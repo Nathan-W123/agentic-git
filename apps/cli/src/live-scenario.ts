@@ -193,3 +193,42 @@ export const LIVE_PRICING_SCENARIO: BenchmarkScenario = {
     ),
   ],
 };
+
+/**
+ * The same repository with six requests instead of three.
+ *
+ * Three tasks is enough to show that a real collision is found, and not enough
+ * to say anything about how the advantage behaves as a team grows — which is
+ * the claim the product actually rests on. Doubling the set is the smallest
+ * change that tests it.
+ *
+ * Contention is deliberately layered rather than uniform: four of the six
+ * change how a total is computed, two change how amounts are displayed, and
+ * two change how discounts are decided, with overlap between those groups. A
+ * scheduler that simply serialises everything and one that isolates genuinely
+ * independent work should diverge here in a way they cannot at three.
+ */
+export const LIVE_PRICING_WIDE_SCENARIO: BenchmarkScenario = {
+  name: "live-pricing-wide",
+  description:
+    "Six real-agent requests over one pricing library; contention is layered, not uniform.",
+  seed: SEED,
+  tasks: [
+    ...LIVE_PRICING_SCENARIO.tasks,
+    task(
+      "task_card_surcharge",
+      "Orders paid by card should cost an extra five percent on top of what the customer would otherwise pay",
+      "codex-d",
+    ),
+    task(
+      "task_loyalty_tier",
+      "Customers who have placed more than twenty five orders should get fifteen percent off instead of ten",
+      "codex-e",
+    ),
+    task(
+      "task_savings_line",
+      "When an order is summarised for a customer, show them how much they saved compared with the undiscounted price",
+      "codex-f",
+    ),
+  ],
+};
