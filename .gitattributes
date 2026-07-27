@@ -1,0 +1,8 @@
+# Normalize to LF in the repository and in working copies.
+# The project targets Windows, macOS, and Linux, and patches move between hosts
+# as changeset text, so a stable line ending keeps diffs byte-identical.
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.ico binary
