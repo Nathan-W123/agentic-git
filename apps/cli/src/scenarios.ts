@@ -438,10 +438,15 @@ export const DEPENDENCY_SCENARIO: BenchmarkScenario = {
   ],
 };
 
+import { LIVE_PRICING_SCENARIO } from "./live-scenario.js";
+
+export { LIVE_PRICING_SCENARIO };
+
 export const SCENARIOS: readonly BenchmarkScenario[] = [
   OVERLAP_SCENARIO,
   MIXED_SCENARIO,
   DEPENDENCY_SCENARIO,
+  LIVE_PRICING_SCENARIO,
 ];
 
 export const DEFAULT_SCENARIO = MIXED_SCENARIO;

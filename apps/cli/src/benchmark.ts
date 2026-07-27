@@ -12,10 +12,14 @@ import type {
   TaskDefinition,
 } from "@coord/shared-types";
 import type { AgentAdapter } from "@coord/agent-protocol";
-import { Coordinator } from "@coord/coordinator";
+import { AutoApprovalController, Coordinator } from "@coord/coordinator";
+import { CodexAdapter } from "@coord/adapter-codex";
 import { GenericCliAdapter } from "@coord/adapter-generic-cli";
 import { IntegrationService } from "@coord/integration-service";
-import type { CoordinationStore } from "@coord/persistence";
+import {
+  InMemoryCoordinationStore,
+  type CoordinationStore,
+} from "@coord/persistence";
 import type { TaskWorkspace } from "@coord/workspace-manager";
 
 import {
@@ -66,6 +70,21 @@ function createAdapter(
 ): AgentAdapter {
   const live = fixture.liveAgent;
   if (live !== undefined && isLiveTask(live, task.id)) {
+    if (live.adapter === "codex") {
+      // Real Codex: separate read-only planning and workspace-write execution
+      // processes, so the benchmark measures the shipped adapter rather than a
+      // JSONL stand-in.
+      return new CodexAdapter({
+        agentId: task.agentId,
+        repository: fixture.repository,
+        workspaces: fixture.workspaces,
+        planningRoot: path.join(fixture.rootPath, "planning"),
+        ...(live.command === "" ? {} : { command: live.command }),
+        ...(live.executionSandbox === undefined
+          ? {}
+          : { executionSandbox: live.executionSandbox }),
+      });
+    }
     return new GenericCliAdapter({
       agentId: task.agentId,
       launch: { command: live.command, args: [...live.args] },
@@ -98,11 +117,19 @@ export async function runCoordinatedFixture(
     fixture.repositories,
     fixture.workspaces,
   );
+  // A blocking conflict escalates to a human reviewer. Nobody is watching a
+  // benchmark, and without a controller that escalation raises, so the task is
+  // recorded as failed. That measures the absence of a reviewer, not the value
+  // of coordination — especially since the uncoordinated arm has no gate to
+  // stop at. Standing a reviewer in keeps the arms comparable: the blocked
+  // task still waits for a later wave, it just is not abandoned.
+  const store = options.store ?? new InMemoryCoordinationStore();
   const coordinator = new Coordinator({
     repositories: fixture.repositories,
     workspaces: fixture.workspaces,
     integrations: integration,
-    ...(options.store === undefined ? {} : { store: options.store }),
+    store,
+    approvals: new AutoApprovalController(store),
   });
   const run = await coordinator.run({
     repository: fixture.repository,

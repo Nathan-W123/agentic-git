@@ -29,10 +29,14 @@ import {
  * is opt-in so a benchmark run never depends on an external binary by accident.
  */
 export interface LiveAgentConfig {
+  /** Which adapter drives the process. Defaults to the JSONL protocol. */
+  adapter?: "generic-cli" | "codex";
   command: string;
   args: string[];
   /** Benchmark tasks handed to the real agent. The rest stay scripted. */
   taskIds: TaskId[] | "all";
+  /** Codex only: the sandbox its edit phase runs under. */
+  executionSandbox?: "workspace-write" | "danger-full-access";
   sandbox?: DockerSandboxOptions;
 }
 
@@ -163,7 +167,23 @@ export function readLiveAgentConfig(
   }
 
   const sandbox = readSandboxConfig(env);
+  const adapter = env["COORD_AGENT_ADAPTER"]?.trim();
+  if (adapter !== undefined && adapter !== "generic-cli" && adapter !== "codex") {
+    throw new Error(`Unsupported COORD_AGENT_ADAPTER value: ${adapter}`);
+  }
+  const executionSandbox = env["COORD_CODEX_SANDBOX"]?.trim();
+  if (
+    executionSandbox !== undefined &&
+    executionSandbox !== "workspace-write" &&
+    executionSandbox !== "danger-full-access"
+  ) {
+    throw new Error(
+      `Unsupported COORD_CODEX_SANDBOX value: ${executionSandbox}`,
+    );
+  }
   return {
+    ...(adapter === undefined ? {} : { adapter }),
+    ...(executionSandbox === undefined ? {} : { executionSandbox }),
     command,
     args: parseAgentArgs(env["COORD_AGENT_ARGS"]),
     taskIds: parseLiveTaskIds(env["COORD_AGENT_TASKS"]),
