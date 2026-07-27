@@ -29,7 +29,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/benchmark.test.js dist/mixed-scenario.test.js dist/dependency-scenario.test.js dist/live-benchmark.test.js dist/persistence.test.js dist/project.test.js dist/real-repo.test.js dist/worker-operations.test.js"
+    "test": "node --test dist/benchmark.test.js dist/mixed-scenario.test.js dist/dependency-scenario.test.js dist/live-benchmark.test.js dist/persistence.test.js dist/project.test.js dist/real-repo.test.js dist/worker-operations.test.js dist/repo-export.test.js"
   },
   "dependencies": {
     "@coord/adapter-codex": "*",

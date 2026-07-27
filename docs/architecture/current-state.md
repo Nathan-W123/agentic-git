@@ -1,8 +1,12 @@
 # Current Capability Matrix
 
-This document maps the repository to `INSTRUCTIONS.md`. It distinguishes
-implemented local-platform behavior from later product phases so missing work
-is explicit.
+This document maps the repository to `instructions.md`. It distinguishes
+implemented behavior from later product phases so missing work is explicit.
+
+`instructions.md` describes a multi-developer, multi-device platform. What is
+implemented today runs as a single-host control plane with remote worker
+execution over HTTP. Cross-device deployment, shared canonical storage, and
+multi-tenant hosting remain later phases.
 
 ## Required MVP
 
@@ -89,6 +93,37 @@ Dynamic replanning is implemented end to end:
 Plan revisions, scope requests, decisions, approvals, and canonical-change
 evidence survive process and browser restarts in the coordination store.
 
+## Repository Lifecycle
+
+- Greenfield start: importing a path that is not yet a repository, or one with
+  no commits, initializes it and makes an initial commit. Any files already
+  present become that commit. A repository that already has history is never
+  modified, and a missing branch there is still an error rather than an
+  invented commit.
+- Import records the upstream tip as `refs/coord/imported/<branch>` inside the
+  canonical mirror, so the mirror itself knows what it diverged from.
+- Export publishes canonical state with `coord repo push`. It targets a
+  dedicated `coord/export-*` branch rather than the imported branch, never
+  force-pushes, and refuses outright when the remote has moved since import.
+  Credentials come from `GITHUB_TOKEN` and are passed only as a request header
+  in the child environment.
+
+## Remote Execution
+
+Hosted execution has a protocol and a working control-plane half:
+
+- API tokens with scopes bounded by the holder's role, hashed at rest, usable
+  by headless clients without cookies or CSRF.
+- A worker protocol with exclusive expiring leases, heartbeats, release, and
+  requeue on expiry, so a worker that dies cannot strand a task.
+- Workspace materialization by Git bundle, so a worker receives only the
+  revision it was leased and the control plane runs no Git server.
+- A worker daemon that leases, clones, runs an agent, and returns a changeset,
+  honoring the project container sandbox when one is configured.
+
+This is single-host today: the control plane, canonical repositories, and
+integration all share one machine.
+
 ## Later Phases
 
 The following are intentionally not represented as complete:
@@ -103,8 +138,9 @@ The following are intentionally not represented as complete:
   overlays.
 - Broad language-server coverage, cross-repository planning, learned
   scheduling, and automatic semantic conflict resolution.
-- External Git synchronization, release/tag management, and complete GitHub
-  replacement behavior.
+- Continuous external Git synchronization, release/tag management, pull-request
+  creation, and complete GitHub replacement behavior. One-way export exists;
+  fetching upstream changes back into canonical does not.
 
-These items belong to Phases 2-4 in `INSTRUCTIONS.md`; they are not required to
-operate or verify the implemented local coordinator.
+These items belong to Phases 2-4 in `instructions.md`; they are not required to
+operate or verify the coordinator as implemented.

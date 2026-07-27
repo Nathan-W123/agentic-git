@@ -28,7 +28,73 @@ The core objective is:
 
 Coordinate work before and while it happens so that conflicts, duplicated effort, stale assumptions, and integration failures are prevented rather than repaired later.
 
-2. Product Vision
+2. Intended Deployment Model
+
+This is primarily a multi-developer and multi-device platform.
+
+Multiple developers and multiple coding agents may connect from:
+
+Different computers
+
+Different locations
+
+A shared local network
+
+A managed cloud environment
+
+A customer-hosted environment
+
+An on-premises enterprise deployment
+
+A single-user local mode may exist later, but the main product is a cross-device coordination system. Design decisions should assume more than one developer and more than one machine unless there is a specific reason not to.
+
+3. Main Product Difference
+
+Most current agent orchestration tools solve this problem:
+
+How can several agents help one developer?
+
+This product solves a different problem:
+
+How can several developers and several agents safely modify one evolving software system at the same time?
+
+This product should coordinate:
+
+Files
+
+Symbols
+
+Interfaces
+
+Dependencies
+
+Database schemas
+
+Build targets
+
+Tests
+
+Agent intentions
+
+Integration order
+
+Canonical code state
+
+It should not limit itself to coordinating:
+
+Tasks
+
+Tickets
+
+Branches
+
+Pull requests
+
+Commits
+
+Existing products often coordinate tasks around the codebase. This product coordinates the evolution of the codebase itself.
+
+4. Product Vision
 
 Traditional software development usually follows this model:
 
@@ -64,7 +130,7 @@ From the user's perspective, the system should feel like a live shared codebase.
 
 Internally, each task should still execute in an isolated workspace so unfinished or unsafe changes do not directly modify the canonical codebase.
 
-3. Core Product Principle
+5. Core Product Principle
 
 The coordinator is an AI traffic controller, not an AI project manager.
 
@@ -100,7 +166,7 @@ The central design principle is:
 
 Most products coordinate tasks. This product coordinates the codebase itself.
 
-4. Non-Goals
+6. Non-Goals
 
 The initial product should not attempt to:
 
@@ -138,7 +204,7 @@ Export
 
 External compatibility
 
-5. Primary Users
+7. Primary Users
 
 Initial users
 
@@ -164,7 +230,7 @@ Security-sensitive organizations
 
 Companies requiring private-cloud, hybrid, on-premises, or air-gapped deployment
 
-6. Core User Experience
+8. Core User Experience
 
 A typical workflow should be:
 
@@ -196,7 +262,7 @@ Git history is updated.
 
 Dependent tasks receive the new canonical state.
 
-7. Shared Codebase Model
+9. Shared Codebase Model
 
 Do not allow all agents to directly edit the same writable filesystem.
 
@@ -232,7 +298,7 @@ Relevant changes from dependent tasks
 
 Agents should not see another agent's incomplete work as canonical.
 
-8. Main System Components
+10. Main System Components
 
 The platform should contain the following major services.
 
@@ -424,7 +490,7 @@ Record policy violations
 
 Preserve tamper-evident history
 
-9. Recommended Technology Stack
+11. Recommended Technology Stack
 
 Frontend
 
@@ -482,7 +548,29 @@ Offline analytics
 
 Do not make Python the default language for latency-sensitive orchestration services unless the team has a strong reason.
 
-10. Agent Coordination Protocol
+12. Agent-Neutral Design
+
+The platform must support multiple coding agents through adapters:
+
+Claude Code
+
+Codex
+
+Cursor
+
+Gemini
+
+Open-source agents
+
+Internal or proprietary agents
+
+Generic command-line agents
+
+The core coordinator must not depend on provider-specific features.
+
+The coordinator defines the minimum common protocol every agent must satisfy. Advanced provider capabilities remain optional and must never become a requirement of the coordination path.
+
+13. Agent Coordination Protocol
 
 All supported coding agents should communicate through a normalized protocol.
 
@@ -604,7 +692,7 @@ Split the task
 
 Escalate to a human
 
-11. Ownership Model
+14. Ownership Model
 
 Do not rely only on hard file locks.
 
@@ -644,7 +732,7 @@ interface ResourceLease {
   expiresAt: Date;
 }
 
-12. Conflict Detection Levels
+15. Conflict Detection Levels
 
 Level 1: File-level conflicts
 
@@ -694,7 +782,7 @@ Intent-level analysis should initially be advisory.
 
 Do not allow an LLM to silently block major work without transparent evidence and override controls.
 
-13. Conflict Scoring
+16. Conflict Scoring
 
 Begin with a deterministic score.
 
@@ -732,7 +820,7 @@ These thresholds must remain configurable.
 
 They should later be adjusted using observed outcomes.
 
-14. Code Intelligence
+17. Code Intelligence
 
 Use deterministic parsers before using LLM reasoning.
 
@@ -777,7 +865,7 @@ Agent X → owns Symbol Y until Time Z
 
 Use LLMs only where deterministic analysis is insufficient.
 
-15. Change Integration
+18. Change Integration
 
 Every completed task must produce a structured changeset.
 
@@ -826,7 +914,7 @@ Release resource ownership.
 
 No task should directly mutate canonical state outside this process.
 
-16. Real-Time Collaboration Streams
+19. Real-Time Collaboration Streams
 
 Keep these streams separate.
 
@@ -872,7 +960,7 @@ Unapproved changes
 
 This separation prevents unfinished work from being mistaken for accepted code.
 
-17. Security Requirements
+20. Security Requirements
 
 Treat every coding agent as an untrusted workload.
 
@@ -945,7 +1033,7 @@ policy:
       - "package.json"
       - "authentication/**"
 
-18. Deployment Models
+21. Deployment Models
 
 Managed cloud
 
@@ -1027,7 +1115,7 @@ Other users connect over the local network.
 
 External AI access should pass through a controlled gateway.
 
-19. Core Database Model
+22. Core Database Model
 
 Suggested initial tables:
 
@@ -1055,7 +1143,7 @@ Important entities should use immutable IDs.
 
 Task state transitions and integration events should be preserved as append-only records where practical.
 
-20. MVP Scope
+23. MVP Scope
 
 The MVP must answer one question:
 
@@ -1070,6 +1158,10 @@ Two coding-agent adapters
 Task submission
 
 Agent plan submission
+
+Prediction of expected file changes
+
+File overlap detection
 
 File-level ownership
 
@@ -1095,6 +1187,10 @@ Do not include in the first MVP
 
 Full cloud IDE
 
+Real-time collaborative text editing
+
+Symbol-level ownership
+
 Air-gapped deployment
 
 Semantic conflict resolution
@@ -1113,45 +1209,55 @@ Full GitHub replacement
 
 Multi-region Kubernetes infrastructure
 
-21. First Build Order
+24. First Build Order
 
 Build in this exact order unless user evidence strongly suggests otherwise.
 
 Create a CLI coordinator.
 
-Launch two isolated agent tasks.
+Implement two agent adapters.
+
+Import a test repository.
+
+Create two tasks.
 
 Require both agents to submit plans.
 
 Record expected file changes.
 
-Detect file overlap.
+Detect overlapping files.
 
-Grant temporary file ownership.
+Grant temporary file-level leases.
 
-Give each task an isolated copy-on-write workspace.
+Give each task one isolated Docker workspace.
+
+Allow agents to edit only their own workspace.
 
 Collect diffs.
 
 Run repository tests.
 
-Integrate the first passing changeset.
+Integrate the first successful changeset.
 
-Replay or rebase the second task.
+Update the canonical version.
 
-Record failures and rework.
+Replay or rebase the second changeset.
 
-Add a simple web dashboard.
+Record conflicts and rework.
 
-Add repository import.
+Compare coordinated and uncoordinated execution.
 
-Add human approvals.
+Add a minimal web dashboard once the command-line workflow works.
 
-Add symbol indexing.
+After the coordination loop is proven, continue with:
 
-Add task dependency tracking.
+Human approvals.
 
-Pilot with real teams.
+Symbol indexing.
+
+Task dependency tracking.
+
+Piloting with real teams.
 
 Do not start by building a polished browser IDE.
 
@@ -1159,7 +1265,7 @@ The coordinator is the product.
 
 The editor is a surface.
 
-22. Development Phases
+25. Development Phases
 
 Phase 0: Technical Proof
 
@@ -1259,7 +1365,7 @@ Architectural policy enforcement
 
 Global engineering dependency graph
 
-23. Product Metrics
+26. Product Metrics
 
 Track the following from the first prototype.
 
@@ -1323,7 +1429,7 @@ The most important benchmark is:
 
 Coordinated agents versus uncoordinated agents on the same repository and task set.
 
-24. Product Design Rules
+27. Product Design Rules
 
 Humans must be able to override coordinator decisions.
 
@@ -1353,7 +1459,7 @@ The coordinator must minimize interruption, not maximize control.
 
 The product must prove measurable gains before expanding scope.
 
-25. Reliability and Failure Behavior
+28. Reliability and Failure Behavior
 
 The platform must define behavior for:
 
@@ -1401,7 +1507,7 @@ Provide repository export
 
 Allow administrators to recover manually
 
-26. Suggested Repository Structure
+29. Suggested Repository Structure
 
 coordinator-platform/
 ├── apps/
@@ -1450,7 +1556,7 @@ coordinator-platform/
     ├── deployment/
     └── benchmarks/
 
-27. Instructions for AI Coding Agents
+30. Instructions for AI Coding Agents
 
 When an AI coding agent works on this project, it should follow these rules.
 
@@ -1541,7 +1647,33 @@ Risks:
 Follow-up:
 - remaining work
 
-28. Instructions for Human Developers
+31. Critical Understanding Check
+
+Before writing code, an agent working on this project should be able to state, in its own words:
+
+Why this product is not just another coding agent.
+
+Why it is not limited to one desktop.
+
+Why coding agents need isolated task workspaces.
+
+Why the canonical codebase cannot be edited directly by an agent.
+
+How the coordinator differs from a ticket manager.
+
+How temporary ownership works.
+
+How changes become canonical.
+
+Why Git still exists underneath the platform.
+
+What the first MVP must prove.
+
+What should deliberately not be built yet.
+
+An agent that cannot answer these should re-read this document before making changes.
+
+32. Instructions for Human Developers
 
 Human developers should:
 
@@ -1567,7 +1699,7 @@ Design for on-premises deployment even when building cloud-first.
 
 Maintain normal Git export and rollback paths.
 
-29. Architectural Decision Priorities
+33. Architectural Decision Priorities
 
 When choosing between designs, prioritize in this order:
 
@@ -1593,7 +1725,7 @@ Interface polish
 
 The product should never sacrifice canonical code safety for a more impressive demo.
 
-30. Long-Term Defensibility
+34. Long-Term Defensibility
 
 The strongest potential defensible assets are:
 
@@ -1623,7 +1755,7 @@ The long-term moat is:
 
 Knowing how to safely schedule, constrain, validate, and integrate heterogeneous agent work better than any competing platform.
 
-31. Immediate Next Milestone
+35. Immediate Next Milestone
 
 The first milestone should demonstrate:
 
@@ -1649,7 +1781,7 @@ A measurable comparison against uncoordinated execution
 
 The project should not move to a broader platform build until this experiment produces evidence that coordination meaningfully reduces rework or completion time.
 
-32. Final Product Statement
+36. Final Product Statement
 
 The product should be described internally as:
 

@@ -23,6 +23,7 @@ import {
   taskSubmit,
 } from "./commands.js";
 import { CoordinatorProject, PROJECT_DIRECTORY } from "./project.js";
+import { repoPush } from "./repo-export.js";
 import {
   createBenchmarkFixture,
   createLiveBenchmarkFixture,
@@ -75,6 +76,7 @@ Usage:
   coord init
   coord repo add <path> [--id=<name>] [--branch=<name>] [--default]
   coord repo github <owner/name|url> [--id=<name>] [--branch=<name>] [--default]
+  coord repo push [--repo=<id>] [--branch=<target>] [--update-existing]
   coord repo list
   coord task submit --objective=<text> [--repo=<id>] [--agent=<id>]
   coord task list [--repo=<id>] [--status=<status>]
@@ -458,6 +460,29 @@ async function runRepo(
         console.log(
           `Imported GitHub repository ${repository.id} ` +
             `(branch ${repository.branch})\nCanonical mirror: ${repository.path}`,
+        );
+      });
+      break;
+    }
+    case "push": {
+      await withProject(async (project, store) => {
+        const repositoryId = flagValue(flags, "repo");
+        const targetBranch = flagValue(flags, "branch");
+        const remoteUrl = flagValue(flags, "remote");
+        const result = await repoPush(project, store, {
+          ...(repositoryId === undefined ? {} : { repositoryId }),
+          ...(targetBranch === undefined ? {} : { targetBranch }),
+          ...(remoteUrl === undefined ? {} : { remoteUrl }),
+          allowExistingTarget: flags.includes("--update-existing"),
+          allowUnverifiedUpstream: flags.includes("--allow-unverified"),
+        });
+        console.log(
+          `Pushed ${result.revision.slice(0, 12)} to ${result.targetBranch}
+` +
+            `Remote: ${result.remoteUrl}
+` +
+            `${result.createdBranch ? "Created" : "Updated"} the target branch; ` +
+            `${result.upstreamBranch} was not modified.`,
         );
       });
       break;

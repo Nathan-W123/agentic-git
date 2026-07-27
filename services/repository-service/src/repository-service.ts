@@ -38,6 +38,59 @@ export interface RemoteImportOptions {
   credentials?: RemoteRepositoryCredentials;
 }
 
+/**
+ * Where the import point is recorded.
+ *
+ * The upstream tip at import time is stored as a ref inside the canonical
+ * mirror rather than in a database, so the mirror stays self-describing: a
+ * repository copied to another host still knows what it diverged from.
+ */
+export const IMPORT_REF_PREFIX = "refs/coord/imported/";
+
+export class UpstreamChangedError extends Error {
+  public constructor(
+    public readonly branch: string,
+    public readonly importedRevision: string,
+    public readonly currentRevision: string | undefined,
+  ) {
+    super(
+      `The remote ${branch} branch has moved since import: it was ` +
+        `${importedRevision.slice(0, 12)} and is now ` +
+        `${currentRevision?.slice(0, 12) ?? "absent"}. Pushing now could bury ` +
+        "work that happened on GitHub in the meantime. Re-import the " +
+        "repository, or pass an explicit upstream revision once the change " +
+        "has been reviewed.",
+    );
+    this.name = "UpstreamChangedError";
+  }
+}
+
+export interface PushToRemoteOptions {
+  remoteUrl: string;
+  /** Branch to create on the remote. Defaults to a dated export branch. */
+  targetBranch?: string;
+  /** Revision to publish. Defaults to the canonical branch tip. */
+  revision?: string;
+  /** Remote branch the import came from. Defaults to the canonical branch. */
+  upstreamBranch?: string;
+  /** Overrides the recorded import point. */
+  expectedUpstreamRevision?: string;
+  /** Proceed even though no import point is recorded. */
+  allowUnverifiedUpstream?: boolean;
+  /** Permit updating a target branch that already exists. Never forces. */
+  allowExistingTarget?: boolean;
+  credentials?: RemoteRepositoryCredentials;
+}
+
+export interface PushToRemoteResult {
+  remoteUrl: string;
+  targetBranch: string;
+  revision: string;
+  upstreamBranch: string;
+  upstreamRevision: string | undefined;
+  createdBranch: boolean;
+}
+
 const DEFAULT_IDENTITY: CommitIdentity = {
   name: "AI Development Coordinator",
   email: "coordinator@localhost",
@@ -65,6 +118,93 @@ export class RepositoryService {
     await this.git.run(["init", `--initial-branch=${branch}`, repositoryPath]);
   }
 
+  /**
+   * Prepares a source directory that has no history yet.
+   *
+   * A greenfield project starts as an empty folder, but the import flow needs
+   * `refs/heads/<branch>` to exist. Rather than making the caller run git by
+   * hand, initialise and make one commit.
+   *
+   * A repository that already has commits is never touched: if the requested
+   * branch is missing there, the caller asked for something that genuinely does
+   * not exist, and inventing a commit would hide that.
+   */
+  private async prepareGreenfieldSource(
+    sourcePath: string,
+    branch: string,
+  ): Promise<boolean> {
+    await mkdir(sourcePath, { recursive: true });
+
+    const isRepository = await this.git.run(
+      ["-C", sourcePath, "rev-parse", "--git-dir"],
+      { allowFailure: true },
+    );
+    if (isRepository.exitCode !== 0) {
+      await this.git.run([
+        "init",
+        `--initial-branch=${branch}`,
+        "--end-of-options",
+        sourcePath,
+      ]);
+    }
+
+    const hasBranch = await this.git.run(
+      ["-C", sourcePath, "show-ref", "--verify", `refs/heads/${branch}`],
+      { allowFailure: true },
+    );
+    if (hasBranch.exitCode === 0) {
+      return false;
+    }
+
+    const hasAnyCommit = await this.git.run(
+      ["-C", sourcePath, "rev-parse", "--verify", "HEAD"],
+      { allowFailure: true },
+    );
+    if (hasAnyCommit.exitCode === 0) {
+      throw new Error(
+        `${sourcePath} has commits but no ${branch} branch. Create or rename ` +
+          "the branch, or import the branch that exists.",
+      );
+    }
+
+    // Unborn HEAD may still point at git's default name rather than the branch
+    // that was asked for, so aim it before the first commit lands.
+    await this.git.run([
+      "-C",
+      sourcePath,
+      "symbolic-ref",
+      "HEAD",
+      `refs/heads/${branch}`,
+    ]);
+    // Any files already sitting in the directory become the scaffold; with an
+    // empty directory this produces an empty root commit instead of failing.
+    await this.git.run(["-C", sourcePath, "add", "--all", "--"]);
+    const emptyHooks = await mkdtemp(
+      path.join(os.tmpdir(), "coord-disabled-hooks-"),
+    );
+    try {
+      await this.git.run([
+        "-C",
+        sourcePath,
+        "-c",
+        `user.name=${this.identity.name}`,
+        "-c",
+        `user.email=${this.identity.email}`,
+        "-c",
+        `core.hooksPath=${emptyHooks}`,
+        "commit",
+        "--allow-empty",
+        "--no-gpg-sign",
+        "--no-verify",
+        "-m",
+        "Initial commit",
+      ]);
+    } finally {
+      await rm(emptyHooks, { recursive: true, force: true });
+    }
+    return true;
+  }
+
   public async importLocalRepository(
     sourcePath: string,
     destinationPath: string,
@@ -72,6 +212,7 @@ export class RepositoryService {
     branch = "main",
   ): Promise<CanonicalRepository> {
     await this.assertBranchName(branch);
+    await this.prepareGreenfieldSource(sourcePath, branch);
 
     const resolvedDestination = path.resolve(destinationPath);
     const destinationParent = path.dirname(resolvedDestination);
@@ -154,11 +295,21 @@ export class RepositoryService {
         options.branch ??
         (await this.discoverDefaultBranch(stagedRepository));
       await this.assertBranchName(branch);
+      const tip = await this.git.run([
+        `--git-dir=${stagedRepository}`,
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        `refs/heads/${branch}`,
+      ]);
+      // Remember what the remote looked like, so a later push can tell whether
+      // anyone else has committed since.
       await this.git.run([
         `--git-dir=${stagedRepository}`,
-        "show-ref",
-        "--verify",
-        `refs/heads/${branch}`,
+        "update-ref",
+        `${IMPORT_REF_PREFIX}${branch}`,
+        "--end-of-options",
+        tip.stdout.trim(),
       ]);
       await rename(stagedRepository, resolvedDestination);
       return {
@@ -169,6 +320,142 @@ export class RepositoryService {
     } finally {
       await rm(stagingRoot, { recursive: true, force: true });
     }
+  }
+
+  /** Reads a single remote ref without cloning. */
+  private async remoteTip(
+    remoteUrl: string,
+    branch: string,
+    credentials: RemoteRepositoryCredentials | undefined,
+  ): Promise<string | undefined> {
+    const result = await this.git.run(
+      ["ls-remote", "--exit-code", "--heads", "--end-of-options", remoteUrl, branch],
+      {
+        env: remoteEnvironment(credentials),
+        allowFailure: true,
+        timeoutMs: 60_000,
+        maxOutputBytes: 1024 * 1024,
+      },
+    );
+    if (result.exitCode !== 0) {
+      // exit 2 means the ref simply does not exist, which is not an error here.
+      return undefined;
+    }
+    const line = result.stdout.split(/\r?\n/u).find((entry) => entry.trim().length > 0);
+    return line?.split(/\s+/u)[0];
+  }
+
+  /** The upstream revision recorded when this repository was imported. */
+  public async importedRevision(
+    repository: CanonicalRepository,
+    branch = repository.branch,
+  ): Promise<string | undefined> {
+    const result = await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        `${IMPORT_REF_PREFIX}${branch}`,
+      ],
+      { allowFailure: true },
+    );
+    return result.exitCode === 0 ? result.stdout.trim() : undefined;
+  }
+
+  /**
+   * Publishes canonical state to a remote branch.
+   *
+   * Two defaults keep this from destroying work. It pushes to a dedicated
+   * export branch rather than the branch it imported from, and it never
+   * force-pushes, so the remote decides whether the update is a fast-forward.
+   * Before pushing it compares the remote's current tip against the revision
+   * recorded at import; if someone else has committed in the meantime the push
+   * is refused outright rather than merged on a guess.
+   */
+  public async pushToRemote(
+    repository: CanonicalRepository,
+    options: PushToRemoteOptions,
+  ): Promise<PushToRemoteResult> {
+    const remoteUrl = normalizeRemoteUrl(options.remoteUrl);
+    const upstreamBranch = options.upstreamBranch ?? repository.branch;
+    await this.assertBranchName(upstreamBranch);
+
+    const targetBranch =
+      options.targetBranch ??
+      `coord/export-${new Date()
+        .toISOString()
+        .replaceAll(/[:.]/gu, "-")
+        .slice(0, 19)}`;
+    await this.assertBranchName(targetBranch);
+
+    const revision =
+      options.revision ?? (await this.getCanonicalVersion(repository)).revision;
+    const resolved = await this.git.run([
+      `--git-dir=${repository.path}`,
+      "rev-parse",
+      "--verify",
+      "--end-of-options",
+      `${revision}^{commit}`,
+    ]);
+    const commit = resolved.stdout.trim();
+
+    const baseline =
+      options.expectedUpstreamRevision ??
+      (await this.importedRevision(repository, upstreamBranch));
+    const currentUpstream = await this.remoteTip(
+      remoteUrl,
+      upstreamBranch,
+      options.credentials,
+    );
+
+    if (baseline === undefined) {
+      if (options.allowUnverifiedUpstream !== true) {
+        throw new Error(
+          `No import point is recorded for ${upstreamBranch}, so upstream ` +
+            "changes cannot be detected. Re-import the repository, supply an " +
+            "expected upstream revision, or explicitly allow an unverified push.",
+        );
+      }
+    } else if (currentUpstream !== baseline) {
+      throw new UpstreamChangedError(upstreamBranch, baseline, currentUpstream);
+    }
+
+    const existingTarget = await this.remoteTip(
+      remoteUrl,
+      targetBranch,
+      options.credentials,
+    );
+    if (existingTarget !== undefined && options.allowExistingTarget !== true) {
+      throw new Error(
+        `The remote already has a ${targetBranch} branch. Choose another ` +
+          "target branch, or allow updating the existing one.",
+      );
+    }
+
+    await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "push",
+        "--end-of-options",
+        remoteUrl,
+        `${commit}:refs/heads/${targetBranch}`,
+      ],
+      {
+        env: remoteEnvironment(options.credentials),
+        timeoutMs: 10 * 60 * 1000,
+        maxOutputBytes: 1024 * 1024,
+      },
+    );
+
+    return {
+      remoteUrl,
+      targetBranch,
+      revision: commit,
+      upstreamBranch,
+      upstreamRevision: currentUpstream,
+      createdBranch: existingTarget === undefined,
+    };
   }
 
   public async assertBranchName(branch: string): Promise<void> {

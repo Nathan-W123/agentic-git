@@ -1,22 +1,35 @@
 # AI-Native Development Coordinator
 
-This repository implements a local control plane for coordinating humans and
-heterogeneous coding agents against a Git-backed canonical codebase. Agents
-plan before editing, work in isolated overlays, negotiate scope, replan when
-canonical changes, and submit changes through validation, approval, and atomic
-promotion.
+A multi-developer, agent-neutral coordination platform that safely schedules,
+isolates, validates, and integrates work from humans and coding agents against
+one continuously managed canonical codebase.
 
-The current implementation includes the complete technical proof, the local
-MVP product surfaces, deterministic structural coordination, and dynamic
-replanning described in [INSTRUCTIONS.md](INSTRUCTIONS.md). See the
-[current capability matrix](docs/architecture/current-state.md) for the exact
-implemented and later-phase boundary.
+The product is not another coding agent. It is the coordination layer between
+developers, coding agents, workspaces, the shared codebase, test and build
+systems, Git, and security policy. Agents plan before editing, work in isolated
+overlays, negotiate scope, replan when canonical changes, and submit changes
+through validation, approval, and atomic promotion.
+
+The intended deployment model is multi-developer and multi-device: developers
+and agents connect from different machines, over a LAN, from managed cloud, or
+from a customer-hosted or on-premises environment. See
+[instructions.md](instructions.md) for the authoritative scope, phases, and
+architecture rules.
+
+**Current deployment status.** The control plane runs as a single host today.
+Remote execution exists — workers authenticate with API tokens and lease tasks
+over HTTP — but multi-tenant hosting, shared storage, and cross-device
+deployment are not built. The [current capability matrix](docs/architecture/current-state.md)
+records the exact implemented and later-phase boundary.
 
 ## Implemented
 
 - Generic JSONL and native Codex adapters with plan, execute, pause, resume,
   cancel, scope-change, and replan behavior.
-- Local Git import and credential-safe GitHub import over HTTPS or SSH.
+- Greenfield project start, local Git import, and credential-safe GitHub
+  import over HTTPS or SSH.
+- One-way export back to GitHub on a dedicated branch, refused when upstream
+  moved since import.
 - Isolated Git worktrees and an optional deny-by-default Docker execution
   boundary.
 - File, symbol, dependency, API, schema, configuration, test, service, and
@@ -77,6 +90,7 @@ Operational commands include:
 
 ```powershell
 node apps/cli/dist/index.js repo github owner/repository
+node apps/cli/dist/index.js repo push --branch=coord/release
 node apps/cli/dist/index.js repo list
 node apps/cli/dist/index.js task list
 node apps/cli/dist/index.js task retry <task-id>
