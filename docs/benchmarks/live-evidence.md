@@ -73,8 +73,53 @@ means "the uncoordinated arm reworked twice, and the coordinated arm is defined
 not to." The defensible comparison is the attempts column and
 `undetectedConflicts`, both of which are genuinely measured.
 
-Three tasks is a small set. The advantage at higher task counts is not measured
-here and should not be extrapolated from it.
+## Does the advantage grow with task count
+
+Three tasks shows a real collision being avoided. It says nothing about the
+claim the product rests on, which is that coordination matters more as more
+people work the same repository. `live-pricing-wide` doubles the set to six
+requests over the same library, with contention layered rather than uniform:
+four change how a total is computed, two change how amounts are displayed, and
+two change how discounts are decided.
+
+| | 3 tasks | 6 tasks |
+| --- | --- | --- |
+| Coordinated attempts | 3 | 6 |
+| Uncoordinated attempts | 5 | 11 |
+| Uncoordinated failures | 2 | 5 |
+| Uncoordinated rework rate | 0.67 | 0.83 |
+| **Wasted integration cycles** | **2** | **5** |
+| Undetected conflicts, both arms | 0 | 0 |
+| Coordinated elapsed | 325-404 s | 724 s |
+| Uncoordinated elapsed | 312-394 s | 773 s |
+
+Both arms completed 6/6. The advantage widens: doubling the tasks produced
+two and a half times the wasted work for the uncoordinated arm, and its rework
+rate rose from two-thirds to five-sixths. The coordinated arm still integrated
+each task exactly once.
+
+At six tasks the coordinated arm was also faster in wall-clock terms (724 s
+against 773 s), which it was not reliably at three. That is one run, so it is
+weaker evidence than the attempts column, but it points the same way.
+
+All fifteen plan pairs were flagged as conflicting, which is every pair — the
+six requests genuinely all touch pricing. The scheduler therefore serialised
+completely and still finished ahead, because the uncoordinated arm spent five
+full agent cycles rebuilding.
+
+Neither arm had an integration fail for an unpredicted reason at either size.
+
+### Caveats
+
+One run at six tasks, against seven at three. The elapsed-time comparison in
+particular should not be leaned on until it is repeated.
+
+The final canonical tree was not separately re-tested at six tasks as it was in
+runs 2 and 3. It does not need to be for the promotion itself to be sound: each
+integration validates against the canonical state it is promoting onto, so the
+last successful promotion in each arm ran the repository's tests against a tree
+containing every earlier change. Zero integration failures therefore means both
+final trees passed at promotion time.
 
 ## On elapsed time
 

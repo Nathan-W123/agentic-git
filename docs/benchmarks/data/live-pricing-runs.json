@@ -317,6 +317,47 @@
         "reworkAvoided": 2,
         "reworkRateAvoided": 0.6667
       }
+    },
+    {
+      "source": "scale",
+      "build": "post-optimisation",
+      "report": {
+        "generatedAt": "2026-07-27T21:15:05.534Z",
+        "scenario": "live-pricing-wide",
+        "scenarioDescription": "Six real-agent requests over one pricing library; contention is layered, not uniform.",
+        "coordinated": {
+          "mode": "coordinated",
+          "scenario": "live-pricing-wide",
+          "tasksPlanned": 6,
+          "tasksCompleted": 6,
+          "completionRate": 1,
+          "conflictWarnings": 15,
+          "integrationAttempts": 6,
+          "integrationFailures": 0,
+          "reworkCount": 0,
+          "reworkRate": 0,
+          "undetectedConflicts": 0,
+          "elapsedMs": 724186,
+          "finalRevision": "b015abadcd8092d458532ed59e651de8464db108"
+        },
+        "uncoordinated": {
+          "mode": "uncoordinated",
+          "scenario": "live-pricing-wide",
+          "tasksPlanned": 6,
+          "tasksCompleted": 6,
+          "completionRate": 1,
+          "conflictWarnings": 0,
+          "integrationAttempts": 11,
+          "integrationFailures": 5,
+          "reworkCount": 5,
+          "reworkRate": 0.8333,
+          "undetectedConflicts": 0,
+          "elapsedMs": 772936,
+          "finalRevision": "bd9bfbbb576945b159e872a0e363566fc9c57b98"
+        },
+        "reworkAvoided": 5,
+        "reworkRateAvoided": 0.8333
+      }
     }
   ]
 }
