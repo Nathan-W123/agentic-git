@@ -1,0 +1,31 @@
+{
+  "name": "ai-native-development-coordinator",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@11.16.0",
+  "workspaces": [
+    "apps/*",
+    "services/*",
+    "packages/*",
+    "adapters/*"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "check": "turbo run typecheck test",
+    "demo": "npm run build --silent && node apps/cli/dist/index.js demo",
+    "benchmark": "npm run build --silent && node apps/cli/dist/index.js benchmark",
+    "verify:docker": "npm run build --silent && node scripts/verify-docker-sandbox.mjs",
+    "clean": "turbo run clean"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "turbo": "^2.5.0",
+    "typescript": "^5.9.0"
+  }
+}

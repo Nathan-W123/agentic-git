@@ -1,0 +1,25 @@
+{
+  "name": "@coord/integration-service",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/integration-service.test.js"
+  },
+  "dependencies": {
+    "@coord/repository-service": "*",
+    "@coord/shared-types": "*",
+    "@coord/workspace-manager": "*"
+  }
+}
+
