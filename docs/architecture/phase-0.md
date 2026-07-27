@@ -144,7 +144,9 @@ itself for a child of the harness that started the coordinator.
 
 ## Deferred Work
 
-- Durable database and append-only audit storage
+Durable state and append-only audit storage landed in
+[Phase 1](phase-1.md); the coordinator still runs without a store by default.
+
 - Human approval gate
 - GitHub repository import
 - Live event transport

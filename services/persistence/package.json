@@ -1,5 +1,5 @@
 {
-  "name": "@coord/coordinator",
+  "name": "@coord/persistence",
   "version": "0.0.0",
   "private": true,
   "type": "module",
@@ -14,14 +14,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/conflict-detector.test.js dist/ownership-service.test.js dist/scope-validator.test.js"
+    "test": "node --test dist/audit-chain.test.js dist/sqlite-store.test.js dist/store-contract.test.js"
   },
   "dependencies": {
-    "@coord/agent-protocol": "*",
-    "@coord/integration-service": "*",
-    "@coord/persistence": "*",
-    "@coord/repository-service": "*",
-    "@coord/shared-types": "*",
-    "@coord/workspace-manager": "*"
+    "@coord/shared-types": "*"
   }
 }

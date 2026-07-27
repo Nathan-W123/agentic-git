@@ -13,6 +13,7 @@ import type { AgentAdapter } from "@coord/agent-protocol";
 import { Coordinator } from "@coord/coordinator";
 import { GenericCliAdapter } from "@coord/adapter-generic-cli";
 import { IntegrationService } from "@coord/integration-service";
+import type { CoordinationStore } from "@coord/persistence";
 import type { TaskWorkspace } from "@coord/workspace-manager";
 
 import {
@@ -32,6 +33,11 @@ export interface CoordinatedFixtureResult {
   metrics: BenchmarkModeResult;
   run: CoordinationRunResult;
   fixture: BenchmarkFixture;
+}
+
+export interface CoordinatedFixtureOptions {
+  /** Durable coordination store. Omitted runs keep in-memory state only. */
+  store?: CoordinationStore;
 }
 
 interface PreparedUncoordinatedTask {
@@ -82,6 +88,7 @@ function undetectedConflictIds(scenario: BenchmarkScenario): Set<string> {
 
 export async function runCoordinatedFixture(
   fixture: BenchmarkFixture,
+  options: CoordinatedFixtureOptions = {},
 ): Promise<CoordinatedFixtureResult> {
   const startedAt = performance.now();
   const integration = new IntegrationService(
@@ -92,11 +99,17 @@ export async function runCoordinatedFixture(
     fixture.repositories,
     fixture.workspaces,
     integration,
+    // Conflict detector, ownership service, and audit log keep their defaults.
+    undefined,
+    undefined,
+    undefined,
+    options.store,
   );
   const run = await coordinator.run({
     repository: fixture.repository,
     workspaceRoot: fixture.workspaceRoot,
     integrationRoot: fixture.integrationRoot,
+    scenario: fixture.scenario.name,
     tasks: fixture.scenario.tasks.map((entry) => ({
       task: entry.task,
       adapter: createAdapter(fixture, entry.task, entry.behavior),

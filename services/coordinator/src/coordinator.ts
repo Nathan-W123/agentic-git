@@ -2,6 +2,7 @@ import type { AgentAdapter, AgentSession } from "@coord/agent-protocol";
 import {
   assertAgentPlan,
   type AgentPlan,
+  type AuditEventType,
   type ChangeSet,
   type CoordinationRunResult,
   type CoordinatorDecision,
@@ -9,6 +10,7 @@ import {
   type TaskExecutionResult,
 } from "@coord/shared-types";
 import { IntegrationService } from "@coord/integration-service";
+import type { CoordinationStore } from "@coord/persistence";
 import {
   RepositoryService,
   type CanonicalRepository,
@@ -37,6 +39,8 @@ export interface CoordinatorRunInput {
   workspaceRoot: string;
   integrationRoot: string;
   tasks: CoordinatedTask[];
+  /** Recorded alongside the run so history can be filtered by task set. */
+  scenario?: string;
 }
 
 interface PlannedTask extends CoordinatedTask {
@@ -70,14 +74,50 @@ export class Coordinator {
     private readonly conflicts = new ConflictDetector(),
     private readonly ownership = new OwnershipService(),
     private readonly audit = new InMemoryAuditLog(),
+    /**
+     * Optional durable store. Writes happen as the run progresses, so a crash
+     * leaves a partial but truthful record rather than nothing.
+     */
+    private readonly store?: CoordinationStore,
   ) {}
 
   public async run(input: CoordinatorRunInput): Promise<CoordinationRunResult> {
     const initialVersion = await this.repositories.getCanonicalVersion(
       input.repository,
     );
+
+    const storedRun = await this.store?.createRun({
+      repository: input.repository,
+      mode: "coordinated",
+      baseVersion: initialVersion,
+      ...(input.scenario === undefined ? {} : { scenario: input.scenario }),
+    });
+    const runId = storedRun?.id;
+
+    try {
+      const result = await this.execute(input, initialVersion, runId);
+      await this.store?.finishRun(
+        runId ?? "",
+        "completed",
+        result.canonicalVersion,
+      );
+      return result;
+    } catch (error) {
+      await this.store?.finishRun(runId ?? "", "failed");
+      throw error;
+    }
+  }
+
+  private async execute(
+    input: CoordinatorRunInput,
+    initialVersion: Awaited<
+      ReturnType<RepositoryService["getCanonicalVersion"]>
+    >,
+    runId: string | undefined,
+  ): Promise<CoordinationRunResult> {
     for (const entry of input.tasks) {
-      this.audit.record("task_submitted", entry.task.id, {
+      await this.store?.saveTask(runId ?? "", entry.task);
+      await this.trace(runId, "task_submitted", entry.task.id, {
         objective: entry.task.objective,
         agentId: entry.task.agentId,
       });
@@ -97,6 +137,8 @@ export class Coordinator {
           canonicalVersion: initialVersion,
           repositoryId: input.repository.id,
         });
+        await this.store?.saveSession(runId ?? "", session);
+
         const plan = await entry.adapter.requestPlan(session.id);
         assertAgentPlan(plan);
         if (plan.taskId !== entry.task.id) {
@@ -105,7 +147,8 @@ export class Coordinator {
           );
         }
 
-        this.audit.record("plan_received", entry.task.id, {
+        await this.store?.savePlan(runId ?? "", entry.task.id, plan);
+        await this.trace(runId, "plan_received", entry.task.id, {
           expectedFiles: plan.expectedFiles,
           riskLevel: plan.riskLevel,
         });
@@ -116,8 +159,9 @@ export class Coordinator {
     const assessments = this.conflicts.assessAll(
       sessionPlans.map((entry) => entry.plan),
     );
+    await this.store?.saveConflicts(runId ?? "", assessments);
     for (const assessment of assessments) {
-      this.audit.record("conflict_detected", undefined, {
+      await this.trace(runId, "conflict_detected", undefined, {
         taskIds: assessment.taskIds,
         score: assessment.score,
         evidence: assessment.evidence,
@@ -175,7 +219,8 @@ export class Coordinator {
               entry.task.agentId,
               waveVersion.sequence,
             );
-            this.audit.record("ownership_granted", entry.task.id, {
+            await this.store?.saveLeases(runId ?? "", leases);
+            await this.trace(runId, "ownership_granted", entry.task.id, {
               leases,
             });
 
@@ -187,7 +232,18 @@ export class Coordinator {
             });
             entry.decision.workspaceId = workspace.id;
             entry.decision.ownershipGrants = leases;
-            this.audit.record("task_started", entry.task.id, {
+            await this.store?.saveDecision(runId ?? "", entry.decision);
+            await this.store?.saveWorkspace(runId ?? "", {
+              id: workspace.id,
+              runId: runId ?? "",
+              taskId: entry.task.id,
+              path: workspace.path,
+              isolation: workspace.isolation,
+              baseRevision: workspace.baseVersion.revision,
+              createdAt: workspace.createdAt,
+            });
+            await this.store?.saveTaskStatus(runId ?? "", entry.task.id, "running");
+            await this.trace(runId, "task_started", entry.task.id, {
               workspaceId: workspace.id,
               baseRevision: waveVersion.revision,
             });
@@ -210,7 +266,8 @@ export class Coordinator {
               );
             }
             assertChangeSetWithinPlan(entry.plan, changeSet);
-            this.audit.record("changeset_collected", entry.task.id, {
+            await this.store?.saveChangeSet(runId ?? "", changeSet);
+            await this.trace(runId, "changeset_collected", entry.task.id, {
               changeSetId: changeSet.id,
               files: changeSet.patches.map((patch) => patch.path),
             });
@@ -220,7 +277,14 @@ export class Coordinator {
               await this.workspaces.destroy(workspace);
             }
             this.ownership.releaseTask(entry.task.id);
-            this.audit.record("task_failed", entry.task.id, {
+            await this.store?.releaseLeases(runId ?? "", entry.task.id);
+            await this.store?.saveTaskStatus(
+              runId ?? "",
+              entry.task.id,
+              "failed",
+              errorMessage(error),
+            );
+            await this.trace(runId, "task_failed", entry.task.id, {
               error: errorMessage(error),
             });
             return {
@@ -248,7 +312,8 @@ export class Coordinator {
             validationCommands: result.task.validationCommands,
             commitMessage: `coord(${result.task.id}): ${result.task.objective}`,
           });
-          this.audit.record("validation_completed", result.task.id, {
+          await this.store?.saveIntegration(runId ?? "", integration);
+          await this.trace(runId, "validation_completed", result.task.id, {
             status: integration.status,
             commands: integration.validation.map((entry) => ({
               label: entry.command.label,
@@ -257,29 +322,42 @@ export class Coordinator {
           });
 
           if (integration.status === "integrated") {
-            this.audit.record("canonical_promoted", result.task.id, {
+            await this.trace(runId, "canonical_promoted", result.task.id, {
               previousRevision: integration.previousVersion.revision,
               revision: integration.canonicalVersion.revision,
               changeSetId: integration.changeSetId,
             });
           } else {
-            this.audit.record("task_failed", result.task.id, {
+            await this.trace(runId, "task_failed", result.task.id, {
               status: integration.status,
               explanation: integration.explanation,
             });
           }
 
+          const status =
+            integration.status === "integrated" ? "integrated" : "failed";
+          await this.store?.saveTaskStatus(
+            runId ?? "",
+            result.task.id,
+            status,
+            integration.explanation,
+          );
           taskResults.push({
             task: result.task,
             plan: result.plan,
             decision: result.decision,
             integration,
-            status:
-              integration.status === "integrated" ? "integrated" : "failed",
+            status,
             explanation: integration.explanation,
           });
         } catch (error) {
-          this.audit.record("task_failed", result.task.id, {
+          await this.store?.saveTaskStatus(
+            runId ?? "",
+            result.task.id,
+            "failed",
+            errorMessage(error),
+          );
+          await this.trace(runId, "task_failed", result.task.id, {
             error: errorMessage(error),
           });
           taskResults.push({
@@ -292,7 +370,8 @@ export class Coordinator {
         } finally {
           await this.workspaces.destroy(result.workspace);
           const released = this.ownership.releaseTask(result.task.id);
-          this.audit.record("ownership_released", result.task.id, {
+          await this.store?.releaseLeases(runId ?? "", result.task.id);
+          await this.trace(runId, "ownership_released", result.task.id, {
             leaseIds: released.map((lease) => lease.leaseId),
           });
         }
@@ -316,5 +395,22 @@ export class Coordinator {
       }),
       audit: this.audit.all(),
     };
+  }
+
+  /** Records one transition to the in-process log and the durable store. */
+  private async trace(
+    runId: string | undefined,
+    type: AuditEventType,
+    taskId: string | undefined,
+    data: Readonly<Record<string, unknown>> = {},
+  ): Promise<void> {
+    this.audit.record(type, taskId, data);
+    if (this.store !== undefined) {
+      await this.store.appendAudit(runId, {
+        type,
+        data,
+        ...(taskId === undefined ? {} : { taskId }),
+      });
+    }
   }
 }

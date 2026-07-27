@@ -17,7 +17,9 @@ The current prototype proves the smallest useful loop:
 
 ## Requirements
 
-- Node.js 22.18 or newer
+- Node.js 24 or newer — the coordination store uses the built-in `node:sqlite`,
+  which is only stable from Node 24. On Node 22 it requires
+  `--experimental-sqlite`.
 - Git 2.40 or newer
 
 Docker is optional. By default the proof uses Git worktrees for filesystem
@@ -33,6 +35,20 @@ npm.cmd run check
 npm.cmd run demo
 npm.cmd run benchmark
 ```
+
+## Durable history
+
+Coordination state is recorded as a run progresses, so it survives the process:
+
+```powershell
+node apps/cli/dist/index.js demo --persist   # records to .coordinator/coordination.db
+node apps/cli/dist/index.js history          # list recorded runs
+node apps/cli/dist/index.js history <run-id> # tasks, conflicts, changesets, integrations
+node apps/cli/dist/index.js verify-audit     # check the audit chain for tampering
+```
+
+Runs without `--persist` keep the previous in-memory behavior. See
+[the Phase 1 notes](docs/architecture/phase-1.md).
 
 `demo` prints the coordination decisions and final canonical source.
 `benchmark` runs a task set in coordinated and uncoordinated modes and reports

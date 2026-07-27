@@ -10,13 +10,14 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/benchmark.test.js dist/mixed-scenario.test.js dist/dependency-scenario.test.js dist/live-benchmark.test.js"
+    "test": "node --test dist/benchmark.test.js dist/mixed-scenario.test.js dist/dependency-scenario.test.js dist/live-benchmark.test.js dist/persistence.test.js"
   },
   "dependencies": {
     "@coord/adapter-generic-cli": "*",
     "@coord/agent-protocol": "*",
     "@coord/coordinator": "*",
     "@coord/integration-service": "*",
+    "@coord/persistence": "*",
     "@coord/repository-service": "*",
     "@coord/shared-types": "*",
     "@coord/workspace-manager": "*"

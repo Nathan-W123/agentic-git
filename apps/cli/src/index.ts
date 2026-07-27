@@ -4,6 +4,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import {
+  SqliteCoordinationStore,
+  type CoordinationStore,
+} from "@coord/persistence";
+
 import { runBenchmark, runCoordinatedFixture } from "./benchmark.js";
 import {
   createBenchmarkFixture,
@@ -19,6 +24,32 @@ import {
   type BenchmarkScenario,
 } from "./scenarios.js";
 
+/** Kept beside the repository so a run's history travels with the checkout. */
+const DEFAULT_DATABASE_PATH = path.join(".coordinator", "coordination.db");
+
+/** Reads `--flag=value`, returning `fallback` when the flag carries no value. */
+function flagValue(
+  flags: readonly string[],
+  name: string,
+  fallback?: string,
+): string | undefined {
+  const prefix = `--${name}`;
+  const match = flags.find(
+    (entry) => entry === prefix || entry.startsWith(`${prefix}=`),
+  );
+  if (match === undefined) {
+    return undefined;
+  }
+  const value = match.slice(prefix.length + 1).trim();
+  return value.length === 0 ? fallback : value;
+}
+
+function openStore(flags: readonly string[], name: string): CoordinationStore {
+  return SqliteCoordinationStore.open(
+    flagValue(flags, name, DEFAULT_DATABASE_PATH) ?? DEFAULT_DATABASE_PATH,
+  );
+}
+
 function printHelp(): void {
   const scenarios = SCENARIOS.map(
     (entry) =>
@@ -28,17 +59,25 @@ function printHelp(): void {
   console.log(`AI-Native Development Coordinator
 
 Usage:
-  coord demo [--live] [--scenario=<name>]
+  coord demo [--live] [--scenario=<name>] [--persist[=<path>]]
   coord benchmark [--json] [--live] [--scenario=<name>] [--repeat=<n>]
+  coord history [--json] [--db=<path>]
+  coord history <run-id> [--json] [--db=<path>]
+  coord verify-audit [--db=<path>]
   coord help
 
 Commands:
-  demo       Run one scenario through coordinated execution.
-  benchmark  Compare coordinated and uncoordinated execution.
+  demo          Run one scenario through coordinated execution.
+  benchmark     Compare coordinated and uncoordinated execution.
+  history       List recorded runs, or show one run in detail.
+  verify-audit  Check the audit chain for tampering.
 
 Options:
   --live         Drive selected tasks with a real agent process instead of the
                  deterministic scripted behavior.
+  --persist[=<path>]  Record the run to a durable store. Defaults to
+                 ${DEFAULT_DATABASE_PATH}.
+  --db=<path>    Store to read from. Defaults to ${DEFAULT_DATABASE_PATH}.
   --scenario=<name>  Task set to run. Defaults to "${DEFAULT_SCENARIO.name}".
   --repeat=<n>   Run the benchmark n times and report each run. Scripted
                  scenarios are deterministic, so this only varies timing;
@@ -128,13 +167,17 @@ function selectRepeat(flags: readonly string[]): number {
 async function runDemo(
   live: boolean,
   scenario: BenchmarkScenario,
+  store: CoordinationStore | undefined,
 ): Promise<void> {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-demo-"));
   try {
     const fixture: BenchmarkFixture = live
       ? await createLiveBenchmarkFixture(root, "demo", undefined, scenario)
       : await createBenchmarkFixture(root, "demo", { scenario });
-    const result = await runCoordinatedFixture(fixture);
+    const result = await runCoordinatedFixture(
+      fixture,
+      store === undefined ? {} : { store },
+    );
     const source = await fixture.repositories.readFile(
       fixture.repository,
       result.run.canonicalVersion.revision,
@@ -161,6 +204,13 @@ async function runDemo(
         `(${result.run.canonicalVersion.revision.slice(0, 12)})`,
     );
     console.log(`Audit events: ${result.run.audit.length}`);
+    if (store !== undefined) {
+      const runs = await store.listRuns(1);
+      console.log(
+        `Recorded run: ${runs[0]?.id ?? "unknown"} ` +
+          `(coord history ${runs[0]?.id ?? ""})`,
+      );
+    }
     console.log(
       fixture.sandbox === undefined
         ? "Workspace isolation: git-worktree (local proof only)"
@@ -180,6 +230,119 @@ async function runDemo(
   }
 }
 
+async function runHistory(
+  runId: string | undefined,
+  flags: readonly string[],
+): Promise<void> {
+  const store = openStore(flags, "db");
+  const asJson = flags.includes("--json");
+  try {
+    if (runId === undefined) {
+      const runs = await store.listRuns();
+      if (asJson) {
+        console.log(JSON.stringify(runs, undefined, 2));
+        return;
+      }
+      if (runs.length === 0) {
+        console.log("No recorded runs. Use `coord demo --persist` to record one.");
+        return;
+      }
+
+      console.log(
+        ["Run".padEnd(42), "Scenario".padEnd(12), "Status".padEnd(11), "Started"].join(""),
+      );
+      for (const run of runs) {
+        console.log(
+          [
+            run.id.padEnd(42),
+            (run.scenario ?? "-").padEnd(12),
+            run.status.padEnd(11),
+            run.startedAt,
+          ].join(""),
+        );
+      }
+      return;
+    }
+
+    const detail = await store.getRun(runId);
+    if (detail === undefined) {
+      throw new Error(`Unknown run: ${runId}`);
+    }
+    if (asJson) {
+      console.log(JSON.stringify(detail, undefined, 2));
+      return;
+    }
+
+    console.log(
+      `Run ${detail.run.id} (${detail.run.scenario ?? "no scenario"}) ` +
+        `${detail.run.status}`,
+    );
+    console.log(
+      `Base ${detail.run.baseRevision.slice(0, 12)} -> ` +
+        `${detail.run.finalRevision?.slice(0, 12) ?? "unchanged"}\n`,
+    );
+
+    console.log("Tasks:");
+    for (const task of detail.tasks) {
+      console.log(
+        `  ${task.id.padEnd(24)} ${task.status.padEnd(11)} ` +
+          `${task.decision?.decision ?? "-"}` +
+          (task.explanation === undefined ? "" : ` — ${task.explanation}`),
+      );
+    }
+
+    if (detail.conflicts.length > 0) {
+      console.log("\nConflicts:");
+      for (const conflict of detail.conflicts) {
+        console.log(
+          `  ${conflict.taskIds.join(" <-> ")} score ${conflict.score} ` +
+            `(${conflict.disposition})`,
+        );
+      }
+    }
+
+    console.log("\nIntegrations:");
+    for (const integration of detail.integrations) {
+      console.log(
+        `  ${integration.taskId.padEnd(24)} ${integration.status.padEnd(18)} ` +
+          `${integration.explanation}`,
+      );
+    }
+
+    console.log(`\nChangesets: ${detail.changeSets.length}`);
+    for (const changeSet of detail.changeSets) {
+      console.log(
+        `  ${changeSet.taskId.padEnd(24)} ` +
+          `${changeSet.patches.map((patch) => patch.path).join(", ")}`,
+      );
+    }
+
+    console.log(`\nAudit events: ${detail.audit.length}`);
+  } finally {
+    await store.close();
+  }
+}
+
+async function runVerifyAudit(flags: readonly string[]): Promise<void> {
+  const store = openStore(flags, "db");
+  try {
+    const verification = await store.verifyAudit();
+    if (verification.valid) {
+      console.log(
+        `Audit chain intact across ${verification.events} event(s).`,
+      );
+      return;
+    }
+    console.error(
+      `Audit chain broken at event ${verification.brokenAt} of ` +
+        `${verification.events}: ${verification.reason}`,
+    );
+    process.exitCode = 1;
+  } finally {
+    await store.close();
+  }
+}
+
 /** Fails fast so a `--live` run never silently falls back to scripted agents. */
 function requireLiveAgentConfig(): LiveAgentConfig {
   const config = readLiveAgentConfig();
@@ -195,8 +358,25 @@ async function main(): Promise<void> {
   const [command = "help", ...flags] = process.argv.slice(2);
   const live = flags.includes("--live");
   switch (command) {
-    case "demo":
-      await runDemo(live, selectScenario(flags));
+    case "demo": {
+      const persist = flags.some((entry) => entry.startsWith("--persist"));
+      const store = persist ? openStore(flags, "persist") : undefined;
+      try {
+        await runDemo(live, selectScenario(flags), store);
+      } finally {
+        await store?.close();
+      }
+      break;
+    }
+    case "history":
+      // A run id, when present, is the only positional argument.
+      await runHistory(
+        flags.find((entry) => !entry.startsWith("--")),
+        flags,
+      );
+      break;
+    case "verify-audit":
+      await runVerifyAudit(flags);
       break;
     case "benchmark": {
       const scenario = selectScenario(flags);
