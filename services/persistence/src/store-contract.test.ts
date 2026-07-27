@@ -958,6 +958,58 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: expiring a lease reports it as expired, not as still active`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "lease-owner@example.invalid",
+        displayName: "Lease Owner",
+        passwordDigest: "unused",
+      });
+      const worker = await store.registerWorker({
+        userId: owner.id,
+        name: "worker",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      await store.saveRepository(REPOSITORY);
+      await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "queued objective",
+        agentId: "codex",
+        validationCommands: TASK.validationCommands,
+      });
+
+      const work = await store.leaseNextTask({
+        workerId: worker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 1,
+      });
+      assert.ok(work !== undefined);
+
+      const expired = await store.expireWorkLeases(
+        new Date(Date.now() + 60_000).toISOString(),
+      );
+      assert.equal(expired.length, 1);
+
+      // The returned record must describe the lease after expiry. One backend
+      // returned the row as it was before the update, so callers reporting
+      // reclaimed work described it as still running.
+      assert.equal(expired[0]?.status, "expired");
+      assert.equal(expired[0]?.outcome, "expired");
+      assert.ok(expired[0]?.finishedAt !== undefined);
+      assert.deepEqual(await store.listWorkLeases({ status: "active" }), []);
+
+      // And the task itself is queued again rather than stranded as claimed.
+      const pending = await store.listSubmittedTasks({ status: "submitted" });
+      assert.equal(pending.length, 1);
+      assert.equal(pending[0]?.id, work.task.id);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: runs list newest first and unknown ids return undefined`, async () => {
     const { store, cleanup } = await backend.open();
     try {

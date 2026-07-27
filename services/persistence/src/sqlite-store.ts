@@ -818,9 +818,17 @@ export class SqliteCoordinationStore implements CoordinationStore {
         "SELECT * FROM work_leases WHERE status = 'active' AND expires_at <= ?",
       )
       .all(now) as Row[];
-    const expired = rows.map((row) => this.toWorkLease(row));
-    for (const lease of expired) {
-      await this.finishWorkLease(lease.id, "expired", now, "lease expired");
+    const expired: WorkLease[] = [];
+    for (const row of rows) {
+      const { id } = this.toWorkLease(row);
+      await this.finishWorkLease(id, "expired", now, "lease expired");
+      // Re-read rather than returning the row selected above: that snapshot
+      // still says `active`, and a caller reporting these leases would
+      // describe expired work as running.
+      const settled = await this.getWorkLease(id);
+      if (settled !== undefined) {
+        expired.push(settled);
+      }
     }
     return expired;
   }
