@@ -1,0 +1,24 @@
+{
+  "name": "@coord/worker",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": { "coord-worker": "./dist/index.js" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/worker.test.js"
+  },
+  "dependencies": {
+    "@coord/adapter-codex": "*",
+    "@coord/adapter-generic-cli": "*",
+    "@coord/agent-protocol": "*",
+    "@coord/api-gateway": "*",
+    "@coord/cli": "*",
+    "@coord/persistence": "*",
+    "@coord/repository-service": "*",
+    "@coord/shared-types": "*",
+    "@coord/workspace-manager": "*"
+  }
+}

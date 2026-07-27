@@ -137,6 +137,12 @@ async function startRuntime(t: TestContext): Promise<TestRuntime> {
         lease: leased.lease,
         task: leased.task,
         repository: { id: leased.task.repositoryId, branch: "main" },
+        canonicalVersion: {
+          sequence: 1,
+          revision: "a".repeat(40),
+          branch: "main",
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
         bundleUrl: `/api/v1/workers/leases/${leased.lease.id}/bundle`,
         bundleRef: `coord-lease/${leased.lease.id}`,
         heartbeatIntervalMs: 60_000,

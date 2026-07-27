@@ -4,6 +4,7 @@ import type {
   WorkLease,
 } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
+import type { CanonicalVersion } from "@coord/shared-types";
 
 import type { CoordinatorProject } from "./project.js";
 
@@ -23,6 +24,11 @@ export interface WorkAssignment {
   lease: WorkLease;
   task: SubmittedTask;
   repository: { id: string; branch: string };
+  /**
+   * The canonical version the lease was issued against. Sent in full so the
+   * worker never has to reconstruct sequence or timestamp from the revision.
+   */
+  canonicalVersion: CanonicalVersion;
   bundleUrl: string;
   /** Branch to check out from the bundle: `git clone --branch <ref>`. */
   bundleRef: string;
@@ -101,6 +107,7 @@ export async function leaseWork(
       id: leased.task.repositoryId,
       branch: repository?.branch ?? "main",
     },
+    canonicalVersion: version,
     bundleUrl: `/api/v1/workers/leases/${leased.lease.id}/bundle`,
     bundleRef: bundleRefFor(leased.lease.id),
     heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,

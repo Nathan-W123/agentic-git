@@ -84,14 +84,47 @@ task, and accepting both would let two workers write results for one task.
   the calling user, and returns `404` rather than `403` so lease ids cannot be
   probed
 
+## The worker daemon
+
+`apps/worker` implements the other half. It is configured entirely by
+environment:
+
+| Variable | Meaning |
+| --- | --- |
+| `COORD_SERVER` | Control plane URL |
+| `COORD_TOKEN` | Bearer token carrying `run_task` |
+| `COORD_PROJECT_ROOT` | Project supplying agent definitions |
+| `COORD_WORKER_NAME` | Reported to the fleet listing |
+| `COORD_REPOSITORY` | Restrict this worker to one repository |
+
+Each iteration leases a task, fetches the bundle, clones it, runs the agent,
+returns a changeset, and deletes the workspace. It owns nothing durable.
+
+Two behaviours matter. A **heartbeat runs alongside execution**, because an
+agent can take far longer than the lease and the control plane would otherwise
+reclaim work still in progress. And **shutdown releases the held lease**, so a
+planned restart makes the task available immediately rather than after the
+expiry.
+
+A lost lease is never reported as a result: by then another worker may hold the
+task, so the run is abandoned instead.
+
+## Isolation
+
+The worker honours the project's sandbox configuration, wrapping the agent in
+`DockerWorkspaceManager` when one is set. With none configured the agent runs
+unconfined, which is only defensible on a single-tenant worker.
+
+The Codex adapter cannot currently be combined with a container sandbox — it
+confines itself through Codex's own `--sandbox` flag rather than a
+`WorkspaceSandbox` — so the worker refuses that combination rather than running
+unconfined while appearing sandboxed.
+
 ## Not yet built
 
-- The long-running worker daemon. The protocol, the control-plane operations,
-  and workspace materialisation are implemented and tested; the poll loop that
-  strings them together is a thin wrapper still to come.
-- Container isolation on the worker side. `DockerWorkspaceManager` exists but
-  has never run against a daemon, and hosted execution is exactly the case it
-  is for: untrusted agents from different tenants on shared compute.
+- Container isolation has still never run against a Docker daemon. Hosted
+  execution is exactly the case it exists for: untrusted agents from different
+  tenants on shared compute. `npm run verify:docker` covers it in one command.
 - Validation on workers. Integration still compiles and tests on the control
   plane, so a repository's own test commands run with control-plane privileges.
 - Per-task credentials and an egress allowlist.

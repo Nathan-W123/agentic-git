@@ -26,7 +26,9 @@ function argument(name: string): string | undefined {
 function portNumber(value: string | undefined): number {
   const port = Number.parseInt(value ?? "4317", 10);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
-    throw new Error("COORD_PORT must be an integer between 1 and 65535");
+    throw new Error(
+      "Port must be an integer between 1 and 65535 (--port or COORD_PORT)",
+    );
   }
   return port;
 }
@@ -123,7 +125,7 @@ async function main(): Promise<void> {
     staticAssets: await loadStaticAssets(),
   });
   const host = process.env["COORD_HOST"] ?? "127.0.0.1";
-  const port = portNumber(process.env["COORD_PORT"]);
+  const port = portNumber(argument("port") ?? process.env["COORD_PORT"]);
   await new Promise<void>((resolve, reject) => {
     gateway.server.once("error", reject);
     gateway.server.listen(port, host, () => {

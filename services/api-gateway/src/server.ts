@@ -128,6 +128,12 @@ export interface WorkAssignment {
   lease: WorkLease;
   task: SubmittedTask;
   repository: { id: string; branch: string };
+  canonicalVersion: {
+    sequence: number;
+    revision: string;
+    branch: string;
+    createdAt: string;
+  };
   /** Fetch the workspace contents from here, then clone it. */
   bundleUrl: string;
   /** Branch to check out from the bundle. */
