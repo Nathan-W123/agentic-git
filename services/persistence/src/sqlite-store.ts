@@ -70,6 +70,11 @@ import type {
   SubmittedTaskFilter,
   SubmittedTaskStatus,
   UserAccount,
+  LeaseTaskInput,
+  LeasedWork,
+  WorkLease,
+  WorkLeaseStatus,
+  WorkerRecord,
 } from "./store.js";
 import {
   DEFAULT_PROJECT_ID,
@@ -590,6 +595,264 @@ export class SqliteCoordinationStore implements CoordinationStore {
         )
         .get(projectId, repositoryId) !== undefined
     );
+  }
+
+  public async registerWorker(input: {
+    userId: string;
+    name: string;
+    adapters: string[];
+    version: string;
+  }): Promise<WorkerRecord> {
+    const now = new Date().toISOString();
+    const worker: WorkerRecord = {
+      id: createId("worker"),
+      userId: input.userId,
+      name: input.name,
+      adapters: [...input.adapters],
+      version: input.version,
+      registeredAt: now,
+      lastSeenAt: now,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO workers
+           (id, user_id, name, adapters_json, version, registered_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        worker.id,
+        worker.userId,
+        worker.name,
+        JSON.stringify(worker.adapters),
+        worker.version,
+        worker.registeredAt,
+        worker.lastSeenAt,
+      );
+    return worker;
+  }
+
+  public async listWorkers(): Promise<WorkerRecord[]> {
+    const rows = this.db
+      .prepare("SELECT * FROM workers ORDER BY last_seen_at DESC")
+      .all() as Row[];
+    return rows.map((row) => this.toWorker(row));
+  }
+
+  public async getWorker(id: string): Promise<WorkerRecord | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM workers WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row === undefined ? undefined : this.toWorker(row);
+  }
+
+  public async touchWorker(id: string, at: string): Promise<void> {
+    this.db
+      .prepare("UPDATE workers SET last_seen_at = ? WHERE id = ?")
+      .run(at, id);
+  }
+
+  public async leaseNextTask(
+    input: LeaseTaskInput,
+  ): Promise<LeasedWork | undefined> {
+    // BEGIN IMMEDIATE takes the write lock up front, so two workers polling at
+    // the same moment serialise here rather than both reading the same
+    // pending row and racing to claim it.
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const clauses = ["status = 'submitted'"];
+      const values: string[] = [];
+      if (input.repositoryId !== undefined) {
+        clauses.push("repository_id = ?");
+        values.push(input.repositoryId);
+      }
+      if (input.projectId !== undefined) {
+        clauses.push("project_id = ?");
+        values.push(input.projectId);
+      }
+
+      const row = this.db
+        .prepare(
+          `SELECT * FROM submitted_tasks WHERE ${clauses.join(" AND ")}
+           ORDER BY submitted_at, rowid LIMIT 1`,
+        )
+        .get(...values) as Row | undefined;
+      if (row === undefined) {
+        this.db.exec("COMMIT");
+        return undefined;
+      }
+
+      const now = new Date();
+      const task = this.toSubmittedTask(row);
+      const lease: WorkLease = {
+        id: createId("lease"),
+        taskId: task.id,
+        workerId: input.workerId,
+        repositoryId: task.repositoryId,
+        projectId: task.projectId,
+        status: "active",
+        baseRevision: input.baseRevision,
+        issuedAt: now.toISOString(),
+        expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
+        heartbeatAt: now.toISOString(),
+        finishedAt: undefined,
+        outcome: undefined,
+        detail: undefined,
+      };
+
+      this.db
+        .prepare(
+          "UPDATE submitted_tasks SET status = 'claimed', claimed_at = ? WHERE id = ?",
+        )
+        .run(lease.issuedAt, task.id);
+      this.db
+        .prepare(
+          `INSERT INTO work_leases
+             (id, task_id, worker_id, repository_id, project_id, status,
+              base_revision, issued_at, expires_at, heartbeat_at)
+           VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?)`,
+        )
+        .run(
+          lease.id,
+          lease.taskId,
+          lease.workerId,
+          lease.repositoryId,
+          lease.projectId ?? null,
+          lease.baseRevision,
+          lease.issuedAt,
+          lease.expiresAt,
+          lease.heartbeatAt,
+        );
+      this.db.exec("COMMIT");
+      return { lease, task: { ...task, status: "claimed", claimedAt: lease.issuedAt } };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  public async getWorkLease(id: string): Promise<WorkLease | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM work_leases WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row === undefined ? undefined : this.toWorkLease(row);
+  }
+
+  public async listWorkLeases(
+    filter: { workerId?: string; status?: WorkLeaseStatus } = {},
+  ): Promise<WorkLease[]> {
+    const clauses: string[] = [];
+    const values: string[] = [];
+    if (filter.workerId !== undefined) {
+      clauses.push("worker_id = ?");
+      values.push(filter.workerId);
+    }
+    if (filter.status !== undefined) {
+      clauses.push("status = ?");
+      values.push(filter.status);
+    }
+    const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
+    const rows = this.db
+      .prepare(`SELECT * FROM work_leases${where} ORDER BY issued_at DESC`)
+      .all(...values) as Row[];
+    return rows.map((row) => this.toWorkLease(row));
+  }
+
+  public async heartbeatWorkLease(
+    id: string,
+    at: string,
+    expiresAt: string,
+  ): Promise<WorkLease | undefined> {
+    this.db
+      .prepare(
+        `UPDATE work_leases SET heartbeat_at = ?, expires_at = ?
+         WHERE id = ? AND status = 'active'`,
+      )
+      .run(at, expiresAt, id);
+    const lease = await this.getWorkLease(id);
+    return lease?.status === "active" ? lease : undefined;
+  }
+
+  public async finishWorkLease(
+    id: string,
+    status: Exclude<WorkLeaseStatus, "active">,
+    at: string,
+    detail?: string,
+  ): Promise<void> {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare("SELECT * FROM work_leases WHERE id = ? AND status = 'active'")
+        .get(id) as Row | undefined;
+      if (row === undefined) {
+        this.db.exec("COMMIT");
+        return;
+      }
+      const lease = this.toWorkLease(row);
+      this.db
+        .prepare(
+          `UPDATE work_leases SET status = ?, finished_at = ?, outcome = ?, detail = ?
+           WHERE id = ?`,
+        )
+        .run(status, at, status, detail ?? null, id);
+
+      // A released or expired lease returns its task to the queue; a settled
+      // one leaves the task alone for the caller to complete.
+      if (status === "released" || status === "expired") {
+        this.db
+          .prepare(
+            `UPDATE submitted_tasks SET status = 'submitted', claimed_at = NULL
+             WHERE id = ? AND status = 'claimed'`,
+          )
+          .run(lease.taskId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  public async expireWorkLeases(now: string): Promise<WorkLease[]> {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM work_leases WHERE status = 'active' AND expires_at <= ?",
+      )
+      .all(now) as Row[];
+    const expired = rows.map((row) => this.toWorkLease(row));
+    for (const lease of expired) {
+      await this.finishWorkLease(lease.id, "expired", now, "lease expired");
+    }
+    return expired;
+  }
+
+  private toWorker(row: Row): WorkerRecord {
+    return {
+      id: text(row, "id"),
+      userId: text(row, "user_id"),
+      name: text(row, "name"),
+      adapters: parseJson<string[]>(row, "adapters_json"),
+      version: text(row, "version"),
+      registeredAt: text(row, "registered_at"),
+      lastSeenAt: text(row, "last_seen_at"),
+    };
+  }
+
+  private toWorkLease(row: Row): WorkLease {
+    return {
+      id: text(row, "id"),
+      taskId: text(row, "task_id"),
+      workerId: text(row, "worker_id"),
+      repositoryId: text(row, "repository_id"),
+      projectId: optionalText(row, "project_id"),
+      status: text(row, "status") as WorkLeaseStatus,
+      baseRevision: text(row, "base_revision"),
+      issuedAt: text(row, "issued_at"),
+      expiresAt: text(row, "expires_at"),
+      heartbeatAt: text(row, "heartbeat_at"),
+      finishedAt: optionalText(row, "finished_at"),
+      outcome: optionalText(row, "outcome"),
+      detail: optionalText(row, "detail"),
+    };
   }
 
   public async createApiToken(token: ApiTokenRecord): Promise<void> {

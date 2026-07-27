@@ -13,6 +13,7 @@ import {
 import type {
   CoordinationStore,
   OrganizationRole,
+  WorkLease,
   StoredRepository,
   SubmittedTask,
   SubmittedTaskStatus,
@@ -40,6 +41,8 @@ import { AuditWebSocketHub } from "./websocket.js";
 
 const API_PREFIX = "/api/v1";
 const MAX_JSON_BYTES = 1024 * 1024;
+/** How long a worker holds a task before it must heartbeat again. */
+const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
 const ROLES: readonly OrganizationRole[] = [
   "owner",
   "admin",
@@ -101,6 +104,35 @@ export interface ApiOperations {
     version?: string;
     explanation: string;
   }>;
+  /**
+   * Remote execution hooks. A deployment without workers omits these and the
+   * worker endpoints report that they are unsupported.
+   */
+  leaseWork?(input: {
+    workerId: string;
+    actorId: string;
+    repositoryId?: string;
+  }): Promise<WorkAssignment | undefined>;
+  leaseBundle?(leaseId: string): Promise<Buffer | undefined>;
+  acceptWorkResult?(input: {
+    leaseId: string;
+    status: "completed" | "failed";
+    actorId: string;
+    changeSet: unknown;
+    detail?: string;
+  }): Promise<unknown>;
+}
+
+/** Everything a worker needs to execute one task without further lookups. */
+export interface WorkAssignment {
+  lease: WorkLease;
+  task: SubmittedTask;
+  repository: { id: string; branch: string };
+  /** Fetch the workspace contents from here, then clone it. */
+  bundleUrl: string;
+  /** Branch to check out from the bundle. */
+  bundleRef: string;
+  heartbeatIntervalMs: number;
 }
 
 export interface ApiGatewayOptions {
@@ -527,6 +559,166 @@ export class ApiGateway {
     if (method === "GET" && path === `${API_PREFIX}/auth/me`) {
       this.sendJson(response, 200, principal);
       return;
+    }
+
+    // ---- Remote worker protocol -------------------------------------------
+    // Every endpoint requires the run_task scope, so a leaked read-only token
+    // cannot pull work or return changesets.
+    if (path === `${API_PREFIX}/workers/register` && method === "POST") {
+      assertTokenScope(principal, "run_task");
+      const body = objectBody(await this.readJson(request));
+      const adapters = body["adapters"];
+      if (
+        !Array.isArray(adapters) ||
+        !adapters.every((entry): entry is string => typeof entry === "string")
+      ) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          "adapters must be an array of strings",
+        );
+      }
+      const worker = await this.options.store.registerWorker({
+        userId: principal.user.id,
+        name: stringField(body["name"], "name", { max: 120 }) ?? "",
+        adapters,
+        version: stringField(body["version"], "version", { max: 40 }) ?? "0",
+      });
+      this.sendJson(response, 201, worker);
+      return;
+    }
+
+    if (path === `${API_PREFIX}/workers` && method === "GET") {
+      this.sendJson(response, 200, {
+        workers: await this.options.store.listWorkers(),
+      });
+      return;
+    }
+
+    if (path === `${API_PREFIX}/workers/leases` && method === "POST") {
+      assertTokenScope(principal, "run_task");
+      const body = objectBody(await this.readJson(request));
+      const workerId = stringField(body["workerId"], "workerId", { max: 120 }) ?? "";
+      const worker = await this.options.store.getWorker(workerId);
+      if (worker === undefined || worker.userId !== principal.user.id) {
+        throw new HttpError(404, "not_found", "Worker was not found");
+      }
+
+      const nowIso = new Date().toISOString();
+      // Reclaim anything a dead worker was holding before handing out new work.
+      await this.options.store.expireWorkLeases(nowIso);
+      await this.options.store.touchWorker(workerId, nowIso);
+
+      const repositoryId = stringField(body["repositoryId"], "repositoryId", {
+        max: 200,
+        optional: true,
+      });
+      const assignment = await this.options.operations.leaseWork?.({
+        workerId,
+        actorId: principal.user.id,
+        ...(repositoryId === undefined ? {} : { repositoryId }),
+      });
+      if (assignment === undefined) {
+        // 204 rather than an empty 200 so a polling worker can branch on the
+        // status code without parsing a body.
+        response.writeHead(204).end();
+        return;
+      }
+      this.sendJson(response, 200, assignment);
+      return;
+    }
+
+    const leaseMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|result|release)$`, "u"),
+    );
+    if (leaseMatch !== undefined) {
+      assertTokenScope(principal, "run_task");
+      const leaseId = leaseMatch[0] ?? "";
+      const action = leaseMatch[1] ?? "";
+      const lease = await this.options.store.getWorkLease(leaseId);
+      if (lease === undefined) {
+        throw new HttpError(404, "not_found", "Lease was not found");
+      }
+      const owner = await this.options.store.getWorker(lease.workerId);
+      if (owner === undefined || owner.userId !== principal.user.id) {
+        throw new HttpError(404, "not_found", "Lease was not found");
+      }
+
+      if (action === "heartbeat" && method === "POST") {
+        const now = new Date();
+        const extended = await this.options.store.heartbeatWorkLease(
+          leaseId,
+          now.toISOString(),
+          new Date(now.getTime() + WORK_LEASE_TTL_MS).toISOString(),
+        );
+        if (extended === undefined) {
+          throw new HttpError(
+            409,
+            "lease_lost",
+            "This lease is no longer active; stop work and re-lease",
+          );
+        }
+        await this.options.store.touchWorker(lease.workerId, now.toISOString());
+        this.sendJson(response, 200, extended);
+        return;
+      }
+
+      if (action === "bundle" && method === "GET") {
+        const bundle = await this.options.operations.leaseBundle?.(leaseId);
+        if (bundle === undefined) {
+          throw new HttpError(
+            501,
+            "not_supported",
+            "This deployment cannot serve repository bundles",
+          );
+        }
+        response
+          .writeHead(200, {
+            "Content-Type": "application/octet-stream",
+            "Content-Length": bundle.byteLength,
+          })
+          .end(bundle);
+        return;
+      }
+
+      if (action === "release" && method === "POST") {
+        await this.options.store.finishWorkLease(
+          leaseId,
+          "released",
+          new Date().toISOString(),
+          "released by worker",
+        );
+        this.sendJson(response, 200, { released: true });
+        return;
+      }
+
+      if (action === "result" && method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const status = body["status"];
+        if (status !== "completed" && status !== "failed") {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            'status must be "completed" or "failed"',
+          );
+        }
+        const detail = stringField(body["detail"], "detail", {
+          max: 2000,
+          optional: true,
+        });
+        const accepted = await this.options.operations.acceptWorkResult?.({
+          leaseId,
+          status,
+          actorId: principal.user.id,
+          changeSet: body["changeSet"],
+          ...(detail === undefined ? {} : { detail }),
+        });
+        this.sendJson(response, 200, accepted ?? { accepted: true });
+        return;
+      }
+
+      throw new HttpError(405, "method_not_allowed", "Unsupported lease action");
     }
 
     if (path === `${API_PREFIX}/auth/tokens` && method === "GET") {

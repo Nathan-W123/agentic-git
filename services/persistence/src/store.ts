@@ -118,6 +118,56 @@ export interface ApiTokenRecord {
   revokedReason: string | undefined;
 }
 
+export interface WorkerRecord {
+  id: string;
+  userId: UserId;
+  name: string;
+  /** Agent adapters this worker can drive, e.g. `codex`, `generic-cli`. */
+  adapters: string[];
+  version: string;
+  registeredAt: string;
+  lastSeenAt: string;
+}
+
+export type WorkLeaseStatus = "active" | "completed" | "failed" | "expired" | "released";
+
+/**
+ * An exclusive, time-bounded assignment of one task to one worker.
+ *
+ * The expiry is the recovery mechanism: a worker that crashes stops
+ * heartbeating, the lease lapses, and the task returns to the queue instead of
+ * being stranded. A unique index guarantees at most one active lease per task.
+ */
+export interface WorkLease {
+  id: string;
+  taskId: TaskId;
+  workerId: string;
+  repositoryId: string;
+  projectId: ProjectId | undefined;
+  status: WorkLeaseStatus;
+  /** Canonical revision the worker must build its workspace from. */
+  baseRevision: string;
+  issuedAt: string;
+  expiresAt: string;
+  heartbeatAt: string;
+  finishedAt: string | undefined;
+  outcome: string | undefined;
+  detail: string | undefined;
+}
+
+export interface LeaseTaskInput {
+  workerId: string;
+  baseRevision: string;
+  ttlMs: number;
+  repositoryId?: string;
+  projectId?: ProjectId;
+}
+
+export interface LeasedWork {
+  lease: WorkLease;
+  task: SubmittedTask;
+}
+
 export interface AuthSessionRecord {
   id: string;
   userId: UserId;
@@ -371,6 +421,48 @@ export interface CoordinationStore {
     projectId: ProjectId,
     repositoryId: string,
   ): Promise<boolean>;
+
+  registerWorker(input: {
+    userId: UserId;
+    name: string;
+    adapters: string[];
+    version: string;
+  }): Promise<WorkerRecord>;
+  listWorkers(): Promise<WorkerRecord[]>;
+  getWorker(id: string): Promise<WorkerRecord | undefined>;
+  touchWorker(id: string, at: string): Promise<void>;
+
+  /**
+   * Atomically hands the oldest pending task to one worker.
+   *
+   * Returns `undefined` when nothing is pending. Callers must not pre-check
+   * availability: the claim and the lease are one transaction so two workers
+   * polling simultaneously cannot receive the same task.
+   */
+  leaseNextTask(input: LeaseTaskInput): Promise<LeasedWork | undefined>;
+  getWorkLease(id: string): Promise<WorkLease | undefined>;
+  listWorkLeases(filter?: {
+    workerId?: string;
+    status?: WorkLeaseStatus;
+  }): Promise<WorkLease[]>;
+  /** Extends an active lease. Returns undefined if it already lapsed. */
+  heartbeatWorkLease(
+    id: string,
+    at: string,
+    expiresAt: string,
+  ): Promise<WorkLease | undefined>;
+  /**
+   * Ends a lease. `completed` and `failed` settle the task; `released`
+   * returns it to the queue for another worker.
+   */
+  finishWorkLease(
+    id: string,
+    status: Exclude<WorkLeaseStatus, "active">,
+    at: string,
+    detail?: string,
+  ): Promise<void>;
+  /** Lapses active leases past their expiry and requeues their tasks. */
+  expireWorkLeases(now: string): Promise<WorkLease[]>;
 
   createApiToken(token: ApiTokenRecord): Promise<void>;
   getApiToken(id: string): Promise<ApiTokenRecord | undefined>;

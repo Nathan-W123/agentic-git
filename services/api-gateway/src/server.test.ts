@@ -121,6 +121,39 @@ async function startRuntime(t: TestContext): Promise<TestRuntime> {
       });
     },
     async runRepository() {},
+    async leaseWork(input) {
+      const leased = await store.leaseNextTask({
+        workerId: input.workerId,
+        baseRevision: "a".repeat(40),
+        ttlMs: 5 * 60 * 1000,
+        ...(input.repositoryId === undefined
+          ? {}
+          : { repositoryId: input.repositoryId }),
+      });
+      if (leased === undefined) {
+        return undefined;
+      }
+      return {
+        lease: leased.lease,
+        task: leased.task,
+        repository: { id: leased.task.repositoryId, branch: "main" },
+        bundleUrl: `/api/v1/workers/leases/${leased.lease.id}/bundle`,
+        bundleRef: `coord-lease/${leased.lease.id}`,
+        heartbeatIntervalMs: 60_000,
+      };
+    },
+    async leaseBundle() {
+      return Buffer.from("PACK-placeholder");
+    },
+    async acceptWorkResult(input) {
+      await store.finishWorkLease(
+        input.leaseId,
+        input.status,
+        new Date().toISOString(),
+        input.detail,
+      );
+      return { accepted: true };
+    },
   };
   const gateway = new ApiGateway({
     store,
@@ -709,5 +742,202 @@ test("invalid and malformed tokens are refused", async (t) => {
   ]) {
     const response = await bearer(runtime.origin, "/api/v1/auth/me", candidate);
     assert.equal(response.status, 401, candidate);
+  }
+});
+
+/**
+ * The remote worker protocol, exercised the way a worker actually uses it:
+ * bearer token only, no cookies, lease -> bundle -> result.
+ */
+async function workerRuntime(t: TestContext) {
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const created = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "fleet", scopes: ["view", "run_task"] },
+  });
+  assert.equal(created.status, 201);
+  return { runtime, client, token: created.data.token as string };
+}
+
+test("a worker registers, leases exclusively, and heartbeats", async (t) => {
+  const { runtime, token } = await workerRuntime(t);
+
+  const registered = await bearer(runtime.origin, "/api/v1/workers/register", token, {
+    method: "POST",
+    body: { name: "worker-a", adapters: ["codex"], version: "1.0.0" },
+  });
+  assert.equal(registered.status, 201);
+  const workerId = registered.data.id as string;
+
+  // Nothing queued yet, so the poll must say so without a body.
+  const empty = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId },
+  });
+  assert.equal(empty.status, 204);
+
+  await runtime.store.saveRepository({
+    id: "repo_worker",
+    path: "/canonical/worker.git",
+    branch: "main",
+  });
+  const task = await runtime.store.submitTask({
+    repositoryId: "repo_worker",
+    objective: "cap the value",
+    agentId: "codex",
+    validationCommands: [],
+  });
+
+  const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId },
+  });
+  assert.equal(leased.status, 200);
+  assert.equal(leased.data.task.id, task.id);
+  assert.equal(leased.data.lease.status, "active");
+  assert.ok(leased.data.bundleUrl.includes(leased.data.lease.id));
+
+  // A second poll finds nothing: the task is exclusively held.
+  const second = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId },
+  });
+  assert.equal(second.status, 204);
+
+  const beat = await bearer(
+    runtime.origin,
+    `/api/v1/workers/leases/${leased.data.lease.id}/heartbeat`,
+    token,
+    { method: "POST" },
+  );
+  assert.equal(beat.status, 200);
+  assert.ok(beat.data.expiresAt > leased.data.lease.expiresAt);
+});
+
+test("releasing a lease returns the task to the queue", async (t) => {
+  const { runtime, token } = await workerRuntime(t);
+  const workerId = (
+    await bearer(runtime.origin, "/api/v1/workers/register", token, {
+      method: "POST",
+      body: { name: "w", adapters: [], version: "1" },
+    })
+  ).data.id as string;
+
+  await runtime.store.saveRepository({
+    id: "repo_release",
+    path: "/canonical/release.git",
+    branch: "main",
+  });
+  await runtime.store.submitTask({
+    repositoryId: "repo_release",
+    objective: "objective",
+    agentId: "codex",
+    validationCommands: [],
+  });
+
+  const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId },
+  });
+  const released = await bearer(
+    runtime.origin,
+    `/api/v1/workers/leases/${leased.data.lease.id}/release`,
+    token,
+    { method: "POST" },
+  );
+  assert.equal(released.status, 200);
+
+  // Another poll now finds the work again.
+  const relet = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId },
+  });
+  assert.equal(relet.status, 200);
+
+  // A heartbeat on the abandoned lease must be refused, not silently accepted.
+  const stale = await bearer(
+    runtime.origin,
+    `/api/v1/workers/leases/${leased.data.lease.id}/heartbeat`,
+    token,
+    { method: "POST" },
+  );
+  assert.equal(stale.status, 409);
+  assert.equal(stale.data.error.code, "lease_lost");
+});
+
+test("worker endpoints require the run_task scope", async (t) => {
+  const { runtime, client } = await workerRuntime(t);
+  const readOnly = await client.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: { name: "read-only", scopes: ["view"] },
+  });
+  const token = readOnly.data.token as string;
+
+  const denied = await bearer(runtime.origin, "/api/v1/workers/register", token, {
+    method: "POST",
+    body: { name: "w", adapters: [], version: "1" },
+  });
+  assert.equal(denied.status, 403);
+  assert.equal(denied.data.error.code, "token_scope_missing");
+});
+
+test("a worker cannot touch another user's lease", async (t) => {
+  const { runtime, client, token } = await workerRuntime(t);
+  const workerId = (
+    await bearer(runtime.origin, "/api/v1/workers/register", token, {
+      method: "POST",
+      body: { name: "w", adapters: [], version: "1" },
+    })
+  ).data.id as string;
+
+  await runtime.store.saveRepository({
+    id: "repo_iso",
+    path: "/canonical/iso.git",
+    branch: "main",
+  });
+  await runtime.store.submitTask({
+    repositoryId: "repo_iso",
+    objective: "objective",
+    agentId: "codex",
+    validationCommands: [],
+  });
+  const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId },
+  });
+
+  // A second tenant with a perfectly valid run_task token.
+  const intruderUser = await runtime.store.createUser({
+    email: "intruder@example.com",
+    displayName: "Intruder",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: "org_local",
+    userId: intruderUser.id,
+    role: "developer",
+  });
+  const intruder = new TestClient(runtime.origin);
+  await intruder.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "intruder@example.com", password: PASSWORD },
+  });
+  const intruderToken = (
+    await intruder.request("/api/v1/auth/tokens", {
+      method: "POST",
+      body: { name: "theirs", scopes: ["view", "run_task"] },
+    })
+  ).data.token as string;
+
+  for (const action of ["heartbeat", "release", "result"]) {
+    const response = await bearer(
+      runtime.origin,
+      `/api/v1/workers/leases/${leased.data.lease.id}/${action}`,
+      intruderToken,
+      { method: "POST", body: { status: "failed" } },
+    );
+    assert.equal(response.status, 404, action);
   }
 });

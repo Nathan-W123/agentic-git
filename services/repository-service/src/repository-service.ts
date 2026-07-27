@@ -2,6 +2,7 @@ import {
   lstat,
   mkdir,
   mkdtemp,
+  readFile,
   rename,
   rm,
 } from "node:fs/promises";
@@ -307,6 +308,56 @@ export class RepositoryService {
       ],
       result,
     );
+  }
+
+  /**
+   * Packages one revision as a Git bundle.
+   *
+   * This is how a remote worker materialises a workspace without the control
+   * plane running a Git server: the bundle is a single self-contained file the
+   * worker can clone from directly. Only the requested revision is included,
+   * so a worker never receives history it was not assigned.
+   *
+   * The bundle is written to a file rather than captured from stdout because
+   * it is binary, and the process runner decodes output as UTF-8.
+   */
+  public async createBundle(
+    repository: CanonicalRepository,
+    revision: string,
+    refName: string,
+  ): Promise<Buffer> {
+    await this.assertBranchName(refName);
+    // Git refuses to bundle a bare commit: a bundle carries refs, not commits.
+    // A short-lived branch names the revision so an arbitrary commit can be
+    // packaged — necessary because canonical may advance while a worker holds
+    // its lease, and the worker must receive the revision it was assigned.
+    const reference = `refs/heads/${refName}`;
+    const staging = await mkdtemp(path.join(os.tmpdir(), "coord-bundle-"));
+    const bundlePath = path.join(staging, "revision.bundle");
+    try {
+      await this.git.run([
+        `--git-dir=${repository.path}`,
+        "update-ref",
+        reference,
+        "--end-of-options",
+        revision,
+      ]);
+      await this.git.run([
+        `--git-dir=${repository.path}`,
+        "bundle",
+        "create",
+        bundlePath,
+        "--end-of-options",
+        refName,
+      ]);
+      return await readFile(bundlePath);
+    } finally {
+      await this.git.run(
+        [`--git-dir=${repository.path}`, "update-ref", "-d", reference],
+        { allowFailure: true },
+      );
+      await rm(staging, { recursive: true, force: true });
+    }
   }
 
   public async readFile(

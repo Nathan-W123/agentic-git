@@ -30,6 +30,11 @@ import {
 import type {
   ApiTokenRecord,
   AppendAuditInput,
+  LeaseTaskInput,
+  LeasedWork,
+  WorkLease,
+  WorkLeaseStatus,
+  WorkerRecord,
   ApprovalFilter,
   AuditEventFilter,
   AuthSessionRecord,
@@ -97,6 +102,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly projectRepositories = new Set<string>();
   private readonly authSessions = new Map<string, AuthSessionRecord>();
   private readonly apiTokens = new Map<string, ApiTokenRecord>();
+  private readonly workers = new Map<string, WorkerRecord>();
+  private readonly workLeases = new Map<string, WorkLease>();
   private readonly approvals = new Map<string, ApprovalRequest>();
 
   public constructor() {
@@ -418,6 +425,152 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     return this.projectRepositories.has(
       this.projectRepositoryKey(projectId, repositoryId),
     );
+  }
+
+  public async registerWorker(input: {
+    userId: string;
+    name: string;
+    adapters: string[];
+    version: string;
+  }): Promise<WorkerRecord> {
+    const now = new Date().toISOString();
+    const worker: WorkerRecord = {
+      id: createId("worker"),
+      userId: input.userId,
+      name: input.name,
+      adapters: [...input.adapters],
+      version: input.version,
+      registeredAt: now,
+      lastSeenAt: now,
+    };
+    this.workers.set(worker.id, worker);
+    return { ...worker, adapters: [...worker.adapters] };
+  }
+
+  public async listWorkers(): Promise<WorkerRecord[]> {
+    return [...this.workers.values()]
+      .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))
+      .map((worker) => ({ ...worker, adapters: [...worker.adapters] }));
+  }
+
+  public async getWorker(id: string): Promise<WorkerRecord | undefined> {
+    const worker = this.workers.get(id);
+    return worker === undefined
+      ? undefined
+      : { ...worker, adapters: [...worker.adapters] };
+  }
+
+  public async touchWorker(id: string, at: string): Promise<void> {
+    const worker = this.workers.get(id);
+    if (worker !== undefined) {
+      worker.lastSeenAt = at;
+    }
+  }
+
+  public async leaseNextTask(
+    input: LeaseTaskInput,
+  ): Promise<LeasedWork | undefined> {
+    // Single-threaded by construction here, but the ordering matches the
+    // SQLite transaction so both backends behave identically.
+    const candidate = [...this.submitted.values()]
+      .filter(
+        (task) =>
+          task.status === "submitted" &&
+          (input.repositoryId === undefined ||
+            task.repositoryId === input.repositoryId) &&
+          (input.projectId === undefined || task.projectId === input.projectId),
+      )
+      .sort((left, right) => left.submittedAt.localeCompare(right.submittedAt))[0];
+    if (candidate === undefined) {
+      return undefined;
+    }
+
+    const now = new Date();
+    const lease: WorkLease = {
+      id: createId("lease"),
+      taskId: candidate.id,
+      workerId: input.workerId,
+      repositoryId: candidate.repositoryId,
+      projectId: candidate.projectId,
+      status: "active",
+      baseRevision: input.baseRevision,
+      issuedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + input.ttlMs).toISOString(),
+      heartbeatAt: now.toISOString(),
+      finishedAt: undefined,
+      outcome: undefined,
+      detail: undefined,
+    };
+    candidate.status = "claimed";
+    candidate.claimedAt = lease.issuedAt;
+    this.workLeases.set(lease.id, lease);
+    return { lease: { ...lease }, task: { ...candidate } };
+  }
+
+  public async getWorkLease(id: string): Promise<WorkLease | undefined> {
+    const lease = this.workLeases.get(id);
+    return lease === undefined ? undefined : { ...lease };
+  }
+
+  public async listWorkLeases(
+    filter: { workerId?: string; status?: WorkLeaseStatus } = {},
+  ): Promise<WorkLease[]> {
+    return [...this.workLeases.values()]
+      .filter(
+        (lease) =>
+          (filter.workerId === undefined || lease.workerId === filter.workerId) &&
+          (filter.status === undefined || lease.status === filter.status),
+      )
+      .sort((left, right) => right.issuedAt.localeCompare(left.issuedAt))
+      .map((lease) => ({ ...lease }));
+  }
+
+  public async heartbeatWorkLease(
+    id: string,
+    at: string,
+    expiresAt: string,
+  ): Promise<WorkLease | undefined> {
+    const lease = this.workLeases.get(id);
+    if (lease === undefined || lease.status !== "active") {
+      return undefined;
+    }
+    lease.heartbeatAt = at;
+    lease.expiresAt = expiresAt;
+    return { ...lease };
+  }
+
+  public async finishWorkLease(
+    id: string,
+    status: Exclude<WorkLeaseStatus, "active">,
+    at: string,
+    detail?: string,
+  ): Promise<void> {
+    const lease = this.workLeases.get(id);
+    if (lease === undefined || lease.status !== "active") {
+      return;
+    }
+    lease.status = status;
+    lease.finishedAt = at;
+    lease.outcome = status;
+    lease.detail = detail;
+
+    if (status === "released" || status === "expired") {
+      const task = this.submitted.get(lease.taskId);
+      if (task !== undefined && task.status === "claimed") {
+        task.status = "submitted";
+        task.claimedAt = undefined;
+      }
+    }
+  }
+
+  public async expireWorkLeases(now: string): Promise<WorkLease[]> {
+    const expired = [...this.workLeases.values()].filter(
+      (lease) => lease.status === "active" && lease.expiresAt <= now,
+    );
+    for (const lease of expired) {
+      await this.finishWorkLease(lease.id, "expired", now, "lease expired");
+    }
+    return expired.map((lease) => ({ ...lease }));
   }
 
   public async createApiToken(token: ApiTokenRecord): Promise<void> {

@@ -10,6 +10,7 @@ import {
   taskSubmit,
 } from "@coord/cli/commands";
 import { CoordinatorProject } from "@coord/cli/project";
+import { workerOperations } from "@coord/cli/worker-operations";
 import { runProcess } from "@coord/repository-service";
 
 import { loadStaticAssets } from "./assets.js";
@@ -82,6 +83,7 @@ async function main(): Promise<void> {
         repositoryId: input.repositoryId,
       });
     },
+    ...workerOperations(project, store),
     async dockerStatus() {
       try {
         const result = await runProcess(

@@ -367,6 +367,46 @@ export const MIGRATIONS: readonly Migration[] = [
       `CREATE INDEX api_tokens_by_expiry ON api_tokens(expires_at)`,
     ],
   },
+  {
+    // Hosted execution: a task is handed to exactly one remote worker for a
+    // bounded time. Without an expiry a worker that dies mid-task strands the
+    // work forever, so the lease is what makes remote execution recoverable.
+    version: 8,
+    name: "remote-workers",
+    statements: [
+      `CREATE TABLE workers (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        name TEXT NOT NULL,
+        adapters_json TEXT NOT NULL,
+        version TEXT NOT NULL,
+        registered_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE work_leases (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL,
+        worker_id TEXT NOT NULL REFERENCES workers(id),
+        repository_id TEXT NOT NULL,
+        project_id TEXT,
+        status TEXT NOT NULL,
+        base_revision TEXT NOT NULL,
+        issued_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        heartbeat_at TEXT NOT NULL,
+        finished_at TEXT,
+        outcome TEXT,
+        detail TEXT
+      )`,
+      // Only one active lease per task, enforced by the database rather than by
+      // application logic, so two workers can never hold the same task.
+      `CREATE UNIQUE INDEX work_leases_one_active
+         ON work_leases(task_id) WHERE status = 'active'`,
+      `CREATE INDEX work_leases_by_worker ON work_leases(worker_id, status)`,
+      `CREATE INDEX work_leases_expiring ON work_leases(status, expires_at)`,
+      `CREATE INDEX workers_by_user ON workers(user_id, last_seen_at DESC)`,
+    ],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(

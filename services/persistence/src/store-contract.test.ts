@@ -449,6 +449,230 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a task leases to exactly one worker`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "fleet@example.com",
+        displayName: "Fleet",
+        passwordDigest: "digest",
+      });
+      const first = await store.registerWorker({
+        userId: user.id,
+        name: "worker-a",
+        adapters: ["codex"],
+        version: "1",
+      });
+      const second = await store.registerWorker({
+        userId: user.id,
+        name: "worker-b",
+        adapters: ["generic-cli"],
+        version: "1",
+      });
+      await store.saveRepository(REPOSITORY);
+      const task = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "cap the value",
+        agentId: "codex",
+        validationCommands: [],
+      });
+
+      const leased = await store.leaseNextTask({
+        workerId: first.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+      });
+      assert.equal(leased?.task.id, task.id);
+      assert.equal(leased?.lease.status, "active");
+      assert.equal(leased?.lease.workerId, first.id);
+      assert.equal(leased?.lease.baseRevision, BASE_VERSION.revision);
+
+      // The task is no longer pending, so a second worker gets nothing.
+      const contested = await store.leaseNextTask({
+        workerId: second.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+      });
+      assert.equal(contested, undefined);
+      assert.equal(
+        (await store.listSubmittedTasks({ status: "submitted" })).length,
+        0,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: an expired lease returns its task to the queue`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "fleet2@example.com",
+        displayName: "Fleet",
+        passwordDigest: "digest",
+      });
+      const worker = await store.registerWorker({
+        userId: user.id,
+        name: "worker",
+        adapters: [],
+        version: "1",
+      });
+      await store.saveRepository(REPOSITORY);
+      const task = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "objective",
+        agentId: "codex",
+        validationCommands: [],
+      });
+
+      // A worker that dies stops heartbeating; the lease must lapse rather
+      // than strand the task forever.
+      const leased = await store.leaseNextTask({
+        workerId: worker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: -1_000,
+      });
+      assert.notEqual(leased, undefined);
+
+      const expired = await store.expireWorkLeases(new Date().toISOString());
+      assert.equal(expired.length, 1);
+      assert.equal(
+        (await store.getWorkLease(leased?.lease.id ?? ""))?.status,
+        "expired",
+      );
+
+      const requeued = await store.listSubmittedTasks({ status: "submitted" });
+      assert.deepEqual(
+        requeued.map((entry) => entry.id),
+        [task.id],
+      );
+
+      // And it can be picked up again by another worker.
+      const relet = await store.leaseNextTask({
+        workerId: worker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+      });
+      assert.equal(relet?.task.id, task.id);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: heartbeats extend a lease and settle it on completion`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "fleet3@example.com",
+        displayName: "Fleet",
+        passwordDigest: "digest",
+      });
+      const worker = await store.registerWorker({
+        userId: user.id,
+        name: "worker",
+        adapters: [],
+        version: "1",
+      });
+      await store.saveRepository(REPOSITORY);
+      await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "objective",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const leased = await store.leaseNextTask({
+        workerId: worker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 1_000,
+      });
+      const leaseId = leased?.lease.id ?? "";
+
+      const extended = await store.heartbeatWorkLease(
+        leaseId,
+        "2026-01-01T00:00:00.000Z",
+        "2099-01-01T00:00:00.000Z",
+      );
+      assert.equal(extended?.expiresAt, "2099-01-01T00:00:00.000Z");
+      // Now far in the future, so a sweep must leave it alone.
+      assert.deepEqual(await store.expireWorkLeases(new Date().toISOString()), []);
+
+      await store.finishWorkLease(
+        leaseId,
+        "completed",
+        "2026-01-02T00:00:00.000Z",
+        "changeset accepted",
+      );
+      const settled = await store.getWorkLease(leaseId);
+      assert.equal(settled?.status, "completed");
+      assert.equal(settled?.detail, "changeset accepted");
+
+      // A settled task is not requeued, and a late heartbeat is refused.
+      assert.equal(
+        (await store.listSubmittedTasks({ status: "submitted" })).length,
+        0,
+      );
+      assert.equal(
+        await store.heartbeatWorkLease(leaseId, "x", "2099-01-01T00:00:00.000Z"),
+        undefined,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: releasing a lease requeues the task for another worker`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "fleet4@example.com",
+        displayName: "Fleet",
+        passwordDigest: "digest",
+      });
+      const worker = await store.registerWorker({
+        userId: user.id,
+        name: "worker",
+        adapters: [],
+        version: "1",
+      });
+      await store.saveRepository(REPOSITORY);
+      const task = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "objective",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const leased = await store.leaseNextTask({
+        workerId: worker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+      });
+
+      await store.finishWorkLease(
+        leased?.lease.id ?? "",
+        "released",
+        new Date().toISOString(),
+        "worker shutting down",
+      );
+      assert.deepEqual(
+        (await store.listSubmittedTasks({ status: "submitted" })).map(
+          (entry) => entry.id,
+        ),
+        [task.id],
+      );
+      assert.deepEqual(
+        (await store.listWorkLeases({ workerId: worker.id, status: "released" }))
+          .length,
+        1,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: api tokens round-trip, revoke, and expire`, async () => {
     const { store, cleanup } = await backend.open();
     try {
