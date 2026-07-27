@@ -486,35 +486,40 @@ export class RepositoryService {
   ): Promise<CanonicalVersion> {
     await this.assertBranchName(repository.branch);
     const reference = `refs/heads/${repository.branch}`;
-    const revisionResult = await this.git.run([
-      `--git-dir=${repository.path}`,
-      "rev-parse",
-      "--verify",
-      reference,
-    ]);
-    const revision = revisionResult.stdout.trim();
 
-    const [sequenceResult, createdAtResult] = await Promise.all([
+    // Resolving the ref used to come first, because the two queries that
+    // followed were written to take the resolved revision. Both accept the ref
+    // name just as well, which makes all of it one round of processes instead
+    // of two. `for-each-ref` also yields the commit date, so the separate
+    // `show` is gone.
+    //
+    // It reports a missing ref as empty output rather than as a failure, so
+    // the check that `rev-parse --verify` used to perform is now explicit.
+    const [referenceResult, sequenceResult] = await Promise.all([
       this.git.run([
         `--git-dir=${repository.path}`,
-        "rev-list",
-        "--count",
-        revision,
+        "for-each-ref",
+        "--format=%(objectname)%09%(committerdate:iso-strict)",
+        reference,
       ]),
-      this.git.run([
-        `--git-dir=${repository.path}`,
-        "show",
-        "-s",
-        "--format=%cI",
-        revision,
-      ]),
+      this.git.run(
+        [`--git-dir=${repository.path}`, "rev-list", "--count", reference],
+        { allowFailure: true },
+      ),
     ]);
+
+    const [revision, createdAt] = referenceResult.stdout.trim().split("\t");
+    if (revision === undefined || revision.length === 0) {
+      throw new Error(
+        `Canonical branch ${repository.branch} does not exist in ${repository.path}`,
+      );
+    }
 
     return {
       sequence: Number.parseInt(sequenceResult.stdout.trim(), 10),
       revision,
       branch: repository.branch,
-      createdAt: createdAtResult.stdout.trim(),
+      createdAt: createdAt ?? "",
     };
   }
 
