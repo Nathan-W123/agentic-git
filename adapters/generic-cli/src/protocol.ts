@@ -4,6 +4,8 @@ import {
   type AgentPlan,
   type CanonicalVersion,
   type CoordinatorDecision,
+  type ReplanRequest,
+  type ScopeChangeDecision,
   type ValidationCommand,
 } from "@coord/shared-types";
 
@@ -33,11 +35,20 @@ export interface StartMessage {
   repositoryId: string;
   canonicalVersion: CanonicalVersion;
   validationCommands: ValidationCommand[];
+  /** Disposable canonical workspace available during planning. */
+  workspacePath?: string;
 }
 
 export interface PlanRequestMessage {
   type: "plan_request";
   sessionId: string;
+}
+
+export interface ReplanRequestMessage {
+  type: "replan_request";
+  sessionId: string;
+  request: ReplanRequest;
+  workspacePath?: string;
 }
 
 export interface ContextMessage {
@@ -48,6 +59,7 @@ export interface ContextMessage {
   decision: CoordinatorDecision;
   canonicalVersion: CanonicalVersion;
   plan: AgentPlan;
+  planRevision?: number;
 }
 
 export interface ControlMessage {
@@ -55,10 +67,18 @@ export interface ControlMessage {
   sessionId: string;
 }
 
+export interface ScopeDecisionMessage {
+  type: "scope_decision";
+  sessionId: string;
+  decision: ScopeChangeDecision;
+}
+
 export type HostMessage =
   | StartMessage
   | PlanRequestMessage
+  | ReplanRequestMessage
   | ContextMessage
+  | ScopeDecisionMessage
   | ControlMessage;
 
 export interface PlanReplyMessage {
@@ -202,11 +222,68 @@ export function parseAgentEvent(value: unknown): AgentEvent {
     case "scope_change_requested":
       return {
         event: "scope_change_requested",
+        ...(typeof record["requestId"] === "string"
+          ? { requestId: record["requestId"] }
+          : {}),
         additionalFiles: optionalStringArray(
           record,
           "additionalFiles",
           "scope change event",
         ),
+        ...(record["additionalSymbols"] === undefined
+          ? {}
+          : {
+              additionalSymbols: optionalStringArray(
+                record,
+                "additionalSymbols",
+                "scope change event",
+              ),
+            }),
+        ...(record["additionalApis"] === undefined
+          ? {}
+          : {
+              additionalApis: optionalStringArray(
+                record,
+                "additionalApis",
+                "scope change event",
+              ),
+            }),
+        ...(record["additionalSchemas"] === undefined
+          ? {}
+          : {
+              additionalSchemas: optionalStringArray(
+                record,
+                "additionalSchemas",
+                "scope change event",
+              ),
+            }),
+        ...(record["additionalConfigKeys"] === undefined
+          ? {}
+          : {
+              additionalConfigKeys: optionalStringArray(
+                record,
+                "additionalConfigKeys",
+                "scope change event",
+              ),
+            }),
+        ...(record["additionalTests"] === undefined
+          ? {}
+          : {
+              additionalTests: optionalStringArray(
+                record,
+                "additionalTests",
+                "scope change event",
+              ),
+            }),
+        ...(record["additionalServices"] === undefined
+          ? {}
+          : {
+              additionalServices: optionalStringArray(
+                record,
+                "additionalServices",
+                "scope change event",
+              ),
+            }),
         reason: requireString(record, "reason", "scope change event"),
         occurredAt,
       };

@@ -5,29 +5,25 @@ import path from "node:path";
 import test from "node:test";
 
 import { runBenchmark } from "./benchmark.js";
-import { DEPENDENCY_SCENARIO, TASK_BOXED, TASK_TOTAL } from "./scenarios.js";
+import { DEPENDENCY_SCENARIO, TASK_BOXED } from "./scenarios.js";
 
-test("file-level detection misses a cross-file dependency conflict", async () => {
+test("dependency coordination replans a cross-file consumer", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-dependency-test-"));
 
   try {
     const report = await runBenchmark(root, { scenario: DEPENDENCY_SCENARIO });
 
-    // The two tasks touch disjoint files, so nothing is predicted.
-    assert.equal(report.coordinated.conflictWarnings, 0);
+    assert.equal(report.coordinated.conflictWarnings, 1);
+    assert.equal(report.coordinated.tasksCompleted, 2);
+    assert.equal(report.coordinated.completionRate, 1);
+    assert.equal(report.coordinated.integrationFailures, 0);
+    assert.equal(report.coordinated.undetectedConflicts, 0);
 
-    // The signature change lands; the new caller applies cleanly and then
-    // fails validation. Coordination does not help, and the metric says so
-    // rather than reporting a clean run.
-    assert.equal(report.coordinated.tasksCompleted, 1);
-    assert.equal(report.coordinated.completionRate, 0.5);
-    assert.equal(report.coordinated.integrationFailures, 1);
-    assert.equal(report.coordinated.undetectedConflicts, 1);
-
-    // The baseline burns an extra attempt replaying work that cannot succeed.
-    assert.equal(report.uncoordinated.tasksCompleted, 1);
+    // The baseline starts the consumer from stale canonical, fails once, then
+    // rebuilds it against the producer's accepted contract.
+    assert.equal(report.uncoordinated.tasksCompleted, 2);
     assert.equal(report.uncoordinated.reworkCount, 1);
-    assert.equal(report.uncoordinated.undetectedConflicts, 1);
+    assert.equal(report.uncoordinated.undetectedConflicts, 0);
     assert.equal(report.uncoordinated.integrationAttempts, 3);
     assert.equal(report.reworkAvoided, 1);
   } finally {
@@ -35,12 +31,11 @@ test("file-level detection misses a cross-file dependency conflict", async () =>
   }
 });
 
-test("the dependency scenario documents which task cannot be predicted", () => {
-  assert.deepEqual(
-    Object.keys(DEPENDENCY_SCENARIO.knownUndetectedConflicts ?? {}),
-    [TASK_TOTAL.id],
-  );
-  // Integration order decides which side of the pair fails, so the scenario
-  // pins the signature change first.
+test("the dependency scenario pins the producer before its consumer", () => {
+  assert.equal(DEPENDENCY_SCENARIO.knownUndetectedConflicts, undefined);
   assert.equal(DEPENDENCY_SCENARIO.tasks[0]?.task.id, TASK_BOXED.id);
+  assert.deepEqual(
+    DEPENDENCY_SCENARIO.tasks[1]?.behavior.plan.dependencies,
+    ["symbol:increment"],
+  );
 });

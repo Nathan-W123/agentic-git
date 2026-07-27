@@ -1,4 +1,5 @@
 export * from "./audit-log.js";
+export * from "./approval-service.js";
 export * from "./conflict-detector.js";
 export * from "./coordinator.js";
 export * from "./ownership-service.js";

@@ -1,6 +1,6 @@
 export * from "./docker-workspace-manager.js";
 
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir, rm } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -17,7 +17,11 @@ import {
 } from "@coord/shared-types";
 import {
   GitClient,
+  GitCommandError,
+  runProcess,
   type CanonicalRepository,
+  type ProcessOptions,
+  type ProcessOutput,
 } from "@coord/repository-service";
 
 /**
@@ -81,10 +85,50 @@ export interface ChangeSetMetadata {
 export interface WorkspaceManager {
   create(input: CreateWorkspaceInput): Promise<TaskWorkspace>;
   destroy(workspace: TaskWorkspace): Promise<void>;
+  runInWorkspace(
+    workspace: TaskWorkspace,
+    spec: SandboxLaunchSpec,
+    options?: WorkspaceCommandOptions,
+  ): Promise<ProcessOutput>;
   collectChangeSet(
     workspace: TaskWorkspace,
     metadata: ChangeSetMetadata,
   ): Promise<ChangeSet>;
+}
+
+export type WorkspaceCommandOptions = Pick<
+  ProcessOptions,
+  "input" | "timeoutMs" | "maxOutputBytes"
+>;
+
+export interface NameStatusEntry {
+  code: string;
+  path: string;
+}
+
+/** Parses `git diff --name-status -z` without corrupting tabs or newlines. */
+export function parseNameStatusZ(output: string): NameStatusEntry[] {
+  const fields = output.split("\0");
+  if (fields.at(-1) === "") {
+    fields.pop();
+  }
+  if (fields.length % 2 !== 0) {
+    throw new Error("Unexpected NUL-delimited git name-status output");
+  }
+
+  const entries: NameStatusEntry[] = [];
+  for (let index = 0; index < fields.length; index += 2) {
+    const code = fields[index];
+    const changedPath = fields[index + 1];
+    if (code === undefined || code.length === 0 || changedPath === undefined) {
+      throw new Error("Unexpected NUL-delimited git name-status output");
+    }
+    entries.push({
+      code,
+      path: normalizeRepositoryPath(changedPath),
+    });
+  }
+  return entries;
 }
 
 function toPatchStatus(code: string): FilePatchStatus {
@@ -98,6 +142,31 @@ function toPatchStatus(code: string): FilePatchStatus {
   }
 }
 
+/**
+ * Windows caps most paths at 260 characters, and git stores worktree metadata
+ * under a directory of the same name inside the canonical repository, so the
+ * name is charged twice against that budget. Submitted tasks carry UUID
+ * identifiers, which overflow it before any repository content is added.
+ *
+ * The directory name is therefore truncated. Full identifiers stay on the
+ * workspace record, which is what everything downstream actually reads.
+ */
+const MAX_TASK_SEGMENT = 24;
+const WORKSPACE_SUFFIX_LENGTH = 12;
+
+export function workspaceDirectoryName(
+  taskId: TaskId,
+  workspaceId: string,
+): string {
+  const safeTaskId = taskId
+    .replaceAll(/[^A-Za-z0-9_-]/gu, "_")
+    .slice(0, MAX_TASK_SEGMENT);
+  const suffix = workspaceId
+    .replaceAll(/[^A-Za-z0-9]/gu, "")
+    .slice(-WORKSPACE_SUFFIX_LENGTH);
+  return `${safeTaskId}-${suffix}`;
+}
+
 function assertWithinRoot(rootPath: string, candidatePath: string): void {
   const relative = path.relative(path.resolve(rootPath), path.resolve(candidatePath));
   if (
@@ -109,6 +178,14 @@ function assertWithinRoot(rootPath: string, candidatePath: string): void {
   }
 }
 
+function isErrorCode(error: unknown, code: string): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === code
+  );
+}
+
 export class GitWorktreeWorkspaceManager implements WorkspaceManager {
   public constructor(private readonly git = new GitClient()) {}
 
@@ -117,18 +194,29 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
     await mkdir(rootPath, { recursive: true });
 
     const id = createId("workspace");
-    const safeTaskId = input.taskId.replaceAll(/[^A-Za-z0-9_-]/gu, "_");
-    const workspacePath = path.join(rootPath, `${safeTaskId}-${id}`);
+    const workspacePath = path.join(
+      rootPath,
+      workspaceDirectoryName(input.taskId, id),
+    );
     assertWithinRoot(rootPath, workspacePath);
 
-    await this.git.run([
-      `--git-dir=${input.repository.path}`,
-      "worktree",
-      "add",
-      "--detach",
-      workspacePath,
-      input.baseVersion.revision,
-    ]);
+    try {
+      await this.git.run([
+        `--git-dir=${input.repository.path}`,
+        "worktree",
+        "add",
+        "--detach",
+        workspacePath,
+        input.baseVersion.revision,
+      ]);
+    } catch (error) {
+      await this.git.run(
+        [`--git-dir=${input.repository.path}`, "worktree", "prune"],
+        { allowFailure: true },
+      );
+      await rm(workspacePath, { recursive: true, force: true });
+      throw error;
+    }
 
     return {
       id,
@@ -144,20 +232,53 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
 
   public async destroy(workspace: TaskWorkspace): Promise<void> {
     assertWithinRoot(workspace.rootPath, workspace.path);
-    await this.git.run(
-      [
-        `--git-dir=${workspace.repository.path}`,
-        "worktree",
-        "remove",
-        "--force",
-        workspace.path,
-      ],
+    const removeArgs = [
+      `--git-dir=${workspace.repository.path}`,
+      "worktree",
+      "remove",
+      "--force",
+      workspace.path,
+    ] as const;
+    const removal = await this.git.run(removeArgs, { allowFailure: true });
+    const pruneArgs = [
+      `--git-dir=${workspace.repository.path}`,
+      "worktree",
+      "prune",
+    ] as const;
+    const prune = await this.git.run(
+      pruneArgs,
       { allowFailure: true },
     );
-    await this.git.run(
-      [`--git-dir=${workspace.repository.path}`, "worktree", "prune"],
-      { allowFailure: true },
-    );
+    if (removal.exitCode !== 0) {
+      try {
+        await lstat(workspace.path);
+        throw new GitCommandError(removeArgs, removal);
+      } catch (error) {
+        if (!isErrorCode(error, "ENOENT")) {
+          throw error;
+        }
+      }
+    }
+    if (prune.exitCode !== 0) {
+      throw new GitCommandError(pruneArgs, prune);
+    }
+  }
+
+  public async runInWorkspace(
+    workspace: TaskWorkspace,
+    spec: SandboxLaunchSpec,
+    options: WorkspaceCommandOptions = {},
+  ): Promise<ProcessOutput> {
+    const commandDirectory =
+      spec.cwd === undefined
+        ? workspace.path
+        : path.resolve(workspace.path, spec.cwd);
+    assertWithinRoot(workspace.path, commandDirectory);
+    return await runProcess(spec.command, spec.args, {
+      cwd: commandDirectory,
+      ...(spec.env === undefined ? {} : { env: spec.env }),
+      ...options,
+    });
   }
 
   public async collectChangeSet(
@@ -178,26 +299,15 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
       workspace.path,
       "diff",
       "--name-status",
+      "-z",
       "--no-renames",
       workspace.baseVersion.revision,
       "--",
     ]);
 
     const patches: FilePatch[] = [];
-    for (const line of names.stdout.split(/\r?\n/u)) {
-      if (line.trim().length === 0) {
-        continue;
-      }
-
-      const separatorIndex = line.indexOf("\t");
-      if (separatorIndex < 1) {
-        throw new Error(`Unexpected git name-status output: ${line}`);
-      }
-
-      const code = line.slice(0, separatorIndex);
-      const changedPath = normalizeRepositoryPath(
-        line.slice(separatorIndex + 1),
-      );
+    for (const entry of parseNameStatusZ(names.stdout)) {
+      const { code, path: changedPath } = entry;
       const patch = await this.git.run([
         "-C",
         workspace.path,
@@ -244,4 +354,3 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
     };
   }
 }
-

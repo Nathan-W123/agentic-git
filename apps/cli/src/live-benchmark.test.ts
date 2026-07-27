@@ -67,6 +67,10 @@ const CAP_AGENT = [
   '    send({ type: "plan", plan: PLAN });',
   "    return;",
   "  }",
+  '  if (message.type === "replan_request") {',
+  '    send({ type: "plan", plan: PLAN });',
+  "    return;",
+  "  }",
   '  if (message.type === "context") {',
   "    send({",
   '      type: "event",',
@@ -100,6 +104,7 @@ const CAP_AGENT = [
   "    process.exit(0);",
   "  }",
   "}",
+  'process.stdin.on("end", () => process.exit(0));',
   "",
 ].join("\n");
 
@@ -218,6 +223,7 @@ test("a real agent process integrates alongside a scripted agent", async () => {
       (entry) => entry.task.id === TASK_CAP.id,
     );
     assert.equal(capTask?.status, "integrated");
+    assert.ok((capTask?.decision?.planRevision ?? 0) > 1);
     assert.equal(
       capTask?.integration?.status,
       "integrated",

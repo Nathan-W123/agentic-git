@@ -12,6 +12,8 @@ import {
   createId,
   type AgentPlan,
   type ChangeSet,
+  type ReplanRequest,
+  type ScopeChangeDecision,
 } from "@coord/shared-types";
 import {
   sanitizeChildEnv,
@@ -47,6 +49,8 @@ export interface GenericCliAdapterOptions {
   launch: SandboxLaunchSpec;
   repository: CanonicalRepository;
   workspaces: WorkspaceManager;
+  /** Disposable canonical worktrees made visible during planning. */
+  planningRoot?: string;
   /**
    * Optional confinement for the agent process.
    *
@@ -286,12 +290,15 @@ class AgentProcess {
 interface CliSession {
   session: AgentSession;
   input: StartTaskInput;
+  planningWorkspace: TaskWorkspace | undefined;
   process: AgentProcess | undefined;
   plan: AgentPlan | undefined;
   context: CoordinatorContext | undefined;
   completion: { symbolsChanged: string[]; explanation: string } | undefined;
   events: AgentEvent[];
+  eventHandlers: Set<(event: AgentEvent) => void>;
   cancelled: boolean;
+  paused: boolean;
 }
 
 /**
@@ -312,7 +319,7 @@ export class GenericCliAdapter implements AgentAdapter {
       canRunCommands: true,
       canUseTools: false,
       supportsStreaming: true,
-      supportsPause: false,
+      supportsPause: true,
     };
   }
 
@@ -326,36 +333,133 @@ export class GenericCliAdapter implements AgentAdapter {
     const record: CliSession = {
       session,
       input,
+      planningWorkspace: undefined,
       process: undefined,
       plan: undefined,
       context: undefined,
       completion: undefined,
       events: [],
+      eventHandlers: new Set(),
       cancelled: false,
+      paused: false,
     };
     this.sessions.set(session.id, record);
 
-    record.process = this.spawnAgent(record);
-    return session;
+    try {
+      if (this.options.planningRoot !== undefined) {
+        record.planningWorkspace = await this.options.workspaces.create({
+          taskId: `planning-${input.task.id}`,
+          rootPath: this.options.planningRoot,
+          repository: this.options.repository,
+          baseVersion: input.canonicalVersion,
+        });
+      }
+      record.process = this.spawnAgent(record, record.planningWorkspace);
+      return session;
+    } catch (error) {
+      this.sessions.delete(session.id);
+      await this.destroyPlanningWorkspace(record);
+      throw error;
+    }
   }
 
   public async requestPlan(sessionId: string): Promise<AgentPlan> {
     const record = this.requireSession(sessionId);
     const agent = this.requireProcess(record);
 
-    agent.send({ type: "plan_request", sessionId });
-    const reply = await agent.waitFor(
-      "plan",
-      this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
-    );
-    if (reply.plan.taskId !== record.input.task.id) {
+    try {
+      agent.send({ type: "plan_request", sessionId });
+      const reply = await agent.waitFor(
+        "plan",
+        this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      );
+      if (reply.plan.taskId !== record.input.task.id) {
+        throw new AgentProtocolError(
+          `Agent planned ${reply.plan.taskId} but was started for ${record.input.task.id}`,
+        );
+      }
+
+      record.plan = reply.plan;
+      return structuredClone(reply.plan);
+    } catch (error) {
+      // A failed or timed-out planning request must not leave an idle child
+      // waiting forever for context that the coordinator will never send.
+      record.process = undefined;
+      agent.kill();
+      await agent.close();
+      await this.destroyPlanningWorkspace(record);
+      throw error;
+    }
+  }
+
+  public async requestReplan(
+    sessionId: string,
+    request: ReplanRequest,
+  ): Promise<AgentPlan> {
+    const record = this.requireSession(sessionId);
+    if (request.taskId !== record.input.task.id) {
       throw new AgentProtocolError(
-        `Agent planned ${reply.plan.taskId} but was started for ${record.input.task.id}`,
+        `Replan request ${request.taskId} does not match ${record.input.task.id}`,
+      );
+    }
+    if (record.context !== undefined) {
+      throw new Error(
+        `Session ${sessionId} cannot replan after execution context was sent`,
       );
     }
 
-    record.plan = reply.plan;
-    return structuredClone(reply.plan);
+    const previous = record.process;
+    record.process = undefined;
+    await previous?.close();
+    await this.destroyPlanningWorkspace(record);
+    record.input = {
+      ...record.input,
+      canonicalVersion: request.canonicalChange.canonicalVersion,
+    };
+
+    try {
+      if (this.options.planningRoot !== undefined) {
+        record.planningWorkspace = await this.options.workspaces.create({
+          taskId: `replanning-${record.input.task.id}`,
+          rootPath: this.options.planningRoot,
+          repository: this.options.repository,
+          baseVersion: request.canonicalChange.canonicalVersion,
+        });
+      }
+      record.process = this.spawnAgent(record, record.planningWorkspace);
+      const agent = this.requireProcess(record);
+      agent.send({
+        type: "replan_request",
+        sessionId,
+        request,
+        ...(record.planningWorkspace === undefined
+          ? {}
+          : {
+              workspacePath:
+                this.options.sandbox?.resolveWorkspacePath(
+                  record.planningWorkspace,
+                ) ?? record.planningWorkspace.path,
+            }),
+      });
+      const reply = await agent.waitFor(
+        "plan",
+        this.options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS,
+      );
+      if (reply.plan.taskId !== record.input.task.id) {
+        throw new AgentProtocolError(
+          `Agent replanned ${reply.plan.taskId} but was started for ${record.input.task.id}`,
+        );
+      }
+      record.plan = reply.plan;
+      return structuredClone(reply.plan);
+    } catch (error) {
+      const agent = record.process;
+      record.process = undefined;
+      agent?.kill();
+      await agent?.close();
+      await this.destroyPlanningWorkspace(record);
+      throw error;
+    }
   }
 
   public async sendContext(
@@ -374,10 +478,15 @@ export class GenericCliAdapter implements AgentAdapter {
     const workspace = this.toWorkspace(record, context);
 
     try {
-      // A container cannot gain a bind mount after it starts, so the confined
-      // planning process is replaced by one that can see the workspace.
-      if (this.options.sandbox !== undefined) {
+      // A process cannot gain a new cwd or container mount after startup.
+      // Replace planning with a fresh process tied only to the granted
+      // execution workspace.
+      if (
+        this.options.sandbox !== undefined ||
+        record.planningWorkspace !== undefined
+      ) {
         await record.process?.close();
+        await this.destroyPlanningWorkspace(record);
         record.process = this.spawnAgent(record, workspace);
       }
 
@@ -391,6 +500,9 @@ export class GenericCliAdapter implements AgentAdapter {
         decision: context.decision,
         canonicalVersion: context.canonicalVersion,
         plan: record.plan,
+        ...(context.planRevision === undefined
+          ? {}
+          : { planRevision: context.planRevision }),
       });
 
       const done = await agent.waitFor(
@@ -401,7 +513,7 @@ export class GenericCliAdapter implements AgentAdapter {
         symbolsChanged: done.symbolsChanged,
         explanation: done.explanation,
       };
-      record.events.push({
+      this.emitEvent(record, {
         event: "completed",
         occurredAt: new Date().toISOString(),
       });
@@ -414,29 +526,60 @@ export class GenericCliAdapter implements AgentAdapter {
     }
   }
 
-  public async pause(_sessionId: string): Promise<void> {
-    throw new Error("GenericCliAdapter does not support pausing agent sessions");
+  public async pause(sessionId: string): Promise<void> {
+    const record = this.requireSession(sessionId);
+    if (record.paused) {
+      return;
+    }
+    this.requireProcess(record).send({ type: "pause", sessionId });
+    record.paused = true;
   }
 
-  public async resume(_sessionId: string): Promise<void> {
-    throw new Error("GenericCliAdapter does not support resuming agent sessions");
+  public async resume(sessionId: string): Promise<void> {
+    const record = this.requireSession(sessionId);
+    if (!record.paused) {
+      return;
+    }
+    this.requireProcess(record).send({ type: "resume", sessionId });
+    record.paused = false;
+  }
+
+  public async resolveScopeChange(
+    sessionId: string,
+    decision: ScopeChangeDecision,
+  ): Promise<void> {
+    const record = this.requireSession(sessionId);
+    if (decision.taskId !== record.input.task.id) {
+      throw new Error(
+        `Scope decision ${decision.taskId} does not match ${record.input.task.id}`,
+      );
+    }
+    if (decision.decision !== "rejected") {
+      record.plan = structuredClone(decision.revisedPlan);
+    }
+    this.requireProcess(record).send({
+      type: "scope_decision",
+      sessionId,
+      decision,
+    });
   }
 
   public async cancel(sessionId: string): Promise<void> {
     const record = this.requireSession(sessionId);
     record.cancelled = true;
+    record.eventHandlers.clear();
     const agent = record.process;
     record.process = undefined;
-    if (agent === undefined) {
-      return;
+    if (agent !== undefined) {
+      try {
+        agent.send({ type: "cancel", sessionId });
+      } catch {
+        // The process may already be gone; the kill below is the real guarantee.
+      }
+      agent.kill();
+      await agent.close();
     }
-    try {
-      agent.send({ type: "cancel", sessionId });
-    } catch {
-      // The process may already be gone; the kill below is the real guarantee.
-    }
-    agent.kill();
-    await agent.close();
+    await this.destroyPlanningWorkspace(record);
   }
 
   public async collectChanges(sessionId: string): Promise<ChangeSet> {
@@ -471,8 +614,12 @@ export class GenericCliAdapter implements AgentAdapter {
     sessionId: string,
     handler: (event: AgentEvent) => void,
   ): Promise<void> {
-    for (const event of this.requireSession(sessionId).events) {
+    const record = this.requireSession(sessionId);
+    for (const event of record.events) {
       handler(event);
+    }
+    if (!record.cancelled && record.completion === undefined) {
+      record.eventHandlers.add(handler);
     }
   }
 
@@ -481,13 +628,15 @@ export class GenericCliAdapter implements AgentAdapter {
     workspace?: TaskWorkspace,
   ): AgentProcess {
     const sandbox = this.options.sandbox;
-    const spec =
-      sandbox === undefined
+    const launch =
+      workspace === undefined
         ? this.options.launch
-        : sandbox.wrapLaunch(this.options.launch, workspace);
+        : { ...this.options.launch, cwd: workspace.path };
+    const spec =
+      sandbox === undefined ? launch : sandbox.wrapLaunch(launch, workspace);
 
     const agent = new AgentProcess(spec, (event) => {
-      record.events.push(event);
+      this.emitEvent(record, event);
     });
     agent.send({
       type: "start",
@@ -497,8 +646,32 @@ export class GenericCliAdapter implements AgentAdapter {
       repositoryId: record.input.repositoryId,
       canonicalVersion: record.input.canonicalVersion,
       validationCommands: record.input.task.validationCommands,
+      ...(workspace === undefined
+        ? {}
+        : {
+            workspacePath:
+              sandbox?.resolveWorkspacePath(workspace) ?? workspace.path,
+          }),
     });
     return agent;
+  }
+
+  private async destroyPlanningWorkspace(record: CliSession): Promise<void> {
+    const workspace = record.planningWorkspace;
+    record.planningWorkspace = undefined;
+    if (workspace !== undefined) {
+      await this.options.workspaces.destroy(workspace);
+    }
+  }
+
+  private emitEvent(record: CliSession, event: AgentEvent): void {
+    record.events.push(event);
+    for (const handler of record.eventHandlers) {
+      handler(event);
+    }
+    if (event.event === "completed") {
+      record.eventHandlers.clear();
+    }
   }
 
   private toWorkspace(

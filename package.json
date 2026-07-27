@@ -20,6 +20,7 @@
     "check": "turbo run typecheck test",
     "demo": "npm run build --silent && node apps/cli/dist/index.js demo",
     "benchmark": "npm run build --silent && node apps/cli/dist/index.js benchmark",
+    "web": "npm run build --silent && node apps/web/dist/index.js",
     "verify:docker": "npm run build --silent && node scripts/verify-docker-sandbox.mjs",
     "clean": "turbo run clean"
   },

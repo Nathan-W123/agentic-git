@@ -27,6 +27,7 @@ const FIXTURE_AGENT = [
   'import fs from "node:fs";',
   'import path from "node:path";',
   "",
+  "let started = null;",
   "let buffer = '';",
   'process.stdin.setEncoding("utf8");',
   'process.stdin.on("data", (chunk) => {',
@@ -48,7 +49,15 @@ const FIXTURE_AGENT = [
   "",
   "function handle(message) {",
   '  const mode = process.env.FIXTURE_MODE ?? "ok";',
+  '  if (message.type === "start") {',
+  "    started = message;",
+  "    return;",
+  "  }",
   '  if (message.type === "plan_request") {',
+  '    if (!started.workspacePath || !fs.existsSync(path.join(started.workspacePath, "src", "counter.js"))) {',
+  '      send({ type: "error", message: "planning workspace missing" });',
+  "      return;",
+  "    }",
   '    if (mode === "plan_error") {',
   '      send({ type: "error", message: "no model credentials" });',
   "      return;",
@@ -174,6 +183,7 @@ function createAdapter(
     },
     repository: fixture.repository,
     workspaces: fixture.workspaces,
+    planningRoot: path.join(fixture.root, "planning"),
     ...overrides,
   });
 }
@@ -226,6 +236,8 @@ test("drives a real child process from plan through changeset", async () => {
     assert.equal(plan.taskId, TASK.id);
 
     const workspace = await createWorkspace(fixture);
+    const events: AgentEvent[] = [];
+    await adapter.streamEvents(session.id, (event) => events.push(event));
     await adapter.sendContext(session.id, contextFor(workspace));
     const changeSet = await adapter.collectChanges(session.id);
 
@@ -238,8 +250,6 @@ test("drives a real child process from plan through changeset", async () => {
     assert.equal(changeSet.agentExplanation, "capped increment at ten");
     assert.equal(changeSet.riskAssessment.level, "low");
 
-    const events: AgentEvent[] = [];
-    await adapter.streamEvents(session.id, (event) => events.push(event));
     assert.deepEqual(
       events.map((event) => event.event),
       ["progress", "completed"],
@@ -355,7 +365,7 @@ test("collectChanges refuses a session that never completed", async () => {
   }
 });
 
-test("a sandbox confines planning without a mount and execution with one", async () => {
+test("a sandbox mounts separate planning and execution workspaces", async () => {
   const fixture = await createFixture();
   const wrapped: Array<TaskWorkspace | undefined> = [];
   const sandbox: WorkspaceSandbox = {
@@ -384,7 +394,8 @@ test("a sandbox confines planning without a mount and execution with one", async
     const changeSet = await adapter.collectChanges(session.id);
 
     assert.equal(wrapped.length, 2);
-    assert.equal(wrapped[0], undefined);
+    assert.match(wrapped[0]?.taskId ?? "", /^planning-/u);
+    assert.notEqual(wrapped[0]?.path, workspace.path);
     assert.equal(wrapped[1]?.path, workspace.path);
     assert.equal(changeSet.patches.length, 1);
 

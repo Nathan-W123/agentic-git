@@ -23,9 +23,11 @@ import os from "node:os";
 import path from "node:path";
 
 import { DockerWorkspaceManager } from "@coord/workspace-manager";
-import { createBenchmarkFixture } from "@coord/cli/dist/fixture.js";
-import { OVERLAP_SCENARIO } from "@coord/cli/dist/scenarios.js";
-import { runCoordinatedFixture } from "@coord/cli/dist/benchmark.js";
+import {
+  createBenchmarkFixture,
+  OVERLAP_SCENARIO,
+  runCoordinatedFixture,
+} from "@coord/cli/verification";
 
 const IMAGE = process.env.COORD_AGENT_IMAGE ?? "coord/reference-agent:1";
 const USER = process.env.COORD_AGENT_USER;
@@ -34,7 +36,7 @@ let failures = 0;
 
 function report(name, ok, detail) {
   const status = ok ? "PASS" : "FAIL";
-  console.log(`[${status}] ${name}${detail === undefined ? "" : ` — ${detail}`}`);
+  console.log(`[${status}] ${name}${detail === undefined ? "" : ` - ${detail}`}`);
   if (!ok) {
     failures += 1;
   }
@@ -162,12 +164,12 @@ async function main() {
           args: [
             "-e",
             "const fs=require('node:fs');const s=fs.statSync('/workspace/.git');" +
-              "process.stdout.write((s.isDirectory()?'DIR':'FILE')+':'+fs.readdirSync('/workspace/.git').length);",
+              "process.stdout.write((s.isFile()?'FILE':'OTHER')+':'+s.size);",
           ],
         });
-        if (!result.stdout.startsWith("DIR:0")) {
+        if (!result.stdout.startsWith("FILE:0")) {
           throw new Error(
-            `expected an empty directory, saw ${result.stdout || result.stderr.trim()}`,
+            `expected an empty file, saw ${result.stdout || result.stderr.trim()}`,
           );
         }
         return "no host path is exposed through .git";

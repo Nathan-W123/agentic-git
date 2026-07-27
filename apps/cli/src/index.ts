@@ -7,9 +7,22 @@ import path from "node:path";
 import {
   SqliteCoordinationStore,
   type CoordinationStore,
+  type SubmittedTaskStatus,
 } from "@coord/persistence";
+import { runProcess } from "@coord/repository-service";
+import type { ApprovalStatus } from "@coord/shared-types";
 
 import { runBenchmark, runCoordinatedFixture } from "./benchmark.js";
+import {
+  repoAdd,
+  repoImportGitHub,
+  resolveRepository,
+  runPendingTasks,
+  taskCancel,
+  taskRetry,
+  taskSubmit,
+} from "./commands.js";
+import { CoordinatorProject, PROJECT_DIRECTORY } from "./project.js";
 import {
   createBenchmarkFixture,
   createLiveBenchmarkFixture,
@@ -59,6 +72,21 @@ function printHelp(): void {
   console.log(`AI-Native Development Coordinator
 
 Usage:
+  coord init
+  coord repo add <path> [--id=<name>] [--branch=<name>] [--default]
+  coord repo github <owner/name|url> [--id=<name>] [--branch=<name>] [--default]
+  coord repo list
+  coord task submit --objective=<text> [--repo=<id>] [--agent=<id>]
+  coord task list [--repo=<id>] [--status=<status>]
+  coord task retry <task-id>
+  coord task cancel <task-id>
+  coord run [--repo=<id>]
+  coord approval list [--status=<status>] [--json]
+  coord approval show <approval-id> [--json]
+  coord approval approve <approval-id> [--comment=<text>] [--actor=<id>]
+  coord approval reject <approval-id> [--comment=<text>] [--actor=<id>]
+  coord doctor
+
   coord demo [--live] [--scenario=<name>] [--persist[=<path>]]
   coord benchmark [--json] [--live] [--scenario=<name>] [--repeat=<n>]
   coord history [--json] [--db=<path>]
@@ -67,7 +95,13 @@ Usage:
   coord help
 
 Commands:
-  demo          Run one scenario through coordinated execution.
+  init          Create ${PROJECT_DIRECTORY}/ with a starter configuration.
+  repo          Register a repository as canonical, or list registered ones.
+  task          Submit a task against a repository, or list the queue.
+  run           Execute every pending task for a repository.
+  approval      Review durable human approval gates.
+  doctor        Verify configuration, Git, Docker, storage, and audit health.
+  demo          Run one built-in scenario through coordinated execution.
   benchmark     Compare coordinated and uncoordinated execution.
   history       List recorded runs, or show one run in detail.
   verify-audit  Check the audit chain for tampering.
@@ -139,7 +173,7 @@ function printBenchmarkTable(
   if (report.coordinated.undetectedConflicts > 0) {
     console.log(
       `Conflicts coordination did not predict: ` +
-        `${report.coordinated.undetectedConflicts}. Phase 0 scores file overlap only.`,
+        `${report.coordinated.undetectedConflicts}. Review the scenario's structural and semantic evidence.`,
     );
   }
 }
@@ -184,7 +218,7 @@ async function runDemo(
       "src/counter.js",
     );
 
-    console.log(`Phase 0 coordination demo: ${scenario.name}`);
+    console.log(`Coordination demo: ${scenario.name}`);
     console.log(`${scenario.description}\n`);
     for (const conflict of result.run.conflicts) {
       console.log(
@@ -287,7 +321,7 @@ async function runHistory(
       console.log(
         `  ${task.id.padEnd(24)} ${task.status.padEnd(11)} ` +
           `${task.decision?.decision ?? "-"}` +
-          (task.explanation === undefined ? "" : ` — ${task.explanation}`),
+          (task.explanation === undefined ? "" : ` - ${task.explanation}`),
       );
     }
 
@@ -317,10 +351,472 @@ async function runHistory(
       );
     }
 
+    console.log(`\nPlan revisions: ${detail.planRevisions.length}`);
+    for (const revision of detail.planRevisions) {
+      console.log(
+        `  ${revision.taskId.padEnd(24)} r${String(revision.revision).padEnd(3)} ` +
+          `${revision.reason.padEnd(18)} ${revision.canonicalRevision.slice(0, 12)}`,
+      );
+    }
+
+    console.log(`\nScope changes: ${detail.scopeChanges.length}`);
+    for (const scope of detail.scopeChanges) {
+      console.log(
+        `  ${scope.request.taskId.padEnd(24)} ` +
+          `${(scope.decision?.decision ?? "pending").padEnd(27)} ` +
+          `${scope.request.reason}`,
+      );
+    }
+
+    console.log(`\nApprovals: ${detail.approvals.length}`);
+    for (const approval of detail.approvals) {
+      console.log(
+        `  ${approval.id.padEnd(42)} ${approval.status.padEnd(10)} ` +
+          `${approval.kind}`,
+      );
+    }
+
     console.log(`\nAudit events: ${detail.audit.length}`);
   } finally {
     await store.close();
   }
+}
+
+/** Opens the project rooted at the current directory and its store together. */
+async function withProject<T>(
+  run: (
+    project: CoordinatorProject,
+    store: CoordinationStore,
+  ) => Promise<T>,
+): Promise<T> {
+  const project = await CoordinatorProject.open(process.cwd());
+  const store = project.openStore();
+  try {
+    return await run(project, store);
+  } finally {
+    await store.close();
+  }
+}
+
+async function runInit(): Promise<void> {
+  const project = await CoordinatorProject.init(process.cwd());
+  const store = project.openStore();
+  await store.close();
+  console.log(`Initialized ${project.directory}`);
+  console.log(`Configure agents and validation commands in ${project.configPath}`);
+}
+
+async function runRepo(
+  subcommand: string | undefined,
+  positional: readonly string[],
+  flags: readonly string[],
+): Promise<void> {
+  switch (subcommand) {
+    case "add": {
+      const sourcePath = positional[0];
+      if (sourcePath === undefined) {
+        throw new Error("Usage: coord repo add <path> [--id=<name>]");
+      }
+      await withProject(async (project, store) => {
+        const id = flagValue(flags, "id");
+        const branch = flagValue(flags, "branch");
+        const repository = await repoAdd(project, store, {
+          sourcePath,
+          ...(id === undefined ? {} : { id }),
+          ...(branch === undefined ? {} : { branch }),
+          setDefault: flags.includes("--default"),
+        });
+        console.log(
+          `Registered ${repository.id} (branch ${repository.branch})\n` +
+            `Canonical mirror: ${repository.path}`,
+        );
+        if (project.config.defaultRepository === repository.id) {
+          console.log(`Default repository is now ${repository.id}`);
+        }
+      });
+      break;
+    }
+    case "github": {
+      const repositoryName = positional[0];
+      if (repositoryName === undefined) {
+        throw new Error(
+          "Usage: coord repo github <owner/name|url> [--id=<name>]",
+        );
+      }
+      await withProject(async (project, store) => {
+        const id = flagValue(flags, "id");
+        const branch = flagValue(flags, "branch");
+        const repository = await repoImportGitHub(project, store, {
+          repository: repositoryName,
+          ...(id === undefined ? {} : { id }),
+          ...(branch === undefined ? {} : { branch }),
+          ...(process.env["GITHUB_TOKEN"] === undefined
+            ? {}
+            : { token: process.env["GITHUB_TOKEN"] }),
+          setDefault: flags.includes("--default"),
+        });
+        console.log(
+          `Imported GitHub repository ${repository.id} ` +
+            `(branch ${repository.branch})\nCanonical mirror: ${repository.path}`,
+        );
+      });
+      break;
+    }
+    case "list":
+      await withProject(async (project, store) => {
+        const repositories = await store.listRepositories();
+        if (repositories.length === 0) {
+          console.log("No repositories registered. Use `coord repo add <path>`.");
+          return;
+        }
+        for (const repository of repositories) {
+          const marker =
+            repository.id === project.config.defaultRepository ? "*" : " ";
+          console.log(
+            `${marker} ${repository.id.padEnd(24)} ${repository.branch.padEnd(12)} ${repository.path}`,
+          );
+        }
+      });
+      break;
+    default:
+      throw new Error(`Unknown repo subcommand: ${subcommand ?? "(none)"}`);
+  }
+}
+
+async function runTask(
+  subcommand: string | undefined,
+  positional: readonly string[],
+  flags: readonly string[],
+): Promise<void> {
+  switch (subcommand) {
+    case "submit": {
+      const objective = flagValue(flags, "objective");
+      if (objective === undefined) {
+        throw new Error(
+          'Usage: coord task submit --objective="<what the agent should do>"',
+        );
+      }
+      await withProject(async (project, store) => {
+        const repo = flagValue(flags, "repo");
+        const agent = flagValue(flags, "agent");
+        const task = await taskSubmit(project, store, {
+          objective,
+          ...(repo === undefined ? {} : { repositoryId: repo }),
+          ...(agent === undefined ? {} : { agentId: agent }),
+        });
+        console.log(
+          `Submitted ${task.id}\n` +
+            `  repository ${task.repositoryId}\n` +
+            `  agent      ${task.agentId}\n` +
+            `  objective  ${task.objective}\n\n` +
+            "Run `coord run` to execute pending tasks.",
+        );
+      });
+      break;
+    }
+    case "list":
+      await withProject(async (_project, store) => {
+        const repo = flagValue(flags, "repo");
+        const statusValue = flagValue(flags, "status");
+        const statuses: readonly SubmittedTaskStatus[] = [
+          "submitted",
+          "claimed",
+          "integrated",
+          "failed",
+          "cancelled",
+        ];
+        const status =
+          statusValue === undefined
+            ? undefined
+            : statuses.find((entry) => entry === statusValue);
+        if (statusValue !== undefined && status === undefined) {
+          throw new Error(
+            `Unknown task status: ${statusValue}. Expected ${statuses.join(", ")}.`,
+          );
+        }
+        const tasks = await store.listSubmittedTasks({
+          ...(repo === undefined ? {} : { repositoryId: repo }),
+          ...(status === undefined ? {} : { status }),
+        });
+        if (tasks.length === 0) {
+          console.log("No tasks match.");
+          return;
+        }
+        console.log(
+          ["Task".padEnd(42), "Status".padEnd(12), "Agent".padEnd(16), "Objective"].join(""),
+        );
+        for (const task of tasks) {
+          console.log(
+            [
+              task.id.padEnd(42),
+              task.status.padEnd(12),
+              task.agentId.padEnd(16),
+              task.objective,
+            ].join(""),
+          );
+        }
+      });
+      break;
+    case "retry": {
+      const taskId = positional[0];
+      if (taskId === undefined) {
+        throw new Error("Usage: coord task retry <task-id>");
+      }
+      await withProject(async (_project, store) => {
+        const task = await taskRetry(store, taskId);
+        console.log(`Returned ${task.id} to the submitted queue.`);
+      });
+      break;
+    }
+    case "cancel": {
+      const taskId = positional[0];
+      if (taskId === undefined) {
+        throw new Error("Usage: coord task cancel <task-id>");
+      }
+      await withProject(async (_project, store) => {
+        const task = await taskCancel(store, taskId);
+        console.log(`Cancelled ${task.id}.`);
+      });
+      break;
+    }
+    default:
+      throw new Error(`Unknown task subcommand: ${subcommand ?? "(none)"}`);
+  }
+}
+
+const APPROVAL_STATUSES: readonly ApprovalStatus[] = [
+  "pending",
+  "approved",
+  "rejected",
+  "expired",
+  "cancelled",
+];
+
+async function runApproval(
+  subcommand: string | undefined,
+  positional: readonly string[],
+  flags: readonly string[],
+): Promise<void> {
+  await withProject(async (_project, store) => {
+    if (subcommand === "list") {
+      const statusValue = flagValue(flags, "status");
+      const status =
+        statusValue === undefined
+          ? undefined
+          : APPROVAL_STATUSES.find((entry) => entry === statusValue);
+      if (statusValue !== undefined && status === undefined) {
+        throw new Error(
+          `Unknown approval status: ${statusValue}. Expected ${APPROVAL_STATUSES.join(", ")}.`,
+        );
+      }
+      const approvals = await store.listApprovals(
+        status === undefined ? {} : { status },
+      );
+      if (flags.includes("--json")) {
+        console.log(JSON.stringify(approvals, undefined, 2));
+        return;
+      }
+      if (approvals.length === 0) {
+        console.log("No approvals match.");
+        return;
+      }
+      console.log(
+        [
+          "Approval".padEnd(42),
+          "Status".padEnd(11),
+          "Kind".padEnd(18),
+          "Task",
+        ].join(""),
+      );
+      for (const approval of approvals) {
+        console.log(
+          [
+            approval.id.padEnd(42),
+            approval.status.padEnd(11),
+            approval.kind.padEnd(18),
+            approval.taskId,
+          ].join(""),
+        );
+      }
+      return;
+    }
+
+    const approvalId = positional[0];
+    if (approvalId === undefined) {
+      throw new Error(
+        `Usage: coord approval ${subcommand ?? "show"} <approval-id>`,
+      );
+    }
+    const approval = await store.getApproval(approvalId);
+    if (approval === undefined) {
+      throw new Error(`Unknown approval: ${approvalId}`);
+    }
+    if (subcommand === "show") {
+      const detail = await store.getRun(approval.runId);
+      const changeSet = detail?.changeSets.find(
+        (entry) => entry.id === approval.changeSetId,
+      );
+      if (flags.includes("--json")) {
+        console.log(JSON.stringify({ approval, changeSet }, undefined, 2));
+        return;
+      }
+      console.log(
+        `Approval ${approval.id}\n` +
+          `  status   ${approval.status}\n` +
+          `  kind     ${approval.kind}\n` +
+          `  task     ${approval.taskId}\n` +
+          `  expires  ${approval.expiresAt}\n` +
+          `  reasons  ${approval.reasons.join("; ")}`,
+      );
+      if (changeSet !== undefined) {
+        console.log(`\nAgent explanation:\n${changeSet.agentExplanation}`);
+        for (const patch of changeSet.patches) {
+          console.log(`\n--- ${patch.path} (${patch.status}) ---\n${patch.patch}`);
+        }
+      }
+      return;
+    }
+    if (subcommand !== "approve" && subcommand !== "reject") {
+      throw new Error(`Unknown approval subcommand: ${subcommand ?? "(none)"}`);
+    }
+    const actor =
+      flagValue(flags, "actor") ??
+      process.env["USERNAME"] ??
+      process.env["USER"] ??
+      "local-operator";
+    const comment =
+      flagValue(flags, "comment") ??
+      `${subcommand === "approve" ? "Approved" : "Rejected"} through the local CLI`;
+    const decided = await store.decideApproval({
+      approvalId,
+      status: subcommand === "approve" ? "approved" : "rejected",
+      decidedBy: actor,
+      comment,
+      decidedAt: new Date().toISOString(),
+    });
+    await store.appendAudit(approval.runId, {
+      type: "approval_decided",
+      taskId: approval.taskId,
+      data: {
+        approvalId,
+        projectId: approval.projectId,
+        status: decided.status,
+        actorId: actor,
+        comment,
+      },
+    });
+    console.log(
+      `${decided.status === "approved" ? "Approved" : "Rejected"} ${approvalId} as ${actor}.`,
+    );
+  });
+}
+
+async function runDoctor(): Promise<void> {
+  await withProject(async (project, store) => {
+    const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
+    try {
+      const git = await runProcess("git", ["--version"], {
+        timeoutMs: 5_000,
+        maxOutputBytes: 8_192,
+      });
+      checks.push({
+        name: "Git",
+        ok: git.exitCode === 0,
+        detail: git.stdout.trim() || git.stderr.trim(),
+      });
+    } catch (error) {
+      checks.push({
+        name: "Git",
+        ok: false,
+        detail: error instanceof Error ? error.message : String(error),
+      });
+    }
+    const audit = await store.verifyAudit();
+    checks.push({
+      name: "Audit",
+      ok: audit.valid,
+      detail: audit.valid
+        ? `${audit.events} chained event(s)`
+        : audit.reason ?? "audit chain is invalid",
+    });
+    const agents = Object.keys(project.config.agents);
+    checks.push({
+      name: "Agents",
+      ok: agents.length > 0,
+      detail:
+        agents.length > 0
+          ? agents.join(", ")
+          : "No agents configured in .coordinator/config.json",
+    });
+    const repositories = await store.listRepositories();
+    checks.push({
+      name: "Repositories",
+      ok: repositories.length > 0,
+      detail:
+        repositories.length > 0
+          ? repositories.map((entry) => entry.id).join(", ")
+          : "No canonical repositories imported",
+    });
+    if (project.config.sandbox !== undefined) {
+      try {
+        const docker = await runProcess("docker", ["version", "--format", "{{.Server.Version}}"], {
+          timeoutMs: 5_000,
+          maxOutputBytes: 8_192,
+        });
+        checks.push({
+          name: "Docker",
+          ok: docker.exitCode === 0,
+          detail: docker.stdout.trim() || docker.stderr.trim(),
+        });
+      } catch (error) {
+        checks.push({
+          name: "Docker",
+          ok: false,
+          detail: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+    for (const check of checks) {
+      console.log(
+        `${check.ok ? "PASS" : "FAIL"}  ${check.name.padEnd(14)} ${check.detail}`,
+      );
+    }
+    if (checks.some((check) => !check.ok)) {
+      process.exitCode = 1;
+    }
+  });
+}
+
+async function runPending(flags: readonly string[]): Promise<void> {
+  await withProject(async (project, store) => {
+    const repo = flagValue(flags, "repo");
+    const repository = await resolveRepository(project, store, repo);
+    console.log(`Running pending tasks for ${repository.id}...\n`);
+
+    const summary = await runPendingTasks(project, store, {
+      ...(repo === undefined ? {} : { repositoryId: repo }),
+    });
+
+    if (summary.claimed.length === 0) {
+      console.log("No pending tasks. Use `coord task submit` to add one.");
+      return;
+    }
+
+    console.log(
+      `Executed ${summary.claimed.length} task(s): ` +
+        `${summary.integrated} integrated, ${summary.failed} failed`,
+    );
+    if (summary.conflicts > 0) {
+      console.log(`Conflict warnings: ${summary.conflicts}`);
+    }
+    console.log(`Canonical is now ${summary.finalRevision.slice(0, 12)}`);
+    if (summary.runId !== undefined) {
+      console.log(`\ncoord history ${summary.runId}`);
+    }
+    if (summary.failed > 0) {
+      process.exitCode = 1;
+    }
+  });
 }
 
 async function runVerifyAudit(flags: readonly string[]): Promise<void> {
@@ -357,7 +853,26 @@ function requireLiveAgentConfig(): LiveAgentConfig {
 async function main(): Promise<void> {
   const [command = "help", ...flags] = process.argv.slice(2);
   const live = flags.includes("--live");
+  const positional = flags.filter((entry) => !entry.startsWith("--"));
   switch (command) {
+    case "init":
+      await runInit();
+      break;
+    case "repo":
+      await runRepo(positional[0], positional.slice(1), flags);
+      break;
+    case "task":
+      await runTask(positional[0], positional.slice(1), flags);
+      break;
+    case "approval":
+      await runApproval(positional[0], positional.slice(1), flags);
+      break;
+    case "doctor":
+      await runDoctor();
+      break;
+    case "run":
+      await runPending(flags);
+      break;
     case "demo": {
       const persist = flags.some((entry) => entry.startsWith("--persist"));
       const store = persist ? openStore(flags, "persist") : undefined;
@@ -422,4 +937,3 @@ main().catch((error: unknown) => {
   console.error(message);
   process.exitCode = 1;
 });
-

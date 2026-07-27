@@ -10,6 +10,8 @@ import {
   createId,
   type AgentPlan,
   type ChangeSet,
+  type ReplanRequest,
+  type ScopeChangeDecision,
 } from "@coord/shared-types";
 import type { CanonicalRepository } from "@coord/repository-service";
 import type {
@@ -19,15 +21,18 @@ import type {
 
 export interface ScriptedAgentBehavior {
   plan: AgentPlan;
+  replan?: (request: ReplanRequest) => AgentPlan | Promise<AgentPlan>;
   execute: (workspacePath: string) => Promise<void>;
 }
 
 interface ScriptedSession {
   session: AgentSession;
   input: StartTaskInput;
+  plan: AgentPlan;
   context?: CoordinatorContext;
   cancelled: boolean;
   events: AgentEvent[];
+  eventHandlers: Set<(event: AgentEvent) => void>;
 }
 
 export interface ScriptedAgentOptions {
@@ -69,15 +74,29 @@ export class ScriptedAgentAdapter implements AgentAdapter {
     this.sessions.set(session.id, {
       session,
       input,
+      plan: structuredClone(this.options.behavior.plan),
       cancelled: false,
       events: [],
+      eventHandlers: new Set(),
     });
     return session;
   }
 
   public async requestPlan(sessionId: string): Promise<AgentPlan> {
-    this.requireSession(sessionId);
-    return structuredClone(this.options.behavior.plan);
+    return structuredClone(this.requireSession(sessionId).plan);
+  }
+
+  public async requestReplan(
+    sessionId: string,
+    request: ReplanRequest,
+  ): Promise<AgentPlan> {
+    const record = this.requireSession(sessionId);
+    record.plan = structuredClone(
+      this.options.behavior.replan === undefined
+        ? { ...record.plan, objective: request.previousPlan.objective }
+        : await this.options.behavior.replan(request),
+    );
+    return structuredClone(record.plan);
   }
 
   public async sendContext(
@@ -90,13 +109,13 @@ export class ScriptedAgentAdapter implements AgentAdapter {
     }
 
     record.context = context;
-    record.events.push({
+    this.emit(record, {
       event: "progress",
-      message: `Editing ${this.options.behavior.plan.expectedFiles.join(", ")}`,
+      message: `Editing ${record.plan.expectedFiles.join(", ")}`,
       occurredAt: new Date().toISOString(),
     });
     await this.options.behavior.execute(context.workspacePath);
-    record.events.push({
+    this.emit(record, {
       event: "completed",
       occurredAt: new Date().toISOString(),
     });
@@ -108,6 +127,16 @@ export class ScriptedAgentAdapter implements AgentAdapter {
 
   public async resume(_sessionId: string): Promise<void> {
     throw new Error("Scripted agents complete synchronously and cannot resume");
+  }
+
+  public async resolveScopeChange(
+    sessionId: string,
+    decision: ScopeChangeDecision,
+  ): Promise<void> {
+    const record = this.requireSession(sessionId);
+    if (decision.decision !== "rejected") {
+      record.plan = structuredClone(decision.revisedPlan);
+    }
   }
 
   public async cancel(sessionId: string): Promise<void> {
@@ -132,9 +161,9 @@ export class ScriptedAgentAdapter implements AgentAdapter {
       createdAt: new Date().toISOString(),
     };
     return await this.options.workspaces.collectChangeSet(workspace, {
-      symbolsChanged: this.options.behavior.plan.expectedSymbols,
+      symbolsChanged: record.plan.expectedSymbols,
       riskAssessment: {
-        level: this.options.behavior.plan.riskLevel,
+        level: record.plan.riskLevel,
         reasons: [],
       },
       agentExplanation: `Scripted execution of ${record.input.task.objective}`,
@@ -148,6 +177,23 @@ export class ScriptedAgentAdapter implements AgentAdapter {
     for (const event of this.requireSession(sessionId).events) {
       handler(event);
     }
+    const record = this.requireSession(sessionId);
+    if (
+      !record.cancelled &&
+      !record.events.some((event) => event.event === "completed")
+    ) {
+      record.eventHandlers.add(handler);
+    }
+  }
+
+  private emit(record: ScriptedSession, event: AgentEvent): void {
+    record.events.push(event);
+    for (const handler of record.eventHandlers) {
+      handler(event);
+    }
+    if (event.event === "completed") {
+      record.eventHandlers.clear();
+    }
   }
 
   private requireSession(sessionId: string): ScriptedSession {
@@ -158,4 +204,3 @@ export class ScriptedAgentAdapter implements AgentAdapter {
     return session;
   }
 }
-

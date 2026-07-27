@@ -1,0 +1,22 @@
+{
+  "name": "@coord/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "bin": {
+    "coord-web": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/*.test.js",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@coord/api-gateway": "*",
+    "@coord/cli": "*",
+    "@coord/persistence": "*",
+    "@coord/repository-service": "*"
+  }
+}

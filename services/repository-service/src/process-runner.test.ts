@@ -68,3 +68,55 @@ test("a failing nested node --test still reports a non-zero exit code", async ()
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a process that exceeds its deadline is terminated", async () => {
+  const result = await runProcess(
+    process.execPath,
+    ["-e", "setInterval(() => undefined, 1000)"],
+    { timeoutMs: 50 },
+  );
+
+  assert.equal(result.exitCode, 124);
+  assert.equal(result.timedOut, true);
+  assert.match(result.stderr, /timed out/u);
+});
+
+test("captured output is bounded", async () => {
+  const result = await runProcess(
+    process.execPath,
+    ["-e", "process.stdout.write('x'.repeat(1000)); process.stderr.write('y'.repeat(1000))"],
+    { maxOutputBytes: 64 },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdoutTruncated, true);
+  assert.equal(result.stderrTruncated, true);
+  assert.ok(result.stdout.length < 100);
+  assert.ok(result.stderr.length < 100);
+});
+
+test("an abort signal terminates the child", async () => {
+  const controller = new AbortController();
+  const running = runProcess(
+    process.execPath,
+    ["-e", "setInterval(() => undefined, 1000)"],
+    { signal: controller.signal },
+  );
+  setTimeout(() => controller.abort(), 100).unref();
+
+  const result = await running;
+  assert.equal(result.exitCode, 130);
+  assert.equal(result.aborted, true);
+  assert.match(result.stderr, /\[process aborted\]/u);
+});
+
+test("invalid resource limits fail before spawning", async () => {
+  await assert.rejects(
+    runProcess(process.execPath, ["--version"], { timeoutMs: 0 }),
+    RangeError,
+  );
+  await assert.rejects(
+    runProcess(process.execPath, ["--version"], { maxOutputBytes: -1 }),
+    RangeError,
+  );
+});

@@ -2,6 +2,8 @@ import type {
   AgentPlan,
   CanonicalVersion,
   ChangeSet,
+  ReplanRequest,
+  ScopeChangeDecision,
   CoordinatorDecision,
   TaskDefinition,
 } from "@coord/shared-types";
@@ -33,6 +35,7 @@ export interface CoordinatorContext {
   decision: CoordinatorDecision;
   canonicalVersion: CanonicalVersion;
   workspacePath: string;
+  planRevision?: number;
 }
 
 export type AgentEvent =
@@ -43,7 +46,14 @@ export type AgentEvent =
     }
   | {
       event: "scope_change_requested";
+      requestId?: string;
       additionalFiles: string[];
+      additionalSymbols?: string[];
+      additionalApis?: string[];
+      additionalSchemas?: string[];
+      additionalConfigKeys?: string[];
+      additionalTests?: string[];
+      additionalServices?: string[];
       reason: string;
       occurredAt: string;
     }
@@ -59,6 +69,11 @@ export interface AgentAdapter {
 
   requestPlan(sessionId: string): Promise<AgentPlan>;
 
+  requestReplan(
+    sessionId: string,
+    request: ReplanRequest,
+  ): Promise<AgentPlan>;
+
   sendContext(
     sessionId: string,
     context: CoordinatorContext,
@@ -67,6 +82,11 @@ export interface AgentAdapter {
   pause(sessionId: string): Promise<void>;
 
   resume(sessionId: string): Promise<void>;
+
+  resolveScopeChange(
+    sessionId: string,
+    decision: ScopeChangeDecision,
+  ): Promise<void>;
 
   cancel(sessionId: string): Promise<void>;
 
@@ -77,13 +97,3 @@ export interface AgentAdapter {
     handler: (event: AgentEvent) => void,
   ): Promise<void>;
 }
-
-export class AdapterNotConfiguredError extends Error {
-  public constructor(adapterName: string, operation: string) {
-    super(
-      `${adapterName} cannot ${operation} until a provider process driver is configured`,
-    );
-    this.name = "AdapterNotConfiguredError";
-  }
-}
-

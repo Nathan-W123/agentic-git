@@ -34,9 +34,8 @@ export interface BenchmarkScenario {
   seed: Readonly<Record<string, string>>;
   tasks: ScenarioTask[];
   /**
-   * Tasks that no Phase 0 conflict level can detect, with the reason. Present
-   * so a scenario that is expected to fail says so instead of looking like a
-   * regression.
+   * Tasks whose conflict is intentionally outside the current structural and
+   * semantic evidence model. Present so expected misses remain explicit.
    */
   knownUndetectedConflicts?: Readonly<Record<string, string>>;
 }
@@ -125,13 +124,14 @@ function plan(
   task: TaskDefinition,
   expectedFiles: string[],
   expectedSymbols: string[],
+  dependencies: string[] = [],
 ): AgentPlan {
   return {
     taskId: task.id,
     objective: task.objective,
     expectedFiles,
     expectedSymbols,
-    dependencies: [],
+    dependencies,
     commands: task.validationCommands,
     externalAccess: [],
     riskLevel: "low",
@@ -328,20 +328,36 @@ export const TOTAL_BEHAVIOR: ScriptedAgentBehavior = {
     TASK_TOTAL,
     ["src/format.js", "test/format-total.test.js"],
     ["total"],
+    ["symbol:increment"],
   ),
+  replan(request) {
+    if (!request.canonicalChange.changedSymbols.includes("increment")) {
+      throw new Error("Expected the increment contract change during replanning");
+    }
+    return {
+      ...request.previousPlan,
+      intent:
+        "Add a total helper compatible with the latest increment return contract",
+    };
+  },
   async execute(workspacePath) {
-    await rewrite(workspacePath, "src/format.js", (source) =>
-      [
+    const counter = await readFile(
+      path.join(workspacePath, "src", "counter.js"),
+      "utf8",
+    );
+    const accessor = /return\s+\{\s*value:/u.test(counter) ? ".value" : "";
+    await rewrite(workspacePath, "src/format.js", (source) => {
+      return [
         'import { increment } from "./counter.js";',
         "",
         source.trimEnd(),
         "",
         "export function total(value) {",
-        "  return increment(value) + 1;",
+        `  return increment(value)${accessor} + 1;`,
         "}",
         "",
-      ].join("\n"),
-    );
+      ].join("\n");
+    });
     await addFile(
       workspacePath,
       "test/format-total.test.js",
@@ -401,16 +417,15 @@ export const MIXED_SCENARIO: BenchmarkScenario = {
 };
 
 /**
- * Two tasks that touch disjoint files but are logically coupled.
+ * Two tasks that touch disjoint files but are linked by a symbol dependency.
  *
- * Phase 0 scores file overlap only, so it predicts no conflict and both tasks
- * run concurrently. The second changeset applies cleanly and then fails
- * validation. This scenario exists to measure that miss rather than hide it.
+ * Structural indexing and the declared dependency sequence the producer first.
+ * The consumer then replans against the new canonical contract before editing.
  */
 export const DEPENDENCY_SCENARIO: BenchmarkScenario = {
   name: "dependency",
   description:
-    "A signature change and a new caller in different files; file-level detection misses it.",
+    "A signature change and a new caller in different files; dependency coordination replans the caller.",
   seed: {
     "package.json": PACKAGE_JSON,
     "src/counter.js": COUNTER_SOURCE,
@@ -421,11 +436,6 @@ export const DEPENDENCY_SCENARIO: BenchmarkScenario = {
     { task: TASK_BOXED, behavior: BOXED_BEHAVIOR },
     { task: TASK_TOTAL, behavior: TOTAL_BEHAVIOR },
   ],
-  knownUndetectedConflicts: {
-    [TASK_TOTAL.id]:
-      "Consumes increment, whose return type task_boxed_increment changes in another file. " +
-      "Phase 0 scores file overlap only, so no conflict is predicted.",
-  },
 };
 
 export const SCENARIOS: readonly BenchmarkScenario[] = [

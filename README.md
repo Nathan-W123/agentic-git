@@ -1,74 +1,127 @@
 # AI-Native Development Coordinator
 
-This repository contains the Phase 0 technical proof for a coordination layer
-that schedules heterogeneous coding agents against a Git-backed canonical
-codebase.
+This repository implements a local control plane for coordinating humans and
+heterogeneous coding agents against a Git-backed canonical codebase. Agents
+plan before editing, work in isolated overlays, negotiate scope, replan when
+canonical changes, and submit changes through validation, approval, and atomic
+promotion.
 
-The current prototype proves the smallest useful loop:
+The current implementation includes the complete technical proof, the local
+MVP product surfaces, deterministic structural coordination, and dynamic
+replanning described in [INSTRUCTIONS.md](INSTRUCTIONS.md). See the
+[current capability matrix](docs/architecture/current-state.md) for the exact
+implemented and later-phase boundary.
 
-1. Two agents submit plans before editing.
-2. The coordinator detects deterministic file overlap.
-3. Tasks receive temporary file ownership.
-4. Each task runs in an isolated Git worktree.
-5. Changes are collected as structured changesets.
-6. Validation runs in a temporary integration worktree.
-7. A passing candidate is promoted with an atomic Git compare-and-swap.
-8. A benchmark compares coordinated and uncoordinated execution.
+## Implemented
+
+- Generic JSONL and native Codex adapters with plan, execute, pause, resume,
+  cancel, scope-change, and replan behavior.
+- Local Git import and credential-safe GitHub import over HTTPS or SSH.
+- Isolated Git worktrees and an optional deny-by-default Docker execution
+  boundary.
+- File, symbol, dependency, API, schema, configuration, test, service, and
+  advisory intent conflict evidence.
+- Configurable conflict scoring, ownership leases, dependency-aware waves,
+  failure propagation, and atomic compare-and-swap integration.
+- Canonical-change indexing, durable plan revisions, live scope negotiation,
+  and agent replanning against fresh canonical worktrees.
+- SQLite task queues, tenant/project isolation, approvals, full changesets,
+  integration history, and append-only hash-chained audit.
+- A versioned HTTP API with sessions, CSRF protection, RBAC, rate limiting,
+  security headers, and project-scoped WebSocket events.
+- A responsive control room for setup, tasks, runs, diffs, replans, approvals,
+  repositories, teams, project settings, and system administration.
+- Deterministic coordinated-versus-uncoordinated benchmarks.
 
 ## Requirements
 
-- Node.js 24 or newer — the coordination store uses the built-in `node:sqlite`,
-  which is only stable from Node 24. On Node 22 it requires
-  `--experimental-sqlite`.
+- Node.js 24 or newer
 - Git 2.40 or newer
+- Docker only when running untrusted agents through the container sandbox
 
-Docker is optional. By default the proof uses Git worktrees for filesystem
-isolation only. `DockerWorkspaceManager` adds process, network, CPU, and memory
-isolation for the agent command and is required before running an untrusted
-agent.
+Git worktrees isolate repository changes but not the host process. Use the
+Docker backend before running an agent you do not trust.
 
-## Commands
+## Build And Verify
 
 ```powershell
 npm.cmd install
+npm.cmd run build
 npm.cmd run check
-npm.cmd run demo
 npm.cmd run benchmark
 ```
 
-## Durable history
-
-Coordination state is recorded as a run progresses, so it survives the process:
+Docker runtime verification is separate:
 
 ```powershell
-node apps/cli/dist/index.js demo --persist   # records to .coordinator/coordination.db
-node apps/cli/dist/index.js history          # list recorded runs
-node apps/cli/dist/index.js history <run-id> # tasks, conflicts, changesets, integrations
-node apps/cli/dist/index.js verify-audit     # check the audit chain for tampering
+npm.cmd run verify:docker
 ```
 
-Runs without `--persist` keep the previous in-memory behavior. See
-[the Phase 1 notes](docs/architecture/phase-1.md).
+The Docker daemon was unavailable in the latest audit environment. Container
+argument and policy behavior is unit tested, but the live runtime script must
+also pass on a Docker-capable host before treating that boundary as deployed.
 
-`demo` prints the coordination decisions and final canonical source.
-`benchmark` runs a task set in coordinated and uncoordinated modes and reports
-integration attempts, failures, and rework.
+## Project CLI
 
-Three scenarios are available via `--scenario=<name>`:
+Initialize a coordinator project in the repository or parent directory where
+you want `.coordinator` state:
 
-| Scenario | Tasks | What it shows |
-| --- | --- | --- |
-| `overlap` | 2 | Ownership sequences a colliding task; 1 rework avoided. |
-| `mixed` (default) | 5 | A three-way collision is ordered while independent tasks still run in parallel; 2 reworks avoided. |
-| `dependency` | 2 | A cross-file dependency conflict that file-level detection provably misses. |
+```powershell
+node C:\path\to\coordinator\apps\cli\dist\index.js init
+node C:\path\to\coordinator\apps\cli\dist\index.js repo add C:\path\to\repo --id=core
+node C:\path\to\coordinator\apps\cli\dist\index.js task submit --objective="Implement the approved change"
+node C:\path\to\coordinator\apps\cli\dist\index.js run
+```
 
-See [the benchmark notes](docs/benchmarks/README.md) for the measured numbers
-and what each metric means.
+Operational commands include:
 
-## Running a real agent
+```powershell
+node apps/cli/dist/index.js repo github owner/repository
+node apps/cli/dist/index.js repo list
+node apps/cli/dist/index.js task list
+node apps/cli/dist/index.js task retry <task-id>
+node apps/cli/dist/index.js task cancel <task-id>
+node apps/cli/dist/index.js approval list
+node apps/cli/dist/index.js approval show <approval-id>
+node apps/cli/dist/index.js approval approve <approval-id> --actor=<user-id>
+node apps/cli/dist/index.js approval reject <approval-id> --actor=<user-id>
+node apps/cli/dist/index.js history
+node apps/cli/dist/index.js verify-audit
+node apps/cli/dist/index.js doctor
+```
 
-Both commands accept `--live`, which replaces the scripted behavior for
-selected tasks with a real process driven over newline-delimited JSON:
+Configure agents and repository validation commands in
+`.coordinator/config.json`. The default configuration is intentionally missing
+an agent so a project cannot silently execute with an unintended provider.
+
+## Web Control Room
+
+Start the web/API process against an initialized project:
+
+```powershell
+$env:COORD_PROJECT_ROOT = "C:\path\to\initialized-project"
+$env:COORD_BOOTSTRAP_TOKEN = "use-a-long-one-time-secret"
+npm.cmd run web
+```
+
+Open `http://127.0.0.1:4317`. The first-run form creates the initial owner and
+local organization. When `COORD_BOOTSTRAP_TOKEN` is omitted, the server
+generates and prints one at startup.
+
+The server binds to loopback by default. Relevant deployment variables are:
+
+| Variable | Purpose |
+| --- | --- |
+| `COORD_PROJECT_ROOT` | Initialized coordinator project directory. |
+| `COORD_HOST` | Listen address; defaults to `127.0.0.1`. |
+| `COORD_PORT` | Listen port; defaults to `4317`. |
+| `COORD_BOOTSTRAP_TOKEN` | First-owner setup secret. |
+| `COORD_ALLOWED_ORIGINS` | Comma-separated additional browser origins. |
+| `COORD_SECURE_COOKIES` | Set `true` behind HTTPS. |
+
+## Real Agents
+
+The benchmark can replace selected scripted tasks with a real JSONL process:
 
 ```powershell
 $env:COORD_AGENT_CMD = "node"
@@ -76,17 +129,12 @@ $env:COORD_AGENT_ARGS = '["./my-agent.mjs"]'
 npm.cmd run benchmark -- --live
 ```
 
-Add `COORD_AGENT_SANDBOX=docker` and `COORD_AGENT_IMAGE=<image>` to run the
-agent inside a container that mounts only its own workspace and has no network
-access. Tasks not selected with `COORD_AGENT_TASKS` keep their deterministic
-scripted behavior, which is the path CI uses.
+Add `COORD_AGENT_SANDBOX=docker` and
+`COORD_AGENT_IMAGE=<image>` to confine that process. The native Codex project
+adapter uses ephemeral `codex exec` processes with read-only planning and
+workspace-write execution.
 
-The Docker backend's runtime behavior has not yet been exercised against a live
-daemon; `npm.cmd run verify:docker` does that in one command. See
-[the sandbox notes](infrastructure/docker/README.md).
-
-See [the generic CLI protocol](docs/protocol/generic-cli.md) for the message
-shapes an agent must implement, and
-[the Phase 0 architecture](docs/architecture/phase-0.md) for component
-boundaries, guarantees, and known limitations.
-
+See the [generic agent protocol](docs/protocol/generic-cli.md), the
+[coordination architecture](docs/architecture/coordination.md), the
+[Docker boundary](infrastructure/docker/README.md), and the
+[benchmark methodology](docs/benchmarks/README.md) for details.

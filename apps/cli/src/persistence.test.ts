@@ -50,9 +50,19 @@ test("a coordinated run is recorded and survives reopening the store", async () 
         assert.ok(task.plan !== undefined, `${task.id} has no plan`);
         assert.ok(task.sessionId !== undefined, `${task.id} has no session`);
       }
+      // The coordinator refreshes each task's decision per wave, so the stored
+      // decision is current state rather than the initial one: a sequenced task
+      // ends up "approved" with no remaining blockers. The evidence that it was
+      // sequenced is the extra plan revision it had to take against the newer
+      // canonical state, which the leading task never needed.
       const capped = detail.tasks.find((task) => task.id === TASK_CAP.id);
-      assert.equal(capped?.decision?.decision, "queued");
-      assert.deepEqual(capped?.decision?.blockedBy, [TASK_NORMALIZE.id]);
+      const leading = detail.tasks.find((task) => task.id === TASK_NORMALIZE.id);
+      assert.equal(capped?.decision?.decision, "approved");
+      assert.equal(leading?.decision?.planRevision, 1);
+      assert.ok(
+        (capped?.decision?.planRevision ?? 0) > 1,
+        "the sequenced task should have been replanned at least once",
+      );
 
       // The overlap that caused the sequencing is preserved as evidence.
       assert.equal(detail.conflicts.length, 1);

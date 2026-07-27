@@ -43,6 +43,9 @@ function log(message) {
   process.stderr.write(`[reference-agent] ${message}\n`);
 }
 
+let paused = false;
+let pendingContext;
+
 function handleContext(message) {
   const workspacePath = message.workspacePath;
   log(`workspace ${workspacePath}`);
@@ -88,8 +91,40 @@ function handle(message) {
     case "plan_request":
       send({ type: "plan", plan: PLAN });
       return;
+    case "replan_request":
+      log(
+        `replanning after ${message.request.canonicalChange.changedFiles.length} canonical file change(s)`,
+      );
+      send({
+        type: "plan",
+        plan: {
+          ...PLAN,
+          objective: message.request.previousPlan.objective,
+        },
+      });
+      return;
     case "context":
-      handleContext(message);
+      if (paused) {
+        pendingContext = message;
+      } else {
+        handleContext(message);
+      }
+      return;
+    case "pause":
+      paused = true;
+      return;
+    case "resume":
+      paused = false;
+      if (pendingContext !== undefined) {
+        const context = pendingContext;
+        pendingContext = undefined;
+        handleContext(context);
+      }
+      return;
+    case "scope_decision":
+      log(
+        `scope ${message.decision.requestId}: ${message.decision.decision}`,
+      );
       return;
     case "cancel":
       process.exit(0);

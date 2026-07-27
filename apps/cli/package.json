@@ -4,15 +4,31 @@
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    "./commands": {
+      "types": "./dist/commands.d.ts",
+      "default": "./dist/commands.js"
+    },
+    "./project": {
+      "types": "./dist/project.d.ts",
+      "default": "./dist/project.js"
+    },
+    "./verification": {
+      "types": "./dist/verification.d.ts",
+      "default": "./dist/verification.js"
+    }
+  },
   "bin": {
     "coord": "./dist/index.js"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/benchmark.test.js dist/mixed-scenario.test.js dist/dependency-scenario.test.js dist/live-benchmark.test.js dist/persistence.test.js"
+    "test": "node --test dist/benchmark.test.js dist/mixed-scenario.test.js dist/dependency-scenario.test.js dist/live-benchmark.test.js dist/persistence.test.js dist/project.test.js dist/real-repo.test.js"
   },
   "dependencies": {
+    "@coord/adapter-codex": "*",
     "@coord/adapter-generic-cli": "*",
     "@coord/agent-protocol": "*",
     "@coord/coordinator": "*",
@@ -23,4 +39,3 @@
     "@coord/workspace-manager": "*"
   }
 }
-

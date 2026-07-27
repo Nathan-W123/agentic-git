@@ -1,0 +1,16 @@
+{
+  "name": "Relay Control Room",
+  "short_name": "Relay",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f3eddf",
+  "theme_color": "#e85d2a",
+  "icons": [
+    {
+      "src": "/mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,7 +1,10 @@
-import type {
-  AgentPlan,
-  ConflictAssessment,
-  ConflictDisposition,
+import {
+  completeAgentPlan,
+  uniqueStrings,
+  type AgentPlan,
+  type ConflictAssessment,
+  type ConflictDisposition,
+  type ConflictEvidence,
 } from "@coord/shared-types";
 
 export interface ConflictThresholds {
@@ -12,17 +15,71 @@ export interface ConflictThresholds {
 
 export interface ConflictDetectorOptions {
   fileOverlapWeight: number;
+  symbolOverlapWeight?: number;
+  dependencyImpactWeight?: number;
+  apiOverlapWeight?: number;
+  schemaOverlapWeight?: number;
+  configurationOverlapWeight?: number;
+  testOverlapWeight?: number;
+  semanticConflictWeight?: number;
   thresholds: ConflictThresholds;
 }
 
-export const DEFAULT_CONFLICT_OPTIONS: ConflictDetectorOptions = {
+interface ResolvedConflictOptions {
+  fileOverlapWeight: number;
+  symbolOverlapWeight: number;
+  dependencyImpactWeight: number;
+  apiOverlapWeight: number;
+  schemaOverlapWeight: number;
+  configurationOverlapWeight: number;
+  testOverlapWeight: number;
+  semanticConflictWeight: number;
+  thresholds: ConflictThresholds;
+}
+
+export const DEFAULT_CONFLICT_OPTIONS: ResolvedConflictOptions = {
   fileOverlapWeight: 20,
+  symbolOverlapWeight: 35,
+  dependencyImpactWeight: 25,
+  apiOverlapWeight: 30,
+  schemaOverlapWeight: 40,
+  configurationOverlapWeight: 15,
+  testOverlapWeight: 10,
+  semanticConflictWeight: 30,
   thresholds: {
     concurrentMaximum: 20,
     notifyMaximum: 45,
     sequenceMaximum: 70,
   },
 };
+
+const OPPOSING_ACTIONS: ReadonlyArray<readonly [string, string]> = [
+  ["add", "remove"],
+  ["allow", "deny"],
+  ["create", "delete"],
+  ["enable", "disable"],
+  ["expand", "restrict"],
+  ["introduce", "eliminate"],
+  ["migrate", "rollback"],
+  ["publish", "hide"],
+  ["require", "optional"],
+  ["start", "stop"],
+];
+
+const STOP_WORDS = new Set([
+  "a",
+  "an",
+  "and",
+  "for",
+  "from",
+  "in",
+  "of",
+  "on",
+  "or",
+  "the",
+  "to",
+  "with",
+]);
 
 function dispositionFor(
   score: number,
@@ -40,46 +97,257 @@ function dispositionFor(
   return "block";
 }
 
+function overlap(first: readonly string[], second: readonly string[]): string[] {
+  const right = new Set(second.map((value) => value.toLowerCase()));
+  return uniqueStrings(
+    first.filter((value) => right.has(value.toLowerCase())),
+  );
+}
+
 export function overlappingFiles(
   first: AgentPlan,
   second: AgentPlan,
 ): string[] {
-  const secondFiles = new Set(second.expectedFiles);
-  return first.expectedFiles.filter((file) => secondFiles.has(file)).sort();
+  return overlap(first.expectedFiles, second.expectedFiles);
+}
+
+function resourceNames(plan: Required<AgentPlan>): Set<string> {
+  return new Set(
+    [
+      ...plan.expectedFiles.flatMap((value) => [value, `file:${value}`]),
+      ...plan.expectedSymbols.flatMap((value) => [value, `symbol:${value}`]),
+      ...plan.expectedApis.flatMap((value) => [value, `api:${value}`]),
+      ...plan.expectedSchemas.flatMap((value) => [value, `schema:${value}`]),
+      ...plan.expectedServices.flatMap((value) => [value, `service:${value}`]),
+    ].map((value) => value.toLowerCase()),
+  );
+}
+
+function dependencyImpact(first: AgentPlan, second: AgentPlan): string[] {
+  const left = completeAgentPlan(first);
+  const right = completeAgentPlan(second);
+  const leftResources = resourceNames(left);
+  const rightResources = resourceNames(right);
+  const impacts = [
+    ...left.dependencies.filter((value) =>
+      rightResources.has(value.toLowerCase()),
+    ),
+    ...right.dependencies.filter((value) =>
+      leftResources.has(value.toLowerCase()),
+    ),
+    ...overlap(left.expectedServices, right.expectedServices).map(
+      (value) => `service:${value}`,
+    ),
+  ];
+  return uniqueStrings(impacts);
+}
+
+function consumes(consumer: AgentPlan, producer: AgentPlan): boolean {
+  const resources = resourceNames(completeAgentPlan(producer));
+  return completeAgentPlan(consumer).dependencies.some((dependency) =>
+    resources.has(dependency.toLowerCase()),
+  );
+}
+
+function words(value: string): Set<string> {
+  return new Set(
+    value
+      .toLowerCase()
+      .match(/[a-z0-9][a-z0-9_-]*/gu)
+      ?.filter((word) => !STOP_WORDS.has(word)) ?? [],
+  );
+}
+
+interface IntentResult {
+  probability: number;
+  resources: string[];
+  explanation: string;
+}
+
+function analyzeIntent(first: AgentPlan, second: AgentPlan): IntentResult | undefined {
+  const left = words(first.intent ?? first.objective);
+  const right = words(second.intent ?? second.objective);
+  const targets = [...left]
+    .filter((word) => right.has(word))
+    .filter(
+      (word) =>
+        !OPPOSING_ACTIONS.some(
+          ([positive, negative]) => word === positive || word === negative,
+        ),
+    )
+    .sort();
+  if (targets.length === 0) {
+    return undefined;
+  }
+
+  for (const [positive, negative] of OPPOSING_ACTIONS) {
+    const opposed =
+      (left.has(positive) && right.has(negative)) ||
+      (left.has(negative) && right.has(positive));
+    if (opposed) {
+      return {
+        probability: 0.9,
+        resources: targets,
+        explanation:
+          `Objectives use opposing actions (${positive}/${negative}) ` +
+          `for shared intent terms: ${targets.join(", ")}`,
+      };
+    }
+  }
+  return undefined;
+}
+
+function evidence(
+  kind: ConflictEvidence["kind"],
+  resources: string[],
+  taskIds: [string, string],
+  score: number,
+  options: Pick<ConflictEvidence, "advisory" | "explanation"> = {},
+): ConflictEvidence | undefined {
+  if (resources.length === 0 || score <= 0) {
+    return undefined;
+  }
+  return {
+    kind,
+    resources,
+    taskIds,
+    score,
+    ...(options.advisory === undefined
+      ? {}
+      : { advisory: options.advisory }),
+    ...(options.explanation === undefined
+      ? {}
+      : { explanation: options.explanation }),
+  };
 }
 
 export class ConflictDetector {
-  public constructor(
-    private readonly options: ConflictDetectorOptions =
-      DEFAULT_CONFLICT_OPTIONS,
-  ) {}
+  private readonly options: ResolvedConflictOptions;
+
+  public constructor(options: ConflictDetectorOptions = DEFAULT_CONFLICT_OPTIONS) {
+    this.options = {
+      fileOverlapWeight: options.fileOverlapWeight,
+      symbolOverlapWeight:
+        options.symbolOverlapWeight ?? DEFAULT_CONFLICT_OPTIONS.symbolOverlapWeight,
+      dependencyImpactWeight:
+        options.dependencyImpactWeight ??
+        DEFAULT_CONFLICT_OPTIONS.dependencyImpactWeight,
+      apiOverlapWeight:
+        options.apiOverlapWeight ?? DEFAULT_CONFLICT_OPTIONS.apiOverlapWeight,
+      schemaOverlapWeight:
+        options.schemaOverlapWeight ??
+        DEFAULT_CONFLICT_OPTIONS.schemaOverlapWeight,
+      configurationOverlapWeight:
+        options.configurationOverlapWeight ??
+        DEFAULT_CONFLICT_OPTIONS.configurationOverlapWeight,
+      testOverlapWeight:
+        options.testOverlapWeight ?? DEFAULT_CONFLICT_OPTIONS.testOverlapWeight,
+      semanticConflictWeight:
+        options.semanticConflictWeight ??
+        DEFAULT_CONFLICT_OPTIONS.semanticConflictWeight,
+      thresholds: { ...options.thresholds },
+    };
+  }
 
   public assess(
     first: AgentPlan,
     second: AgentPlan,
   ): ConflictAssessment | undefined {
-    const files = overlappingFiles(first, second);
-    if (files.length === 0) {
+    const taskIds: [string, string] = [first.taskId, second.taskId];
+    const left = completeAgentPlan(first);
+    const right = completeAgentPlan(second);
+    const intent = analyzeIntent(left, right);
+    const items = [
+      evidence(
+        "file_overlap",
+        overlappingFiles(left, right),
+        taskIds,
+        overlappingFiles(left, right).length * this.options.fileOverlapWeight,
+      ),
+      evidence(
+        "symbol_overlap",
+        overlap(left.expectedSymbols, right.expectedSymbols),
+        taskIds,
+        overlap(left.expectedSymbols, right.expectedSymbols).length *
+          this.options.symbolOverlapWeight,
+      ),
+      evidence(
+        "dependency_impact",
+        dependencyImpact(left, right),
+        taskIds,
+        dependencyImpact(left, right).length *
+          this.options.dependencyImpactWeight,
+      ),
+      evidence(
+        "api_overlap",
+        overlap(left.expectedApis, right.expectedApis),
+        taskIds,
+        overlap(left.expectedApis, right.expectedApis).length *
+          this.options.apiOverlapWeight,
+      ),
+      evidence(
+        "schema_overlap",
+        overlap(left.expectedSchemas, right.expectedSchemas),
+        taskIds,
+        overlap(left.expectedSchemas, right.expectedSchemas).length *
+          this.options.schemaOverlapWeight,
+      ),
+      evidence(
+        "configuration_overlap",
+        overlap(left.expectedConfigKeys, right.expectedConfigKeys),
+        taskIds,
+        overlap(left.expectedConfigKeys, right.expectedConfigKeys).length *
+          this.options.configurationOverlapWeight,
+      ),
+      evidence(
+        "test_overlap",
+        overlap(left.expectedTests, right.expectedTests),
+        taskIds,
+        overlap(left.expectedTests, right.expectedTests).length *
+          this.options.testOverlapWeight,
+      ),
+      evidence(
+        "intent_conflict",
+        intent?.resources ?? [],
+        taskIds,
+        Math.round(
+          (intent?.probability ?? 0) * this.options.semanticConflictWeight,
+        ),
+        {
+          advisory: true,
+          ...(intent === undefined ? {} : { explanation: intent.explanation }),
+        },
+      ),
+    ].filter((entry): entry is ConflictEvidence => entry !== undefined);
+
+    if (items.length === 0) {
       return undefined;
     }
-
-    const score = Math.min(100, files.length * this.options.fileOverlapWeight);
-    const disposition = dispositionFor(score, this.options.thresholds);
+    const score = Math.min(
+      100,
+      items.reduce((total, entry) => total + entry.score, 0),
+    );
+    const structural = items.some((entry) => entry.advisory !== true);
+    let disposition = dispositionFor(score, this.options.thresholds);
+    if (!structural && ["sequence", "block"].includes(disposition)) {
+      disposition = "concurrent_with_notification";
+    }
+    const explanation = items
+      .map(
+        (entry) =>
+          `${entry.kind}: ${entry.resources.join(", ")} (+${entry.score})`,
+      )
+      .join("; ");
     return {
-      taskIds: [first.taskId, second.taskId],
+      taskIds,
       score,
       disposition,
-      evidence: [
-        {
-          kind: "file_overlap",
-          resources: files,
-          taskIds: [first.taskId, second.taskId],
-          score,
-        },
-      ],
+      evidence: items,
       explanation:
-        `${files.length} planned file overlap(s): ${files.join(", ")}. ` +
-        "Exclusive file ownership may require sequencing independently of the score.",
+        `${explanation}. ` +
+        (structural
+          ? "Structural evidence controls scheduling."
+          : "Intent-only evidence is advisory and never blocks automatically."),
     };
   }
 
@@ -100,5 +368,35 @@ export class ConflictDetector {
     }
     return assessments;
   }
-}
 
+  public conflictsForScheduling(
+    first: AgentPlan,
+    second: AgentPlan,
+  ): boolean {
+    const assessment = this.assess(first, second);
+    if (assessment === undefined) {
+      return false;
+    }
+    return assessment.evidence.some(
+      (entry) => entry.advisory !== true && entry.score > 0,
+    );
+  }
+
+  /**
+   * Returns producer-before-consumer order when dependency evidence has one
+   * unambiguous direction. Symmetric conflicts retain submission order.
+   */
+  public preferredOrder(
+    first: AgentPlan,
+    second: AgentPlan,
+  ): [string, string] | undefined {
+    const firstConsumesSecond = consumes(first, second);
+    const secondConsumesFirst = consumes(second, first);
+    if (firstConsumesSecond === secondConsumesFirst) {
+      return undefined;
+    }
+    return firstConsumesSecond
+      ? [second.taskId, first.taskId]
+      : [first.taskId, second.taskId];
+  }
+}

@@ -25,9 +25,10 @@ Sent immediately after the process is spawned.
   "taskId": "task_cap_value",
   "objective": "Cap the incremented value at ten",
   "repositoryId": "demo",
+  "workspacePath": "/workspace",
   "canonicalVersion": {
     "sequence": 1,
-    "revision": "…",
+    "revision": "...",
     "branch": "main",
     "createdAt": "2026-01-01T00:00:00Z"
   },
@@ -43,8 +44,9 @@ Sent immediately after the process is spawned.
 { "type": "plan_request", "sessionId": "session_..." }
 ```
 
-The agent must reply with a `plan`. No workspace exists yet: planning happens
-before the coordinator grants file ownership.
+The agent must reply with a `plan`. `workspacePath` points at a disposable
+worktree of the canonical revision. The agent may inspect it, but changes made
+during planning are discarded and never become the execution changeset.
 
 ### `context`
 
@@ -55,7 +57,8 @@ before the coordinator grants file ownership.
   "workspacePath": "/workspace",
   "decision": { "decision": "approved", "...": "..." },
   "canonicalVersion": { "...": "..." },
-  "plan": { "...": "..." }
+  "plan": { "...": "..." },
+  "planRevision": 2
 }
 ```
 
@@ -63,8 +66,55 @@ before the coordinator grants file ownership.
 Docker sandbox this is the container mount point, not the host path. The agent
 edits files under that path and replies with `done`.
 
-The approved plan is echoed back because a sandboxed agent is restarted between
-planning and execution.
+The approved plan is echoed back because the agent is restarted between the
+disposable planning workspace and the coordinator-granted execution workspace.
+
+### `replan_request`
+
+Sent before execution when a blocking task has promoted a newer canonical
+revision. The optional `workspacePath` is a fresh read-only planning worktree.
+
+```json
+{
+  "type": "replan_request",
+  "sessionId": "session_...",
+  "workspacePath": "/workspace",
+  "request": {
+    "taskId": "task_format_total",
+    "previousPlan": { "...": "..." },
+    "canonicalChange": {
+      "changedFiles": ["src/counter.js"],
+      "changedSymbols": ["increment"],
+      "reason": "Blocking work changed canonical state before this task started"
+    },
+    "constraints": []
+  }
+}
+```
+
+The agent must inspect the new contract and answer with a complete `plan`.
+
+### `scope_decision`
+
+Answers a prior `scope_change_requested` event. The agent must not edit newly
+requested resources until the decision is `approved` or
+`approved_with_constraints`.
+
+```json
+{
+  "type": "scope_decision",
+  "sessionId": "session_...",
+  "decision": {
+    "requestId": "scope_...",
+    "decision": "approved",
+    "revisedPlan": { "...": "..." },
+    "ownershipGrants": [],
+    "constraints": [],
+    "explanation": "Scope is conflict-free",
+    "decidedAt": "2026-01-01T00:00:00Z"
+  }
+}
+```
 
 ### `pause`, `resume`, `cancel`
 
@@ -72,9 +122,9 @@ planning and execution.
 { "type": "cancel", "sessionId": "session_..." }
 ```
 
-Control messages are not acknowledged. `GenericCliAdapter` reports
-`supportsPause: false`, so only `cancel` is sent in practice; the agent should
-exit when it receives one.
+Control messages are not acknowledged. The adapter reports
+`supportsPause: true`; an agent must stop starting new edits while paused,
+continue after `resume`, and exit promptly after `cancel`.
 
 ## Agent messages
 
@@ -88,7 +138,13 @@ exit when it receives one.
     "objective": "Cap the incremented value at ten",
     "expectedFiles": ["src/counter.js", "test/cap.test.js"],
     "expectedSymbols": ["increment"],
-    "dependencies": [],
+    "dependencies": ["symbol:normalizeInput"],
+    "expectedApis": [],
+    "expectedSchemas": [],
+    "expectedConfigKeys": [],
+    "expectedTests": ["test/cap.test.js"],
+    "expectedServices": [],
+    "intent": "Bound the returned counter value without changing its API",
     "commands": [],
     "externalAccess": [],
     "riskLevel": "low"
@@ -111,6 +167,10 @@ coordinator rejects a changeset that leaves the approved scope.
 
 Supported events are `progress`, `scope_change_requested`, and `completed`.
 `occurredAt` is optional and is filled in by the host when omitted.
+
+A scope request may name files, symbols, APIs, schemas, configuration keys,
+tests, and services. It needs a stable `requestId` and a non-empty reason. The
+agent should wait for the matching `scope_decision` before editing that scope.
 
 ### `done`
 
@@ -160,7 +220,8 @@ With `COORD_AGENT_SANDBOX=docker` the agent runs under
 `DockerWorkspaceManager`. A container cannot gain a bind mount after it starts,
 so the adapter runs two processes per session:
 
-1. A planning container with **no host mount**, which answers `plan_request`.
+1. A planning container with a disposable canonical worktree, which answers
+   `plan_request`.
 2. An execution container that bind-mounts only the task worktree, which
    receives `start` again, then `context`.
 
@@ -168,6 +229,6 @@ Agents must therefore treat planning and execution as independent invocations
 and rely on the `context` message rather than in-process state.
 
 A sandboxed agent also cannot use git. The worktree's `.git` pointer refers to a
-host path that is not mounted, so it is masked with an empty directory. Read and
+host path that is not mounted, so it is masked with a read-only empty file. Read and
 write files under `workspacePath`; the coordinator collects the diff on the host
 after `done`.

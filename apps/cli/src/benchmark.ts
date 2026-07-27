@@ -1,3 +1,5 @@
+import path from "node:path";
+
 import type {
   AgentPlan,
   BenchmarkModeResult,
@@ -69,6 +71,7 @@ function createAdapter(
       launch: { command: live.command, args: [...live.args] },
       repository: fixture.repository,
       workspaces: fixture.workspaces,
+      planningRoot: path.join(fixture.rootPath, "planning"),
       ...(fixture.sandbox === undefined ? {} : { sandbox: fixture.sandbox }),
     });
   }
@@ -81,7 +84,7 @@ function createAdapter(
   });
 }
 
-/** Tasks the scenario documents as undetectable by Phase 0 conflict levels. */
+/** Tasks the scenario explicitly documents as currently undetectable. */
 function undetectedConflictIds(scenario: BenchmarkScenario): Set<string> {
   return new Set(Object.keys(scenario.knownUndetectedConflicts ?? {}));
 }
@@ -95,16 +98,12 @@ export async function runCoordinatedFixture(
     fixture.repositories,
     fixture.workspaces,
   );
-  const coordinator = new Coordinator(
-    fixture.repositories,
-    fixture.workspaces,
-    integration,
-    // Conflict detector, ownership service, and audit log keep their defaults.
-    undefined,
-    undefined,
-    undefined,
-    options.store,
-  );
+  const coordinator = new Coordinator({
+    repositories: fixture.repositories,
+    workspaces: fixture.workspaces,
+    integrations: integration,
+    ...(options.store === undefined ? {} : { store: options.store }),
+  });
   const run = await coordinator.run({
     repository: fixture.repository,
     workspaceRoot: fixture.workspaceRoot,

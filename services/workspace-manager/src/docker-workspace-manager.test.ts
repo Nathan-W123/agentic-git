@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 
 import type { ChangeSet } from "@coord/shared-types";
@@ -8,7 +9,9 @@ import { DockerWorkspaceManager } from "./docker-workspace-manager.js";
 import type {
   ChangeSetMetadata,
   CreateWorkspaceInput,
+  SandboxLaunchSpec,
   TaskWorkspace,
+  WorkspaceCommandOptions,
   WorkspaceManager,
 } from "./index.js";
 
@@ -49,6 +52,14 @@ class RecordingWorkspaceManager implements WorkspaceManager {
 
   public async destroy(workspace: TaskWorkspace): Promise<void> {
     this.destroyed.push(workspace);
+  }
+
+  public async runInWorkspace(
+    _workspace: TaskWorkspace,
+    _spec: SandboxLaunchSpec,
+    _options?: WorkspaceCommandOptions,
+  ): Promise<ProcessOutput> {
+    return { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
   }
 
   public async collectChangeSet(
@@ -117,7 +128,7 @@ test("only the task workspace is bind-mounted into the container", () => {
   const args = manager.buildRunArgs(AGENT_LAUNCH, WORKSPACE);
 
   const mounts = args.filter((entry) => entry === "--volume");
-  assert.equal(mounts.length, 1);
+  assert.equal(mounts.length, 2);
   assert.equal(flagValue(args, "--volume"), `${EXPECTED_MOUNT}:/workspace`);
   assert.equal(flagValue(args, "--workdir"), "/workspace");
 });
@@ -126,16 +137,19 @@ test("the worktree git pointer is masked inside the container", () => {
   const manager = new DockerWorkspaceManager({ image: "coord/agent:1" });
   const args = manager.buildRunArgs(AGENT_LAUNCH, WORKSPACE);
 
-  // A detached worktree's .git holds an absolute host path that does not exist
-  // in the container; an empty tmpfs replaces it without leaking the layout.
-  const tmpfsMounts = args
-    .filter((entry, index) => args[index - 1] === "--tmpfs")
-    .concat();
-  assert.ok(tmpfsMounts.includes("/workspace/.git"));
+  // A detached worktree's .git is a file, so masking it with a tmpfs directory
+  // is not portable. A read-only empty file bind preserves the target type.
+  const volumeMounts = args.filter(
+    (entry, index) => args[index - 1] === "--volume",
+  );
+  const mask = volumeMounts.find((entry) =>
+    entry.endsWith(":/workspace/.git:ro"),
+  );
+  assert.ok(mask?.includes(".coord-empty-git-mask"));
 
-  const volumeIndex = args.indexOf("--volume");
-  const maskIndex = args.indexOf("/workspace/.git");
-  assert.ok(volumeIndex < maskIndex, "the mask must follow the workspace mount");
+  const workspaceIndex = args.indexOf(`${EXPECTED_MOUNT}:/workspace`);
+  const maskIndex = args.indexOf(mask ?? "");
+  assert.ok(workspaceIndex < maskIndex, "the mask must follow the workspace mount");
 });
 
 test("git metadata masking can be turned off", () => {
@@ -144,7 +158,7 @@ test("git metadata masking can be turned off", () => {
     maskGitMetadata: false,
   });
   const args = manager.buildRunArgs(AGENT_LAUNCH, WORKSPACE);
-  assert.ok(!args.includes("/workspace/.git"));
+  assert.ok(!args.some((entry) => entry.endsWith(":/workspace/.git:ro")));
 });
 
 test("the agent command and arguments straddle the image name", () => {
@@ -235,6 +249,22 @@ test("values that could be read as Docker flags are rejected", () => {
     () => new DockerWorkspaceManager({ image: "a", pidsLimit: 0 }),
     /positive integer/u,
   );
+  assert.throws(
+    () =>
+      new DockerWorkspaceManager({
+        image: "a",
+        extraArgs: ["--privileged"],
+      }),
+    /only complete --label/u,
+  );
+  assert.throws(
+    () =>
+      new DockerWorkspaceManager({
+        image: "a",
+        extraArgs: ["--volume", "/:/host"],
+      }),
+    /only complete --label/u,
+  );
 });
 
 test("a workspace outside an absolute path cannot be mounted", () => {
@@ -245,9 +275,29 @@ test("a workspace outside an absolute path cannot be mounted", () => {
   );
 });
 
+test("absolute workspace paths may contain spaces", () => {
+  const manager = new DockerWorkspaceManager({ image: "coord/agent:1" });
+  const spacedPath = isWindows
+    ? "C:\\coord workspace\\task"
+    : "/coord workspace/task";
+  const args = manager.buildRunArgs(AGENT_LAUNCH, {
+    ...WORKSPACE,
+    path: spacedPath,
+    rootPath: path.dirname(spacedPath),
+  });
+  assert.ok(
+    args.some((entry) =>
+      entry.startsWith(`${spacedPath.replaceAll("\\", "/")}:/workspace`),
+    ),
+  );
+});
+
 test("worktree lifecycle is delegated to the host backend", async () => {
   const inner = new RecordingWorkspaceManager();
-  const manager = new DockerWorkspaceManager({ image: "coord/agent:1" }, inner);
+  const manager = new DockerWorkspaceManager(
+    { image: "coord/agent:1", maskGitMetadata: false },
+    inner,
+  );
 
   const workspace = await manager.create({
     taskId: "task_1",

@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/docker-workspace-manager.test.js"
+    "test": "node --test dist/docker-workspace-manager.test.js dist/workspace-path.test.js"
   },
   "dependencies": {
     "@coord/repository-service": "*",

@@ -1,90 +1,79 @@
-# Phase 1: Persistence
+# Phase 1: Local MVP
 
-## Why this first
+## Outcome
 
-Phase 1 calls for a web dashboard, authentication, repository import, task
-management, diff review, agent status, and integration history. Six of those
-seven need state that outlives a single process. Phase 0 kept everything in
-memory: a run's tasks, leases, changesets, and audit events existed only while
-the CLI was alive, so a crash lost the record of work that had already touched
-the canonical repository.
+The Phase 1 local MVP is complete. It adds a durable multi-tenant control
+plane and responsive web dashboard over the technical proof.
 
-The store is therefore the foundation, not the first feature. It directly
-supplies task management, integration history, agent status, and the audit
-timeline; the dashboard becomes a read model over it rather than a live view of
-one process.
+## Persistence
 
-## Backend
+`CoordinationStore` has in-memory and SQLite implementations with one shared
+contract test suite. SQLite uses Node 24's built-in `node:sqlite`, keeping the
+local deployment dependency-free.
 
-`node:sqlite`, built into Node 24. This adds durable state with no runtime
-dependency and no database server, which keeps the local proof runnable on a
-machine with nothing installed but Node and Git. It raises the engine floor
-from Node 22 to Node 24, since `node:sqlite` is flagged before then.
+State is written during a run, not reconstructed at the end:
 
-`CoordinationStore` is an interface with two implementations. A shared contract
-test runs against both, so the in-memory default cannot silently drift from the
-durable one. `§9` of `instructions.md` names PostgreSQL for the platform build;
-the async interface over a synchronous driver exists so that swap needs no
-caller changes.
+- organizations, users, memberships, projects, and project repositories,
+- authentication sessions and durable approval requests,
+- submitted tasks and run/task status,
+- plans and every plan revision,
+- conflicts and transparent evidence,
+- resource leases and workspaces,
+- scope requests and decisions,
+- changesets and ordered file patches,
+- validation and integration outcomes,
+- canonical versions and hash-chained audit events.
 
-## What is recorded
+Task claiming is transactional and project-scoped. A crash cannot cause a
+different project to consume the task or silently execute the same queue entry
+twice. Failed or stranded entries can be retried explicitly.
 
-Writes happen as a run progresses rather than at the end, so a crash leaves a
-partial but truthful record instead of nothing:
+## Audit Integrity
 
-- `runs` — mode, scenario, base and final revision, status
-- `tasks` — objective, agent, plan, coordinator decision, session, final status
-- `conflicts` — scored pairs with their file-overlap evidence
-- `resource_leases` — grants and release times
-- `workspaces` — path, isolation mode, base revision
-- `changesets` and `file_patches` — full patch text, so diff review needs no
-  surviving worktree
-- `integrations` — status, validation output, and **both** canonical versions
-- `canonical_versions` — every revision the coordinator has observed
-- `audit_events` — append-only, hash-chained
+SQLite triggers reject updates and deletes on audit events. Every event also
+stores a payload hash and chain hash, so editing, removal, insertion, or
+reordering is detectable with `coord verify-audit`.
 
-Integration records store the previous version's branch and timestamp in full.
-Deriving them from the canonical version silently misreports the base a
-changeset was attempted against, which is exactly the fact an integration
-history exists to answer.
+This is tamper evidence, not an external trust anchor. An attacker who controls
+the database file and all verification code could rebuild the chain; signed or
+replicated checkpoints remain a later deployment feature.
 
-## Audit integrity
+## API And Authentication
 
-`§17` requires immutable audit records and `§8.10` a tamper-evident history.
-Two mechanisms, doing different jobs:
+The versioned `/api/v1` surface includes:
 
-1. **Append-only enforcement.** SQLite triggers abort any `UPDATE` or `DELETE`
-   on `audit_events`, so an in-place edit fails loudly.
-2. **Hash chain.** Each event stores a payload hash and a chain hash folding in
-   its predecessor. Editing, removing, reordering, or inserting an event breaks
-   the chain from that point on.
+- one-time owner bootstrap and password login,
+- HTTP-only session cookies and double-submit CSRF protection,
+- organization/project RBAC and tenant isolation,
+- rate limits, body limits, origin checks, CSP and browser hardening headers,
+- organizations, projects, repositories, tasks, runs, approvals, members, and
+  admin operations,
+- project-scoped authenticated WebSocket audit updates.
 
-The triggers stop casual edits. They do not stop someone who can write the
-database file from dropping a trigger and rebuilding the table — the chain is
-what makes that detectable, and `coord verify-audit` reports the first event
-where the history stops being consistent.
+Unhashed web assets use ETag revalidation so a deployment cannot leave a
+browser running stale JavaScript against a new API.
 
-This is detection, not prevention. An attacker with write access can recompute
-the whole chain. Making that impossible needs an external anchor — a signed or
-replicated checkpoint — which is deferred.
+## Web Product
 
-Payload hashing serializes with sorted keys so an event always hashes to the
-same digest regardless of field insertion order.
+The control room provides:
 
-## Coordinator integration
+- setup and sign-in,
+- overview metrics and a live project ledger,
+- task submission, cancellation, retry, and run controls,
+- run details with plans, replans, scope, conflicts, diffs, validation, and
+  integration history,
+- human approval review and decisions,
+- GitHub import,
+- team membership and roles,
+- project, organization, and system administration.
 
-The store is optional. `Coordinator` takes one and writes through at every
-transition it already recorded in the audit log; with no store, behavior is
-byte-for-byte what it was in Phase 0. That keeps the deterministic benchmark
-path free of I/O and makes persistence a decision at the call site.
+The interface is responsive on desktop and mobile. A browser audit exercised
+every route, authenticated session behavior, mobile navigation, and horizontal
+overflow with no application exceptions.
 
-## Not yet built
+## Operational Boundary
 
-- HTTP surface and web dashboard over the store
-- Authentication and multi-tenancy; `organizations`, `users`, `principals`,
-  `projects`, and `policies` from `§19` have no code behind them yet
-- Crash recovery: the store now records enough to resume, but nothing reads it
-  back to resume a partial run, and worktrees are still not garbage collected
-  across restarts
-- Retention: the audit log grows without bound
-- External anchoring of the audit chain
+This phase is a local, single-process control plane. Durable state supports
+manual recovery, but automatic in-place run resumption, worktree scavenging,
+PostgreSQL/Redis, high availability, and distributed workers remain later
+deployment phases. See [current-state.md](current-state.md).

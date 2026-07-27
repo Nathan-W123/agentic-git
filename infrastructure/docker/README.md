@@ -1,7 +1,7 @@
 # Docker Sandbox
 
-`DockerWorkspaceManager` keeps the git worktree on the host and runs only the
-agent's command inside a container. See the Security Boundary section of
+`DockerWorkspaceManager` keeps Git and canonical promotion on the host, while
+agent and validation commands run inside containers. See the Security Boundary section of
 [the Phase 0 architecture](../../docs/architecture/phase-0.md) for what that
 does and does not isolate.
 
@@ -32,10 +32,12 @@ a live daemon can answer:
 - the container root filesystem is read-only,
 - a full coordinated run integrates with the agent inside a container.
 
-**Status: not yet executed.** No Docker daemon was available on the machine
-where this was written, so every check above is unverified against a real
-runtime. The argument construction and delegation behavior are covered by unit
-tests in `services/workspace-manager`, which need no daemon.
+**Latest status: blocked at daemon availability.** The verifier now loads its
+supported CLI fixture API and reaches the daemon probe, but the latest audit
+host has no `docker` executable (`spawn docker ENOENT`). The remaining runtime
+checks are therefore unverified on this host. Argument construction and
+delegation behavior are covered by unit tests in `services/workspace-manager`,
+which need no daemon.
 
 ## Running the benchmark sandboxed
 
@@ -61,7 +63,7 @@ gitdir: C:/Users/you/AppData/Local/Temp/coord-.../canonical.git/worktrees/task_c
 
 That path does not exist in the container, so git commands inside the sandbox
 cannot work and the file leaks the host directory layout. The manager therefore
-mounts an empty tmpfs over `<workspace>/.git` by default, which turns the
+bind-mounts a read-only empty file over `<workspace>/.git` by default, which turns the
 failure into a plain "not a git repository" and reveals nothing. Agents do not
 need repository metadata: the coordinator collects the diff on the host after
 the agent signals completion. Set `maskGitMetadata: false` to opt out.
@@ -71,6 +73,7 @@ user. If the container uid cannot write it, the agent fails on its first edit.
 Set `COORD_AGENT_USER` to a matching uid, for example `COORD_AGENT_USER=1000:1000`.
 Docker Desktop on macOS and Windows remaps ownership and does not need this.
 
-**Validation still runs on the host.** Only the agent command is containerized.
-Integration compiles, tests, and promotes in a host worktree, so validation
-commands are as trusted as the repository they come from.
+**Git operations still run on the host.** Patch application, candidate commit
+creation, and compare-and-swap promotion use the host worktree. Validation
+commands run through the container backend with the configured network and
+resource policy.

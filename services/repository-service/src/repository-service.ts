@@ -1,9 +1,19 @@
-import { mkdir } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  rename,
+  rm,
+} from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
-import type { CanonicalVersion } from "@coord/shared-types";
+import {
+  normalizeRepositoryPath,
+  type CanonicalVersion,
+} from "@coord/shared-types";
 
-import { GitClient } from "./git-client.js";
+import { GitClient, GitCommandError } from "./git-client.js";
 
 export interface CanonicalRepository {
   id: string;
@@ -16,10 +26,29 @@ export interface CommitIdentity {
   email: string;
 }
 
+export interface RemoteRepositoryCredentials {
+  /** GitHub accepts `x-access-token`; other Git hosts may require a username. */
+  username?: string;
+  token: string;
+}
+
+export interface RemoteImportOptions {
+  branch?: string;
+  credentials?: RemoteRepositoryCredentials;
+}
+
 const DEFAULT_IDENTITY: CommitIdentity = {
   name: "AI Development Coordinator",
   email: "coordinator@localhost",
 };
+
+function isErrorCode(error: unknown, code: string): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as NodeJS.ErrnoException).code === code
+  );
+}
 
 export class RepositoryService {
   public constructor(
@@ -41,25 +70,117 @@ export class RepositoryService {
     id: string,
     branch = "main",
   ): Promise<CanonicalRepository> {
-    await mkdir(path.dirname(destinationPath), { recursive: true });
-    await this.git.run(["clone", "--bare", sourcePath, destinationPath]);
-    await this.git.run([
-      `--git-dir=${destinationPath}`,
-      "show-ref",
-      "--verify",
-      `refs/heads/${branch}`,
-    ]);
+    await this.assertBranchName(branch);
+
+    const resolvedDestination = path.resolve(destinationPath);
+    const destinationParent = path.dirname(resolvedDestination);
+    await mkdir(destinationParent, { recursive: true });
+    try {
+      await lstat(resolvedDestination);
+      throw new Error(`Canonical repository already exists: ${resolvedDestination}`);
+    } catch (error) {
+      if (!isErrorCode(error, "ENOENT")) {
+        throw error;
+      }
+    }
+
+    const stagingRoot = await mkdtemp(
+      path.join(destinationParent, `.${path.basename(resolvedDestination)}.import-`),
+    );
+    const stagedRepository = path.join(stagingRoot, "repository.git");
+    try {
+      await this.git.run(["clone", "--bare", sourcePath, stagedRepository]);
+      await this.git.run([
+        `--git-dir=${stagedRepository}`,
+        "show-ref",
+        "--verify",
+        `refs/heads/${branch}`,
+      ]);
+      await rename(stagedRepository, resolvedDestination);
+    } finally {
+      await rm(stagingRoot, { recursive: true, force: true });
+    }
 
     return {
       id,
-      path: destinationPath,
+      path: resolvedDestination,
       branch,
     };
+  }
+
+  /**
+   * Imports an HTTPS or SSH remote without embedding credentials in
+   * the URL or process arguments. Token authentication is supplied through
+   * Git's environment-backed configuration and exists only in the child.
+   */
+  public async importRemoteRepository(
+    sourceUrl: string,
+    destinationPath: string,
+    id: string,
+    options: RemoteImportOptions = {},
+  ): Promise<CanonicalRepository> {
+    const remote = normalizeRemoteUrl(sourceUrl);
+    if (options.branch !== undefined) {
+      await this.assertBranchName(options.branch);
+    }
+
+    const resolvedDestination = path.resolve(destinationPath);
+    const destinationParent = path.dirname(resolvedDestination);
+    await mkdir(destinationParent, { recursive: true });
+    try {
+      await lstat(resolvedDestination);
+      throw new Error(`Canonical repository already exists: ${resolvedDestination}`);
+    } catch (error) {
+      if (!isErrorCode(error, "ENOENT")) {
+        throw error;
+      }
+    }
+
+    const stagingRoot = await mkdtemp(
+      path.join(destinationParent, `.${path.basename(resolvedDestination)}.import-`),
+    );
+    const stagedRepository = path.join(stagingRoot, "repository.git");
+    try {
+      await this.git.run(
+        ["clone", "--bare", remote, stagedRepository],
+        {
+          env: remoteEnvironment(options.credentials),
+          timeoutMs: 10 * 60 * 1000,
+          maxOutputBytes: 1024 * 1024,
+        },
+      );
+      const branch =
+        options.branch ??
+        (await this.discoverDefaultBranch(stagedRepository));
+      await this.assertBranchName(branch);
+      await this.git.run([
+        `--git-dir=${stagedRepository}`,
+        "show-ref",
+        "--verify",
+        `refs/heads/${branch}`,
+      ]);
+      await rename(stagedRepository, resolvedDestination);
+      return {
+        id,
+        path: resolvedDestination,
+        branch,
+      };
+    } finally {
+      await rm(stagingRoot, { recursive: true, force: true });
+    }
+  }
+
+  public async assertBranchName(branch: string): Promise<void> {
+    if (branch.length === 0) {
+      throw new Error("Canonical branch must not be empty");
+    }
+    await this.git.run(["check-ref-format", `refs/heads/${branch}`]);
   }
 
   public async getCanonicalVersion(
     repository: CanonicalRepository,
   ): Promise<CanonicalVersion> {
+    await this.assertBranchName(repository.branch);
     const reference = `refs/heads/${repository.branch}`;
     const revisionResult = await this.git.run([
       `--git-dir=${repository.path}`,
@@ -98,27 +219,48 @@ export class RepositoryService {
     message: string,
   ): Promise<string | undefined> {
     await this.git.run(["-C", worktreePath, "add", "--all", "--"]);
+    const diffArgs = [
+      "-C",
+      worktreePath,
+      "diff",
+      "--cached",
+      "--quiet",
+      "--exit-code",
+    ] as const;
     const diff = await this.git.run(
-      ["-C", worktreePath, "diff", "--cached", "--quiet", "--exit-code"],
+      diffArgs,
       { allowFailure: true },
     );
 
     if (diff.exitCode === 0) {
       return undefined;
     }
+    if (diff.exitCode !== 1) {
+      throw new GitCommandError(diffArgs, diff);
+    }
 
-    await this.git.run([
-      "-C",
-      worktreePath,
-      "-c",
-      `user.name=${this.identity.name}`,
-      "-c",
-      `user.email=${this.identity.email}`,
-      "commit",
-      "--no-gpg-sign",
-      "-m",
-      message,
-    ]);
+    const emptyHooks = await mkdtemp(
+      path.join(os.tmpdir(), "coord-disabled-hooks-"),
+    );
+    try {
+      await this.git.run([
+        "-C",
+        worktreePath,
+        "-c",
+        `user.name=${this.identity.name}`,
+        "-c",
+        `user.email=${this.identity.email}`,
+        "-c",
+        `core.hooksPath=${emptyHooks}`,
+        "commit",
+        "--no-gpg-sign",
+        "--no-verify",
+        "-m",
+        message,
+      ]);
+    } finally {
+      await rm(emptyHooks, { recursive: true, force: true });
+    }
 
     const revision = await this.git.run([
       "-C",
@@ -144,7 +286,27 @@ export class RepositoryService {
       ],
       { allowFailure: true },
     );
-    return result.exitCode === 0;
+    if (result.exitCode === 0) {
+      return true;
+    }
+
+    const current = await this.getCanonicalVersion(repository);
+    if (current.revision === candidateRevision) {
+      return true;
+    }
+    if (current.revision !== expectedRevision) {
+      return false;
+    }
+    throw new GitCommandError(
+      [
+        `--git-dir=${repository.path}`,
+        "update-ref",
+        `refs/heads/${repository.branch}`,
+        candidateRevision,
+        expectedRevision,
+      ],
+      result,
+    );
   }
 
   public async readFile(
@@ -152,16 +314,189 @@ export class RepositoryService {
     revision: string,
     repositoryPath: string,
   ): Promise<string> {
+    const safePath = normalizeRepositoryPath(repositoryPath);
     const result = await this.git.run([
       `--git-dir=${repository.path}`,
       "show",
-      `${revision}:${repositoryPath}`,
+      "--end-of-options",
+      `${revision}:${safePath}`,
     ]);
     return result.stdout;
+  }
+
+  public async listFiles(
+    repository: CanonicalRepository,
+    revision: string,
+  ): Promise<string[]> {
+    const result = await this.git.run([
+      `--git-dir=${repository.path}`,
+      "ls-tree",
+      "-r",
+      "--name-only",
+      "-z",
+      "--full-tree",
+      revision,
+    ]);
+    return result.stdout
+      .split("\0")
+      .filter((entry) => entry.length > 0)
+      .map(normalizeRepositoryPath)
+      .sort();
+  }
+
+  public async listChangedFiles(
+    repository: CanonicalRepository,
+    fromRevision: string,
+    toRevision: string,
+  ): Promise<string[]> {
+    if (fromRevision === toRevision) {
+      return [];
+    }
+    const result = await this.git.run([
+      `--git-dir=${repository.path}`,
+      "diff",
+      "--name-only",
+      "-z",
+      "--no-renames",
+      fromRevision,
+      toRevision,
+      "--",
+    ]);
+    return result.stdout
+      .split("\0")
+      .filter((entry) => entry.length > 0)
+      .map(normalizeRepositoryPath)
+      .sort();
   }
 
   public getGitClient(): GitClient {
     return this.git;
   }
+
+  private async discoverDefaultBranch(repositoryPath: string): Promise<string> {
+    const symbolic = await this.git.run([
+      `--git-dir=${repositoryPath}`,
+      "symbolic-ref",
+      "--short",
+      "HEAD",
+    ]);
+    const branch = symbolic.stdout.trim();
+    if (branch.length === 0) {
+      throw new Error("Remote repository does not advertise a default branch");
+    }
+    return branch;
+  }
 }
 
+export function normalizeGitHubRepository(value: string): string {
+  const trimmed = value.trim();
+  const shorthand = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/u.exec(
+    trimmed,
+  );
+  if (shorthand !== null) {
+    return `https://github.com/${shorthand[1]}/${shorthand[2]}.git`;
+  }
+
+  const ssh = /^git@github\.com:([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)(?:\.git)?$/u.exec(
+    trimmed,
+  );
+  if (ssh !== null) {
+    return `git@github.com:${ssh[1]}/${ssh[2]}.git`;
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(
+      "GitHub repository must be owner/name, an HTTPS URL, or an SSH URL",
+    );
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.hostname.toLowerCase() !== "github.com" ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0
+  ) {
+    throw new Error("Only credential-free https://github.com URLs are accepted");
+  }
+  const parts = parsed.pathname
+    .replace(/\.git$/u, "")
+    .split("/")
+    .filter(Boolean);
+  if (
+    parts.length !== 2 ||
+    !parts.every((part) => /^[A-Za-z0-9_.-]+$/u.test(part))
+  ) {
+    throw new Error("GitHub repository URL must contain exactly owner/name");
+  }
+  return `https://github.com/${parts[0]}/${parts[1]}.git`;
+}
+
+function normalizeRemoteUrl(value: string): string {
+  const trimmed = value.trim();
+  if (trimmed.includes("\0") || trimmed.length === 0) {
+    throw new Error("Remote repository URL is invalid");
+  }
+  if (/^git@[^:]+:[^\s]+$/u.test(trimmed)) {
+    return trimmed;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error("Remote repository must be an absolute Git URL");
+  }
+  if (
+    !["https:", "ssh:"].includes(parsed.protocol) ||
+    parsed.username.length > 0 ||
+    parsed.password.length > 0 ||
+    parsed.search.length > 0 ||
+    parsed.hash.length > 0
+  ) {
+    throw new Error(
+      "Remote repository URL must use HTTPS or SSH and contain no credentials, query, or fragment",
+    );
+  }
+  return parsed.toString();
+}
+
+function remoteEnvironment(
+  credentials: RemoteRepositoryCredentials | undefined,
+): NodeJS.ProcessEnv {
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    GIT_TERMINAL_PROMPT: "0",
+  };
+  if (credentials === undefined) {
+    return env;
+  }
+  if (
+    credentials.token.length === 0 ||
+    credentials.token.includes("\0") ||
+    credentials.token.includes("\r") ||
+    credentials.token.includes("\n")
+  ) {
+    throw new Error("Remote repository token must be a non-empty single line");
+  }
+  const username = credentials.username ?? "x-access-token";
+  if (
+    username.length === 0 ||
+    username.includes("\0") ||
+    username.includes(":") ||
+    /[\r\n]/u.test(username)
+  ) {
+    throw new Error("Remote repository username is invalid");
+  }
+  const basic = Buffer.from(`${username}:${credentials.token}`, "utf8").toString(
+    "base64",
+  );
+  return {
+    ...env,
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.extraHeader",
+    GIT_CONFIG_VALUE_0: `Authorization: Basic ${basic}`,
+  };
+}

@@ -19,6 +19,13 @@ test("rejects paths outside the repository", () => {
   assert.throws(() => normalizeRepositoryPath("C:\\secret.txt"), /Invalid/u);
 });
 
+test("preserves whitespace that is part of a legal Git filename", () => {
+  assert.equal(
+    normalizeRepositoryPath(" src/filename .ts "),
+    " src/filename .ts ",
+  );
+});
+
 test("validates and normalizes an agent plan", () => {
   const plan: unknown = {
     taskId: "task_1",
@@ -35,3 +42,17 @@ test("validates and normalizes an agent plan", () => {
   assert.deepEqual(plan.expectedFiles, ["src/index.ts"]);
 });
 
+test("rejects malformed validation commands in an agent plan", () => {
+  assert.throws(() =>
+    assertAgentPlan({
+      taskId: "task_1",
+      objective: "Change a file",
+      expectedFiles: ["src/index.ts"],
+      expectedSymbols: [],
+      dependencies: [],
+      commands: [{ executable: "node", args: "bad", label: "tests" }],
+      externalAccess: [],
+      riskLevel: "low",
+    }),
+  );
+});

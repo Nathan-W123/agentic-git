@@ -31,20 +31,25 @@ test("a three-way collision is sequenced without serializing independent work", 
     assert.equal(result.metrics.integrationFailures, 0);
     assert.equal(result.metrics.undetectedConflicts, 0);
 
-    // The two independent tasks are approved immediately; the later counter
-    // tasks are queued behind whichever took file ownership first.
+    // Decisions are refreshed as each scheduling wave becomes runnable, so
+    // every successfully integrated task ends in the approved state. Plan
+    // revisions preserve the ordering that got it there.
     const decisions = new Map(
       result.run.tasks.map((entry) => [entry.task.id, entry.decision]),
     );
     assert.equal(decisions.get(TASK_NORMALIZE.id)?.decision, "approved");
     assert.equal(decisions.get(TASK_FORMAT.id)?.decision, "approved");
     assert.equal(decisions.get(TASK_CONFIG.id)?.decision, "approved");
-    assert.equal(decisions.get(TASK_CAP.id)?.decision, "queued");
-    assert.equal(decisions.get(TASK_FLOOR.id)?.decision, "queued");
-    assert.deepEqual(decisions.get(TASK_FLOOR.id)?.blockedBy, [
-      TASK_NORMALIZE.id,
-      TASK_CAP.id,
-    ]);
+    assert.equal(decisions.get(TASK_CAP.id)?.decision, "approved");
+    assert.equal(decisions.get(TASK_FLOOR.id)?.decision, "approved");
+    assert.ok(
+      (decisions.get(TASK_CAP.id)?.planRevision ?? 0) >
+        (decisions.get(TASK_NORMALIZE.id)?.planRevision ?? 0),
+    );
+    assert.ok(
+      (decisions.get(TASK_FLOOR.id)?.planRevision ?? 0) >
+        (decisions.get(TASK_CAP.id)?.planRevision ?? 0),
+    );
 
     // All three counter edits compose, in plan order, on the final revision.
     const counter = await fixture.repositories.readFile(

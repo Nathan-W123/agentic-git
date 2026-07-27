@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#e85d2a">
+    <meta
+      name="description"
+      content="The live coordination layer for humans and coding agents."
+    >
+    <link rel="icon" href="/mark.svg" type="image/svg+xml">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="stylesheet" href="/styles.css">
+    <title>Relay Control Room</title>
+  </head>
+  <body>
+    <div class="ambient-grid" aria-hidden="true"></div>
+
+    <main class="auth-shell" id="auth-shell">
+      <section class="auth-story">
+        <a class="wordmark wordmark-large" href="/" aria-label="Relay home">
+          <img src="/mark.svg" alt="" width="48" height="48">
+          <span>relay</span>
+        </a>
+        <p class="kicker">AI-native development coordination</p>
+        <h1>Keep every agent<br>on the same page.</h1>
+        <p class="auth-intro">
+          Plans before edits. Isolated workspaces. Human gates where they
+          matter. One canonical codebase that never sees unfinished work.
+        </p>
+        <ol class="signal-list">
+          <li><span>01</span> Predict structural collisions</li>
+          <li><span>02</span> Sequence dependent work</li>
+          <li><span>03</span> Replan when canonical moves</li>
+        </ol>
+      </section>
+
+      <section class="auth-panel" aria-labelledby="auth-title">
+        <div class="auth-status">
+          <span class="pulse-dot"></span>
+          <span id="gateway-status">Checking local control plane</span>
+        </div>
+        <div class="auth-tabs" role="tablist" aria-label="Authentication mode">
+          <button class="auth-tab active" data-auth-mode="login" role="tab">
+            Sign in
+          </button>
+          <button class="auth-tab" data-auth-mode="bootstrap" role="tab">
+            First run
+          </button>
+        </div>
+
+        <form id="login-form" class="auth-form" data-form="login">
+          <div>
+            <p class="eyebrow">Welcome back</p>
+            <h2 id="auth-title">Enter the control room</h2>
+          </div>
+          <label>
+            <span>Email address</span>
+            <input name="email" type="email" autocomplete="username" required>
+          </label>
+          <label>
+            <span>Password</span>
+            <input
+              name="password"
+              type="password"
+              autocomplete="current-password"
+              minlength="12"
+              required
+            >
+          </label>
+          <button class="button button-primary button-wide" type="submit">
+            Open Relay
+            <span aria-hidden="true">→</span>
+          </button>
+        </form>
+
+        <form
+          id="bootstrap-form"
+          class="auth-form"
+          data-form="bootstrap"
+          hidden
+        >
+          <div>
+            <p class="eyebrow">Local setup</p>
+            <h2>Create the first owner</h2>
+          </div>
+          <label>
+            <span>Bootstrap token</span>
+            <input name="token" type="password" autocomplete="off" required>
+            <small>Printed once by <code>coord-web</code> at startup.</small>
+          </label>
+          <div class="field-pair">
+            <label>
+              <span>Your name</span>
+              <input name="displayName" autocomplete="name" required>
+            </label>
+            <label>
+              <span>Team name</span>
+              <input name="organizationName" value="Local team" required>
+            </label>
+          </div>
+          <label>
+            <span>Email address</span>
+            <input name="email" type="email" autocomplete="username" required>
+          </label>
+          <label>
+            <span>Password</span>
+            <input
+              name="password"
+              type="password"
+              autocomplete="new-password"
+              minlength="12"
+              required
+            >
+            <small>Use 12+ characters with letters, numbers, and variety.</small>
+          </label>
+          <button class="button button-primary button-wide" type="submit">
+            Establish control room
+            <span aria-hidden="true">→</span>
+          </button>
+        </form>
+        <p class="form-message" id="auth-message" role="alert"></p>
+      </section>
+    </main>
+
+    <div class="app-shell" id="app-shell" hidden>
+      <aside class="rail" id="rail">
+        <div>
+          <a class="wordmark" href="#overview">
+            <img src="/mark.svg" alt="" width="38" height="38">
+            <span>relay</span>
+          </a>
+          <div class="context-picker">
+            <label for="organization-select">Organization</label>
+            <select id="organization-select"></select>
+            <label for="project-select">Project</label>
+            <select id="project-select"></select>
+          </div>
+          <nav class="primary-nav" aria-label="Main navigation">
+            <a href="#overview" data-route="overview">
+              <span class="nav-glyph">⌁</span> Overview
+            </a>
+            <a href="#tasks" data-route="tasks">
+              <span class="nav-glyph">↗</span> Tasks
+              <span class="nav-count" id="task-count">0</span>
+            </a>
+            <a href="#runs" data-route="runs">
+              <span class="nav-glyph">◎</span> Runs
+            </a>
+            <a href="#approvals" data-route="approvals">
+              <span class="nav-glyph">✓</span> Approvals
+              <span class="nav-count hot" id="approval-count">0</span>
+            </a>
+            <a href="#repositories" data-route="repositories">
+              <span class="nav-glyph">⌘</span> Repositories
+            </a>
+            <a href="#team" data-route="team">
+              <span class="nav-glyph">◇</span> Team
+            </a>
+            <a href="#settings" data-route="settings">
+              <span class="nav-glyph">⚙</span> Settings
+            </a>
+            <a href="#admin" data-route="admin" id="admin-nav" hidden>
+              <span class="nav-glyph">△</span> System admin
+            </a>
+          </nav>
+        </div>
+        <div class="rail-footer">
+          <div class="live-indicator">
+            <span class="pulse-dot" id="live-dot"></span>
+            <span id="live-label">Connecting</span>
+          </div>
+          <button class="profile-button" id="profile-button">
+            <span class="avatar" id="profile-avatar">R</span>
+            <span>
+              <strong id="profile-name">Relay user</strong>
+              <small id="profile-role">member</small>
+            </span>
+            <span aria-hidden="true">•••</span>
+          </button>
+          <button class="text-button" id="logout-button">Sign out</button>
+        </div>
+      </aside>
+
+      <header class="mobile-header">
+        <a class="wordmark" href="#overview">
+          <img src="/mark.svg" alt="" width="34" height="34">
+          <span>relay</span>
+        </a>
+        <button
+          class="icon-button"
+          id="menu-button"
+          aria-label="Open navigation"
+          aria-expanded="false"
+        >
+          <span></span><span></span>
+        </button>
+      </header>
+
+      <main class="workspace">
+        <header class="page-head">
+          <div>
+            <p class="eyebrow" id="page-eyebrow">Control room</p>
+            <h1 id="page-title">Overview</h1>
+            <p id="page-description">
+              Canonical state, active work, and decisions at a glance.
+            </p>
+          </div>
+          <div class="page-actions">
+            <span class="updated-at" id="updated-at"></span>
+            <button class="button button-quiet" id="refresh-button">
+              Refresh
+            </button>
+            <a class="button button-primary" href="#tasks" id="new-task-button">
+              New task <span aria-hidden="true">↗</span>
+            </a>
+          </div>
+        </header>
+        <div class="route-view" id="route-view" aria-live="polite"></div>
+      </main>
+    </div>
+
+    <aside class="detail-drawer" id="detail-drawer" aria-hidden="true">
+      <button class="drawer-scrim" data-close-drawer aria-label="Close details"></button>
+      <section class="drawer-panel">
+        <header class="drawer-head">
+          <div>
+            <p class="eyebrow" id="drawer-eyebrow">Detail</p>
+            <h2 id="drawer-title">Review</h2>
+          </div>
+          <button class="icon-button drawer-close" data-close-drawer aria-label="Close">
+            ×
+          </button>
+        </header>
+        <div class="drawer-body" id="drawer-body"></div>
+      </section>
+    </aside>
+
+    <div class="toast-region" id="toast-region" aria-live="assertive"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

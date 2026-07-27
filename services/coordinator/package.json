@@ -14,10 +14,11 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/conflict-detector.test.js dist/ownership-service.test.js dist/scope-validator.test.js"
+    "test": "node --test dist/*.test.js"
   },
   "dependencies": {
     "@coord/agent-protocol": "*",
+    "@coord/code-intelligence": "*",
     "@coord/integration-service": "*",
     "@coord/persistence": "*",
     "@coord/repository-service": "*",
