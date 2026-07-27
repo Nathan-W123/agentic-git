@@ -105,6 +105,18 @@ function isErrorCode(error: unknown, code: string): boolean {
 }
 
 export class RepositoryService {
+  /**
+   * Branch names already accepted by `git check-ref-format`.
+   *
+   * The check is a pure function of the string — it reads no repository state —
+   * but it costs a process launch, and `getCanonicalVersion` runs it on every
+   * call. A coordinated run asks for the canonical version once per wave and
+   * again inside every integration, so the same handful of names were being
+   * re-validated a dozen or more times per run. Names are only ever added after
+   * git has approved them, so a hit is exactly as authoritative as a miss.
+   */
+  private readonly validatedBranches = new Set<string>();
+
   public constructor(
     private readonly git = new GitClient(),
     private readonly identity: CommitIdentity = DEFAULT_IDENTITY,
@@ -462,7 +474,11 @@ export class RepositoryService {
     if (branch.length === 0) {
       throw new Error("Canonical branch must not be empty");
     }
+    if (this.validatedBranches.has(branch)) {
+      return;
+    }
     await this.git.run(["check-ref-format", `refs/heads/${branch}`]);
+    this.validatedBranches.add(branch);
   }
 
   public async getCanonicalVersion(

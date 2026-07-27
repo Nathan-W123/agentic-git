@@ -238,18 +238,36 @@ export class Coordinator {
           input.repository,
           waveVersion.revision,
         );
-        for (const entry of pending) {
-          if (entry.plannedVersion.revision !== waveVersion.revision) {
-            await this.replanTask(
-              input,
-              entry,
-              waveVersion,
-              index,
-              recorder,
-              runAudit,
-            );
-          }
-        }
+        // Every task still queued has to see the canonical state the previous
+        // wave produced, and each of those replans is a full round trip to an
+        // agent. Issued one at a time they dominate a real run: a fully
+        // sequenced set of n tasks performs n(n-1)/2 of them, so eight tasks
+        // means twenty-eight agent calls back to back.
+        //
+        // They are independent. A replan reads canonical and the shared index,
+        // both immutable at this point in the wave, and writes only to its own
+        // entry and its own agent session. Audit appends are already made
+        // concurrently by the parallel execution below and are serialised by
+        // the store, so the chain stays intact; only the interleaving of events
+        // between tasks changes. Initial planning is parallel for the same
+        // reasons, and this makes replanning agree with it.
+        await Promise.all(
+          pending
+            .filter(
+              (entry) => entry.plannedVersion.revision !== waveVersion.revision,
+            )
+            .map(
+              async (entry) =>
+                await this.replanTask(
+                  input,
+                  entry,
+                  waveVersion,
+                  index,
+                  recorder,
+                  runAudit,
+                ),
+            ),
+        );
 
         const assessments = this.conflicts.assessAll(
           pending.map((entry) => entry.plan),

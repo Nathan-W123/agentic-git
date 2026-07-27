@@ -383,33 +383,54 @@ export class CodeIntelligenceService {
     let totalBytes = 0;
     let skippedFiles = 0;
 
-    for (const filePath of candidates) {
+    // Each read is a `git show`, so a file-at-a-time loop costs one process
+    // launch per source file and spends most of its time waiting on spawn
+    // rather than on git. Reads run a chunk at a time instead.
+    //
+    // The budget below is order-dependent — whether a file is included depends
+    // on the total accepted before it — so the accounting stays strictly
+    // sequential over `candidates`, and only the fetching is overlapped. A
+    // chunk whose budget runs out mid-way discards the reads it had already
+    // started, which is what the sequential version did by never issuing them;
+    // the resulting index is identical either way.
+    const readAhead = 16;
+    for (let offset = 0; offset < candidates.length; offset += readAhead) {
       if (files.length >= maxFiles || totalBytes >= maxTotalBytes) {
-        skippedFiles += 1;
-        continue;
+        skippedFiles += candidates.length - offset;
+        break;
       }
-      const source = await this.repositories.readFile(
-        repository,
-        revision,
-        filePath,
+      const chunk = candidates.slice(offset, offset + readAhead);
+      const sources = await Promise.all(
+        chunk.map(
+          async (filePath) =>
+            await this.repositories.readFile(repository, revision, filePath),
+        ),
       );
-      const bytes = Buffer.byteLength(source);
-      if (bytes > maxFileBytes || totalBytes + bytes > maxTotalBytes) {
-        skippedFiles += 1;
-        continue;
+
+      for (const [chunkIndex, filePath] of chunk.entries()) {
+        if (files.length >= maxFiles || totalBytes >= maxTotalBytes) {
+          skippedFiles += 1;
+          continue;
+        }
+        const source = sources[chunkIndex] ?? "";
+        const bytes = Buffer.byteLength(source);
+        if (bytes > maxFileBytes || totalBytes + bytes > maxTotalBytes) {
+          skippedFiles += 1;
+          continue;
+        }
+        totalBytes += bytes;
+        const language = SOURCE_EXTENSIONS.get(
+          path.posix.extname(filePath).toLowerCase(),
+        );
+        if (language === undefined) {
+          continue;
+        }
+        files.push(
+          language === "typescript" || language === "javascript"
+            ? analyzeScript(filePath, source, language)
+            : analyzeDataFile(filePath, source, language),
+        );
       }
-      totalBytes += bytes;
-      const language = SOURCE_EXTENSIONS.get(
-        path.posix.extname(filePath).toLowerCase(),
-      );
-      if (language === undefined) {
-        continue;
-      }
-      files.push(
-        language === "typescript" || language === "javascript"
-          ? analyzeScript(filePath, source, language)
-          : analyzeDataFile(filePath, source, language),
-      );
     }
 
     const allPaths = new Set(repositoryFiles);
