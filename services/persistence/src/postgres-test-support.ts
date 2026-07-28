@@ -17,7 +17,7 @@ const run = promisify(execFile);
  * temporary file.
  */
 
-const CONTAINER = "coord-postgres-contract";
+const DEFAULT_CONTAINER = "coord-postgres-contract";
 const IMAGE = "postgres:16-alpine";
 const PASSWORD = "coordinator-contract";
 const READY_TIMEOUT_MS = 90_000;
@@ -27,6 +27,15 @@ export interface PostgresTestServer {
   adminUrl: string;
   /** Stops the dockerized server if this process started it. */
   stop(): Promise<void>;
+}
+
+export interface PostgresTestServerOptions {
+  /**
+   * Container name for the dockerized server. Suites that can run
+   * concurrently (turbo runs packages in parallel) must use distinct names,
+   * because each suite stops the container it started.
+   */
+  containerName?: string;
 }
 
 async function docker(...args: string[]): Promise<string> {
@@ -43,10 +52,10 @@ async function dockerAvailable(): Promise<boolean> {
   }
 }
 
-async function containerRunning(): Promise<boolean> {
+async function containerRunning(container: string): Promise<boolean> {
   try {
     return (
-      (await docker("inspect", "--format", "{{.State.Running}}", CONTAINER)) ===
+      (await docker("inspect", "--format", "{{.State.Running}}", container)) ===
       "true"
     );
   } catch {
@@ -54,9 +63,9 @@ async function containerRunning(): Promise<boolean> {
   }
 }
 
-async function mappedPort(): Promise<number> {
+async function mappedPort(container: string): Promise<number> {
   // May report several bindings (IPv4 and IPv6); any line carries the port.
-  const output = await docker("port", CONTAINER, "5432/tcp");
+  const output = await docker("port", container, "5432/tcp");
   const first = output.split(/\r?\n/u)[0] ?? "";
   const port = Number.parseInt(first.slice(first.lastIndexOf(":") + 1), 10);
   if (!Number.isSafeInteger(port) || port < 1) {
@@ -98,9 +107,9 @@ async function waitUntilReady(adminUrl: string): Promise<void> {
  * detected throws, so a broken environment fails the suite instead of
  * silently skipping the backend.
  */
-export async function startPostgresTestServer(): Promise<
-  PostgresTestServer | undefined
-> {
+export async function startPostgresTestServer(
+  options: PostgresTestServerOptions = {},
+): Promise<PostgresTestServer | undefined> {
   const configured = process.env["COORD_TEST_POSTGRES_URL"]?.trim();
   if (configured !== undefined && configured.length > 0) {
     return { adminUrl: configured, stop: async () => undefined };
@@ -110,17 +119,18 @@ export async function startPostgresTestServer(): Promise<
     return undefined;
   }
 
+  const container = options.containerName ?? DEFAULT_CONTAINER;
   let startedByUs = false;
-  if (!(await containerRunning())) {
+  if (!(await containerRunning(container))) {
     // A stopped leftover container (created without --rm by a crashed run of
     // an older revision) would block the name; clear it before creating.
-    await docker("rm", "-f", CONTAINER).catch(() => undefined);
+    await docker("rm", "-f", container).catch(() => undefined);
     await docker(
       "run",
       "--detach",
       "--rm",
       "--name",
-      CONTAINER,
+      container,
       "-e",
       `POSTGRES_PASSWORD=${PASSWORD}`,
       "-p",
@@ -130,14 +140,14 @@ export async function startPostgresTestServer(): Promise<
     startedByUs = true;
   }
 
-  const port = await mappedPort();
+  const port = await mappedPort(container);
   const adminUrl = `postgresql://postgres:${PASSWORD}@127.0.0.1:${port}/postgres`;
   await waitUntilReady(adminUrl);
   return {
     adminUrl,
     stop: async () => {
       if (startedByUs) {
-        await docker("rm", "-f", CONTAINER).catch(() => undefined);
+        await docker("rm", "-f", container).catch(() => undefined);
       }
     },
   };

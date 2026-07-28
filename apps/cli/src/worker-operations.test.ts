@@ -7,7 +7,13 @@ import test from "node:test";
 import {
   DEFAULT_PROJECT_ID,
   InMemoryCoordinationStore,
+  PostgresCoordinationStore,
+  type CoordinationStore,
 } from "@coord/persistence";
+import {
+  createScratchDatabase,
+  startPostgresTestServer,
+} from "@coord/persistence/testing";
 import { GitClient, RepositoryService } from "@coord/repository-service";
 import type { AgentPlan, ChangeSet } from "@coord/shared-types";
 import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
@@ -26,13 +32,15 @@ import {
 
 interface Harness {
   root: string;
-  store: InMemoryCoordinationStore;
+  store: CoordinationStore;
   repositories: RepositoryService;
   workerId: string;
   revision: string;
 }
 
-async function createHarness(): Promise<Harness> {
+async function createHarness(
+  store: CoordinationStore = new InMemoryCoordinationStore(),
+): Promise<Harness> {
   const root = await mkdtemp(path.join(os.tmpdir(), "cwork-"));
   const sourcePath = path.join(root, "src-repo");
   const repositories = new RepositoryService();
@@ -54,7 +62,6 @@ async function createHarness(): Promise<Harness> {
   );
   const version = await repositories.getCanonicalVersion(canonical);
 
-  const store = new InMemoryCoordinationStore();
   await store.saveRepository({
     id: canonical.id,
     path: canonical.path,
@@ -534,5 +541,134 @@ test("a failed result settles the task and is audited", async () => {
     assert.equal(failure?.data["detail"], "agent exited with code 3");
   } finally {
     await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("the full remote cycle runs end to end against a Postgres store", async () => {
+  // The contract suite proves the Postgres store honors the storage contract;
+  // this proves the actual runtime path — lease, bundle, result, three-way
+  // integration, canonical promotion — against a real server, the way a
+  // COORD_DATABASE_URL deployment runs it. Same Docker policy as the contract
+  // suite: skipped only when Docker is absent, loud about it, and its own
+  // container name because turbo runs package suites concurrently.
+  const server =
+    process.env["COORD_SKIP_POSTGRES_TESTS"] === "1"
+      ? undefined
+      : await startPostgresTestServer({
+          containerName: "coord-postgres-worker-smoke",
+        });
+  if (server === undefined) {
+    console.warn(
+      "postgres: remote-cycle smoke test skipped (Docker is unavailable and " +
+        "COORD_TEST_POSTGRES_URL is not set)",
+    );
+    return;
+  }
+  const database = await createScratchDatabase(server.adminUrl);
+  const store = PostgresCoordinationStore.open(database.url);
+  let harness: Harness | undefined;
+  try {
+    harness = await createHarness(store);
+    const taskId = await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+    assert.equal(assignment.task.id, taskId);
+    assert.equal(assignment.lease.baseRevision, harness.revision);
+
+    // The worker side: reconstruct the workspace from the bundle bytes alone.
+    const bundle = await leaseBundle(harness.store, assignment.lease.id);
+    assert.ok(bundle !== undefined);
+    const remote = path.join(harness.root, "worker-side");
+    await mkdir(remote, { recursive: true });
+    const bundlePath = path.join(remote, "revision.bundle");
+    await writeFile(bundlePath, bundle);
+    const git = new GitClient();
+    const workspace = path.join(remote, "workspace");
+    await git.run([
+      "clone",
+      "--branch",
+      assignment.bundleRef,
+      bundlePath,
+      workspace,
+    ]);
+    await writeFile(
+      path.join(workspace, "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+
+    // Collect the changeset from a coordinator-side worktree, exactly as the
+    // in-memory promotion test does, and hand the result back.
+    const repository = await harness.store.getRepository("repo_worker");
+    assert.ok(repository);
+    const canonical = {
+      id: repository.id,
+      path: repository.path,
+      branch: repository.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const agentWorkspace = await workspaces.create({
+      taskId,
+      rootPath: path.join(harness.root, "agent-workspaces"),
+      repository: canonical,
+      baseVersion: assignment.canonicalVersion,
+    });
+    await writeFile(
+      path.join(agentWorkspace.path, "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(agentWorkspace, {
+      symbolsChanged: ["value"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "raised the value",
+    });
+    await workspaces.destroy(agentWorkspace);
+
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskId),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(accepted.accepted, true, accepted.reason);
+    assert.equal(accepted.integrationStatus, "integrated");
+    assert.ok(accepted.runId);
+
+    // The change is canonical, and every durable record went through Postgres.
+    const version = await harness.repositories.getCanonicalVersion(canonical);
+    assert.equal(
+      await harness.repositories.readFile(
+        canonical,
+        version.revision,
+        "src/value.js",
+      ),
+      "export const value = 2;\n",
+    );
+    assert.equal(
+      (await harness.store.listSubmittedTasks())[0]?.status,
+      "integrated",
+    );
+    const detail = await harness.store.getRun(accepted.runId);
+    assert.equal(detail?.changeSets.length, 1);
+    assert.equal(detail?.integrations[0]?.status, "integrated");
+    assert.equal((await harness.store.verifyAudit()).valid, true);
+  } finally {
+    await store.close();
+    await database.drop();
+    await server.stop();
+    if (harness !== undefined) {
+      await rm(harness.root, { recursive: true, force: true });
+    }
   }
 });
