@@ -18,6 +18,7 @@
     "@coord/cli": "*",
     "@coord/coordinator": "*",
     "@coord/persistence": "*",
-    "@coord/repository-service": "*"
+    "@coord/repository-service": "*",
+    "monaco-editor": "0.52.2"
   }
 }

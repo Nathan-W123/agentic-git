@@ -757,6 +757,10 @@ export async function admitWorkPlan(
       // decided whole. One split per lineage is what stops a task from shedding
       // scope round after round, each round paying for another agent run.
       partialAdmission: !isDeferredScopeFollowUp(task.objective),
+      // The same index that enriched this plan is what can say which of the
+      // enriched claims came from which file, so a withheld file takes its own
+      // symbols with it instead of leaving them to block the remainder.
+      resourcesInFile: (file) => intelligence.resourcesInFile(index, file),
     });
     // What is recorded against the lease is what was actually granted. On a
     // partial admission that is the reduced plan, and recording the whole one

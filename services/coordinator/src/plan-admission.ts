@@ -1,11 +1,14 @@
 import {
+  completeAgentPlan,
   planAdmissionApproved,
+  planResourceKey,
   reducePlanScope,
   uniqueRepositoryPaths,
   type AgentPlan,
   type ConflictAssessment,
   type DeferredResource,
   type PlanAdmission,
+  type PlanResourceRef,
   type ResourceLease,
   type TaskId,
 } from "@coord/shared-types";
@@ -57,6 +60,18 @@ export interface PlanAdmissionInput {
    * forever.
    */
   partialAdmission?: boolean;
+  /**
+   * Resources the repository index attributes to one file.
+   *
+   * Plans reaching admission have been enriched: naming a file makes the plan
+   * claim that file's symbols, APIs and schemas too. Withholding the file
+   * without withholding those claims would leave the reduced plan asking for
+   * the very things the other holder owns, and partial admission would almost
+   * never apply. Supplying this lets a withheld file take its own derived
+   * claims with it — and only its own: a symbol that also lives in a granted
+   * file stays claimed, because the holder really may still edit it.
+   */
+  resourcesInFile?: (file: string) => readonly PlanResourceRef[];
 }
 
 /**
@@ -76,6 +91,24 @@ export function approvedSchemaResources(plan: AgentPlan): ReadonlySet<string> {
   return new Set(
     (plan.expectedSchemas ?? []).map((resource) => `schema\0${resource}`),
   );
+}
+
+/** Every resource a plan claims, other than the files themselves. */
+function declaredResources(plan: AgentPlan): PlanResourceRef[] {
+  const complete = completeAgentPlan(plan);
+  const refs = (
+    resourceType: PlanResourceRef["resourceType"],
+    ids: readonly string[],
+  ): PlanResourceRef[] =>
+    ids.map((resourceId) => ({ resourceType, resourceId }));
+  return [
+    ...refs("symbol", complete.expectedSymbols),
+    ...refs("api", complete.expectedApis),
+    ...refs("schema", complete.expectedSchemas),
+    ...refs("configuration", complete.expectedConfigKeys),
+    ...refs("test", complete.expectedTests),
+    ...refs("service", complete.expectedServices),
+  ];
 }
 
 /** Intent evidence is advisory; only structural evidence controls scheduling. */
@@ -164,10 +197,11 @@ export class PlanAdmissionController {
     input: PlanAdmissionInput,
     whole: PlanAdmission,
   ): PlanAdmission | undefined {
-    const deferred = this.contestedFiles(input);
-    if (deferred.length === 0) {
+    const contested = this.contestedFiles(input);
+    if (contested.length === 0) {
       return undefined;
     }
+    const deferred = [...contested, ...this.derivedFrom(input, contested)];
     const reduced = reducePlanScope(input.plan, deferred);
     // Nothing left to work on: the holder would burn an agent run to produce
     // an empty changeset, which is strictly worse than waiting its turn.
@@ -200,6 +234,64 @@ export class PlanAdmissionController {
           )
           .join(", "),
     };
+  }
+
+  /**
+   * Claims the plan only carries because of a file being withheld.
+   *
+   * A resource that also belongs to a granted file is not returned: the holder
+   * keeps working in that file, so it keeps the claim. What is returned is
+   * exactly the set no granted file accounts for, which is what makes
+   * withholding it enforceable — no patch that reaches canonical can be in a
+   * file these live in.
+   */
+  private derivedFrom(
+    input: PlanAdmissionInput,
+    contested: readonly DeferredResource[],
+  ): DeferredResource[] {
+    const locate = input.resourcesInFile;
+    if (locate === undefined) {
+      return [];
+    }
+    const withheld = new Set(contested.map((entry) => entry.resourceId));
+    const retained = new Set(
+      input.plan.expectedFiles
+        .filter((file) => !withheld.has(file))
+        .flatMap((file) => locate(file))
+        .map((resource) =>
+          planResourceKey(resource.resourceType, resource.resourceId),
+        ),
+    );
+    const claimed = new Set(
+      declaredResources(input.plan).map((resource) =>
+        planResourceKey(resource.resourceType, resource.resourceId),
+      ),
+    );
+
+    const derived = new Map<string, DeferredResource>();
+    for (const file of contested) {
+      for (const resource of locate(file.resourceId)) {
+        const key = planResourceKey(
+          resource.resourceType,
+          resource.resourceId,
+        );
+        if (retained.has(key) || !claimed.has(key) || derived.has(key)) {
+          continue;
+        }
+        derived.set(key, {
+          resourceType: resource.resourceType,
+          resourceId: resource.resourceId,
+          heldBy: file.heldBy,
+          reason:
+            `claimed only through the deferred file ${file.resourceId}`,
+        });
+      }
+    }
+    return [...derived.values()].sort((left, right) =>
+      `${left.resourceType}:${left.resourceId}`.localeCompare(
+        `${right.resourceType}:${right.resourceId}`,
+      ),
+    );
   }
 
   /**

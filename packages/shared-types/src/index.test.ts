@@ -5,9 +5,15 @@ import {
   assertAgentPlan,
   assertChangeSet,
   assertProjectPolicy,
+  deferredFilePaths,
   normalizeRepositoryPath,
+  planAdmissionApproved,
+  planAdmissionPartial,
   projectBudgets,
+  reducePlanScope,
   uniqueRepositoryPaths,
+  type AgentPlan,
+  type PlanAdmission,
 } from "./index.js";
 
 test("normalizes and deduplicates repository paths", () => {
@@ -144,4 +150,80 @@ test("project policy accepts budgets and rejects malformed ones", () => {
   );
   // A corrupt policy must throw rather than read as "no budgets".
   assert.throws(() => projectBudgets({ version: 9 } as never));
+});
+
+test("reducing a plan's scope removes claims and nothing else", () => {
+  const plan: AgentPlan = {
+    taskId: "task_1",
+    objective: "Widen the API",
+    expectedFiles: ["src/a.ts", "src/shared.ts"],
+    expectedSymbols: ["alpha"],
+    expectedApis: ["GET /v1/a"],
+    expectedTests: ["test/a.test.ts"],
+    dependencies: ["src/shared.ts"],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  };
+
+  const reduced = reducePlanScope(plan, [
+    { resourceType: "file", resourceId: "SRC/Shared.ts" },
+    { resourceType: "api", resourceId: "GET /v1/a" },
+  ]);
+
+  assert.deepEqual(reduced.expectedFiles, ["src/a.ts"]);
+  assert.deepEqual(reduced.expectedApis, []);
+  // A dependency is something the plan reads, not something it claims, so
+  // dropping the claim must not drop the dependency.
+  assert.deepEqual(reduced.dependencies, ["src/shared.ts"]);
+  // Identity and everything unrelated survive untouched: every check
+  // downstream compares the objective to decide the plan is for this task.
+  assert.equal(reduced.objective, plan.objective);
+  assert.deepEqual(reduced.expectedSymbols, ["alpha"]);
+  assert.deepEqual(reduced.expectedTests, ["test/a.test.ts"]);
+  // The original is left alone.
+  assert.equal(plan.expectedFiles.length, 2);
+});
+
+test("a partial admission is an approval, and says what it withheld", () => {
+  const admission: PlanAdmission = {
+    status: "approved_with_constraints",
+    taskId: "task_1",
+    planRevision: 1,
+    baseRevision: "a".repeat(40),
+    ownershipGrants: [],
+    constraints: [],
+    blockedBy: [],
+    conflicts: [],
+    explanation: "partial",
+    decidedAt: new Date().toISOString(),
+    deferredResources: [
+      {
+        resourceType: "file",
+        resourceId: "src\\shared.ts",
+        heldBy: ["task_2"],
+        reason: "held by task_2",
+      },
+      {
+        resourceType: "symbol",
+        resourceId: "shared",
+        heldBy: ["task_2"],
+        reason: "held by task_2",
+      },
+    ],
+  };
+
+  assert.equal(planAdmissionApproved(admission), true);
+  assert.equal(planAdmissionPartial(admission), true);
+  // Deferred files come back in the form a changeset patch path takes.
+  assert.deepEqual(deferredFilePaths(admission), ["src/shared.ts"]);
+
+  const whole = { ...admission, deferredResources: [] };
+  assert.equal(planAdmissionPartial(whole), false);
+  assert.deepEqual(deferredFilePaths(whole), []);
+  // A refusal is never partial, whatever it carries.
+  assert.equal(
+    planAdmissionPartial({ ...admission, status: "sequenced" }),
+    false,
+  );
 });

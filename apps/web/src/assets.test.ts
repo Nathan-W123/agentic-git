@@ -13,7 +13,35 @@ test("loads every control-room asset with an explicit content type", async () =>
     assets.get("/app.js")?.contentType,
     "text/javascript; charset=utf-8",
   );
-  assert.equal(assets.size, 5);
+  assert.equal(
+    assets.get("/editor.js")?.contentType,
+    "text/javascript; charset=utf-8",
+  );
+});
+
+test("serves the vendored Monaco build same-origin under /vendor", async () => {
+  const assets = await loadStaticAssets();
+  // The AMD loader and main bundle are what /editor.js requests at runtime;
+  // the worker is what Monaco spawns for language services. CSP allows no
+  // CDN, so these must exist locally or the editor cannot function.
+  for (const asset of [
+    "/vendor/monaco/vs/loader.js",
+    "/vendor/monaco/vs/editor/editor.main.js",
+    "/vendor/monaco/vs/editor/editor.main.css",
+    "/vendor/monaco/vs/base/worker/workerMain.js",
+  ]) {
+    assert.equal(
+      assets.get(asset)?.contentType?.startsWith("text/"),
+      true,
+      `${asset} should be served`,
+    );
+  }
+});
+
+test("a missing vendor directory degrades to dashboard-only assets", async () => {
+  const assets = await loadStaticAssets(undefined, false);
+  assert.equal(assets.get("/app.js") !== undefined, true);
+  assert.equal(assets.get("/vendor/monaco/vs/loader.js"), undefined);
 });
 
 async function browserSource(): Promise<string> {

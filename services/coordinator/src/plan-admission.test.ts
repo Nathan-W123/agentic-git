@@ -11,6 +11,7 @@ import {
   PlanAdmissionController,
   approvedSchemaResources,
   structuralConflict,
+  type PlanAdmissionInput,
 } from "./plan-admission.js";
 import { ConflictDetector } from "./conflict-detector.js";
 
@@ -52,7 +53,9 @@ function admit(
   candidate: AgentPlan,
   active: readonly AgentPlan[],
   controller = new PlanAdmissionController(),
-  overrides: { partialAdmission?: boolean } = {},
+  overrides: Partial<
+    Pick<PlanAdmissionInput, "partialAdmission" | "resourcesInFile">
+  > = {},
 ) {
   return controller.admit({
     plan: candidate,
@@ -383,6 +386,73 @@ test("two executing holders of different files are both named", () => {
       { id: "src/y.ts", heldBy: ["task_c"] },
     ],
   );
+});
+
+/**
+ * Plans reaching admission are enriched, so a file drags its symbols into the
+ * plan with it. Withholding the file has to withhold those too, or the reduced
+ * plan asks for exactly what the other holder owns.
+ */
+const INDEX: Record<string, { resourceType: "symbol"; resourceId: string }[]> = {
+  "src/a.ts": [{ resourceType: "symbol", resourceId: "alpha" }],
+  "src/shared.ts": [
+    { resourceType: "symbol", resourceId: "sharedFn" },
+    // Also lives in src/a.ts, so it belongs to work that is being granted.
+    { resourceType: "symbol", resourceId: "alpha" },
+  ],
+};
+
+test("a withheld file takes the symbols only it accounts for", () => {
+  const admission = admit(
+    plan("task_a", {
+      expectedFiles: ["src/a.ts", "src/shared.ts"],
+      expectedSymbols: ["alpha", "sharedFn"],
+    }),
+    [
+      plan("task_b", {
+        expectedFiles: ["src/shared.ts"],
+        expectedSymbols: ["sharedFn"],
+      }),
+    ],
+    new PlanAdmissionController(),
+    {
+      resourcesInFile: (file: string) => INDEX[file] ?? [],
+    },
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  // `sharedFn` went with the file it came from. `alpha` did not: src/a.ts is
+  // granted and the holder may still edit it there.
+  assert.deepEqual(grantedResources(admission), [
+    "file:src/a.ts",
+    "symbol:alpha",
+  ]);
+  assert.deepEqual(
+    admission.deferredResources?.map(
+      (resource) => `${resource.resourceType}:${resource.resourceId}`,
+    ),
+    ["file:src/shared.ts", "symbol:sharedFn"],
+  );
+});
+
+test("without the index the same plan waits, rather than over-claiming", () => {
+  // No attribution means no way to tell `sharedFn` apart from `alpha`, so the
+  // reduced plan still claims a symbol the other task owns and is refused.
+  const admission = admit(
+    plan("task_a", {
+      expectedFiles: ["src/a.ts", "src/shared.ts"],
+      expectedSymbols: ["alpha", "sharedFn"],
+    }),
+    [
+      plan("task_b", {
+        expectedFiles: ["src/shared.ts"],
+        expectedSymbols: ["sharedFn"],
+      }),
+    ],
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.equal(admission.ownershipGrants.length, 0);
 });
 
 test("a plan's own schemas are the approval for claiming them", () => {

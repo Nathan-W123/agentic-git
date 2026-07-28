@@ -1,4 +1,5 @@
-import { readFile } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
+import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -8,16 +9,81 @@ const PUBLIC_FILES = [
   ["index.html", "text/html; charset=utf-8"],
   ["styles.css", "text/css; charset=utf-8"],
   ["app.js", "text/javascript; charset=utf-8"],
+  ["editor.js", "text/javascript; charset=utf-8"],
   ["mark.svg", "image/svg+xml"],
   ["manifest.webmanifest", "application/manifest+json"],
 ] as const;
+
+/**
+ * Content types for the vendored Monaco tree. Anything not listed here is
+ * deliberately not served: the vendor directory is treated as an allowlist of
+ * asset kinds, not a general file server.
+ */
+const VENDOR_CONTENT_TYPES: ReadonlyMap<string, string> = new Map([
+  [".js", "text/javascript; charset=utf-8"],
+  [".css", "text/css; charset=utf-8"],
+  [".ttf", "font/ttf"],
+  [".svg", "image/svg+xml"],
+  [".png", "image/png"],
+]);
 
 export function defaultPublicDirectory(): string {
   return fileURLToPath(new URL("../public/", import.meta.url));
 }
 
+/**
+ * The vendored Monaco editor build (`monaco-editor/min/vs`).
+ *
+ * Served same-origin under /vendor/monaco/vs because the gateway's CSP allows
+ * no external script or style sources — a CDN copy would simply be blocked.
+ */
+export function defaultMonacoDirectory(): string | undefined {
+  try {
+    const require = createRequire(import.meta.url);
+    return path.join(
+      path.dirname(require.resolve("monaco-editor/package.json")),
+      "min",
+      "vs",
+    );
+  } catch {
+    return undefined;
+  }
+}
+
+async function loadDirectory(
+  assets: Map<string, StaticAsset>,
+  root: string,
+  urlPrefix: string,
+): Promise<void> {
+  const entries = await readdir(root, { withFileTypes: true, recursive: true });
+  await Promise.all(
+    entries.map(async (entry) => {
+      if (!entry.isFile()) {
+        return;
+      }
+      const filePath = path.join(entry.parentPath, entry.name);
+      const relative = path.relative(root, filePath);
+      if (relative.startsWith("..")) {
+        throw new Error(`Vendor asset escapes its root: ${filePath}`);
+      }
+      const contentType = VENDOR_CONTENT_TYPES.get(
+        path.extname(entry.name).toLowerCase(),
+      );
+      if (contentType === undefined) {
+        return;
+      }
+      assets.set(`${urlPrefix}${relative.replaceAll(path.sep, "/")}`, {
+        body: await readFile(filePath),
+        contentType,
+      });
+    }),
+  );
+}
+
 export async function loadStaticAssets(
   directory = defaultPublicDirectory(),
+  /** `false` disables the vendored editor entirely (used by tests). */
+  monacoDirectory: string | false | undefined = defaultMonacoDirectory(),
 ): Promise<ReadonlyMap<string, StaticAsset>> {
   const root = path.resolve(directory);
   const assets = new Map<string, StaticAsset>();
@@ -33,5 +99,10 @@ export async function loadStaticAssets(
       });
     }),
   );
+  // A deployment without the vendored editor still serves the dashboard; the
+  // editor tab reports that its assets are unavailable.
+  if (monacoDirectory !== undefined && monacoDirectory !== false) {
+    await loadDirectory(assets, path.resolve(monacoDirectory), "/vendor/monaco/vs/");
+  }
   return assets;
 }

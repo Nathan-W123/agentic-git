@@ -1,3 +1,18 @@
+/*
+ * Relay control room front-end.
+ *
+ * Shell model: a VS Code-style frame — activity bar on the far left, a
+ * contextual sidebar, a tabbed center area, a dockable bottom panel
+ * (terminal + live events), and a status bar. Content inside the frame is
+ * GitHub-flavored: the task queue reads like an Issues list, a run reads
+ * like a pull request (file tree, diffs, review threads), canonical history
+ * reads like a commit list.
+ *
+ * The data layer (state, api, websocket refresh) is deliberately unchanged
+ * from the previous single-page implementation; only presentation and
+ * navigation were rebuilt.
+ */
+
 const API_ROOT = "/api/v1";
 
 const state = {
@@ -18,63 +33,25 @@ const state = {
   metrics: undefined,
   workers: [],
   admin: undefined,
-  route: "overview",
   socket: undefined,
   refreshTimer: undefined,
-  inspectedRunId: undefined,
-};
 
-const routeMeta = {
-  overview: [
-    "Control room",
-    "Overview",
-    "Canonical state, active work, and decisions at a glance.",
-  ],
-  tasks: [
-    "Work queue",
-    "Tasks",
-    "Submit intent, choose an agent, and control the project queue.",
-  ],
-  runs: [
-    "Integration ledger",
-    "Runs",
-    "Inspect scheduling, replans, validation, and canonical promotions.",
-  ],
-  approvals: [
-    "Human gates",
-    "Approvals",
-    "Review protected plans, scope expansions, and proposed changesets.",
-  ],
-  repositories: [
-    "Canonical sources",
-    "Repositories",
-    "Import GitHub mirrors and start coordinated work against them.",
-  ],
-  team: [
-    "Access control",
-    "Team",
-    "Manage organization membership and role-based permissions.",
-  ],
-  board: [
-    "Queue projection",
-    "Board",
-    "The same task queue, arranged by where each task has got to.",
-  ],
-  coordination: [
-    "Measured outcomes",
-    "Coordination",
-    "How well scheduling predicted contention, what it cost, and who is executing.",
-  ],
-  settings: [
-    "Project controls",
-    "Settings",
-    "Policy, budgets, project identity, and lifecycle state.",
-  ],
-  admin: [
-    "Host operations",
-    "System admin",
-    "Manage users and inspect the local control plane across organizations.",
-  ],
+  /** Shell state. */
+  activity: "overview",
+  tabs: [],
+  activeTabId: undefined,
+  taskFilter: "open",
+  panelOpen: false,
+  panelTab: "terminal",
+
+  /** Explorer / workspace state, keyed by the selected repository. */
+  explorerRepo: localStorage.getItem("relay.explorerRepo") ?? "",
+  workspace: undefined,
+  workspaceFiles: [],
+  expandedDirs: new Set(),
+  dirtyFiles: new Set(),
+
+  terminal: { lines: [], busy: false, history: [], historyIndex: -1 },
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -116,6 +93,65 @@ function statusBadge(value) {
     normalized.replaceAll("_", " "),
   )}</span>`;
 }
+
+function duration(milliseconds) {
+  if (typeof milliseconds !== "number" || !Number.isFinite(milliseconds)) {
+    return "—";
+  }
+  if (milliseconds < 1000) {
+    return `${Math.round(milliseconds)} ms`;
+  }
+  const seconds = milliseconds / 1000;
+  if (seconds < 90) {
+    return `${seconds.toFixed(1)} s`;
+  }
+  const minutes = seconds / 60;
+  if (minutes < 90) {
+    return `${minutes.toFixed(1)} min`;
+  }
+  return `${(minutes / 60).toFixed(1)} h`;
+}
+
+function percent(part, whole) {
+  if (whole === 0) {
+    return "—";
+  }
+  return `${Math.round((part / whole) * 100)}%`;
+}
+
+/* ------------------------------------------------------------- icons ---- */
+
+/** Minimal inline icon set (16×16 outline, GitHub octicon-adjacent). */
+const ICONS = {
+  home: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M6.906.664a1.75 1.75 0 0 1 2.187 0l5.25 4.2c.415.332.657.835.657 1.367v7.019A1.75 1.75 0 0 1 13.25 15h-3.5a.75.75 0 0 1-.75-.75V9H7v5.25a.75.75 0 0 1-.75.75h-3.5A1.75 1.75 0 0 1 1 13.25V6.23c0-.531.242-1.034.657-1.366l5.25-4.2Zm1.25 1.171a.25.25 0 0 0-.312 0l-5.25 4.2a.25.25 0 0 0-.094.196v7.019c0 .138.112.25.25.25H5.5V8.25a.75.75 0 0 1 .75-.75h3.5a.75.75 0 0 1 .75.75v5.25h2.75a.25.25 0 0 0 .25-.25V6.23a.25.25 0 0 0-.094-.195Z"/></svg>',
+  files: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 9 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688l-.011-.013-2.914-2.914-.013-.011Z"/></svg>',
+  tasks: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z"/></svg>',
+  runs: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Zm4.879-2.773 4.264 2.559a.25.25 0 0 1 0 .428l-4.264 2.559A.25.25 0 0 1 6 10.559V5.442a.25.25 0 0 1 .379-.215Z"/></svg>',
+  approvals: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8.5.75a.75.75 0 0 0-1.5 0V2h-.984c-.305 0-.604.08-.869.23l-1.288.737A.25.25 0 0 1 3.735 3H1.75a.75.75 0 0 0 0 1.5h.428L.066 9.192a.75.75 0 0 0 .154.838c.187.185.376.293.557.393.19.106.411.203.65.29a4.8 4.8 0 0 0 1.598.26 4.8 4.8 0 0 0 1.597-.26c.239-.087.46-.184.651-.29.18-.1.37-.208.556-.393a.75.75 0 0 0 .154-.838L3.822 4.5h.162c.305 0 .604-.08.869-.23l1.289-.737a.25.25 0 0 1 .124-.033H7v9h-.75a.75.75 0 0 0 0 1.5h3.5a.75.75 0 0 0 0-1.5H8.5v-9h.734a.25.25 0 0 1 .124.033l1.289.737c.265.15.564.23.869.23h.162l-2.112 4.692a.75.75 0 0 0 .154.838c.187.185.376.293.556.393.191.106.412.203.651.29a4.8 4.8 0 0 0 1.597.26 4.8 4.8 0 0 0 1.598-.26 4.1 4.1 0 0 0 .65-.29c.181-.1.37-.208.557-.393a.75.75 0 0 0 .154-.838L13.822 4.5h.428a.75.75 0 0 0 0-1.5h-1.985a.25.25 0 0 1-.124-.033l-1.289-.737A1.75 1.75 0 0 0 9.984 2H8.5ZM3.025 10.184c-.242.088-.523.15-.837.18l.837-1.86.838 1.86a3.3 3.3 0 0 1-.838-.18Zm9.95 0c-.242.088-.523.15-.837.18l.837-1.86.838 1.86a3.3 3.3 0 0 1-.838-.18Z"/></svg>',
+  repos: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 2.5A2.5 2.5 0 0 1 4.5 0h8.75a.75.75 0 0 1 .75.75v12.5a.75.75 0 0 1-.75.75h-2.5a.75.75 0 0 1 0-1.5h1.75v-2h-8a1 1 0 0 0-.714 1.7.75.75 0 1 1-1.072 1.05A2.5 2.5 0 0 1 2 11.5Zm10.5-1h-8a1 1 0 0 0-1 1v6.708A2.5 2.5 0 0 1 4.5 9h8ZM5 12.25a.25.25 0 0 1 .25-.25h3.5a.25.25 0 0 1 .25.25v3.25a.25.25 0 0 1-.4.2l-1.45-1.087a.25.25 0 0 0-.3 0L5.4 15.7a.25.25 0 0 1-.4-.2Z"/></svg>',
+  board: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M0 1.75C0 .784.784 0 1.75 0h12.5C15.216 0 16 .784 16 1.75v12.5A1.75 1.75 0 0 1 14.25 16H1.75A1.75 1.75 0 0 1 0 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25H5V1.5Zm4.75 0v13h3V1.5Zm4.5 0v13h3.25a.25.25 0 0 0 .25-.25V1.75a.25.25 0 0 0-.25-.25Z"/></svg>',
+  graph: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.5 1.75V13.5h13.75a.75.75 0 0 1 0 1.5H.75a.75.75 0 0 1-.75-.75V1.75a.75.75 0 0 1 1.5 0Zm14.28 2.53-5.25 5.25a.75.75 0 0 1-1.06 0L7 7.06 4.28 9.78a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042l3.25-3.25a.75.75 0 0 1 1.06 0L10 7.94l4.72-4.72a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042Z"/></svg>',
+  people: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 5.5a3.5 3.5 0 1 1 5.898 2.549 5.5 5.5 0 0 1 3.034 4.084.75.75 0 1 1-1.482.235 4 4 0 0 0-7.9 0 .75.75 0 0 1-1.482-.236A5.5 5.5 0 0 1 3.102 8.05 3.5 3.5 0 0 1 2 5.5ZM11 4a3.001 3.001 0 0 1 2.22 5.018 5 5 0 0 1 2.56 3.012.749.749 0 0 1-.885.954.752.752 0 0 1-.549-.514 3.5 3.5 0 0 0-2.522-2.372.75.75 0 0 1-.574-.73v-.352a.75.75 0 0 1 .416-.672A1.5 1.5 0 0 0 11 5.5.75.75 0 0 1 11 4Zm-5.5-.5a2 2 0 1 0-.001 3.999A2 2 0 0 0 5.5 3.5Z"/></svg>',
+  gear: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 0a8.2 8.2 0 0 1 .701.031C9.444.095 9.99.645 10.16 1.29l.288 1.107c.018.066.079.158.212.224.231.114.454.243.668.386.123.082.233.09.299.071l1.103-.303c.644-.176 1.392.021 1.82.63.27.385.506.792.704 1.218.315.675.111 1.422-.364 1.891l-.814.806c-.049.048-.098.147-.088.294.016.257.016.515 0 .772-.01.147.038.246.088.294l.814.806c.475.469.679 1.216.364 1.891a8 8 0 0 1-.704 1.217c-.428.61-1.176.807-1.82.63l-1.102-.302c-.067-.019-.177-.011-.3.071a5.9 5.9 0 0 1-.668.386c-.133.066-.194.158-.211.224l-.29 1.106c-.168.646-.715 1.196-1.458 1.26a8.2 8.2 0 0 1-1.402 0c-.743-.064-1.289-.614-1.458-1.26l-.289-1.106c-.018-.066-.079-.158-.212-.224a5.9 5.9 0 0 1-.668-.386c-.123-.082-.233-.09-.299-.071l-1.103.303c-.644.176-1.392-.021-1.82-.63a8 8 0 0 1-.704-1.218c-.315-.675-.111-1.422.363-1.891l.815-.806c.05-.048.098-.147.088-.294a6.2 6.2 0 0 1 0-.772c.01-.147-.038-.246-.088-.294l-.815-.806C.635 6.045.431 5.298.746 4.623a8 8 0 0 1 .704-1.217c.428-.61 1.176-.807 1.82-.63l1.102.302c.067.019.177.011.3-.071.214-.143.437-.272.668-.386.133-.066.194-.158.211-.224l.29-1.106C6.009.645 6.556.095 7.299.03 7.53.01 7.764 0 8 0Zm-.571 1.525c-.036.003-.108.036-.137.146l-.289 1.105c-.147.561-.549.967-.998 1.189-.173.086-.34.183-.5.29-.417.278-.97.423-1.529.27l-1.103-.303c-.109-.03-.175.016-.195.045-.22.312-.412.644-.573.99-.014.031-.021.11.059.19l.815.806c.411.406.562.957.53 1.456a4.7 4.7 0 0 0 0 .582c.032.499-.119 1.05-.53 1.456l-.815.806c-.081.08-.073.159-.059.19.162.346.353.677.573.989.02.03.085.076.195.046l1.102-.303c.56-.153 1.113-.008 1.53.27.161.107.328.204.501.29.447.222.85.629.997 1.189l.289 1.105c.029.109.101.143.137.146a6.6 6.6 0 0 0 1.142 0c.036-.003.108-.036.137-.146l.289-1.105c.147-.561.549-.967.998-1.189.173-.086.34-.183.5-.29.417-.278.97-.423 1.529-.27l1.103.303c.109.029.175-.016.195-.045.22-.313.411-.644.573-.99.014-.031.021-.11-.059-.19l-.815-.806c-.411-.406-.562-.957-.53-1.456a4.7 4.7 0 0 0 0-.582c-.032-.499.119-1.05.53-1.456l.815-.806c.081-.08.073-.159.059-.19a6.5 6.5 0 0 0-.573-.989c-.02-.03-.085-.076-.195-.046l-1.102.303c-.56.153-1.113.008-1.53-.27a4.4 4.4 0 0 0-.501-.29c-.447-.222-.85-.629-.997-1.189l-.289-1.105c-.029-.11-.101-.143-.137-.146a6.6 6.6 0 0 0-1.142 0ZM11 8a3 3 0 1 1-6 0 3 3 0 0 1 6 0ZM9.5 8a1.5 1.5 0 1 0-3.001.001A1.5 1.5 0 0 0 9.5 8Z"/></svg>',
+  shield: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M7.467.133a1.75 1.75 0 0 1 1.066 0l5.25 1.68A1.75 1.75 0 0 1 15 3.48V7c0 1.566-.32 3.182-1.303 4.682-.983 1.498-2.585 2.813-5.032 3.855a1.7 1.7 0 0 1-1.33 0c-2.447-1.042-4.049-2.357-5.032-3.855C1.32 10.182 1 8.566 1 7V3.48a1.75 1.75 0 0 1 1.217-1.667Zm.61 1.429a.25.25 0 0 0-.153 0l-5.25 1.68a.25.25 0 0 0-.174.238V7c0 1.358.275 2.666 1.057 3.86.784 1.194 2.121 2.34 4.366 3.297a.2.2 0 0 0 .154 0c2.245-.956 3.582-2.104 4.366-3.298C13.225 9.666 13.5 8.36 13.5 7V3.48a.25.25 0 0 0-.175-.238Z"/></svg>',
+  terminal: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M0 2.75C0 1.784.784 1 1.75 1h12.5c.966 0 1.75.784 1.75 1.75v10.5A1.75 1.75 0 0 1 14.25 15H1.75A1.75 1.75 0 0 1 0 13.25Zm1.75-.25a.25.25 0 0 0-.25.25v10.5c0 .138.112.25.25.25h12.5a.25.25 0 0 0 .25-.25V2.75a.25.25 0 0 0-.25-.25ZM7.25 8a.75.75 0 0 1-.22.53l-2.25 2.25a.75.75 0 1 1-1.06-1.06L5.44 8 3.72 6.28a.75.75 0 1 1 1.06-1.06l2.25 2.25c.141.14.22.331.22.53Zm1.5 1.5h3a.75.75 0 0 1 0 1.5h-3a.75.75 0 0 1 0-1.5Z"/></svg>',
+  file: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M2 1.75C2 .784 2.784 0 3.75 0h6.586c.464 0 .909.184 1.237.513l2.914 2.914c.329.328.513.773.513 1.237v9.586A1.75 1.75 0 0 1 13.25 16h-9.5A1.75 1.75 0 0 1 2 14.25Zm1.75-.25a.25.25 0 0 0-.25.25v12.5c0 .138.112.25.25.25h9.5a.25.25 0 0 0 .25-.25V6h-2.75A1.75 1.75 0 0 1 9 4.25V1.5Zm6.75.062V4.25c0 .138.112.25.25.25h2.688l-.011-.013-2.914-2.914-.013-.011Z"/></svg>',
+  folder: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M1.75 1A1.75 1.75 0 0 0 0 2.75v10.5C0 14.216.784 15 1.75 15h12.5A1.75 1.75 0 0 0 16 13.25v-8.5A1.75 1.75 0 0 0 14.25 3H7.5a.25.25 0 0 1-.2-.1l-.9-1.2C6.07 1.26 5.55 1 5 1Z"/></svg>',
+  chevronDown: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M12.78 5.22a.749.749 0 0 1 0 1.06l-4.25 4.25a.749.749 0 0 1-1.06 0L3.22 6.28a.749.749 0 1 1 1.06-1.06L8 8.939l3.72-3.719a.749.749 0 0 1 1.06 0Z"/></svg>',
+  chevronRight: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M6.22 3.22a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L9.94 8 6.22 4.28a.75.75 0 0 1 0-1.06Z"/></svg>',
+  issueOpen: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M8 9.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z"/><path d="M8 0a8 8 0 1 1 0 16A8 8 0 0 1 8 0ZM1.5 8a6.5 6.5 0 1 0 13 0 6.5 6.5 0 0 0-13 0Z"/></svg>',
+  issueClosed: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M11.28 6.78a.75.75 0 0 0-1.06-1.06L7.25 8.69 5.78 7.22a.75.75 0 0 0-1.06 1.06l2 2a.75.75 0 0 0 1.06 0l3.5-3.5Z"/><path d="M16 8A8 8 0 1 1 0 8a8 8 0 0 1 16 0Zm-1.5 0a6.5 6.5 0 1 0-13 0 6.5 6.5 0 0 0 13 0Z"/></svg>',
+  issueFailed: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M2.343 13.657A8 8 0 1 1 13.658 2.343 8 8 0 0 1 2.343 13.657ZM6.03 4.97a.751.751 0 0 0-1.042.018.751.751 0 0 0-.018 1.042L6.94 8 4.97 9.97a.749.749 0 0 0 .326 1.275.749.749 0 0 0 .734-.215L8 9.06l1.97 1.97a.749.749 0 0 0 1.275-.326.749.749 0 0 0-.215-.734L9.06 8l1.97-1.97a.749.749 0 0 0-.326-1.275.749.749 0 0 0-.734.215L8 6.94Z"/></svg>',
+  history: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="m.427 1.927 1.215 1.215a8.002 8.002 0 1 1-1.6 5.685.75.75 0 1 1 1.493-.154 6.5 6.5 0 1 0 1.18-4.458l1.358 1.358A.25.25 0 0 1 3.896 6H.25A.25.25 0 0 1 0 5.75V2.104a.25.25 0 0 1 .427-.177ZM7.75 4a.75.75 0 0 1 .75.75v2.992l2.028.812a.75.75 0 0 1-.557 1.392l-2.5-1A.751.751 0 0 1 7 8.25v-3.5A.75.75 0 0 1 7.75 4Z"/></svg>',
+  close: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M3.72 3.72a.75.75 0 0 1 1.06 0L8 6.94l3.22-3.22a.749.749 0 0 1 1.275.326.749.749 0 0 1-.215.734L9.06 8l3.22 3.22a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215L8 9.06l-3.22 3.22a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042L6.94 8 3.72 4.78a.75.75 0 0 1 0-1.06Z"/></svg>',
+  commit: '<svg viewBox="0 0 16 16" fill="currentColor"><path d="M11.93 8.5a4.002 4.002 0 0 1-7.86 0H.75a.75.75 0 0 1 0-1.5h3.32a4.002 4.002 0 0 1 7.86 0h3.32a.75.75 0 0 1 0 1.5Zm-1.43-.75a2.5 2.5 0 1 0-5 0 2.5 2.5 0 0 0 5 0Z"/></svg>',
+};
+
+function icon(name) {
+  return ICONS[name] ?? "";
+}
+
+/* --------------------------------------------------------------- api ---- */
 
 function csrfToken() {
   const entry = document.cookie
@@ -175,11 +211,13 @@ async function apiOptional(path, fallback) {
 
 function toast(message, tone = "default") {
   const item = document.createElement("div");
-  item.className = `toast${tone === "error" ? " error" : ""}`;
+  item.className = `toast${tone === "error" ? " error" : tone === "warn" ? " warn" : ""}`;
   item.textContent = message;
   $("#toast-region").append(item);
   window.setTimeout(() => item.remove(), 4_500);
 }
+
+/* -------------------------------------------------------------- auth ---- */
 
 function authMessage(message) {
   $("#auth-message").textContent = message;
@@ -233,14 +271,7 @@ function canRun() {
   return ["owner", "admin", "developer"].includes(currentRole());
 }
 
-function updateIdentity() {
-  const user = state.principal?.user;
-  $("#profile-name").textContent = user?.displayName ?? "Relay user";
-  $("#profile-avatar").textContent =
-    user?.displayName?.trim().charAt(0).toUpperCase() || "R";
-  $("#profile-role").textContent = currentRole().replaceAll("_", " ");
-  $("#admin-nav").hidden = user?.systemAdmin !== true;
-}
+/* ------------------------------------------------------------ context ---- */
 
 function renderSelectors() {
   const organizationSelect = $("#organization-select");
@@ -356,18 +387,18 @@ async function loadContext({ quiet = false } = {}) {
       state.admin = undefined;
     }
 
+    if (
+      state.explorerRepo &&
+      !state.repositories.some((repo) => repo.id === state.explorerRepo)
+    ) {
+      state.explorerRepo = state.repositories[0]?.id ?? "";
+    } else if (!state.explorerRepo) {
+      state.explorerRepo = state.repositories[0]?.id ?? "";
+    }
+
     renderSelectors();
-    updateIdentity();
     connectSocket();
-    render();
-    $("#task-count").textContent = String(
-      state.tasks.filter((task) =>
-        ["submitted", "claimed"].includes(task.status),
-      ).length,
-    );
-    $("#approval-count").textContent = String(
-      state.approvals.filter((approval) => approval.status === "pending").length,
-    );
+    renderShell();
     $("#updated-at").textContent = `Updated ${formatDate(new Date(), {
       short: true,
     })}`;
@@ -381,11 +412,10 @@ async function loadContext({ quiet = false } = {}) {
       return;
     }
     toast(error.message, "error");
-    if (!quiet) {
-      renderError(error);
-    }
   }
 }
+
+/* ------------------------------------------------------------- socket ---- */
 
 function closeSocket() {
   if (state.socket) {
@@ -415,7 +445,7 @@ function connectSocket() {
   socket.addEventListener("open", () => {
     $("#live-dot").classList.remove("error");
     $("#live-dot").classList.add("live");
-    $("#live-label").textContent = "Live event stream";
+    $("#live-label").textContent = "Live";
   });
   socket.addEventListener("message", (message) => {
     try {
@@ -523,44 +553,794 @@ function timeline(events, limit = 12) {
     .join("")}</ol>`;
 }
 
-function render() {
-  const requested = location.hash.slice(1).split("/")[0] || "overview";
-  state.route =
-    routeMeta[requested] &&
-    (requested !== "admin" || state.principal?.user?.systemAdmin)
-      ? requested
-      : "overview";
-  const [eyebrow, title, description] = routeMeta[state.route];
-  $("#page-eyebrow").textContent = eyebrow;
-  $("#page-title").textContent = title;
-  $("#page-description").textContent = description;
-  $$(".primary-nav a").forEach((link) => {
-    link.classList.toggle("active", link.dataset.route === state.route);
-  });
-  $("#new-task-button").hidden = state.route === "tasks" || !state.projectId;
+/* --------------------------------------------------------- shell: tabs --- */
 
-  if (!state.projectId && state.route !== "admin") {
-    renderNoProject();
-    return;
-  }
+/**
+ * Activity → the sidebar it shows and the singleton tab it opens.
+ *
+ * Every route of the previous dashboard maps onto one of these, so old
+ * `#tasks`-style links (and bookmarks) keep working.
+ */
+const ACTIVITIES = [
+  { id: "overview", label: "Overview", icon: "home", view: "overview" },
+  { id: "explorer", label: "Explorer", icon: "files", view: "explorer" },
+  { id: "tasks", label: "Tasks", icon: "tasks", view: "tasks", badge: "tasks" },
+  { id: "runs", label: "Runs", icon: "runs", view: "runs" },
+  {
+    id: "approvals",
+    label: "Approvals",
+    icon: "approvals",
+    view: "approvals",
+    badge: "approvals",
+  },
+  { id: "repositories", label: "Repositories", icon: "repos", view: "repositories" },
+  { id: "coordination", label: "Coordination", icon: "graph", view: "coordination" },
+];
 
-  const views = {
-    overview: renderOverview,
-    tasks: renderTasks,
-    runs: renderRuns,
-    approvals: renderApprovals,
-    repositories: renderRepositories,
-    board: renderBoard,
-    coordination: renderCoordination,
-    team: renderTeam,
-    settings: renderSettings,
-    admin: renderAdmin,
-  };
-  views[state.route]();
+const FOOTER_ACTIVITIES = [
+  { id: "team", label: "Team", icon: "people", view: "team" },
+  { id: "admin", label: "System admin", icon: "shield", view: "admin" },
+  { id: "settings", label: "Settings", icon: "gear", view: "settings" },
+];
+
+const VIEW_META = {
+  overview: { title: "Overview", icon: "home", activity: "overview" },
+  explorer: { title: "Workspace", icon: "files", activity: "explorer" },
+  tasks: { title: "Tasks", icon: "tasks", activity: "tasks" },
+  board: { title: "Board", icon: "board", activity: "tasks" },
+  runs: { title: "Runs", icon: "runs", activity: "runs" },
+  approvals: { title: "Approvals", icon: "approvals", activity: "approvals" },
+  repositories: { title: "Repositories", icon: "repos", activity: "repositories" },
+  coordination: { title: "Coordination", icon: "graph", activity: "coordination" },
+  team: { title: "Team", icon: "people", activity: "team" },
+  settings: { title: "Settings", icon: "gear", activity: "settings" },
+  admin: { title: "System admin", icon: "shield", activity: "admin" },
+};
+
+function findTab(id) {
+  return state.tabs.find((tab) => tab.id === id);
 }
 
-function renderNoProject() {
-  $("#route-view").innerHTML = `
+function activeTab() {
+  return findTab(state.activeTabId);
+}
+
+/** Opens (or focuses) a tab. Singleton ids simply match by id. */
+function openTab(tab, { activate = true } = {}) {
+  if (!findTab(tab.id)) {
+    state.tabs.push(tab);
+  } else {
+    Object.assign(findTab(tab.id), tab);
+  }
+  if (activate) {
+    state.activeTabId = tab.id;
+  }
+  renderShell();
+}
+
+function closeTab(id) {
+  const index = state.tabs.findIndex((tab) => tab.id === id);
+  if (index === -1) {
+    return;
+  }
+  const [closed] = state.tabs.splice(index, 1);
+  if (closed?.kind === "file") {
+    state.dirtyFiles.delete(closed.data.path);
+    window.relayEditor?.disposeModel?.(closed.data.repoId, closed.data.path);
+  }
+  if (state.activeTabId === id) {
+    const next = state.tabs[Math.max(0, index - 1)];
+    state.activeTabId = next?.id;
+    if (next === undefined) {
+      openView("overview");
+      return;
+    }
+  }
+  renderShell();
+}
+
+function openView(view, { activate = true } = {}) {
+  const meta = VIEW_META[view];
+  if (!meta) {
+    return;
+  }
+  if (activate) {
+    state.activity = meta.activity;
+  }
+  openTab(
+    { id: `view:${view}`, kind: "view", view, title: meta.title, icon: meta.icon },
+    { activate },
+  );
+}
+
+function openRunTab(runId) {
+  state.activity = "runs";
+  openTab({
+    id: `run:${runId}`,
+    kind: "run",
+    title: `Run ${shortId(runId, 12)}`,
+    icon: "runs",
+    data: { runId },
+  });
+}
+
+function openApprovalTab(approvalId) {
+  state.activity = "approvals";
+  openTab({
+    id: `approval:${approvalId}`,
+    kind: "approval",
+    title: `Review ${shortId(approvalId, 12)}`,
+    icon: "approvals",
+    data: { approvalId },
+  });
+}
+
+function openHistoryTab(repositoryId) {
+  state.activity = "repositories";
+  openTab({
+    id: `history:${repositoryId}`,
+    kind: "history",
+    title: `${repositoryId} history`,
+    icon: "history",
+    data: { repositoryId },
+  });
+}
+
+function openFileTab(repoId, path) {
+  state.activity = "explorer";
+  openTab({
+    id: `file:${repoId}:${path}`,
+    kind: "file",
+    title: path.split("/").at(-1) ?? path,
+    icon: "file",
+    data: { repoId, path },
+  });
+}
+
+/** Keeps the location hash in sync so deep links and bookmarks work. */
+function tabHash(tab) {
+  if (tab === undefined) {
+    return "#overview";
+  }
+  switch (tab.kind) {
+    case "view":
+      return `#${tab.view}`;
+    case "run":
+      return `#run/${encodeURIComponent(tab.data.runId)}`;
+    case "approval":
+      return `#approval/${encodeURIComponent(tab.data.approvalId)}`;
+    case "history":
+      return `#history/${encodeURIComponent(tab.data.repositoryId)}`;
+    case "file":
+      return `#file/${encodeURIComponent(tab.data.repoId)}/${tab.data.path
+        .split("/")
+        .map(encodeURIComponent)
+        .join("/")}`;
+    default:
+      return "#overview";
+  }
+}
+
+let applyingHash = false;
+
+function applyHash() {
+  const raw = location.hash.slice(1);
+  if (raw.length === 0) {
+    openView("overview");
+    return;
+  }
+  const [head, ...rest] = raw.split("/");
+  applyingHash = true;
+  try {
+    if (head === "run" && rest[0]) {
+      openRunTab(decodeURIComponent(rest[0]));
+    } else if (head === "approval" && rest[0]) {
+      openApprovalTab(decodeURIComponent(rest[0]));
+    } else if (head === "history" && rest[0]) {
+      openHistoryTab(decodeURIComponent(rest[0]));
+    } else if (head === "file" && rest.length >= 2) {
+      openFileTab(
+        decodeURIComponent(rest[0]),
+        rest.slice(1).map(decodeURIComponent).join("/"),
+      );
+    } else if (VIEW_META[head]) {
+      openView(head);
+    } else {
+      openView("overview");
+    }
+  } finally {
+    applyingHash = false;
+  }
+}
+
+function syncHash() {
+  if (applyingHash) {
+    return;
+  }
+  const hash = tabHash(activeTab());
+  if (location.hash !== hash) {
+    history.replaceState(null, "", hash);
+  }
+}
+
+/* ------------------------------------------------------ shell: render ---- */
+
+function renderShell() {
+  renderActivityBar();
+  renderSidebar();
+  renderTabStrip();
+  renderActiveTabContent();
+  renderStatusBar();
+  renderEventsPanel();
+  syncHash();
+}
+
+function activityButton(entry) {
+  const badge =
+    entry.badge === "tasks"
+      ? state.tasks.filter((task) => ["submitted", "claimed"].includes(task.status))
+          .length
+      : entry.badge === "approvals"
+        ? state.approvals.filter((approval) => approval.status === "pending").length
+        : 0;
+  return `
+    <button
+      class="activity-button${state.activity === entry.id ? " active" : ""}"
+      data-activity="${entry.id}"
+      title="${escapeHtml(entry.label)}"
+      aria-label="${escapeHtml(entry.label)}"
+    >
+      ${icon(entry.icon)}
+      ${
+        entry.badge
+          ? `<span class="badge${entry.badge === "approvals" ? " hot" : ""}"${
+              badge === 0 ? " data-zero" : ""
+            }>${badge}</span>`
+          : ""
+      }
+    </button>`;
+}
+
+function renderActivityBar() {
+  $("#activity-items").innerHTML = ACTIVITIES.map(activityButton).join("");
+  $("#activity-footer").innerHTML = FOOTER_ACTIVITIES.filter(
+    (entry) => entry.id !== "admin" || state.principal?.user?.systemAdmin,
+  )
+    .map(activityButton)
+    .join("");
+}
+
+function sideItem({ label, meta, iconName, action, active, count, indent = 0, title }) {
+  return `
+    <button
+      class="side-item${active ? " active" : ""}"
+      ${action}
+      ${title ? `title="${escapeHtml(title)}"` : ""}
+    >
+      ${indent > 0 ? `<span class="indent" style="width:${indent * 12}px"></span>` : ""}
+      ${iconName ? icon(iconName) : ""}
+      <span class="grow">${label}</span>
+      ${meta ? `<span class="muted">${meta}</span>` : ""}
+      ${count === undefined ? "" : `<span class="count">${count}</span>`}
+    </button>`;
+}
+
+function renderSidebar() {
+  const title = {
+    overview: "Overview",
+    explorer: "Explorer",
+    tasks: "Tasks",
+    runs: "Integration runs",
+    approvals: "Approvals",
+    repositories: "Repositories",
+    coordination: "Coordination",
+    team: "Team",
+    settings: "Settings",
+    admin: "System admin",
+  }[state.activity];
+  $("#sidebar-title").textContent = title ?? "";
+  const sidebars = {
+    overview: sidebarOverview,
+    explorer: sidebarExplorer,
+    tasks: sidebarTasks,
+    runs: sidebarRuns,
+    approvals: sidebarApprovals,
+    repositories: sidebarRepositories,
+    coordination: sidebarCoordination,
+    team: sidebarSimple,
+    settings: sidebarSimple,
+    admin: sidebarSimple,
+  };
+  const renderer = sidebars[state.activity] ?? sidebarSimple;
+  const { body, actions = "" } = renderer();
+  $("#sidebar-body").innerHTML = body;
+  $("#sidebar-actions").innerHTML = actions;
+}
+
+function sidebarOverview() {
+  const pending = state.tasks.filter((task) => task.status === "submitted").length;
+  const active = state.tasks.filter((task) => task.status === "claimed").length;
+  const reviews = state.approvals.filter(
+    (approval) => approval.status === "pending",
+  ).length;
+  return {
+    body: `
+      ${sideItem({
+        label: "Overview",
+        iconName: "home",
+        action: 'data-open-view="overview"',
+        active: activeTab()?.id === "view:overview",
+      })}
+      <div class="side-section">
+        <h3>At a glance</h3>
+        ${sideItem({
+          label: "Queued tasks",
+          iconName: "tasks",
+          action: 'data-open-view="tasks"',
+          count: pending,
+        })}
+        ${sideItem({
+          label: "In motion",
+          iconName: "runs",
+          action: 'data-open-view="runs"',
+          count: active,
+        })}
+        ${sideItem({
+          label: "Awaiting review",
+          iconName: "approvals",
+          action: 'data-open-view="approvals"',
+          count: reviews,
+        })}
+      </div>
+      <div class="side-section">
+        <h3>Recent activity</h3>
+        ${timeline(state.audit, 6)}
+      </div>`,
+  };
+}
+
+function sidebarExplorer() {
+  if (state.repositories.length === 0) {
+    return {
+      body: '<p class="side-empty">Import a repository to browse and edit a task workspace.</p>',
+    };
+  }
+  const repoOptions = state.repositories
+    .map(
+      (repository) =>
+        `<option value="${escapeHtml(repository.id)}"${
+          repository.id === state.explorerRepo ? " selected" : ""
+        }>${escapeHtml(repository.id)} · ${escapeHtml(repository.branch)}</option>`,
+    )
+    .join("");
+  const workspace = state.workspace;
+  const workspaceForRepo =
+    workspace !== undefined && workspace.repositoryId === state.explorerRepo;
+  let workspaceBlock;
+  if (!canRun()) {
+    workspaceBlock =
+      '<p class="side-empty">Your role can view the dashboard but not open an editing workspace.</p>';
+  } else if (!workspaceForRepo || !workspace.exists) {
+    workspaceBlock = `
+      <p class="side-empty">
+        No workspace yet. Open one to get your own isolated overlay of
+        canonical — edits stay yours until you submit them through the
+        integration pipeline.
+      </p>
+      ${sideItem({
+        label: "Open workspace",
+        iconName: "files",
+        action: 'data-action="workspace-open"',
+      })}`;
+  } else {
+    const dirty = workspace.dirtyFiles?.length ?? 0;
+    workspaceBlock = `
+      <div class="side-section">
+        <h3>Workspace</h3>
+        <p class="side-empty">
+          Base <code>${escapeHtml(shortId(workspace.baseRevision, 10))}</code>
+          ${
+            workspace.baseRevision === workspace.canonicalRevision
+              ? "(current)"
+              : `— canonical moved to <code>${escapeHtml(
+                  shortId(workspace.canonicalRevision, 10),
+                )}</code>`
+          }
+          · ${dirty} changed file${dirty === 1 ? "" : "s"}
+        </p>
+        <div class="row-actions" style="padding: 0 8px 8px">
+          <button class="mini-button" data-action="workspace-submit" ${
+            dirty === 0 ? "disabled" : ""
+          }>Submit changes</button>
+          <button class="mini-button" data-action="workspace-reset">Reset to canonical</button>
+          <button class="mini-button danger" data-action="workspace-discard">Discard</button>
+        </div>
+      </div>
+      <div class="side-section file-tree" id="file-tree">
+        <h3>Files</h3>
+        ${renderFileTree()}
+      </div>`;
+  }
+  return {
+    actions:
+      '<button class="mini-button" data-action="workspace-refresh" title="Refresh workspace">↻</button>',
+    body: `
+      <div class="side-section">
+        <label style="padding: 0 8px">
+          <span>Repository</span>
+          <select id="explorer-repo-select">${repoOptions}</select>
+        </label>
+      </div>
+      ${workspaceBlock}`,
+  };
+}
+
+function renderFileTree() {
+  if (state.workspaceFiles.length === 0) {
+    return '<p class="side-empty">The workspace is empty.</p>';
+  }
+  // Build a nested structure from flat paths.
+  const root = { dirs: new Map(), files: [] };
+  for (const file of state.workspaceFiles) {
+    const parts = file.path.split("/");
+    let node = root;
+    for (const part of parts.slice(0, -1)) {
+      if (!node.dirs.has(part)) {
+        node.dirs.set(part, { dirs: new Map(), files: [] });
+      }
+      node = node.dirs.get(part);
+    }
+    node.files.push({ name: parts.at(-1), ...file });
+  }
+  const dirty = new Set(state.workspace?.dirtyFiles ?? []);
+  const renderNode = (node, prefix, depth) => {
+    const chunks = [];
+    for (const [name, child] of [...node.dirs.entries()].sort(([a], [b]) =>
+      a.localeCompare(b),
+    )) {
+      const path = prefix === "" ? name : `${prefix}/${name}`;
+      const expanded = state.expandedDirs.has(path);
+      chunks.push(`
+        <button class="side-item dir" data-toggle-dir="${escapeHtml(path)}">
+          <span class="indent" style="width:${depth * 12}px"></span>
+          ${icon(expanded ? "chevronDown" : "chevronRight")}
+          ${icon("folder")}
+          <span class="grow">${escapeHtml(name)}</span>
+        </button>`);
+      if (expanded) {
+        chunks.push(renderNode(child, path, depth + 1));
+      }
+    }
+    for (const file of [...node.files].sort((a, b) =>
+      a.name.localeCompare(b.name),
+    )) {
+      const isDirty = dirty.has(file.path) || state.dirtyFiles.has(file.path);
+      chunks.push(`
+        <button
+          class="side-item"
+          data-open-file="${escapeHtml(file.path)}"
+          title="${escapeHtml(file.path)}"
+        >
+          <span class="indent" style="width:${(depth + 1) * 12}px"></span>
+          ${icon("file")}
+          <span class="grow${isDirty ? " file-dirty" : ""}">${escapeHtml(
+            file.name,
+          )}${isDirty ? " ●" : ""}</span>
+        </button>`);
+    }
+    return chunks.join("");
+  };
+  return renderNode(root, "", 0);
+}
+
+function sidebarTasks() {
+  const counts = {};
+  for (const task of state.tasks) {
+    counts[task.status] = (counts[task.status] ?? 0) + 1;
+  }
+  return {
+    body: `
+      ${sideItem({
+        label: "All tasks",
+        iconName: "tasks",
+        action: 'data-open-view="tasks"',
+        active: activeTab()?.id === "view:tasks",
+        count: state.tasks.length,
+      })}
+      ${sideItem({
+        label: "Board",
+        iconName: "board",
+        action: 'data-open-view="board"',
+        active: activeTab()?.id === "view:board",
+      })}
+      <div class="side-section">
+        <h3>By status</h3>
+        ${["submitted", "claimed", "integrated", "failed", "cancelled"]
+          .map((status) =>
+            sideItem({
+              label: status.replaceAll("_", " "),
+              action: `data-task-filter="${status}"`,
+              active: state.taskFilter === status,
+              count: counts[status] ?? 0,
+            }),
+          )
+          .join("")}
+      </div>
+      ${
+        canRun() && state.repositories.length > 0
+          ? `<div class="side-section"><h3>Run queue</h3>${state.repositories
+              .map((repository) =>
+                sideItem({
+                  label: `Run ${escapeHtml(repository.id)}`,
+                  iconName: "runs",
+                  action: `data-run-repo="${escapeHtml(repository.id)}"`,
+                }),
+              )
+              .join("")}</div>`
+          : ""
+      }`,
+  };
+}
+
+function sidebarRuns() {
+  const runs = state.runs.slice(0, 30);
+  return {
+    body: `
+      ${sideItem({
+        label: "All runs",
+        iconName: "runs",
+        action: 'data-open-view="runs"',
+        active: activeTab()?.id === "view:runs",
+        count: state.runs.length,
+      })}
+      <div class="side-section">
+        <h3>Recent</h3>
+        ${
+          runs.length === 0
+            ? '<p class="side-empty">No integration runs yet.</p>'
+            : runs
+                .map((run) =>
+                  sideItem({
+                    label: `${escapeHtml(run.repositoryId)} · ${escapeHtml(
+                      run.status,
+                    )}`,
+                    meta: escapeHtml(formatDate(run.startedAt, { short: true })),
+                    iconName: "commit",
+                    action: `data-open-run="${escapeHtml(run.id)}"`,
+                    active: activeTab()?.id === `run:${run.id}`,
+                    title: run.id,
+                  }),
+                )
+                .join("")
+        }
+      </div>`,
+  };
+}
+
+function sidebarApprovals() {
+  const pending = state.approvals.filter(
+    (approval) => approval.status === "pending",
+  );
+  const decided = state.approvals.filter(
+    (approval) => approval.status !== "pending",
+  );
+  const item = (approval) =>
+    sideItem({
+      label: escapeHtml(approval.reasons[0] ?? approval.kind),
+      iconName: "approvals",
+      action: `data-open-approval="${escapeHtml(approval.id)}"`,
+      active: activeTab()?.id === `approval:${approval.id}`,
+      meta: escapeHtml(approval.status),
+    });
+  return {
+    body: `
+      ${sideItem({
+        label: "Review queue",
+        iconName: "approvals",
+        action: 'data-open-view="approvals"',
+        active: activeTab()?.id === "view:approvals",
+        count: pending.length,
+      })}
+      <div class="side-section">
+        <h3>Pending</h3>
+        ${
+          pending.length === 0
+            ? '<p class="side-empty">No decisions blocking work.</p>'
+            : pending.map(item).join("")
+        }
+      </div>
+      <div class="side-section">
+        <h3>Decided</h3>
+        ${
+          decided.length === 0
+            ? '<p class="side-empty">No decision history.</p>'
+            : decided.slice(0, 15).map(item).join("")
+        }
+      </div>`,
+  };
+}
+
+function sidebarRepositories() {
+  return {
+    body: `
+      ${sideItem({
+        label: "All repositories",
+        iconName: "repos",
+        action: 'data-open-view="repositories"',
+        active: activeTab()?.id === "view:repositories",
+        count: state.repositories.length,
+      })}
+      <div class="side-section">
+        <h3>Canonical mirrors</h3>
+        ${
+          state.repositories.length === 0
+            ? '<p class="side-empty">No repository linked yet.</p>'
+            : state.repositories
+                .map((repository) =>
+                  sideItem({
+                    label: escapeHtml(repository.id),
+                    meta: escapeHtml(repository.branch),
+                    iconName: "repos",
+                    action: `data-open-history="${escapeHtml(repository.id)}"`,
+                    active:
+                      activeTab()?.id === `history:${repository.id}`,
+                  }),
+                )
+                .join("")
+        }
+      </div>`,
+  };
+}
+
+function sidebarCoordination() {
+  return {
+    body: `
+      ${sideItem({
+        label: "Coordination metrics",
+        iconName: "graph",
+        action: 'data-open-view="coordination"',
+        active: activeTab()?.id === "view:coordination",
+      })}
+      <div class="side-section">
+        <h3>Workers</h3>
+        ${
+          state.workers.length === 0
+            ? '<p class="side-empty">No workers registered.</p>'
+            : state.workers
+                .map((worker) =>
+                  sideItem({
+                    label: escapeHtml(worker.name || shortId(worker.id)),
+                    meta: escapeHtml(worker.version ?? ""),
+                    iconName: "people",
+                  }),
+                )
+                .join("")
+        }
+      </div>`,
+  };
+}
+
+function sidebarSimple() {
+  const items = {
+    team: [["team", "Members & roles", "people"]],
+    settings: [["settings", "Project & policy", "gear"]],
+    admin: [["admin", "Host operations", "shield"]],
+  }[state.activity] ?? [["overview", "Overview", "home"]];
+  return {
+    body: items
+      .map(([view, label, iconName]) =>
+        sideItem({
+          label,
+          iconName,
+          action: `data-open-view="${view}"`,
+          active: activeTab()?.id === `view:${view}`,
+        }),
+      )
+      .join(""),
+  };
+}
+
+function renderTabStrip() {
+  $("#tab-strip").innerHTML = state.tabs
+    .map(
+      (tab) => `
+      <button
+        class="tab${tab.id === state.activeTabId ? " active" : ""}"
+        data-tab-id="${escapeHtml(tab.id)}"
+        role="tab"
+        aria-selected="${tab.id === state.activeTabId}"
+        title="${escapeHtml(tab.title)}"
+      >
+        ${icon(tab.icon)}
+        <span class="label">${escapeHtml(tab.title)}</span>
+        ${
+          tab.kind === "file" && state.dirtyFiles.has(tab.data.path)
+            ? '<span class="dirty-dot" title="Unsaved changes"></span>'
+            : `<span class="close" data-close-tab="${escapeHtml(tab.id)}">${icon(
+                "close",
+              )}</span>`
+        }
+      </button>`,
+    )
+    .join("");
+}
+
+function renderStatusBar() {
+  const docker = state.health?.docker;
+  $("#status-docker").innerHTML = docker
+    ? `${icon("shield")} ${
+        docker.available
+          ? `sandbox ${escapeHtml(docker.version ?? "ready")}`
+          : "no sandbox"
+      }`
+    : "";
+  const user = state.principal?.user;
+  $("#status-user").textContent = user
+    ? `${user.displayName} · ${currentRole().replaceAll("_", " ")}`
+    : "";
+}
+
+function renderEventsPanel() {
+  const panel = $("#events-panel");
+  if (panel) {
+    panel.innerHTML = timeline(state.audit, 40);
+  }
+}
+
+/* -------------------------------------------------- tab content: views --- */
+
+const viewRenderers = {
+  overview: renderOverview,
+  explorer: renderExplorerView,
+  tasks: renderTasks,
+  board: renderBoard,
+  runs: renderRuns,
+  approvals: renderApprovals,
+  repositories: renderRepositories,
+  coordination: renderCoordination,
+  team: renderTeam,
+  settings: renderSettings,
+  admin: renderAdmin,
+};
+
+function renderActiveTabContent() {
+  const container = $("#tab-content");
+  const tab = activeTab();
+  container.classList.toggle(
+    "no-scroll",
+    tab?.kind === "file" || (tab?.kind === "view" && tab.view === "explorer"),
+  );
+  if (tab === undefined) {
+    openView("overview");
+    return;
+  }
+  if (tab.kind === "view") {
+    if (!state.projectId && !["settings", "admin", "overview"].includes(tab.view)) {
+      container.innerHTML = `<div class="view">${noProjectContent()}</div>`;
+      return;
+    }
+    container.innerHTML = viewRenderers[tab.view]?.() ?? "";
+    return;
+  }
+  if (tab.kind === "run") {
+    void renderRunTab(container, tab);
+    return;
+  }
+  if (tab.kind === "approval") {
+    void renderApprovalTab(container, tab);
+    return;
+  }
+  if (tab.kind === "history") {
+    void renderHistoryTab(container, tab);
+    return;
+  }
+  if (tab.kind === "file") {
+    void renderFileTabContent(container, tab);
+  }
+}
+
+function noProjectContent() {
+  return `
     <div class="empty-state">
       <div>
         <p class="eyebrow">Start here</p>
@@ -594,7 +1374,21 @@ function projectCreateForm() {
     </form>`;
 }
 
+/* Overview ---------------------------------------------------------------- */
+
+function metric(label, value, foot, glyph) {
+  return `
+    <article class="metric">
+      <span class="metric-label">${escapeHtml(label)} <span>${glyph ?? ""}</span></span>
+      <strong class="metric-value">${escapeHtml(value)}</strong>
+      <span class="metric-foot">${escapeHtml(foot)}</span>
+    </article>`;
+}
+
 function renderOverview() {
+  if (!state.projectId) {
+    return `<div class="view">${noProjectContent()}</div>`;
+  }
   const pendingTasks = state.tasks.filter((task) => task.status === "submitted");
   const activeTasks = state.tasks.filter((task) => task.status === "claimed");
   const integratedTasks = state.tasks.filter(
@@ -606,7 +1400,15 @@ function renderOverview() {
   const docker = state.health?.docker;
   const recentTasks = state.tasks.slice(-6).reverse();
 
-  $("#route-view").innerHTML = `
+  return `<div class="view">
+    <header class="view-head">
+      <div class="page-actions">
+        <button class="button button-primary" data-open-view="tasks">New task ↗</button>
+      </div>
+      <p class="eyebrow">Control room</p>
+      <h1>${escapeHtml(state.project?.name ?? "Overview")}</h1>
+      <p>Canonical state, active work, and decisions at a glance.</p>
+    </header>
     <div class="signal-banner${docker?.available === false ? " warn" : ""}">
       <span class="health-orb${docker?.available === false ? " warn" : ""}"></span>
       <div>
@@ -628,7 +1430,7 @@ function renderOverview() {
       <section class="panel">
         <header class="panel-head">
           <div><h2>Work in view</h2><p>Latest task outcomes for this project</p></div>
-          <a class="mini-button" href="#tasks">Open queue</a>
+          <button class="mini-button" data-open-view="tasks">Open queue</button>
         </header>
         <div class="table-wrap">
           ${taskTable(recentTasks, false)}
@@ -640,16 +1442,47 @@ function renderOverview() {
         </header>
         <div class="panel-body">${timeline(state.audit, 8)}</div>
       </section>
-    </div>`;
+    </div>
+  </div>`;
 }
 
-function metric(label, value, foot, glyph) {
-  return `
-    <article class="metric">
-      <span class="metric-label">${escapeHtml(label)} <span>${glyph}</span></span>
-      <strong class="metric-value">${escapeHtml(value)}</strong>
-      <span class="metric-foot">${escapeHtml(foot)}</span>
-    </article>`;
+/* Tasks (GitHub Issues-flavored) ------------------------------------------ */
+
+function taskStatusIcon(status) {
+  if (["submitted", "claimed"].includes(status)) {
+    return `<span class="issue-icon ${status === "claimed" ? "progress" : "open"}">${icon(
+      "issueOpen",
+    )}</span>`;
+  }
+  if (status === "integrated") {
+    return `<span class="issue-icon closed">${icon("issueClosed")}</span>`;
+  }
+  if (status === "failed") {
+    return `<span class="issue-icon failed">${icon("issueFailed")}</span>`;
+  }
+  return `<span class="issue-icon neutral">${icon("issueClosed")}</span>`;
+}
+
+function taskActions(task) {
+  if (!canRun()) {
+    return "";
+  }
+  const actions = [];
+  if (["submitted", "claimed"].includes(task.status)) {
+    actions.push(
+      `<button class="mini-button" data-task-action="cancel" data-task-id="${escapeHtml(
+        task.id,
+      )}">Cancel</button>`,
+    );
+  }
+  if (["failed", "claimed"].includes(task.status)) {
+    actions.push(
+      `<button class="mini-button" data-task-action="retry" data-task-id="${escapeHtml(
+        task.id,
+      )}">Retry</button>`,
+    );
+  }
+  return actions.join("");
 }
 
 function taskTable(tasks, actions = true) {
@@ -685,24 +1518,51 @@ function taskTable(tasks, actions = true) {
     </table>`;
 }
 
-function taskActions(task) {
-  if (!canRun()) {
-    return "";
-  }
-  if (["submitted", "claimed"].includes(task.status)) {
-    return `<button class="mini-button" data-task-action="cancel" data-task-id="${escapeHtml(
-      task.id,
-    )}">Cancel</button>`;
-  }
-  if (["failed", "claimed"].includes(task.status)) {
-    return `<button class="mini-button" data-task-action="retry" data-task-id="${escapeHtml(
-      task.id,
-    )}">Retry</button>`;
-  }
-  return "";
+function taskIssueRow(task) {
+  return `
+    <div class="issue-row">
+      ${taskStatusIcon(task.status)}
+      <div class="issue-main">
+        <button class="issue-title" ${
+          task.runId
+            ? `data-open-run="${escapeHtml(task.runId)}"`
+            : `data-open-view="board"`
+        }>${escapeHtml(task.objective)}</button>
+        <div class="issue-meta">
+          <span>${escapeHtml(shortId(task.id, 18))}</span>
+          <span>opened ${escapeHtml(formatDate(task.submittedAt))}</span>
+          <span class="chip">${escapeHtml(task.agentId)}</span>
+          ${statusBadge(task.status)}
+        </div>
+      </div>
+      <div class="issue-side">
+        ${
+          task.runId
+            ? `<button class="mini-button" data-open-run="${escapeHtml(
+                task.runId,
+              )}">Run</button>`
+            : ""
+        }
+        ${taskActions(task)}
+      </div>
+    </div>`;
 }
 
 function renderTasks() {
+  const open = state.tasks.filter((task) =>
+    ["submitted", "claimed"].includes(task.status),
+  );
+  const closed = state.tasks.filter(
+    (task) => !["submitted", "claimed"].includes(task.status),
+  );
+  const filter = state.taskFilter;
+  const shown =
+    filter === "open"
+      ? open
+      : filter === "closed"
+        ? closed
+        : state.tasks.filter((task) => task.status === filter);
+
   const repositoryOptions = state.repositories
     .map(
       (repository) =>
@@ -719,18 +1579,13 @@ function renderTasks() {
         }>${escapeHtml(agent.id)} · ${escapeHtml(agent.adapter)}</option>`,
     )
     .join("");
-  const runButtons = state.repositories
-    .map(
-      (repository) => `
-        <button class="button button-quiet" data-run-repo="${escapeHtml(
-          repository.id,
-        )}" ${canRun() ? "" : "disabled"}>
-          Run ${escapeHtml(repository.id)}
-        </button>`,
-    )
-    .join("");
 
-  $("#route-view").innerHTML = `
+  return `<div class="view">
+    <header class="view-head">
+      <p class="eyebrow">Work queue</p>
+      <h1>Tasks</h1>
+      <p>Submit intent, choose an agent, and control the project queue.</p>
+    </header>
     <div class="split-form">
       <form class="form-card" data-form="task-submit">
         <p class="eyebrow">Intent before edits</p>
@@ -755,166 +1610,42 @@ function renderTasks() {
         }>Queue task <span aria-hidden="true">↗</span></button>
         ${
           state.repositories.length === 0
-            ? '<small>Import a repository before submitting work.</small>'
+            ? "<small>Import a repository before submitting work.</small>"
             : ""
         }
         ${
           state.agents.length === 0
-            ? '<small>Configure at least one agent in .coordinator/config.json.</small>'
+            ? "<small>Configure at least one agent in .coordinator/config.json.</small>"
             : ""
         }
       </form>
-      <section class="panel">
-        <header class="panel-head">
-          <div><h2>Project queue</h2><p>${state.tasks.length} total task${
-            state.tasks.length === 1 ? "" : "s"
-          }</p></div>
-          <div class="row-actions">${runButtons}</div>
-        </header>
-        <div class="table-wrap">${taskTable([...state.tasks].reverse())}</div>
-      </section>
-    </div>`;
-}
-
-function renderRuns() {
-  const cards =
-    state.runs.length === 0
-      ? '<div class="empty-state"><div><h2>No integration runs</h2><p>Start a repository run from the task queue. Every plan, conflict, lease, replan, validation, and promotion will be retained here.</p><a class="button button-primary" href="#tasks">Open task queue</a></div></div>'
-      : `<div class="card-grid">${state.runs
-          .map(
-            (run) => `
-              <article class="run-card">
-                <div class="card-meta">${statusBadge(run.status)}<span class="chip">${escapeHtml(
-                  run.mode,
-                )}</span></div>
-                <h3>${escapeHtml(run.repositoryId)}</h3>
-                <p>Started ${escapeHtml(formatDate(run.startedAt))}<br>Base ${escapeHtml(
-                  shortId(run.baseRevision, 12),
-                )} → ${escapeHtml(shortId(run.finalRevision ?? "pending", 12))}</p>
-                <div class="card-meta">
-                  <span class="chip">${escapeHtml(shortId(run.id, 18))}</span>
-                  <button class="mini-button" data-run-id="${escapeHtml(
-                    run.id,
-                  )}">Inspect run</button>
-                </div>
-              </article>`,
-          )
-          .join("")}</div>`;
-  $("#route-view").innerHTML = cards;
-}
-
-function renderApprovals() {
-  const pending = state.approvals.filter(
-    (approval) => approval.status === "pending",
-  );
-  const history = state.approvals.filter(
-    (approval) => approval.status !== "pending",
-  );
-  $("#route-view").innerHTML = `
-    ${
-      pending.length > 0
-        ? `<div class="signal-banner warn"><span class="health-orb warn"></span><div><strong>${pending.length} decision${
-            pending.length === 1 ? "" : "s"
-          } blocking work</strong><span>Review reasons and diff evidence before canonical can advance.</span></div><span class="chip">action needed</span></div>`
-        : ""
-    }
-    <section class="panel">
-      <header class="panel-head"><div><h2>Pending review</h2><p>Durable gates survive worker and browser restarts</p></div></header>
-      <div class="panel-body">${approvalCards(pending, true)}</div>
-    </section>
-    <section class="panel panel-spaced">
-      <header class="panel-head"><div><h2>Decision history</h2><p>Approved, rejected, expired, and cancelled gates</p></div></header>
-      <div class="panel-body">${approvalCards(history, false)}</div>
-    </section>`;
-}
-
-function approvalCards(approvals, actionable) {
-  if (approvals.length === 0) {
-    return `<div class="empty-state"><div><h2>${
-      actionable ? "No work is blocked" : "No decisions recorded"
-    }</h2><p>${
-      actionable
-        ? "Protected plans and changesets will wait here for a reviewer."
-        : "Completed reviews will remain available as audit evidence."
-    }</p></div></div>`;
-  }
-  return `<div class="card-grid">${approvals
-    .map(
-      (approval) => `
-        <article class="approval-card">
-          <div class="card-meta">${statusBadge(approval.status)}<span class="chip">${escapeHtml(
-            approval.kind.replaceAll("_", " "),
-          )}</span></div>
-          <h3>${escapeHtml(approval.reasons[0] ?? "Human review required")}</h3>
-          <p>${escapeHtml(approval.reasons.slice(1).join(" · ") || `Task ${shortId(approval.taskId, 16)}`)}</p>
-          <div class="card-meta">
-            <span class="chip">expires ${escapeHtml(formatDate(approval.expiresAt, { short: true }))}</span>
-            <button class="mini-button" data-approval-id="${escapeHtml(
-              approval.id,
-            )}">${actionable ? "Review" : "Inspect"}</button>
-          </div>
-        </article>`,
-    )
-    .join("")}</div>`;
-}
-
-function renderRepositories() {
-  $("#route-view").innerHTML = `
-    <div class="split-form">
-      <form class="form-card" data-form="github-import">
-        <p class="eyebrow">Canonical mirror</p>
-        <h2>Import from GitHub</h2>
-        <p>Relay creates an internal bare mirror. Private tokens are passed only to Git and are never persisted.</p>
-        <label>
-          <span>Repository</span>
-          <input name="repository" placeholder="owner/repository" required>
-        </label>
-        <div class="inline-fields">
-          <label><span>Local ID (optional)</span><input name="id" placeholder="core-api"></label>
-          <label><span>Branch (auto-detect)</span><input name="branch" placeholder="main"></label>
-        </div>
-        <label>
-          <span>Fine-grained token (private repositories only)</span>
-          <input name="token" type="password" autocomplete="off" placeholder="github_pat_...">
-        </label>
-        <button class="button button-primary" type="submit">Import repository</button>
-      </form>
-      <section class="panel">
-        <header class="panel-head"><div><h2>Linked repositories</h2><p>${state.repositories.length} canonical mirror${
-          state.repositories.length === 1 ? "" : "s"
-        }</p></div></header>
-        <div class="panel-body">
+      <section class="issue-list">
+        <header class="issue-list-head">
+          <button class="issue-filter${filter === "open" ? " active" : ""}" data-set-task-filter="open">
+            ${icon("issueOpen")} ${open.length} Open
+          </button>
+          <button class="issue-filter${filter === "closed" ? " active" : ""}" data-set-task-filter="closed">
+            ${icon("issueClosed")} ${closed.length} Closed
+          </button>
           ${
-            state.repositories.length === 0
-              ? '<div class="empty-state"><div><h2>No repository linked</h2><p>Import a public or private GitHub repository to create the first canonical source.</p></div></div>'
-              : `<div class="repo-grid">${state.repositories
-                  .map(
-                    (repository) => `
-                      <article class="repo-card">
-                        <h3>${escapeHtml(repository.id)}</h3>
-                        <p>${escapeHtml(repository.remoteUrl ?? "Local repository mirror")}</p>
-                        <div class="card-meta">
-                          <span class="chip">${escapeHtml(repository.provider ?? "local")}</span>
-                          <span class="chip">${escapeHtml(repository.branch)}</span>
-                          ${
-                            canRun()
-                              ? `<button class="mini-button" data-run-repo="${escapeHtml(
-                                  repository.id,
-                                )}">Run queue</button>`
-                              : ""
-                          }
-                          <button class="mini-button" data-action="repo-history" data-repo-id="${escapeHtml(
-                            repository.id,
-                          )}">History</button>
-                        </div>
-                      </article>`,
-                  )
-                  .join("")}</div>`
+            ["open", "closed"].includes(filter)
+              ? ""
+              : `<span class="chip">filter: ${escapeHtml(filter)}</span>`
           }
-        </div>
+          <span class="spacer" style="flex:1"></span>
+          <span class="muted">${state.tasks.length} total</span>
+        </header>
+        ${
+          shown.length === 0
+            ? '<div class="empty-state"><div><h2>Nothing here</h2><p>No tasks match this filter.</p></div></div>'
+            : [...shown].reverse().map(taskIssueRow).join("")
+        }
       </section>
-    </div>`;
+    </div>
+  </div>`;
 }
+
+/* Board ------------------------------------------------------------------- */
 
 /**
  * Columns of the board.
@@ -961,7 +1692,7 @@ function renderBoard() {
                 </div>
                 ${
                   task.runId
-                    ? `<button class="mini-button" data-action="inspect-run" data-run-id="${escapeHtml(
+                    ? `<button class="mini-button" data-open-run="${escapeHtml(
                         task.runId,
                       )}">Open run</button>`
                     : ""
@@ -974,37 +1705,233 @@ function renderBoard() {
       </section>`;
   }).join("");
 
-  $("#route-view").innerHTML = `
+  return `<div class="view wide">
+    <header class="view-head">
+      <p class="eyebrow">Queue projection</p>
+      <h1>Board</h1>
+      <p>The same task queue, arranged by where each task has got to.</p>
+    </header>
     <div class="board-grid">${columns}</div>
     <p class="muted panel-note">
       This is a view of the task queue, not a separate tracker. A card moves
       when the coordinator moves the task.
-    </p>`;
+    </p>
+  </div>`;
 }
 
-function duration(milliseconds) {
-  if (typeof milliseconds !== "number" || !Number.isFinite(milliseconds)) {
-    return "—";
+/* Runs (GitHub Actions-flavored list) ------------------------------------- */
+
+function runStatusIcon(status) {
+  if (status === "completed") {
+    return `<span class="issue-icon closed">${icon("issueClosed")}</span>`;
   }
-  if (milliseconds < 1000) {
-    return `${Math.round(milliseconds)} ms`;
+  if (status === "failed") {
+    return `<span class="issue-icon failed">${icon("issueFailed")}</span>`;
   }
-  const seconds = milliseconds / 1000;
-  if (seconds < 90) {
-    return `${seconds.toFixed(1)} s`;
-  }
-  const minutes = seconds / 60;
-  if (minutes < 90) {
-    return `${minutes.toFixed(1)} min`;
-  }
-  return `${(minutes / 60).toFixed(1)} h`;
+  return `<span class="issue-icon progress">${icon("issueOpen")}</span>`;
 }
 
-function percent(part, whole) {
-  if (whole === 0) {
-    return "—";
+function renderRuns() {
+  return `<div class="view">
+    <header class="view-head">
+      <p class="eyebrow">Integration ledger</p>
+      <h1>Runs</h1>
+      <p>Inspect scheduling, replans, validation, and canonical promotions.</p>
+    </header>
+    ${
+      state.runs.length === 0
+        ? '<div class="empty-state"><div><h2>No integration runs</h2><p>Start a repository run from the task queue. Every plan, conflict, lease, replan, validation, and promotion will be retained here.</p><button class="button button-primary" data-open-view="tasks">Open task queue</button></div></div>'
+        : `<section class="issue-list">
+            <header class="issue-list-head">
+              <span class="muted">${state.runs.length} run${
+                state.runs.length === 1 ? "" : "s"
+              } · newest first</span>
+            </header>
+            ${state.runs
+              .map(
+                (run) => `
+                <div class="issue-row">
+                  ${runStatusIcon(run.status)}
+                  <div class="issue-main">
+                    <button class="issue-title" data-open-run="${escapeHtml(run.id)}">
+                      ${escapeHtml(run.repositoryId)}
+                      <span class="muted">·</span>
+                      ${escapeHtml(shortId(run.baseRevision, 10))} → ${escapeHtml(
+                        shortId(run.finalRevision ?? "pending", 10),
+                      )}
+                    </button>
+                    <div class="issue-meta">
+                      <span>${escapeHtml(shortId(run.id, 20))}</span>
+                      <span>started ${escapeHtml(formatDate(run.startedAt))}</span>
+                      <span class="chip">${escapeHtml(run.mode)}</span>
+                    </div>
+                  </div>
+                  <div class="issue-side">
+                    ${statusBadge(run.status)}
+                  </div>
+                </div>`,
+              )
+              .join("")}
+          </section>`
+    }
+  </div>`;
+}
+
+/* Approvals ---------------------------------------------------------------- */
+
+function approvalCards(approvals, actionable) {
+  if (approvals.length === 0) {
+    return `<div class="empty-state"><div><h2>${
+      actionable ? "No work is blocked" : "No decisions recorded"
+    }</h2><p>${
+      actionable
+        ? "Protected plans and changesets will wait here for a reviewer."
+        : "Completed reviews will remain available as audit evidence."
+    }</p></div></div>`;
   }
-  return `${Math.round((part / whole) * 100)}%`;
+  return `<div class="card-grid">${approvals
+    .map(
+      (approval) => `
+        <article class="approval-card">
+          <div class="card-meta">${statusBadge(approval.status)}<span class="chip">${escapeHtml(
+            approval.kind.replaceAll("_", " "),
+          )}</span></div>
+          <h3>${escapeHtml(approval.reasons[0] ?? "Human review required")}</h3>
+          <p>${escapeHtml(approval.reasons.slice(1).join(" · ") || `Task ${shortId(approval.taskId, 16)}`)}</p>
+          <div class="card-meta">
+            <span class="chip">expires ${escapeHtml(formatDate(approval.expiresAt, { short: true }))}</span>
+            <button class="mini-button" data-open-approval="${escapeHtml(
+              approval.id,
+            )}">${actionable ? "Review" : "Inspect"}</button>
+          </div>
+        </article>`,
+    )
+    .join("")}</div>`;
+}
+
+function renderApprovals() {
+  const pending = state.approvals.filter(
+    (approval) => approval.status === "pending",
+  );
+  const history = state.approvals.filter(
+    (approval) => approval.status !== "pending",
+  );
+  return `<div class="view">
+    <header class="view-head">
+      <p class="eyebrow">Human gates</p>
+      <h1>Approvals</h1>
+      <p>Review protected plans, scope expansions, and proposed changesets.</p>
+    </header>
+    ${
+      pending.length > 0
+        ? `<div class="signal-banner warn"><span class="health-orb warn"></span><div><strong>${pending.length} decision${
+            pending.length === 1 ? "" : "s"
+          } blocking work</strong><span>Review reasons and diff evidence before canonical can advance.</span></div><span class="chip warn">action needed</span></div>`
+        : ""
+    }
+    <section class="panel">
+      <header class="panel-head"><div><h2>Pending review</h2><p>Durable gates survive worker and browser restarts</p></div></header>
+      <div class="panel-body">${approvalCards(pending, true)}</div>
+    </section>
+    <section class="panel panel-spaced">
+      <header class="panel-head"><div><h2>Decision history</h2><p>Approved, rejected, expired, and cancelled gates</p></div></header>
+      <div class="panel-body">${approvalCards(history, false)}</div>
+    </section>
+  </div>`;
+}
+
+/* Repositories ------------------------------------------------------------- */
+
+function renderRepositories() {
+  return `<div class="view">
+    <header class="view-head">
+      <p class="eyebrow">Canonical sources</p>
+      <h1>Repositories</h1>
+      <p>Import GitHub mirrors and start coordinated work against them.</p>
+    </header>
+    <div class="split-form">
+      <form class="form-card" data-form="github-import">
+        <p class="eyebrow">Canonical mirror</p>
+        <h2>Import from GitHub</h2>
+        <p>Relay creates an internal bare mirror. Private tokens are passed only to Git and are never persisted.</p>
+        <label>
+          <span>Repository</span>
+          <input name="repository" placeholder="owner/repository" required>
+        </label>
+        <div class="field-pair">
+          <label><span>Local ID (optional)</span><input name="id" placeholder="core-api"></label>
+          <label><span>Branch (auto-detect)</span><input name="branch" placeholder="main"></label>
+        </div>
+        <label>
+          <span>Fine-grained token (private repositories only)</span>
+          <input name="token" type="password" autocomplete="off" placeholder="github_pat_...">
+        </label>
+        <button class="button button-primary" type="submit">Import repository</button>
+      </form>
+      <section class="panel">
+        <header class="panel-head"><div><h2>Linked repositories</h2><p>${state.repositories.length} canonical mirror${
+          state.repositories.length === 1 ? "" : "s"
+        }</p></div></header>
+        <div class="panel-body">
+          ${
+            state.repositories.length === 0
+              ? '<div class="empty-state"><div><h2>No repository linked</h2><p>Import a public or private GitHub repository to create the first canonical source.</p></div></div>'
+              : `<div class="card-grid">${state.repositories
+                  .map(
+                    (repository) => `
+                      <article class="repo-card">
+                        <h3>${escapeHtml(repository.id)}</h3>
+                        <p>${escapeHtml(repository.remoteUrl ?? "Local repository mirror")}</p>
+                        <div class="card-meta">
+                          <span class="chip">${escapeHtml(repository.provider ?? "local")}</span>
+                          <span class="chip">${escapeHtml(repository.branch)}</span>
+                          ${
+                            canRun()
+                              ? `<button class="mini-button" data-run-repo="${escapeHtml(
+                                  repository.id,
+                                )}">Run queue</button>`
+                              : ""
+                          }
+                          <button class="mini-button" data-open-history="${escapeHtml(
+                            repository.id,
+                          )}">History</button>
+                        </div>
+                      </article>`,
+                  )
+                  .join("")}</div>`
+          }
+        </div>
+      </section>
+    </div>
+  </div>`;
+}
+
+/* Coordination -------------------------------------------------------------- */
+
+function workerTable(workers) {
+  if (workers.length === 0) {
+    return '<div class="empty-state"><div><h2>No workers registered</h2><p>A worker registers itself with a scoped API token. Until one does, tasks run on the control plane.</p></div></div>';
+  }
+  return `
+    <table class="data-table">
+      <thead><tr><th>Worker</th><th>Adapters</th><th>Version</th><th>Last seen</th></tr></thead>
+      <tbody>
+        ${workers
+          .map(
+            (worker) => `
+          <tr>
+            <td><strong>${escapeHtml(worker.name || shortId(worker.id))}</strong>
+              <div class="muted">${escapeHtml(shortId(worker.id, 16))}</div></td>
+            <td>${(worker.adapters ?? [])
+              .map((adapter) => `<span class="chip">${escapeHtml(adapter)}</span>`)
+              .join(" ")}</td>
+            <td>${escapeHtml(worker.version ?? "—")}</td>
+            <td>${escapeHtml(formatDate(worker.lastSeenAt))}</td>
+          </tr>`,
+          )
+          .join("")}
+      </tbody>
+    </table>`;
 }
 
 /**
@@ -1017,21 +1944,27 @@ function percent(part, whole) {
  */
 function renderCoordination() {
   const metrics = state.metrics;
+  const head = `
+    <header class="view-head">
+      <p class="eyebrow">Measured outcomes</p>
+      <h1>Coordination</h1>
+      <p>How well scheduling predicted contention, what it cost, and who is executing.</p>
+    </header>`;
   if (!metrics) {
-    $("#route-view").innerHTML = `
+    return `<div class="view">${head}
       <div class="empty-state">
         <div>
           <h2>Coordination metrics are unavailable</h2>
           <p>This deployment does not expose the metrics endpoint, or your role cannot view it.</p>
         </div>
-      </div>`;
-    return;
+      </div>
+    </div>`;
   }
 
   const { conflicts, rework, throughput, approvals, cost, window } = metrics;
   const decided = conflicts.confirmedPredictions + conflicts.falsePositives;
 
-  $("#route-view").innerHTML = `
+  return `<div class="view">${head}
     <section class="metric-grid">
       ${metric(
         "Conflicts predicted",
@@ -1099,55 +2032,39 @@ function renderCoordination() {
         </div>
       </section>
     </div>
-    <section class="panel">
+    <section class="panel panel-spaced">
       <header class="panel-head">
         <div><h2>Remote execution</h2><p>Lease runtime is the platform's one directly measured spend signal</p></div>
         <span class="chip">${window.events} events to sequence ${window.toSequence}</span>
       </header>
-      <section class="metric-grid">
-        ${metric("Lease runtime", duration(cost.leaseRuntimeMs), "Total across all leases", "◷")}
-        ${metric("Active leases", cost.activeLeases, "Executing right now", "◎")}
-        ${metric("Settled leases", cost.settledLeases, "Completed, failed, or released", "⌁")}
-        ${metric("Registered workers", state.workers.length, "Visible to your account", "⌗")}
-      </section>
-      <div class="table-wrap">${workerTable(state.workers)}</div>
-      <p class="muted panel-note">
-        Runtime is wall-clock lease time, not model cost. Token accounting is not
-        available from the agent adapters today.
-      </p>
-    </section>`;
+      <div class="panel-body">
+        <section class="metric-grid">
+          ${metric("Lease runtime", duration(cost.leaseRuntimeMs), "Total across all leases", "◷")}
+          ${metric("Active leases", cost.activeLeases, "Executing right now", "◎")}
+          ${metric("Settled leases", cost.settledLeases, "Completed, failed, or released", "⌁")}
+          ${metric("Registered workers", state.workers.length, "Visible to your account", "⌗")}
+        </section>
+        <div class="table-wrap">${workerTable(state.workers)}</div>
+        <p class="muted panel-note">
+          Runtime is wall-clock lease time, not model cost. Token accounting is not
+          available from the agent adapters today.
+        </p>
+      </div>
+    </section>
+  </div>`;
 }
 
-function workerTable(workers) {
-  if (workers.length === 0) {
-    return '<div class="empty-state"><div><h2>No workers registered</h2><p>A worker registers itself with a scoped API token. Until one does, tasks run on the control plane.</p></div></div>';
-  }
-  return `
-    <table class="data-table">
-      <thead><tr><th>Worker</th><th>Adapters</th><th>Version</th><th>Last seen</th></tr></thead>
-      <tbody>
-        ${workers
-          .map(
-            (worker) => `
-          <tr>
-            <td><strong>${escapeHtml(worker.name || shortId(worker.id))}</strong>
-              <div class="muted">${escapeHtml(shortId(worker.id, 16))}</div></td>
-            <td>${(worker.adapters ?? [])
-              .map((adapter) => `<span class="chip">${escapeHtml(adapter)}</span>`)
-              .join(" ")}</td>
-            <td>${escapeHtml(worker.version ?? "—")}</td>
-            <td>${escapeHtml(formatDate(worker.lastSeenAt))}</td>
-          </tr>`,
-          )
-          .join("")}
-      </tbody>
-    </table>`;
-}
+/* Team ---------------------------------------------------------------------- */
 
 function renderTeam() {
   const manageable = canManageMembers();
   const roles = ["owner", "admin", "developer", "reviewer", "viewer"];
-  $("#route-view").innerHTML = `
+  return `<div class="view">
+    <header class="view-head">
+      <p class="eyebrow">Access control</p>
+      <h1>Team</h1>
+      <p>Manage organization membership and role-based permissions.</p>
+    </header>
     <div class="split-form">
       ${
         manageable
@@ -1213,8 +2130,11 @@ function renderTeam() {
           </table>
         </div>
       </section>
-    </div>`;
+    </div>
+  </div>`;
 }
+
+/* Settings ------------------------------------------------------------------ */
 
 const RISK_LEVELS = ["low", "medium", "high", "critical"];
 
@@ -1360,7 +2280,30 @@ function policyForm(manageable) {
 function renderSettings() {
   const organization = currentOrganization();
   const manageable = canManageProject();
-  $("#route-view").innerHTML = `
+  if (!state.projectId) {
+    return `<div class="view">
+      <header class="view-head">
+        <p class="eyebrow">Project controls</p>
+        <h1>Settings</h1>
+      </header>
+      ${noProjectContent()}
+      <div class="stack" style="margin-top:16px; max-width:420px">
+        <form class="form-card" data-form="organization-create">
+          <p class="eyebrow">Separate tenant</p>
+          <h2>Create organization</h2>
+          <label><span>Name</span><input name="name" required></label>
+          <label><span>Slug</span><input name="slug" pattern="[A-Za-z0-9._-]+" required></label>
+          <button class="button button-quiet" type="submit">Create organization</button>
+        </form>
+      </div>
+    </div>`;
+  }
+  return `<div class="view">
+    <header class="view-head">
+      <p class="eyebrow">Project controls</p>
+      <h1>Settings</h1>
+      <p>Policy, budgets, project identity, and lifecycle state.</p>
+    </header>
     <div class="card-grid">
       <form class="form-card" data-form="project-update">
         <p class="eyebrow">Project identity</p>
@@ -1413,17 +2356,23 @@ function renderSettings() {
           <button class="button button-quiet" type="submit">Create organization</button>
         </form>
       </div>
-    </div>`;
+    </div>
+  </div>`;
 }
+
+/* Admin --------------------------------------------------------------------- */
 
 function renderAdmin() {
   if (!state.admin) {
-    $("#route-view").innerHTML =
-      '<div class="empty-state"><div><h2>System administrator required</h2></div></div>';
-    return;
+    return '<div class="view"><div class="empty-state"><div><h2>System administrator required</h2></div></div></div>';
   }
   const counts = state.admin.counts;
-  $("#route-view").innerHTML = `
+  return `<div class="view">
+    <header class="view-head">
+      <p class="eyebrow">Host operations</p>
+      <h1>System admin</h1>
+      <p>Manage users and inspect the local control plane across organizations.</p>
+    </header>
     <section class="metric-grid">
       ${metric("Users", counts.users, "Accounts on this host", "◇")}
       ${metric("Organizations", counts.organizations, "Tenant boundaries", "△")}
@@ -1473,20 +2422,11 @@ function renderAdmin() {
           </table>
         </div>
       </section>
-    </div>`;
+    </div>
+  </div>`;
 }
 
-function renderError(error) {
-  $("#route-view").innerHTML = `
-    <div class="empty-state">
-      <div><h2>Control room could not load</h2><p>${escapeHtml(
-        error.message,
-      )}</p><button class="button button-primary" id="inline-retry">Try again</button></div>
-    </div>`;
-  $("#inline-retry")?.addEventListener("click", () => {
-    void loadContext();
-  });
-}
+/* ------------------------------------------- tab content: detail tabs ---- */
 
 function diffHtml(patch) {
   if (!patch) {
@@ -1509,139 +2449,13 @@ function diffHtml(patch) {
     .join("")}</pre>`;
 }
 
-function openDrawer(eyebrow, title, content) {
-  $("#drawer-eyebrow").textContent = eyebrow;
-  $("#drawer-title").textContent = title;
-  $("#drawer-body").innerHTML = content;
-  $("#detail-drawer").classList.add("open");
-  $("#detail-drawer").setAttribute("aria-hidden", "false");
-  document.body.style.overflow = "hidden";
-}
-
-function closeDrawer() {
-  $("#detail-drawer").classList.remove("open");
-  $("#detail-drawer").setAttribute("aria-hidden", "true");
-  document.body.style.overflow = "";
-}
-
-async function inspectRun(runId) {
-  // Remembered so adding or resolving a comment can re-render the same drawer.
-  state.inspectedRunId = runId;
-  openDrawer(
-    "Integration ledger",
-    `Run ${shortId(runId, 12)}`,
-    '<div class="skeleton skeleton-tall"></div>',
-  );
-  try {
-    const response = await api(`/runs/${encodeURIComponent(runId)}`);
-    const detail = response.run;
-    $("#drawer-body").innerHTML = renderRunDetail(detail);
-  } catch (error) {
-    $("#drawer-body").innerHTML = `<div class="empty-state"><div><h2>Run unavailable</h2><p>${escapeHtml(
-      error.message,
-    )}</p></div></div>`;
-  }
-}
-
-/**
- * Canonical history for one repository, with rollback offered per revision.
- *
- * The rollback control sits here rather than on a settings page because the
- * decision is always "back to *this* revision", and the only way to make that
- * choice well is with the history in front of you.
- */
-async function inspectRepositoryHistory(repositoryId) {
-  openDrawer(
-    "Canonical history",
-    escapeHtml(repositoryId),
-    '<div class="skeleton skeleton-tall"></div>',
-  );
-  try {
-    const response = await api(
-      `/projects/${encodeURIComponent(state.projectId)}/repositories/` +
-        `${encodeURIComponent(repositoryId)}/versions?limit=50`,
-    );
-    const versions = response.versions ?? [];
-    const canRollback = canManageProject();
-    $("#drawer-body").innerHTML = `
-      <section class="drawer-section">
-        <h3>Promotions</h3>
-        <p class="muted">
-          Newest first. A rollback does not rewrite this history — it submits
-          the revert as an ordinary change, so the record keeps moving forward.
-        </p>
-        ${
-          versions.length === 0
-            ? '<div class="empty-state"><div><h2>No history</h2></div></div>'
-            : `<ol class="version-list">${versions
-                .map(
-                  (version, index) => `
-            <li class="version-entry">
-              <div>
-                <p class="version-subject">${escapeHtml(version.subject)}</p>
-                <p class="muted">
-                  <code>${escapeHtml(shortId(version.revision, 12))}</code>
-                  · #${version.sequence}
-                  · ${escapeHtml(version.author)}
-                  · ${escapeHtml(formatDate(version.createdAt, { short: true }))}
-                </p>
-              </div>
-              ${
-                index === 0
-                  ? '<span class="chip">current</span>'
-                  : canRollback
-                    ? `<button class="mini-button" data-action="rollback"
-                         data-repo-id="${escapeHtml(repositoryId)}"
-                         data-revision="${escapeHtml(version.revision)}">Roll back to here</button>`
-                    : ""
-              }
-            </li>`,
-                )
-                .join("")}</ol>`
-        }
-      </section>`;
-  } catch (error) {
-    $("#drawer-body").innerHTML = `<div class="empty-state"><div><h2>History unavailable</h2><p>${escapeHtml(
-      error.message,
-    )}</p></div></div>`;
-  }
-}
-
-async function requestRollback(repositoryId, revision) {
-  const reason = window.prompt(
-    `Roll ${repositoryId} back to ${shortId(revision, 12)}?\n\n` +
-      "The revert goes through validation and approval like any other change. " +
-      "Give a reason for the record:",
-  );
-  if (reason === null) {
-    return;
-  }
-  toast("Rollback submitted; it may wait for approval", "default");
-  try {
-    const response = await api(
-      `/projects/${encodeURIComponent(state.projectId)}/repositories/` +
-        `${encodeURIComponent(repositoryId)}/rollback`,
-      { method: "POST", body: { targetRevision: revision, reason } },
-    );
-    const result = response.rollback ?? {};
-    toast(
-      `Rollback ${result.status}: ${result.explanation ?? ""}`.trim(),
-      result.status === "integrated" ? "default" : "warn",
-    );
-    await loadContext({ quiet: true });
-    closeDrawer();
-  } catch (error) {
-    toast(error.message, "warn");
-  }
-}
-
 /**
  * A review thread, anchored to one file or to the changeset as a whole.
  *
  * Rendered inline under the diff it is about rather than in a separate tab:
  * a remark about a hunk is only useful next to the hunk.
  */
-function commentThread(comments, changeSetId, filePath) {
+function commentThread(comments, changeSetId, filePath, runId) {
   const entries = comments
     .map(
       (comment) => `
@@ -1657,7 +2471,7 @@ function commentThread(comments, changeSetId, filePath) {
               : canReview()
                 ? `<button class="mini-button" data-action="resolve-comment" data-comment-id="${escapeHtml(
                     comment.id,
-                  )}">Resolve</button>`
+                  )}" data-run-id="${escapeHtml(runId)}">Resolve</button>`
                 : ""
           }
         </div>
@@ -1666,6 +2480,7 @@ function commentThread(comments, changeSetId, filePath) {
     .join("");
   const form = canReview()
     ? `<form class="comment-form" data-form="comment-add"
+         data-run-id="${escapeHtml(runId)}"
          data-changeset-id="${escapeHtml(changeSetId)}"
          ${filePath === undefined ? "" : `data-file-path="${escapeHtml(filePath)}"`}>
         <textarea name="body" rows="2" placeholder="${
@@ -1682,8 +2497,27 @@ function commentThread(comments, changeSetId, filePath) {
   return `<div class="comment-thread">${entries}${form}</div>`;
 }
 
+async function renderRunTab(container, tab) {
+  container.innerHTML =
+    '<div class="view"><div class="skeleton skeleton-tall"></div></div>';
+  try {
+    const response = await api(`/runs/${encodeURIComponent(tab.data.runId)}`);
+    if (activeTab() !== tab) {
+      return;
+    }
+    container.innerHTML = `<div class="view wide">${renderRunDetail(
+      response.run,
+    )}</div>`;
+  } catch (error) {
+    container.innerHTML = `<div class="view"><div class="empty-state"><div><h2>Run unavailable</h2><p>${escapeHtml(
+      error.message,
+    )}</p></div></div></div>`;
+  }
+}
+
 function renderRunDetail(detail) {
   const run = detail.run;
+  const runId = run.id;
   const taskItems = detail.tasks
     .map(
       (task) => `<div class="detail-item"><strong>${escapeHtml(
@@ -1729,9 +2563,7 @@ function renderRunDetail(detail) {
       )}</strong>${escapeHtml(integration.explanation)}<br>
         ${
           // IntegrationResult carries `validation`, one CommandResult per
-          // configured command. The field read here used to be `testResults`,
-          // which the type has never had, so any run that reached integration
-          // blanked this drawer.
+          // configured command.
           (integration.validation ?? [])
             .map(
               (result) =>
@@ -1745,18 +2577,38 @@ function renderRunDetail(detail) {
     )
     .join("");
   const comments = detail.comments ?? [];
-  const diffs = detail.changeSets
-    .flatMap((changeSet) =>
-      changeSet.patches.map(
-        (patch) => `<div class="detail-section"><h3>${escapeHtml(
+  const patchEntries = detail.changeSets.flatMap((changeSet) =>
+    changeSet.patches.map((patch) => ({ changeSet, patch })),
+  );
+  const fileTree = patchEntries
+    .map(
+      ({ patch }, index) => `
+      <a class="side-item" href="#diff-${index}" onclick="document.getElementById('diff-${index}')?.scrollIntoView({behavior:'smooth'});return false;">
+        ${icon("file")}
+        <span class="grow" title="${escapeHtml(patch.path)}">${escapeHtml(
           patch.path,
-        )} · ${escapeHtml(patch.status)}</h3>${diffHtml(patch.patch)}
-          ${commentThread(
-            comments.filter((comment) => comment.filePath === patch.path),
-            changeSet.id,
-            patch.path,
-          )}</div>`,
-      ),
+        )}</span>
+        <span class="muted">${escapeHtml(patch.status)}</span>
+      </a>`,
+    )
+    .join("");
+  const diffs = patchEntries
+    .map(
+      ({ changeSet, patch }, index) => `
+      <div class="diff-file" id="diff-${index}">
+        <div class="diff-file-head">
+          ${icon("file")}
+          <span class="path">${escapeHtml(patch.path)}</span>
+          ${statusBadge(patch.status)}
+        </div>
+        ${diffHtml(patch.patch)}
+        ${commentThread(
+          comments.filter((comment) => comment.filePath === patch.path),
+          changeSet.id,
+          patch.path,
+          runId,
+        )}
+      </div>`,
     )
     .join("");
   const generalComments = detail.changeSets
@@ -1768,66 +2620,85 @@ function renderRunDetail(detail) {
             comment.filePath === undefined,
         ),
         changeSet.id,
+        undefined,
+        runId,
       ),
     )
     .join("");
   return `
-    <div class="signal-banner">
-      <span class="health-orb"></span>
-      <div><strong>${escapeHtml(run.repositoryId)}</strong><span>${escapeHtml(
-        shortId(run.baseRevision, 12),
-      )} → ${escapeHtml(shortId(run.finalRevision ?? "pending", 12))}</span></div>
-      ${statusBadge(run.status)}
-    </div>
-    <section class="detail-section"><h3>Tasks</h3><div class="detail-list">${
-      taskItems || '<div class="detail-item">No task records.</div>'
-    }</div></section>
-    <section class="detail-section"><h3>Conflict evidence</h3><div class="detail-list">${
-      conflicts || '<div class="detail-item">No structural conflicts recorded.</div>'
-    }</div></section>
-    <section class="detail-section"><h3>Plan history</h3><div class="detail-list">${
-      revisions || '<div class="detail-item">No plan revisions recorded.</div>'
-    }</div></section>
-    <section class="detail-section"><h3>Scope changes</h3><div class="detail-list">${
-      scopes || '<div class="detail-item">No scope expansion requested.</div>'
-    }</div></section>
-    <section class="detail-section"><h3>Integration</h3><div class="detail-list">${
-      integrations || '<div class="detail-item">Integration has not completed.</div>'
-    }</div></section>
-    <section class="detail-section"><h3>Changes</h3>${
-      diffs || '<div class="detail-item">No changeset diff recorded.</div>'
-    }</section>
-    ${
-      generalComments.trim().length === 0
-        ? ""
-        : `<section class="detail-section"><h3>Review</h3>${generalComments}</section>`
-    }
-    <section class="detail-section"><h3>Run audit</h3>${timeline(
-      detail.audit.map((event, index) => ({
-        sequence: index,
-        runId: run.id,
-        event,
-      })),
-      100,
-    )}</section>`;
+    <header class="pr-head">
+      <p class="eyebrow">Integration run</p>
+      <h1>${escapeHtml(run.repositoryId)}
+        <span class="muted">${escapeHtml(shortId(run.id, 16))}</span></h1>
+      <p class="muted">
+        ${statusBadge(run.status)}
+        <span class="chip">${escapeHtml(run.mode)}</span>
+        base <code>${escapeHtml(shortId(run.baseRevision, 12))}</code>
+        → <code>${escapeHtml(shortId(run.finalRevision ?? "pending", 12))}</code>
+        · started ${escapeHtml(formatDate(run.startedAt))}
+      </p>
+    </header>
+    <div class="pr-columns">
+      <nav class="pr-file-tree">
+        <h3 class="side-section-title muted" style="margin:4px 6px">Files changed (${
+          patchEntries.length
+        })</h3>
+        ${fileTree || '<p class="side-empty">No changeset diff recorded.</p>'}
+      </nav>
+      <div>
+        <section class="detail-section"><h3>Tasks</h3><div class="detail-list">${
+          taskItems || '<div class="detail-item">No task records.</div>'
+        }</div></section>
+        <section class="detail-section"><h3>Conflict evidence</h3><div class="detail-list">${
+          conflicts || '<div class="detail-item">No structural conflicts recorded.</div>'
+        }</div></section>
+        <section class="detail-section"><h3>Plan history</h3><div class="detail-list">${
+          revisions || '<div class="detail-item">No plan revisions recorded.</div>'
+        }</div></section>
+        <section class="detail-section"><h3>Scope changes</h3><div class="detail-list">${
+          scopes || '<div class="detail-item">No scope expansion requested.</div>'
+        }</div></section>
+        <section class="detail-section"><h3>Integration</h3><div class="detail-list">${
+          integrations || '<div class="detail-item">Integration has not completed.</div>'
+        }</div></section>
+        <section class="detail-section"><h3>Files changed</h3>${
+          diffs || '<div class="detail-item">No changeset diff recorded.</div>'
+        }</section>
+        ${
+          generalComments.trim().length === 0
+            ? ""
+            : `<section class="detail-section"><h3>Review</h3>${generalComments}</section>`
+        }
+        <section class="detail-section"><h3>Run audit</h3>${timeline(
+          detail.audit.map((event, index) => ({
+            sequence: index,
+            runId: run.id,
+            event,
+          })),
+          100,
+        )}</section>
+      </div>
+    </div>`;
 }
 
-async function inspectApproval(approvalId) {
-  openDrawer(
-    "Human gate",
-    `Approval ${shortId(approvalId, 12)}`,
-    '<div class="skeleton skeleton-tall"></div>',
-  );
+async function renderApprovalTab(container, tab) {
+  container.innerHTML =
+    '<div class="view"><div class="skeleton skeleton-tall"></div></div>';
   try {
-    const response = await api(`/approvals/${encodeURIComponent(approvalId)}`);
-    $("#drawer-body").innerHTML = renderApprovalDetail(
+    const response = await api(
+      `/approvals/${encodeURIComponent(tab.data.approvalId)}`,
+    );
+    if (activeTab() !== tab) {
+      return;
+    }
+    container.innerHTML = `<div class="view">${renderApprovalDetail(
       response.approval,
       response.changeSet,
-    );
+    )}</div>`;
   } catch (error) {
-    $("#drawer-body").innerHTML = `<div class="empty-state"><div><h2>Approval unavailable</h2><p>${escapeHtml(
+    container.innerHTML = `<div class="view"><div class="empty-state"><div><h2>Approval unavailable</h2><p>${escapeHtml(
       error.message,
-    )}</p></div></div>`;
+    )}</p></div></div></div>`;
   }
 }
 
@@ -1838,9 +2709,15 @@ function renderApprovalDetail(approval, changeSet) {
   const patches =
     changeSet?.patches
       ?.map(
-        (patch) => `<div class="detail-section"><h3>${escapeHtml(
-          patch.path,
-        )} · ${escapeHtml(patch.status)}</h3>${diffHtml(patch.patch)}</div>`,
+        (patch) => `
+        <div class="diff-file">
+          <div class="diff-file-head">
+            ${icon("file")}
+            <span class="path">${escapeHtml(patch.path)}</span>
+            ${statusBadge(patch.status)}
+          </div>
+          ${diffHtml(patch.patch)}
+        </div>`,
       )
       .join("") ?? "";
   const decision =
@@ -1849,8 +2726,10 @@ function renderApprovalDetail(approval, changeSet) {
           approval.id,
         )}">
           <label><span>Reviewer comment</span><textarea name="comment" placeholder="Explain the decision for the audit record"></textarea></label>
-          <button class="button button-danger" type="submit" name="status" value="rejected">Reject</button>
-          <button class="button button-primary" type="submit" name="status" value="approved">Approve</button>
+          <div class="decision-actions">
+            <button class="button button-danger" type="submit" name="status" value="rejected">Reject</button>
+            <button class="button button-primary" type="submit" name="status" value="approved">Approve</button>
+          </div>
         </form>`
       : `<div class="detail-item"><strong>${escapeHtml(
           approval.status,
@@ -1858,12 +2737,25 @@ function renderApprovalDetail(approval, changeSet) {
           approval.decisionComment ?? "No reviewer comment",
         )}</div>`;
   return `
+    <header class="pr-head">
+      <p class="eyebrow">Human gate</p>
+      <h1>${escapeHtml(approval.kind.replaceAll("_", " "))}</h1>
+      <p class="muted">
+        ${statusBadge(approval.status)}
+        Task <code>${escapeHtml(shortId(approval.taskId, 18))}</code>
+        · Run <button class="text-button" data-open-run="${escapeHtml(
+          approval.runId,
+        )}">${escapeHtml(shortId(approval.runId, 16))}</button>
+        · expires ${escapeHtml(formatDate(approval.expiresAt))}
+      </p>
+    </header>
     <div class="signal-banner${approval.status === "pending" ? " warn" : ""}">
       <span class="health-orb${approval.status === "pending" ? " warn" : ""}"></span>
-      <div><strong>${escapeHtml(
-        approval.kind.replaceAll("_", " "),
-      )}</strong><span>Task ${escapeHtml(shortId(approval.taskId, 18))}</span></div>
-      ${statusBadge(approval.status)}
+      <div><strong>${
+        approval.status === "pending"
+          ? "This gate is blocking work"
+          : "Decision recorded"
+      }</strong><span>Durable across worker and browser restarts.</span></div>
     </div>
     <section class="detail-section"><h3>Why review is required</h3><div class="detail-list">${reasons}</div></section>
     ${
@@ -1873,9 +2765,367 @@ function renderApprovalDetail(approval, changeSet) {
           )}</div></section>`
         : ""
     }
-    ${patches}
+    ${
+      patches
+        ? `<section class="detail-section"><h3>Proposed changes</h3>${patches}</section>`
+        : ""
+    }
     <section class="detail-section"><h3>Decision</h3>${decision}</section>`;
 }
+
+/**
+ * Canonical history for one repository, with rollback offered per revision.
+ *
+ * The rollback control sits here rather than on a settings page because the
+ * decision is always "back to *this* revision", and the only way to make that
+ * choice well is with the history in front of you.
+ */
+async function renderHistoryTab(container, tab) {
+  container.innerHTML =
+    '<div class="view"><div class="skeleton skeleton-tall"></div></div>';
+  const repositoryId = tab.data.repositoryId;
+  try {
+    const response = await api(
+      `/projects/${encodeURIComponent(state.projectId)}/repositories/` +
+        `${encodeURIComponent(repositoryId)}/versions?limit=50`,
+    );
+    if (activeTab() !== tab) {
+      return;
+    }
+    const versions = response.versions ?? [];
+    const canRollback = canManageProject();
+    container.innerHTML = `<div class="view">
+      <header class="view-head">
+        <p class="eyebrow">Canonical history</p>
+        <h1>${escapeHtml(repositoryId)}</h1>
+        <p>
+          Newest first. A rollback does not rewrite this history — it submits
+          the revert as an ordinary change, so the record keeps moving forward.
+        </p>
+      </header>
+      ${
+        versions.length === 0
+          ? '<div class="empty-state"><div><h2>No history</h2></div></div>'
+          : `<ol class="version-list">${versions
+              .map(
+                (version, index) => `
+          <li class="version-entry">
+            <div>
+              <p class="version-subject">${escapeHtml(version.subject)}</p>
+              <p class="muted">
+                <code>${escapeHtml(shortId(version.revision, 12))}</code>
+                · #${version.sequence}
+                · ${escapeHtml(version.author)}
+                · ${escapeHtml(formatDate(version.createdAt, { short: true }))}
+              </p>
+            </div>
+            ${
+              index === 0
+                ? '<span class="chip">current</span>'
+                : canRollback
+                  ? `<button class="mini-button" data-action="rollback"
+                       data-repo-id="${escapeHtml(repositoryId)}"
+                       data-revision="${escapeHtml(version.revision)}">Roll back to here</button>`
+                  : ""
+            }
+          </li>`,
+              )
+              .join("")}</ol>`
+      }
+    </div>`;
+  } catch (error) {
+    container.innerHTML = `<div class="view"><div class="empty-state"><div><h2>History unavailable</h2><p>${escapeHtml(
+      error.message,
+    )}</p></div></div></div>`;
+  }
+}
+
+async function requestRollback(repositoryId, revision) {
+  const reason = window.prompt(
+    `Roll ${repositoryId} back to ${shortId(revision, 12)}?\n\n` +
+      "The revert goes through validation and approval like any other change. " +
+      "Give a reason for the record:",
+  );
+  if (reason === null) {
+    return;
+  }
+  toast("Rollback submitted; it may wait for approval", "default");
+  try {
+    const response = await api(
+      `/projects/${encodeURIComponent(state.projectId)}/repositories/` +
+        `${encodeURIComponent(repositoryId)}/rollback`,
+      { method: "POST", body: { targetRevision: revision, reason } },
+    );
+    const result = response.rollback ?? {};
+    toast(
+      `Rollback ${result.status}: ${result.explanation ?? ""}`.trim(),
+      result.status === "integrated" ? "default" : "warn",
+    );
+    await loadContext({ quiet: true });
+  } catch (error) {
+    toast(error.message, "warn");
+  }
+}
+
+/* --------------------------------------------- explorer + editor tabs ---- */
+
+function renderExplorerView() {
+  return `<div class="editor-frame">
+    <div class="editor-placeholder">
+      <div>
+        <h2>Task workspace</h2>
+        <p>
+          ${
+            state.repositories.length === 0
+              ? "Import a repository, then open a workspace from the Explorer sidebar."
+              : state.workspace?.exists
+                ? "Pick a file from the Explorer sidebar to edit it here."
+                : "Open a workspace from the Explorer sidebar to browse and edit files."
+          }
+        </p>
+        <p class="muted">
+          Edits live in your own isolated overlay and only reach canonical
+          through the integration pipeline (validation, conflict check,
+          promotion) when you submit them.
+        </p>
+      </div>
+    </div>
+  </div>`;
+}
+
+async function renderFileTabContent(container, tab) {
+  container.innerHTML =
+    '<div class="view"><div class="skeleton skeleton-tall"></div></div>';
+  try {
+    const editor = await loadEditorModule();
+    if (activeTab() !== tab) {
+      return;
+    }
+    await editor.openFile(container, tab);
+  } catch (error) {
+    container.innerHTML = `<div class="view"><div class="empty-state"><div><h2>Editor unavailable</h2><p>${escapeHtml(
+      error.message,
+    )}</p></div></div></div>`;
+  }
+}
+
+let editorModulePromise;
+
+function loadEditorModule() {
+  editorModulePromise ??= import("/editor.js").then((module) => {
+    module.init({
+      state,
+      api,
+      toast,
+      escapeHtml,
+      icon,
+      shortId,
+      canEdit: () => canRun(),
+      markDirty: (path, dirty) => {
+        if (dirty) {
+          state.dirtyFiles.add(path);
+        } else {
+          state.dirtyFiles.delete(path);
+        }
+        renderTabStrip();
+        renderSidebar();
+      },
+      onSaved: () => void refreshWorkspace({ quiet: true }),
+      activeTab,
+    });
+    window.relayEditor = module;
+    return module;
+  });
+  return editorModulePromise;
+}
+
+/* ------------------------------------------------- workspace plumbing ---- */
+
+function workspaceBase() {
+  return (
+    `/projects/${encodeURIComponent(state.projectId)}` +
+    `/repositories/${encodeURIComponent(state.explorerRepo)}/workspace`
+  );
+}
+
+async function refreshWorkspace({ quiet = false } = {}) {
+  if (!state.projectId || !state.explorerRepo) {
+    state.workspace = undefined;
+    state.workspaceFiles = [];
+    renderSidebar();
+    return;
+  }
+  try {
+    const status = await api(workspaceBase());
+    state.workspace = { ...status.workspace, repositoryId: state.explorerRepo };
+    if (state.workspace.exists) {
+      const files = await api(`${workspaceBase()}/files`);
+      state.workspaceFiles = files.files ?? [];
+    } else {
+      state.workspaceFiles = [];
+    }
+  } catch (error) {
+    state.workspace = undefined;
+    state.workspaceFiles = [];
+    if (!quiet && error.status !== 501) {
+      toast(error.message, "error");
+    }
+  }
+  renderSidebar();
+  renderTerminalContext();
+}
+
+async function workspaceAction(action) {
+  try {
+    if (action === "workspace-open") {
+      await api(workspaceBase(), { method: "POST", body: {} });
+      toast("Workspace opened — an isolated overlay of canonical");
+    } else if (action === "workspace-reset") {
+      if (
+        !window.confirm(
+          "Reset the workspace to current canonical? Unsubmitted edits are discarded.",
+        )
+      ) {
+        return;
+      }
+      await api(`${workspaceBase()}/reset`, { method: "POST", body: {} });
+      toast("Workspace reset to canonical");
+    } else if (action === "workspace-discard") {
+      if (
+        !window.confirm(
+          "Discard this workspace and all unsubmitted edits in it?",
+        )
+      ) {
+        return;
+      }
+      await api(workspaceBase(), { method: "DELETE", body: {} });
+      toast("Workspace discarded");
+    } else if (action === "workspace-submit") {
+      const objective = window.prompt(
+        "Submit workspace changes through the integration pipeline?\n\n" +
+          "The change is validated and conflict-checked like any agent's " +
+          "work, and may wait for approval. Describe the change:",
+      );
+      if (objective === null || objective.trim().length === 0) {
+        return;
+      }
+      toast("Submitting through the integration pipeline…");
+      const response = await api(`${workspaceBase()}/submit`, {
+        method: "POST",
+        body: { objective: objective.trim() },
+      });
+      const result = response.result ?? {};
+      toast(
+        `Submission ${result.status}: ${result.explanation ?? ""}`.trim(),
+        result.status === "integrated" ? "default" : "warn",
+      );
+      await loadContext({ quiet: true });
+    } else if (action === "workspace-refresh") {
+      // fallthrough to the shared refresh below
+    }
+    await refreshWorkspace({ quiet: false });
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/* ------------------------------------------------------------ terminal --- */
+
+function renderTerminalContext() {
+  const target = $("#terminal-context");
+  if (!target) {
+    return;
+  }
+  if (!state.explorerRepo) {
+    target.textContent = "no repository selected";
+    return;
+  }
+  const sandbox = state.workspace?.sandbox;
+  target.textContent = `${state.explorerRepo} · ${
+    state.workspace?.exists
+      ? sandbox?.available
+        ? `sandboxed bash (${sandbox.image})`
+        : "sandbox unavailable"
+      : "no workspace open"
+  }`;
+}
+
+function terminalPrint(kind, text) {
+  const scroll = $("#terminal-scroll");
+  for (const line of String(text ?? "").split("\n")) {
+    const element = document.createElement("span");
+    element.className = `terminal-line ${kind}`;
+    element.textContent = line;
+    scroll.append(element);
+  }
+  scroll.scrollTop = scroll.scrollHeight;
+}
+
+async function runTerminalCommand(command) {
+  if (state.terminal.busy) {
+    return;
+  }
+  terminalPrint("cmd", command);
+  if (!state.projectId || !state.explorerRepo) {
+    terminalPrint("sys", "Select a repository in the Explorer first.");
+    return;
+  }
+  if (!state.workspace?.exists) {
+    terminalPrint(
+      "sys",
+      "No workspace is open. Open one from the Explorer sidebar first.",
+    );
+    return;
+  }
+  state.terminal.busy = true;
+  $("#terminal-input").disabled = true;
+  try {
+    const response = await api(`${workspaceBase()}/exec`, {
+      method: "POST",
+      body: { command },
+    });
+    const result = response.result ?? {};
+    if (result.stdout) {
+      terminalPrint("out", result.stdout.replace(/\n$/u, ""));
+    }
+    if (result.stderr) {
+      terminalPrint("err", result.stderr.replace(/\n$/u, ""));
+    }
+    terminalPrint(
+      "sys",
+      `exit ${result.exitCode}${result.timedOut ? " (timed out)" : ""} · ${duration(
+        result.durationMs,
+      )}`,
+    );
+    void refreshWorkspace({ quiet: true });
+  } catch (error) {
+    terminalPrint("err", error.message);
+  } finally {
+    state.terminal.busy = false;
+    const input = $("#terminal-input");
+    input.disabled = false;
+    input.focus();
+  }
+}
+
+function setPanel(open, tab) {
+  state.panelOpen = open;
+  if (tab) {
+    state.panelTab = tab;
+  }
+  $("#bottom-panel").hidden = !open;
+  $$(".panel-tab").forEach((button) => {
+    button.classList.toggle("active", button.dataset.panelTab === state.panelTab);
+  });
+  $$(".panel-view").forEach((view) => {
+    view.hidden = view.dataset.panelView !== state.panelTab;
+  });
+  if (open && state.panelTab === "terminal") {
+    $("#terminal-input")?.focus();
+  }
+}
+
+/* -------------------------------------------------------------- forms ---- */
 
 async function mutate(path, body, success) {
   await api(path, { method: "POST", body });
@@ -2001,21 +3251,19 @@ async function handleSubmit(event) {
         break;
       }
       case "comment-add": {
-        await api(
-          `/runs/${encodeURIComponent(state.inspectedRunId)}/comments`,
-          {
-            method: "POST",
-            body: {
-              changeSetId: form.dataset.changesetId,
-              body: value("body"),
-              ...(form.dataset.filePath === undefined
-                ? {}
-                : { filePath: form.dataset.filePath }),
-            },
+        const runId = form.dataset.runId;
+        await api(`/runs/${encodeURIComponent(runId)}/comments`, {
+          method: "POST",
+          body: {
+            changeSetId: form.dataset.changesetId,
+            body: value("body"),
+            ...(form.dataset.filePath === undefined
+              ? {}
+              : { filePath: form.dataset.filePath }),
           },
-        );
+        });
         toast("Comment added");
-        await inspectRun(state.inspectedRunId);
+        renderActiveTabContent();
         break;
       }
       case "organization-update":
@@ -2065,7 +3313,7 @@ async function handleSubmit(event) {
           { status, comment: value("comment") },
           `Approval ${status}`,
         );
-        closeDrawer();
+        renderActiveTabContent();
         break;
       }
       default:
@@ -2082,17 +3330,107 @@ async function handleSubmit(event) {
   }
 }
 
+/* -------------------------------------------------------------- clicks ---- */
+
 async function handleClick(event) {
   const target = event.target.closest("button, a");
   if (!target) {
     return;
   }
-  if (target.matches("[data-close-drawer]")) {
-    closeDrawer();
-    return;
-  }
   if (target.dataset.authMode) {
     setAuthMode(target.dataset.authMode);
+    return;
+  }
+  if (target.dataset.activity) {
+    const activity = target.dataset.activity;
+    if (state.activity === activity) {
+      // VS Code behavior: clicking the active icon toggles the sidebar.
+      $("#app-shell").classList.toggle("sidebar-collapsed");
+      $("#app-shell").classList.toggle("sidebar-open");
+      return;
+    }
+    state.activity = activity;
+    $("#app-shell").classList.remove("sidebar-collapsed");
+    $("#app-shell").classList.add("sidebar-open");
+    const entry = [...ACTIVITIES, ...FOOTER_ACTIVITIES].find(
+      (candidate) => candidate.id === activity,
+    );
+    if (entry) {
+      openView(entry.view);
+    }
+    if (activity === "explorer") {
+      void refreshWorkspace({ quiet: true });
+    }
+    return;
+  }
+  if (target.dataset.closeTab !== undefined) {
+    event.stopPropagation();
+    const tab = findTab(target.dataset.closeTab);
+    if (
+      tab?.kind === "file" &&
+      state.dirtyFiles.has(tab.data.path) &&
+      !window.confirm("Close this file and lose unsaved changes?")
+    ) {
+      return;
+    }
+    closeTab(target.dataset.closeTab);
+    return;
+  }
+  if (target.dataset.tabId) {
+    state.activeTabId = target.dataset.tabId;
+    const tab = activeTab();
+    if (tab?.kind === "view") {
+      state.activity = VIEW_META[tab.view]?.activity ?? state.activity;
+    } else if (tab?.kind === "file") {
+      state.activity = "explorer";
+    }
+    renderShell();
+    return;
+  }
+  if (target.dataset.openView) {
+    openView(target.dataset.openView);
+    return;
+  }
+  if (target.dataset.openRun) {
+    openRunTab(target.dataset.openRun);
+    return;
+  }
+  if (target.dataset.openApproval) {
+    openApprovalTab(target.dataset.openApproval);
+    return;
+  }
+  if (target.dataset.openHistory) {
+    openHistoryTab(target.dataset.openHistory);
+    return;
+  }
+  if (target.dataset.openFile) {
+    openFileTab(state.explorerRepo, target.dataset.openFile);
+    return;
+  }
+  if (target.dataset.toggleDir !== undefined) {
+    const path = target.dataset.toggleDir;
+    if (state.expandedDirs.has(path)) {
+      state.expandedDirs.delete(path);
+    } else {
+      state.expandedDirs.add(path);
+    }
+    renderSidebar();
+    return;
+  }
+  if (target.dataset.setTaskFilter) {
+    state.taskFilter = target.dataset.setTaskFilter;
+    renderShell();
+    return;
+  }
+  if (target.dataset.taskFilter) {
+    state.taskFilter = target.dataset.taskFilter;
+    openView("tasks");
+    return;
+  }
+  if (
+    target.dataset.action?.startsWith("workspace-")
+  ) {
+    await workspaceAction(target.dataset.action);
     return;
   }
   if (target.id === "refresh-button") {
@@ -2108,14 +3446,17 @@ async function handleClick(event) {
     }
     return;
   }
-  if (target.id === "menu-button") {
-    const open = $("#rail").classList.toggle("open");
-    target.setAttribute("aria-expanded", String(open));
+  if (target.id === "panel-toggle") {
+    setPanel(!state.panelOpen);
     return;
   }
-  if (target.closest(".primary-nav")) {
-    $("#rail").classList.remove("open");
-    $("#menu-button").setAttribute("aria-expanded", "false");
+  if (target.id === "panel-close") {
+    setPanel(false);
+    return;
+  }
+  if (target.dataset.panelTab) {
+    setPanel(true, target.dataset.panelTab);
+    return;
   }
   if (target.dataset.runRepo) {
     target.setAttribute("disabled", "");
@@ -2157,26 +3498,14 @@ async function handleClick(event) {
         { method: "POST", body: {} },
       );
       toast("Comment resolved");
-      await inspectRun(state.inspectedRunId);
+      renderActiveTabContent();
     } catch (error) {
       toast(error.message, "error");
     }
     return;
   }
-  if (target.dataset.action === "repo-history") {
-    await inspectRepositoryHistory(target.dataset.repoId);
-    return;
-  }
   if (target.dataset.action === "rollback") {
     await requestRollback(target.dataset.repoId, target.dataset.revision);
-    return;
-  }
-  if (target.dataset.runId) {
-    await inspectRun(target.dataset.runId);
-    return;
-  }
-  if (target.dataset.approvalId) {
-    await inspectApproval(target.dataset.approvalId);
     return;
   }
   if (target.dataset.memberRemove) {
@@ -2228,6 +3557,12 @@ async function handleChange(event) {
     await loadContext({ quiet: true });
     return;
   }
+  if (target.id === "explorer-repo-select") {
+    state.explorerRepo = target.value;
+    localStorage.setItem("relay.explorerRepo", state.explorerRepo);
+    await refreshWorkspace();
+    return;
+  }
   if (target.dataset.memberRole) {
     try {
       await api(
@@ -2245,13 +3580,19 @@ async function handleChange(event) {
   }
 }
 
+/* ---------------------------------------------------------------- boot ---- */
+
 async function enterApp() {
   const me = await api("/auth/me");
   state.principal = me;
   $("#auth-shell").hidden = true;
   $("#app-shell").hidden = false;
   authMessage("");
+  applyHash();
   await loadContext({ quiet: true });
+  if (state.activity === "explorer") {
+    void refreshWorkspace({ quiet: true });
+  }
 }
 
 async function boot() {
@@ -2264,11 +3605,38 @@ async function boot() {
   document.addEventListener("change", (event) => {
     void handleChange(event);
   });
-  window.addEventListener("hashchange", render);
+  window.addEventListener("hashchange", () => {
+    applyHash();
+  });
   window.addEventListener("keydown", (event) => {
-    if (event.key === "Escape") {
-      closeDrawer();
-      $("#rail").classList.remove("open");
+    if (event.key === "`" && event.ctrlKey) {
+      event.preventDefault();
+      setPanel(!state.panelOpen);
+    }
+  });
+  $("#terminal-input").addEventListener("keydown", (event) => {
+    const input = event.target;
+    if (event.key === "Enter") {
+      const command = input.value.trim();
+      if (command.length === 0) {
+        return;
+      }
+      state.terminal.history.push(command);
+      state.terminal.historyIndex = state.terminal.history.length;
+      input.value = "";
+      void runTerminalCommand(command);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      if (state.terminal.historyIndex > 0) {
+        state.terminal.historyIndex -= 1;
+        input.value = state.terminal.history[state.terminal.historyIndex] ?? "";
+      }
+    } else if (event.key === "ArrowDown") {
+      event.preventDefault();
+      if (state.terminal.historyIndex < state.terminal.history.length) {
+        state.terminal.historyIndex += 1;
+        input.value = state.terminal.history[state.terminal.historyIndex] ?? "";
+      }
     }
   });
 
@@ -2298,5 +3666,7 @@ async function boot() {
     showAuth();
   }
 }
+
+export { policyPayload };
 
 void boot();

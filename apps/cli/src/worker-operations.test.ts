@@ -14,8 +14,20 @@ import {
   createScratchDatabase,
   startPostgresTestServer,
 } from "@coord/persistence/testing";
+import {
+  DEFERRED_SCOPE_MARKER,
+  PlanAdmissionController,
+  type PlanAdmissionInput,
+} from "@coord/coordinator";
 import { GitClient, RepositoryService } from "@coord/repository-service";
-import type { AgentPlan, ChangeSet } from "@coord/shared-types";
+import {
+  deferredFilePaths,
+  planAdmissionApproved,
+  planAdmissionPartial,
+  type AgentPlan,
+  type ChangeSet,
+  type PlanAdmission,
+} from "@coord/shared-types";
 import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
 
 import {
@@ -42,6 +54,8 @@ interface Harness {
 
 async function createHarness(
   store: CoordinationStore = new InMemoryCoordinationStore(),
+  /** Extra seeded files, repository-relative, for multi-file scenarios. */
+  extraFiles: Readonly<Record<string, string>> = {},
 ): Promise<Harness> {
   const root = await mkdtemp(path.join(os.tmpdir(), "cwork-"));
   const sourcePath = path.join(root, "src-repo");
@@ -54,6 +68,11 @@ async function createHarness(
     "export const value = 1;\n",
     "utf8",
   );
+  for (const [file, contents] of Object.entries(extraFiles)) {
+    const target = path.join(sourcePath, file);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(target, contents, "utf8");
+  }
   await repositories.commitAll(sourcePath, "seed");
 
   const canonical = await repositories.importLocalRepository(
@@ -1483,6 +1502,586 @@ test("a lapsed lease cannot have a plan admitted", async () => {
     assert.equal(
       (await harness.store.listSubmittedTasks({ status: "submitted" })).length,
       1,
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Partial admission end to end.
+ *
+ * One task holds src/value.js. A second task declares that file plus four
+ * nobody is touching. All-or-nothing arbitration makes the second task wait
+ * for all five; here it is admitted on the four immediately, the fifth is
+ * withheld, and the withheld part comes back as a task of its own.
+ */
+
+const FREE_FILES = ["src/a.js", "src/b.js", "src/c.js", "src/d.js"];
+
+/** A repository with the contested file plus four uncontested ones. */
+async function splitHarness(): Promise<Harness> {
+  return await createHarness(
+    new InMemoryCoordinationStore(),
+    Object.fromEntries(
+      FREE_FILES.map((file, index) => [
+        file,
+        `export const free${index} = ${index};\n`,
+      ]),
+    ),
+  );
+}
+
+/** Puts one task in flight holding src/value.js, and leaves it holding it. */
+async function holdTheContestedFile(harness: Harness): Promise<WorkAssignment> {
+  await harness.store.submitTask({
+    repositoryId: "repo_worker",
+    objective: "extend the value module",
+    agentId: "generic-cli",
+    validationCommands: [],
+  });
+  const assignment = await leaseWork(
+    harness.store,
+    {
+      workerId: harness.workerId,
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryParallelism: 2,
+    },
+    harness.repositories,
+  );
+  assert.ok(assignment);
+  const outcome = await admitWorkPlan(
+    harness.store,
+    {
+      leaseId: assignment.lease.id,
+      actorId: "user",
+      plan: plan(assignment.task.id, {
+        objective: assignment.task.objective,
+        expectedFiles: ["src/value.js"],
+        expectedSymbols: ["value"],
+      }),
+    },
+    { repositories: harness.repositories },
+  );
+  assert.ok(outcome.outcome === "admitted");
+  assert.equal(outcome.admission.status, "approved");
+  return assignment;
+}
+
+/** Leases the second task, which wants the held file and four free ones. */
+async function leaseTheSplitTask(harness: Harness): Promise<WorkAssignment> {
+  const user = await harness.store.createUser({
+    email: `split-${Math.random().toString(36).slice(2)}@example.com`,
+    displayName: "Split",
+    passwordDigest: "digest",
+  });
+  const worker = await harness.store.registerWorker({
+    userId: user.id,
+    name: `worker-split-${Math.random().toString(36).slice(2)}`,
+    adapters: ["generic-cli"],
+    version: "1.0.0",
+  });
+  await harness.store.submitTask({
+    repositoryId: "repo_worker",
+    objective: "raise every constant",
+    agentId: "generic-cli",
+    validationCommands: [],
+  });
+  const assignment = await leaseWork(
+    harness.store,
+    {
+      workerId: worker.id,
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryParallelism: 2,
+    },
+    harness.repositories,
+  );
+  assert.ok(assignment);
+  return assignment;
+}
+
+function splitTaskPlan(assignment: WorkAssignment): AgentPlan {
+  return plan(assignment.task.id, {
+    objective: assignment.task.objective,
+    expectedFiles: [...FREE_FILES, "src/value.js"],
+    expectedSymbols: [],
+  });
+}
+
+/**
+ * Submits a plan and keeps resubmitting it until it is admitted, exactly as
+ * the worker's deferral loop does, returning how long that took.
+ */
+async function admissionWait(
+  harness: Harness,
+  assignment: WorkAssignment,
+  services: Parameters<typeof admitWorkPlan>[2],
+): Promise<{ admission: PlanAdmission; waitedMs: number }> {
+  const startedAt = Date.now();
+  const submit = async () =>
+    await admitWorkPlan(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        actorId: "user",
+        plan: splitTaskPlan(assignment),
+      },
+      services,
+    );
+  let outcome = await submit();
+  while (
+    outcome.outcome === "admitted" &&
+    !planAdmissionApproved(outcome.admission) &&
+    Date.now() - startedAt < 30_000
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    outcome = await submit();
+  }
+  assert.ok(outcome.outcome === "admitted");
+  return { admission: outcome.admission, waitedMs: Date.now() - startedAt };
+}
+
+/** Arbitration as it was before partial admission: the whole plan or none. */
+class WholePlanAdmissions extends PlanAdmissionController {
+  public override admit(input: PlanAdmissionInput): PlanAdmission {
+    return super.admit({ ...input, partialAdmission: false });
+  }
+}
+
+test("a partly contested task lands its free files while the contested one is still held", async () => {
+  const harness = await splitHarness();
+  try {
+    const holder = await holdTheContestedFile(harness);
+    const split = await leaseTheSplitTask(harness);
+
+    const admitted = await admitWorkPlan(
+      harness.store,
+      {
+        leaseId: split.lease.id,
+        actorId: "user",
+        plan: splitTaskPlan(split),
+      },
+      { repositories: harness.repositories },
+    );
+    assert.ok(admitted.outcome === "admitted");
+    const admission = admitted.admission;
+
+    // Admitted, not sequenced — and specific about what it withheld.
+    assert.equal(admission.status, "approved_with_constraints");
+    assert.ok(planAdmissionPartial(admission));
+    assert.deepEqual(deferredFilePaths(admission), ["src/value.js"]);
+    assert.deepEqual(
+      admission.deferredResources
+        ?.filter((resource) => resource.resourceType === "file")
+        .flatMap((resource) => resource.heldBy),
+      [holder.task.id],
+    );
+    assert.deepEqual(
+      admission.ownershipGrants
+        .filter((grant) => grant.resourceType === "file")
+        .map((grant) => grant.resourceId)
+        .sort(),
+      FREE_FILES,
+    );
+    // The contested file is owned by nobody but the holder.
+    assert.ok(
+      !admission.ownershipGrants.some(
+        (grant) => grant.resourceId === "src/value.js",
+      ),
+    );
+
+    // The agent ignores the constraint and edits all five files. What it was
+    // told does not decide what lands; what it was granted does.
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const repository = {
+      id: stored.id,
+      path: stored.path,
+      branch: stored.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId: split.task.id,
+      rootPath: path.join(harness.root, "split-workspace"),
+      repository,
+      baseVersion: split.canonicalVersion,
+    });
+    for (const [index, file] of FREE_FILES.entries()) {
+      await writeFile(
+        path.join(workspace.path, file),
+        `export const free${index} = ${index + 100};\n`,
+        "utf8",
+      );
+    }
+    await writeFile(
+      path.join(workspace.path, "src", "value.js"),
+      "export const value = 999;\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: [],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "raised every constant",
+    });
+    await workspaces.destroy(workspace);
+    assert.equal(changeSet.patches.length, 5);
+
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: split.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: splitTaskPlan(split),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(accepted.accepted, true, accepted.reason);
+    assert.equal(accepted.integrationStatus, "integrated");
+
+    // The four free files are in canonical. The contested one is untouched:
+    // a patch was produced for it and never applied.
+    const version = await harness.repositories.getCanonicalVersion(repository);
+    for (const [index, file] of FREE_FILES.entries()) {
+      assert.equal(
+        await harness.repositories.readFile(repository, version.revision, file),
+        `export const free${index} = ${index + 100};\n`,
+      );
+    }
+    assert.equal(
+      await harness.repositories.readFile(
+        repository,
+        version.revision,
+        "src/value.js",
+      ),
+      "export const value = 1;\n",
+    );
+
+    // The whole point, stated as a fact about time: this landed while the
+    // holder still held the contested file. Under all-or-nothing arbitration
+    // none of it could have landed before the holder settled.
+    assert.equal(
+      (await harness.store.getWorkLease(holder.lease.id))?.status,
+      "active",
+    );
+    assert.equal(
+      (await harness.store.listSubmittedTasks()).find(
+        (task) => task.id === holder.task.id,
+      )?.status,
+      "claimed",
+    );
+
+    // The withheld work is queued as a task of its own, not lost.
+    const followUp = (
+      await harness.store.listSubmittedTasks({ status: "submitted" })
+    ).find((task) => task.objective.includes(DEFERRED_SCOPE_MARKER));
+    assert.ok(followUp, "the deferred scope must come back as a task");
+    assert.match(followUp.objective, /src\/value\.js/u);
+    assert.match(followUp.objective, /raise every constant/u);
+    assert.equal(followUp.repositoryId, "repo_worker");
+    assert.equal(followUp.agentId, split.task.agentId);
+
+    // The record shows what was promoted and what was held back, rather than
+    // implying the agent's whole output reached canonical.
+    const detail = await harness.store.getRun(accepted.runId ?? "");
+    assert.equal(detail?.changeSets.length, 1);
+    assert.deepEqual(
+      detail?.changeSets[0]?.patches.map((entry) => entry.path).sort(),
+      FREE_FILES,
+    );
+    const collected = (
+      await harness.store.listAuditEvents({ taskId: split.task.id })
+    ).find((entry) => entry.event.type === "changeset_collected");
+    assert.deepEqual(collected?.event.data["withheldFiles"], ["src/value.js"]);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("partial admission starts work that all-or-nothing arbitration would have made wait", async () => {
+  // The timing claim, measured. Both runs are the same repository shape, the
+  // same two tasks and the same contested file; the only difference is whether
+  // admission may split the plan. The holder settles after a fixed delay, so
+  // the all-or-nothing run cannot start before then and the partial run does
+  // not have to wait at all.
+  const HOLD_MS = 2_000;
+
+  const sequenced = await splitHarness();
+  const partial = await splitHarness();
+  const releaseTimers: NodeJS.Timeout[] = [];
+  try {
+    const sequencedHolder = await holdTheContestedFile(sequenced);
+    const sequencedSplit = await leaseTheSplitTask(sequenced);
+    const partialHolder = await holdTheContestedFile(partial);
+    const partialSplit = await leaseTheSplitTask(partial);
+
+    // The contested file frees up HOLD_MS after each run starts, so the two
+    // measurements are of the same wait and not of each other's setup.
+    const releaseAfterHold = (harness: Harness, leaseId: string): void => {
+      releaseTimers.push(
+        setTimeout(() => {
+          void harness.store.finishWorkLease(
+            leaseId,
+            "released",
+            new Date().toISOString(),
+            "holder finished",
+          );
+        }, HOLD_MS),
+      );
+    };
+
+    releaseAfterHold(sequenced, sequencedHolder.lease.id);
+    const wholePlan = await admissionWait(sequenced, sequencedSplit, {
+      repositories: sequenced.repositories,
+      admissions: new WholePlanAdmissions(),
+    });
+
+    releaseAfterHold(partial, partialHolder.lease.id);
+    const split = await admissionWait(partial, partialSplit, {
+      repositories: partial.repositories,
+    });
+
+    // All-or-nothing: nothing could start until the holder let go.
+    assert.equal(wholePlan.admission.status, "approved");
+    assert.ok(
+      wholePlan.waitedMs >= HOLD_MS,
+      `all-or-nothing admission should have waited for the holder, waited ${wholePlan.waitedMs}ms`,
+    );
+
+    // Partial: admitted on the four free files on the first submission, with
+    // the holder still holding the fifth.
+    assert.equal(split.admission.status, "approved_with_constraints");
+    assert.deepEqual(deferredFilePaths(split.admission), ["src/value.js"]);
+    assert.ok(
+      split.waitedMs < HOLD_MS,
+      `partial admission should not have waited for the holder, waited ${split.waitedMs}ms`,
+    );
+    assert.ok(
+      split.waitedMs < wholePlan.waitedMs,
+      `partial ${split.waitedMs}ms should beat all-or-nothing ${wholePlan.waitedMs}ms`,
+    );
+    assert.equal(
+      (await partial.store.getWorkLease(partialHolder.lease.id))?.status,
+      "active",
+      "the partial run must have been admitted before the holder let go",
+    );
+  } finally {
+    for (const timer of releaseTimers) {
+      clearTimeout(timer);
+    }
+    await rm(sequenced.root, { recursive: true, force: true });
+    await rm(partial.root, { recursive: true, force: true });
+  }
+});
+
+test("a follow-up task is arbitrated whole, so a task sheds scope only once", async () => {
+  const harness = await splitHarness();
+  try {
+    const holder = await holdTheContestedFile(harness);
+    // A follow-up naming the contested file and a free one. Partial admission
+    // would happily grant the free one; the marker in the objective is what
+    // stops it, and the task waits for the whole thing instead.
+    await harness.store.submitTask({
+      repositoryId: "repo_worker",
+      objective: `${DEFERRED_SCOPE_MARKER} raise every constant — only the part that belongs in src/value.js`,
+      agentId: "generic-cli",
+      validationCommands: [],
+    });
+    const assignment = await leaseWork(
+      harness.store,
+      {
+        workerId: harness.workerId,
+        projectId: DEFAULT_PROJECT_ID,
+        repositoryParallelism: 2,
+      },
+      harness.repositories,
+    );
+    assert.ok(assignment);
+    assert.ok(assignment.task.objective.includes(DEFERRED_SCOPE_MARKER));
+
+    const outcome = await admitWorkPlan(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        actorId: "user",
+        plan: plan(assignment.task.id, {
+          objective: assignment.task.objective,
+          expectedFiles: ["src/a.js", "src/value.js"],
+          expectedSymbols: [],
+        }),
+      },
+      { repositories: harness.repositories },
+    );
+    assert.ok(outcome.outcome === "admitted");
+    assert.equal(outcome.admission.status, "sequenced");
+    assert.equal(outcome.admission.deferredResources, undefined);
+    assert.deepEqual(outcome.admission.blockedBy, [holder.task.id]);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("an agent that only edited the deferred file is requeued, not failed", async () => {
+  const harness = await splitHarness();
+  try {
+    await holdTheContestedFile(harness);
+    const split = await leaseTheSplitTask(harness);
+    const admitted = await admitWorkPlan(
+      harness.store,
+      {
+        leaseId: split.lease.id,
+        actorId: "user",
+        plan: splitTaskPlan(split),
+      },
+      { repositories: harness.repositories },
+    );
+    assert.ok(admitted.outcome === "admitted");
+    assert.equal(admitted.admission.status, "approved_with_constraints");
+
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId: split.task.id,
+      rootPath: path.join(harness.root, "deferred-only-workspace"),
+      repository: {
+        id: stored.id,
+        path: stored.path,
+        branch: stored.branch,
+      },
+      baseVersion: split.canonicalVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "value.js"),
+      "export const value = 42;\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: [],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "only touched the deferred file",
+    });
+    await workspaces.destroy(workspace);
+
+    const outcome = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: split.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: splitTaskPlan(split),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+
+    // Nothing to promote, but nothing wrong with the task either: it goes back
+    // to the queue at full scope rather than being marked failed.
+    assert.equal(outcome.accepted, false);
+    assert.equal(outcome.requeued, true);
+    assert.match(outcome.reason ?? "", /deferred resource/u);
+    assert.equal(
+      (await harness.store.listSubmittedTasks()).find(
+        (task) => task.id === split.task.id,
+      )?.status,
+      "submitted",
+    );
+    // Canonical never moved, and no follow-up task was invented for work that
+    // never landed.
+    assert.equal(
+      (await harness.store.listSubmittedTasks()).some((task) =>
+        task.objective.includes(DEFERRED_SCOPE_MARKER),
+      ),
+      false,
+    );
+    assert.equal((await harness.store.listRuns()).length, 0);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a changeset touching a file that was never arbitrated is still refused", async () => {
+  // Partial admission widens what a result may declare, not what it may
+  // write. A file in neither the granted nor the deferred set is the same
+  // scope escape it always was.
+  const harness = await splitHarness();
+  try {
+    await holdTheContestedFile(harness);
+    const split = await leaseTheSplitTask(harness);
+    const admitted = await admitWorkPlan(
+      harness.store,
+      {
+        leaseId: split.lease.id,
+        actorId: "user",
+        plan: splitTaskPlan(split),
+      },
+      { repositories: harness.repositories },
+    );
+    assert.ok(admitted.outcome === "admitted");
+    assert.equal(admitted.admission.status, "approved_with_constraints");
+
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId: split.task.id,
+      rootPath: path.join(harness.root, "escape-workspace"),
+      repository: {
+        id: stored.id,
+        path: stored.path,
+        branch: stored.branch,
+      },
+      baseVersion: split.canonicalVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "a.js"),
+      "export const free0 = 100;\n",
+      "utf8",
+    );
+    await writeFile(
+      path.join(workspace.path, "src", "surprise.js"),
+      "export const surprise = true;\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: [],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "wandered outside the plan",
+    });
+    await workspaces.destroy(workspace);
+
+    const outcome = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: split.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: splitTaskPlan(split),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(outcome.accepted, false);
+    assert.match(outcome.reason ?? "", /src\/surprise\.js/u);
+    assert.equal(
+      (await harness.store.getWorkLease(split.lease.id))?.status,
+      "failed",
     );
   } finally {
     await rm(harness.root, { recursive: true, force: true });

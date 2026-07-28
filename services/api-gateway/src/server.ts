@@ -2464,11 +2464,15 @@ export class ApiGateway {
     response.setHeader("X-Frame-Options", "DENY");
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    // style-src allows 'unsafe-inline' because the vendored Monaco editor
+    // injects its theming through runtime <style> elements; script-src stays
+    // 'self' (no CDN, no inline scripts) and workers are same-origin scripts.
     response.setHeader(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self'; style-src 'self'; " +
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; " +
         "img-src 'self' data:; connect-src 'self' ws: wss:; " +
-        "font-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+        "font-src 'self'; worker-src 'self'; object-src 'none'; " +
+        "base-uri 'none'; frame-ancestors 'none'",
     );
   }
 

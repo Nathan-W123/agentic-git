@@ -8,6 +8,7 @@ import {
   uniqueRepositoryPaths,
   uniqueStrings,
   type AgentPlan,
+  type PlanResourceRef,
 } from "@coord/shared-types";
 import ts from "typescript";
 
@@ -33,6 +34,10 @@ export interface IndexedFile {
   tests: string[];
   services: string[];
 }
+
+/** Paths enrichment treats as tests in their own right. */
+const TEST_FILE_PATH =
+  /(?:^|\/)(?:test|tests|__tests__)(?:\/|$)|\.(?:test|spec)\./u;
 
 export interface DependencyEdge {
   fromFile: string;
@@ -485,6 +490,41 @@ export class CodeIntelligenceService {
   }
 
   /**
+   * The resources {@link enrichPlan} would attribute to one file.
+   *
+   * Enrichment is one-way: a plan naming a file ends up claiming that file's
+   * symbols, APIs and schemas, and afterwards nothing records where any of
+   * them came from. Partial admission needs the inverse — if a file is
+   * withheld, which of the plan's claims exist only because of it? — so the
+   * attribution lives here, beside the projection it has to agree with.
+   */
+  public resourcesInFile(
+    index: RepositoryIndex,
+    filePath: string,
+  ): PlanResourceRef[] {
+    const file = index.files.find((entry) => entry.path === filePath);
+    if (file === undefined) {
+      return [];
+    }
+    const refs = (
+      resourceType: PlanResourceRef["resourceType"],
+      ids: readonly string[],
+    ): PlanResourceRef[] =>
+      ids.map((resourceId) => ({ resourceType, resourceId }));
+    return [
+      ...refs("symbol", file.symbols),
+      ...refs("api", file.apis),
+      ...refs("schema", file.schemas),
+      ...refs("configuration", file.configKeys),
+      ...refs("test", file.tests),
+      ...refs("service", file.services),
+      ...(TEST_FILE_PATH.test(file.path)
+        ? refs("test", [file.path])
+        : []),
+    ];
+  }
+
+  /**
    * Conservatively projects indexed resources for every file an agent plans
    * to modify. This catches consumers and shared contracts before editing.
    */
@@ -516,7 +556,7 @@ export class CodeIntelligenceService {
         ...(plan.expectedTests ?? []),
         ...files.flatMap((file) => file.tests),
         ...files
-          .filter((file) => /(?:^|\/)(?:test|tests|__tests__)(?:\/|$)|\.(?:test|spec)\./u.test(file.path))
+          .filter((file) => TEST_FILE_PATH.test(file.path))
           .map((file) => file.path),
       ]),
       expectedServices: uniqueStrings([
