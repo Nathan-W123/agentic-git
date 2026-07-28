@@ -105,7 +105,10 @@ async function lease(harness: Harness) {
   });
 }
 
-function plan(taskId: string): AgentPlan {
+function plan(
+  taskId: string,
+  overrides: Partial<AgentPlan> = {},
+): AgentPlan {
   return {
     taskId,
     objective: "raise the value",
@@ -115,6 +118,7 @@ function plan(taskId: string): AgentPlan {
     commands: [],
     externalAccess: [],
     riskLevel: "low",
+    ...overrides,
   };
 }
 
@@ -539,6 +543,206 @@ test("a failed result settles the task and is audited", async () => {
     const failure = audit.find((event) => event.type === "task_failed");
     assert.equal(failure?.taskId, taskId);
     assert.equal(failure?.data["detail"], "agent exited with code 3");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent workers in one repository cannot corrupt canonical; the loser replans", async () => {
+  const harness = await createHarness();
+  try {
+    const secondUser = await harness.store.createUser({
+      email: "fleet-b@example.com",
+      displayName: "Fleet B",
+      passwordDigest: "digest",
+    });
+    const secondWorker = await harness.store.registerWorker({
+      userId: secondUser.id,
+      name: "worker-b",
+      adapters: ["generic-cli"],
+      version: "1.0.0",
+    });
+
+    const taskA = await harness.store.submitTask({
+      repositoryId: "repo_worker",
+      objective: "raise the value",
+      agentId: "generic-cli",
+      validationCommands: [],
+    });
+    const taskB = await harness.store.submitTask({
+      repositoryId: "repo_worker",
+      objective: "add another module",
+      agentId: "generic-cli",
+      validationCommands: [],
+    });
+
+    // Both workers hold leases in the same repository, at the same base.
+    const assignmentA = await leaseWork(harness.store, {
+      workerId: harness.workerId,
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryParallelism: 2,
+    });
+    const assignmentB = await leaseWork(harness.store, {
+      workerId: secondWorker.id,
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryParallelism: 2,
+    });
+    assert.equal(assignmentA?.task.id, taskA.id);
+    assert.equal(assignmentB?.task.id, taskB.id);
+    assert.ok(assignmentA && assignmentB);
+    assert.equal(assignmentA.lease.baseRevision, assignmentB.lease.baseRevision);
+
+    const repository = await harness.store.getRepository("repo_worker");
+    assert.ok(repository);
+    const canonical = {
+      id: repository.id,
+      path: repository.path,
+      branch: repository.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const collect = async (
+      taskId: string,
+      baseVersion: typeof assignmentA.canonicalVersion,
+      file: string,
+      content: string,
+      symbols: string[],
+    ) => {
+      const workspace = await workspaces.create({
+        taskId,
+        rootPath: path.join(harness.root, "agent-workspaces"),
+        repository: canonical,
+        baseVersion,
+      });
+      await mkdir(path.dirname(path.join(workspace.path, file)), {
+        recursive: true,
+      });
+      await writeFile(path.join(workspace.path, file), content, "utf8");
+      const changeSet = await workspaces.collectChangeSet(workspace, {
+        symbolsChanged: symbols,
+        riskAssessment: { level: "low", reasons: [] },
+        agentExplanation: `changed ${file}`,
+      });
+      await workspaces.destroy(workspace);
+      return changeSet;
+    };
+
+    // Worker A integrates first and moves canonical.
+    const acceptedA = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignmentA.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskA.id),
+        changeSet: await collect(
+          taskA.id,
+          assignmentA.canonicalVersion,
+          "src/value.js",
+          "export const value = 2;\n",
+          ["value"],
+        ),
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(acceptedA.accepted, true, acceptedA.reason);
+
+    // Worker B built from the now-stale base. Its result must not integrate
+    // — and must not fail the task either: it requeues to replan.
+    const staleResult = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignmentB.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: "add another module",
+          expectedFiles: ["src/other.js"],
+          expectedSymbols: ["other"],
+        }),
+        changeSet: await collect(
+          taskB.id,
+          assignmentB.canonicalVersion,
+          "src/other.js",
+          "export const other = 1;\n",
+          ["other"],
+        ),
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(staleResult.accepted, false);
+    assert.equal(staleResult.requeued, true);
+    assert.equal(
+      (await harness.store.listSubmittedTasks()).find(
+        (task) => task.id === taskB.id,
+      )?.status,
+      "submitted",
+    );
+
+    // The requeued task re-leases at the promoted revision and integrates.
+    const retryAssignment = await leaseWork(harness.store, {
+      workerId: secondWorker.id,
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryParallelism: 2,
+    });
+    assert.equal(retryAssignment?.task.id, taskB.id);
+    assert.ok(retryAssignment);
+    assert.notEqual(
+      retryAssignment.lease.baseRevision,
+      assignmentB.lease.baseRevision,
+    );
+    const acceptedB = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: retryAssignment.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: "add another module",
+          expectedFiles: ["src/other.js"],
+          expectedSymbols: ["other"],
+        }),
+        changeSet: await collect(
+          taskB.id,
+          retryAssignment.canonicalVersion,
+          "src/other.js",
+          "export const other = 1;\n",
+          ["other"],
+        ),
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(acceptedB.accepted, true, acceptedB.reason);
+
+    // Canonical carries both changes, in order, with a valid audit chain.
+    const version = await harness.repositories.getCanonicalVersion(canonical);
+    assert.equal(
+      await harness.repositories.readFile(
+        canonical,
+        version.revision,
+        "src/value.js",
+      ),
+      "export const value = 2;\n",
+    );
+    assert.equal(
+      await harness.repositories.readFile(
+        canonical,
+        version.revision,
+        "src/other.js",
+      ),
+      "export const other = 1;\n",
+    );
+    assert.equal((await harness.store.verifyAudit()).valid, true);
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }

@@ -39,6 +39,34 @@ import type { CoordinatorProject } from "./project.js";
 export const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
 const HEARTBEAT_INTERVAL_MS = 60 * 1000;
 
+/**
+ * How many remote workers may hold leases in one repository at once.
+ *
+ * Concurrency is optimistic: every result must still integrate from the exact
+ * base it was leased at, and a result whose base went stale is requeued to
+ * replan, so this bound trades duplicate agent effort against wall-clock
+ * throughput without touching correctness. Operators tune it with
+ * COORD_REPOSITORY_PARALLELISM; workers cannot choose it for themselves.
+ */
+export const DEFAULT_REPOSITORY_PARALLELISM = 4;
+
+function configuredRepositoryParallelism(explicit?: number): number {
+  if (explicit !== undefined) {
+    return explicit;
+  }
+  const raw = process.env["COORD_REPOSITORY_PARALLELISM"]?.trim() ?? "";
+  if (raw.length === 0) {
+    return DEFAULT_REPOSITORY_PARALLELISM;
+  }
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(
+      "COORD_REPOSITORY_PARALLELISM must be a positive integer",
+    );
+  }
+  return value;
+}
+
 export interface WorkAssignment {
   lease: WorkLease;
   task: SubmittedTask;
@@ -143,8 +171,11 @@ function adapterName(
 /**
  * Atomically leases the next compatible task in one authorized project.
  *
- * The store serializes active leases per repository, so remote workers always
- * plan from the latest accepted canonical state rather than racing blind edits.
+ * A repository admits a bounded number of concurrent leases
+ * ({@link DEFAULT_REPOSITORY_PARALLELISM}). Each lease pins the exact
+ * canonical revision it was issued at; result acceptance integrates from that
+ * exact base or requeues the task to replan, so concurrent workers can never
+ * corrupt canonical — a losing worker only wastes its own effort.
  */
 export async function leaseWork(
   store: CoordinationStore,
@@ -152,6 +183,8 @@ export async function leaseWork(
     workerId: string;
     projectId: string;
     repositoryId?: string;
+    /** Test override; deployments configure COORD_REPOSITORY_PARALLELISM. */
+    repositoryParallelism?: number;
   },
   repositories = new RepositoryService(),
   project?: CoordinatorProject,
@@ -160,6 +193,9 @@ export async function leaseWork(
   if (worker === undefined) {
     throw new Error(`Unknown worker: ${input.workerId}`);
   }
+  const repositoryParallelism = configuredRepositoryParallelism(
+    input.repositoryParallelism,
+  );
   const pending = await store.listSubmittedTasks({
     projectId: input.projectId,
     status: "submitted",
@@ -167,51 +203,55 @@ export async function leaseWork(
       ? {}
       : { repositoryId: input.repositoryId }),
   });
-  const next = pending.find((task) => {
-    const required = adapterName(project, task);
-    return required === undefined || worker.adapters.includes(required);
-  });
-  if (next === undefined) {
-    return undefined;
-  }
 
-  const stored = await store.getRepository(next.repositoryId);
-  if (stored === undefined) {
-    throw new Error(`Unknown repository: ${next.repositoryId}`);
+  // Try every compatible candidate rather than only the first: another
+  // worker polling at the same moment may have claimed it, or its
+  // repository may be at its parallelism cap while a later task's is not.
+  for (const next of pending) {
+    const required = adapterName(project, next);
+    if (required !== undefined && !worker.adapters.includes(required)) {
+      continue;
+    }
+    const stored = await store.getRepository(next.repositoryId);
+    if (stored === undefined) {
+      throw new Error(`Unknown repository: ${next.repositoryId}`);
+    }
+    const repository = canonical(stored);
+    const version = await repositories.getCanonicalVersion(repository);
+    const leased = await store.leaseNextTask({
+      workerId: input.workerId,
+      taskId: next.id,
+      projectId: input.projectId,
+      repositoryId: next.repositoryId,
+      baseRevision: version.revision,
+      ttlMs: WORK_LEASE_TTL_MS,
+      repositoryParallelism,
+    });
+    if (leased === undefined) {
+      continue;
+    }
+    await trace(store, undefined, "task_started", leased.task.id, {
+      projectId: leased.task.projectId,
+      repositoryId: leased.task.repositoryId,
+      workerId: leased.lease.workerId,
+      leaseId: leased.lease.id,
+      baseRevision: leased.lease.baseRevision,
+      remote: true,
+    });
+    return {
+      lease: leased.lease,
+      task: leased.task,
+      repository: {
+        id: stored.id,
+        branch: stored.branch,
+      },
+      canonicalVersion: version,
+      bundleUrl: `/api/v1/workers/leases/${leased.lease.id}/bundle`,
+      bundleRef: bundleRefFor(leased.lease.id),
+      heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+    };
   }
-  const repository = canonical(stored);
-  const version = await repositories.getCanonicalVersion(repository);
-  const leased = await store.leaseNextTask({
-    workerId: input.workerId,
-    taskId: next.id,
-    projectId: input.projectId,
-    repositoryId: next.repositoryId,
-    baseRevision: version.revision,
-    ttlMs: WORK_LEASE_TTL_MS,
-  });
-  if (leased === undefined) {
-    return undefined;
-  }
-  await trace(store, undefined, "task_started", leased.task.id, {
-    projectId: leased.task.projectId,
-    repositoryId: leased.task.repositoryId,
-    workerId: leased.lease.workerId,
-    leaseId: leased.lease.id,
-    baseRevision: leased.lease.baseRevision,
-    remote: true,
-  });
-  return {
-    lease: leased.lease,
-    task: leased.task,
-    repository: {
-      id: stored.id,
-      branch: stored.branch,
-    },
-    canonicalVersion: version,
-    bundleUrl: `/api/v1/workers/leases/${leased.lease.id}/bundle`,
-    bundleRef: bundleRefFor(leased.lease.id),
-    heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
-  };
+  return undefined;
 }
 
 /**

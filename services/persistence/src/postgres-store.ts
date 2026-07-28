@@ -727,6 +727,10 @@ export class PostgresCoordinationStore implements CoordinationStore {
     if (input.baseRevision.trim().length === 0) {
       throw new Error("Work lease base revision must not be empty");
     }
+    const parallelism = input.repositoryParallelism ?? 1;
+    if (!Number.isSafeInteger(parallelism) || parallelism < 1) {
+      throw new RangeError("Repository parallelism must be a positive integer");
+    }
 
     // The advisory lock plays the role BEGIN IMMEDIATE plays in SQLite: two
     // workers polling at the same moment serialise here rather than both
@@ -768,12 +772,13 @@ export class PostgresCoordinationStore implements CoordinationStore {
         if (input.projectId !== undefined) {
           clauses.push(`project_id = ${bind(values, input.projectId)}`);
         }
+        // The parallelism cap bounds concurrent leases per repository. It is
+        // a throughput valve, not the safety mechanism: exact-base
+        // integration and stale-requeue at acceptance hold at any setting.
         clauses.push(
-          `NOT EXISTS (
-            SELECT 1 FROM work_leases
+          `(SELECT COUNT(*) FROM work_leases
             WHERE work_leases.repository_id = submitted_tasks.repository_id
-              AND work_leases.status = 'active'
-          )`,
+              AND work_leases.status = 'active') < ${bind(values, parallelism)}`,
         );
 
         const row = (

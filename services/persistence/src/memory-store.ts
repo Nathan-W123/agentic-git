@@ -480,9 +480,21 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     if (input.baseRevision.trim().length === 0) {
       throw new Error("Work lease base revision must not be empty");
     }
+    const parallelism = input.repositoryParallelism ?? 1;
+    if (!Number.isSafeInteger(parallelism) || parallelism < 1) {
+      throw new RangeError("Repository parallelism must be a positive integer");
+    }
 
     const now = new Date();
     await this.expireWorkLeases(now.toISOString());
+
+    // The parallelism cap bounds concurrent leases per repository; it is a
+    // throughput valve, not the safety mechanism.
+    const activeLeases = (repositoryId: string): number =>
+      [...this.workLeases.values()].filter(
+        (lease) =>
+          lease.status === "active" && lease.repositoryId === repositoryId,
+      ).length;
 
     // Single-threaded by construction here, but the ordering matches the
     // SQLite transaction so both backends behave identically.
@@ -494,11 +506,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
           (input.repositoryId === undefined ||
             task.repositoryId === input.repositoryId) &&
           (input.projectId === undefined || task.projectId === input.projectId) &&
-          ![...this.workLeases.values()].some(
-            (lease) =>
-              lease.status === "active" &&
-              lease.repositoryId === task.repositoryId,
-          ),
+          activeLeases(task.repositoryId) < parallelism,
       )
       .sort((left, right) => left.submittedAt.localeCompare(right.submittedAt))[0];
     if (candidate === undefined) {

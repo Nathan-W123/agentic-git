@@ -666,6 +666,10 @@ export class SqliteCoordinationStore implements CoordinationStore {
     if (input.baseRevision.trim().length === 0) {
       throw new Error("Work lease base revision must not be empty");
     }
+    const parallelism = input.repositoryParallelism ?? 1;
+    if (!Number.isSafeInteger(parallelism) || parallelism < 1) {
+      throw new RangeError("Repository parallelism must be a positive integer");
+    }
 
     // BEGIN IMMEDIATE takes the write lock up front, so two workers polling at
     // the same moment serialise here rather than both reading the same
@@ -698,7 +702,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       }
 
       const clauses = ["status = 'submitted'"];
-      const values: string[] = [];
+      const values: (string | number)[] = [];
       if (input.taskId !== undefined) {
         clauses.push("id = ?");
         values.push(input.taskId);
@@ -711,13 +715,15 @@ export class SqliteCoordinationStore implements CoordinationStore {
         clauses.push("project_id = ?");
         values.push(input.projectId);
       }
+      // The parallelism cap bounds concurrent leases per repository. It is a
+      // throughput valve, not the safety mechanism: exact-base integration
+      // and stale-requeue at acceptance hold at any setting.
       clauses.push(
-        `NOT EXISTS (
-          SELECT 1 FROM work_leases
+        `(SELECT COUNT(*) FROM work_leases
           WHERE work_leases.repository_id = submitted_tasks.repository_id
-            AND work_leases.status = 'active'
-        )`,
+            AND work_leases.status = 'active') < ?`,
       );
+      values.push(parallelism);
 
       const row = this.db
         .prepare(

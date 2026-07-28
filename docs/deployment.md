@@ -58,6 +58,7 @@ the web UI.
 | `COORD_BOOTSTRAP_TOKEN` | First-run setup token, minimum 24 characters. Generated and printed on boot if unset — set it explicitly in real deployments. | generated |
 | `COORD_SECURE_COOKIES` | `true` to mark session cookies Secure. Required when serving over HTTPS; leave `false` for plain-HTTP trials. | `false` |
 | `COORD_ALLOWED_ORIGINS` | Comma-separated browser origins allowed CORS access, for a UI hosted on a different origin. | none |
+| `COORD_REPOSITORY_PARALLELISM` | How many remote workers may hold leases in one repository at once. Concurrency is optimistic — every result integrates from its exact leased base or is requeued to replan — so raising this trades duplicate agent effort for throughput, never correctness. | `4` |
 
 The same variables work without Docker: build with `npm ci && npm run build`,
 then run `node apps/web/dist/index.js` under whatever supervisor you prefer.

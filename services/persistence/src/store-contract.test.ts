@@ -1137,6 +1137,104 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: repository parallelism admits concurrent leases without double-assignment`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "parallel-fleet@example.invalid",
+        displayName: "Parallel Fleet",
+        passwordDigest: "unused",
+      });
+      const firstWorker = await store.registerWorker({
+        userId: owner.id,
+        name: "worker-a",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      const secondWorker = await store.registerWorker({
+        userId: owner.id,
+        name: "worker-b",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      await store.saveRepository(REPOSITORY);
+      for (const objective of ["first", "second", "third"]) {
+        await store.submitTask({
+          repositoryId: REPOSITORY.id,
+          objective,
+          agentId: "codex",
+          validationCommands: [],
+        });
+      }
+
+      await assert.rejects(
+        store.leaseNextTask({
+          workerId: firstWorker.id,
+          baseRevision: BASE_VERSION.revision,
+          ttlMs: 60_000,
+          repositoryParallelism: 0,
+        }),
+        RangeError,
+      );
+
+      // Two workers hold two distinct tasks in one repository at once.
+      const first = await store.leaseNextTask({
+        workerId: firstWorker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 2,
+      });
+      const second = await store.leaseNextTask({
+        workerId: secondWorker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 2,
+      });
+      assert.ok(first !== undefined);
+      assert.ok(second !== undefined);
+      assert.notEqual(first.task.id, second.task.id);
+
+      // The cap is enforced: a third lease is refused until one settles.
+      assert.equal(
+        await store.leaseNextTask({
+          workerId: firstWorker.id,
+          baseRevision: BASE_VERSION.revision,
+          ttlMs: 60_000,
+          repositoryParallelism: 2,
+        }),
+        undefined,
+      );
+      assert.equal(
+        await store.finishWorkLease(
+          first.lease.id,
+          "completed",
+          new Date().toISOString(),
+          "done",
+        ),
+        true,
+      );
+      const third = await store.leaseNextTask({
+        workerId: firstWorker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 2,
+      });
+      assert.ok(third !== undefined);
+      assert.notEqual(third.task.id, second.task.id);
+
+      // Task-level exclusivity never relaxes: every active lease holds a
+      // distinct task.
+      const active = await store.listWorkLeases({ status: "active" });
+      assert.equal(
+        new Set(active.map((lease) => lease.taskId)).size,
+        active.length,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: worker and task references are validated consistently`, async () => {
     const { store, cleanup } = await backend.open();
     try {

@@ -162,6 +162,13 @@ export interface LeaseTaskInput {
   taskId?: TaskId;
   repositoryId?: string;
   projectId?: ProjectId;
+  /**
+   * How many active leases one repository may carry at once. Defaults to 1:
+   * strictly serialized remote execution. Values above 1 admit concurrent
+   * workers in a repository; correctness then rests on exact-base integration
+   * and stale-requeue at result acceptance, which this limit does not relax.
+   */
+  repositoryParallelism?: number;
 }
 
 export interface LeasedWork {
