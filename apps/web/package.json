@@ -16,9 +16,13 @@
   "dependencies": {
     "@coord/api-gateway": "*",
     "@coord/cli": "*",
+    "@coord/code-intelligence": "*",
     "@coord/coordinator": "*",
+    "@coord/integration-service": "*",
     "@coord/persistence": "*",
     "@coord/repository-service": "*",
+    "@coord/shared-types": "*",
+    "@coord/workspace-manager": "*",
     "monaco-editor": "0.52.2"
   }
 }

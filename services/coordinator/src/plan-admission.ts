@@ -192,6 +192,14 @@ export class PlanAdmissionController {
    * the control plane can hold a result to it, and a changeset is a set of
    * file patches: "this patch touches a file you were not granted" is
    * checkable, "this patch touches a symbol you were not granted" is not.
+   *
+   * The cost is one the repository parallelism bound already accepts. This
+   * turns "the second plan waits" into "the second plan runs concurrently", so
+   * the two now race to integrate and the loser is requeued to replan by the
+   * exact-base check. That is the same optimistic trade concurrent leases were
+   * introduced under, and it is only ever reached where they are enabled: with
+   * parallelism of one, no two plans are active in a repository at once and
+   * nothing here can fire.
    */
   private admitPartially(
     input: PlanAdmissionInput,

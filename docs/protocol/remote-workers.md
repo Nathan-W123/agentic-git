@@ -39,7 +39,7 @@ The answer is one of four, mirroring the Agent Planning Protocol:
 | Status | Meaning | What the worker does |
 | --- | --- | --- |
 | `approved` | No structural conflict; ownership granted | Execute |
-| `approved_with_constraints` | Approved, with advisory overlap recorded | Execute, honouring `constraints` |
+| `approved_with_constraints` | Approved, with advisory overlap or a partial grant recorded | Execute, honouring `constraints` |
 | `sequenced` | Executing work holds these resources | Wait `retryAfterMs`, resubmit |
 | `blocked` | Not separable by ordering, or the base moved | Plan again |
 
@@ -71,6 +71,51 @@ repository that has been approved:
   resources do not. A plan's own declared schemas are the approval for claiming
   them, exactly as locally.
 
+### Partial admission
+
+Leases are per-resource, and so is this decision. When the whole plan is
+refused, admission asks a second question: is *some* of it free right now? A
+plan naming five files and colliding on one has four files nobody is touching,
+and making it wait for all five is throughput given away for no safety gained.
+
+The contested files are dropped and the remainder goes through the same
+arbitration as any other plan. Partial admission chooses what to ask, never the
+answer — a remainder that still collides falls back to the all-or-nothing
+refusal. What comes back is `approved_with_constraints` carrying
+`deferredResources`: which resources were withheld, who holds them, and why.
+
+Only files are ever withheld. A withheld resource is worth nothing unless a
+result can be held to it, and a changeset is a set of file patches. A file does
+take its enriched claims with it — the symbols, APIs and schemas that no
+*granted* file accounts for — because those exist in the plan only by virtue of
+the withheld file, and leaving them behind would have the reduced plan asking
+for exactly what the other holder owns.
+
+The worker executes normally. It passes the withheld set to its agent as
+constraints on the decision, before any editing, which is the only point where
+a real agent can absorb a scope change. Enforcement does not depend on the
+agent obeying:
+
+- Patches inside the granted scope are promoted.
+- Patches on a withheld file are held back — never applied, never carried
+  forward. They were written against a file another task is mid-rewrite of.
+- A patch on a file in neither set is the scope escape it always was, and the
+  result is refused.
+- A result consisting only of withheld patches has nothing to promote, so the
+  task is released back to the queue at full scope rather than failed.
+
+Once the granted part is durably in canonical, the withheld part is submitted
+as a task of its own, marked so that it is arbitrated whole. That marker is the
+termination argument: a task sheds scope at most once, instead of shedding one
+file per round and paying for an agent run each time.
+
+The cost is the one repository parallelism already accepts. Partial admission
+turns "the second task waits" into "the second task runs concurrently", so the
+two now race to integrate, and whichever loses is requeued to replan by the
+exact-base check. That trade is only ever taken where concurrent leases were
+already enabled: at `COORD_REPOSITORY_PARALLELISM=1` no two plans are ever
+active in one repository, and partial admission never fires.
+
 Arbitration is serialized in the database, not in application code. The write
 that records an admission carries the set of already-admitted leases it was
 decided from, and is refused if that set has changed — so two workers
@@ -89,6 +134,12 @@ alongside its changeset. A result whose reported plan claims resources the
 admission never covered is refused, and the changeset is validated against the
 admitted plan. A result on a lease with no approved admission is refused
 outright.
+
+Under a partial admission the admitted plan is the *reduced* one, so the same
+sentence carries the stronger guarantee: no patch can reach canonical against a
+resource the task was not granted. A reported plan may still name a withheld
+resource — the worker declared it honestly and the coordinator is what narrowed
+it — but declaring is not writing, and only the granted patches are applied.
 
 ## The lease is the recovery mechanism
 

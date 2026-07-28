@@ -76,6 +76,35 @@ export interface StaticAsset {
   etag?: string;
 }
 
+/** Identifies one user's overlay workspace of one repository. */
+export interface WorkspaceScopeInput {
+  projectId: string;
+  repositoryId: string;
+  /** Always the authenticated principal's id, never caller-supplied. */
+  userId: string;
+}
+
+/**
+ * Human overlay workspaces: the dashboard's file editor and sandboxed
+ * terminal. The implementations live with the web application; the gateway
+ * only routes, authorizes, and validates shapes. Every operation receives
+ * the authenticated user id, so an implementation can scope state per user
+ * without trusting anything from the request body.
+ */
+export interface WorkspaceOperations {
+  status(input: WorkspaceScopeInput): Promise<unknown>;
+  open(input: WorkspaceScopeInput): Promise<unknown>;
+  reset(input: WorkspaceScopeInput): Promise<unknown>;
+  discard(input: WorkspaceScopeInput): Promise<void>;
+  listFiles(input: WorkspaceScopeInput): Promise<unknown>;
+  readFile(input: WorkspaceScopeInput & { path: string }): Promise<unknown>;
+  writeFile(
+    input: WorkspaceScopeInput & { path: string; content: string },
+  ): Promise<unknown>;
+  exec(input: WorkspaceScopeInput & { command: string }): Promise<unknown>;
+  submit(input: WorkspaceScopeInput & { objective: string }): Promise<unknown>;
+}
+
 export interface ApiOperations {
   listAgents?(): Promise<
     Array<{
@@ -161,6 +190,8 @@ export interface ApiOperations {
     changeSet: unknown;
     detail?: string;
   }): Promise<unknown>;
+  /** Dashboard overlay workspaces; absent on deployments without them. */
+  workspace?: WorkspaceOperations;
 }
 
 /** Everything a worker needs to execute one task without further lookups. */
@@ -1987,6 +2018,154 @@ export class ApiGateway {
       // error, so the outcome travels in the body with a 200.
       this.sendJson(response, 200, { rollback: result });
       return;
+    }
+
+    // ---- Overlay workspaces (dashboard editor + sandboxed terminal) -------
+    // One user's isolated worktree of one repository. The user id in scope
+    // is always the authenticated principal's, so no request can address
+    // another user's overlay. Editing requires submit_task (the same right
+    // needed to put work into the queue); running terminal commands requires
+    // run_task. Canonical is untouched by everything here except `submit`,
+    // which goes through the ordinary integration pipeline.
+    const workspaceMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/workspace` +
+          `(?:/(files|file|reset|exec|submit))?$`,
+        "u",
+      ),
+    );
+    if (workspaceMatch !== undefined) {
+      const [projectId = "", repositoryId = "", action] = workspaceMatch;
+      const workspaceOperations = this.options.operations.workspace;
+      if (workspaceOperations === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment does not support overlay workspaces",
+        );
+      }
+      await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        action === "exec" ? "run_task" : "submit_task",
+      );
+      const scope = {
+        projectId,
+        repositoryId,
+        userId: principal.user.id,
+      };
+      // Overlay implementations throw errors carrying an HTTP status and
+      // code; anything else stays an internal error.
+      const perform = async <T>(operation: () => Promise<T>): Promise<T> => {
+        try {
+          return await operation();
+        } catch (error) {
+          const status = (error as { status?: unknown }).status;
+          const code = (error as { code?: unknown }).code;
+          if (
+            error instanceof Error &&
+            typeof status === "number" &&
+            typeof code === "string"
+          ) {
+            throw new HttpError(status, code, error.message);
+          }
+          throw error;
+        }
+      };
+
+      if (action === undefined) {
+        if (method === "GET") {
+          this.sendJson(response, 200, {
+            workspace: await perform(() => workspaceOperations.status(scope)),
+          });
+          return;
+        }
+        if (method === "POST") {
+          this.sendJson(response, 200, {
+            workspace: await perform(() => workspaceOperations.open(scope)),
+          });
+          return;
+        }
+        if (method === "DELETE") {
+          await perform(() => workspaceOperations.discard(scope));
+          this.sendJson(response, 200, { discarded: true });
+          return;
+        }
+      }
+      if (action === "reset" && method === "POST") {
+        this.sendJson(response, 200, {
+          workspace: await perform(() => workspaceOperations.reset(scope)),
+        });
+        return;
+      }
+      if (action === "files" && method === "GET") {
+        this.sendJson(response, 200, {
+          files: await perform(() => workspaceOperations.listFiles(scope)),
+        });
+        return;
+      }
+      if (action === "file" && method === "GET") {
+        const filePath = stringField(
+          url.searchParams.get("path") ?? undefined,
+          "path",
+          { max: 1_000 },
+        );
+        this.sendJson(response, 200, {
+          file: await perform(() =>
+            workspaceOperations.readFile({ ...scope, path: filePath ?? "" }),
+          ),
+        });
+        return;
+      }
+      if (action === "file" && method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const filePath = stringField(body["path"], "path", { max: 1_000 });
+        const content = body["content"];
+        if (typeof content !== "string") {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "content must be a string",
+          );
+        }
+        await perform(() =>
+          workspaceOperations.writeFile({
+            ...scope,
+            path: filePath ?? "",
+            content,
+          }),
+        );
+        this.sendJson(response, 200, { saved: true });
+        return;
+      }
+      if (action === "exec" && method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const command =
+          stringField(body["command"], "command", { max: 4_000 }) ?? "";
+        this.sendJson(response, 200, {
+          result: await perform(() =>
+            workspaceOperations.exec({ ...scope, command }),
+          ),
+        });
+        return;
+      }
+      if (action === "submit" && method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const objective =
+          stringField(body["objective"], "objective", {
+            max: 2_000,
+            optional: true,
+          }) ?? "";
+        this.sendJson(response, 200, {
+          result: await perform(() =>
+            workspaceOperations.submit({ ...scope, objective }),
+          ),
+        });
+        return;
+      }
+      throw new HttpError(405, "method_not_allowed", "Unsupported method");
     }
 
     const runsMatch = matchPath(

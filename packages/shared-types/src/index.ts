@@ -422,7 +422,11 @@ export type AuditEventType =
   | "task_cancelled"
   | "cleanup_failed"
   | "ownership_released"
-  | "recovery_completed";
+  | "recovery_completed"
+  /** A human overlay workspace was created from the dashboard. */
+  | "workspace_created"
+  /** A sandboxed terminal command ran in an overlay workspace. */
+  | "workspace_command_executed";
 
 export interface AuditEvent {
   id: string;

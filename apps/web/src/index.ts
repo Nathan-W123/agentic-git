@@ -17,6 +17,7 @@ import { workerOperations } from "@coord/cli/worker-operations";
 import { RepositoryService, runProcess } from "@coord/repository-service";
 
 import { loadStaticAssets } from "./assets.js";
+import { OverlayWorkspaceService } from "./overlay.js";
 
 function argument(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -79,8 +80,21 @@ async function main(): Promise<void> {
     process.env["COORD_BOOTSTRAP_TOKEN"] ?? generatedToken ?? "";
 
   const repositories = new RepositoryService();
+  const overlays = new OverlayWorkspaceService(project, store, repositories);
 
   const operations: ApiOperations = {
+    workspace: {
+      status: (input) => overlays.status(input),
+      open: (input) => overlays.open(input),
+      reset: (input) => overlays.reset(input),
+      discard: (input) => overlays.discard(input),
+      listFiles: (input) => overlays.listFiles(input),
+      readFile: (input) => overlays.readOverlayFile(input, input.path),
+      writeFile: (input) =>
+        overlays.writeOverlayFile(input, input.path, input.content),
+      exec: (input) => overlays.exec(input, input.command),
+      submit: (input) => overlays.submit(input, input.objective),
+    },
     async listAgents() {
       return Object.entries(project.config.agents).map(([id, agent]) => ({
         id,
