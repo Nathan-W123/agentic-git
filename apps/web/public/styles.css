@@ -16,9 +16,9 @@
   --fg: #e6edf3;
   --fg-muted: #9198a1;
   --fg-subtle: #6e7681;
-  --accent: #58a6ff;
-  --accent-strong: #1f6feb;
-  --accent-dim: rgba(56, 139, 253, 0.15);
+  --accent: #42e3f5;
+  --accent-strong: #0e9fb8;
+  --accent-dim: rgba(66, 227, 245, 0.15);
   --success: #3fb950;
   --success-dim: rgba(46, 160, 67, 0.15);
   --danger: #f85149;
@@ -27,7 +27,7 @@
   --warn-dim: rgba(187, 128, 9, 0.15);
   --purple: #bc8cff;
   --purple-dim: rgba(163, 113, 247, 0.18);
-  --brand: #e85d2a;
+  --brand: #42e3f5;
   --font-ui: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
   --activity-width: 48px;
@@ -39,6 +39,15 @@
 
 * {
   box-sizing: border-box;
+}
+
+/*
+ * Author `display` values on elements like .auth-shell (grid) silently defeat
+ * the UA's `[hidden] { display: none }` rule; without this, the auth overlay
+ * keeps covering the app after sign-in.
+ */
+[hidden] {
+  display: none !important;
 }
 
 html,
@@ -57,7 +66,7 @@ body {
 }
 
 ::selection {
-  background: rgba(56, 139, 253, 0.4);
+  background: rgba(66, 227, 245, 0.35);
 }
 
 a {
@@ -1218,7 +1227,7 @@ button.status-item:hover {
 .status-validating,
 .status-admin {
   color: var(--accent);
-  border-color: rgba(88, 166, 255, 0.4);
+  border-color: rgba(66, 227, 245, 0.4);
 }
 
 .status-cancelled,
@@ -1759,6 +1768,12 @@ button.status-item:hover {
   border-bottom: 1px solid var(--border);
   font-family: var(--font-mono);
   font-size: 12px;
+}
+
+.diff-file-head svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
 }
 
 .diff-file-head .path {
