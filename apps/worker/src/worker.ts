@@ -77,6 +77,12 @@ export interface IterationResult {
    * the queue and no agent execution time was spent on it.
    */
   deferred?: boolean;
+  /**
+   * Resources the control plane withheld while admitting the rest of the plan.
+   * Present only on a partial admission, where the task ran on what it was
+   * granted and the remainder was queued as a follow-up task.
+   */
+  deferredResources?: string[];
 }
 
 const DEFAULT_POLL_MS = 5_000;
@@ -185,10 +191,14 @@ export class Worker {
         plan: result.plan,
         changeSet: result.changeSet,
       });
+      const withheld = (admission.deferredResources ?? []).map(
+        (resource) => `${resource.resourceType}:${resource.resourceId}`,
+      );
       return {
         worked: true,
         taskId: assignment.task.id,
         accepted: accepted.accepted,
+        ...(withheld.length === 0 ? {} : { deferredResources: withheld }),
         ...(accepted.reason === undefined ? {} : { reason: accepted.reason }),
       };
     } catch (error) {
@@ -370,7 +380,17 @@ export class Worker {
     };
   }
 
-  /** Runs the agent against the ownership the control plane granted. */
+  /**
+   * Runs the agent against the ownership the control plane granted.
+   *
+   * On a partial admission the grants cover only part of what the agent
+   * planned, and the withheld resources arrive as constraints on the decision
+   * below — which is how the agent learns about them, since it is given the
+   * decision before it edits anything. That is advice, not enforcement: an
+   * agent that writes to a deferred file anyway is not stopped here. The
+   * control plane splits those patches off the result instead, so the worker
+   * never has to make an agent obey a mid-session scope change.
+   */
   private async execute(
     assignment: WorkAssignment,
     planned: PlannedWork,

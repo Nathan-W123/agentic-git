@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { AgentPlan } from "@coord/shared-types";
+import {
+  planAdmissionApproved,
+  planAdmissionPartial,
+  type AgentPlan,
+} from "@coord/shared-types";
 
 import {
   PlanAdmissionController,
@@ -48,6 +52,7 @@ function admit(
   candidate: AgentPlan,
   active: readonly AgentPlan[],
   controller = new PlanAdmissionController(),
+  overrides: { partialAdmission?: boolean } = {},
 ) {
   return controller.admit({
     plan: candidate,
@@ -59,7 +64,17 @@ function admit(
       agentId: "agent-b",
       plan: entry,
     })),
+    ...overrides,
   });
+}
+
+/** `type:id` for every lease an admission handed out, sorted. */
+function grantedResources(admission: {
+  ownershipGrants: readonly { resourceType: string; resourceId: string }[];
+}): string[] {
+  return admission.ownershipGrants
+    .map((lease) => `${lease.resourceType}:${lease.resourceId}`)
+    .sort();
 }
 
 test("a plan with nothing running is approved and granted ownership", () => {
@@ -182,6 +197,192 @@ test("a resubmitted plan is not sequenced behind its own earlier admission", () 
 
   assert.equal(admission.status, "approved");
   assert.deepEqual(admission.blockedBy, []);
+});
+
+/**
+ * Partial admission: a plan that collides on part of what it declared is
+ * admitted on the rest instead of waiting for all of it.
+ */
+
+/** Five files, one of which an executing task is holding. */
+function partiallyContested(): { candidate: AgentPlan; running: AgentPlan } {
+  return {
+    candidate: plan("task_a", {
+      expectedFiles: [
+        "src/a.ts",
+        "src/b.ts",
+        "src/c.ts",
+        "src/d.ts",
+        "src/shared.ts",
+      ],
+      expectedSymbols: ["alpha"],
+    }),
+    running: plan("task_b", {
+      expectedFiles: ["src/shared.ts"],
+      expectedSymbols: ["beta"],
+    }),
+  };
+}
+
+test("a plan colliding on one file is admitted on the four that are free", () => {
+  const { candidate, running } = partiallyContested();
+  const admission = admit(candidate, [running]);
+
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.ok(planAdmissionApproved(admission));
+  assert.ok(planAdmissionPartial(admission));
+  // The four uncontested files are owned now, and so is the symbol that came
+  // with them. The contested file is not.
+  assert.deepEqual(grantedResources(admission), [
+    "file:src/a.ts",
+    "file:src/b.ts",
+    "file:src/c.ts",
+    "file:src/d.ts",
+    "symbol:alpha",
+  ]);
+  assert.deepEqual(admission.deferredResources, [
+    {
+      resourceType: "file",
+      resourceId: "src/shared.ts",
+      heldBy: ["task_b"],
+      reason: admission.deferredResources?.[0]?.reason ?? "",
+    },
+  ]);
+  assert.match(
+    admission.deferredResources?.[0]?.reason ?? "",
+    /task_b/u,
+  );
+  // Nothing is blocking this holder — it is executing right now.
+  assert.deepEqual(admission.blockedBy, []);
+  assert.equal(admission.retryAfterMs, undefined);
+});
+
+test("a partial admission tells the agent exactly what to leave alone", () => {
+  const { candidate, running } = partiallyContested();
+  const admission = admit(candidate, [running]);
+
+  assert.ok(
+    admission.constraints.some((constraint) =>
+      /Do not modify.*file:src\/shared\.ts/u.test(constraint),
+    ),
+    admission.constraints.join(" | "),
+  );
+  // The structural evidence that caused the deferral is still reported, so the
+  // audit trail shows a conflict was found rather than an unqualified approval.
+  assert.ok(admission.conflicts.some(structuralConflict));
+});
+
+test("all-or-nothing arbitration is what happens with partial admission off", () => {
+  const { candidate, running } = partiallyContested();
+  const admission = admit(candidate, [running], new PlanAdmissionController(), {
+    partialAdmission: false,
+  });
+
+  assert.equal(admission.status, "sequenced");
+  assert.equal(admission.ownershipGrants.length, 0);
+  assert.equal(admission.deferredResources, undefined);
+  assert.deepEqual(admission.blockedBy, ["task_b"]);
+});
+
+test("a plan whose every file is contested is sequenced, not admitted empty", () => {
+  // Nothing would be left to work on, so admitting would buy an agent run that
+  // could only produce an empty changeset.
+  const admission = admit(
+    plan("task_a", { expectedFiles: ["src/shared.ts"], expectedSymbols: [] }),
+    [plan("task_b", { expectedFiles: ["src/shared.ts"], expectedSymbols: [] })],
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.equal(admission.ownershipGrants.length, 0);
+});
+
+test("a remainder that still collides is refused rather than half-granted", () => {
+  // Both plans claim the symbol `common`, which lives somewhere neither plan
+  // pinned down. Dropping the shared file does not release the symbol, so the
+  // reduced plan fails the same arbitration and the whole plan waits.
+  const admission = admit(
+    plan("task_a", {
+      expectedFiles: ["src/a.ts", "src/shared.ts"],
+      expectedSymbols: ["common"],
+    }),
+    [
+      plan("task_b", {
+        expectedFiles: ["src/shared.ts"],
+        expectedSymbols: ["common"],
+      }),
+    ],
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.equal(admission.ownershipGrants.length, 0);
+  assert.equal(admission.deferredResources, undefined);
+});
+
+test("only files are ever deferred, because only files can be enforced", () => {
+  // Ownership holds the symbol, not any file the two plans share. A changeset
+  // is a set of file patches, so a withheld symbol could not be held to; the
+  // plan waits instead of being admitted on a promise nobody can check.
+  const admission = admit(
+    plan("task_a", { expectedFiles: ["src/a.ts"], expectedSymbols: ["shared"] }),
+    [plan("task_b", { expectedFiles: ["src/b.ts"], expectedSymbols: ["shared"] })],
+    new PlanAdmissionController(silentDetector()),
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.equal(admission.deferredResources, undefined);
+});
+
+test("a file held only in shared mode is not deferred", () => {
+  // Prose is shared, so two plans on the same markdown file are not competing
+  // for it. Conflict scoring still sequences them; the reduced plan proves the
+  // file was never the problem by being granted in full.
+  const admission = admit(
+    plan("task_a", {
+      expectedFiles: ["docs/guide.md", "src/a.ts"],
+      expectedSymbols: [],
+    }),
+    [
+      plan("task_b", {
+        expectedFiles: ["docs/guide.md"],
+        expectedSymbols: [],
+      }),
+    ],
+  );
+
+  // docs/guide.md is contested by conflict scoring even though ownership is
+  // happy with it, so it is deferred and src/a.ts is granted.
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(grantedResources(admission), ["file:src/a.ts"]);
+  assert.deepEqual(
+    admission.deferredResources?.map((resource) => resource.resourceId),
+    ["docs/guide.md"],
+  );
+});
+
+test("two executing holders of different files are both named", () => {
+  const admission = admit(
+    plan("task_a", {
+      expectedFiles: ["src/a.ts", "src/x.ts", "src/y.ts"],
+      expectedSymbols: [],
+    }),
+    [
+      plan("task_b", { expectedFiles: ["src/x.ts"], expectedSymbols: [] }),
+      plan("task_c", { expectedFiles: ["src/y.ts"], expectedSymbols: [] }),
+    ],
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(grantedResources(admission), ["file:src/a.ts"]);
+  assert.deepEqual(
+    admission.deferredResources?.map((resource) => ({
+      id: resource.resourceId,
+      heldBy: resource.heldBy,
+    })),
+    [
+      { id: "src/x.ts", heldBy: ["task_b"] },
+      { id: "src/y.ts", heldBy: ["task_c"] },
+    ],
+  );
 });
 
 test("a plan's own schemas are the approval for claiming them", () => {

@@ -1,6 +1,10 @@
 import {
+  planAdmissionApproved,
+  reducePlanScope,
+  uniqueRepositoryPaths,
   type AgentPlan,
   type ConflictAssessment,
+  type DeferredResource,
   type PlanAdmission,
   type ResourceLease,
   type TaskId,
@@ -45,6 +49,14 @@ export interface PlanAdmissionInput {
   planRevision?: number;
   /** How long a deferred holder should wait before resubmitting. */
   retryAfterMs?: number;
+  /**
+   * Whether a plan that only partly collides may be admitted on the rest of
+   * its declared resources. Defaults to on. Turning it off restores strict
+   * all-or-nothing arbitration, which is what a follow-up task gets: splitting
+   * an already-split task again is how a task could keep shedding scope
+   * forever.
+   */
+  partialAdmission?: boolean;
 }
 
 /**
@@ -77,6 +89,32 @@ function otherTask(assessment: ConflictAssessment, taskId: TaskId): TaskId {
   return assessment.taskIds.find((id) => id !== taskId) ?? taskId;
 }
 
+/**
+ * The agent-facing half of a partial admission.
+ *
+ * It reaches the agent through the coordinator decision the worker sends
+ * before execution, so a well-behaved agent simply never writes to these
+ * files. The control plane does not rely on that: a changeset that touches a
+ * deferred file is split apart rather than applied.
+ */
+export function deferralConstraints(
+  deferred: readonly DeferredResource[],
+): string[] {
+  if (deferred.length === 0) {
+    return [];
+  }
+  return [
+    "Do not modify these deferred resources; they are owned by other " +
+      `executing tasks and will be handled by a follow-up task: ${deferred
+        .map((resource) => `${resource.resourceType}:${resource.resourceId}`)
+        .join(", ")}`,
+    ...deferred.map(
+      (resource) =>
+        `${resource.resourceType}:${resource.resourceId} — ${resource.reason}`,
+    ),
+  ];
+}
+
 export class PlanAdmissionController {
   public constructor(
     private readonly conflicts: ConflictDetector = new ConflictDetector(),
@@ -90,8 +128,174 @@ export class PlanAdmissionController {
       new OwnershipService(),
   ) {}
 
+  /**
+   * Decides one plan against the work already running.
+   *
+   * All-or-nothing first, because that is the answer that needs no
+   * qualification. Only when the whole plan is refused is the finer question
+   * asked: is *some* of it free right now? A plan that names five files and
+   * collides on one has four files nobody is touching, and making the holder
+   * wait for all five is throughput thrown away for no safety gained.
+   */
   public admit(input: PlanAdmissionInput): PlanAdmission {
+    const whole = this.decide(input.plan, input);
+    if (planAdmissionApproved(whole) || input.partialAdmission === false) {
+      return whole;
+    }
+    return this.admitPartially(input, whole) ?? whole;
+  }
+
+  /**
+   * Admits the uncontested remainder of a plan, or nothing.
+   *
+   * The reduced plan is put through the same arbitration as any other plan
+   * rather than being waved through: partial admission decides *what to ask*,
+   * it never decides the answer. If the remainder is refused for any reason —
+   * a symbol both plans still claim, a schema awaiting approval, dependency
+   * impact that no resource removal can undo — the original all-or-nothing
+   * answer stands.
+   *
+   * Only files are ever withheld. A withheld resource is only meaningful if
+   * the control plane can hold a result to it, and a changeset is a set of
+   * file patches: "this patch touches a file you were not granted" is
+   * checkable, "this patch touches a symbol you were not granted" is not.
+   */
+  private admitPartially(
+    input: PlanAdmissionInput,
+    whole: PlanAdmission,
+  ): PlanAdmission | undefined {
+    const deferred = this.contestedFiles(input);
+    if (deferred.length === 0) {
+      return undefined;
+    }
+    const reduced = reducePlanScope(input.plan, deferred);
+    // Nothing left to work on: the holder would burn an agent run to produce
+    // an empty changeset, which is strictly worse than waiting its turn.
+    if (reduced.expectedFiles.length === 0) {
+      return undefined;
+    }
+    const partial = this.decide(reduced, input);
+    if (!planAdmissionApproved(partial)) {
+      return undefined;
+    }
+    const granted = reduced.expectedFiles.join(", ");
+    return {
+      ...partial,
+      status: "approved_with_constraints",
+      // Not blocked: this holder is executing. What is held up is named
+      // per-resource in `deferredResources`, alongside who holds it.
+      blockedBy: [],
+      deferredResources: deferred,
+      constraints: [...partial.constraints, ...deferralConstraints(deferred)],
+      conflicts: [
+        ...partial.conflicts,
+        ...whole.conflicts.filter(structuralConflict),
+      ],
+      explanation:
+        `Partially admitted: granted ${granted}; deferred ` +
+        deferred
+          .map(
+            (resource) =>
+              `${resource.resourceId} (held by ${resource.heldBy.join(", ")})`,
+          )
+          .join(", "),
+    };
+  }
+
+  /**
+   * Declared files that executing work is holding, with who holds each.
+   *
+   * Both halves of arbitration are asked, because they catch different things:
+   * conflict scoring sees two plans naming the same file, ownership sees a
+   * live lease on one. A file either of them names is contested.
+   */
+  private contestedFiles(input: PlanAdmissionInput): DeferredResource[] {
     const taskId = input.plan.taskId;
+    const others = input.active.filter((entry) => entry.taskId !== taskId);
+    const contested = new Map<
+      string,
+      { heldBy: Set<TaskId>; reasons: Set<string> }
+    >();
+    const note = (file: string, holder: TaskId, reason: string): void => {
+      const entry = contested.get(file) ?? {
+        heldBy: new Set<TaskId>(),
+        reasons: new Set<string>(),
+      };
+      entry.heldBy.add(holder);
+      entry.reasons.add(reason);
+      contested.set(file, entry);
+    };
+
+    for (const entry of others) {
+      const assessment = this.conflicts.assess(input.plan, entry.plan);
+      if (assessment === undefined || !structuralConflict(assessment)) {
+        continue;
+      }
+      for (const item of assessment.evidence) {
+        if (item.advisory === true || item.kind !== "file_overlap") {
+          continue;
+        }
+        for (const file of item.resources) {
+          note(
+            file,
+            entry.taskId,
+            `also declared by executing task ${entry.taskId}`,
+          );
+        }
+      }
+    }
+    for (const lease of this.seededOwnership(input, others).blockersFor(
+      input.plan,
+    )) {
+      if (lease.resourceType !== "file") {
+        continue;
+      }
+      note(
+        lease.resourceId,
+        lease.taskId,
+        `owned by ${lease.taskId} in ${lease.mode} mode until ${lease.expiresAt}`,
+      );
+    }
+
+    const declared = new Set(uniqueRepositoryPaths(input.plan.expectedFiles));
+    return [...contested]
+      .filter(([file]) => declared.has(file))
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([file, entry]): DeferredResource => ({
+        resourceType: "file",
+        resourceId: file,
+        heldBy: [...entry.heldBy].sort(),
+        reason: [...entry.reasons].sort().join("; "),
+      }));
+  }
+
+  /**
+   * An ownership view holding every executing plan's leases.
+   *
+   * Seeding failures are swallowed for the same reason as in {@link decide}:
+   * one executing plan colliding with another is someone else's problem, and
+   * the candidate is arbitrated against whatever seeded successfully.
+   */
+  private seededOwnership(
+    input: PlanAdmissionInput,
+    others: readonly ActivePlan[],
+  ): OwnershipService {
+    const ownership = this.ownershipFor();
+    for (const entry of others) {
+      try {
+        ownership.acquire(entry.plan, entry.agentId, input.baseVersion, {
+          approvedResources: approvedSchemaResources(entry.plan),
+        });
+      } catch {
+        // See decide(): a collision between two already-admitted plans is not
+        // this candidate's to resolve.
+      }
+    }
+    return ownership;
+  }
+
+  private decide(plan: AgentPlan, input: PlanAdmissionInput): PlanAdmission {
+    const taskId = plan.taskId;
     const retryAfterMs = input.retryAfterMs ?? DEFAULT_PLAN_RETRY_MS;
     const shared = {
       taskId,
@@ -102,7 +306,7 @@ export class PlanAdmissionController {
     const others = input.active.filter((entry) => entry.taskId !== taskId);
 
     const assessments = others
-      .map((entry) => this.conflicts.assess(input.plan, entry.plan))
+      .map((entry) => this.conflicts.assess(plan, entry.plan))
       .filter((entry): entry is ConflictAssessment => entry !== undefined);
     const structural = assessments.filter(structuralConflict);
     const blocking = structural.filter(
@@ -160,24 +364,17 @@ export class PlanAdmissionController {
     // these run together"; ownership answers "may this exact resource be held
     // in this mode", which is where shared files and intent-mode resources
     // stop being conflicts at all.
-    const ownership = this.ownershipFor();
-    for (const entry of others) {
-      try {
-        ownership.acquire(entry.plan, entry.agentId, input.baseVersion, {
-          approvedResources: approvedSchemaResources(entry.plan),
-        });
-      } catch {
-        // Two admitted plans can only collide here if one was admitted while
-        // the other was invisible — a lapsed lease, say. Conflict assessment
-        // above already covered the candidate against both, so seeding
-        // continues rather than failing the admission on someone else's state.
-      }
-    }
+    //
+    // Two admitted plans can only collide while seeding if one was admitted
+    // while the other was invisible — a lapsed lease, say. Conflict assessment
+    // above already covered the candidate against both, so seeding continues
+    // rather than failing the admission on someone else's state.
+    const ownership = this.seededOwnership(input, others);
 
     let grants: ResourceLease[];
     try {
-      grants = ownership.acquire(input.plan, input.agentId, input.baseVersion, {
-        approvedResources: approvedSchemaResources(input.plan),
+      grants = ownership.acquire(plan, input.agentId, input.baseVersion, {
+        approvedResources: approvedSchemaResources(plan),
       });
     } catch (error) {
       if (error instanceof OwnershipConflictError) {

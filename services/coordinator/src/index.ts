@@ -5,5 +5,6 @@ export * from "./coordinator.js";
 export * from "./metrics.js";
 export * from "./policy.js";
 export * from "./ownership-service.js";
+export * from "./partial-admission.js";
 export * from "./plan-admission.js";
 export * from "./scope-validator.js";

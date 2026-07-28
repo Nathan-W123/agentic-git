@@ -5,9 +5,13 @@ import { CodeIntelligenceService } from "@coord/code-intelligence";
 import {
   DEFAULT_PLAN_RETRY_MS,
   PlanAdmissionController,
+  ScopeExpansionError,
   StoreApprovalController,
   approvalPolicyForProject,
   assertChangeSetWithinPlan,
+  deferredScopeObjective,
+  isDeferredScopeFollowUp,
+  splitChangeSet,
   type ActivePlan,
 } from "@coord/coordinator";
 import { IntegrationService } from "@coord/integration-service";
@@ -23,9 +27,12 @@ import {
 import {
   assertAgentPlan,
   assertChangeSet,
+  deferredFilePaths,
   normalizeRepositoryPath,
   planAdmissionApproved,
+  planAdmissionPartial,
   projectBudgets,
+  reducePlanScope,
   type AgentPlan,
   type CanonicalVersion,
   type ChangeSet,
@@ -471,6 +478,91 @@ async function requeueForCanonicalChange(
   };
 }
 
+/**
+ * Hands back a task whose agent only edited the resources it was not granted.
+ *
+ * This is the degenerate partial admission: the deferral covered the work the
+ * agent actually did, so there is nothing to promote. Releasing the lease
+ * returns the task to the queue at its full original scope, where it will be
+ * arbitrated again — by then the contested resource may well be free, and the
+ * whole task can run at once.
+ */
+async function requeueForDeferredScope(
+  store: CoordinationStore,
+  lease: WorkLease,
+  task: SubmittedTask,
+  split: { deferred: readonly { path: string }[] },
+): Promise<WorkResultAcceptance> {
+  const paths = split.deferred.map((patch) => patch.path).sort();
+  const reason =
+    "Every change the agent made was to a deferred resource " +
+    `(${paths.join(", ")}); the task was requeued at full scope`;
+  const now = new Date().toISOString();
+  const released = await store.finishWorkLease(
+    lease.id,
+    "released",
+    now,
+    reason,
+  );
+  if (!released) {
+    await store.expireWorkLeases(now);
+    return { accepted: false, reason: "lease was lost before requeueing" };
+  }
+  await trace(store, undefined, "replan_requested", task.id, {
+    projectId: task.projectId,
+    repositoryId: task.repositoryId,
+    workerId: lease.workerId,
+    leaseId: lease.id,
+    deferredFiles: paths,
+    reason,
+  });
+  return { accepted: false, reason, requeued: true };
+}
+
+/**
+ * Queues the remainder of a partially admitted task.
+ *
+ * This is what makes partial admission a division of labour rather than a
+ * quiet loss of scope. The granted files are in canonical; the deferred ones
+ * are still owned by someone else, so they become a small task of their own
+ * that will be leased, planned, and arbitrated like any other — against
+ * whatever canonical looks like once the current holder is done with them.
+ *
+ * The agent's own patches for the deferred files are deliberately not carried
+ * forward. They were written against a revision of a file that another task is
+ * in the middle of rewriting, so replaying them later would be applying a diff
+ * to a base that no longer exists. Their paths are recorded; their content is
+ * not resurrected.
+ */
+async function queueDeferredScope(
+  store: CoordinationStore,
+  runId: string,
+  task: SubmittedTask,
+  admission: PlanAdmission,
+  split: { deferred: readonly { path: string }[] },
+): Promise<void> {
+  const deferred = admission.deferredResources ?? [];
+  if (deferred.length === 0) {
+    return;
+  }
+  const followUp = await store.submitTask({
+    repositoryId: task.repositoryId,
+    ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
+    objective: deferredScopeObjective(task.objective, deferred),
+    agentId: task.agentId,
+    validationCommands: task.validationCommands,
+    ...(task.submittedBy === undefined ? {} : { submittedBy: task.submittedBy }),
+  });
+  await trace(store, runId, "task_submitted", followUp.id, {
+    projectId: task.projectId,
+    repositoryId: task.repositoryId,
+    objective: followUp.objective,
+    deferredFrom: task.id,
+    deferredResources: deferred,
+    discardedPatches: split.deferred.map((patch) => patch.path).sort(),
+  });
+}
+
 export interface WorkPlanInput {
   leaseId: string;
   actorId: string;
@@ -661,10 +753,22 @@ export async function admitWorkPlan(
       baseRevision: baseVersion.revision,
       baseVersion: baseVersion.sequence,
       active: executing.active,
+      // A task that already exists because an earlier admission was partial is
+      // decided whole. One split per lineage is what stops a task from shedding
+      // scope round after round, each round paying for another agent run.
+      partialAdmission: !isDeferredScopeFollowUp(task.objective),
     });
+    // What is recorded against the lease is what was actually granted. On a
+    // partial admission that is the reduced plan, and recording the whole one
+    // would be a lie with consequences: this record is the view every later
+    // admission arbitrates against, so it would hold resources for this task
+    // that this task was refused.
+    const admittedPlan = planAdmissionPartial(admission)
+      ? reducePlanScope(plan, admission.deferredResources ?? [])
+      : plan;
     const saved = await store.saveWorkLeasePlan({
       leaseId: lease.id,
-      submission: { plan, admission },
+      submission: { plan: admittedPlan, admission },
       observedApprovedLeaseIds: executing.approvedLeaseIds,
     });
     if (saved.outcome === "lease_lost") {
@@ -699,6 +803,13 @@ export async function admitWorkPlan(
       blockedBy: admission.blockedBy,
       constraints: admission.constraints,
       explanation: admission.explanation,
+      ...(planAdmissionPartial(admission)
+        ? {
+            partial: true,
+            grantedFiles: admittedPlan.expectedFiles,
+            deferredResources: admission.deferredResources,
+          }
+        : {}),
     });
     if (admission.ownershipGrants.length > 0) {
       await trace(store, undefined, "ownership_granted", task.id, {
@@ -738,8 +849,18 @@ export async function admitWorkPlan(
  * The admitted plan is the contract ownership was granted against, so a
  * result that widened its own scope is refused rather than re-arbitrated:
  * by then the edits already exist and no other holder had a chance to object.
+ *
+ * A deferred resource is not a widening. The worker reports the plan it
+ * submitted, and under a partial admission that plan legitimately names more
+ * than was granted — the coordinator is the one that narrowed it. Declaring a
+ * deferred file is allowed; the changeset touching it is a separate question,
+ * answered by {@link splitChangeSet}, which never lets it reach canonical.
  */
-function planScopeEscapes(admitted: AgentPlan, reported: AgentPlan): string[] {
+function planScopeEscapes(
+  admitted: AgentPlan,
+  reported: AgentPlan,
+  deferredFiles: readonly string[] = [],
+): string[] {
   const escapes: string[] = [];
   const compare = (
     kind: string,
@@ -758,7 +879,7 @@ function planScopeEscapes(admitted: AgentPlan, reported: AgentPlan): string[] {
   };
   compare(
     "file",
-    admitted.expectedFiles,
+    [...admitted.expectedFiles, ...deferredFiles],
     reported.expectedFiles,
     normalizeRepositoryPath,
   );
@@ -929,8 +1050,12 @@ export async function acceptWorkResult(
   let baseVersion: CanonicalVersion;
   // The enriched plan the coordinator admitted, not the one the worker chose
   // to report: ownership was granted against the former, so that is what the
-  // changeset is held to.
+  // changeset is held to. Under a partial admission this is already the
+  // reduced plan, which is exactly the point — the contract is what was
+  // granted, not what was asked for.
   const plan = admitted.plan;
+  const deferred = deferredFilePaths(admitted.admission);
+  let split: ReturnType<typeof splitChangeSet>;
   try {
     baseVersion = await repositories.getVersionAtRevision(
       repository,
@@ -943,7 +1068,7 @@ export async function acceptWorkResult(
     ) {
       throw new Error("Plan or changeset is for a different task");
     }
-    const escapes = planScopeEscapes(plan, rawPlan);
+    const escapes = planScopeEscapes(plan, rawPlan, deferred);
     if (escapes.length > 0) {
       throw new Error(
         `Reported plan claims resources the admitted plan did not cover: ${escapes.join(", ")}`,
@@ -960,13 +1085,26 @@ export async function acceptWorkResult(
     if (changeSet.riskAssessment.level !== plan.riskLevel) {
       throw new Error("Plan and changeset disagree about risk level");
     }
-    assertChangeSetWithinPlan(plan, changeSet);
+    split = splitChangeSet(plan, admitted.admission, changeSet);
+    // A file in neither bucket was never arbitrated at all, which is the
+    // scope escape the validator has always refused.
+    if (split.escaped.length > 0) {
+      throw new ScopeExpansionError(split.escaped);
+    }
+    assertChangeSetWithinPlan(plan, split.granted);
   } catch (error) {
     return await rejectWorkerResult(
       store,
       leaseAtStart,
       `Remote result failed coordination policy: ${errorMessage(error)}`,
     );
+  }
+
+  // The agent spent its whole run inside the part it did not own. Nothing can
+  // be promoted, but nothing is wrong with the task either, so it goes back to
+  // the queue rather than being failed — the same treatment a stale base gets.
+  if (split.granted.patches.length === 0 && split.deferred.length > 0) {
+    return await requeueForDeferredScope(store, leaseAtStart, task, split);
   }
 
   const currentBeforeRun = await repositories.getCanonicalVersion(repository);
@@ -994,6 +1132,7 @@ export async function acceptWorkResult(
     scenario: "remote-worker",
     baseVersion,
   });
+  const promoted = split.granted;
   let runFinished = false;
   try {
     await store.saveTask(run.id, taskDefinition);
@@ -1008,7 +1147,11 @@ export async function acceptWorkResult(
     // The grants the plan was admitted under belong in the run record, so the
     // history shows what this task was allowed to own, not just what it wrote.
     await store.saveLeases(run.id, admitted.admission.ownershipGrants);
-    await store.saveChangeSet(run.id, changeSet);
+    // The promoted changeset is the granted half. Recording the agent's whole
+    // output here would put patches in the run history that this run never
+    // applied, which is the kind of record that misleads exactly when someone
+    // is trying to work out what happened.
+    await store.saveChangeSet(run.id, promoted);
     await trace(store, run.id, "plan_received", task.id, {
       projectId: task.projectId,
       repositoryId: task.repositoryId,
@@ -1022,8 +1165,17 @@ export async function acceptWorkResult(
       repositoryId: task.repositoryId,
       workerId: leaseAtStart.workerId,
       leaseId: leaseAtStart.id,
-      changeSetId: changeSet.id,
-      files: changeSet.patches.map((patch) => patch.path),
+      changeSetId: promoted.id,
+      files: promoted.patches.map((patch) => patch.path),
+      ...(split.deferred.length === 0
+        ? {}
+        : {
+            reportedChangeSetId: changeSet.id,
+            withheldFiles: split.deferred.map((patch) => patch.path).sort(),
+            withheldReason:
+              "patches on resources this task was not granted; the work is " +
+              "requeued as a follow-up task rather than applied",
+          }),
     });
 
     // The task's project decides how strict review is; a project without a
@@ -1033,7 +1185,7 @@ export async function acceptWorkResult(
         ? undefined
         : await store.getProject(task.projectId);
     const approvalPolicy = approvalPolicyForProject(project?.policy);
-    const reviewReasons = approvalPolicy.changesetReasons(plan, changeSet);
+    const reviewReasons = approvalPolicy.changesetReasons(plan, promoted);
     const decision: CoordinatorDecision = {
       decision:
         reviewReasons.length === 0 && admitted.admission.constraints.length === 0
@@ -1074,7 +1226,7 @@ export async function acceptWorkResult(
         kind: "changeset",
         requestedBy: task.agentId,
         reasons: reviewReasons,
-        changeSetId: changeSet.id,
+        changeSetId: promoted.id,
         onRequested: async (request) => {
           await trace(store, run.id, "approval_requested", task.id, {
             projectId: task.projectId,
@@ -1134,7 +1286,7 @@ export async function acceptWorkResult(
       integrationRoot:
         services.integrationRoot ??
         path.resolve(".coordinator", "integration"),
-      changeSet,
+      changeSet: promoted,
       validationCommands: task.validationCommands,
       commitMessage: `coord(${task.id}): ${task.objective}`,
       requireExactBase: true,
@@ -1173,6 +1325,10 @@ export async function acceptWorkResult(
         revision: integration.canonicalVersion.revision,
         changeSetId: integration.changeSetId,
       });
+      // Only now, with the granted half durably in canonical, is the deferred
+      // half turned into work of its own. Queueing it earlier would leave a
+      // task asking for the remainder of something that never landed.
+      await queueDeferredScope(store, run.id, task, admitted.admission, split);
     } else {
       await store.saveTaskStatus(
         run.id,

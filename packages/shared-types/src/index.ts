@@ -162,6 +162,24 @@ export type PlanAdmissionStatus =
   | "blocked"
   | "sequenced";
 
+/**
+ * A resource a plan declared that its admission withheld while granting the
+ * rest of the plan.
+ *
+ * Ownership has always been per-resource; this is what makes the *decision*
+ * per-resource too. A holder that receives one of these may start immediately
+ * on everything else it declared, and must leave this resource alone: it is
+ * owned by the named tasks, and the control plane refuses any changeset that
+ * touches it.
+ */
+export interface DeferredResource {
+  resourceType: ResourceType;
+  resourceId: string;
+  /** Executing tasks that hold the resource right now. */
+  heldBy: TaskId[];
+  reason: string;
+}
+
 export interface PlanAdmission {
   status: PlanAdmissionStatus;
   taskId: TaskId;
@@ -173,6 +191,12 @@ export interface PlanAdmission {
   blockedBy: TaskId[];
   /** Structural evidence behind a non-approval, empty when approved. */
   conflicts: ConflictAssessment[];
+  /**
+   * Declared resources this admission withheld. Absent or empty for an
+   * all-or-nothing decision; non-empty only on an approval, where it means the
+   * holder was admitted on the rest of its plan and these are still contested.
+   */
+  deferredResources?: DeferredResource[];
   explanation: string;
   /** How long to wait before resubmitting the same plan. Absent when approved. */
   retryAfterMs?: number;
@@ -188,6 +212,31 @@ export function planAdmissionApproved(admission: PlanAdmission): boolean {
   return (
     admission.status === "approved" ||
     admission.status === "approved_with_constraints"
+  );
+}
+
+/**
+ * Whether the holder was admitted on part of its plan rather than all of it.
+ *
+ * A partial admission is an approval — the holder executes — so it is
+ * deliberately not a separate status. What distinguishes it is the withheld
+ * set, which the control plane enforces when the result comes back.
+ */
+export function planAdmissionPartial(admission: PlanAdmission): boolean {
+  return (
+    planAdmissionApproved(admission) &&
+    (admission.deferredResources ?? []).length > 0
+  );
+}
+
+/** Files a partial admission withheld, in the changeset's path form. */
+export function deferredFilePaths(
+  admission: PlanAdmission,
+): string[] {
+  return uniqueRepositoryPaths(
+    (admission.deferredResources ?? [])
+      .filter((resource) => resource.resourceType === "file")
+      .map((resource) => resource.resourceId),
   );
 }
 
@@ -704,6 +753,68 @@ export function mergePlanScope(
   };
   assertAgentPlan(revised);
   return revised;
+}
+
+/**
+ * Removes named resources from a plan, leaving everything else intact.
+ *
+ * The inverse of {@link mergePlanScope}: where that widens a plan after an
+ * approved scope change, this narrows one to the subset a partial admission
+ * granted. The objective is deliberately untouched — the plan is still for the
+ * same task, and every identity check downstream compares objectives.
+ *
+ * `dependencies` are untouched too: a dependency is something the plan reads,
+ * not something it claims, so removing a claim never removes a dependency.
+ */
+export function reducePlanScope(
+  plan: AgentPlan,
+  removed: readonly PlanResourceRef[],
+): AgentPlan {
+  const dropped = new Set(
+    removed.map((resource) =>
+      planResourceKey(resource.resourceType, resource.resourceId),
+    ),
+  );
+  const keep =
+    (type: ResourceType) =>
+    (value: string): boolean =>
+      !dropped.has(planResourceKey(type, value));
+  const revised: AgentPlan = {
+    ...structuredClone(plan),
+    expectedFiles: plan.expectedFiles.filter(keep("file")),
+    expectedSymbols: plan.expectedSymbols.filter(keep("symbol")),
+    ...(plan.expectedApis === undefined
+      ? {}
+      : { expectedApis: plan.expectedApis.filter(keep("api")) }),
+    ...(plan.expectedSchemas === undefined
+      ? {}
+      : { expectedSchemas: plan.expectedSchemas.filter(keep("schema")) }),
+    ...(plan.expectedConfigKeys === undefined
+      ? {}
+      : {
+          expectedConfigKeys: plan.expectedConfigKeys.filter(
+            keep("configuration"),
+          ),
+        }),
+    ...(plan.expectedTests === undefined
+      ? {}
+      : { expectedTests: plan.expectedTests.filter(keep("test")) }),
+    ...(plan.expectedServices === undefined
+      ? {}
+      : { expectedServices: plan.expectedServices.filter(keep("service")) }),
+  };
+  assertAgentPlan(revised);
+  return revised;
+}
+
+export interface PlanResourceRef {
+  resourceType: ResourceType;
+  resourceId: string;
+}
+
+/** Case-insensitive identity for a planned resource. */
+export function planResourceKey(type: ResourceType, id: string): string {
+  return `${type}\0${id.trim().toLowerCase()}`;
 }
 
 /**
