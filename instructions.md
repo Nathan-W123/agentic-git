@@ -204,6 +204,12 @@ Export
 
 External compatibility
 
+These are read and export paths. Writing to canonical through Git directly
+— branching, merging, or resetting outside the coordinator's pipeline — is
+intentionally unsupported in every phase, not just the first. History,
+rollback, and review features are built on Git history but always go
+through the coordinator (see section 18).
+
 7. Primary Users
 
 Initial users
@@ -914,6 +920,38 @@ Release resource ownership.
 
 No task should directly mutate canonical state outside this process.
 
+Version history, rollback, and review
+
+Every promotion already creates a Git commit, so canonical history is a
+product surface, not an internal detail. The following build on it and are
+scoped for Phase 2:
+
+History browsing. The dashboard and API expose the canonical version
+timeline that promotions already produce: versions, the tasks and
+changesets behind them, validation results, and approvals.
+
+Rollback. Reverting to a previous canonical version is submitted as an
+ordinary changeset: it is conflict-checked against in-flight work,
+validated in an integration snapshot, approved where policy requires, and
+promoted atomically. A rollback is never a raw Git reset, so it is
+audited, blockable, and safe against concurrent tasks like any other
+change.
+
+Review threads. Approvals gain positioned comment threads on changeset
+diffs, so review is a conversation rather than a single diff-and-decide
+gate.
+
+Task boards. Issue-style board views are projections of the existing task
+submission queue, not a second tracking system.
+
+Scope boundary: these features surface Git history through the
+coordinator. Direct branch, merge, or reset access to the canonical
+repository outside the integration pipeline is intentionally not offered,
+in any phase. That is a design boundary, not a missing feature: an
+uncoordinated write path would reintroduce exactly the race conditions and
+corrupted merges the platform exists to prevent. Read-only Git access,
+history, and export remain guaranteed.
+
 19. Real-Time Collaboration Streams
 
 Keep these streams separate.
@@ -1323,6 +1361,14 @@ Cost controls
 
 Better audit logs
 
+Canonical version history browsing in the dashboard and API
+
+Pipeline-safe rollback to a previous canonical version
+
+Review comment threads on changeset diffs
+
+Issue and task-board views over the task queue
+
 Reliability and recovery
 
 Success condition:
@@ -1440,6 +1486,11 @@ Canonical state changes must be atomic.
 Agent work must be isolated by default.
 
 Git export must always remain possible.
+
+Rollback must ride the integration pipeline, never a raw Git reset.
+
+Direct branch or merge access to canonical outside the coordinator is
+intentionally unsupported; read-only history and export remain guaranteed.
 
 Provider-specific capabilities must be optional.
 

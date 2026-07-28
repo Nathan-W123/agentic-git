@@ -46,6 +46,20 @@ records the exact implemented and later-phase boundary.
   repositories, teams, project settings, and system administration.
 - Deterministic coordinated-versus-uncoordinated benchmarks.
 
+## Planned: Version-Control Parity
+
+Every promotion already creates a Git commit; Phase 2 surfaces that history
+as product features (see instructions.md, sections 18 and 25): canonical
+version history browsing, pipeline-safe rollback to a previous version —
+submitted, conflict-checked, validated, and promoted like any other change,
+never a raw reset — review comment threads on diffs, and task-board views
+over the existing task queue.
+
+By design, there is no direct branch/merge/reset access to the canonical
+repository outside the coordinator's pipeline, in any phase. An
+uncoordinated write path would reintroduce the races the platform exists to
+prevent. Read-only Git access and export are guaranteed instead.
+
 ## Requirements
 
 - Node.js 24 or newer
