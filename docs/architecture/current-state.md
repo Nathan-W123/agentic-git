@@ -120,6 +120,14 @@ Hosted execution has a protocol and a working control-plane half:
   revision it was leased and the control plane runs no Git server.
 - A worker daemon that leases, clones, runs an agent, and returns a changeset,
   honoring the project container sandbox when one is configured.
+- Plan-first admission (protocol version 2): the worker's agent plans, the
+  plan is arbitrated against every plan currently executing in the repository
+  using the same conflict detection and ownership services the local scheduler
+  uses, and only an approved answer licenses execution. A conflict costs one
+  planning round trip instead of a discarded execution. Arbitration is
+  serialized in the store, so concurrent workers cannot both be admitted
+  against a stale view. Exact-base integration and requeue-to-replan remain
+  the backstop underneath. See docs/protocol/remote-workers.md.
 
 The coordination store itself is no longer bound to one disk: alongside the
 SQLite file, a PostgreSQL backend implements the same store contract and is

@@ -89,6 +89,28 @@ test("stale integrations count as contention, other failures as rework", async (
   await store.close();
 });
 
+test("a deferred plan counts as contention that cost nothing to execute", async () => {
+  const store = new InMemoryCoordinationStore();
+  // Predicted, then the plan was stopped before any editing: the prediction
+  // is confirmed, but unlike a replan no execution was thrown away.
+  await append(store, "conflict_detected", "task_b", {
+    taskIds: ["task_a", "task_b"],
+    disposition: "sequence",
+    score: 40,
+    stage: "remote_plan_admission",
+  });
+  await append(store, "plan_admitted", "task_b", { status: "sequenced" });
+  await append(store, "plan_admitted", "task_a", { status: "approved" });
+
+  const metrics = await computeCoordinationMetrics(store);
+  assert.equal(metrics.rework.planTimeDeferrals, 1);
+  assert.equal(metrics.rework.taskRestarts, 0);
+  assert.equal(metrics.rework.replansRequested, 0);
+  assert.equal(metrics.conflicts.confirmedPredictions, 1);
+
+  await store.close();
+});
+
 test("throughput, restarts, and approval latency come from event timestamps", async () => {
   const store = new InMemoryCoordinationStore();
   await append(store, "task_submitted", "task_1", {});

@@ -117,7 +117,6 @@ export interface WorkResultAcceptance {
 
 interface WorkResultServices {
   repositories?: RepositoryService;
-  intelligence?: CodeIntelligenceService;
   integrations?: IntegrationService;
   integrationRoot?: string;
 }
@@ -594,14 +593,24 @@ export async function admitWorkPlan(
     return { outcome: "rejected", reason };
   }
   const repository = canonical(storedRepository);
-  const baseVersion = await repositories.getVersionAtRevision(
-    repository,
-    lease.baseRevision,
-  );
+  let baseVersion: CanonicalVersion;
+  let current: CanonicalVersion;
+  try {
+    baseVersion = await repositories.getVersionAtRevision(
+      repository,
+      lease.baseRevision,
+    );
+    current = await repositories.getCanonicalVersion(repository);
+  } catch (error) {
+    // The revision this lease pinned is unreadable, so nothing can be decided
+    // about a plan written against it.
+    const reason = `Leased base revision is unusable: ${errorMessage(error)}`;
+    await failLease(store, lease, reason, "remote_plan_validation");
+    return { outcome: "rejected", reason };
+  }
 
   // Canonical moving under a plan is the cheapest possible moment to notice:
   // the worker has planned but not edited, so requeueing costs one plan.
-  const current = await repositories.getCanonicalVersion(repository);
   if (current.revision !== baseVersion.revision) {
     await requeueForCanonicalChange(
       store,
@@ -1239,14 +1248,15 @@ export function workerOperations(
     sandboxOptions === undefined
       ? worktrees
       : new DockerWorkspaceManager(sandboxOptions, worktrees);
-  const intelligence = new CodeIntelligenceService(repositories);
   const services: WorkResultServices = {
     repositories,
-    intelligence,
     integrations: new IntegrationService(repositories, workspaces),
     integrationRoot: project.integrationRoot,
   };
-  const planServices: WorkPlanServices = { repositories, intelligence };
+  const planServices: WorkPlanServices = {
+    repositories,
+    intelligence: new CodeIntelligenceService(repositories),
+  };
   const processing = new Map<string, Promise<WorkResultAcceptance>>();
   // Admission reads the repository's executing plans and writes one back.
   // Serialising per repository in the hosting process keeps a burst of
@@ -1264,10 +1274,10 @@ export function workerOperations(
     admitWorkPlan: async (input: WorkPlanInput) => {
       const lease = await store.getWorkLease(input.leaseId);
       const key = lease?.repositoryId ?? input.leaseId;
-      const queued = (admitting.get(key) ?? Promise.resolve()).then(
-        async () => await admitWorkPlan(store, input, planServices),
-        async () => await admitWorkPlan(store, input, planServices),
-      );
+      const run = async () => await admitWorkPlan(store, input, planServices);
+      // Chained on settlement, not on success: one failed admission must not
+      // wedge every later submission in the repository.
+      const queued = (admitting.get(key) ?? Promise.resolve()).then(run, run);
       admitting.set(key, queued);
       try {
         return await queued;

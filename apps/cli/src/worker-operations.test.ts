@@ -1082,3 +1082,409 @@ test("the full remote cycle runs end to end against a Postgres store", async () 
     }
   }
 });
+
+test("two workers targeting one file are separated at plan time, not after executing", async () => {
+  // The behaviour this whole protocol change exists for. Two remote workers
+  // lease concurrently in one repository and plan against the same file. Under
+  // the previous optimistic model both would have run an agent to completion
+  // and the loser's work would have been discarded at integration. Here the
+  // second worker is sequenced while its agent is still idle, and the proof is
+  // countable: exactly one run per task, one changeset per task, and no
+  // discarded execution anywhere in the durable record.
+  //
+  // Against a real Postgres server, because the serialization that makes the
+  // arbitration sound is the store's, not the process's.
+  const server =
+    process.env["COORD_SKIP_POSTGRES_TESTS"] === "1"
+      ? undefined
+      : await startPostgresTestServer({
+          containerName: "coord-postgres-worker-smoke",
+        });
+  if (server === undefined) {
+    console.warn(
+      "postgres: plan-time conflict test skipped (Docker is unavailable and " +
+        "COORD_TEST_POSTGRES_URL is not set)",
+    );
+    return;
+  }
+  const database = await createScratchDatabase(server.adminUrl);
+  const store = PostgresCoordinationStore.open(database.url);
+  let harness: Harness | undefined;
+  try {
+    harness = await createHarness(store);
+    const secondUser = await store.createUser({
+      email: "fleet-plan-b@example.com",
+      displayName: "Fleet B",
+      passwordDigest: "digest",
+    });
+    const secondWorker = await store.registerWorker({
+      userId: secondUser.id,
+      name: "worker-b",
+      adapters: ["generic-cli"],
+      version: "1.0.0",
+    });
+
+    const taskA = await store.submitTask({
+      repositoryId: "repo_worker",
+      objective: "raise the value",
+      agentId: "generic-cli",
+      validationCommands: [],
+    });
+    const taskB = await store.submitTask({
+      repositoryId: "repo_worker",
+      objective: "extend the value module",
+      agentId: "generic-cli",
+      validationCommands: [],
+    });
+
+    const assignmentA = await leaseWork(store, {
+      workerId: harness.workerId,
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryParallelism: 2,
+    });
+    const assignmentB = await leaseWork(store, {
+      workerId: secondWorker.id,
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryParallelism: 2,
+    });
+    assert.ok(assignmentA && assignmentB);
+    assert.equal(assignmentA.task.id, taskA.id);
+    assert.equal(assignmentB.task.id, taskB.id);
+    // Both hold the same base: this is exactly the race the old model lost.
+    assert.equal(assignmentA.lease.baseRevision, assignmentB.lease.baseRevision);
+
+    // Worker A plans first and is granted ownership of the file.
+    const admittedA = await admit(harness, assignmentA);
+    assert.equal(admittedA.outcome, "admitted");
+    assert.equal(
+      admittedA.outcome === "admitted" ? admittedA.admission.status : undefined,
+      "approved",
+    );
+    assert.ok(
+      admittedA.outcome === "admitted" &&
+        admittedA.admission.ownershipGrants.some(
+          (grant) =>
+            grant.resourceType === "file" &&
+            grant.resourceId === "src/value.js" &&
+            grant.mode === "exclusive",
+        ),
+      "worker A must hold the file exclusively",
+    );
+
+    // Worker B plans against the same file and is stopped here — before its
+    // agent has written a line.
+    const admittedB = await admit(harness, assignmentB, {
+      expectedSymbols: ["value", "extra"],
+    });
+    assert.equal(admittedB.outcome, "admitted");
+    assert.ok(admittedB.outcome === "admitted");
+    assert.equal(admittedB.admission.status, "sequenced");
+    assert.deepEqual(admittedB.admission.blockedBy, [taskA.id]);
+    assert.equal(admittedB.admission.ownershipGrants.length, 0);
+    assert.ok((admittedB.admission.retryAfterMs ?? 0) > 0);
+    assert.ok(
+      admittedB.admission.conflicts.some((assessment) =>
+        assessment.evidence.some(
+          (entry) =>
+            entry.kind === "file_overlap" &&
+            entry.resources.includes("src/value.js"),
+        ),
+      ),
+      "the sequencing decision must cite the overlapping file",
+    );
+    // Nothing has executed yet: the conflict was found before any run existed.
+    assert.equal((await store.listRuns()).length, 0);
+
+    const stored = await store.getRepository("repo_worker");
+    assert.ok(stored);
+    const repository = {
+      id: stored.id,
+      path: stored.path,
+      branch: stored.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const collect = async (
+      taskId: string,
+      baseVersion: typeof assignmentA.canonicalVersion,
+      content: string,
+      symbols: string[],
+    ) => {
+      const workspace = await workspaces.create({
+        taskId,
+        rootPath: path.join(harness?.root ?? "", "agent-workspaces"),
+        repository,
+        baseVersion,
+      });
+      await writeFile(
+        path.join(workspace.path, "src", "value.js"),
+        content,
+        "utf8",
+      );
+      const changeSet = await workspaces.collectChangeSet(workspace, {
+        symbolsChanged: symbols,
+        riskAssessment: { level: "low", reasons: [] },
+        agentExplanation: `wrote ${taskId}`,
+      });
+      await workspaces.destroy(workspace);
+      return changeSet;
+    };
+
+    // Worker A executes against its grant and integrates.
+    const acceptedA = await acceptWorkResult(
+      store,
+      {
+        leaseId: assignmentA.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskA.id, { objective: taskA.objective }),
+        changeSet: await collect(
+          taskA.id,
+          assignmentA.canonicalVersion,
+          "export const value = 2;\n",
+          ["value"],
+        ),
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(acceptedA.accepted, true, acceptedA.reason);
+
+    // Worker B, still idle, resubmits the plan it already has. Canonical moved
+    // while it waited, so the answer is to plan again rather than to run —
+    // again without spending any execution time.
+    const resubmitted = await admit(harness, assignmentB, {
+      expectedSymbols: ["value", "extra"],
+    });
+    assert.ok(resubmitted.outcome === "admitted");
+    assert.equal(resubmitted.admission.status, "blocked");
+    assert.equal(resubmitted.admission.requeue, true);
+    assert.equal(
+      (await store.getWorkLease(assignmentB.lease.id))?.status,
+      "released",
+    );
+    assert.equal(
+      (await store.listSubmittedTasks()).find((task) => task.id === taskB.id)
+        ?.status,
+      "submitted",
+    );
+
+    // It re-leases at the promoted revision, replans, and is now approved:
+    // the file it wanted is free.
+    const retry = await leaseWork(store, {
+      workerId: secondWorker.id,
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryParallelism: 2,
+    });
+    assert.ok(retry);
+    assert.equal(retry.task.id, taskB.id);
+    assert.notEqual(retry.lease.baseRevision, assignmentB.lease.baseRevision);
+    const admittedRetry = await admit(harness, retry, {
+      expectedSymbols: ["value", "extra"],
+    });
+    assert.ok(admittedRetry.outcome === "admitted");
+    assert.equal(admittedRetry.admission.status, "approved");
+
+    const acceptedB = await acceptWorkResult(
+      store,
+      {
+        leaseId: retry.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: taskB.objective,
+          expectedSymbols: ["value", "extra"],
+        }),
+        changeSet: await collect(
+          taskB.id,
+          retry.canonicalVersion,
+          "export const value = 2;\nexport const extra = true;\n",
+          ["extra"],
+        ),
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(acceptedB.accepted, true, acceptedB.reason);
+
+    // Canonical carries both changes, serialized in the order arbitration
+    // chose.
+    const version = await harness.repositories.getCanonicalVersion(repository);
+    assert.equal(
+      await harness.repositories.readFile(
+        repository,
+        version.revision,
+        "src/value.js",
+      ),
+      "export const value = 2;\nexport const extra = true;\n",
+    );
+
+    // The countable proof: one run and one changeset per task. A discarded
+    // execution would have left a third run and a second changeset for taskB.
+    const runs = await store.listRuns();
+    assert.equal(runs.length, 2);
+    const audit = await store.listAudit();
+    assert.equal(
+      audit.filter(
+        (event) =>
+          event.type === "changeset_collected" && event.taskId === taskB.id,
+      ).length,
+      1,
+    );
+    // And the deferral itself is on the record, with its evidence.
+    assert.equal(
+      audit.filter(
+        (event) =>
+          event.type === "plan_admitted" &&
+          event.taskId === taskB.id &&
+          event.data["status"] === "sequenced",
+      ).length,
+      1,
+    );
+    assert.ok(
+      audit.some(
+        (event) =>
+          event.type === "conflict_detected" &&
+          event.data["stage"] === "remote_plan_admission",
+      ),
+    );
+    assert.equal((await store.verifyAudit()).valid, true);
+  } finally {
+    await store.close();
+    await database.drop();
+    await server.stop();
+    if (harness !== undefined) {
+      await rm(harness.root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("a result without an approved admission is refused", async () => {
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+
+    // Skipping admission entirely is what an old, plan-blind worker does.
+    const unplanned = await acceptWorkResult(harness.store, {
+      leaseId: assignment.lease.id,
+      status: "completed",
+      actorId: "user",
+      plan: plan(taskId),
+      changeSet: resultStub(taskId, harness.revision),
+    });
+    assert.equal(unplanned.accepted, false);
+    assert.match(unplanned.reason ?? "", /require an admitted plan/u);
+    assert.equal(
+      (await harness.store.getWorkLease(assignment.lease.id))?.status,
+      "failed",
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a result cannot claim resources its admitted plan never covered", async () => {
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    const assignment = await leaseAndAdmit(harness);
+
+    // The admitted plan covered src/value.js. Reporting a wider one after the
+    // fact would mean claiming ownership nobody had a chance to object to.
+    const widened = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskId, {
+          expectedFiles: ["src/value.js", "src/secret.js"],
+        }),
+        changeSet: resultStub(taskId, harness.revision),
+      },
+      { repositories: harness.repositories },
+    );
+    assert.equal(widened.accepted, false);
+    assert.match(widened.reason ?? "", /src\/secret\.js/u);
+    assert.equal(
+      (await harness.store.getWorkLease(assignment.lease.id))?.status,
+      "failed",
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("an unusable plan fails the lease instead of looping", async () => {
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+
+    const rejected = await admitWorkPlan(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        actorId: "user",
+        // Right task, wrong objective: the agent planned something other than
+        // what it was leased.
+        plan: plan(taskId, { objective: "something else entirely" }),
+      },
+      { repositories: harness.repositories },
+    );
+    assert.equal(rejected.outcome, "rejected");
+    assert.match(
+      rejected.outcome === "rejected" ? rejected.reason : "",
+      /objective does not match/u,
+    );
+    assert.equal(
+      (await harness.store.getWorkLease(assignment.lease.id))?.status,
+      "failed",
+    );
+    // Failed, not requeued: the same plan would be rejected again forever.
+    assert.equal(
+      (await harness.store.listSubmittedTasks())[0]?.status,
+      "failed",
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a lapsed lease cannot have a plan admitted", async () => {
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+    await harness.store.expireWorkLeases(
+      new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    );
+
+    const outcome = await admitWorkPlan(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        actorId: "user",
+        plan: plan(taskId),
+      },
+      { repositories: harness.repositories },
+    );
+    assert.equal(outcome.outcome, "lease_lost");
+    // The task is back in the queue for whoever leases it next.
+    assert.equal(
+      (await harness.store.listSubmittedTasks({ status: "submitted" })).length,
+      1,
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});

@@ -321,6 +321,96 @@ test("remote agents are constrained to their original plan", async (t) => {
   ]);
 });
 
+test("a worker whose plan is sequenced never runs its agent", async (t) => {
+  const runtime = await startRuntime(t);
+
+  // A rival worker already holds a lease in this repository with an admitted
+  // plan on src/value.js — the file this project's agent always plans.
+  const rival = new WorkerClient({
+    serverUrl: runtime.origin,
+    token: runtime.token,
+  });
+  const rivalId = (
+    await rival.register({
+      name: "rival",
+      adapters: ["generic-cli"],
+      version: "1.0.0",
+    })
+  ).id;
+  const held = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const contested = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const rivalAssignment = await rival.lease(rivalId, DEFAULT_PROJECT_ID);
+  assert.equal(rivalAssignment?.task.id, held.id);
+  assert.ok(rivalAssignment);
+  const rivalAdmission = await rival.submitPlan(rivalAssignment.lease.id, {
+    taskId: held.id,
+    objective: held.objective,
+    expectedFiles: ["src/value.js"],
+    expectedSymbols: ["value"],
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  });
+  assert.equal(rivalAdmission.status, "approved");
+
+  // The daemon leases the contested task, plans, and is told to stand down.
+  // planWaitBudgetMs 0 makes it give the lease straight back instead of
+  // waiting out the rival, which is the same decision compressed in time.
+  const worker = new Worker({
+    client: new WorkerClient({
+      serverUrl: runtime.origin,
+      token: runtime.token,
+    }),
+    project: runtime.project,
+    workspaceRoot: path.join(runtime.root, "deferred"),
+    planWaitBudgetMs: 0,
+  });
+  await worker.register();
+  const result = await worker.runOnce();
+
+  assert.equal(result.worked, true);
+  assert.equal(result.taskId, contested.id);
+  assert.equal(result.deferred, true);
+  assert.equal(result.accepted, false);
+  assert.match(result.reason ?? "", /sequenced/u);
+
+  // The agent never edited anything: no run, no changeset, nothing to discard.
+  assert.equal((await runtime.store.listRuns()).length, 0);
+  const audit = await runtime.store.listAudit();
+  assert.equal(
+    audit.filter((event) => event.type === "changeset_collected").length,
+    0,
+  );
+  assert.ok(
+    audit.some(
+      (event) =>
+        event.type === "plan_admitted" &&
+        event.taskId === contested.id &&
+        event.data["status"] === "sequenced",
+    ),
+  );
+
+  // And the task is queued again, not failed: it is perfectly good work that
+  // simply cannot run yet.
+  assert.equal(
+    (await runtime.store.listSubmittedTasks()).find(
+      (task) => task.id === contested.id,
+    )?.status,
+    "submitted",
+  );
+});
+
 test("an agent failure is reported, not swallowed", async (t) => {
   const runtime = await startRuntime(t);
   // Point the agent at an executable that does not exist.
