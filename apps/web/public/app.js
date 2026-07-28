@@ -15,6 +15,8 @@ const state = {
   audit: [],
   agents: [],
   members: [],
+  metrics: undefined,
+  workers: [],
   admin: undefined,
   route: "overview",
   socket: undefined,
@@ -52,10 +54,15 @@ const routeMeta = {
     "Team",
     "Manage organization membership and role-based permissions.",
   ],
+  coordination: [
+    "Measured outcomes",
+    "Coordination",
+    "How well scheduling predicted contention, what it cost, and who is executing.",
+  ],
   settings: [
     "Project controls",
     "Settings",
-    "Update project identity, organization details, and lifecycle state.",
+    "Policy, budgets, project identity, and lifecycle state.",
   ],
   admin: [
     "Host operations",
@@ -140,6 +147,24 @@ async function api(path, options = {}) {
     throw error;
   }
   return data;
+}
+
+/**
+ * A GET whose absence is not an error.
+ *
+ * Metrics, the worker fleet, and version history are all optional deployment
+ * capabilities — a control plane without remote execution answers 501, and a
+ * viewer without the scope answers 403. Neither should blank the whole page.
+ */
+async function apiOptional(path, fallback) {
+  try {
+    return await api(path);
+  } catch (error) {
+    if ([401, 500].includes(error.status)) {
+      throw error;
+    }
+    return fallback;
+  }
 }
 
 function toast(message, tone = "default") {
@@ -281,6 +306,8 @@ async function loadContext({ quiet = false } = {}) {
         audit,
         agents,
         project,
+        metrics,
+        workers,
       ] = await Promise.all([
         api(`/projects/${projectId}/repositories`),
         api(`/projects/${projectId}/tasks`),
@@ -289,6 +316,8 @@ async function loadContext({ quiet = false } = {}) {
         api(`/projects/${projectId}/audit`),
         api(`/projects/${projectId}/agents`),
         api(`/projects/${projectId}`),
+        apiOptional(`/projects/${projectId}/metrics`, { metrics: undefined }),
+        apiOptional(`/workers`, { workers: [] }),
       ]);
       state.repositories = repositories.repositories;
       state.tasks = tasks.tasks;
@@ -297,6 +326,8 @@ async function loadContext({ quiet = false } = {}) {
       state.audit = audit.events;
       state.agents = agents.agents;
       state.project = project.project;
+      state.metrics = metrics.metrics;
+      state.workers = workers.workers ?? [];
     } else {
       state.repositories = [];
       state.tasks = [];
@@ -305,6 +336,8 @@ async function loadContext({ quiet = false } = {}) {
       state.audit = [];
       state.agents = [];
       state.project = undefined;
+      state.metrics = undefined;
+      state.workers = [];
     }
 
     if (state.principal?.user?.systemAdmin) {
@@ -511,6 +544,7 @@ function render() {
     runs: renderRuns,
     approvals: renderApprovals,
     repositories: renderRepositories,
+    coordination: renderCoordination,
     team: renderTeam,
     settings: renderSettings,
     admin: renderAdmin,
@@ -872,6 +906,168 @@ function renderRepositories() {
     </div>`;
 }
 
+function duration(milliseconds) {
+  if (typeof milliseconds !== "number" || !Number.isFinite(milliseconds)) {
+    return "—";
+  }
+  if (milliseconds < 1000) {
+    return `${Math.round(milliseconds)} ms`;
+  }
+  const seconds = milliseconds / 1000;
+  if (seconds < 90) {
+    return `${seconds.toFixed(1)} s`;
+  }
+  const minutes = seconds / 60;
+  if (minutes < 90) {
+    return `${minutes.toFixed(1)} min`;
+  }
+  return `${(minutes / 60).toFixed(1)} h`;
+}
+
+function percent(part, whole) {
+  if (whole === 0) {
+    return "—";
+  }
+  return `${Math.round((part / whole) * 100)}%`;
+}
+
+/**
+ * Prediction quality, rework, and spend, straight from the audit chain.
+ *
+ * The numbers are deliberately shown with their denominators. A conflict
+ * prediction count means nothing on its own; what matters is how many were
+ * confirmed by contention that actually happened and how many were false
+ * alarms, because that ratio is the argument for the whole scheduler.
+ */
+function renderCoordination() {
+  const metrics = state.metrics;
+  if (!metrics) {
+    $("#route-view").innerHTML = `
+      <div class="empty-state">
+        <div>
+          <h2>Coordination metrics are unavailable</h2>
+          <p>This deployment does not expose the metrics endpoint, or your role cannot view it.</p>
+        </div>
+      </div>`;
+    return;
+  }
+
+  const { conflicts, rework, throughput, approvals, cost, window } = metrics;
+  const decided = conflicts.confirmedPredictions + conflicts.falsePositives;
+
+  $("#route-view").innerHTML = `
+    <section class="metric-grid">
+      ${metric(
+        "Conflicts predicted",
+        conflicts.predictions,
+        `${conflicts.openPredictions} still open`,
+        "◈",
+      )}
+      ${metric(
+        "Predictions confirmed",
+        conflicts.confirmedPredictions,
+        `${percent(conflicts.confirmedPredictions, decided)} of decided predictions`,
+        "✓",
+      )}
+      ${metric(
+        "False alarms",
+        conflicts.falsePositives,
+        "Predicted pairs that both landed cleanly",
+        "○",
+      )}
+      ${metric(
+        "Missed conflicts",
+        conflicts.unpredictedContention,
+        "Contention no prediction covered",
+        "!",
+      )}
+    </section>
+    <div class="content-grid">
+      <section class="panel">
+        <header class="panel-head">
+          <div><h2>Rework</h2><p>Work repeated, and work avoided before it ran</p></div>
+        </header>
+        <div class="table-wrap">
+          <table class="data-table">
+            <tbody>
+              <tr><td>Replans requested</td><td><strong>${rework.replansRequested}</strong></td>
+                <td class="muted">Canonical moved under a task</td></tr>
+              <tr><td>Integration failures</td><td><strong>${rework.integrationFailures}</strong></td>
+                <td class="muted">Validation or conflict at promotion</td></tr>
+              <tr><td>Task restarts</td><td><strong>${rework.taskRestarts}</strong></td>
+                <td class="muted">Executions that had to be repeated</td></tr>
+              <tr><td>Deferred at plan time</td><td><strong>${rework.planTimeDeferrals ?? 0}</strong></td>
+                <td class="muted">Refused before any editing — rework avoided</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+      <section class="panel">
+        <header class="panel-head">
+          <div><h2>Throughput</h2><p>Queue to canonical</p></div>
+        </header>
+        <div class="table-wrap">
+          <table class="data-table">
+            <tbody>
+              <tr><td>Submitted</td><td><strong>${throughput.tasksSubmitted}</strong></td><td></td></tr>
+              <tr><td>Integrated</td><td><strong>${throughput.tasksIntegrated}</strong></td>
+                <td class="muted">${percent(throughput.tasksIntegrated, throughput.tasksSubmitted)} of submitted</td></tr>
+              <tr><td>Failed</td><td><strong>${throughput.tasksFailed}</strong></td><td></td></tr>
+              <tr><td>Mean time to integration</td>
+                <td><strong>${duration(throughput.averageTimeToIntegrationMs)}</strong></td><td></td></tr>
+              <tr><td>Approvals decided</td>
+                <td><strong>${approvals.decided} / ${approvals.requested}</strong></td>
+                <td class="muted">Mean wait ${duration(approvals.averageDecisionMs)}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+    <section class="panel">
+      <header class="panel-head">
+        <div><h2>Remote execution</h2><p>Lease runtime is the platform's one directly measured spend signal</p></div>
+        <span class="chip">${window.events} events to sequence ${window.toSequence}</span>
+      </header>
+      <section class="metric-grid">
+        ${metric("Lease runtime", duration(cost.leaseRuntimeMs), "Total across all leases", "◷")}
+        ${metric("Active leases", cost.activeLeases, "Executing right now", "◎")}
+        ${metric("Settled leases", cost.settledLeases, "Completed, failed, or released", "⌁")}
+        ${metric("Registered workers", state.workers.length, "Visible to your account", "⌗")}
+      </section>
+      <div class="table-wrap">${workerTable(state.workers)}</div>
+      <p class="muted panel-note">
+        Runtime is wall-clock lease time, not model cost. Token accounting is not
+        available from the agent adapters today.
+      </p>
+    </section>`;
+}
+
+function workerTable(workers) {
+  if (workers.length === 0) {
+    return '<div class="empty-state"><div><h2>No workers registered</h2><p>A worker registers itself with a scoped API token. Until one does, tasks run on the control plane.</p></div></div>';
+  }
+  return `
+    <table class="data-table">
+      <thead><tr><th>Worker</th><th>Adapters</th><th>Version</th><th>Last seen</th></tr></thead>
+      <tbody>
+        ${workers
+          .map(
+            (worker) => `
+          <tr>
+            <td><strong>${escapeHtml(worker.name || shortId(worker.id))}</strong>
+              <div class="muted">${escapeHtml(shortId(worker.id, 16))}</div></td>
+            <td>${(worker.adapters ?? [])
+              .map((adapter) => `<span class="chip">${escapeHtml(adapter)}</span>`)
+              .join(" ")}</td>
+            <td>${escapeHtml(worker.version ?? "—")}</td>
+            <td>${escapeHtml(formatDate(worker.lastSeenAt))}</td>
+          </tr>`,
+          )
+          .join("")}
+      </tbody>
+    </table>`;
+}
+
 function renderTeam() {
   const manageable = canManageMembers();
   const roles = ["owner", "admin", "developer", "reviewer", "viewer"];
@@ -944,6 +1140,147 @@ function renderTeam() {
     </div>`;
 }
 
+const RISK_LEVELS = ["low", "medium", "high", "critical"];
+
+/**
+ * Turns the policy form's raw values into a PATCH body.
+ *
+ * Self-contained and free of DOM access so a test can exercise it directly.
+ * The rules it encodes are easy to get subtly wrong: an empty field means
+ * "use the built-in default" rather than zero, a risk selection identical to
+ * the default is not worth storing (it would pin the project against a future
+ * change to that default), and a form with nothing set at all clears the
+ * policy rather than storing an empty one.
+ */
+function policyPayload(input) {
+  const defaultRiskLevels = ["high", "critical"];
+  const minutes = (raw, label) => {
+    const text = String(raw ?? "").trim();
+    if (text === "") {
+      return undefined;
+    }
+    const parsed = Number.parseInt(text, 10);
+    if (!Number.isSafeInteger(parsed) || parsed < 1) {
+      throw new Error(`${label} must be a whole number of minutes above zero`);
+    }
+    return parsed * 60000;
+  };
+
+  const riskLevels = [...new Set(input.riskLevels ?? [])];
+  const protectedPaths = String(input.protectedPaths ?? "")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const approvalTimeoutMs = minutes(
+    input.approvalTimeoutMinutes,
+    "Approval timeout",
+  );
+  const maxTaskRuntimeMs = minutes(
+    input.maxTaskRuntimeMinutes,
+    "Max runtime per task",
+  );
+  const maxProjectRuntimeMsPerDay = minutes(
+    input.maxProjectRuntimeMinutesPerDay,
+    "Max runtime per day",
+  );
+
+  const sameAsDefault =
+    riskLevels.length === defaultRiskLevels.length &&
+    defaultRiskLevels.every((level) => riskLevels.includes(level));
+  const approvals = {
+    ...(input.requireChangesetReview ? { requireChangesetReview: true } : {}),
+    ...(riskLevels.length > 0 && !sameAsDefault ? { riskLevels } : {}),
+    ...(protectedPaths.length > 0 ? { protectedPaths } : {}),
+    ...(approvalTimeoutMs === undefined ? {} : { approvalTimeoutMs }),
+  };
+  const budgets = {
+    ...(maxTaskRuntimeMs === undefined ? {} : { maxTaskRuntimeMs }),
+    ...(maxProjectRuntimeMsPerDay === undefined
+      ? {}
+      : { maxProjectRuntimeMsPerDay }),
+  };
+  const policy = {
+    version: 1,
+    ...(Object.keys(approvals).length > 0 ? { approvals } : {}),
+    ...(Object.keys(budgets).length > 0 ? { budgets } : {}),
+  };
+  return Object.keys(policy).length === 1 ? { policy: null } : { policy };
+}
+
+/** Milliseconds are the stored unit; minutes are the one people reason in. */
+function minutesValue(milliseconds) {
+  return typeof milliseconds === "number" && Number.isFinite(milliseconds)
+    ? String(Math.round(milliseconds / 60000))
+    : "";
+}
+
+/**
+ * The declarative project policy, as a form.
+ *
+ * Every field is optional in the stored policy, and an absent field means "use
+ * the built-in default" — so the form has to distinguish empty from zero, and
+ * clearing everything must send `null` rather than an empty policy object.
+ */
+function policyForm(manageable) {
+  const policy = state.project?.policy ?? {};
+  const approvals = policy.approvals ?? {};
+  const budgets = policy.budgets ?? {};
+  const reviewed = approvals.riskLevels ?? ["high", "critical"];
+  const disabled = manageable ? "" : "disabled";
+  return `
+    <form class="form-card" data-form="project-policy">
+      <p class="eyebrow">Coordination policy</p>
+      <h2>Approvals and budgets</h2>
+      <p class="muted">
+        Empty fields fall back to the built-in defaults. Saving with everything
+        empty clears the policy entirely.
+      </p>
+      <label><span><input name="requireChangesetReview" type="checkbox" ${
+        approvals.requireChangesetReview ? "checked" : ""
+      } ${disabled}> Require human review of every changeset</span></label>
+      <fieldset class="field-group">
+        <legend>Risk levels requiring review</legend>
+        ${RISK_LEVELS.map(
+          (level) => `
+          <label class="inline"><span><input name="riskLevel" type="checkbox" value="${level}" ${
+            reviewed.includes(level) ? "checked" : ""
+          } ${disabled}> ${level}</span></label>`,
+        ).join("")}
+      </fieldset>
+      <label>
+        <span>Protected paths (one glob per line)</span>
+        <textarea name="protectedPaths" rows="3" placeholder="secrets/**" ${disabled}>${escapeHtml(
+          (approvals.protectedPaths ?? []).join("\n"),
+        )}</textarea>
+      </label>
+      <label>
+        <span>Approval timeout (minutes)</span>
+        <input name="approvalTimeoutMinutes" type="number" min="1" placeholder="default" value="${escapeHtml(
+          minutesValue(approvals.approvalTimeoutMs),
+        )}" ${disabled}>
+      </label>
+      <label>
+        <span>Max runtime per task (minutes)</span>
+        <input name="maxTaskRuntimeMinutes" type="number" min="1" placeholder="unlimited" value="${escapeHtml(
+          minutesValue(budgets.maxTaskRuntimeMs),
+        )}" ${disabled}>
+        <small class="muted">A lease past this age is failed at heartbeat, not extended.</small>
+      </label>
+      <label>
+        <span>Max runtime per day, whole project (minutes)</span>
+        <input name="maxProjectRuntimeMinutesPerDay" type="number" min="1" placeholder="unlimited" value="${escapeHtml(
+          minutesValue(budgets.maxProjectRuntimeMsPerDay),
+        )}" ${disabled}>
+        <small class="muted">An exhausted project stops receiving workers. Tasks stay queued, never failed.</small>
+      </label>
+      ${
+        manageable
+          ? '<button class="button button-primary" type="submit">Save policy</button>'
+          : '<p class="muted">Your role cannot change project policy.</p>'
+      }
+    </form>`;
+}
+
 function renderSettings() {
   const organization = currentOrganization();
   const manageable = canManageProject();
@@ -971,6 +1308,7 @@ function renderSettings() {
         }
       </form>
       <div class="stack">
+        ${policyForm(manageable)}
         ${
           currentRole() === "owner"
             ? `<form class="form-card" data-form="organization-update">
@@ -1391,6 +1729,29 @@ async function handleSubmit(event) {
         toast("Project settings saved");
         await loadContext({ quiet: true });
         break;
+      case "project-policy": {
+        const body = policyPayload({
+          requireChangesetReview: data.get("requireChangesetReview") === "on",
+          riskLevels: data.getAll("riskLevel").map((level) => String(level)),
+          protectedPaths: value("protectedPaths"),
+          approvalTimeoutMinutes: value("approvalTimeoutMinutes"),
+          maxTaskRuntimeMinutes: value("maxTaskRuntimeMinutes"),
+          maxProjectRuntimeMinutesPerDay: value(
+            "maxProjectRuntimeMinutesPerDay",
+          ),
+        });
+        await api(`/projects/${encodeURIComponent(state.projectId)}`, {
+          method: "PATCH",
+          body,
+        });
+        toast(
+          body.policy === null
+            ? "Policy cleared; built-in defaults apply"
+            : "Coordination policy saved",
+        );
+        await loadContext({ quiet: true });
+        break;
+      }
       case "organization-update":
         await api(`/organizations/${encodeURIComponent(state.organizationId)}`, {
           method: "PATCH",
