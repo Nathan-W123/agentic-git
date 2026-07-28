@@ -99,6 +99,8 @@ test("a deferred plan counts as contention that cost nothing to execute", async 
     score: 40,
     stage: "remote_plan_admission",
   });
+  // Submitted twice while waiting, which is one deferred task, not two.
+  await append(store, "plan_admitted", "task_b", { status: "sequenced" });
   await append(store, "plan_admitted", "task_b", { status: "sequenced" });
   await append(store, "plan_admitted", "task_a", { status: "approved" });
 

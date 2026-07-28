@@ -516,7 +516,11 @@ export class Worker {
         );
         result = { worked: false };
       }
-      if (!result.worked && !this.stopping) {
+      // A deferred task goes straight back to the queue, and this worker is
+      // usually the one that picks it up again. Polling immediately would
+      // replan it into the same refusal, so back off as if the queue were
+      // empty — which, for work this worker can do, it effectively is.
+      if ((!result.worked || result.deferred === true) && !this.stopping) {
         await new Promise((resolve) => setTimeout(resolve, idle));
       }
     }
