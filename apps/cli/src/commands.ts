@@ -4,7 +4,7 @@ import path from "node:path";
 import { CodexAdapter } from "@coord/adapter-codex";
 import { GenericCliAdapter } from "@coord/adapter-generic-cli";
 import type { AgentAdapter } from "@coord/agent-protocol";
-import { Coordinator } from "@coord/coordinator";
+import { Coordinator, approvalPolicyForProject } from "@coord/coordinator";
 import type {
   CoordinationStore,
   StoredRepository,
@@ -471,10 +471,14 @@ export async function runPendingTasks(
       };
     });
 
+    // The project's stored declarative policy governs approvals for this
+    // run; without one the coordinator keeps its built-in defaults.
+    const projectRecord = await store.getProject(projectId);
     const coordinator = new Coordinator({
       repositories,
       workspaces,
       store,
+      approvalPolicy: approvalPolicyForProject(projectRecord?.policy),
     });
     const result = await coordinator.run({
       repository: canonical,

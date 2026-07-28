@@ -3,8 +3,8 @@ import path from "node:path";
 
 import { CodeIntelligenceService } from "@coord/code-intelligence";
 import {
-  ApprovalPolicy,
   StoreApprovalController,
+  approvalPolicyForProject,
   assertChangeSetWithinPlan,
 } from "@coord/coordinator";
 import { IntegrationService } from "@coord/integration-service";
@@ -609,7 +609,13 @@ export async function acceptWorkResult(
       files: changeSet.patches.map((patch) => patch.path),
     });
 
-    const approvalPolicy = new ApprovalPolicy();
+    // The task's project decides how strict review is; a project without a
+    // stored policy uses the built-in defaults.
+    const project =
+      task.projectId === undefined
+        ? undefined
+        : await store.getProject(task.projectId);
+    const approvalPolicy = approvalPolicyForProject(project?.policy);
     const reviewReasons = approvalPolicy.changesetReasons(plan, changeSet);
     const decision: CoordinatorDecision = {
       decision:
@@ -632,10 +638,6 @@ export async function acceptWorkResult(
         "awaiting_approval",
         reviewReasons.join("; "),
       );
-      const project =
-        task.projectId === undefined
-          ? undefined
-          : await store.getProject(task.projectId);
       const review = await new StoreApprovalController(
         store,
         approvalPolicy.timeoutMs,

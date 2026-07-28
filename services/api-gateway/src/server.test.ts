@@ -977,6 +977,39 @@ test("project metrics are served to members and refused across tenants", async (
   assert.equal(denied.status, 403);
 });
 
+test("project policy is validated, stored, and clearable through the API", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const invalid = await owner.request("/api/v1/projects/project_local", {
+    method: "PATCH",
+    body: { policy: { version: 2 } },
+  });
+  assert.equal(invalid.status, 400);
+  assert.equal(invalid.data.error.code, "invalid_policy");
+
+  const policy = {
+    version: 1,
+    approvals: { requireChangesetReview: true, protectedPaths: ["infra/**"] },
+  };
+  const set = await owner.request("/api/v1/projects/project_local", {
+    method: "PATCH",
+    body: { policy },
+  });
+  assert.equal(set.status, 200);
+  assert.deepEqual(set.data.project.policy, policy);
+  const fetched = await owner.request("/api/v1/projects/project_local");
+  assert.deepEqual(fetched.data.project.policy, policy);
+
+  const cleared = await owner.request("/api/v1/projects/project_local", {
+    method: "PATCH",
+    body: { policy: null },
+  });
+  assert.equal(cleared.status, 200);
+  assert.equal(cleared.data.project.policy, undefined);
+});
+
 test("configured browser origins receive credentialed CORS and preflight", async (t) => {
   const allowedOrigin = "https://relay-client.example";
   const runtime = await startRuntime(t, {

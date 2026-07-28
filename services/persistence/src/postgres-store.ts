@@ -540,6 +540,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       name: input.name.trim(),
       description: input.description?.trim() ?? "",
       archived: false,
+      policy: undefined,
       createdAt: now,
       updatedAt: now,
     };
@@ -568,6 +569,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       name?: string;
       description?: string;
       archived?: boolean;
+      policy?: Record<string, unknown> | null;
     },
   ): Promise<ProjectRecord> {
     const existing = await this.getProject(id);
@@ -580,17 +582,25 @@ export class PostgresCoordinationStore implements CoordinationStore {
       name: input.name?.trim() ?? existing.name,
       description: input.description?.trim() ?? existing.description,
       archived: input.archived ?? existing.archived,
+      policy:
+        input.policy === undefined
+          ? existing.policy
+          : input.policy === null
+            ? undefined
+            : structuredClone(input.policy),
       updatedAt: new Date().toISOString(),
     };
     await this.query(
       `UPDATE projects
-       SET slug = $1, name = $2, description = $3, archived = $4, updated_at = $5
-       WHERE id = $6`,
+       SET slug = $1, name = $2, description = $3, archived = $4,
+           policy_json = $5, updated_at = $6
+       WHERE id = $7`,
       [
         project.slug,
         project.name,
         project.description,
         project.archived,
+        project.policy === undefined ? null : JSON.stringify(project.policy),
         project.updatedAt,
         id,
       ],
@@ -2115,6 +2125,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       name: text(row, "name"),
       description: text(row, "description"),
       archived: flag(row, "archived"),
+      policy: optionalJson<Record<string, unknown>>(row, "policy_json"),
       createdAt: text(row, "created_at"),
       updatedAt: text(row, "updated_at"),
     };

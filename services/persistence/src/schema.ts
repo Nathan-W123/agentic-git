@@ -407,6 +407,13 @@ export const MIGRATIONS: readonly Migration[] = [
       `CREATE INDEX workers_by_user ON workers(user_id, last_seen_at DESC)`,
     ],
   },
+  {
+    // Declarative per-project coordination policy, stored as opaque JSON.
+    // The coordinator interprets it; the store only carries it.
+    version: 9,
+    name: "project-policy",
+    statements: [`ALTER TABLE projects ADD COLUMN policy_json TEXT`],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(

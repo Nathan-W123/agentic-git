@@ -121,6 +121,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       name: "Local Project",
       description: "Default project for CLI-created repositories",
       archived: false,
+      policy: undefined,
       createdAt: now,
       updatedAt: now,
     });
@@ -333,6 +334,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       name: input.name.trim(),
       description: input.description?.trim() ?? "",
       archived: false,
+      policy: undefined,
       createdAt: now,
       updatedAt: now,
     };
@@ -347,6 +349,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       name?: string;
       description?: string;
       archived?: boolean;
+      policy?: Record<string, unknown> | null;
     },
   ): Promise<ProjectRecord> {
     const project = this.requireProject(id);
@@ -363,6 +366,10 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     }
     if (input.archived !== undefined) {
       project.archived = input.archived;
+    }
+    if (input.policy !== undefined) {
+      project.policy =
+        input.policy === null ? undefined : structuredClone(input.policy);
     }
     project.updatedAt = new Date().toISOString();
     return copy(project);

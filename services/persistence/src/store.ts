@@ -88,6 +88,12 @@ export interface ProjectRecord {
   name: string;
   description: string;
   archived: boolean;
+  /**
+   * Declarative coordination policy, opaque to the store. The gateway
+   * validates writes and the coordinator interprets reads, so the storage
+   * layer never needs the policy vocabulary.
+   */
+  policy: Record<string, unknown> | undefined;
   createdAt: string;
   updatedAt: string;
 }
@@ -418,6 +424,8 @@ export interface CoordinationStore {
       name?: string;
       description?: string;
       archived?: boolean;
+      /** An object replaces the policy; `null` clears it. */
+      policy?: Record<string, unknown> | null;
     },
   ): Promise<ProjectRecord>;
   getProject(id: ProjectId): Promise<ProjectRecord | undefined>;

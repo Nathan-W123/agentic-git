@@ -1137,6 +1137,41 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: project policy round-trips, survives edits, and clears`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const project = await store.createProject({
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        slug: "policied",
+        name: "Policied",
+      });
+      assert.equal(project.policy, undefined);
+
+      const policy = {
+        version: 1,
+        approvals: {
+          requireChangesetReview: true,
+          protectedPaths: ["secrets/**"],
+        },
+      };
+      const updated = await store.updateProject(project.id, { policy });
+      assert.deepEqual(updated.policy, policy);
+      assert.deepEqual((await store.getProject(project.id))?.policy, policy);
+
+      // Unrelated edits leave the policy alone; null removes it.
+      const renamed = await store.updateProject(project.id, {
+        name: "Renamed",
+      });
+      assert.deepEqual(renamed.policy, policy);
+      const cleared = await store.updateProject(project.id, { policy: null });
+      assert.equal(cleared.policy, undefined);
+      assert.equal((await store.getProject(project.id))?.policy, undefined);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: repository parallelism admits concurrent leases without double-assignment`, async () => {
     const { store, cleanup } = await backend.open();
     try {

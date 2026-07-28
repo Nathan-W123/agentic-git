@@ -18,7 +18,11 @@ import type {
   SubmittedTask,
   SubmittedTaskStatus,
 } from "@coord/persistence";
-import { createId, type ApprovalStatus } from "@coord/shared-types";
+import {
+  assertProjectPolicy,
+  createId,
+  type ApprovalStatus,
+} from "@coord/shared-types";
 
 import {
   AuthService,
@@ -1353,11 +1357,32 @@ export class ApiGateway {
           optional: true,
         });
         const archived = booleanField(body["archived"], "archived");
+        let policy: Record<string, unknown> | null | undefined;
+        if ("policy" in body) {
+          const value = body["policy"];
+          if (value === null) {
+            policy = null;
+          } else {
+            try {
+              assertProjectPolicy(value);
+            } catch (error) {
+              throw new HttpError(
+                400,
+                "invalid_policy",
+                error instanceof Error
+                  ? error.message
+                  : "Project policy is invalid",
+              );
+            }
+            policy = value as unknown as Record<string, unknown>;
+          }
+        }
         const project = await this.options.store.updateProject(projectId, {
           ...(slug === undefined ? {} : { slug }),
           ...(name === undefined ? {} : { name }),
           ...(description === undefined ? {} : { description }),
           ...(archived === undefined ? {} : { archived }),
+          ...(policy === undefined ? {} : { policy }),
         });
         await this.options.store.appendAudit(undefined, {
           type: "project_changed",

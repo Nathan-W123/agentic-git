@@ -418,6 +418,86 @@ test("a protected remote result waits for durable human approval", async () => {
   }
 });
 
+test("a project policy forces review of an otherwise benign changeset", async () => {
+  const harness = await createHarness();
+  try {
+    // Declarative policy on the default project: every changeset needs a
+    // human, even a low-risk one touching nothing protected.
+    await harness.store.updateProject(DEFAULT_PROJECT_ID, {
+      policy: { version: 1, approvals: { requireChangesetReview: true } },
+    });
+
+    const taskId = await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const repository = {
+      id: stored.id,
+      path: stored.path,
+      branch: stored.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId,
+      rootPath: path.join(harness.root, "policy-workspace"),
+      repository,
+      baseVersion: assignment.canonicalVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "value.js"),
+      "export const value = 4;\n",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: ["value"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "benign low-risk update",
+    });
+    await workspaces.destroy(workspace);
+
+    const resultPromise = acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskId),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "policy-integration"),
+      },
+    );
+    let approval = (await harness.store.listApprovals({ taskId }))[0];
+    for (let attempt = 0; approval === undefined && attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      approval = (await harness.store.listApprovals({ taskId }))[0];
+    }
+    assert.ok(approval);
+    assert.ok(
+      approval.reasons.some((reason) =>
+        reason.includes("Project policy requires"),
+      ),
+    );
+    await harness.store.decideApproval({
+      approvalId: approval.id,
+      status: "approved",
+      decidedBy: "reviewer",
+      comment: "Policy-mandated review",
+      decidedAt: new Date().toISOString(),
+    });
+
+    const result = await resultPromise;
+    assert.equal(result.accepted, true, result.reason);
+    assert.equal(result.integrationStatus, "integrated");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
 test("canonical movement requeues remote work for a fresh plan", async () => {
   const harness = await createHarness();
   try {

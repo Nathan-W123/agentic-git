@@ -661,3 +661,125 @@ export function mergePlanScope(
   assertAgentPlan(revised);
   return revised;
 }
+
+/**
+ * Declarative per-project coordination policy.
+ *
+ * Stored on the project record and evaluated by the coordinator wherever it
+ * previously used built-in constants. Every field is optional: an absent
+ * field means "use the built-in default", so an empty policy changes
+ * nothing and a project with no policy behaves exactly as before.
+ */
+export interface ProjectApprovalPolicyConfig {
+  /** Require a human decision on every changeset, regardless of risk. */
+  requireChangesetReview?: boolean;
+  /** Risk levels that require human review. Default: high and critical. */
+  riskLevels?: RiskLevel[];
+  /** Glob patterns whose files require human review when touched. */
+  protectedPaths?: string[];
+  /** How long an approval waits before expiring, in milliseconds. */
+  approvalTimeoutMs?: number;
+}
+
+export interface ProjectPolicy {
+  version: 1;
+  approvals?: ProjectApprovalPolicyConfig;
+}
+
+export const RISK_LEVELS: readonly RiskLevel[] = [
+  "low",
+  "medium",
+  "high",
+  "critical",
+];
+
+const MAX_PROTECTED_PATHS = 200;
+const MAX_PROTECTED_PATH_LENGTH = 512;
+const MIN_APPROVAL_TIMEOUT_MS = 1_000;
+const MAX_APPROVAL_TIMEOUT_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function assertProjectPolicy(
+  value: unknown,
+): asserts value is ProjectPolicy {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Project policy must be an object");
+  }
+  const policy = value as Partial<ProjectPolicy>;
+  if (policy.version !== 1) {
+    throw new TypeError("Project policy version must be 1");
+  }
+  for (const key of Object.keys(policy)) {
+    if (key !== "version" && key !== "approvals") {
+      throw new TypeError(`Project policy has an unknown field: ${key}`);
+    }
+  }
+  if (policy.approvals === undefined) {
+    return;
+  }
+  const approvals = policy.approvals as Partial<ProjectApprovalPolicyConfig>;
+  if (
+    typeof approvals !== "object" ||
+    approvals === null ||
+    Array.isArray(approvals)
+  ) {
+    throw new TypeError("Project policy approvals must be an object");
+  }
+  for (const key of Object.keys(approvals)) {
+    if (
+      key !== "requireChangesetReview" &&
+      key !== "riskLevels" &&
+      key !== "protectedPaths" &&
+      key !== "approvalTimeoutMs"
+    ) {
+      throw new TypeError(
+        `Project approval policy has an unknown field: ${key}`,
+      );
+    }
+  }
+  if (
+    approvals.requireChangesetReview !== undefined &&
+    typeof approvals.requireChangesetReview !== "boolean"
+  ) {
+    throw new TypeError("requireChangesetReview must be a boolean");
+  }
+  if (approvals.riskLevels !== undefined) {
+    if (
+      !Array.isArray(approvals.riskLevels) ||
+      !approvals.riskLevels.every((entry) =>
+        (RISK_LEVELS as readonly string[]).includes(entry as string),
+      )
+    ) {
+      throw new TypeError(
+        `riskLevels must be an array drawn from ${RISK_LEVELS.join(", ")}`,
+      );
+    }
+  }
+  if (approvals.protectedPaths !== undefined) {
+    if (
+      !Array.isArray(approvals.protectedPaths) ||
+      approvals.protectedPaths.length > MAX_PROTECTED_PATHS ||
+      !approvals.protectedPaths.every(
+        (entry) =>
+          typeof entry === "string" &&
+          entry.trim().length > 0 &&
+          entry.length <= MAX_PROTECTED_PATH_LENGTH,
+      )
+    ) {
+      throw new TypeError(
+        "protectedPaths must be non-empty glob strings " +
+          `(at most ${MAX_PROTECTED_PATHS} of up to ${MAX_PROTECTED_PATH_LENGTH} characters)`,
+      );
+    }
+  }
+  if (approvals.approvalTimeoutMs !== undefined) {
+    if (
+      !Number.isSafeInteger(approvals.approvalTimeoutMs) ||
+      approvals.approvalTimeoutMs < MIN_APPROVAL_TIMEOUT_MS ||
+      approvals.approvalTimeoutMs > MAX_APPROVAL_TIMEOUT_MS
+    ) {
+      throw new TypeError(
+        "approvalTimeoutMs must be an integer between one second and thirty days",
+      );
+    }
+  }
+}

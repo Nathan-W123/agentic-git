@@ -1,12 +1,12 @@
-import { LATEST_SCHEMA_VERSION, type Migration } from "./schema.js";
+import type { Migration } from "./schema.js";
 
 /**
  * Schema migrations for the Postgres coordination store.
  *
- * Postgres arrived at schema version {@link LATEST_SCHEMA_VERSION}, so its
- * history begins with one baseline migration that creates the full schema the
- * SQLite migrations build up incrementally. Future migrations must be added to
- * both dialects under the same version number so either backend can host the
+ * Postgres arrived at schema version 8, so its history begins with one
+ * baseline migration that creates the full schema the SQLite migrations
+ * build up incrementally to that point. Migrations after 8 are added to both
+ * dialects under the same version number so either backend can host the
  * same release.
  *
  * Dialect notes, so the two schemas stay recognizably the same:
@@ -20,7 +20,7 @@ import { LATEST_SCHEMA_VERSION, type Migration } from "./schema.js";
  */
 export const POSTGRES_MIGRATIONS: readonly Migration[] = [
   {
-    version: LATEST_SCHEMA_VERSION,
+    version: 8,
     name: "postgres-baseline",
     statements: [
       `CREATE TABLE repositories (
@@ -371,5 +371,11 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `CREATE INDEX work_leases_expiring ON work_leases(status, expires_at)`,
       `CREATE INDEX workers_by_user ON workers(user_id, last_seen_at DESC)`,
     ],
+  },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 9,
+    name: "project-policy",
+    statements: [`ALTER TABLE projects ADD COLUMN policy_json TEXT`],
   },
 ];
