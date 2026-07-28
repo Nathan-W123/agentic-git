@@ -1727,12 +1727,20 @@ function renderRunDetail(detail) {
       (integration) => `<div class="detail-item"><strong>${escapeHtml(
         integration.status,
       )}</strong>${escapeHtml(integration.explanation)}<br>
-        ${integration.testResults
-          .map(
-            (result) =>
-              `${escapeHtml(result.name)}: ${result.passed ? "passed" : "failed"}`,
-          )
-          .join("<br>")}
+        ${
+          // IntegrationResult carries `validation`, one CommandResult per
+          // configured command. The field read here used to be `testResults`,
+          // which the type has never had, so any run that reached integration
+          // blanked this drawer.
+          (integration.validation ?? [])
+            .map(
+              (result) =>
+                `${escapeHtml(result.command.label)}: ${
+                  result.exitCode === 0 ? "passed" : `exit ${result.exitCode}`
+                }`,
+            )
+            .join("<br>") || "No validation commands configured"
+        }
       </div>`,
     )
     .join("");
