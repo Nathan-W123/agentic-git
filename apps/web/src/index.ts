@@ -4,6 +4,7 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 import { ApiGateway, type ApiOperations } from "@coord/api-gateway";
+import { computeCoordinationMetrics } from "@coord/coordinator";
 import {
   repoImportGitHub,
   runPendingTasks,
@@ -106,6 +107,11 @@ async function main(): Promise<void> {
       await runPendingTasks(project, store, {
         projectId: input.projectId,
         repositoryId: input.repositoryId,
+      });
+    },
+    async projectMetrics(input) {
+      return await computeCoordinationMetrics(store, {
+        projectId: input.projectId,
       });
     },
     ...workerOperations(project, store),

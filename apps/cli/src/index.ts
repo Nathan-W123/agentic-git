@@ -22,6 +22,8 @@ import {
   taskRetry,
   taskSubmit,
 } from "./commands.js";
+import { computeCoordinationMetrics } from "@coord/coordinator";
+
 import { CoordinatorProject, PROJECT_DIRECTORY } from "./project.js";
 import { recoverCoordinationState } from "./recovery.js";
 import { repoPush } from "./repo-export.js";
@@ -97,6 +99,7 @@ Usage:
   coord approval reject <approval-id> [--comment=<text>] [--actor=<id>]
   coord doctor
   coord recover
+  coord metrics [--json]
 
   coord demo [--live] [--scenario=<name>] [--persist[=<path>]]
   coord benchmark [--json] [--live] [--scenario=<name>] [--repeat=<n>]
@@ -745,6 +748,53 @@ async function runApproval(
   });
 }
 
+async function runMetrics(json: boolean): Promise<void> {
+  await withProject(async (_project, store) => {
+    const metrics = await computeCoordinationMetrics(store);
+    if (json) {
+      console.log(JSON.stringify(metrics, undefined, 2));
+      return;
+    }
+    const { conflicts, rework, throughput, approvals } = metrics;
+    console.log(`Audit events analysed: ${metrics.window.events}`);
+    console.log("");
+    console.log("Conflicts");
+    console.log(`  Predictions:             ${conflicts.predictions}`);
+    console.log(`  Confirmed predictions:   ${conflicts.confirmedPredictions}`);
+    console.log(`  False positives:         ${conflicts.falsePositives}`);
+    console.log(`  Still open:              ${conflicts.openPredictions}`);
+    console.log(`  Missed (unpredicted):    ${conflicts.unpredictedContention}`);
+    console.log("");
+    console.log("Rework");
+    console.log(`  Replans requested:       ${rework.replansRequested}`);
+    console.log(`  Integration failures:    ${rework.integrationFailures}`);
+    console.log(`  Task restarts:           ${rework.taskRestarts}`);
+    console.log("");
+    console.log("Throughput");
+    console.log(`  Tasks submitted:         ${throughput.tasksSubmitted}`);
+    console.log(`  Tasks integrated:        ${throughput.tasksIntegrated}`);
+    console.log(`  Tasks failed:            ${throughput.tasksFailed}`);
+    console.log(
+      `  Avg time to integration: ${
+        throughput.averageTimeToIntegrationMs === undefined
+          ? "n/a"
+          : `${Math.round(throughput.averageTimeToIntegrationMs / 1000)}s`
+      }`,
+    );
+    console.log("");
+    console.log("Approvals");
+    console.log(`  Requested:               ${approvals.requested}`);
+    console.log(`  Decided:                 ${approvals.decided}`);
+    console.log(
+      `  Avg decision time:       ${
+        approvals.averageDecisionMs === undefined
+          ? "n/a"
+          : `${Math.round(approvals.averageDecisionMs / 1000)}s`
+      }`,
+    );
+  });
+}
+
 async function runRecover(): Promise<void> {
   await withProject(async (project, store) => {
     // Only run this when no control plane is serving this store: recovering
@@ -926,6 +976,9 @@ async function main(): Promise<void> {
       break;
     case "recover":
       await runRecover();
+      break;
+    case "metrics":
+      await runMetrics(flags.includes("--json"));
       break;
     case "run":
       await runPending(flags);

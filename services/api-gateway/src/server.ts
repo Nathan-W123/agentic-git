@@ -108,6 +108,8 @@ export interface ApiOperations {
    * Remote execution hooks. A deployment without workers omits these and the
    * worker endpoints report that they are unsupported.
    */
+  /** Coordination metrics derived from the audit chain, project-scoped. */
+  projectMetrics?(input: { projectId: string }): Promise<unknown>;
   leaseWork?(input: {
     workerId: string;
     projectId: string;
@@ -1715,6 +1717,27 @@ export class ApiGateway {
           projectId,
           ...(status === undefined ? {} : { status }),
         }),
+      });
+      return;
+    }
+
+    const metricsMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/metrics$`, "u"),
+    );
+    if (metricsMatch !== undefined && method === "GET") {
+      const projectId = metricsMatch[0] ?? "";
+      await authorizeProject(this.options.store, principal, projectId, "view");
+      const operation = this.options.operations.projectMetrics;
+      if (operation === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment does not expose coordination metrics",
+        );
+      }
+      this.sendJson(response, 200, {
+        metrics: await operation({ projectId }),
       });
       return;
     }

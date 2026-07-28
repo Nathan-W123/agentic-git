@@ -16,6 +16,7 @@
   "dependencies": {
     "@coord/api-gateway": "*",
     "@coord/cli": "*",
+    "@coord/coordinator": "*",
     "@coord/persistence": "*",
     "@coord/repository-service": "*"
   }

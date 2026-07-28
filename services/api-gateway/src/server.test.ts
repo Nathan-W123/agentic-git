@@ -145,6 +145,9 @@ async function startRuntime(
       });
     },
     async runRepository() {},
+    async projectMetrics(input) {
+      return { stub: true, projectId: input.projectId };
+    },
     async leaseWork(input) {
       const leased = await store.leaseNextTask({
         workerId: input.workerId,
@@ -943,6 +946,35 @@ test("malformed hosts and encoded paths stay inside the HTTP error boundary", as
 
   const healthy = await client.request("/api/v1/health");
   assert.equal(healthy.status, 200);
+});
+
+test("project metrics are served to members and refused across tenants", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const metrics = await owner.request(
+    "/api/v1/projects/project_local/metrics",
+  );
+  assert.equal(metrics.status, 200);
+  assert.equal(metrics.data.metrics.projectId, "project_local");
+
+  // A signed-in user with no membership in the project's organization gets
+  // the same generic refusal as for any other project-scoped resource.
+  const outsiderUser = await runtime.store.createUser({
+    email: "metrics-outsider@example.com",
+    displayName: "Outsider",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  const outsider = new TestClient(runtime.origin);
+  await outsider.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: outsiderUser.email, password: PASSWORD },
+  });
+  const denied = await outsider.request(
+    "/api/v1/projects/project_local/metrics",
+  );
+  assert.equal(denied.status, 403);
 });
 
 test("configured browser origins receive credentialed CORS and preflight", async (t) => {
