@@ -1,0 +1,11 @@
+.git
+.turbo
+node_modules
+**/node_modules
+**/dist
+**/.tsbuildinfo
+.coordinator
+**/.coordinator
+docs
+*.md
+!infrastructure/docker/*.md

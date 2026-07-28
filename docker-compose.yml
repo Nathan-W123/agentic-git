@@ -1,0 +1,42 @@
+# One-command control plane: Postgres for shared coordination state plus the
+# coordinator web/API process. Workers and browsers on other machines connect
+# to port 4317. See docs/deployment.md for the full multi-device guide.
+#
+# Required in the environment (or a .env file next to this compose file):
+#   POSTGRES_PASSWORD        password for the coordinator database user
+#   COORD_BOOTSTRAP_TOKEN    first-run setup token, at least 24 characters
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: coordinator
+      POSTGRES_USER: coordinator
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - coordinator-db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coordinator -d coordinator"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  control-plane:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/control-plane.Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      COORD_DATABASE_URL: postgresql://coordinator:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/coordinator
+      COORD_BOOTSTRAP_TOKEN: ${COORD_BOOTSTRAP_TOKEN:?set COORD_BOOTSTRAP_TOKEN (min 24 chars)}
+      COORD_SECURE_COOKIES: ${COORD_SECURE_COOKIES:-false}
+      COORD_ALLOWED_ORIGINS: ${COORD_ALLOWED_ORIGINS:-}
+    ports:
+      - "${COORD_PORT:-4317}:4317"
+    volumes:
+      - coordinator-data:/data
+
+volumes:
+  coordinator-db:
+  coordinator-data:
