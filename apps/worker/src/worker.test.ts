@@ -5,9 +5,13 @@ import path from "node:path";
 import test, { type TestContext } from "node:test";
 
 import { ApiGateway, type ApiOperations } from "@coord/api-gateway";
+import type { CodexProcessRunner } from "@coord/adapter-codex";
 import { CoordinatorProject } from "@coord/cli/project";
 import { workerOperations } from "@coord/cli/worker-operations";
-import { SqliteCoordinationStore } from "@coord/persistence";
+import {
+  DEFAULT_PROJECT_ID,
+  SqliteCoordinationStore,
+} from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
 
 import { WorkerClient } from "./client.js";
@@ -31,6 +35,7 @@ const AGENT = [
   'import fs from "node:fs";',
   'import path from "node:path";',
   "let started = null;",
+  "let pendingContext = null;",
   "let buffer = '';",
   'process.stdin.setEncoding("utf8");',
   'process.stdin.on("data", (chunk) => {',
@@ -63,12 +68,36 @@ const AGENT = [
   "    return;",
   "  }",
   '  if (message.type === "context") {',
+  '    if (started.objective === "request extra scope") {',
+  "      pendingContext = message;",
+  "      send({",
+  '        type: "event",',
+  "        event: {",
+  '          event: "scope_change_requested",',
+  '          requestId: "scope_remote_test",',
+  '          additionalFiles: ["src/extra.js"],',
+  '          reason: "test remote scope handling",',
+  "        },",
+  "      });",
+  "      return;",
+  "    }",
   '    const file = path.join(message.workspacePath, "src", "value.js");',
   '    fs.writeFileSync(file, "export const value = 2;\\n", "utf8");',
   "    send({",
   '      type: "done",',
   '      symbolsChanged: ["value"],',
   '      explanation: "raised the value",',
+  "    });",
+  "    return;",
+  "  }",
+  '  if (message.type === "scope_decision") {',
+  '    if (message.decision.decision !== "rejected") process.exit(9);',
+  '    const file = path.join(pendingContext.workspacePath, "src", "value.js");',
+  '    fs.writeFileSync(file, "export const value = 2;\\n", "utf8");',
+  "    send({",
+  '      type: "done",',
+  '      symbolsChanged: ["value"],',
+  '      explanation: "continued within approved scope",',
   "    });",
   "    return;",
   "  }",
@@ -239,8 +268,57 @@ test("a worker executes a leased task end to end over HTTP", async (t) => {
   assert.equal(collected?.taskId, task.id);
   assert.deepEqual(collected?.data["files"], ["src/value.js"]);
 
+  // The result was not merely acknowledged: it is a durable run, the queue
+  // task is finalized, and canonical contains the worker's edit.
+  const tasks = await runtime.store.listSubmittedTasks();
+  assert.equal(tasks[0]?.status, "integrated");
+  assert.ok(tasks[0]?.runId);
+  const repository = await runtime.store.getRepository(runtime.repositoryId);
+  assert.ok(repository);
+  const repositories = new RepositoryService();
+  const version = await repositories.getCanonicalVersion({
+    id: repository.id,
+    path: repository.path,
+    branch: repository.branch,
+  });
+  assert.equal(
+    await repositories.readFile(
+      {
+        id: repository.id,
+        path: repository.path,
+        branch: repository.branch,
+      },
+      version.revision,
+      "src/value.js",
+    ),
+    "export const value = 2;\n",
+  );
+
   // Nothing is left pending, and a second poll finds nothing.
   assert.deepEqual(await worker.runOnce(), { worked: false });
+});
+
+test("remote agents are constrained to their original plan", async (t) => {
+  const runtime = await startRuntime(t);
+  const worker = makeWorker(runtime);
+  await worker.register();
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "request extra scope",
+    agentId: "local",
+    validationCommands: [],
+  });
+
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, true, result.reason);
+  const storedTask = (await runtime.store.listSubmittedTasks()).find(
+    (entry) => entry.id === task.id,
+  );
+  assert.equal(storedTask?.status, "integrated");
+  const run = await runtime.store.getRun(storedTask?.runId ?? "");
+  assert.deepEqual(run?.changeSets[0]?.patches.map((patch) => patch.path), [
+    "src/value.js",
+  ]);
 });
 
 test("an agent failure is reported, not swallowed", async (t) => {
@@ -287,7 +365,7 @@ test("stopping a worker hands its lease back immediately", async (t) => {
     serverUrl: runtime.origin,
     token: runtime.token,
   });
-  const assignment = await client.lease(workerId);
+  const assignment = await client.lease(workerId, DEFAULT_PROJECT_ID);
   assert.notEqual(assignment, undefined);
   await client.release(assignment?.lease.id ?? "");
 
@@ -331,6 +409,80 @@ test("a configured sandbox is applied to the agent process", async (t) => {
   assert.equal(result.worked, true);
   assert.equal(result.accepted, false);
   assert.match(result.reason ?? "", /docker/iu);
+});
+
+test("a Codex worker uses the clone Git directory and configured model args", async (t) => {
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: {
+      adapter: "codex",
+      command: "codex-test-double",
+      args: ["--model", "worker-test-model"],
+    },
+  };
+  await runtime.project.save();
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise with codex",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const invocations: string[][] = [];
+  const runner: CodexProcessRunner = async (_executable, args, options) => {
+    invocations.push([...args]);
+    const prompt = options?.input ?? "";
+    if (prompt.includes("prepare a coordination plan")) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          taskId: task.id,
+          objective: task.objective,
+          expectedFiles: ["src/value.js"],
+          expectedSymbols: ["value"],
+          dependencies: [],
+          commands: [],
+          externalAccess: [],
+          riskLevel: "low",
+        }),
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    const cwd = options?.cwd;
+    assert.ok(cwd);
+    await writeFile(
+      path.join(cwd, "src", "value.js"),
+      "export const value = 4;\n",
+    );
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: ["value"],
+        explanation: "raised with codex",
+      }),
+      stderr: "",
+      durationMs: 1,
+    };
+  };
+  const worker = new Worker({
+    client: new WorkerClient({
+      serverUrl: runtime.origin,
+      token: runtime.token,
+    }),
+    project: runtime.project,
+    workspaceRoot: path.join(runtime.root, "codex-worker"),
+    codexRunner: runner,
+  });
+
+  await worker.register();
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, true, result.reason);
+  assert.equal(invocations.length, 2);
+  for (const args of invocations) {
+    const model = args.indexOf("--model");
+    assert.equal(args[model + 1], "worker-test-model");
+  }
 });
 
 test("the Codex adapter refuses to pretend it is sandboxed", async (t) => {

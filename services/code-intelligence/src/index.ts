@@ -64,6 +64,7 @@ export interface CodeIntelligenceOptions {
   maxFiles?: number;
   maxFileBytes?: number;
   maxTotalBytes?: number;
+  maxCacheEntries?: number;
 }
 
 const SOURCE_EXTENSIONS = new Map<string, SupportedLanguage>([
@@ -360,7 +361,16 @@ export class CodeIntelligenceService {
   public constructor(
     private readonly repositories = new RepositoryService(),
     private readonly options: CodeIntelligenceOptions = {},
-  ) {}
+  ) {
+    for (const [name, value] of Object.entries(options)) {
+      if (value === undefined) {
+        continue;
+      }
+      if (!Number.isSafeInteger(value) || Number(value) < 1) {
+        throw new RangeError(`${name} must be a positive integer`);
+      }
+    }
+  }
 
   public async index(
     repository: CanonicalRepository,
@@ -464,6 +474,13 @@ export class CodeIntelligenceService {
       skippedFiles,
     };
     this.cache.set(key, structuredClone(index));
+    while (this.cache.size > (this.options.maxCacheEntries ?? 100)) {
+      const oldest = this.cache.keys().next().value as string | undefined;
+      if (oldest === undefined) {
+        break;
+      }
+      this.cache.delete(oldest);
+    }
     return index;
   }
 

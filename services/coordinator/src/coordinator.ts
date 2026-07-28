@@ -176,6 +176,9 @@ export class Coordinator {
             baseVersion: initialVersion,
             ...(input.scenario === undefined ? {} : { scenario: input.scenario }),
           });
+    const ownershipHeartbeat = setInterval(() => {
+      this.ownership.renewActive();
+    }, this.ownership.renewalIntervalMs);
 
     try {
       const result = await this.execute(
@@ -196,6 +199,8 @@ export class Coordinator {
         );
       }
       throw error;
+    } finally {
+      clearInterval(ownershipHeartbeat);
     }
   }
 

@@ -40,6 +40,7 @@ export * from "./protocol.js";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_EXECUTION_TIMEOUT_MS = 600_000;
+const MAX_REPLAY_EVENTS = 10_000;
 const STDERR_RETENTION_BYTES = 16_384;
 
 export interface GenericCliAdapterOptions {
@@ -665,6 +666,9 @@ export class GenericCliAdapter implements AgentAdapter {
   }
 
   private emitEvent(record: CliSession, event: AgentEvent): void {
+    if (record.events.length >= MAX_REPLAY_EVENTS) {
+      record.events.shift();
+    }
     record.events.push(event);
     for (const handler of record.eventHandlers) {
       handler(event);

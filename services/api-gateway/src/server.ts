@@ -110,6 +110,7 @@ export interface ApiOperations {
    */
   leaseWork?(input: {
     workerId: string;
+    projectId: string;
     actorId: string;
     repositoryId?: string;
   }): Promise<WorkAssignment | undefined>;
@@ -118,6 +119,7 @@ export interface ApiOperations {
     leaseId: string;
     status: "completed" | "failed";
     actorId: string;
+    plan: unknown;
     changeSet: unknown;
     detail?: string;
   }): Promise<unknown>;
@@ -262,9 +264,18 @@ function objectBody(value: unknown): Record<string, unknown> {
 
 function matchPath(pathname: string, pattern: RegExp): string[] | undefined {
   const match = pattern.exec(pathname);
-  return match === null
-    ? undefined
-    : match.slice(1).map((value) => decodeURIComponent(value));
+  if (match === null) {
+    return undefined;
+  }
+  try {
+    return match.slice(1).map((value) => decodeURIComponent(value));
+  } catch {
+    throw new HttpError(
+      400,
+      "invalid_path",
+      "Request path contains invalid percent encoding",
+    );
+  }
 }
 
 function publicUser(user: {
@@ -307,7 +318,25 @@ export class ApiGateway {
       throw new Error("Bootstrap token must contain at least 24 characters");
     }
     this.bodyLimit = options.requestBodyLimit ?? MAX_JSON_BYTES;
-    this.allowedOrigins = new Set(options.allowedOrigins ?? []);
+    if (!Number.isSafeInteger(this.bodyLimit) || this.bodyLimit < 1) {
+      throw new RangeError("Request body limit must be a positive integer");
+    }
+    this.allowedOrigins = new Set(
+      (options.allowedOrigins ?? []).map((value) => {
+        const parsed = new URL(value);
+        if (
+          !["http:", "https:"].includes(parsed.protocol) ||
+          parsed.username.length > 0 ||
+          parsed.password.length > 0 ||
+          parsed.pathname !== "/" ||
+          parsed.search.length > 0 ||
+          parsed.hash.length > 0
+        ) {
+          throw new Error(`Allowed origin must be a credential-free HTTP origin: ${value}`);
+        }
+        return parsed.origin;
+      }),
+    );
     this.auth = new AuthService(options.store, {
       secureCookies: options.secureCookies ?? false,
     });
@@ -362,8 +391,20 @@ export class ApiGateway {
         ? request.headers["x-request-id"]
         : randomUUID();
     this.securityHeaders(response, requestId);
-    const host = request.headers.host ?? "localhost";
-    const url = new URL(request.url ?? "/", `http://${host}`);
+    let url: URL;
+    try {
+      // Routing needs only the origin-form path. Never parse an untrusted Host
+      // header as a URL base: malformed authority syntax must not escape the
+      // request error boundary or trigger an unhandled rejection.
+      url = new URL(request.url ?? "/", "http://localhost");
+    } catch {
+      this.sendError(
+        response,
+        requestId,
+        new HttpError(400, "invalid_url", "Request URL is invalid"),
+      );
+      return;
+    }
     const context: RequestContext = {
       request,
       response,
@@ -395,6 +436,20 @@ export class ApiGateway {
         return;
       }
       this.assertOrigin(request);
+      this.applyCors(request, response);
+      if (request.method === "OPTIONS") {
+        response.setHeader(
+          "Access-Control-Allow-Methods",
+          "GET, HEAD, POST, PATCH, DELETE, OPTIONS",
+        );
+        response.setHeader(
+          "Access-Control-Allow-Headers",
+          "Authorization, Content-Type, X-CSRF-Token, X-Request-Id",
+        );
+        response.setHeader("Access-Control-Max-Age", "600");
+        response.writeHead(204).end();
+        return;
+      }
       const isPublic =
         request.method === "GET" && url.pathname === `${API_PREFIX}/health` ||
         request.method === "POST" &&
@@ -595,8 +650,12 @@ export class ApiGateway {
     }
 
     if (path === `${API_PREFIX}/workers` && method === "GET") {
+      assertTokenScope(principal, "run_task");
+      const workers = await this.options.store.listWorkers();
       this.sendJson(response, 200, {
-        workers: await this.options.store.listWorkers(),
+        workers: principal.user.systemAdmin
+          ? workers
+          : workers.filter((worker) => worker.userId === principal.user.id),
       });
       return;
     }
@@ -609,6 +668,14 @@ export class ApiGateway {
       if (worker === undefined || worker.userId !== principal.user.id) {
         throw new HttpError(404, "not_found", "Worker was not found");
       }
+      const projectId =
+        stringField(body["projectId"], "projectId", { max: 120 }) ?? "";
+      await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "run_task",
+      );
 
       const nowIso = new Date().toISOString();
       // Reclaim anything a dead worker was holding before handing out new work.
@@ -619,8 +686,17 @@ export class ApiGateway {
         max: 200,
         optional: true,
       });
-      const assignment = await this.options.operations.leaseWork?.({
+      const leaseOperation = this.options.operations.leaseWork;
+      if (leaseOperation === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment does not support remote workers",
+        );
+      }
+      const assignment = await leaseOperation({
         workerId,
+        projectId,
         actorId: principal.user.id,
         ...(repositoryId === undefined ? {} : { repositoryId }),
       });
@@ -629,6 +705,22 @@ export class ApiGateway {
         // status code without parsing a body.
         response.writeHead(204).end();
         return;
+      }
+      if (
+        assignment.task.projectId !== projectId ||
+        assignment.lease.projectId !== projectId
+      ) {
+        await this.options.store.finishWorkLease(
+          assignment.lease.id,
+          "released",
+          new Date().toISOString(),
+          "control-plane project mismatch",
+        );
+        throw new HttpError(
+          500,
+          "invalid_assignment",
+          "Worker assignment escaped its authorized project",
+        );
       }
       this.sendJson(response, 200, assignment);
       return;
@@ -650,6 +742,19 @@ export class ApiGateway {
       if (owner === undefined || owner.userId !== principal.user.id) {
         throw new HttpError(404, "not_found", "Lease was not found");
       }
+      if (lease.projectId === undefined) {
+        throw new HttpError(
+          409,
+          "invalid_lease",
+          "Lease has no project boundary and cannot be used remotely",
+        );
+      }
+      await authorizeProject(
+        this.options.store,
+        principal,
+        lease.projectId,
+        "run_task",
+      );
 
       if (action === "heartbeat" && method === "POST") {
         const now = new Date();
@@ -659,6 +764,7 @@ export class ApiGateway {
           new Date(now.getTime() + WORK_LEASE_TTL_MS).toISOString(),
         );
         if (extended === undefined) {
+          await this.options.store.expireWorkLeases(now.toISOString());
           throw new HttpError(
             409,
             "lease_lost",
@@ -671,12 +777,20 @@ export class ApiGateway {
       }
 
       if (action === "bundle" && method === "GET") {
-        const bundle = await this.options.operations.leaseBundle?.(leaseId);
-        if (bundle === undefined) {
+        const bundleOperation = this.options.operations.leaseBundle;
+        if (bundleOperation === undefined) {
           throw new HttpError(
             501,
             "not_supported",
             "This deployment cannot serve repository bundles",
+          );
+        }
+        const bundle = await bundleOperation(leaseId);
+        if (bundle === undefined) {
+          throw new HttpError(
+            409,
+            "lease_lost",
+            "This lease is no longer active; stop work and re-lease",
           );
         }
         response
@@ -689,12 +803,20 @@ export class ApiGateway {
       }
 
       if (action === "release" && method === "POST") {
-        await this.options.store.finishWorkLease(
+        const released = await this.options.store.finishWorkLease(
           leaseId,
           "released",
           new Date().toISOString(),
           "released by worker",
         );
+        if (!released) {
+          await this.options.store.expireWorkLeases(new Date().toISOString());
+          throw new HttpError(
+            409,
+            "lease_lost",
+            "This lease is no longer active; stop work and re-lease",
+          );
+        }
         this.sendJson(response, 200, { released: true });
         return;
       }
@@ -713,14 +835,23 @@ export class ApiGateway {
           max: 2000,
           optional: true,
         });
-        const accepted = await this.options.operations.acceptWorkResult?.({
+        const resultOperation = this.options.operations.acceptWorkResult;
+        if (resultOperation === undefined) {
+          throw new HttpError(
+            501,
+            "not_supported",
+            "This deployment cannot accept remote worker results",
+          );
+        }
+        const accepted = await resultOperation({
           leaseId,
           status,
           actorId: principal.user.id,
+          plan: body["plan"],
           changeSet: body["changeSet"],
           ...(detail === undefined ? {} : { detail }),
         });
-        this.sendJson(response, 200, accepted ?? { accepted: true });
+        this.sendJson(response, 200, accepted);
         return;
       }
 
@@ -1933,6 +2064,25 @@ export class ApiGateway {
       (origin === `http://${host}` || origin === `https://${host}`);
     if (!sameOrigin && !this.allowedOrigins.has(origin)) {
       throw new HttpError(403, "origin_rejected", "Request origin is not allowed");
+    }
+  }
+
+  private applyCors(
+    request: IncomingMessage,
+    response: ServerResponse,
+  ): void {
+    const origin = request.headers.origin;
+    if (origin === undefined) {
+      return;
+    }
+    const host = request.headers.host;
+    const sameOrigin =
+      host !== undefined &&
+      (origin === `http://${host}` || origin === `https://${host}`);
+    if (!sameOrigin && this.allowedOrigins.has(origin)) {
+      response.setHeader("Access-Control-Allow-Origin", origin);
+      response.setHeader("Access-Control-Allow-Credentials", "true");
+      response.setHeader("Vary", "Origin");
     }
   }
 

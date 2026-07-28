@@ -161,3 +161,14 @@ test("resource limits mark an index as truncated without reading unbounded files
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("rejects non-positive resource and cache limits", () => {
+  assert.throws(
+    () => new CodeIntelligenceService(undefined, { maxFiles: 0 }),
+    RangeError,
+  );
+  assert.throws(
+    () => new CodeIntelligenceService(undefined, { maxCacheEntries: -1 }),
+    RangeError,
+  );
+});

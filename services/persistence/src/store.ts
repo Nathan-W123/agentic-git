@@ -159,6 +159,7 @@ export interface LeaseTaskInput {
   workerId: string;
   baseRevision: string;
   ttlMs: number;
+  taskId?: TaskId;
   repositoryId?: string;
   projectId?: ProjectId;
 }
@@ -460,7 +461,7 @@ export interface CoordinationStore {
     status: Exclude<WorkLeaseStatus, "active">,
     at: string,
     detail?: string,
-  ): Promise<void>;
+  ): Promise<boolean>;
   /** Lapses active leases past their expiry and requeues their tasks. */
   expireWorkLeases(now: string): Promise<WorkLease[]>;
 

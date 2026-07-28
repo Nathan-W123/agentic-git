@@ -118,7 +118,15 @@ export class OwnershipService {
     private readonly now: () => Date = () => new Date(),
     private readonly defaultTtlMs = 5 * 60 * 1000,
     private readonly policy: OwnershipPolicy = new DefaultOwnershipPolicy(),
-  ) {}
+  ) {
+    if (!Number.isSafeInteger(defaultTtlMs) || defaultTtlMs < 1_000) {
+      throw new RangeError("Ownership lease TTL must be at least one second");
+    }
+  }
+
+  public get renewalIntervalMs(): number {
+    return Math.max(250, Math.floor(this.defaultTtlMs / 3));
+  }
 
   public acquire(
     plan: AgentPlan,
@@ -196,6 +204,24 @@ export class OwnershipService {
   public activeLeases(): ResourceLease[] {
     this.expireLeases();
     return [...this.leases.values()].flat();
+  }
+
+  /** Extends every active lease while a coordinator run is still making progress. */
+  public renewActive(): ResourceLease[] {
+    this.expireLeases();
+    const expiresAt = new Date(
+      this.now().getTime() + this.defaultTtlMs,
+    ).toISOString();
+    const renewed: ResourceLease[] = [];
+    for (const [key, leases] of this.leases) {
+      const updated = leases.map((lease) => {
+        const next = { ...lease, expiresAt };
+        renewed.push(next);
+        return next;
+      });
+      this.leases.set(key, updated);
+    }
+    return renewed;
   }
 
   public blockersFor(plan: AgentPlan): ResourceLease[] {

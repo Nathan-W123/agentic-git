@@ -167,3 +167,44 @@ test("remote imports reject local and unencrypted transports", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("revision metadata and concurrent bundle requests remain deterministic", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-bundle-test-"));
+  const source = path.join(root, "source");
+  const repositories = new RepositoryService();
+  try {
+    await repositories.initializeWorkingRepository(source);
+    await writeFile(path.join(source, "value.txt"), "one\n");
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      path.join(root, "canonical.git"),
+      "bundle",
+    );
+    const canonical = await repositories.getCanonicalVersion(repository);
+    assert.deepEqual(
+      await repositories.getVersionAtRevision(
+        repository,
+        canonical.revision,
+      ),
+      canonical,
+    );
+
+    const [first, second] = await Promise.all([
+      repositories.createBundle(
+        repository,
+        canonical.revision,
+        "coord-lease/same",
+      ),
+      repositories.createBundle(
+        repository,
+        canonical.revision,
+        "coord-lease/same",
+      ),
+    ]);
+    assert.ok(first.byteLength > 0);
+    assert.deepEqual(first, second);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

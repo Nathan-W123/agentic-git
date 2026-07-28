@@ -2,12 +2,20 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { GenericCliAdapter } from "@coord/adapter-generic-cli";
-import { CodexAdapter } from "@coord/adapter-codex";
+import {
+  CodexAdapter,
+  type CodexProcessRunner,
+} from "@coord/adapter-codex";
 import type { AgentAdapter } from "@coord/agent-protocol";
 import type { WorkAssignment } from "@coord/cli/worker-operations";
 import type { AgentConfig, CoordinatorProject } from "@coord/cli/project";
+import { DEFAULT_PROJECT_ID } from "@coord/persistence";
 import { GitClient } from "@coord/repository-service";
-import type { ChangeSet } from "@coord/shared-types";
+import type {
+  AgentPlan,
+  ChangeSet,
+  ScopeChangeDecision,
+} from "@coord/shared-types";
 import {
   DockerWorkspaceManager,
   GitWorktreeWorkspaceManager,
@@ -33,7 +41,10 @@ export interface WorkerOptions {
   workspaceRoot: string;
   name?: string;
   version?: string;
+  projectId?: string;
   repositoryId?: string;
+  /** Injected only by tests or embedded runtimes. */
+  codexRunner?: CodexProcessRunner;
   /** Idle wait between polls when the queue is empty. */
   pollIntervalMs?: number;
 }
@@ -85,6 +96,7 @@ export class Worker {
     const workerId = this.identity?.id ?? (await this.register());
     const assignment = await this.options.client.lease(
       workerId,
+      this.options.projectId ?? DEFAULT_PROJECT_ID,
       this.options.repositoryId,
     );
     if (assignment === undefined) {
@@ -111,13 +123,14 @@ export class Worker {
     beat.unref?.();
 
     try {
-      const changeSet = await this.execute(assignment, scratch);
+      const result = await this.execute(assignment, scratch);
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
       }
       const accepted = await this.options.client.report(assignment.lease.id, {
         status: "completed",
-        changeSet,
+        plan: result.plan,
+        changeSet: result.changeSet,
       });
       return {
         worked: true,
@@ -146,7 +159,7 @@ export class Worker {
   private async execute(
     assignment: WorkAssignment,
     scratch: string,
-  ): Promise<ChangeSet> {
+  ): Promise<{ plan: AgentPlan; changeSet: ChangeSet }> {
     await mkdir(scratch, { recursive: true });
     const bundlePath = path.join(scratch, "revision.bundle");
     await writeFile(bundlePath, await this.options.client.bundle(assignment.lease.id));
@@ -185,12 +198,32 @@ export class Worker {
     // the worker itself is single-tenant.
     const worktrees = new GitWorktreeWorkspaceManager(git);
     const sandboxOptions = this.options.project.sandboxOptions();
+    const [, configuredAgent] = this.options.project.requireAgent(
+      assignment.task.agentId,
+    );
     const docker =
       sandboxOptions === undefined
         ? undefined
         : new DockerWorkspaceManager(sandboxOptions, worktrees);
+    const agentSandbox =
+      sandboxOptions === undefined
+        ? undefined
+        : new DockerWorkspaceManager(
+            {
+              ...sandboxOptions,
+              ...(configuredAgent.env === undefined
+                ? {}
+                : { env: configuredAgent.env }),
+            },
+            worktrees,
+          );
     const workspaces: WorkspaceManager = docker ?? worktrees;
-    const adapter = this.adapterFor(assignment, workspace, workspaces, docker);
+    const adapter = this.adapterFor(
+      assignment,
+      workspace,
+      workspaces,
+      agentSandbox,
+    );
     const session = await adapter.startTask({
       task: {
         id: assignment.task.id,
@@ -201,7 +234,36 @@ export class Worker {
       canonicalVersion: assignment.canonicalVersion,
       repositoryId: assignment.repository.id,
     });
-    await adapter.requestPlan(session.id);
+    const plan = await adapter.requestPlan(session.id);
+    let eventError: unknown;
+    let eventChain = Promise.resolve();
+    await adapter.streamEvents(session.id, (event) => {
+      eventChain = eventChain
+        .then(async () => {
+          if (event.event !== "scope_change_requested") {
+            return;
+          }
+          const decision: ScopeChangeDecision = {
+            requestId:
+              event.requestId?.trim() ||
+              `scope_${assignment.task.id}_${Date.now()}`,
+            taskId: assignment.task.id,
+            decision: "rejected",
+            revisedPlan: plan,
+            constraints: [
+              "Remote execution must remain within the leased plan",
+            ],
+            ownershipGrants: [],
+            explanation:
+              "Scope expansion requires a new control-plane plan and lease",
+            decidedAt: new Date().toISOString(),
+          };
+          await adapter.resolveScopeChange(session.id, decision);
+        })
+        .catch((error: unknown) => {
+          eventError = error;
+        });
+    });
     await adapter.sendContext(session.id, {
       decision: {
         decision: "approved",
@@ -210,12 +272,21 @@ export class Worker {
         ownershipGrants: [],
         constraints: [],
         blockedBy: [],
-        explanation: "Leased to a remote worker",
+        explanation:
+          "Leased to a remote worker; control-plane verification is required",
       },
       canonicalVersion: assignment.canonicalVersion,
       workspacePath,
+      planRevision: 1,
     });
-    return await adapter.collectChanges(session.id);
+    await eventChain;
+    if (eventError !== undefined) {
+      throw eventError;
+    }
+    return {
+      plan,
+      changeSet: await adapter.collectChanges(session.id),
+    };
   }
 
   private adapterFor(
@@ -244,11 +315,20 @@ export class Worker {
       }
       return new CodexAdapter({
         agentId,
-        repository,
+        repository: {
+          ...repository,
+          // A bundle clone is a normal repository. Worktree operations need
+          // its actual Git directory, not the working-tree root.
+          path: path.join(workspace.path, ".git"),
+        },
         workspaces,
         planningRoot: path.join(workspace.rootPath, "planning"),
         ...(agent.command === undefined ? {} : { command: agent.command }),
+        ...(agent.args === undefined ? {} : { args: agent.args }),
         ...(agent.env === undefined ? {} : { env: { ...process.env, ...agent.env } }),
+        ...(this.options.codexRunner === undefined
+          ? {}
+          : { runner: this.options.codexRunner }),
       });
     }
     if (agent.command === undefined) {

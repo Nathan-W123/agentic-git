@@ -603,6 +603,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
     adapters: string[];
     version: string;
   }): Promise<WorkerRecord> {
+    if ((await this.getUser(input.userId)) === undefined) {
+      throw new Error(`Unknown user: ${input.userId}`);
+    }
     const now = new Date().toISOString();
     const worker: WorkerRecord = {
       id: createId("worker"),
@@ -654,13 +657,52 @@ export class SqliteCoordinationStore implements CoordinationStore {
   public async leaseNextTask(
     input: LeaseTaskInput,
   ): Promise<LeasedWork | undefined> {
+    if ((await this.getWorker(input.workerId)) === undefined) {
+      throw new Error(`Unknown worker: ${input.workerId}`);
+    }
+    if (!Number.isSafeInteger(input.ttlMs) || input.ttlMs < 1) {
+      throw new RangeError("Work lease TTL must be a positive integer");
+    }
+    if (input.baseRevision.trim().length === 0) {
+      throw new Error("Work lease base revision must not be empty");
+    }
+
     // BEGIN IMMEDIATE takes the write lock up front, so two workers polling at
     // the same moment serialise here rather than both reading the same
     // pending row and racing to claim it.
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      const now = new Date();
+      const nowIso = now.toISOString();
+      const expired = this.db
+        .prepare(
+          `SELECT task_id FROM work_leases
+           WHERE status = 'active' AND expires_at <= ?`,
+        )
+        .all(nowIso) as Row[];
+      this.db
+        .prepare(
+          `UPDATE work_leases
+           SET status = 'expired', finished_at = ?, outcome = 'expired',
+               detail = 'lease expired'
+           WHERE status = 'active' AND expires_at <= ?`,
+        )
+        .run(nowIso, nowIso);
+      for (const row of expired) {
+        this.db
+          .prepare(
+            `UPDATE submitted_tasks SET status = 'submitted', claimed_at = NULL
+             WHERE id = ? AND status = 'claimed'`,
+          )
+          .run(text(row, "task_id"));
+      }
+
       const clauses = ["status = 'submitted'"];
       const values: string[] = [];
+      if (input.taskId !== undefined) {
+        clauses.push("id = ?");
+        values.push(input.taskId);
+      }
       if (input.repositoryId !== undefined) {
         clauses.push("repository_id = ?");
         values.push(input.repositoryId);
@@ -669,6 +711,13 @@ export class SqliteCoordinationStore implements CoordinationStore {
         clauses.push("project_id = ?");
         values.push(input.projectId);
       }
+      clauses.push(
+        `NOT EXISTS (
+          SELECT 1 FROM work_leases
+          WHERE work_leases.repository_id = submitted_tasks.repository_id
+            AND work_leases.status = 'active'
+        )`,
+      );
 
       const row = this.db
         .prepare(
@@ -681,7 +730,6 @@ export class SqliteCoordinationStore implements CoordinationStore {
         return undefined;
       }
 
-      const now = new Date();
       const task = this.toSubmittedTask(row);
       const lease: WorkLease = {
         id: createId("lease"),
@@ -762,14 +810,16 @@ export class SqliteCoordinationStore implements CoordinationStore {
     at: string,
     expiresAt: string,
   ): Promise<WorkLease | undefined> {
-    this.db
+    if (expiresAt <= at) {
+      return undefined;
+    }
+    const changed = this.db
       .prepare(
         `UPDATE work_leases SET heartbeat_at = ?, expires_at = ?
-         WHERE id = ? AND status = 'active'`,
+         WHERE id = ? AND status = 'active' AND expires_at > ?`,
       )
-      .run(at, expiresAt, id);
-    const lease = await this.getWorkLease(id);
-    return lease?.status === "active" ? lease : undefined;
+      .run(at, expiresAt, id, at);
+    return changed.changes === 0 ? undefined : await this.getWorkLease(id);
   }
 
   public async finishWorkLease(
@@ -777,7 +827,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     status: Exclude<WorkLeaseStatus, "active">,
     at: string,
     detail?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const row = this.db
@@ -785,9 +835,14 @@ export class SqliteCoordinationStore implements CoordinationStore {
         .get(id) as Row | undefined;
       if (row === undefined) {
         this.db.exec("COMMIT");
-        return;
+        return false;
       }
       const lease = this.toWorkLease(row);
+      const lapsed = lease.expiresAt <= at;
+      if (status === "expired" ? !lapsed : lapsed) {
+        this.db.exec("COMMIT");
+        return false;
+      }
       this.db
         .prepare(
           `UPDATE work_leases SET status = ?, finished_at = ?, outcome = ?, detail = ?
@@ -806,6 +861,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
           .run(lease.taskId);
       }
       this.db.exec("COMMIT");
+      return true;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
@@ -821,7 +877,15 @@ export class SqliteCoordinationStore implements CoordinationStore {
     const expired: WorkLease[] = [];
     for (const row of rows) {
       const { id } = this.toWorkLease(row);
-      await this.finishWorkLease(id, "expired", now, "lease expired");
+      const changed = await this.finishWorkLease(
+        id,
+        "expired",
+        now,
+        "lease expired",
+      );
+      if (!changed) {
+        continue;
+      }
       // Re-read rather than returning the row selected above: that snapshot
       // still says `active`, and a caller reporting these leases would
       // describe expired work as running.
@@ -864,6 +928,15 @@ export class SqliteCoordinationStore implements CoordinationStore {
   }
 
   public async createApiToken(token: ApiTokenRecord): Promise<void> {
+    if ((await this.getUser(token.userId)) === undefined) {
+      throw new Error(`Unknown user: ${token.userId}`);
+    }
+    if (
+      token.organizationId !== undefined &&
+      (await this.getOrganization(token.organizationId)) === undefined
+    ) {
+      throw new Error(`Unknown organization: ${token.organizationId}`);
+    }
     this.db
       .prepare(
         `INSERT INTO api_tokens
@@ -1044,10 +1117,23 @@ export class SqliteCoordinationStore implements CoordinationStore {
   }
 
   public async submitTask(input: SubmitTaskInput): Promise<SubmittedTask> {
+    if ((await this.getRepository(input.repositoryId)) === undefined) {
+      throw new Error(`Unknown repository: ${input.repositoryId}`);
+    }
+    const projectId = input.projectId ?? DEFAULT_PROJECT_ID;
+    if ((await this.getProject(projectId)) === undefined) {
+      throw new Error(`Unknown project: ${projectId}`);
+    }
+    if (
+      input.submittedBy !== undefined &&
+      (await this.getUser(input.submittedBy)) === undefined
+    ) {
+      throw new Error(`Unknown user: ${input.submittedBy}`);
+    }
     const task: SubmittedTask = {
       id: createId("task"),
       repositoryId: input.repositoryId,
-      projectId: input.projectId ?? DEFAULT_PROJECT_ID,
+      projectId,
       objective: input.objective,
       agentId: input.agentId,
       validationCommands: input.validationCommands,

@@ -433,6 +433,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     adapters: string[];
     version: string;
   }): Promise<WorkerRecord> {
+    this.requireUser(input.userId);
     const now = new Date().toISOString();
     const worker: WorkerRecord = {
       id: createId("worker"),
@@ -470,22 +471,40 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   public async leaseNextTask(
     input: LeaseTaskInput,
   ): Promise<LeasedWork | undefined> {
+    if (!this.workers.has(input.workerId)) {
+      throw new Error(`Unknown worker: ${input.workerId}`);
+    }
+    if (!Number.isSafeInteger(input.ttlMs) || input.ttlMs < 1) {
+      throw new RangeError("Work lease TTL must be a positive integer");
+    }
+    if (input.baseRevision.trim().length === 0) {
+      throw new Error("Work lease base revision must not be empty");
+    }
+
+    const now = new Date();
+    await this.expireWorkLeases(now.toISOString());
+
     // Single-threaded by construction here, but the ordering matches the
     // SQLite transaction so both backends behave identically.
     const candidate = [...this.submitted.values()]
       .filter(
         (task) =>
           task.status === "submitted" &&
+          (input.taskId === undefined || task.id === input.taskId) &&
           (input.repositoryId === undefined ||
             task.repositoryId === input.repositoryId) &&
-          (input.projectId === undefined || task.projectId === input.projectId),
+          (input.projectId === undefined || task.projectId === input.projectId) &&
+          ![...this.workLeases.values()].some(
+            (lease) =>
+              lease.status === "active" &&
+              lease.repositoryId === task.repositoryId,
+          ),
       )
       .sort((left, right) => left.submittedAt.localeCompare(right.submittedAt))[0];
     if (candidate === undefined) {
       return undefined;
     }
 
-    const now = new Date();
     const lease: WorkLease = {
       id: createId("lease"),
       taskId: candidate.id,
@@ -531,7 +550,12 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     expiresAt: string,
   ): Promise<WorkLease | undefined> {
     const lease = this.workLeases.get(id);
-    if (lease === undefined || lease.status !== "active") {
+    if (
+      lease === undefined ||
+      lease.status !== "active" ||
+      lease.expiresAt <= at ||
+      expiresAt <= at
+    ) {
       return undefined;
     }
     lease.heartbeatAt = at;
@@ -544,10 +568,15 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     status: Exclude<WorkLeaseStatus, "active">,
     at: string,
     detail?: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     const lease = this.workLeases.get(id);
-    if (lease === undefined || lease.status !== "active") {
-      return;
+    const lapsed = lease !== undefined && lease.expiresAt <= at;
+    if (
+      lease === undefined ||
+      lease.status !== "active" ||
+      (status === "expired" ? !lapsed : lapsed)
+    ) {
+      return false;
     }
     lease.status = status;
     lease.finishedAt = at;
@@ -561,19 +590,29 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         task.claimedAt = undefined;
       }
     }
+    return true;
   }
 
   public async expireWorkLeases(now: string): Promise<WorkLease[]> {
     const expired = [...this.workLeases.values()].filter(
       (lease) => lease.status === "active" && lease.expiresAt <= now,
     );
+    const settled: WorkLease[] = [];
     for (const lease of expired) {
-      await this.finishWorkLease(lease.id, "expired", now, "lease expired");
+      if (
+        await this.finishWorkLease(lease.id, "expired", now, "lease expired")
+      ) {
+        settled.push(lease);
+      }
     }
-    return expired.map((lease) => ({ ...lease }));
+    return settled.map((lease) => ({ ...lease }));
   }
 
   public async createApiToken(token: ApiTokenRecord): Promise<void> {
+    this.requireUser(token.userId);
+    if (token.organizationId !== undefined) {
+      this.requireOrganization(token.organizationId);
+    }
     this.apiTokens.set(token.id, { ...token, scopes: [...token.scopes] });
   }
 
@@ -713,6 +752,13 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   }
 
   public async submitTask(input: SubmitTaskInput): Promise<SubmittedTask> {
+    if (!this.repositories.has(input.repositoryId)) {
+      throw new Error(`Unknown repository: ${input.repositoryId}`);
+    }
+    this.requireProject(input.projectId ?? DEFAULT_PROJECT_ID);
+    if (input.submittedBy !== undefined) {
+      this.requireUser(input.submittedBy);
+    }
     const task: SubmittedTask = {
       id: createId("task"),
       repositoryId: input.repositoryId,

@@ -247,6 +247,27 @@ export class ConflictDetector {
         DEFAULT_CONFLICT_OPTIONS.semanticConflictWeight,
       thresholds: { ...options.thresholds },
     };
+    for (const [name, value] of Object.entries(this.options)) {
+      if (name === "thresholds") {
+        continue;
+      }
+      if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+        throw new RangeError(`${name} must be a finite non-negative number`);
+      }
+    }
+    const { concurrentMaximum, notifyMaximum, sequenceMaximum } =
+      this.options.thresholds;
+    if (
+      ![concurrentMaximum, notifyMaximum, sequenceMaximum].every(
+        (value) => Number.isFinite(value) && value >= 0,
+      ) ||
+      concurrentMaximum > notifyMaximum ||
+      notifyMaximum > sequenceMaximum
+    ) {
+      throw new RangeError(
+        "Conflict thresholds must be finite, non-negative, and ordered",
+      );
+    }
   }
 
   public assess(

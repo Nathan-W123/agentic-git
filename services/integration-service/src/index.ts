@@ -24,6 +24,8 @@ export interface IntegrateChangeSetInput {
   changeSet: ChangeSet;
   validationCommands: ValidationCommand[];
   commitMessage: string;
+  /** Reject instead of replaying when canonical no longer matches the worker base. */
+  requireExactBase?: boolean;
 }
 
 export interface IntegrationServiceOptions {
@@ -52,7 +54,19 @@ export class IntegrationService {
     private readonly workspaces: WorkspaceManager =
       new GitWorktreeWorkspaceManager(repositories.getGitClient()),
     private readonly options: IntegrationServiceOptions = {},
-  ) {}
+  ) {
+    for (const [name, value] of [
+      ["validationTimeoutMs", options.validationTimeoutMs],
+      ["maxValidationOutputBytes", options.maxValidationOutputBytes],
+    ] as const) {
+      if (
+        value !== undefined &&
+        (!Number.isSafeInteger(value) || value < 1)
+      ) {
+        throw new RangeError(`${name} must be a positive integer`);
+      }
+    }
+  }
 
   public async integrate(
     input: IntegrateChangeSetInput,
@@ -60,6 +74,22 @@ export class IntegrationService {
     const previousVersion = await this.repositories.getCanonicalVersion(
       input.repository,
     );
+
+    if (
+      input.requireExactBase === true &&
+      input.changeSet.baseRevision !== previousVersion.revision
+    ) {
+      return {
+        taskId: input.changeSet.taskId,
+        changeSetId: input.changeSet.id,
+        status: "stale",
+        previousVersion,
+        canonicalVersion: previousVersion,
+        validation: [],
+        explanation:
+          "Canonical state changed after the remote plan; the task must replan",
+      };
+    }
 
     if (input.changeSet.patches.length === 0) {
       return {
@@ -218,6 +248,14 @@ export class IntegrationService {
       };
     }
 
+    const candidateTree = (
+      await this.repositories.getGitClient().run([
+        "-C",
+        integrationWorkspace.path,
+        "write-tree",
+      ])
+    ).stdout.trim();
+
     for (const command of input.validationCommands) {
       const startedAt = new Date().toISOString();
       const output = await this.workspaces.runInWorkspace(
@@ -255,6 +293,44 @@ export class IntegrationService {
             (output.timedOut === true ? " (timed out)" : ""),
         };
       }
+    }
+
+    // Validation is evidence, not an additional editor. Stage the resulting
+    // workspace and prove that neither its tree nor HEAD changed before commit.
+    await this.repositories.getGitClient().run([
+      "-C",
+      integrationWorkspace.path,
+      "add",
+      "--all",
+      "--",
+    ]);
+    const [validatedTree, validatedHead] = await Promise.all([
+      this.repositories.getGitClient().run([
+        "-C",
+        integrationWorkspace.path,
+        "write-tree",
+      ]),
+      this.repositories.getGitClient().run([
+        "-C",
+        integrationWorkspace.path,
+        "rev-parse",
+        "HEAD",
+      ]),
+    ]);
+    if (
+      validatedTree.stdout.trim() !== candidateTree ||
+      validatedHead.stdout.trim() !== previousVersion.revision
+    ) {
+      return {
+        taskId: input.changeSet.taskId,
+        changeSetId: input.changeSet.id,
+        status: "policy_failed",
+        previousVersion,
+        canonicalVersion: previousVersion,
+        validation,
+        explanation:
+          "A validation command modified repository content or history",
+      };
     }
 
     const candidateRevision = await this.repositories.commitAll(

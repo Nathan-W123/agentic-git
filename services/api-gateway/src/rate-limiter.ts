@@ -44,6 +44,9 @@ export class RateLimiter {
   }
 
   public consume(key: string, cost = 1): RateLimit {
+    if (key.length === 0 || !Number.isFinite(cost) || cost <= 0) {
+      throw new RangeError("Rate-limit key and cost must be positive");
+    }
     const now = this.now();
     const current = this.buckets.get(key) ?? {
       tokens: this.capacity,

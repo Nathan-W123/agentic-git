@@ -445,6 +445,21 @@ function isOptionalStringArray(value: unknown): value is string[] | undefined {
   return value === undefined || isStringArray(value);
 }
 
+function isValidationCommand(value: unknown): value is ValidationCommand {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as Partial<ValidationCommand>).executable === "string" &&
+    (value as Partial<ValidationCommand>).executable?.trim().length !== 0 &&
+    Array.isArray((value as Partial<ValidationCommand>).args) &&
+    (value as Partial<ValidationCommand>).args?.every(
+      (argument) => typeof argument === "string",
+    ) === true &&
+    typeof (value as Partial<ValidationCommand>).label === "string" &&
+    (value as Partial<ValidationCommand>).label?.trim().length !== 0
+  );
+}
+
 export function assertAgentPlan(value: unknown): asserts value is AgentPlan {
   if (typeof value !== "object" || value === null) {
     throw new TypeError("Agent plan must be an object");
@@ -465,17 +480,7 @@ export function assertAgentPlan(value: unknown): asserts value is AgentPlan {
     !isOptionalStringArray(plan.expectedServices) ||
     !isStringArray(plan.dependencies) ||
     !Array.isArray(plan.commands) ||
-    !plan.commands.every(
-      (command) =>
-        typeof command === "object" &&
-        command !== null &&
-        typeof command.executable === "string" &&
-        command.executable.trim().length > 0 &&
-        Array.isArray(command.args) &&
-        command.args.every((argument) => typeof argument === "string") &&
-        typeof command.label === "string" &&
-        command.label.trim().length > 0,
-    ) ||
+    !plan.commands.every(isValidationCommand) ||
     !isStringArray(plan.externalAccess) ||
     !["low", "medium", "high", "critical"].includes(plan.riskLevel ?? "") ||
     (plan.intent !== undefined &&
@@ -506,6 +511,101 @@ export function assertAgentPlan(value: unknown): asserts value is AgentPlan {
   if (plan.intent !== undefined) {
     plan.intent = plan.intent.trim();
   }
+}
+
+function isNonNegativeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function isCommandResult(value: unknown): value is CommandResult {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const result = value as Partial<CommandResult>;
+  return (
+    isValidationCommand(result.command) &&
+    Number.isSafeInteger(result.exitCode) &&
+    typeof result.stdout === "string" &&
+    typeof result.stderr === "string" &&
+    typeof result.startedAt === "string" &&
+    !Number.isNaN(Date.parse(result.startedAt)) &&
+    isNonNegativeInteger(result.durationMs)
+  );
+}
+
+function isTestResult(value: unknown): value is TestResult {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const result = value as Partial<TestResult>;
+  return (
+    typeof result.name === "string" &&
+    result.name.trim().length > 0 &&
+    ["passed", "failed", "skipped"].includes(result.status ?? "") &&
+    isNonNegativeInteger(result.durationMs) &&
+    typeof result.output === "string"
+  );
+}
+
+/**
+ * Validates a changeset received across a trust boundary and normalizes every
+ * repository path before it can reach Git or durable storage.
+ */
+export function assertChangeSet(value: unknown): asserts value is ChangeSet {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Changeset must be an object");
+  }
+
+  const changeSet = value as Partial<ChangeSet>;
+  if (
+    typeof changeSet.id !== "string" ||
+    changeSet.id.trim().length === 0 ||
+    typeof changeSet.taskId !== "string" ||
+    changeSet.taskId.trim().length === 0 ||
+    !isNonNegativeInteger(changeSet.baseVersion) ||
+    typeof changeSet.baseRevision !== "string" ||
+    changeSet.baseRevision.trim().length === 0 ||
+    !Array.isArray(changeSet.patches) ||
+    !changeSet.patches.every(
+      (entry) =>
+        typeof entry === "object" &&
+        entry !== null &&
+        typeof entry.path === "string" &&
+        ["added", "modified", "deleted"].includes(entry.status) &&
+        typeof entry.patch === "string",
+    ) ||
+    !Array.isArray(changeSet.commandsRun) ||
+    !changeSet.commandsRun.every(isCommandResult) ||
+    !Array.isArray(changeSet.tests) ||
+    !changeSet.tests.every(isTestResult) ||
+    !isStringArray(changeSet.dependenciesChanged) ||
+    !isStringArray(changeSet.symbolsChanged) ||
+    typeof changeSet.riskAssessment !== "object" ||
+    changeSet.riskAssessment === null ||
+    !["low", "medium", "high", "critical"].includes(
+      changeSet.riskAssessment.level ?? "",
+    ) ||
+    !isStringArray(changeSet.riskAssessment.reasons) ||
+    typeof changeSet.agentExplanation !== "string" ||
+    typeof changeSet.createdAt !== "string" ||
+    Number.isNaN(Date.parse(changeSet.createdAt))
+  ) {
+    throw new TypeError("Changeset does not match the coordination schema");
+  }
+
+  changeSet.id = changeSet.id.trim();
+  changeSet.taskId = changeSet.taskId.trim();
+  changeSet.baseRevision = changeSet.baseRevision.trim();
+  changeSet.patches = changeSet.patches.map((entry) => ({
+    ...entry,
+    path: normalizeRepositoryPath(entry.path),
+  }));
+  changeSet.dependenciesChanged = uniqueStrings(changeSet.dependenciesChanged);
+  changeSet.symbolsChanged = uniqueStrings(changeSet.symbolsChanged);
+  changeSet.riskAssessment = {
+    ...changeSet.riskAssessment,
+    reasons: uniqueStrings(changeSet.riskAssessment.reasons),
+  };
 }
 
 /** Returns a detached plan with every optional resource collection populated. */

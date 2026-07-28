@@ -4,8 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import {
+  DEFAULT_PROJECT_ID,
+  InMemoryCoordinationStore,
+} from "@coord/persistence";
 import { GitClient, RepositoryService } from "@coord/repository-service";
+import type { AgentPlan, ChangeSet } from "@coord/shared-types";
+import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
 
 import {
   acceptWorkResult,
@@ -86,15 +91,55 @@ async function submit(harness: Harness): Promise<string> {
   return task.id;
 }
 
+async function lease(harness: Harness) {
+  return await leaseWork(harness.store, {
+    workerId: harness.workerId,
+    projectId: DEFAULT_PROJECT_ID,
+  });
+}
+
+function plan(taskId: string): AgentPlan {
+  return {
+    taskId,
+    objective: "raise the value",
+    expectedFiles: ["src/value.js"],
+    expectedSymbols: ["value"],
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  };
+}
+
+function resultStub(
+  taskId: string,
+  revision: string,
+  overrides: Partial<ChangeSet> = {},
+): ChangeSet {
+  return {
+    id: "changeset_1",
+    taskId,
+    baseVersion: 1,
+    baseRevision: revision,
+    patches: [],
+    commandsRun: [],
+    tests: [],
+    dependenciesChanged: [],
+    symbolsChanged: ["value"],
+    riskAssessment: { level: "low", reasons: [] },
+    agentExplanation: "raised the value",
+    createdAt: new Date().toISOString(),
+    ...overrides,
+  };
+}
+
 test("a lease pins the worker to the canonical revision", async () => {
   const harness = await createHarness();
   try {
-    assert.equal(await leaseWork(harness.store, { workerId: harness.workerId }), undefined);
+    assert.equal(await lease(harness), undefined);
 
     const taskId = await submit(harness);
-    const assignment = await leaseWork(harness.store, {
-      workerId: harness.workerId,
-    });
+    const assignment = await lease(harness);
 
     assert.equal(assignment?.task.id, taskId);
     assert.equal(assignment?.lease.baseRevision, harness.revision);
@@ -110,9 +155,7 @@ test("a worker reconstructs the workspace from the bundle alone", async () => {
   const harness = await createHarness();
   try {
     await submit(harness);
-    const assignment = await leaseWork(harness.store, {
-      workerId: harness.workerId,
-    });
+    const assignment = await lease(harness);
     const bundle = await leaseBundle(
       harness.store,
       assignment?.lease.id ?? "",
@@ -161,9 +204,7 @@ test("a bundle is only served for an active lease", async () => {
   const harness = await createHarness();
   try {
     await submit(harness);
-    const assignment = await leaseWork(harness.store, {
-      workerId: harness.workerId,
-    });
+    const assignment = await lease(harness);
     const leaseId = assignment?.lease.id ?? "";
 
     await harness.store.finishWorkLease(
@@ -178,59 +219,258 @@ test("a bundle is only served for an active lease", async () => {
   }
 });
 
-test("a completed result must match the revision it was leased against", async () => {
+test("an invalid completed result fails the lease instead of retrying forever", async () => {
   const harness = await createHarness();
   try {
     const taskId = await submit(harness);
-    const assignment = await leaseWork(harness.store, {
-      workerId: harness.workerId,
-    });
+    const assignment = await lease(harness);
     const leaseId = assignment?.lease.id ?? "";
 
-    // Built from some other revision: the control plane cannot integrate this.
-    const stale = await acceptWorkResult(harness.store, {
+    const rejected = await acceptWorkResult(harness.store, {
       leaseId,
       status: "completed",
       actorId: "user",
-      changeSet: { taskId, baseRevision: "b".repeat(40), patches: [] },
+      plan: plan(taskId),
+      changeSet: resultStub(taskId, "b".repeat(40)),
     });
-    assert.equal(stale.accepted, false);
-    assert.match(stale.reason ?? "", /does not match the revision/u);
-
-    // Right revision, wrong task.
-    const misrouted = await acceptWorkResult(harness.store, {
-      leaseId,
-      status: "completed",
-      actorId: "user",
-      changeSet: { taskId: "task_other", baseRevision: harness.revision },
-    });
-    assert.equal(misrouted.accepted, false);
-
-    // A completed result with no changeset at all.
-    const empty = await acceptWorkResult(harness.store, {
-      leaseId,
-      status: "completed",
-      actorId: "user",
-      changeSet: undefined,
-    });
-    assert.equal(empty.accepted, false);
-
-    // The lease survived all three rejections and still accepts a valid result.
-    const accepted = await acceptWorkResult(harness.store, {
-      leaseId,
-      status: "completed",
-      actorId: "user",
-      changeSet: {
-        id: "changeset_1",
-        taskId,
-        baseRevision: harness.revision,
-        patches: [{ path: "src/value.js", status: "modified", patch: "@@" }],
-      },
-    });
-    assert.equal(accepted.accepted, true);
+    assert.equal(rejected.accepted, false);
+    assert.match(rejected.reason ?? "", /base does not match/u);
     assert.equal(
       (await harness.store.getWorkLease(leaseId))?.status,
-      "completed",
+      "failed",
+    );
+    assert.equal(
+      (await harness.store.listSubmittedTasks())[0]?.status,
+      "failed",
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a valid remote result is recorded, validated, and promoted", async () => {
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+    const repository = await harness.store.getRepository("repo_worker");
+    assert.ok(repository);
+    const canonical = {
+      id: repository.id,
+      path: repository.path,
+      branch: repository.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId,
+      rootPath: path.join(harness.root, "agent-workspaces"),
+      repository: canonical,
+      baseVersion: assignment.canonicalVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: ["value"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "raised the value",
+    });
+    await workspaces.destroy(workspace);
+
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskId),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(accepted.accepted, true, accepted.reason);
+    assert.equal(accepted.integrationStatus, "integrated");
+    assert.ok(accepted.runId);
+    assert.equal(
+      (await harness.store.listSubmittedTasks())[0]?.status,
+      "integrated",
+    );
+    const version = await harness.repositories.getCanonicalVersion(canonical);
+    assert.equal(
+      await harness.repositories.readFile(
+        canonical,
+        version.revision,
+        "src/value.js",
+      ),
+      "export const value = 2;\n",
+    );
+    const detail = await harness.store.getRun(accepted.runId);
+    assert.equal(detail?.changeSets.length, 1);
+    assert.equal(detail?.integrations[0]?.status, "integrated");
+    const duplicate = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskId),
+        changeSet,
+      },
+      { repositories: harness.repositories },
+    );
+    assert.equal(duplicate.accepted, true);
+    assert.equal(duplicate.runId, accepted.runId);
+    assert.equal((await harness.store.listRuns()).length, 1);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a protected remote result waits for durable human approval", async () => {
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const repository = {
+      id: stored.id,
+      path: stored.path,
+      branch: stored.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId,
+      rootPath: path.join(harness.root, "approval-workspace"),
+      repository,
+      baseVersion: assignment.canonicalVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "value.js"),
+      "export const value = 3;\n",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: ["value"],
+      riskAssessment: { level: "high", reasons: ["protected behavior"] },
+      agentExplanation: "approved high-risk update",
+    });
+    await workspaces.destroy(workspace);
+    const highRiskPlan = { ...plan(taskId), riskLevel: "high" as const };
+
+    const resultPromise = acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: highRiskPlan,
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "approval-integration"),
+      },
+    );
+    let approval = (await harness.store.listApprovals({ taskId }))[0];
+    for (let attempt = 0; approval === undefined && attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      approval = (await harness.store.listApprovals({ taskId }))[0];
+    }
+    assert.ok(approval);
+    assert.equal(approval.status, "pending");
+    await harness.store.decideApproval({
+      approvalId: approval.id,
+      status: "approved",
+      decidedBy: "reviewer",
+      comment: "Reviewed the remote diff",
+      decidedAt: new Date().toISOString(),
+    });
+
+    const result = await resultPromise;
+    assert.equal(result.accepted, true, result.reason);
+    const detail = await harness.store.getRun(result.runId ?? "");
+    assert.equal(detail?.approvals[0]?.status, "approved");
+    assert.equal(detail?.tasks[0]?.status, "integrated");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("canonical movement requeues remote work for a fresh plan", async () => {
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const repository = {
+      id: stored.id,
+      path: stored.path,
+      branch: stored.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const competing = await workspaces.create({
+      taskId: "competing",
+      rootPath: path.join(harness.root, "competing"),
+      repository,
+      baseVersion: assignment.canonicalVersion,
+    });
+    await writeFile(path.join(competing.path, "README.md"), "new canonical\n");
+    const candidate = await harness.repositories.commitAll(
+      competing.path,
+      "advance canonical",
+    );
+    assert.ok(candidate);
+    assert.equal(
+      await harness.repositories.promote(
+        repository,
+        candidate,
+        assignment.canonicalVersion.revision,
+      ),
+      true,
+    );
+    await workspaces.destroy(competing);
+
+    const result = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskId),
+        changeSet: resultStub(taskId, assignment.canonicalVersion.revision),
+      },
+      { repositories: harness.repositories },
+    );
+    assert.equal(result.accepted, false);
+    assert.equal(result.requeued, true);
+    assert.equal(
+      (await harness.store.getWorkLease(assignment.lease.id))?.status,
+      "released",
+    );
+    assert.equal(
+      (await harness.store.listSubmittedTasks())[0]?.status,
+      "submitted",
+    );
+    assert.ok(
+      (await harness.store.listAudit()).some(
+        (event) =>
+          event.type === "replan_requested" && event.taskId === taskId,
+      ),
     );
   } finally {
     await rm(harness.root, { recursive: true, force: true });
@@ -241,9 +481,7 @@ test("a lapsed lease cannot report a result", async () => {
   const harness = await createHarness();
   try {
     const taskId = await submit(harness);
-    const assignment = await leaseWork(harness.store, {
-      workerId: harness.workerId,
-    });
+    const assignment = await lease(harness);
     const leaseId = assignment?.lease.id ?? "";
 
     // The worker stalled, the lease expired, and the task went back to the
@@ -255,7 +493,8 @@ test("a lapsed lease cannot report a result", async () => {
       leaseId,
       status: "completed",
       actorId: "user",
-      changeSet: { taskId, baseRevision: harness.revision, patches: [] },
+      plan: plan(taskId),
+      changeSet: resultStub(taskId, harness.revision),
     });
     assert.equal(late.accepted, false);
     assert.match(late.reason ?? "", /lease is expired/u);
@@ -274,14 +513,13 @@ test("a failed result settles the task and is audited", async () => {
   const harness = await createHarness();
   try {
     const taskId = await submit(harness);
-    const assignment = await leaseWork(harness.store, {
-      workerId: harness.workerId,
-    });
+    const assignment = await lease(harness);
 
     const result = await acceptWorkResult(harness.store, {
       leaseId: assignment?.lease.id ?? "",
       status: "failed",
       actorId: "user",
+      plan: undefined,
       changeSet: undefined,
       detail: "agent exited with code 3",
     });

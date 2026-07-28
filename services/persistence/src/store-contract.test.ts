@@ -531,11 +531,13 @@ for (const backend of backends) {
       const leased = await store.leaseNextTask({
         workerId: worker.id,
         baseRevision: BASE_VERSION.revision,
-        ttlMs: -1_000,
+        ttlMs: 1,
       });
       assert.notEqual(leased, undefined);
 
-      const expired = await store.expireWorkLeases(new Date().toISOString());
+      const expired = await store.expireWorkLeases(
+        new Date(Date.now() + 60_000).toISOString(),
+      );
       assert.equal(expired.length, 1);
       assert.equal(
         (await store.getWorkLease(leased?.lease.id ?? ""))?.status,
@@ -987,9 +989,30 @@ for (const backend of backends) {
       });
       assert.ok(work !== undefined);
 
-      const expired = await store.expireWorkLeases(
-        new Date(Date.now() + 60_000).toISOString(),
+      const afterExpiry = new Date(Date.now() + 60_000).toISOString();
+      const originalExpiry = work.lease.expiresAt;
+      assert.equal(
+        await store.heartbeatWorkLease(
+          work.lease.id,
+          afterExpiry,
+          new Date(Date.now() + 120_000).toISOString(),
+        ),
+        undefined,
       );
+      assert.equal(
+        (await store.getWorkLease(work.lease.id))?.expiresAt,
+        originalExpiry,
+      );
+      assert.equal(
+        await store.finishWorkLease(
+          work.lease.id,
+          "completed",
+          afterExpiry,
+          "late result",
+        ),
+        false,
+      );
+      const expired = await store.expireWorkLeases(afterExpiry);
       assert.equal(expired.length, 1);
 
       // The returned record must describe the lease after expiry. One backend
@@ -1004,6 +1027,126 @@ for (const backend of backends) {
       const pending = await store.listSubmittedTasks({ status: "submitted" });
       assert.equal(pending.length, 1);
       assert.equal(pending[0]?.id, work.task.id);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: only one remote lease per repository is active`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "serialized-worker@example.invalid",
+        displayName: "Serialized Worker",
+        passwordDigest: "unused",
+      });
+      const firstWorker = await store.registerWorker({
+        userId: owner.id,
+        name: "worker-a",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      const secondWorker = await store.registerWorker({
+        userId: owner.id,
+        name: "worker-b",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      await store.saveRepository(REPOSITORY);
+      for (const objective of ["first", "second"]) {
+        await store.submitTask({
+          repositoryId: REPOSITORY.id,
+          objective,
+          agentId: "codex",
+          validationCommands: [],
+        });
+      }
+
+      const first = await store.leaseNextTask({
+        workerId: firstWorker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+      });
+      assert.ok(first !== undefined);
+      assert.equal(
+        await store.leaseNextTask({
+          workerId: secondWorker.id,
+          baseRevision: BASE_VERSION.revision,
+          ttlMs: 60_000,
+        }),
+        undefined,
+      );
+
+      assert.equal(
+        await store.finishWorkLease(
+          first.lease.id,
+          "released",
+          new Date().toISOString(),
+          "test release",
+        ),
+        true,
+      );
+      assert.ok(
+        (await store.leaseNextTask({
+          workerId: secondWorker.id,
+          baseRevision: BASE_VERSION.revision,
+          ttlMs: 60_000,
+        })) !== undefined,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: worker and task references are validated consistently`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await assert.rejects(
+        store.registerWorker({
+          userId: "user_missing",
+          name: "worker",
+          adapters: [],
+          version: "1",
+        }),
+        /user|foreign key/iu,
+      );
+      await assert.rejects(
+        store.submitTask({
+          repositoryId: "repo_missing",
+          objective: "objective",
+          agentId: "codex",
+          validationCommands: [],
+        }),
+        /repository|foreign key/iu,
+      );
+
+      await store.saveRepository(REPOSITORY);
+      await assert.rejects(
+        store.submitTask({
+          projectId: "project_missing",
+          repositoryId: REPOSITORY.id,
+          objective: "objective",
+          agentId: "codex",
+          validationCommands: [],
+        }),
+        /project|foreign key/iu,
+      );
+      await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "objective",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      await assert.rejects(
+        store.leaseNextTask({
+          workerId: "worker_missing",
+          baseRevision: BASE_VERSION.revision,
+          ttlMs: 60_000,
+        }),
+        /worker|foreign key/iu,
+      );
     } finally {
       await store.close();
       await cleanup();

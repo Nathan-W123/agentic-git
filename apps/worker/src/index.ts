@@ -31,6 +31,15 @@ async function main(): Promise<void> {
     ...(process.env["COORD_WORKER_NAME"] === undefined
       ? {}
       : { name: process.env["COORD_WORKER_NAME"] }),
+    ...((process.env["COORD_PROJECT_ID"] ?? process.env["COORD_PROJECT"]) ===
+    undefined
+      ? {}
+      : {
+          projectId:
+            process.env["COORD_PROJECT_ID"] ??
+            process.env["COORD_PROJECT"] ??
+            "",
+        }),
     ...(process.env["COORD_REPOSITORY"] === undefined
       ? {}
       : { repositoryId: process.env["COORD_REPOSITORY"] }),

@@ -242,7 +242,6 @@ export class StoreApprovalController implements ApprovalController {
         const timer = setTimeout(() => {
           finish();
         }, this.pollIntervalMs);
-        timer.unref?.();
         input.signal?.addEventListener("abort", abort, { once: true });
         if (input.signal?.aborted === true) {
           abort();

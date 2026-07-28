@@ -87,3 +87,20 @@ test("expired leases stop blocking new work", () => {
   assert.equal(service.acquire(plan("task_b"), "agent_b", 2).length, 1);
   assert.equal(service.activeLeases()[0]?.taskId, "task_b");
 });
+
+test("active work can renew ownership before a long execution expires", () => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const service = new OwnershipService(() => now, 1_000);
+  const original = service.acquire(plan("task_a"), "agent_a", 1)[0];
+  now = new Date("2026-01-01T00:00:00.800Z");
+  const renewed = service.renewActive()[0];
+
+  assert.ok(original);
+  assert.ok(renewed);
+  assert.ok(renewed.expiresAt > original.expiresAt);
+  now = new Date("2026-01-01T00:00:01.200Z");
+  assert.throws(
+    () => service.acquire(plan("task_b"), "agent_b", 2),
+    OwnershipConflictError,
+  );
+});

@@ -31,6 +31,7 @@ import type {
 
 const DEFAULT_PLANNING_TIMEOUT_MS = 10 * 60 * 1000;
 const DEFAULT_EXECUTION_TIMEOUT_MS = 60 * 60 * 1000;
+const MAX_REPLAY_EVENTS = 10_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 
 const PLAN_SCHEMA = {
@@ -760,7 +761,6 @@ export class CodexAdapter implements AgentAdapter {
         ),
       );
     }, this.executionTimeoutMs);
-    timer.unref?.();
     const resolve = (decision: ScopeChangeDecision): void => {
       clearTimeout(timer);
       resolvePromise(decision);
@@ -919,6 +919,9 @@ export class CodexAdapter implements AgentAdapter {
   }
 
   private emit(record: CodexSession, event: AgentEvent): void {
+    if (record.events.length >= MAX_REPLAY_EVENTS) {
+      record.events.shift();
+    }
     record.events.push(event);
     for (const handler of record.eventHandlers) {
       handler(event);

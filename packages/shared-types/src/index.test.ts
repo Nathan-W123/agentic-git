@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   assertAgentPlan,
+  assertChangeSet,
   normalizeRepositoryPath,
   uniqueRepositoryPaths,
 } from "./index.js";
@@ -53,6 +54,66 @@ test("rejects malformed validation commands in an agent plan", () => {
       commands: [{ executable: "node", args: "bad", label: "tests" }],
       externalAccess: [],
       riskLevel: "low",
+    }),
+  );
+});
+
+test("validates and normalizes a changeset received over the wire", () => {
+  const changeSet: unknown = {
+    id: " change_1 ",
+    taskId: " task_1 ",
+    baseVersion: 1,
+    baseRevision: "abc123",
+    patches: [
+      {
+        path: "src\\index.ts",
+        status: "modified",
+        patch: "diff --git a/src/index.ts b/src/index.ts\n",
+      },
+    ],
+    commandsRun: [],
+    tests: [],
+    dependenciesChanged: [" dep ", "dep"],
+    symbolsChanged: ["main"],
+    riskAssessment: { level: "low", reasons: [" safe ", "safe"] },
+    agentExplanation: "Updated the entry point",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  assertChangeSet(changeSet);
+  assert.equal(changeSet.id, "change_1");
+  assert.equal(changeSet.taskId, "task_1");
+  assert.equal(changeSet.patches[0]?.path, "src/index.ts");
+  assert.deepEqual(changeSet.dependenciesChanged, ["dep"]);
+  assert.deepEqual(changeSet.riskAssessment.reasons, ["safe"]);
+});
+
+test("rejects malformed or escaping changesets", () => {
+  const valid = {
+    id: "change_1",
+    taskId: "task_1",
+    baseVersion: 1,
+    baseRevision: "abc123",
+    patches: [],
+    commandsRun: [],
+    tests: [],
+    dependenciesChanged: [],
+    symbolsChanged: [],
+    riskAssessment: { level: "low", reasons: [] },
+    agentExplanation: "",
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+
+  assert.throws(() =>
+    assertChangeSet({
+      ...valid,
+      patches: [{ path: "../secret", status: "added", patch: "content" }],
+    }),
+  );
+  assert.throws(() =>
+    assertChangeSet({
+      ...valid,
+      tests: [{ name: "test", status: "unknown", durationMs: 0, output: "" }],
     }),
   );
 });

@@ -90,7 +90,31 @@ class TestClient {
   }
 }
 
-async function startRuntime(t: TestContext): Promise<TestRuntime> {
+async function rawHttp(port: number, request: string): Promise<string> {
+  return await new Promise<string>((resolve, reject) => {
+    const socket = net.createConnection(port, "127.0.0.1");
+    const chunks: Buffer[] = [];
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("Timed out waiting for raw HTTP response"));
+    }, 4_000);
+    socket.once("connect", () => socket.end(request));
+    socket.on("data", (chunk: Buffer) => chunks.push(chunk));
+    socket.once("end", () => {
+      clearTimeout(timer);
+      resolve(Buffer.concat(chunks).toString("utf8"));
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+}
+
+async function startRuntime(
+  t: TestContext,
+  options: { allowedOrigins?: readonly string[] } = {},
+): Promise<TestRuntime> {
   const store = new InMemoryCoordinationStore();
   const operations: ApiOperations = {
     async listAgents() {
@@ -124,6 +148,7 @@ async function startRuntime(t: TestContext): Promise<TestRuntime> {
     async leaseWork(input) {
       const leased = await store.leaseNextTask({
         workerId: input.workerId,
+        projectId: input.projectId,
         baseRevision: "a".repeat(40),
         ttlMs: 5 * 60 * 1000,
         ...(input.repositoryId === undefined
@@ -165,6 +190,9 @@ async function startRuntime(t: TestContext): Promise<TestRuntime> {
     store,
     operations,
     bootstrapToken: BOOTSTRAP_TOKEN,
+    ...(options.allowedOrigins === undefined
+      ? {}
+      : { allowedOrigins: options.allowedOrigins }),
     staticAssets: new Map([
       [
         "/index.html",
@@ -777,10 +805,18 @@ test("a worker registers, leases exclusively, and heartbeats", async (t) => {
   assert.equal(registered.status, 201);
   const workerId = registered.data.id as string;
 
+  const unscoped = await bearer(
+    runtime.origin,
+    "/api/v1/workers/leases",
+    token,
+    { method: "POST", body: { workerId } },
+  );
+  assert.equal(unscoped.status, 400);
+
   // Nothing queued yet, so the poll must say so without a body.
   const empty = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
     method: "POST",
-    body: { workerId },
+    body: { workerId, projectId: DEFAULT_PROJECT_ID },
   });
   assert.equal(empty.status, 204);
 
@@ -798,7 +834,7 @@ test("a worker registers, leases exclusively, and heartbeats", async (t) => {
 
   const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
     method: "POST",
-    body: { workerId },
+    body: { workerId, projectId: DEFAULT_PROJECT_ID },
   });
   assert.equal(leased.status, 200);
   assert.equal(leased.data.task.id, task.id);
@@ -808,7 +844,7 @@ test("a worker registers, leases exclusively, and heartbeats", async (t) => {
   // A second poll finds nothing: the task is exclusively held.
   const second = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
     method: "POST",
-    body: { workerId },
+    body: { workerId, projectId: DEFAULT_PROJECT_ID },
   });
   assert.equal(second.status, 204);
 
@@ -845,7 +881,7 @@ test("releasing a lease returns the task to the queue", async (t) => {
 
   const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
     method: "POST",
-    body: { workerId },
+    body: { workerId, projectId: DEFAULT_PROJECT_ID },
   });
   const released = await bearer(
     runtime.origin,
@@ -858,7 +894,7 @@ test("releasing a lease returns the task to the queue", async (t) => {
   // Another poll now finds the work again.
   const relet = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
     method: "POST",
-    body: { workerId },
+    body: { workerId, projectId: DEFAULT_PROJECT_ID },
   });
   assert.equal(relet.status, 200);
 
@@ -889,6 +925,195 @@ test("worker endpoints require the run_task scope", async (t) => {
   assert.equal(denied.data.error.code, "token_scope_missing");
 });
 
+test("malformed hosts and encoded paths stay inside the HTTP error boundary", async (t) => {
+  const runtime = await startRuntime(t);
+  const hostResponse = await rawHttp(
+    runtime.port,
+    "GET /api/v1/health HTTP/1.1\r\n" +
+      "Host: [malformed\r\n" +
+      "Connection: close\r\n\r\n",
+  );
+  assert.match(hostResponse, /^HTTP\/1\.1 200 /u);
+
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const malformedPath = await client.request("/api/v1/projects/%E0%A4%A");
+  assert.equal(malformedPath.status, 400);
+  assert.equal(malformedPath.data.error.code, "invalid_path");
+
+  const healthy = await client.request("/api/v1/health");
+  assert.equal(healthy.status, 200);
+});
+
+test("configured browser origins receive credentialed CORS and preflight", async (t) => {
+  const allowedOrigin = "https://relay-client.example";
+  const runtime = await startRuntime(t, {
+    allowedOrigins: [allowedOrigin],
+  });
+  const preflight = await fetch(`${runtime.origin}/api/v1/auth/login`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: allowedOrigin,
+      "Access-Control-Request-Method": "POST",
+      "Access-Control-Request-Headers": "content-type,x-csrf-token",
+    },
+  });
+  assert.equal(preflight.status, 204);
+  assert.equal(
+    preflight.headers.get("access-control-allow-origin"),
+    allowedOrigin,
+  );
+  assert.match(
+    preflight.headers.get("access-control-allow-methods") ?? "",
+    /POST/u,
+  );
+  assert.equal(
+    preflight.headers.get("access-control-allow-credentials"),
+    "true",
+  );
+
+  const allowed = await fetch(`${runtime.origin}/api/v1/health`, {
+    headers: { Origin: allowedOrigin },
+  });
+  assert.equal(allowed.status, 200);
+  assert.equal(
+    allowed.headers.get("access-control-allow-origin"),
+    allowedOrigin,
+  );
+
+  const denied = await fetch(`${runtime.origin}/api/v1/health`, {
+    headers: { Origin: "https://attacker.example" },
+  });
+  assert.equal(denied.status, 403);
+  assert.equal(denied.headers.get("access-control-allow-origin"), null);
+});
+
+test("a project-bound worker token cannot pull another tenant's queue", async (t) => {
+  const { runtime } = await workerRuntime(t);
+  const firstOrganization = await runtime.store.createOrganization({
+    slug: "worker-first",
+    name: "Worker First",
+  });
+  const secondOrganization = await runtime.store.createOrganization({
+    slug: "worker-second",
+    name: "Worker Second",
+  });
+  const firstProject = await runtime.store.createProject({
+    organizationId: firstOrganization.id,
+    slug: "first",
+    name: "First",
+  });
+  const secondProject = await runtime.store.createProject({
+    organizationId: secondOrganization.id,
+    slug: "second",
+    name: "Second",
+  });
+  const developer = await runtime.store.createUser({
+    email: "fleet-developer@example.com",
+    displayName: "Fleet Developer",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: firstOrganization.id,
+    userId: developer.id,
+    role: "developer",
+  });
+  const developerClient = new TestClient(runtime.origin);
+  await developerClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: developer.email, password: PASSWORD },
+  });
+  const issued = await developerClient.request("/api/v1/auth/tokens", {
+    method: "POST",
+    body: {
+      name: "tenant-worker",
+      scopes: ["view", "run_task"],
+      organizationId: firstOrganization.id,
+    },
+  });
+  const token = issued.data.token as string;
+  const worker = await bearer(
+    runtime.origin,
+    "/api/v1/workers/register",
+    token,
+    {
+      method: "POST",
+      body: { name: "tenant-worker", adapters: ["codex"], version: "1" },
+    },
+  );
+  const outsider = await runtime.store.createUser({
+    email: "other-fleet@example.com",
+    displayName: "Other Fleet",
+    passwordDigest: "unused",
+  });
+  await runtime.store.registerWorker({
+    userId: outsider.id,
+    name: "other-worker",
+    adapters: ["codex"],
+    version: "1",
+  });
+  const visibleWorkers = await bearer(
+    runtime.origin,
+    "/api/v1/workers",
+    token,
+  );
+  assert.deepEqual(
+    visibleWorkers.data.workers.map((entry: { id: string }) => entry.id),
+    [worker.data.id],
+  );
+
+  await runtime.store.saveRepository({
+    id: "repo_other_tenant",
+    path: "/canonical/other-tenant.git",
+    branch: "main",
+  });
+  await runtime.store.linkRepository(
+    secondProject.id,
+    "repo_other_tenant",
+  );
+  await runtime.store.submitTask({
+    projectId: secondProject.id,
+    repositoryId: "repo_other_tenant",
+    objective: "private objective",
+    agentId: "codex",
+    validationCommands: [],
+  });
+
+  const ownQueue = await bearer(
+    runtime.origin,
+    "/api/v1/workers/leases",
+    token,
+    {
+      method: "POST",
+      body: {
+        workerId: worker.data.id,
+        projectId: firstProject.id,
+      },
+    },
+  );
+  assert.equal(ownQueue.status, 204);
+
+  const crossTenant = await bearer(
+    runtime.origin,
+    "/api/v1/workers/leases",
+    token,
+    {
+      method: "POST",
+      body: {
+        workerId: worker.data.id,
+        projectId: secondProject.id,
+      },
+    },
+  );
+  assert.equal(crossTenant.status, 403);
+  assert.equal(crossTenant.data.error.code, "token_organization_mismatch");
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ projectId: secondProject.id }))[0]
+      ?.status,
+    "submitted",
+  );
+});
+
 test("a worker cannot touch another user's lease", async (t) => {
   const { runtime, client, token } = await workerRuntime(t);
   const workerId = (
@@ -911,7 +1136,7 @@ test("a worker cannot touch another user's lease", async (t) => {
   });
   const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
     method: "POST",
-    body: { workerId },
+    body: { workerId, projectId: DEFAULT_PROJECT_ID },
   });
 
   // A second tenant with a perfectly valid run_task token.

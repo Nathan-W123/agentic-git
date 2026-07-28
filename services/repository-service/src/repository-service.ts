@@ -116,6 +116,7 @@ export class RepositoryService {
    * git has approved them, so a hit is exactly as authoritative as a miss.
    */
   private readonly validatedBranches = new Set<string>();
+  private readonly bundleLocks = new Map<string, Promise<void>>();
 
   public constructor(
     private readonly git = new GitClient(),
@@ -523,6 +524,51 @@ export class RepositoryService {
     };
   }
 
+  /** Resolves a canonical-version record for an already selected commit. */
+  public async getVersionAtRevision(
+    repository: CanonicalRepository,
+    revision: string,
+  ): Promise<CanonicalVersion> {
+    const candidate = revision.trim();
+    if (candidate.length === 0) {
+      throw new Error("Revision must not be empty");
+    }
+    const [resolved, sequence, createdAt] = await Promise.all([
+      this.git.run([
+        `--git-dir=${repository.path}`,
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        `${candidate}^{commit}`,
+      ]),
+      this.git.run([
+        `--git-dir=${repository.path}`,
+        "rev-list",
+        "--count",
+        "--end-of-options",
+        candidate,
+      ]),
+      this.git.run([
+        `--git-dir=${repository.path}`,
+        "show",
+        "-s",
+        "--format=%cI",
+        "--end-of-options",
+        candidate,
+      ]),
+    ]);
+    const sequenceNumber = Number.parseInt(sequence.stdout.trim(), 10);
+    if (!Number.isSafeInteger(sequenceNumber) || sequenceNumber < 1) {
+      throw new Error(`Could not determine history depth for ${candidate}`);
+    }
+    return {
+      sequence: sequenceNumber,
+      revision: resolved.stdout.trim(),
+      branch: repository.branch,
+      createdAt: createdAt.stdout.trim(),
+    };
+  }
+
   public async commitAll(
     worktreePath: string,
     message: string,
@@ -623,8 +669,9 @@ export class RepositoryService {
    *
    * This is how a remote worker materialises a workspace without the control
    * plane running a Git server: the bundle is a single self-contained file the
-   * worker can clone from directly. Only the requested revision is included,
-   * so a worker never receives history it was not assigned.
+   * worker can clone from directly. It advertises only the lease ref and
+   * excludes newer canonical refs, but necessarily includes the ancestors
+   * reachable from that commit so Git can materialize the snapshot.
    *
    * The bundle is written to a file rather than captured from stdout because
    * it is binary, and the process runner decodes output as UTF-8.
@@ -635,36 +682,60 @@ export class RepositoryService {
     refName: string,
   ): Promise<Buffer> {
     await this.assertBranchName(refName);
-    // Git refuses to bundle a bare commit: a bundle carries refs, not commits.
-    // A short-lived branch names the revision so an arbitrary commit can be
-    // packaged — necessary because canonical may advance while a worker holds
-    // its lease, and the worker must receive the revision it was assigned.
-    const reference = `refs/heads/${refName}`;
-    const staging = await mkdtemp(path.join(os.tmpdir(), "coord-bundle-"));
-    const bundlePath = path.join(staging, "revision.bundle");
+    const key = `${repository.path}\0${refName}`;
+    return await this.withBundleLock(key, async () => {
+      // Git refuses to bundle a bare commit: a bundle carries refs, not commits.
+      // A short-lived branch names the revision so an arbitrary commit can be
+      // packaged after canonical advances beyond the lease.
+      const reference = `refs/heads/${refName}`;
+      const staging = await mkdtemp(path.join(os.tmpdir(), "coord-bundle-"));
+      const bundlePath = path.join(staging, "revision.bundle");
+      try {
+        await this.git.run([
+          `--git-dir=${repository.path}`,
+          "update-ref",
+          reference,
+          "--end-of-options",
+          revision,
+        ]);
+        await this.git.run([
+          `--git-dir=${repository.path}`,
+          "bundle",
+          "create",
+          bundlePath,
+          "--end-of-options",
+          refName,
+        ]);
+        return await readFile(bundlePath);
+      } finally {
+        await this.git.run(
+          [`--git-dir=${repository.path}`, "update-ref", "-d", reference],
+          { allowFailure: true },
+        );
+        await rm(staging, { recursive: true, force: true });
+      }
+    });
+  }
+
+  private async withBundleLock<T>(
+    key: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.bundleLocks.get(key) ?? Promise.resolve();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const current = previous.then(() => gate);
+    this.bundleLocks.set(key, current);
+    await previous;
     try {
-      await this.git.run([
-        `--git-dir=${repository.path}`,
-        "update-ref",
-        reference,
-        "--end-of-options",
-        revision,
-      ]);
-      await this.git.run([
-        `--git-dir=${repository.path}`,
-        "bundle",
-        "create",
-        bundlePath,
-        "--end-of-options",
-        refName,
-      ]);
-      return await readFile(bundlePath);
+      return await operation();
     } finally {
-      await this.git.run(
-        [`--git-dir=${repository.path}`, "update-ref", "-d", reference],
-        { allowFailure: true },
-      );
-      await rm(staging, { recursive: true, force: true });
+      release();
+      if (this.bundleLocks.get(key) === current) {
+        this.bundleLocks.delete(key);
+      }
     }
   }
 

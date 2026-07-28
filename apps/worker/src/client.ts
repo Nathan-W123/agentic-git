@@ -42,22 +42,52 @@ export interface WorkerClientOptions {
   /** Injected in tests; defaults to global fetch. */
   fetch?: typeof globalThis.fetch;
   requestTimeoutMs?: number;
+  /** Result posts can remain open while a human approval gate is pending. */
+  resultTimeoutMs?: number;
+  maxBundleBytes?: number;
 }
 
 export class WorkerClient {
   private readonly base: string;
   private readonly fetchImpl: typeof globalThis.fetch;
   private readonly timeoutMs: number;
+  private readonly resultTimeoutMs: number;
+  private readonly maxBundleBytes: number;
 
   public constructor(private readonly options: WorkerClientOptions) {
-    this.base = options.serverUrl.replace(/\/+$/u, "");
+    const server = new URL(options.serverUrl);
+    if (
+      !["http:", "https:"].includes(server.protocol) ||
+      server.username.length > 0 ||
+      server.password.length > 0
+    ) {
+      throw new Error("Worker server URL must be credential-free HTTP or HTTPS");
+    }
+    this.base = server.href.replace(/\/+$/u, "");
     this.fetchImpl = options.fetch ?? globalThis.fetch;
     this.timeoutMs = options.requestTimeoutMs ?? 30_000;
+    this.resultTimeoutMs =
+      options.resultTimeoutMs ?? 25 * 60 * 60 * 1000;
+    this.maxBundleBytes = options.maxBundleBytes ?? 256 * 1024 * 1024;
+    for (const [name, value] of [
+      ["requestTimeoutMs", this.timeoutMs],
+      ["resultTimeoutMs", this.resultTimeoutMs],
+      ["maxBundleBytes", this.maxBundleBytes],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value < 1) {
+        throw new RangeError(`${name} must be a positive integer`);
+      }
+    }
   }
 
   private async request(
     path: string,
-    init: { method?: string; body?: unknown; expectBinary?: boolean } = {},
+    init: {
+      method?: string;
+      body?: unknown;
+      expectBinary?: boolean;
+      timeoutMs?: number;
+    } = {},
   ): Promise<{ status: number; json?: unknown; bytes?: Buffer }> {
     const headers = new Headers({
       Authorization: `Bearer ${this.options.token}`,
@@ -67,7 +97,10 @@ export class WorkerClient {
     }
 
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timer = setTimeout(
+      () => controller.abort(),
+      init.timeoutMs ?? this.timeoutMs,
+    );
     timer.unref?.();
     let response: Response;
     try {
@@ -75,6 +108,7 @@ export class WorkerClient {
         method: init.method ?? "GET",
         headers,
         signal: controller.signal,
+        redirect: "error",
         ...(init.body === undefined
           ? {}
           : { body: JSON.stringify(init.body) }),
@@ -87,9 +121,27 @@ export class WorkerClient {
       return { status: 204 };
     }
     if (init.expectBinary === true && response.ok) {
+      const declaredLength = Number.parseInt(
+        response.headers.get("content-length") ?? "",
+        10,
+      );
+      if (
+        Number.isFinite(declaredLength) &&
+        declaredLength > this.maxBundleBytes
+      ) {
+        throw new Error(
+          `Repository bundle exceeds ${this.maxBundleBytes} bytes`,
+        );
+      }
+      const bytes = Buffer.from(await response.arrayBuffer());
+      if (bytes.byteLength > this.maxBundleBytes) {
+        throw new Error(
+          `Repository bundle exceeds ${this.maxBundleBytes} bytes`,
+        );
+      }
       return {
         status: response.status,
-        bytes: Buffer.from(await response.arrayBuffer()),
+        bytes,
       };
     }
 
@@ -122,12 +174,14 @@ export class WorkerClient {
   /** Returns undefined when the queue is empty, signalled by a 204. */
   public async lease(
     workerId: string,
+    projectId: string,
     repositoryId?: string,
   ): Promise<WorkAssignment | undefined> {
     const { status, json } = await this.request("/api/v1/workers/leases", {
       method: "POST",
       body: {
         workerId,
+        projectId,
         ...(repositoryId === undefined ? {} : { repositoryId }),
       },
     });
@@ -161,12 +215,21 @@ export class WorkerClient {
   public async report(
     leaseId: string,
     result:
-      | { status: "completed"; changeSet: unknown; detail?: string }
+      | {
+          status: "completed";
+          plan: unknown;
+          changeSet: unknown;
+          detail?: string;
+        }
       | { status: "failed"; detail: string },
   ): Promise<{ accepted: boolean; reason?: string }> {
     const { json } = await this.request(
       `/api/v1/workers/leases/${leaseId}/result`,
-      { method: "POST", body: result },
+      {
+        method: "POST",
+        body: result,
+        timeoutMs: this.resultTimeoutMs,
+      },
     );
     return (json as { accepted: boolean; reason?: string }) ?? { accepted: true };
   }

@@ -96,22 +96,20 @@ export function permissionsForRole(
 }
 
 /**
- * Applies the token's scopes on top of the role.
+ * Refuses a token used outside the organization it was bound to.
  *
- * Effective permission is the intersection of the two, so a token can only
- * ever narrow what its owner could already do. A token also cannot act outside
- * the organization it was bound to.
+ * The binding is a property of the credential, not of the user's memberships:
+ * no role in the target organization could ever make the request succeed. It
+ * is therefore checked before the role, so the caller is told the credential
+ * itself is confined rather than the misleading generic `forbidden`.
  */
-function assertTokenAllows(
+function assertTokenOrganization(
   principal: AuthenticatedPrincipal,
   organizationId: string,
-  permission: Permission,
 ): void {
   const token = principal.token;
-  if (token === undefined) {
-    return;
-  }
   if (
+    token !== undefined &&
     token.organizationId !== undefined &&
     token.organizationId !== organizationId
   ) {
@@ -119,13 +117,6 @@ function assertTokenAllows(
       "This token is bound to a different organization",
       403,
       "token_organization_mismatch",
-    );
-  }
-  if (!token.scopes.includes(permission)) {
-    throw new AuthenticationError(
-      `This token does not carry the "${permission}" scope`,
-      403,
-      "token_scope_missing",
     );
   }
 }
@@ -170,6 +161,7 @@ export async function authorizeOrganization(
   organizationId: string,
   permission: Permission,
 ): Promise<AuthorizedOrganization> {
+  assertTokenOrganization(principal, organizationId);
   const organization = await store.getOrganization(organizationId);
   if (organization === undefined) {
     throw new AuthenticationError(
@@ -180,7 +172,9 @@ export async function authorizeOrganization(
   }
   const role = roleFor(principal, organizationId);
   assertPermission(role, permission);
-  assertTokenAllows(principal, organizationId, permission);
+  // Effective permission is the intersection of role and scope, so a token
+  // can only ever narrow what its owner could already do.
+  assertTokenScope(principal, permission);
   return { organization, role };
 }
 

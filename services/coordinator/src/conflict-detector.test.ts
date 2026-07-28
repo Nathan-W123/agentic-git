@@ -145,3 +145,30 @@ test("custom thresholds change scheduling disposition without changing evidence"
   assert.equal(assessment?.score, 20);
   assert.equal(assessment?.disposition, "block");
 });
+
+test("rejects invalid weights and unordered thresholds", () => {
+  assert.throws(
+    () =>
+      new ConflictDetector({
+        fileOverlapWeight: -1,
+        thresholds: {
+          concurrentMaximum: 20,
+          notifyMaximum: 45,
+          sequenceMaximum: 70,
+        },
+      }),
+    RangeError,
+  );
+  assert.throws(
+    () =>
+      new ConflictDetector({
+        fileOverlapWeight: 20,
+        thresholds: {
+          concurrentMaximum: 50,
+          notifyMaximum: 40,
+          sequenceMaximum: 70,
+        },
+      }),
+    RangeError,
+  );
+});

@@ -246,6 +246,78 @@ test("rejects patches whose contents do not match declared files", async () => {
   }
 });
 
+test("rejects repository mutations made by validation commands", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-integration-test-"));
+  const sourcePath = path.join(root, "source");
+  const repositories = new RepositoryService();
+  const workspaces = new GitWorktreeWorkspaceManager(
+    repositories.getGitClient(),
+  );
+
+  try {
+    await repositories.initializeWorkingRepository(sourcePath);
+    await mkdir(path.join(sourcePath, "src"), { recursive: true });
+    await writeFile(
+      path.join(sourcePath, "src", "value.js"),
+      "export const value = 1;\n",
+      "utf8",
+    );
+    await repositories.commitAll(sourcePath, "seed");
+    const repository = await repositories.importLocalRepository(
+      sourcePath,
+      path.join(root, "canonical.git"),
+      "fixture",
+    );
+    const baseVersion = await repositories.getCanonicalVersion(repository);
+    const taskWorkspace = await workspaces.create({
+      taskId: "task_update",
+      rootPath: path.join(root, "workspaces"),
+      repository,
+      baseVersion,
+    });
+    await writeFile(
+      path.join(taskWorkspace.path, "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(taskWorkspace, {
+      symbolsChanged: ["value"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "Update the fixture value",
+    });
+    const integration = new IntegrationService(repositories, workspaces);
+
+    for (const script of [
+      "require('node:fs').writeFileSync('src/injected.js', 'injected\\n')",
+      "require('node:fs').writeFileSync('src/value.js', 'tampered\\n')",
+    ]) {
+      const result = await integration.integrate({
+        repository,
+        integrationRoot: path.join(root, "integration"),
+        changeSet,
+        validationCommands: [
+          {
+            executable: process.execPath,
+            args: ["-e", script],
+            label: "mutating validation",
+          },
+        ],
+        commitMessage: "coord: guarded validation",
+      });
+      assert.equal(result.status, "policy_failed");
+      assert.match(result.explanation, /validation command modified/u);
+      assert.equal(
+        (await repositories.getCanonicalVersion(repository)).revision,
+        baseVersion.revision,
+      );
+    }
+
+    await workspaces.destroy(taskWorkspace);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("preserves a promoted result when integration cleanup fails", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-integration-test-"));
   const sourcePath = path.join(root, "source");
