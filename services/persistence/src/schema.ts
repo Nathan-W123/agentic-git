@@ -486,6 +486,31 @@ export const MIGRATIONS: readonly Migration[] = [
          ON audit_archive(checkpoint_id, sequence)`,
     ],
   },
+  {
+    // Review threads on changeset diffs. Distinct from approvals: an approval
+    // is one decision with one outcome, while review is a conversation that
+    // can happen around a changeset that was never gated at all.
+    version: 12,
+    name: "changeset-comments",
+    statements: [
+      `CREATE TABLE changeset_comments (
+        id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL REFERENCES runs(id),
+        change_set_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        file_path TEXT,
+        author_id TEXT NOT NULL REFERENCES users(id),
+        body TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        resolved_at TEXT,
+        resolved_by TEXT REFERENCES users(id)
+      )`,
+      `CREATE INDEX comments_by_run
+         ON changeset_comments(run_id, created_at)`,
+      `CREATE INDEX comments_by_changeset
+         ON changeset_comments(change_set_id, created_at)`,
+    ],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(

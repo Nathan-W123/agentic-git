@@ -805,6 +805,141 @@ label.inline {
   margin: 0;
 }
 
+.board-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+.board-column {
+  display: grid;
+  gap: 0.75rem;
+  padding: 0.9rem;
+  border: 1px solid var(--line);
+  border-radius: 0.8rem;
+  background: var(--white);
+}
+
+.board-head {
+  display: flex;
+  gap: 0.6rem;
+  align-items: start;
+  justify-content: space-between;
+}
+
+.board-head h2 {
+  margin: 0;
+  font-family: var(--display);
+  font-size: 1.1rem;
+  letter-spacing: -0.02em;
+}
+
+.board-head p {
+  margin: 0.15rem 0 0;
+}
+
+.board-cards {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.board-card {
+  display: grid;
+  gap: 0.5rem;
+  padding: 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+}
+
+.board-objective {
+  margin: 0;
+  font-size: 0.82rem;
+  line-height: 1.4;
+}
+
+.board-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: center;
+}
+
+.board-empty {
+  margin: 0;
+}
+
+.version-list {
+  display: grid;
+  gap: 0.5rem;
+  margin: 0.8rem 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.version-entry {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.7rem 0.8rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+}
+
+.version-subject {
+  margin: 0 0 0.2rem;
+  font-size: 0.85rem;
+}
+
+.version-entry p.muted {
+  margin: 0;
+}
+
+.comment-thread {
+  display: grid;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+  padding: 0.6rem;
+  border: 1px solid var(--line);
+  border-radius: 0.6rem;
+}
+
+.comment {
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.5rem 0.6rem;
+  border-left: 2px solid var(--line);
+}
+
+.comment.resolved {
+  opacity: 0.6;
+}
+
+.comment-body {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.comment-meta {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.comment-form {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.comment-form textarea {
+  width: 100%;
+  font: inherit;
+  font-size: 0.8rem;
+}
+
 .inline-fields {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

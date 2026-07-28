@@ -12,8 +12,9 @@ import {
 } from "@coord/cli/commands";
 import { CoordinatorProject } from "@coord/cli/project";
 import { recoverCoordinationState } from "@coord/cli/recovery";
+import { rollbackCanonical } from "@coord/cli/rollback";
 import { workerOperations } from "@coord/cli/worker-operations";
-import { runProcess } from "@coord/repository-service";
+import { RepositoryService, runProcess } from "@coord/repository-service";
 
 import { loadStaticAssets } from "./assets.js";
 
@@ -77,6 +78,8 @@ async function main(): Promise<void> {
   const bootstrapToken =
     process.env["COORD_BOOTSTRAP_TOKEN"] ?? generatedToken ?? "";
 
+  const repositories = new RepositoryService();
+
   const operations: ApiOperations = {
     async listAgents() {
       return Object.entries(project.config.agents).map(([id, agent]) => ({
@@ -112,6 +115,29 @@ async function main(): Promise<void> {
     async projectMetrics(input) {
       return await computeCoordinationMetrics(store, {
         projectId: input.projectId,
+      });
+    },
+    async repositoryVersions(input) {
+      const stored = await store.getRepository(input.repositoryId);
+      if (stored === undefined) {
+        throw new Error(`Unknown repository: ${input.repositoryId}`);
+      }
+      return await repositories.listCanonicalHistory(
+        {
+          id: stored.id,
+          path: stored.path,
+          branch: stored.branch,
+        },
+        input.limit ?? 50,
+      );
+    },
+    async rollbackRepository(input) {
+      return await rollbackCanonical(project, store, {
+        repositoryId: input.repositoryId,
+        targetRevision: input.targetRevision,
+        actorId: input.actorId,
+        projectId: input.projectId,
+        ...(input.reason === undefined ? {} : { reason: input.reason }),
       });
     },
     ...workerOperations(project, store),

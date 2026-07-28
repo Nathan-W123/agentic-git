@@ -64,6 +64,39 @@ The same variables work without Docker: build with `npm ci && npm run build`,
 then run `node apps/web/dist/index.js` under whatever supervisor you prefer.
 Node.js >= 24 and `git` must be installed.
 
+## Audit retention
+
+The audit log is append-only and grows without bound, and every metrics pass
+reads it. Compaction is explicit rather than automatic, because deciding how
+much history to keep is an operator's call:
+
+```bash
+coord audit archive --before=2026-01-01T00:00:00.000Z
+```
+
+That moves every event before the cut into an archive table and records a
+checkpoint holding the chain hash at the boundary plus a digest of the
+segment. `coord verify-audit` still covers the whole history afterwards — it
+walks the archived segments first and continues the live chain from the last
+checkpoint. Archiving a chain that does not currently verify is refused, so a
+checkpoint can never launder an existing break.
+
+Export before reclaiming space, because pruning is not reversible:
+
+```bash
+coord audit export > audit-archive.jsonl
+coord audit prune --through=100000
+```
+
+Pruning drops whole checkpointed segments. Verification keeps passing and
+reports them as attested rather than retained: the checkpoint still proves the
+segment existed and where it ended, but its contents are gone. `coord audit
+checkpoints` lists what has been archived so far.
+
+Deleting audit rows outside this path is refused by the database itself, in
+both SQLite and Postgres — the delete trigger requires a checkpoint that covers
+the row.
+
 ## Adding a worker on another machine
 
 Workers execute leased tasks in isolated workspaces and return changesets.

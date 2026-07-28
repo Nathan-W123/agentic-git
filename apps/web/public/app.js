@@ -21,6 +21,7 @@ const state = {
   route: "overview",
   socket: undefined,
   refreshTimer: undefined,
+  inspectedRunId: undefined,
 };
 
 const routeMeta = {
@@ -53,6 +54,11 @@ const routeMeta = {
     "Access control",
     "Team",
     "Manage organization membership and role-based permissions.",
+  ],
+  board: [
+    "Queue projection",
+    "Board",
+    "The same task queue, arranged by where each task has got to.",
   ],
   coordination: [
     "Measured outcomes",
@@ -544,6 +550,7 @@ function render() {
     runs: renderRuns,
     approvals: renderApprovals,
     repositories: renderRepositories,
+    board: renderBoard,
     coordination: renderCoordination,
     team: renderTeam,
     settings: renderSettings,
@@ -896,6 +903,9 @@ function renderRepositories() {
                                 )}">Run queue</button>`
                               : ""
                           }
+                          <button class="mini-button" data-action="repo-history" data-repo-id="${escapeHtml(
+                            repository.id,
+                          )}">History</button>
                         </div>
                       </article>`,
                   )
@@ -904,6 +914,72 @@ function renderRepositories() {
         </div>
       </section>
     </div>`;
+}
+
+/**
+ * Columns of the board.
+ *
+ * A projection of `SubmittedTaskStatus`, not a workflow of its own: the
+ * coordinator moves tasks between these states and the board only groups what
+ * it finds. Adding a column here without a matching status would invent a
+ * stage the platform does not have.
+ */
+const BOARD_COLUMNS = [
+  ["submitted", "Queued", "Waiting for a runner or a worker"],
+  ["claimed", "In flight", "Held by a run or a remote lease"],
+  ["integrated", "Landed", "Promoted into canonical"],
+  ["failed", "Failed", "Ended without landing"],
+  ["cancelled", "Cancelled", "Withdrawn before landing"],
+];
+
+function renderBoard() {
+  const columns = BOARD_COLUMNS.map(([status, title, description]) => {
+    const tasks = state.tasks.filter((task) => task.status === status);
+    return `
+      <section class="board-column">
+        <header class="board-head">
+          <div>
+            <h2>${escapeHtml(title)}</h2>
+            <p class="muted">${escapeHtml(description)}</p>
+          </div>
+          <span class="chip">${tasks.length}</span>
+        </header>
+        <div class="board-cards">
+          ${
+            tasks.length === 0
+              ? '<p class="muted board-empty">Nothing here.</p>'
+              : tasks
+                  .map(
+                    (task) => `
+              <article class="board-card" data-task-id="${escapeHtml(task.id)}">
+                <p class="board-objective">${escapeHtml(task.objective)}</p>
+                <div class="board-meta">
+                  <span class="chip">${escapeHtml(task.agentId)}</span>
+                  <span class="muted">${escapeHtml(
+                    formatDate(task.submittedAt, { short: true }),
+                  )}</span>
+                </div>
+                ${
+                  task.runId
+                    ? `<button class="mini-button" data-action="inspect-run" data-run-id="${escapeHtml(
+                        task.runId,
+                      )}">Open run</button>`
+                    : ""
+                }
+              </article>`,
+                  )
+                  .join("")
+          }
+        </div>
+      </section>`;
+  }).join("");
+
+  $("#route-view").innerHTML = `
+    <div class="board-grid">${columns}</div>
+    <p class="muted panel-note">
+      This is a view of the task queue, not a separate tracker. A card moves
+      when the coordinator moves the task.
+    </p>`;
 }
 
 function duration(milliseconds) {
@@ -1449,6 +1525,8 @@ function closeDrawer() {
 }
 
 async function inspectRun(runId) {
+  // Remembered so adding or resolving a comment can re-render the same drawer.
+  state.inspectedRunId = runId;
   openDrawer(
     "Integration ledger",
     `Run ${shortId(runId, 12)}`,
@@ -1463,6 +1541,145 @@ async function inspectRun(runId) {
       error.message,
     )}</p></div></div>`;
   }
+}
+
+/**
+ * Canonical history for one repository, with rollback offered per revision.
+ *
+ * The rollback control sits here rather than on a settings page because the
+ * decision is always "back to *this* revision", and the only way to make that
+ * choice well is with the history in front of you.
+ */
+async function inspectRepositoryHistory(repositoryId) {
+  openDrawer(
+    "Canonical history",
+    escapeHtml(repositoryId),
+    '<div class="skeleton skeleton-tall"></div>',
+  );
+  try {
+    const response = await api(
+      `/projects/${encodeURIComponent(state.projectId)}/repositories/` +
+        `${encodeURIComponent(repositoryId)}/versions?limit=50`,
+    );
+    const versions = response.versions ?? [];
+    const canRollback = canManageProject();
+    $("#drawer-body").innerHTML = `
+      <section class="drawer-section">
+        <h3>Promotions</h3>
+        <p class="muted">
+          Newest first. A rollback does not rewrite this history — it submits
+          the revert as an ordinary change, so the record keeps moving forward.
+        </p>
+        ${
+          versions.length === 0
+            ? '<div class="empty-state"><div><h2>No history</h2></div></div>'
+            : `<ol class="version-list">${versions
+                .map(
+                  (version, index) => `
+            <li class="version-entry">
+              <div>
+                <p class="version-subject">${escapeHtml(version.subject)}</p>
+                <p class="muted">
+                  <code>${escapeHtml(shortId(version.revision, 12))}</code>
+                  · #${version.sequence}
+                  · ${escapeHtml(version.author)}
+                  · ${escapeHtml(formatDate(version.createdAt, { short: true }))}
+                </p>
+              </div>
+              ${
+                index === 0
+                  ? '<span class="chip">current</span>'
+                  : canRollback
+                    ? `<button class="mini-button" data-action="rollback"
+                         data-repo-id="${escapeHtml(repositoryId)}"
+                         data-revision="${escapeHtml(version.revision)}">Roll back to here</button>`
+                    : ""
+              }
+            </li>`,
+                )
+                .join("")}</ol>`
+        }
+      </section>`;
+  } catch (error) {
+    $("#drawer-body").innerHTML = `<div class="empty-state"><div><h2>History unavailable</h2><p>${escapeHtml(
+      error.message,
+    )}</p></div></div>`;
+  }
+}
+
+async function requestRollback(repositoryId, revision) {
+  const reason = window.prompt(
+    `Roll ${repositoryId} back to ${shortId(revision, 12)}?\n\n` +
+      "The revert goes through validation and approval like any other change. " +
+      "Give a reason for the record:",
+  );
+  if (reason === null) {
+    return;
+  }
+  toast("Rollback submitted; it may wait for approval", "default");
+  try {
+    const response = await api(
+      `/projects/${encodeURIComponent(state.projectId)}/repositories/` +
+        `${encodeURIComponent(repositoryId)}/rollback`,
+      { method: "POST", body: { targetRevision: revision, reason } },
+    );
+    const result = response.rollback ?? {};
+    toast(
+      `Rollback ${result.status}: ${result.explanation ?? ""}`.trim(),
+      result.status === "integrated" ? "default" : "warn",
+    );
+    await loadContext({ quiet: true });
+    closeDrawer();
+  } catch (error) {
+    toast(error.message, "warn");
+  }
+}
+
+/**
+ * A review thread, anchored to one file or to the changeset as a whole.
+ *
+ * Rendered inline under the diff it is about rather than in a separate tab:
+ * a remark about a hunk is only useful next to the hunk.
+ */
+function commentThread(comments, changeSetId, filePath) {
+  const entries = comments
+    .map(
+      (comment) => `
+      <article class="comment${comment.resolvedAt ? " resolved" : ""}">
+        <p class="comment-body">${escapeHtml(comment.body)}</p>
+        <div class="comment-meta">
+          <span class="muted">${escapeHtml(
+            formatDate(comment.createdAt, { short: true }),
+          )}</span>
+          ${
+            comment.resolvedAt
+              ? '<span class="chip">resolved</span>'
+              : canReview()
+                ? `<button class="mini-button" data-action="resolve-comment" data-comment-id="${escapeHtml(
+                    comment.id,
+                  )}">Resolve</button>`
+                : ""
+          }
+        </div>
+      </article>`,
+    )
+    .join("");
+  const form = canReview()
+    ? `<form class="comment-form" data-form="comment-add"
+         data-changeset-id="${escapeHtml(changeSetId)}"
+         ${filePath === undefined ? "" : `data-file-path="${escapeHtml(filePath)}"`}>
+        <textarea name="body" rows="2" placeholder="${
+          filePath === undefined
+            ? "Comment on this changeset"
+            : `Comment on ${escapeHtml(filePath)}`
+        }" required></textarea>
+        <button class="mini-button" type="submit">Comment</button>
+      </form>`
+    : "";
+  if (entries.length === 0 && form.length === 0) {
+    return "";
+  }
+  return `<div class="comment-thread">${entries}${form}</div>`;
 }
 
 function renderRunDetail(detail) {
@@ -1519,12 +1736,30 @@ function renderRunDetail(detail) {
       </div>`,
     )
     .join("");
+  const comments = detail.comments ?? [];
   const diffs = detail.changeSets
     .flatMap((changeSet) =>
       changeSet.patches.map(
         (patch) => `<div class="detail-section"><h3>${escapeHtml(
           patch.path,
-        )} · ${escapeHtml(patch.status)}</h3>${diffHtml(patch.patch)}</div>`,
+        )} · ${escapeHtml(patch.status)}</h3>${diffHtml(patch.patch)}
+          ${commentThread(
+            comments.filter((comment) => comment.filePath === patch.path),
+            changeSet.id,
+            patch.path,
+          )}</div>`,
+      ),
+    )
+    .join("");
+  const generalComments = detail.changeSets
+    .map((changeSet) =>
+      commentThread(
+        comments.filter(
+          (comment) =>
+            comment.changeSetId === changeSet.id &&
+            comment.filePath === undefined,
+        ),
+        changeSet.id,
       ),
     )
     .join("");
@@ -1554,6 +1789,11 @@ function renderRunDetail(detail) {
     <section class="detail-section"><h3>Changes</h3>${
       diffs || '<div class="detail-item">No changeset diff recorded.</div>'
     }</section>
+    ${
+      generalComments.trim().length === 0
+        ? ""
+        : `<section class="detail-section"><h3>Review</h3>${generalComments}</section>`
+    }
     <section class="detail-section"><h3>Run audit</h3>${timeline(
       detail.audit.map((event, index) => ({
         sequence: index,
@@ -1752,6 +1992,24 @@ async function handleSubmit(event) {
         await loadContext({ quiet: true });
         break;
       }
+      case "comment-add": {
+        await api(
+          `/runs/${encodeURIComponent(state.inspectedRunId)}/comments`,
+          {
+            method: "POST",
+            body: {
+              changeSetId: form.dataset.changesetId,
+              body: value("body"),
+              ...(form.dataset.filePath === undefined
+                ? {}
+                : { filePath: form.dataset.filePath }),
+            },
+          },
+        );
+        toast("Comment added");
+        await inspectRun(state.inspectedRunId);
+        break;
+      }
       case "organization-update":
         await api(`/organizations/${encodeURIComponent(state.organizationId)}`, {
           method: "PATCH",
@@ -1882,6 +2140,27 @@ async function handleClick(event) {
     } catch (error) {
       toast(error.message, "error");
     }
+    return;
+  }
+  if (target.dataset.action === "resolve-comment") {
+    try {
+      await api(
+        `/comments/${encodeURIComponent(target.dataset.commentId)}/resolve`,
+        { method: "POST", body: {} },
+      );
+      toast("Comment resolved");
+      await inspectRun(state.inspectedRunId);
+    } catch (error) {
+      toast(error.message, "error");
+    }
+    return;
+  }
+  if (target.dataset.action === "repo-history") {
+    await inspectRepositoryHistory(target.dataset.repoId);
+    return;
+  }
+  if (target.dataset.action === "rollback") {
+    await requestRollback(target.dataset.repoId, target.dataset.revision);
     return;
   }
   if (target.dataset.runId) {

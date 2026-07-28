@@ -48,8 +48,10 @@ import { LATEST_SCHEMA_VERSION, MIGRATIONS } from "./schema.js";
 import type {
   ApiTokenRecord,
   AppendAuditInput,
+  AddChangesetCommentInput,
   ApprovalFilter,
   ArchiveAuditInput,
+  ChangesetComment,
   AuditArchiveResult,
   AuditEventFilter,
   AuthSessionRecord,
@@ -1829,6 +1831,121 @@ export class SqliteCoordinationStore implements CoordinationStore {
     }
   }
 
+  public async addChangesetComment(
+    input: AddChangesetCommentInput,
+  ): Promise<ChangesetComment> {
+    const body = input.body.trim();
+    if (body.length === 0) {
+      throw new Error("A comment must have a body");
+    }
+    const changeSet = this.db
+      .prepare("SELECT id FROM changesets WHERE id = ? AND run_id = ?")
+      .get(input.changeSetId, input.runId) as Row | undefined;
+    if (changeSet === undefined) {
+      throw new Error(`Unknown changeset: ${input.changeSetId}`);
+    }
+    const comment: ChangesetComment = {
+      id: createId("comment"),
+      runId: input.runId,
+      changeSetId: input.changeSetId,
+      taskId: input.taskId,
+      filePath: input.filePath,
+      authorId: input.authorId,
+      body,
+      createdAt: new Date().toISOString(),
+      resolvedAt: undefined,
+      resolvedBy: undefined,
+    };
+    this.db
+      .prepare(
+        `INSERT INTO changeset_comments
+           (id, run_id, change_set_id, task_id, file_path, author_id, body, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        comment.id,
+        comment.runId,
+        comment.changeSetId,
+        comment.taskId,
+        comment.filePath ?? null,
+        comment.authorId,
+        comment.body,
+        comment.createdAt,
+      );
+    return comment;
+  }
+
+  public async listChangesetComments(
+    filter: { runId?: string; changeSetId?: string; resolved?: boolean } = {},
+  ): Promise<ChangesetComment[]> {
+    const clauses: string[] = [];
+    const values: string[] = [];
+    if (filter.runId !== undefined) {
+      clauses.push("run_id = ?");
+      values.push(filter.runId);
+    }
+    if (filter.changeSetId !== undefined) {
+      clauses.push("change_set_id = ?");
+      values.push(filter.changeSetId);
+    }
+    if (filter.resolved !== undefined) {
+      clauses.push(
+        filter.resolved ? "resolved_at IS NOT NULL" : "resolved_at IS NULL",
+      );
+    }
+    const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM changeset_comments${where} ORDER BY created_at, rowid`,
+      )
+      .all(...values) as Row[];
+    return rows.map((row) => this.toComment(row));
+  }
+
+  public async getChangesetComment(
+    id: string,
+  ): Promise<ChangesetComment | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM changeset_comments WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row === undefined ? undefined : this.toComment(row);
+  }
+
+  public async resolveChangesetComment(
+    id: string,
+    resolvedBy: string,
+    at: string,
+  ): Promise<ChangesetComment> {
+    // Guarded on resolved_at so resolving twice keeps the first reviewer's
+    // name rather than quietly reassigning the remark to whoever clicked last.
+    this.db
+      .prepare(
+        `UPDATE changeset_comments SET resolved_at = ?, resolved_by = ?
+         WHERE id = ? AND resolved_at IS NULL`,
+      )
+      .run(at, resolvedBy, id);
+    const comment = await this.getChangesetComment(id);
+    if (comment === undefined) {
+      throw new Error(`Unknown comment: ${id}`);
+    }
+    return comment;
+  }
+
+  private toComment(row: Row): ChangesetComment {
+    return {
+      id: text(row, "id"),
+      runId: text(row, "run_id"),
+      changeSetId: text(row, "change_set_id"),
+      taskId: text(row, "task_id"),
+      filePath: optionalText(row, "file_path"),
+      authorId: text(row, "author_id"),
+      body: text(row, "body"),
+      createdAt: text(row, "created_at"),
+      resolvedAt: optionalText(row, "resolved_at"),
+      resolvedBy: optionalText(row, "resolved_by"),
+    };
+  }
+
   public async saveIntegration(
     runId: string,
     result: IntegrationResult,
@@ -2377,6 +2494,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       planRevisions: await this.listPlanRevisions(runId),
       scopeChanges: await this.listScopeChanges(runId),
       approvals: await this.listApprovals({ runId }),
+      comments: await this.listChangesetComments({ runId }),
       audit: await this.listAudit(runId),
     };
   }

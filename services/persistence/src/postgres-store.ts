@@ -47,8 +47,10 @@ import { POSTGRES_MIGRATIONS } from "./postgres-schema.js";
 import type {
   ApiTokenRecord,
   AppendAuditInput,
+  AddChangesetCommentInput,
   ApprovalFilter,
   ArchiveAuditInput,
+  ChangesetComment,
   AuditArchiveResult,
   AuditEventFilter,
   AuthSessionRecord,
@@ -1826,6 +1828,118 @@ export class PostgresCoordinationStore implements CoordinationStore {
     });
   }
 
+  public async addChangesetComment(
+    input: AddChangesetCommentInput,
+  ): Promise<ChangesetComment> {
+    const body = input.body.trim();
+    if (body.length === 0) {
+      throw new Error("A comment must have a body");
+    }
+    const changeSet = await this.row(
+      "SELECT id FROM changesets WHERE id = $1 AND run_id = $2",
+      [input.changeSetId, input.runId],
+    );
+    if (changeSet === undefined) {
+      throw new Error(`Unknown changeset: ${input.changeSetId}`);
+    }
+    const comment: ChangesetComment = {
+      id: createId("comment"),
+      runId: input.runId,
+      changeSetId: input.changeSetId,
+      taskId: input.taskId,
+      filePath: input.filePath,
+      authorId: input.authorId,
+      body,
+      createdAt: new Date().toISOString(),
+      resolvedAt: undefined,
+      resolvedBy: undefined,
+    };
+    await this.query(
+      `INSERT INTO changeset_comments
+         (id, run_id, change_set_id, task_id, file_path, author_id, body, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        comment.id,
+        comment.runId,
+        comment.changeSetId,
+        comment.taskId,
+        comment.filePath ?? null,
+        comment.authorId,
+        comment.body,
+        comment.createdAt,
+      ],
+    );
+    return comment;
+  }
+
+  public async listChangesetComments(
+    filter: { runId?: string; changeSetId?: string; resolved?: boolean } = {},
+  ): Promise<ChangesetComment[]> {
+    const clauses: string[] = [];
+    const values: unknown[] = [];
+    if (filter.runId !== undefined) {
+      clauses.push(`run_id = ${bind(values, filter.runId)}`);
+    }
+    if (filter.changeSetId !== undefined) {
+      clauses.push(`change_set_id = ${bind(values, filter.changeSetId)}`);
+    }
+    if (filter.resolved !== undefined) {
+      clauses.push(
+        filter.resolved ? "resolved_at IS NOT NULL" : "resolved_at IS NULL",
+      );
+    }
+    const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
+    const rows = await this.rows(
+      `SELECT * FROM changeset_comments${where} ORDER BY created_at, id`,
+      values,
+    );
+    return rows.map((row) => this.toComment(row));
+  }
+
+  public async getChangesetComment(
+    id: string,
+  ): Promise<ChangesetComment | undefined> {
+    const row = await this.row(
+      "SELECT * FROM changeset_comments WHERE id = $1",
+      [id],
+    );
+    return row === undefined ? undefined : this.toComment(row);
+  }
+
+  public async resolveChangesetComment(
+    id: string,
+    resolvedBy: string,
+    at: string,
+  ): Promise<ChangesetComment> {
+    // Guarded on resolved_at so resolving twice keeps the first reviewer's
+    // name rather than quietly reassigning the remark to whoever clicked last.
+    await this.query(
+      `UPDATE changeset_comments SET resolved_at = $1, resolved_by = $2
+       WHERE id = $3 AND resolved_at IS NULL`,
+      [at, resolvedBy, id],
+    );
+    const comment = await this.getChangesetComment(id);
+    if (comment === undefined) {
+      throw new Error(`Unknown comment: ${id}`);
+    }
+    return comment;
+  }
+
+  private toComment(row: Row): ChangesetComment {
+    return {
+      id: text(row, "id"),
+      runId: text(row, "run_id"),
+      changeSetId: text(row, "change_set_id"),
+      taskId: text(row, "task_id"),
+      filePath: optionalText(row, "file_path"),
+      authorId: text(row, "author_id"),
+      body: text(row, "body"),
+      createdAt: text(row, "created_at"),
+      resolvedAt: optionalText(row, "resolved_at"),
+      resolvedBy: optionalText(row, "resolved_by"),
+    };
+  }
+
   public async saveIntegration(
     runId: string,
     result: IntegrationResult,
@@ -2346,6 +2460,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       planRevisions: await this.listPlanRevisions(runId),
       scopeChanges: await this.listScopeChanges(runId),
       approvals: await this.listApprovals({ runId }),
+      comments: await this.listChangesetComments({ runId }),
       audit: await this.listAudit(runId),
     };
   }

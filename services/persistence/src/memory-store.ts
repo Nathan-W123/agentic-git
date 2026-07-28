@@ -41,8 +41,10 @@ import type {
   WorkLease,
   WorkLeaseStatus,
   WorkerRecord,
+  AddChangesetCommentInput,
   ApprovalFilter,
   ArchiveAuditInput,
+  ChangesetComment,
   AuditArchiveResult,
   AuditEventFilter,
   AuthSessionRecord,
@@ -148,6 +150,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly workers = new Map<string, WorkerRecord>();
   private readonly workLeases = new Map<string, WorkLease>();
   private readonly approvals = new Map<string, ApprovalRequest>();
+  private readonly comments = new Map<string, ChangesetComment>();
 
   public constructor() {
     const now = new Date().toISOString();
@@ -1177,6 +1180,75 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     }
   }
 
+  public async addChangesetComment(
+    input: AddChangesetCommentInput,
+  ): Promise<ChangesetComment> {
+    const state = this.requireRun(input.runId);
+    if (!state.changeSets.some((entry) => entry.id === input.changeSetId)) {
+      throw new Error(`Unknown changeset: ${input.changeSetId}`);
+    }
+    this.requireUser(input.authorId);
+    const body = input.body.trim();
+    if (body.length === 0) {
+      throw new Error("A comment must have a body");
+    }
+    const comment: ChangesetComment = {
+      id: createId("comment"),
+      runId: input.runId,
+      changeSetId: input.changeSetId,
+      taskId: input.taskId,
+      filePath: input.filePath,
+      authorId: input.authorId,
+      body,
+      createdAt: new Date().toISOString(),
+      resolvedAt: undefined,
+      resolvedBy: undefined,
+    };
+    this.comments.set(comment.id, comment);
+    return copy(comment);
+  }
+
+  public async listChangesetComments(
+    filter: { runId?: string; changeSetId?: string; resolved?: boolean } = {},
+  ): Promise<ChangesetComment[]> {
+    return copy(
+      [...this.comments.values()]
+        .filter(
+          (comment) =>
+            (filter.runId === undefined || comment.runId === filter.runId) &&
+            (filter.changeSetId === undefined ||
+              comment.changeSetId === filter.changeSetId) &&
+            (filter.resolved === undefined ||
+              filter.resolved === (comment.resolvedAt !== undefined)),
+        )
+        .sort((left, right) => left.createdAt.localeCompare(right.createdAt)),
+    );
+  }
+
+  public async getChangesetComment(
+    id: string,
+  ): Promise<ChangesetComment | undefined> {
+    const comment = this.comments.get(id);
+    return comment === undefined ? undefined : copy(comment);
+  }
+
+  public async resolveChangesetComment(
+    id: string,
+    resolvedBy: string,
+    at: string,
+  ): Promise<ChangesetComment> {
+    const comment = this.comments.get(id);
+    if (comment === undefined) {
+      throw new Error(`Unknown comment: ${id}`);
+    }
+    this.requireUser(resolvedBy);
+    if (comment.resolvedAt === undefined) {
+      comment.resolvedAt = at;
+      comment.resolvedBy = resolvedBy;
+    }
+    return copy(comment);
+  }
+
   public async saveIntegration(
     runId: string,
     result: IntegrationResult,
@@ -1490,6 +1562,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       planRevisions: [...state.planRevisions],
       scopeChanges: [...state.scopeChanges],
       approvals: await this.listApprovals({ runId }),
+      comments: await this.listChangesetComments({ runId }),
       audit: await this.listAudit(runId),
     });
   }

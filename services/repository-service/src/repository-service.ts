@@ -16,6 +16,17 @@ import {
 
 import { GitClient, GitCommandError } from "./git-client.js";
 
+/** One promotion in the canonical branch's history. */
+export interface CanonicalHistoryEntry {
+  revision: string;
+  /** History depth, matching {@link CanonicalVersion.sequence}. */
+  sequence: number;
+  createdAt: string;
+  author: string;
+  subject: string;
+  branch: string;
+}
+
 export interface CanonicalRepository {
   id: string;
   path: string;
@@ -772,6 +783,57 @@ export class RepositoryService {
       .filter((entry) => entry.length > 0)
       .map(normalizeRepositoryPath)
       .sort();
+  }
+
+  /**
+   * The canonical branch's promotion history, newest first.
+   *
+   * Read from Git rather than from the store's `canonical_versions` table:
+   * that table records the versions the coordinator happened to observe, while
+   * the branch is the actual record of what canonical has been. A history view
+   * that disagreed with `git log` would be worse than none.
+   */
+  public async listCanonicalHistory(
+    repository: CanonicalRepository,
+    limit = 50,
+  ): Promise<CanonicalHistoryEntry[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 500) {
+      throw new RangeError("History limit must be between 1 and 500");
+    }
+    await this.assertBranchName(repository.branch);
+    const reference = `refs/heads/${repository.branch}`;
+    const [log, total] = await Promise.all([
+      this.git.run([
+        `--git-dir=${repository.path}`,
+        "log",
+        `--max-count=${limit}`,
+        // Unit separator between fields and a NUL between records, so a commit
+        // subject containing tabs or newlines cannot split a record.
+        "--format=%H%x1f%cI%x1f%an%x1f%s%x00",
+        reference,
+      ]),
+      this.git.run(
+        [`--git-dir=${repository.path}`, "rev-list", "--count", reference],
+        { allowFailure: true },
+      ),
+    ]);
+    const depth = Number.parseInt(total.stdout.trim(), 10);
+    return log.stdout
+      .split("\0")
+      .map((record) => record.trim())
+      .filter((record) => record.length > 0)
+      .map((record, index): CanonicalHistoryEntry => {
+        const [revision, createdAt, author, subject] = record.split("\x1f");
+        return {
+          revision: revision ?? "",
+          // The tip is the deepest commit; each older entry is one shallower.
+          sequence: Number.isSafeInteger(depth) ? depth - index : 0,
+          createdAt: createdAt ?? "",
+          author: author ?? "",
+          subject: subject ?? "",
+          branch: repository.branch,
+        };
+      });
   }
 
   public async listChangedFiles(

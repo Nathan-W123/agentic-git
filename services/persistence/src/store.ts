@@ -355,6 +355,37 @@ export interface StoredWorkspace {
   createdAt: string;
 }
 
+/**
+ * A review remark on a changeset, optionally anchored to one file.
+ *
+ * Separate from the approval record on purpose: an approval is a single
+ * decision with one outcome, while review is a conversation that may happen
+ * before, during, or after that decision — including on changesets that were
+ * never gated at all.
+ */
+export interface ChangesetComment {
+  id: string;
+  runId: string;
+  changeSetId: string;
+  taskId: TaskId;
+  /** File the remark is about; absent for a comment on the changeset itself. */
+  filePath: string | undefined;
+  authorId: UserId;
+  body: string;
+  createdAt: string;
+  resolvedAt: string | undefined;
+  resolvedBy: UserId | undefined;
+}
+
+export interface AddChangesetCommentInput {
+  runId: string;
+  changeSetId: string;
+  taskId: TaskId;
+  filePath?: string;
+  authorId: UserId;
+  body: string;
+}
+
 export interface RunDetail {
   run: StoredRun;
   tasks: StoredTask[];
@@ -366,6 +397,7 @@ export interface RunDetail {
   planRevisions: StoredPlanRevision[];
   scopeChanges: StoredScopeChange[];
   approvals: ApprovalRequest[];
+  comments: ChangesetComment[];
   audit: AuditEvent[];
 }
 
@@ -658,6 +690,21 @@ export interface CoordinationStore {
   releaseLeases(runId: string, taskId: TaskId): Promise<void>;
   saveWorkspace(runId: string, workspace: StoredWorkspace): Promise<void>;
   saveChangeSet(runId: string, changeSet: ChangeSet): Promise<void>;
+  addChangesetComment(
+    input: AddChangesetCommentInput,
+  ): Promise<ChangesetComment>;
+  listChangesetComments(filter?: {
+    runId?: string;
+    changeSetId?: string;
+    resolved?: boolean;
+  }): Promise<ChangesetComment[]>;
+  getChangesetComment(id: string): Promise<ChangesetComment | undefined>;
+  /** Marks a remark handled. Resolving an already-resolved comment is a no-op. */
+  resolveChangesetComment(
+    id: string,
+    resolvedBy: UserId,
+    at: string,
+  ): Promise<ChangesetComment>;
   saveIntegration(runId: string, result: IntegrationResult): Promise<void>;
   saveCanonicalVersion(
     repositoryId: string,

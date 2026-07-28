@@ -104,6 +104,24 @@ export interface ApiOperations {
     repositoryId: string;
     actorId: string;
   }): Promise<void>;
+  /** Canonical branch history, newest first. */
+  repositoryVersions?(input: {
+    projectId: string;
+    repositoryId: string;
+    limit?: number;
+  }): Promise<unknown>;
+  /**
+   * Reverts canonical to an earlier revision through the ordinary pipeline.
+   * Never a raw reset: it is planned, conflict-checked, validated, and
+   * promoted by compare-and-swap like any other change.
+   */
+  rollbackRepository?(input: {
+    projectId: string;
+    repositoryId: string;
+    targetRevision: string;
+    actorId: string;
+    reason?: string;
+  }): Promise<{ status: string; explanation: string }>;
   dockerStatus?(): Promise<{
     available: boolean;
     version?: string;
@@ -1767,6 +1785,207 @@ export class ApiGateway {
           this.activeRuns.delete(key);
         });
       this.sendJson(response, 202, { operationId, status: "accepted" });
+      return;
+    }
+
+    const runCommentsMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/runs/([^/]+)/comments$`, "u"),
+    );
+    if (runCommentsMatch !== undefined) {
+      const runId = runCommentsMatch[0] ?? "";
+      const detail = await this.options.store.getRun(runId);
+      if (detail === undefined || detail.run.projectId === undefined) {
+        throw new HttpError(404, "not_found", "Run was not found");
+      }
+      if (method === "GET") {
+        await authorizeProject(
+          this.options.store,
+          principal,
+          detail.run.projectId,
+          "view",
+        );
+        this.sendJson(response, 200, {
+          comments: await this.options.store.listChangesetComments({ runId }),
+        });
+        return;
+      }
+      if (method === "POST") {
+        // Reviewing is its own permission: a viewer reads the diff, a
+        // reviewer writes on it.
+        await authorizeProject(
+          this.options.store,
+          principal,
+          detail.run.projectId,
+          "review",
+        );
+        const body = objectBody(await this.readJson(request));
+        const changeSetId = stringField(body["changeSetId"], "changeSetId", {
+          max: 200,
+        });
+        const text = stringField(body["body"], "body", { max: 10_000 });
+        if (changeSetId === undefined || text === undefined || text.length === 0) {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "changeSetId and body are required",
+          );
+        }
+        const changeSet = detail.changeSets.find(
+          (entry) => entry.id === changeSetId,
+        );
+        if (changeSet === undefined) {
+          throw new HttpError(404, "not_found", "Changeset was not found");
+        }
+        const filePath = stringField(body["filePath"], "filePath", {
+          max: 1_000,
+          optional: true,
+        });
+        if (
+          filePath !== undefined &&
+          !changeSet.patches.some((patch) => patch.path === filePath)
+        ) {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "filePath is not part of this changeset",
+          );
+        }
+        const comment = await this.options.store.addChangesetComment({
+          runId,
+          changeSetId,
+          taskId: changeSet.taskId,
+          authorId: principal.user.id,
+          body: text,
+          ...(filePath === undefined ? {} : { filePath }),
+        });
+        this.sendJson(response, 201, { comment });
+        return;
+      }
+      throw new HttpError(405, "method_not_allowed", "Unsupported method");
+    }
+
+    const resolveCommentMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/comments/([^/]+)/resolve$`, "u"),
+    );
+    if (resolveCommentMatch !== undefined && method === "POST") {
+      const commentId = resolveCommentMatch[0] ?? "";
+      const comment = await this.options.store.getChangesetComment(commentId);
+      if (comment === undefined) {
+        throw new HttpError(404, "not_found", "Comment was not found");
+      }
+      const detail = await this.options.store.getRun(comment.runId);
+      if (detail?.run.projectId === undefined) {
+        throw new HttpError(404, "not_found", "Comment was not found");
+      }
+      await authorizeProject(
+        this.options.store,
+        principal,
+        detail.run.projectId,
+        "review",
+      );
+      this.sendJson(response, 200, {
+        comment: await this.options.store.resolveChangesetComment(
+          commentId,
+          principal.user.id,
+          new Date().toISOString(),
+        ),
+      });
+      return;
+    }
+
+    const versionsMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/versions$`,
+        "u",
+      ),
+    );
+    if (versionsMatch !== undefined && method === "GET") {
+      const [projectId = "", repositoryId = ""] = versionsMatch;
+      await authorizeProject(this.options.store, principal, projectId, "view");
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      const operation = this.options.operations.repositoryVersions;
+      if (operation === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment does not expose canonical history",
+        );
+      }
+      const limit = Math.min(
+        200,
+        Math.max(1, Number.parseInt(url.searchParams.get("limit") ?? "50", 10)),
+      );
+      this.sendJson(response, 200, {
+        versions: await operation({ projectId, repositoryId, limit }),
+      });
+      return;
+    }
+
+    const rollbackMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/rollback$`,
+        "u",
+      ),
+    );
+    if (rollbackMatch !== undefined && method === "POST") {
+      const [projectId = "", repositoryId = ""] = rollbackMatch;
+      // Reverting canonical wholesale is a project-management act, not
+      // ordinary task work, so it needs more than the run_task a developer
+      // carries.
+      await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "manage_project",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      const operation = this.options.operations.rollbackRepository;
+      if (operation === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment does not support rollback",
+        );
+      }
+      const body = objectBody(await this.readJson(request));
+      const targetRevision = stringField(
+        body["targetRevision"],
+        "targetRevision",
+        { max: 200 },
+      );
+      if (targetRevision === undefined || targetRevision.length === 0) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          "targetRevision is required",
+        );
+      }
+      const reason = stringField(body["reason"], "reason", {
+        max: 2_000,
+        optional: true,
+      });
+      const result = await operation({
+        projectId,
+        repositoryId,
+        targetRevision,
+        actorId: principal.user.id,
+        ...(reason === undefined ? {} : { reason }),
+      });
+      // A rollback that was refused is a legitimate answer, not a transport
+      // error, so the outcome travels in the body with a 200.
+      this.sendJson(response, 200, { rollback: result });
       return;
     }
 

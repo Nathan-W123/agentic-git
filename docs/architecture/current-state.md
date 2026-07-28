@@ -129,6 +129,24 @@ Hosted execution has a protocol and a working control-plane half:
   against a stale view. Exact-base integration and requeue-to-replan remain
   the backstop underneath. See docs/protocol/remote-workers.md.
 
+Phase 2's coordination surfaces are reachable from the control room, not only
+from the API and CLI: a Coordination route showing prediction quality, rework,
+and remote-execution cost against their denominators; the declarative project
+policy and both runtime budgets as an editable form; the registered worker
+fleet; a Board projecting the task queue by status; canonical version history
+per repository; and review comment threads anchored to changeset diffs.
+
+Two operational gaps closed with them. The audit log can be **compacted**:
+`archiveAuditEvents` moves an unbroken prefix into an archive table behind a
+checkpoint recording the chain hash and a digest of the segment, so
+verification spans archived and live events and still detects tampering in
+either. The delete trigger became conditional on a checkpoint rather than
+absolute, so history still cannot be dropped quietly. And **rollback** exists:
+reverting canonical to an earlier revision is submitted as an ordinary change —
+planned, conflict-checked against executing work, validated, policy-gated, and
+promoted by compare-and-swap — never a raw `git reset`, so history moves
+forward and the reverted revision stays reachable.
+
 The coordination store itself is no longer bound to one disk: alongside the
 SQLite file, a PostgreSQL backend implements the same store contract and is
 selected by setting `COORD_DATABASE_URL` to a `postgresql://` URL. Both

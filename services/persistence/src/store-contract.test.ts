@@ -1562,6 +1562,104 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: changeset comments thread, resolve, and read back with the run`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const runId = await populate(store);
+      const author = await store.createUser({
+        email: "reviewer@example.invalid",
+        displayName: "Reviewer",
+        passwordDigest: "unused",
+      });
+      const detail = await store.getRun(runId);
+      const changeSet = detail?.changeSets[0];
+      assert.ok(changeSet);
+      const filePath = changeSet.patches[0]?.path;
+      assert.ok(filePath);
+
+      const general = await store.addChangesetComment({
+        runId,
+        changeSetId: changeSet.id,
+        taskId: changeSet.taskId,
+        authorId: author.id,
+        body: "  Overall this looks right.  ",
+      });
+      // Bodies are trimmed, and an empty one is not a comment at all.
+      assert.equal(general.body, "Overall this looks right.");
+      assert.equal(general.filePath, undefined);
+      assert.equal(general.resolvedAt, undefined);
+      await assert.rejects(
+        store.addChangesetComment({
+          runId,
+          changeSetId: changeSet.id,
+          taskId: changeSet.taskId,
+          authorId: author.id,
+          body: "   ",
+        }),
+        /body/u,
+      );
+      // A comment must belong to a changeset that exists in that run.
+      await assert.rejects(
+        store.addChangesetComment({
+          runId,
+          changeSetId: "changeset_missing",
+          taskId: changeSet.taskId,
+          authorId: author.id,
+          body: "orphan",
+        }),
+        /Unknown changeset/u,
+      );
+
+      const anchored = await store.addChangesetComment({
+        runId,
+        changeSetId: changeSet.id,
+        taskId: changeSet.taskId,
+        filePath,
+        authorId: author.id,
+        body: "This branch needs a test.",
+      });
+      assert.equal(anchored.filePath, filePath);
+
+      assert.equal((await store.listChangesetComments({ runId })).length, 2);
+      assert.equal(
+        (await store.listChangesetComments({ resolved: false })).length,
+        2,
+      );
+
+      const resolved = await store.resolveChangesetComment(
+        anchored.id,
+        author.id,
+        "2026-02-01T00:00:00.000Z",
+      );
+      assert.equal(resolved.resolvedAt, "2026-02-01T00:00:00.000Z");
+      assert.equal(resolved.resolvedBy, author.id);
+      // Resolving again keeps the first reviewer rather than reassigning it.
+      const again = await store.resolveChangesetComment(
+        anchored.id,
+        author.id,
+        "2026-03-01T00:00:00.000Z",
+      );
+      assert.equal(again.resolvedAt, "2026-02-01T00:00:00.000Z");
+      assert.equal(
+        (await store.listChangesetComments({ resolved: true })).length,
+        1,
+      );
+
+      // The run detail carries them, so a reviewer opening a run sees the
+      // thread without a second request.
+      const reread = await store.getRun(runId);
+      assert.equal(reread?.comments.length, 2);
+      assert.deepEqual(
+        reread?.comments.map((comment) => comment.body),
+        ["Overall this looks right.", "This branch needs a test."],
+      );
+      assert.equal(await store.getChangesetComment("comment_missing"), undefined);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: audit events filter by type, task, project, and time`, async () => {
     const { store, cleanup } = await backend.open();
     try {
