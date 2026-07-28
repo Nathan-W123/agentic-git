@@ -172,3 +172,86 @@ test("rejects non-positive resource and cache limits", () => {
     RangeError,
   );
 });
+
+test("records where each symbol lives, and admits when it cannot", async () => {
+  // Line positions are what let ownership withhold a symbol while granting the
+  // file it lives in: they are the only thing a diff hunk can be compared
+  // against without re-reading the file.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-ranges-"));
+  try {
+    const source = path.join(root, "source");
+    const repositories = new RepositoryService();
+    await repositories.initializeWorkingRepository(source);
+    await mkdir(path.join(source, "src"), { recursive: true });
+    await writeFile(
+      path.join(source, "src", "shapes.ts"),
+      [
+        "export const alpha = 1;", // line 1
+        "", // 2
+        "export function beta() {", // 3
+        "  return alpha;", // 4
+        "}", // 5
+        "", // 6
+        "export interface Gamma {", // 7
+        "  id: string;", // 8
+        "}", // 9
+      ].join("\n"),
+    );
+    await writeFile(
+      path.join(source, "data", "config.yaml"),
+      "service:\n  name: example\n",
+    ).catch(async () => {
+      await mkdir(path.join(source, "data"), { recursive: true });
+      await writeFile(
+        path.join(source, "data", "config.yaml"),
+        "service:\n  name: example\n",
+      );
+    });
+    await repositories.commitAll(source, "seed");
+    const repository = await repositories.importLocalRepository(
+      source,
+      path.join(root, "canonical.git"),
+      "shapes",
+    );
+    const version = await repositories.getCanonicalVersion(repository);
+    const service = new CodeIntelligenceService(repositories);
+    const index = await service.index(repository, version.revision);
+
+    const ranges = service.symbolRangesInFile(index, "src/shapes.ts");
+    assert.ok(ranges);
+    const byName = new Map(ranges.map((range) => [range.name, range]));
+    // 1-based and inclusive, so they line up with a diff hunk's old side.
+    assert.deepEqual(byName.get("alpha"), {
+      name: "alpha",
+      startLine: 1,
+      endLine: 1,
+    });
+    assert.deepEqual(byName.get("beta"), {
+      name: "beta",
+      startLine: 3,
+      endLine: 5,
+    });
+    assert.deepEqual(byName.get("Gamma"), {
+      name: "Gamma",
+      startLine: 7,
+      endLine: 9,
+    });
+    // Every symbol the index reports is locatable, or enforcement would have
+    // gaps it could not see.
+    const file = index.files.find((entry) => entry.path === "src/shapes.ts");
+    assert.deepEqual(
+      [...byName.keys()].sort(),
+      [...(file?.symbols ?? [])].sort(),
+    );
+
+    // A file that is not parsed into an AST says so, rather than reporting an
+    // empty list that would read as "declares nothing".
+    assert.equal(
+      service.symbolRangesInFile(index, "data/config.yaml"),
+      undefined,
+    );
+    assert.equal(service.symbolRangesInFile(index, "src/missing.ts"), undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

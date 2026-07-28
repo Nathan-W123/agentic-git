@@ -13,8 +13,10 @@ import {
   isDeferredScopeFollowUp,
   replayBlockers,
   splitChangeSet,
+  withheldPatchRecord,
   type ActivePlan,
   type CanonicalAdvance,
+  type ChangeSetSplit,
 } from "@coord/coordinator";
 import { IntegrationService } from "@coord/integration-service";
 import type {
@@ -39,8 +41,10 @@ import {
   type CanonicalVersion,
   type ChangeSet,
   type CoordinatorDecision,
+  type DeferredResource,
   type IntegrationResult,
   type PlanAdmission,
+  type ResourceType,
   type TaskDefinition,
 } from "@coord/shared-types";
 import {
@@ -578,7 +582,8 @@ async function queueDeferredScope(
   runId: string,
   task: SubmittedTask,
   admission: PlanAdmission,
-  split: { deferred: readonly { path: string }[] },
+  split: ChangeSetSplit,
+  reported: ChangeSet,
 ): Promise<void> {
   const deferred = admission.deferredResources ?? [];
   if (deferred.length === 0) {
@@ -587,7 +592,14 @@ async function queueDeferredScope(
   const followUp = await store.submitTask({
     repositoryId: task.repositoryId,
     ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
-    objective: deferredScopeObjective(task.objective, deferred),
+    objective: deferredScopeObjective(
+      task.objective,
+      deferred,
+      // A granted file whose patch was held back for reaching into a withheld
+      // symbol lost its other edits with it. The follow-up covers it, or that
+      // work is quietly gone.
+      Object.keys(split.withheldSymbols).sort(),
+    ),
     agentId: task.agentId,
     validationCommands: task.validationCommands,
     ...(task.submittedBy === undefined ? {} : { submittedBy: task.submittedBy }),
@@ -599,7 +611,33 @@ async function queueDeferredScope(
     deferredFrom: task.id,
     deferredResources: deferred,
     discardedPatches: split.deferred.map((patch) => patch.path).sort(),
+    ...(Object.keys(split.withheldSymbols).length === 0
+      ? {}
+      : { droppedForWithheldSymbols: split.withheldSymbols }),
   });
+
+  // The work itself, kept rather than thrown away. It is not replayed later —
+  // it was written against a file another task is rewriting — but the agent
+  // that picks the follow-up up starts from what was already worked out
+  // instead of from nothing.
+  if (split.deferred.length > 0) {
+    const record = withheldPatchRecord(split.deferred);
+    await trace(store, runId, "changeset_withheld", followUp.id, {
+      projectId: task.projectId,
+      repositoryId: task.repositoryId,
+      deferredFrom: task.id,
+      reportedChangeSetId: reported.id,
+      baseRevision: reported.baseRevision,
+      baseVersion: reported.baseVersion,
+      patches: record.patches,
+      truncated: record.truncated,
+      bytes: record.bytes,
+      explanation:
+        "Patches a partial admission held back. Kept as context for the " +
+        "follow-up task; never applied, because the base they were written " +
+        "against is being rewritten by whoever holds the deferred resource",
+    });
+  }
 }
 
 export interface WorkPlanInput {
@@ -800,6 +838,11 @@ export async function admitWorkPlan(
       // enriched claims came from which file, so a withheld file takes its own
       // symbols with it instead of leaving them to block the remainder.
       resourcesInFile: (file) => intelligence.resourcesInFile(index, file),
+      // And where those symbols live, so one can be withheld while the file
+      // holding it is granted — the index is built at the base revision, which
+      // is the coordinate system a diff hunk's old side is measured in.
+      symbolRangesInFile: (file) =>
+        intelligence.symbolRangesInFile(index, file),
     });
     // What is recorded against the lease is what was actually granted. On a
     // partial admission that is the reduced plan, and recording the whole one
@@ -902,17 +945,23 @@ export async function admitWorkPlan(
 function planScopeEscapes(
   admitted: AgentPlan,
   reported: AgentPlan,
-  deferredFiles: readonly string[] = [],
+  deferred: readonly DeferredResource[] = [],
 ): string[] {
+  const withheld = (type: ResourceType): string[] =>
+    deferred
+      .filter((resource) => resource.resourceType === type)
+      .map((resource) => resource.resourceId);
   const escapes: string[] = [];
   const compare = (
-    kind: string,
+    kind: ResourceType,
     allowedValues: readonly string[],
     reportedValues: readonly string[] | undefined,
     normalize: (value: string) => string = (value) => value,
   ): void => {
     const allowed = new Set(
-      allowedValues.map((value) => normalize(value).toLowerCase()),
+      [...allowedValues, ...withheld(kind)].map((value) =>
+        normalize(value).toLowerCase(),
+      ),
     );
     for (const value of reportedValues ?? []) {
       if (!allowed.has(normalize(value).toLowerCase())) {
@@ -922,7 +971,7 @@ function planScopeEscapes(
   };
   compare(
     "file",
-    [...admitted.expectedFiles, ...deferredFiles],
+    admitted.expectedFiles,
     reported.expectedFiles,
     normalizeRepositoryPath,
   );
@@ -1100,6 +1149,15 @@ export async function acceptWorkResult(
   // granted, not what was asked for.
   const plan = admitted.plan;
   const deferred = deferredFilePaths(admitted.admission);
+  // Only needed when the admission withheld something finer than a file, and
+  // then it must be the *base* revision's index: a hunk's old side is measured
+  // against the revision the agent started from, not the one it is landing on.
+  const withheldSymbols = (admitted.admission.deferredResources ?? []).some(
+    (resource) => resource.resourceType === "symbol",
+  );
+  const baseIndex = withheldSymbols
+    ? await intelligence.index(repository, leaseAtStart.baseRevision)
+    : undefined;
   let split: ReturnType<typeof splitChangeSet>;
   try {
     baseVersion = await repositories.getVersionAtRevision(
@@ -1113,7 +1171,11 @@ export async function acceptWorkResult(
     ) {
       throw new Error("Plan or changeset is for a different task");
     }
-    const escapes = planScopeEscapes(plan, rawPlan, deferred);
+    const escapes = planScopeEscapes(
+      plan,
+      rawPlan,
+      admitted.admission.deferredResources ?? [],
+    );
     if (escapes.length > 0) {
       throw new Error(
         `Reported plan claims resources the admitted plan did not cover: ${escapes.join(", ")}`,
@@ -1130,7 +1192,14 @@ export async function acceptWorkResult(
     if (changeSet.riskAssessment.level !== plan.riskLevel) {
       throw new Error("Plan and changeset disagree about risk level");
     }
-    split = splitChangeSet(plan, admitted.admission, changeSet);
+    split = splitChangeSet(
+      plan,
+      admitted.admission,
+      changeSet,
+      baseIndex === undefined
+        ? undefined
+        : (file) => intelligence.symbolRangesInFile(baseIndex, file),
+    );
     // A file in neither bucket was never arbitrated at all, which is the
     // scope escape the validator has always refused.
     if (split.escaped.length > 0) {
@@ -1243,6 +1312,9 @@ export async function acceptWorkResult(
             withheldReason:
               "patches on resources this task was not granted; the work is " +
               "requeued as a follow-up task rather than applied",
+            ...(Object.keys(split.withheldSymbols).length === 0
+              ? {}
+              : { withheldSymbols: split.withheldSymbols }),
           }),
     });
 
@@ -1417,7 +1489,14 @@ export async function acceptWorkResult(
       // Only now, with the granted half durably in canonical, is the deferred
       // half turned into work of its own. Queueing it earlier would leave a
       // task asking for the remainder of something that never landed.
-      await queueDeferredScope(store, run.id, task, admitted.admission, split);
+      await queueDeferredScope(
+        store,
+        run.id,
+        task,
+        admitted.admission,
+        split,
+        changeSet,
+      );
     } else {
       await store.saveTaskStatus(
         run.id,

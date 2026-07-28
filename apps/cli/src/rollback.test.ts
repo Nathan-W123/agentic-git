@@ -114,16 +114,31 @@ async function createHarness(): Promise<Harness> {
 }
 
 /** Approves the first request to appear, so a gated call can complete. */
+/**
+ * How long to wait for a pipeline stage to reach its approval gate. Generous
+ * on purpose: it bounds a hang, it is not a performance assertion.
+ */
+const APPROVAL_WAIT_MS = 60_000;
+
 async function approveWhenAsked(
   store: CoordinationStore,
   decision: "approved" | "rejected" = "approved",
 ): Promise<string> {
+  // Waits on a deadline rather than an attempt count. The rollback has to
+  // plan, assess conflicts and build a changeset before it asks for approval,
+  // and on a machine running the whole monorepo's suites at once that takes
+  // far longer than it does alone — a fixed number of 10ms attempts turns a
+  // busy CPU into a test failure.
+  const deadline = Date.now() + APPROVAL_WAIT_MS;
   let approval = (await store.listApprovals({}))[0];
-  for (let attempt = 0; approval === undefined && attempt < 200; attempt += 1) {
+  while (approval === undefined && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 10));
     approval = (await store.listApprovals({}))[0];
   }
-  assert.ok(approval, "a rollback must stop for a human");
+  assert.ok(
+    approval,
+    `a rollback must stop for a human (waited ${APPROVAL_WAIT_MS}ms)`,
+  );
   await store.decideApproval({
     approvalId: approval.id,
     status: decision,

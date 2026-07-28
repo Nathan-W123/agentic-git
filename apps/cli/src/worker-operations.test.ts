@@ -144,6 +144,30 @@ function plan(
 }
 
 /**
+ * How long to wait for a result to reach its approval gate.
+ *
+ * A deadline rather than an attempt count, and a generous one: the result has
+ * to be validated and recorded before it asks for approval, and on a machine
+ * running every package's suite at once that takes far longer than it does
+ * alone. This bounds a hang; it is not a performance assertion.
+ */
+const APPROVAL_WAIT_MS = 60_000;
+
+async function approvalFor(harness: Harness, taskId: string) {
+  const deadline = Date.now() + APPROVAL_WAIT_MS;
+  let approval = (await harness.store.listApprovals({ taskId }))[0];
+  while (approval === undefined && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    approval = (await harness.store.listApprovals({ taskId }))[0];
+  }
+  assert.ok(
+    approval,
+    `the result must stop for a human (waited ${APPROVAL_WAIT_MS}ms)`,
+  );
+  return approval;
+}
+
+/**
  * The plan-first step every remote result now has to pass through: the worker
  * submits its plan and the control plane answers before any editing.
  */
@@ -451,12 +475,7 @@ test("a protected remote result waits for durable human approval", async () => {
         integrationRoot: path.join(harness.root, "approval-integration"),
       },
     );
-    let approval = (await harness.store.listApprovals({ taskId }))[0];
-    for (let attempt = 0; approval === undefined && attempt < 100; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      approval = (await harness.store.listApprovals({ taskId }))[0];
-    }
-    assert.ok(approval);
+    const approval = await approvalFor(harness, taskId);
     assert.equal(approval.status, "pending");
     await harness.store.decideApproval({
       approvalId: approval.id,
@@ -528,12 +547,7 @@ test("a project policy forces review of an otherwise benign changeset", async ()
         integrationRoot: path.join(harness.root, "policy-integration"),
       },
     );
-    let approval = (await harness.store.listApprovals({ taskId }))[0];
-    for (let attempt = 0; approval === undefined && attempt < 100; attempt += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      approval = (await harness.store.listApprovals({ taskId }))[0];
-    }
-    assert.ok(approval);
+    const approval = await approvalFor(harness, taskId);
     assert.ok(
       approval.reasons.some((reason) =>
         reason.includes("Project policy requires"),
@@ -1792,6 +1806,28 @@ test("a partly contested task lands its free files while the contested one is st
       await harness.store.listAuditEvents({ taskId: split.task.id })
     ).find((entry) => entry.event.type === "changeset_collected");
     assert.deepEqual(collected?.event.data["withheldFiles"], ["src/value.js"]);
+
+    // The held-back work is kept, joined to the follow-up that will redo it.
+    // It is never replayed — the file it was written against is being
+    // rewritten by the holder — but the next agent does not start cold.
+    const withheld = (
+      await harness.store.listAuditEvents({ taskId: followUp.id })
+    ).find((entry) => entry.event.type === "changeset_withheld");
+    assert.ok(withheld, "the withheld patches must be kept, not dropped");
+    assert.equal(withheld.event.data["deferredFrom"], split.task.id);
+    assert.equal(withheld.event.data["baseRevision"], split.lease.baseRevision);
+    assert.equal(withheld.event.data["truncated"], false);
+    const patches = withheld.event.data["patches"] as {
+      path: string;
+      patch: string;
+    }[];
+    assert.deepEqual(
+      patches.map((entry) => entry.path),
+      ["src/value.js"],
+    );
+    // The actual diff, not just a note that there was one.
+    assert.match(patches[0]?.patch ?? "", /^--- a\/src\/value\.js/mu);
+    assert.match(patches[0]?.patch ?? "", /\+export const value = 999;/u);
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }
@@ -2203,6 +2239,303 @@ test("a result is still requeued when the advance touched what it depends on", a
       ),
       "export const value = 7;\n",
     );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Withholding a symbol end to end.
+ *
+ * The contested resource is not a file this time: both tasks want the same
+ * function, which lives in a file only one of them declares. Ownership could
+ * always see that; what is new is that the plan can be admitted on everything
+ * else and the result held to it.
+ */
+
+/** A module whose two exports can be contested independently. */
+const SHAPES = [
+  "export const keepMe = 1;",
+  "",
+  "export function contended() {",
+  "  return keepMe;",
+  "}",
+  "",
+].join("\n");
+
+async function symbolHarness(): Promise<Harness> {
+  return await createHarness(new InMemoryCoordinationStore(), {
+    "src/shapes.js": SHAPES,
+    "src/free.js": "export const free = 1;\n",
+  });
+}
+
+test("a symbol is withheld while the file holding it keeps working", async () => {
+  const harness = await symbolHarness();
+  try {
+    // The holder declares only src/other.js, but claims the symbol
+    // `contended` — the case ownership catches and file paths cannot.
+    await harness.store.submitTask({
+      repositoryId: "repo_worker",
+      objective: "rework the contended helper",
+      agentId: "generic-cli",
+      validationCommands: [],
+    });
+    const holder = await leaseWork(
+      harness.store,
+      {
+        workerId: harness.workerId,
+        projectId: DEFAULT_PROJECT_ID,
+        repositoryParallelism: 2,
+      },
+      harness.repositories,
+    );
+    assert.ok(holder);
+    const holderAdmission = await admitWorkPlan(
+      harness.store,
+      {
+        leaseId: holder.lease.id,
+        actorId: "user",
+        plan: plan(holder.task.id, {
+          objective: holder.task.objective,
+          expectedFiles: ["src/other.js"],
+          expectedSymbols: ["contended"],
+        }),
+      },
+      { repositories: harness.repositories },
+    );
+    assert.ok(holderAdmission.outcome === "admitted");
+    assert.equal(holderAdmission.admission.status, "approved");
+
+    // The second task declares the file that actually holds `contended`, plus
+    // an unrelated one.
+    const split = await leaseTheSplitTask(harness);
+    const splitPlan = plan(split.task.id, {
+      objective: split.task.objective,
+      expectedFiles: ["src/shapes.js", "src/free.js"],
+      expectedSymbols: ["keepMe", "contended"],
+    });
+    const admitted = await admitWorkPlan(
+      harness.store,
+      { leaseId: split.lease.id, actorId: "user", plan: splitPlan },
+      { repositories: harness.repositories },
+    );
+    assert.ok(admitted.outcome === "admitted");
+    assert.equal(admitted.admission.status, "approved_with_constraints");
+
+    // The symbol is withheld; the file holding it is not.
+    assert.deepEqual(
+      admitted.admission.deferredResources?.map(
+        (resource) => `${resource.resourceType}:${resource.resourceId}`,
+      ),
+      ["symbol:contended"],
+    );
+    assert.deepEqual(
+      admitted.admission.ownershipGrants
+        .filter((grant) => grant.resourceType === "file")
+        .map((grant) => grant.resourceId)
+        .sort(),
+      ["src/free.js", "src/shapes.js"],
+    );
+
+    // The agent edits `keepMe` in the granted file, and leaves `contended`
+    // alone — the case that is supposed to sail through.
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const repository = {
+      id: stored.id,
+      path: stored.path,
+      branch: stored.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId: split.task.id,
+      rootPath: path.join(harness.root, "symbol-workspace"),
+      repository,
+      baseVersion: split.canonicalVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "shapes.js"),
+      SHAPES.replace("export const keepMe = 1;", "export const keepMe = 100;"),
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: ["keepMe"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "raised keepMe and left contended alone",
+    });
+    await workspaces.destroy(workspace);
+
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: split.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: splitPlan,
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(accepted.accepted, true, accepted.reason);
+
+    const version = await harness.repositories.getCanonicalVersion(repository);
+    const promoted = await harness.repositories.readFile(
+      repository,
+      version.revision,
+      "src/shapes.js",
+    );
+    assert.match(promoted, /keepMe = 100/u);
+    // `contended` is exactly as it was: the holder still owns it.
+    assert.match(promoted, /export function contended\(\) \{/u);
+    assert.equal(
+      (await harness.store.getWorkLease(holder.lease.id))?.status,
+      "active",
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a patch reaching into a withheld symbol loses its file, not the run", async () => {
+  const harness = await symbolHarness();
+  try {
+    await harness.store.submitTask({
+      repositoryId: "repo_worker",
+      objective: "rework the contended helper",
+      agentId: "generic-cli",
+      validationCommands: [],
+    });
+    const holder = await leaseWork(
+      harness.store,
+      {
+        workerId: harness.workerId,
+        projectId: DEFAULT_PROJECT_ID,
+        repositoryParallelism: 2,
+      },
+      harness.repositories,
+    );
+    assert.ok(holder);
+    await admitWorkPlan(
+      harness.store,
+      {
+        leaseId: holder.lease.id,
+        actorId: "user",
+        plan: plan(holder.task.id, {
+          objective: holder.task.objective,
+          expectedFiles: ["src/other.js"],
+          expectedSymbols: ["contended"],
+        }),
+      },
+      { repositories: harness.repositories },
+    );
+
+    const split = await leaseTheSplitTask(harness);
+    const splitPlan = plan(split.task.id, {
+      objective: split.task.objective,
+      expectedFiles: ["src/shapes.js", "src/free.js"],
+      expectedSymbols: ["keepMe", "contended"],
+    });
+    const admitted = await admitWorkPlan(
+      harness.store,
+      { leaseId: split.lease.id, actorId: "user", plan: splitPlan },
+      { repositories: harness.repositories },
+    );
+    assert.ok(admitted.outcome === "admitted");
+    assert.equal(admitted.admission.status, "approved_with_constraints");
+
+    // This time the agent ignores the constraint and rewrites `contended`,
+    // while also editing an unrelated file it does own.
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const repository = {
+      id: stored.id,
+      path: stored.path,
+      branch: stored.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId: split.task.id,
+      rootPath: path.join(harness.root, "symbol-escape-workspace"),
+      repository,
+      baseVersion: split.canonicalVersion,
+    });
+    await writeFile(
+      path.join(workspace.path, "src", "shapes.js"),
+      SHAPES.replace("  return keepMe;", "  return keepMe * 2;"),
+      "utf8",
+    );
+    await writeFile(
+      path.join(workspace.path, "src", "free.js"),
+      "export const free = 42;\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: ["contended", "free"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "rewrote contended anyway",
+    });
+    await workspaces.destroy(workspace);
+
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: split.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: splitPlan,
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+
+    // The unrelated file still lands. The file holding the withheld symbol
+    // does not — the run is not lost, only the part of it that reached where
+    // it was told not to.
+    assert.equal(accepted.accepted, true, accepted.reason);
+    const version = await harness.repositories.getCanonicalVersion(repository);
+    assert.equal(
+      await harness.repositories.readFile(
+        repository,
+        version.revision,
+        "src/free.js",
+      ),
+      "export const free = 42;\n",
+    );
+    assert.match(
+      await harness.repositories.readFile(
+        repository,
+        version.revision,
+        "src/shapes.js",
+      ),
+      /return keepMe;/u,
+    );
+
+    // The dropped file is named in the follow-up, so its other edits are not
+    // silently gone.
+    const followUp = (
+      await harness.store.listSubmittedTasks({ status: "submitted" })
+    ).find((task) => task.objective.includes(DEFERRED_SCOPE_MARKER));
+    assert.ok(followUp);
+    assert.match(followUp.objective, /symbol contended/u);
+    assert.match(followUp.objective, /src\/shapes\.js/u);
+
+    const collected = (
+      await harness.store.listAuditEvents({ taskId: split.task.id })
+    ).find((entry) => entry.event.type === "changeset_collected");
+    assert.deepEqual(collected?.event.data["withheldSymbols"], {
+      "src/shapes.js": ["contended"],
+    });
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }

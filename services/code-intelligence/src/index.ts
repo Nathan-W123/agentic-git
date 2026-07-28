@@ -20,11 +20,33 @@ export type SupportedLanguage =
   | "sql"
   | "prisma";
 
+/**
+ * Where one symbol lives in the file, in 1-based inclusive line numbers.
+ *
+ * Recorded so a withheld symbol can be held to something. Ownership can name
+ * a symbol, but a changeset is a set of file patches, and without knowing
+ * which lines a symbol occupies there is no way to ask whether a patch touched
+ * it. These are base-revision coordinates, which is exactly what the old side
+ * of a diff hunk is measured in.
+ */
+export interface SymbolRange {
+  name: string;
+  startLine: number;
+  endLine: number;
+}
+
 export interface IndexedFile {
   path: string;
   language: SupportedLanguage;
   bytes: number;
   symbols: string[];
+  /**
+   * Empty for a file whose language the indexer does not parse into an AST.
+   * Callers must not read that as "this file has no symbols" — use
+   * {@link CodeIntelligenceService.symbolRangesInFile}, which distinguishes
+   * the two, before deciding anything enforcement depends on.
+   */
+  symbolRanges: SymbolRange[];
   imports: string[];
   dependencies: string[];
   referencedSymbols: string[];
@@ -157,11 +179,27 @@ function analyzeScript(
   const configKeys = new Set<string>();
   const tests = new Set<string>();
   const services = new Set<string>();
+  const ranges = new Map<string, SymbolRange>();
+
+  const record = (name: string, node: ts.Node): void => {
+    const start = file.getLineAndCharacterOfPosition(node.getStart(file)).line;
+    const end = file.getLineAndCharacterOfPosition(node.getEnd()).line;
+    const existing = ranges.get(name);
+    // A name declared more than once (an overload, a re-export) spans from the
+    // first to the last, which is the conservative reading: an edit anywhere
+    // between them counts as touching it.
+    ranges.set(name, {
+      name,
+      startLine: Math.min(existing?.startLine ?? start + 1, start + 1),
+      endLine: Math.max(existing?.endLine ?? end + 1, end + 1),
+    });
+  };
 
   const visit = (node: ts.Node): void => {
     const declaration = namedDeclaration(node);
     if (declaration !== undefined) {
       symbols.add(declaration);
+      record(declaration, node);
       if (/(?:Service|Client|Repository|Gateway|Worker)$/u.test(declaration)) {
         services.add(declaration);
       }
@@ -177,6 +215,15 @@ function analyzeScript(
 
     if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
       symbols.add(node.name.text);
+      // The whole statement, not just the declarator: `export const value = 1`
+      // is one thing to an agent editing it, and the modifiers are part of it.
+      record(
+        node.name.text,
+        ts.isVariableDeclarationList(node.parent) &&
+          ts.isVariableStatement(node.parent.parent)
+          ? node.parent.parent
+          : node,
+      );
     }
 
     if (
@@ -247,6 +294,10 @@ function analyzeScript(
     language,
     bytes: Buffer.byteLength(source),
     symbols: uniqueStrings([...symbols]),
+    symbolRanges: [...ranges.values()].sort(
+      (left, right) =>
+        left.startLine - right.startLine || left.name.localeCompare(right.name),
+    ),
     imports: uniqueStrings([...imports]),
     dependencies: uniqueStrings([...dependencies]),
     referencedSymbols: uniqueStrings([...referencedSymbols]),
@@ -323,6 +374,8 @@ function analyzeDataFile(
     language,
     bytes: Buffer.byteLength(source),
     symbols: [],
+    // Not parsed into an AST, so nothing can be located inside it.
+    symbolRanges: [],
     imports: [],
     dependencies: [],
     referencedSymbols: [],
@@ -498,6 +551,29 @@ export class CodeIntelligenceService {
    * withheld, which of the plan's claims exist only because of it? — so the
    * attribution lives here, beside the projection it has to agree with.
    */
+  /**
+   * Where each symbol lives in one file, or `undefined` when that cannot be
+   * known — the file is not in the index, or its language is not parsed into
+   * an AST.
+   *
+   * The distinction is the whole point. An empty array means "parsed, and it
+   * declares nothing"; `undefined` means "no idea what is in here". Only the
+   * first is safe to enforce a withheld symbol against, because only the first
+   * lets a patch be checked for touching it.
+   */
+  public symbolRangesInFile(
+    index: RepositoryIndex,
+    filePath: string,
+  ): SymbolRange[] | undefined {
+    const file = index.files.find((entry) => entry.path === filePath);
+    if (file === undefined) {
+      return undefined;
+    }
+    return file.language === "typescript" || file.language === "javascript"
+      ? file.symbolRanges
+      : undefined;
+  }
+
   public resourcesInFile(
     index: RepositoryIndex,
     filePath: string,

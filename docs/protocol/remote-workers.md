@@ -84,12 +84,28 @@ answer — a remainder that still collides falls back to the all-or-nothing
 refusal. What comes back is `approved_with_constraints` carrying
 `deferredResources`: which resources were withheld, who holds them, and why.
 
-Only files are ever withheld. A withheld resource is worth nothing unless a
-result can be held to it, and a changeset is a set of file patches. A file does
-take its enriched claims with it — the symbols, APIs and schemas that no
-*granted* file accounts for — because those exist in the plan only by virtue of
-the withheld file, and leaving them behind would have the reduced plan asking
-for exactly what the other holder owns.
+Files are withheld first, because a file can always be held to: a patch on a
+file that was not granted is refused on its path alone. A withheld file takes
+its enriched claims with it — the symbols, APIs and schemas that no *granted*
+file accounts for — because those exist in the plan only by virtue of it, and
+leaving them behind would have the reduced plan asking for exactly what the
+other holder owns.
+
+When dropping the contested files is not enough, a **symbol** can be withheld
+while the file holding it is granted. That needs the repository index to say
+which lines the symbol occupies at the base revision, which is the same
+coordinate system the old side of a diff hunk is measured in. The patch body is
+walked — not just the hunk header, whose context lines are not changes — and a
+patch that reaches into those lines loses its whole file. Promoting the rest
+would mean rewriting hunk offsets to publish half a diff, which is where this
+would stop being a division of work and start being a guess about meaning.
+
+Enforceability is the limit throughout. A symbol is only withheld when *every*
+file still being granted can be parsed; one unreadable file among them and the
+plan waits instead, because an instruction the control plane cannot check is
+not one. At result time the same rule fails closed: if the positions are
+missing when they are needed, the patch is held back rather than promoted on
+the assumption that it was fine.
 
 The worker executes normally. It passes the withheld set to its agent as
 constraints on the decision, before any editing, which is the only point where
@@ -107,14 +123,50 @@ agent obeying:
 Once the granted part is durably in canonical, the withheld part is submitted
 as a task of its own, marked so that it is arbitrated whole. That marker is the
 termination argument: a task sheds scope at most once, instead of shedding one
-file per round and paying for an agent run each time.
+file per round and paying for an agent run each time. A granted file whose
+patch was dropped for reaching into a withheld symbol is named in the follow-up
+too, or its other edits would be quietly gone.
+
+The held-back patches are kept with that follow-up rather than discarded,
+bounded so one runaway changeset cannot bloat the audit log, and each patch is
+kept whole or recorded by name only. They are never replayed: they were written
+against a file another task is in the middle of rewriting, and applying them to
+whatever it becomes would be publishing a change nobody re-read. What they are
+for is the agent that picks the follow-up up, which starts from what was
+already worked out instead of from nothing.
 
 The cost is the one repository parallelism already accepts. Partial admission
 turns "the second task waits" into "the second task runs concurrently", so the
-two now race to integrate, and whichever loses is requeued to replan by the
-exact-base check. That trade is only ever taken where concurrent leases were
-already enabled: at `COORD_REPOSITORY_PARALLELISM=1` no two plans are ever
-active in one repository, and partial admission never fires.
+two now race to integrate. The loser is not automatically thrown away — see
+below — but it may still be requeued, and that trade is only ever taken where
+concurrent leases were already enabled: at `COORD_REPOSITORY_PARALLELISM=1` no
+two plans are ever active in one repository, and partial admission never fires.
+
+### A result can outlive its base
+
+Exact-base integration refuses every result whose base has been overtaken. That
+is the right default, but on its own it is blunt: the integration workspace is
+built from *current* canonical and the patches are applied three-way, so a
+result overtaken by work it has nothing to do with would apply perfectly well.
+Refusing it discards a finished agent run to prevent a collision that did not
+happen.
+
+So before requeueing, the control plane asks whether the advance actually
+concerned this result — whether it touched a file the result writes, a resource
+the plan claimed, or anything the plan **depends on**. The last is the one that
+matters: an agent that read a module and wrote code against it is invalidated
+when that module changes, whether or not it edited it, and enrichment resolves
+imports into `file:` and `symbol:` dependency entries precisely so that is
+visible. Only an advance that touched none of those is replayed.
+
+Permission is pinned to one revision rather than passed as a flag, so canonical
+moving once more between the check and the integration leaves them unequal and
+the result is refused as stale exactly as before. Everything that made remote
+results safe is untouched: the three-way apply, the comparison of applied
+against declared entries, and the compare-and-swap promotion all still run, and
+anything that cannot be ruled out still takes the requeue-to-replan path. The
+integration record carries `replayedFrom` so the history shows a result
+outlived its base rather than hiding it behind an ordinary promotion.
 
 Arbitration is serialized in the database, not in application code. The write
 that records an admission carries the set of already-admitted leases it was

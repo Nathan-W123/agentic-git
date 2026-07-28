@@ -54,7 +54,10 @@ function admit(
   active: readonly AgentPlan[],
   controller = new PlanAdmissionController(),
   overrides: Partial<
-    Pick<PlanAdmissionInput, "partialAdmission" | "resourcesInFile">
+    Pick<
+      PlanAdmissionInput,
+      "partialAdmission" | "resourcesInFile" | "symbolRangesInFile"
+    >
   > = {},
 ) {
   return controller.admit({
@@ -321,9 +324,9 @@ test("a remainder that still collides is refused rather than half-granted", () =
   assert.equal(admission.deferredResources, undefined);
 });
 
-test("only files are ever deferred, because only files can be enforced", () => {
-  // Ownership holds the symbol, not any file the two plans share. A changeset
-  // is a set of file patches, so a withheld symbol could not be held to; the
+test("a symbol is not deferred when nothing can say where it lives", () => {
+  // Ownership holds the symbol, not any file the two plans share. With no
+  // symbol positions supplied, a withheld symbol could not be held to, so the
   // plan waits instead of being admitted on a promise nobody can check.
   const admission = admit(
     plan("task_a", { expectedFiles: ["src/a.ts"], expectedSymbols: ["shared"] }),
@@ -465,6 +468,118 @@ test("a plan's own schemas are the approval for claiming them", () => {
     admission.ownershipGrants.some(
       (lease) =>
         lease.resourceType === "schema" && lease.mode === "approval_required",
+    ),
+  );
+});
+
+/**
+ * Withholding something finer than a file. Ownership could always name a
+ * symbol; what was missing was any way to hold a result to one, so the plan
+ * waited instead. With line positions the question has an answer.
+ */
+
+/** src/a.ts holds both symbols; only one of them is contested. */
+const SYMBOL_RANGES: Record<string, { name: string; startLine: number; endLine: number }[]> = {
+  "src/a.ts": [
+    { name: "alpha", startLine: 1, endLine: 5 },
+    { name: "shared", startLine: 10, endLine: 20 },
+  ],
+};
+
+function contestedSymbolPlans(): { candidate: AgentPlan; running: AgentPlan } {
+  return {
+    // Nothing this plan declares is contested at the file level: task_b names
+    // a different file. What collides is the symbol.
+    candidate: plan("task_a", {
+      expectedFiles: ["src/a.ts", "src/contested.ts"],
+      expectedSymbols: ["alpha", "shared"],
+    }),
+    running: plan("task_b", {
+      expectedFiles: ["src/contested.ts"],
+      expectedSymbols: ["shared"],
+    }),
+  };
+}
+
+test("a symbol is withheld while the file holding it is granted", () => {
+  const { candidate, running } = contestedSymbolPlans();
+  const admission = admit(candidate, [running], new PlanAdmissionController(), {
+    symbolRangesInFile: (file: string) => SYMBOL_RANGES[file] ?? [],
+  });
+
+  assert.equal(admission.status, "approved_with_constraints");
+  // src/a.ts is granted even though a symbol inside it is not, and `alpha`
+  // stays claimed because nobody else wants it.
+  assert.deepEqual(grantedResources(admission), [
+    "file:src/a.ts",
+    "symbol:alpha",
+  ]);
+  assert.deepEqual(
+    admission.deferredResources?.map(
+      (resource) => `${resource.resourceType}:${resource.resourceId}`,
+    ),
+    ["file:src/contested.ts", "symbol:shared"],
+  );
+});
+
+test("a symbol is not withheld when a granted file cannot be read", () => {
+  // src/a.ts has no line positions, so "did this patch touch `shared`" has no
+  // answer for it. Withholding the symbol would be an instruction with nothing
+  // behind it, so the plan waits for the whole thing instead.
+  const { candidate, running } = contestedSymbolPlans();
+  const admission = admit(candidate, [running], new PlanAdmissionController(), {
+    symbolRangesInFile: () => undefined,
+  });
+
+  assert.equal(admission.status, "sequenced");
+  assert.equal(admission.ownershipGrants.length, 0);
+  assert.equal(admission.deferredResources, undefined);
+});
+
+test("without any symbol positions at all the plan still waits", () => {
+  const { candidate, running } = contestedSymbolPlans();
+  const admission = admit(candidate, [running]);
+
+  assert.equal(admission.status, "sequenced");
+  assert.equal(admission.deferredResources, undefined);
+});
+
+test("files are withheld before symbols, and only symbols still held follow", () => {
+  // The contested file goes first. `shared` lives in it *and* in a granted
+  // file, so dropping the file does not release it and it is withheld too.
+  const admission = admit(
+    plan("task_a", {
+      expectedFiles: ["src/a.ts", "src/contested.ts"],
+      expectedSymbols: ["alpha", "shared"],
+    }),
+    [
+      plan("task_b", {
+        expectedFiles: ["src/contested.ts"],
+        expectedSymbols: ["shared"],
+      }),
+    ],
+    new PlanAdmissionController(),
+    {
+      symbolRangesInFile: (file: string) => SYMBOL_RANGES[file] ?? [],
+      resourcesInFile: (file: string) =>
+        file === "src/contested.ts"
+          ? [{ resourceType: "symbol" as const, resourceId: "shared" }]
+          : [],
+    },
+  );
+
+  // `shared` is attributed to the deferred file too, but it also lives in the
+  // granted one, so it is not dropped as merely derived — it is withheld in
+  // its own right, and the granted file keeps its patch checked against it.
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(grantedResources(admission), [
+    "file:src/a.ts",
+    "symbol:alpha",
+  ]);
+  assert.ok(
+    admission.deferredResources?.some(
+      (resource) =>
+        resource.resourceType === "symbol" && resource.resourceId === "shared",
     ),
   );
 });

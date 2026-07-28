@@ -420,6 +420,8 @@ export type AuditEventType =
   | "scope_change_requested"
   | "scope_change_decided"
   | "changeset_collected"
+  /** Patches a partial admission held back, kept for the follow-up task. */
+  | "changeset_withheld"
   | "approval_requested"
   | "approval_decided"
   | "validation_completed"

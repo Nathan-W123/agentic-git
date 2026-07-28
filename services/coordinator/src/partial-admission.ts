@@ -1,3 +1,4 @@
+import { namesTouchedByPatch, type NamedRange } from "./hunks.js";
 import {
   createId,
   deferredFilePaths,
@@ -7,6 +8,7 @@ import {
   type ChangeSet,
   type DeferredResource,
   type FilePatch,
+  type FilePatchStatus,
   type PlanAdmission,
 } from "@coord/shared-types";
 
@@ -23,10 +25,15 @@ import {
 export interface ChangeSetSplit {
   /** Patches inside the granted scope. The only ones that reach canonical. */
   granted: ChangeSet;
-  /** Patches on deferred files. Never applied; the work is requeued instead. */
+  /** Patches held back. Never applied; the work is requeued instead. */
   deferred: FilePatch[];
   /** Patches on files that were neither granted nor deferred. */
   escaped: string[];
+  /**
+   * Withheld symbols a patch reached into, by the file that reached. Empty
+   * unless the admission withheld something finer than a file.
+   */
+  withheldSymbols: Record<string, string[]>;
 }
 
 /**
@@ -39,21 +46,51 @@ export function splitChangeSet(
   plan: AgentPlan,
   admission: PlanAdmission,
   changeSet: ChangeSet,
+  /**
+   * Where each symbol lives in one file at the base revision, or `undefined`
+   * when that file cannot be parsed. Only consulted when the admission
+   * withheld a symbol — and when it did and this cannot answer, the patch is
+   * held back rather than promoted on the assumption that it was fine.
+   */
+  symbolRangesInFile?: (file: string) => readonly NamedRange[] | undefined,
 ): ChangeSetSplit {
   const granted = new Set(uniqueRepositoryPaths(plan.expectedFiles));
   const deferred = new Set(deferredFilePaths(admission));
+  const withheldNames = (admission.deferredResources ?? [])
+    .filter((resource) => resource.resourceType === "symbol")
+    .map((resource) => resource.resourceId);
   const grantedPatches: FilePatch[] = [];
   const deferredPatches: FilePatch[] = [];
   const escaped: string[] = [];
+  const withheldSymbols: Record<string, string[]> = {};
 
   for (const patch of changeSet.patches) {
-    if (granted.has(patch.path)) {
-      grantedPatches.push(patch);
-    } else if (deferred.has(patch.path)) {
+    if (deferred.has(patch.path)) {
       deferredPatches.push(patch);
-    } else {
-      escaped.push(patch.path);
+      continue;
     }
+    if (!granted.has(patch.path)) {
+      escaped.push(patch.path);
+      continue;
+    }
+    // The file was granted, but a symbol inside it may not have been. A patch
+    // that reached into one loses the whole file: promoting the rest would
+    // mean rewriting hunk offsets to publish half a diff, which is where this
+    // stops being a division of work and starts being a guess about meaning.
+    const reached =
+      withheldNames.length === 0
+        ? []
+        : namesTouchedByPatch(
+            patch.patch,
+            symbolRangesInFile?.(patch.path),
+            withheldNames,
+          );
+    if (reached.length > 0) {
+      withheldSymbols[patch.path] = reached;
+      deferredPatches.push(patch);
+      continue;
+    }
+    grantedPatches.push(patch);
   }
 
   return {
@@ -69,7 +106,62 @@ export function splitChangeSet(
           },
     deferred: deferredPatches,
     escaped: [...new Set(escaped)].sort(),
+    withheldSymbols,
   };
+}
+
+/**
+ * How much withheld patch text is kept. Enough for a handful of real files,
+ * bounded so one runaway changeset cannot bloat a hash-chained audit log.
+ */
+export const WITHHELD_PATCH_BUDGET_BYTES = 64 * 1024;
+
+export interface WithheldPatch {
+  path: string;
+  status: FilePatchStatus;
+  /** Empty when the budget was spent before this patch was reached. */
+  patch: string;
+  omitted?: boolean;
+}
+
+export interface WithheldPatchRecord {
+  patches: WithheldPatch[];
+  /** At least one patch could not be kept in full. */
+  truncated: boolean;
+  bytes: number;
+}
+
+/**
+ * The work a partial admission held back, kept rather than discarded.
+ *
+ * It is deliberately not replayed later: it was written against a file another
+ * task is in the middle of rewriting, so applying it to whatever that file
+ * becomes would be publishing a change nobody re-read. What it is good for is
+ * telling the agent that picks up the follow-up what was already worked out,
+ * so the second attempt is not a cold start.
+ *
+ * Patches are kept whole or not at all. Half a diff reads like a diff and
+ * applies like nothing, which is a worse thing to hand to an agent than an
+ * honest note saying it was dropped.
+ */
+export function withheldPatchRecord(
+  patches: readonly FilePatch[],
+  budgetBytes = WITHHELD_PATCH_BUDGET_BYTES,
+): WithheldPatchRecord {
+  const kept: WithheldPatch[] = [];
+  let bytes = 0;
+  let truncated = false;
+  for (const patch of patches) {
+    const size = Buffer.byteLength(patch.patch, "utf8");
+    if (bytes + size > budgetBytes) {
+      truncated = true;
+      kept.push({ path: patch.path, status: patch.status, patch: "", omitted: true });
+      continue;
+    }
+    bytes += size;
+    kept.push({ path: patch.path, status: patch.status, patch: patch.patch });
+  }
+  return { patches: kept, truncated, bytes };
 }
 
 /**
@@ -96,9 +188,24 @@ export function isDeferredScopeFollowUp(objective: string): boolean {
 export function deferredScopeObjective(
   objective: string,
   deferred: readonly DeferredResource[],
+  /**
+   * Files whose patches were held back even though the file itself was
+   * granted, because they reached into a withheld symbol. Their other edits
+   * went with them, so the follow-up has to cover them too or that work is
+   * simply lost.
+   */
+  alsoDropped: readonly string[] = [],
 ): string {
-  const resources = deferred
-    .map((resource) => resource.resourceId)
+  const resources = [
+    ...new Set([
+      ...deferred.map((resource) =>
+        resource.resourceType === "file"
+          ? resource.resourceId
+          : `${resource.resourceType} ${resource.resourceId}`,
+      ),
+      ...alsoDropped,
+    ]),
+  ]
     .sort()
     .join(", ");
   return (
