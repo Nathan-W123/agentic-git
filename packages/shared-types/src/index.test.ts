@@ -4,7 +4,9 @@ import test from "node:test";
 import {
   assertAgentPlan,
   assertChangeSet,
+  assertProjectPolicy,
   normalizeRepositoryPath,
+  projectBudgets,
   uniqueRepositoryPaths,
 } from "./index.js";
 
@@ -116,4 +118,30 @@ test("rejects malformed or escaping changesets", () => {
       tests: [{ name: "test", status: "unknown", durationMs: 0, output: "" }],
     }),
   );
+});
+
+test("project policy accepts budgets and rejects malformed ones", () => {
+  const policy = {
+    version: 1,
+    budgets: { maxTaskRuntimeMs: 60_000, maxProjectRuntimeMsPerDay: 3_600_000 },
+  };
+  assertProjectPolicy(policy);
+  assert.deepEqual(projectBudgets(policy as never), {
+    maxTaskRuntimeMs: 60_000,
+    maxProjectRuntimeMsPerDay: 3_600_000,
+  });
+  assert.deepEqual(projectBudgets(undefined), {});
+  assert.deepEqual(projectBudgets({ version: 1 } as never), {});
+
+  assert.throws(() =>
+    assertProjectPolicy({ version: 1, budgets: { maxTaskRuntimeMs: 0 } }),
+  );
+  assert.throws(() =>
+    assertProjectPolicy({ version: 1, budgets: { monthlyDollars: 5 } }),
+  );
+  assert.throws(() =>
+    assertProjectPolicy({ version: 1, budgets: [] }),
+  );
+  // A corrupt policy must throw rather than read as "no budgets".
+  assert.throws(() => projectBudgets({ version: 9 } as never));
 });

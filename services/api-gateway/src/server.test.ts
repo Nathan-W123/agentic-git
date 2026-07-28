@@ -1179,6 +1179,63 @@ test("a project-bound worker token cannot pull another tenant's queue", async (t
   );
 });
 
+test("a task past its runtime budget is failed at heartbeat", async (t) => {
+  const { runtime, token } = await workerRuntime(t);
+  const workerId = (
+    await bearer(runtime.origin, "/api/v1/workers/register", token, {
+      method: "POST",
+      body: { name: "budgeted", adapters: [], version: "1" },
+    })
+  ).data.id as string;
+  await runtime.store.saveRepository({
+    id: "repo_budget",
+    path: "/canonical/budget.git",
+    branch: "main",
+  });
+  await runtime.store.submitTask({
+    repositoryId: "repo_budget",
+    objective: "long-running objective",
+    agentId: "codex",
+    validationCommands: [],
+  });
+  await runtime.store.updateProject(DEFAULT_PROJECT_ID, {
+    policy: { version: 1, budgets: { maxTaskRuntimeMs: 1 } },
+  });
+
+  const leased = await bearer(runtime.origin, "/api/v1/workers/leases", token, {
+    method: "POST",
+    body: { workerId, projectId: DEFAULT_PROJECT_ID },
+  });
+  assert.equal(leased.status, 200);
+  const leaseId = leased.data.lease.id as string;
+
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const beat = await bearer(
+    runtime.origin,
+    `/api/v1/workers/leases/${leaseId}/heartbeat`,
+    token,
+    { method: "POST" },
+  );
+  assert.equal(beat.status, 409);
+  assert.equal(beat.data.error.code, "budget_exceeded");
+
+  // Failed, not requeued: rerunning the same runaway task would just burn
+  // the budget again.
+  assert.equal((await runtime.store.getWorkLease(leaseId))?.status, "failed");
+  assert.equal(
+    (await runtime.store.listSubmittedTasks())[0]?.status,
+    "failed",
+  );
+  const audit = await runtime.store.listAudit();
+  assert.ok(
+    audit.some(
+      (event) =>
+        event.type === "task_failed" &&
+        event.data["stage"] === "budget_enforcement",
+    ),
+  );
+});
+
 test("a worker cannot touch another user's lease", async (t) => {
   const { runtime, client, token } = await workerRuntime(t);
   const workerId = (

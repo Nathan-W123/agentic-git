@@ -856,7 +856,12 @@ export class PostgresCoordinationStore implements CoordinationStore {
   }
 
   public async listWorkLeases(
-    filter: { workerId?: string; status?: WorkLeaseStatus } = {},
+    filter: {
+      workerId?: string;
+      status?: WorkLeaseStatus;
+      projectId?: ProjectId;
+      issuedAfter?: string;
+    } = {},
   ): Promise<WorkLease[]> {
     const clauses: string[] = [];
     const values: unknown[] = [];
@@ -865,6 +870,12 @@ export class PostgresCoordinationStore implements CoordinationStore {
     }
     if (filter.status !== undefined) {
       clauses.push(`status = ${bind(values, filter.status)}`);
+    }
+    if (filter.projectId !== undefined) {
+      clauses.push(`project_id = ${bind(values, filter.projectId)}`);
+    }
+    if (filter.issuedAfter !== undefined) {
+      clauses.push(`issued_at > ${bind(values, filter.issuedAfter)}`);
     }
     const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
     const rows = await this.rows(

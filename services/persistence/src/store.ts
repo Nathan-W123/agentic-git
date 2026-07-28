@@ -460,6 +460,9 @@ export interface CoordinationStore {
   listWorkLeases(filter?: {
     workerId?: string;
     status?: WorkLeaseStatus;
+    projectId?: ProjectId;
+    /** Only leases issued strictly after this ISO timestamp. */
+    issuedAfter?: string;
   }): Promise<WorkLease[]>;
   /** Extends an active lease. Returns undefined if it already lapsed. */
   heartbeatWorkLease(

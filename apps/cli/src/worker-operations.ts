@@ -20,6 +20,7 @@ import {
 import {
   assertAgentPlan,
   assertChangeSet,
+  projectBudgets,
   type AgentPlan,
   type CanonicalVersion,
   type ChangeSet,
@@ -196,6 +197,36 @@ export async function leaseWork(
   const repositoryParallelism = configuredRepositoryParallelism(
     input.repositoryParallelism,
   );
+
+  // Cost control: an exhausted project stops receiving workers until usage
+  // rolls out of the 24-hour window. Tasks stay queued rather than failing —
+  // the budget throttles spend, it does not discard work.
+  const projectRecord = await store.getProject(input.projectId);
+  const budget = projectBudgets(projectRecord?.policy).maxProjectRuntimeMsPerDay;
+  if (budget !== undefined) {
+    const now = Date.now();
+    const windowStart = new Date(now - 24 * 60 * 60 * 1000).toISOString();
+    // Leases that began before the window under-count slightly; budgets are
+    // throttles, and the error is bounded by one task's runtime.
+    const leases = await store.listWorkLeases({
+      projectId: input.projectId,
+      issuedAfter: windowStart,
+    });
+    const usedMs = leases.reduce((sum, lease) => {
+      const started = new Date(lease.issuedAt).getTime();
+      const ended =
+        lease.finishedAt !== undefined
+          ? new Date(lease.finishedAt).getTime()
+          : lease.status === "active"
+            ? now
+            : started;
+      return sum + Math.max(0, ended - started);
+    }, 0);
+    if (usedMs >= budget) {
+      return undefined;
+    }
+  }
+
   const pending = await store.listSubmittedTasks({
     projectId: input.projectId,
     status: "submitted",

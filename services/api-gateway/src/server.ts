@@ -21,6 +21,7 @@ import type {
 import {
   assertProjectPolicy,
   createId,
+  projectBudgets,
   type ApprovalStatus,
 } from "@coord/shared-types";
 
@@ -764,6 +765,59 @@ export class ApiGateway {
 
       if (action === "heartbeat" && method === "POST") {
         const now = new Date();
+
+        // Cost control: a lease past the project's per-task runtime budget
+        // is failed rather than extended. Failing (not releasing) is
+        // deliberate — requeueing would re-run the same runaway task and
+        // burn the budget again.
+        if (lease.projectId !== undefined) {
+          const project = await this.options.store.getProject(lease.projectId);
+          const maxTaskRuntimeMs = projectBudgets(
+            project?.policy,
+          ).maxTaskRuntimeMs;
+          const runtimeMs =
+            now.getTime() - new Date(lease.issuedAt).getTime();
+          if (maxTaskRuntimeMs !== undefined && runtimeMs > maxTaskRuntimeMs) {
+            const failed = await this.options.store.finishWorkLease(
+              leaseId,
+              "failed",
+              now.toISOString(),
+              `Task exceeded the project runtime budget of ${maxTaskRuntimeMs} ms`,
+            );
+            if (failed) {
+              const task = (
+                await this.options.store.listSubmittedTasks({
+                  repositoryId: lease.repositoryId,
+                })
+              ).find((entry) => entry.id === lease.taskId);
+              if (task?.status === "claimed") {
+                await this.options.store.completeSubmittedTask(
+                  task.id,
+                  "failed",
+                );
+              }
+              await this.options.store.appendAudit(undefined, {
+                type: "task_failed",
+                taskId: lease.taskId,
+                data: {
+                  projectId: lease.projectId,
+                  repositoryId: lease.repositoryId,
+                  workerId: lease.workerId,
+                  leaseId,
+                  stage: "budget_enforcement",
+                  runtimeMs,
+                  maxTaskRuntimeMs,
+                },
+              });
+            }
+            throw new HttpError(
+              409,
+              "budget_exceeded",
+              "This task exceeded the project's runtime budget; stop work",
+            );
+          }
+        }
+
         const extended = await this.options.store.heartbeatWorkLease(
           leaseId,
           now.toISOString(),

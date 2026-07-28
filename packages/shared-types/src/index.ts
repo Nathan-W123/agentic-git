@@ -681,9 +681,25 @@ export interface ProjectApprovalPolicyConfig {
   approvalTimeoutMs?: number;
 }
 
+export interface ProjectBudgetPolicyConfig {
+  /**
+   * Hard cap on one task's remote execution time. Enforced at heartbeat: a
+   * lease past this age is failed rather than extended, so a runaway agent
+   * cannot burn compute indefinitely.
+   */
+  maxTaskRuntimeMs?: number;
+  /**
+   * Rolling 24-hour budget of total remote execution time for the project.
+   * Enforced at lease time: an exhausted project stops receiving workers
+   * until usage rolls out of the window. Tasks stay queued, not failed.
+   */
+  maxProjectRuntimeMsPerDay?: number;
+}
+
 export interface ProjectPolicy {
   version: 1;
   approvals?: ProjectApprovalPolicyConfig;
+  budgets?: ProjectBudgetPolicyConfig;
 }
 
 export const RISK_LEVELS: readonly RiskLevel[] = [
@@ -709,10 +725,11 @@ export function assertProjectPolicy(
     throw new TypeError("Project policy version must be 1");
   }
   for (const key of Object.keys(policy)) {
-    if (key !== "version" && key !== "approvals") {
+    if (key !== "version" && key !== "approvals" && key !== "budgets") {
       throw new TypeError(`Project policy has an unknown field: ${key}`);
     }
   }
+  assertBudgetPolicy(policy.budgets);
   if (policy.approvals === undefined) {
     return;
   }
@@ -782,4 +799,49 @@ export function assertProjectPolicy(
       );
     }
   }
+}
+
+const MAX_BUDGET_MS = 30 * 24 * 60 * 60 * 1000;
+
+function assertBudgetPolicy(value: unknown): void {
+  if (value === undefined) {
+    return;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new TypeError("Project policy budgets must be an object");
+  }
+  const budgets = value as Partial<ProjectBudgetPolicyConfig>;
+  for (const key of Object.keys(budgets)) {
+    if (key !== "maxTaskRuntimeMs" && key !== "maxProjectRuntimeMsPerDay") {
+      throw new TypeError(`Project budget policy has an unknown field: ${key}`);
+    }
+  }
+  for (const key of ["maxTaskRuntimeMs", "maxProjectRuntimeMsPerDay"] as const) {
+    const limit = budgets[key];
+    if (
+      limit !== undefined &&
+      (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_BUDGET_MS)
+    ) {
+      throw new TypeError(
+        `${key} must be an integer between 1 ms and thirty days`,
+      );
+    }
+  }
+}
+
+/**
+ * Reads the budget block out of a stored project policy.
+ *
+ * Missing policy means no budgets. A corrupt policy throws for the same
+ * reason approval interpretation does: a configured spending limit must
+ * never be silently ignored because the record failed to parse.
+ */
+export function projectBudgets(
+  policy: Record<string, unknown> | undefined,
+): ProjectBudgetPolicyConfig {
+  if (policy === undefined) {
+    return {};
+  }
+  assertProjectPolicy(policy);
+  return policy.budgets ?? {};
 }

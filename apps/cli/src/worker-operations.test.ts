@@ -498,6 +498,55 @@ test("a project policy forces review of an otherwise benign changeset", async ()
   }
 });
 
+test("an exhausted daily runtime budget stops leasing until cleared", async () => {
+  const harness = await createHarness();
+  try {
+    await harness.store.updateProject(DEFAULT_PROJECT_ID, {
+      policy: {
+        version: 1,
+        budgets: { maxProjectRuntimeMsPerDay: 60_000 },
+      },
+    });
+
+    await submit(harness);
+    const first = await lease(harness);
+    assert.ok(first, "the untouched budget must admit the first lease");
+
+    // Settle the lease with two minutes of recorded runtime — more than the
+    // one-minute daily budget.
+    const finishAt = new Date(
+      new Date(first.lease.issuedAt).getTime() + 120_000,
+    ).toISOString();
+    assert.equal(
+      await harness.store.finishWorkLease(
+        first.lease.id,
+        "completed",
+        finishAt,
+        "consumed the budget",
+      ),
+      true,
+    );
+    await harness.store.completeSubmittedTask(first.task.id, "integrated");
+
+    // The next task stays queued, not failed: budgets throttle, they do not
+    // discard work.
+    const queued = await submit(harness);
+    assert.equal(await lease(harness), undefined);
+    assert.equal(
+      (await harness.store.listSubmittedTasks()).find(
+        (task) => task.id === queued,
+      )?.status,
+      "submitted",
+    );
+
+    // Removing the budget restores leasing immediately.
+    await harness.store.updateProject(DEFAULT_PROJECT_ID, { policy: null });
+    assert.equal((await lease(harness))?.task.id, queued);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
 test("canonical movement requeues remote work for a fresh plan", async () => {
   const harness = await createHarness();
   try {

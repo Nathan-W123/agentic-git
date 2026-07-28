@@ -782,6 +782,13 @@ async function runMetrics(json: boolean): Promise<void> {
       }`,
     );
     console.log("");
+    console.log("Cost");
+    console.log(
+      `  Remote runtime:          ${Math.round(metrics.cost.leaseRuntimeMs / 1000)}s`,
+    );
+    console.log(`  Active leases:           ${metrics.cost.activeLeases}`);
+    console.log(`  Settled leases:          ${metrics.cost.settledLeases}`);
+    console.log("");
     console.log("Approvals");
     console.log(`  Requested:               ${approvals.requested}`);
     console.log(`  Decided:                 ${approvals.decided}`);

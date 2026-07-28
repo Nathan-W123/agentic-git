@@ -100,6 +100,39 @@ A worker that shuts down cleanly releases its lease immediately; one that
 dies simply stops heartbeating and the lease expires, so its task returns to
 the queue either way.
 
+## Project policy and budgets
+
+Each project can carry a declarative policy, set by a project admin via
+`PATCH /api/v1/projects/<id>` with a `policy` field (or cleared with
+`"policy": null`). Both the local coordinator and remote result acceptance
+evaluate it; a project without a policy uses the built-in defaults.
+
+```json
+{
+  "version": 1,
+  "approvals": {
+    "requireChangesetReview": false,
+    "riskLevels": ["high", "critical"],
+    "protectedPaths": ["secrets/**", "infrastructure/production/**"],
+    "approvalTimeoutMs": 86400000
+  },
+  "budgets": {
+    "maxTaskRuntimeMs": 1800000,
+    "maxProjectRuntimeMsPerDay": 28800000
+  }
+}
+```
+
+- `approvals` controls when a changeset needs a human: always, by risk
+  level, or when protected paths are touched. `protectedPaths` *replaces*
+  the default protected set when present.
+- `budgets` are runtime cost controls for remote execution. A task past
+  `maxTaskRuntimeMs` is failed at its next heartbeat; a project past its
+  rolling 24-hour `maxProjectRuntimeMsPerDay` stops receiving workers —
+  queued tasks wait rather than fail. Budgets are throttles, not hard
+  accounting: two workers leasing at the same instant can overshoot by at
+  most one task's runtime.
+
 ## Production notes
 
 - The control-plane image contains no Docker CLI, so the containerized

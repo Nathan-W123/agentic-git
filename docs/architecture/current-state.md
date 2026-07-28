@@ -143,8 +143,10 @@ The following are intentionally not represented as complete:
 - Redis/event-bus deployment, high availability, Kubernetes, Terraform,
   hybrid workers, and air-gapped release tooling. (A PostgreSQL storage
   backend exists; the rest of that deployment stack does not.)
-- General declarative policy evaluation, dependency/malware scanning, signed
-  artifacts, external audit anchoring, SSO, billing, and cost accounting.
+- Dependency/malware scanning, signed artifacts, external audit anchoring,
+  SSO, and billing. (Declarative per-project policy now governs approvals
+  and runtime budgets — see docs/deployment.md — but model-cost accounting
+  and payment plumbing do not exist.)
 - Full IDE, presence/cursor/terminal streams, and projection of unapproved task
   overlays.
 - Broad language-server coverage, cross-repository planning, learned

@@ -1270,6 +1270,93 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: work leases filter by project and issue time`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "lease-filter@example.invalid",
+        displayName: "Lease Filter",
+        passwordDigest: "unused",
+      });
+      const worker = await store.registerWorker({
+        userId: owner.id,
+        name: "worker",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      const secondProject = await store.createProject({
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        slug: "lease-filter",
+        name: "Lease Filter",
+      });
+      await store.saveRepository(REPOSITORY);
+      const otherRepository = {
+        id: "repo_filter_2",
+        path: "/canonical-2.git",
+        branch: "main",
+      };
+      await store.saveRepository(otherRepository);
+      await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        projectId: DEFAULT_PROJECT_ID,
+        objective: "default project task",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      await store.submitTask({
+        repositoryId: otherRepository.id,
+        projectId: secondProject.id,
+        objective: "second project task",
+        agentId: "codex",
+        validationCommands: [],
+      });
+
+      const first = await store.leaseNextTask({
+        workerId: worker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        projectId: DEFAULT_PROJECT_ID,
+      });
+      const second = await store.leaseNextTask({
+        workerId: worker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        projectId: secondProject.id,
+      });
+      assert.ok(first !== undefined && second !== undefined);
+
+      assert.deepEqual(
+        (await store.listWorkLeases({ projectId: DEFAULT_PROJECT_ID })).map(
+          (lease) => lease.id,
+        ),
+        [first.lease.id],
+      );
+      assert.deepEqual(
+        (await store.listWorkLeases({ projectId: secondProject.id })).map(
+          (lease) => lease.id,
+        ),
+        [second.lease.id],
+      );
+      assert.equal(
+        (
+          await store.listWorkLeases({
+            issuedAfter: "1970-01-01T00:00:00.000Z",
+          })
+        ).length,
+        2,
+      );
+      assert.deepEqual(
+        await store.listWorkLeases({
+          issuedAfter: "2999-01-01T00:00:00.000Z",
+        }),
+        [],
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: worker and task references are validated consistently`, async () => {
     const { store, cleanup } = await backend.open();
     try {

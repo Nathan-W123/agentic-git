@@ -547,13 +547,22 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   }
 
   public async listWorkLeases(
-    filter: { workerId?: string; status?: WorkLeaseStatus } = {},
+    filter: {
+      workerId?: string;
+      status?: WorkLeaseStatus;
+      projectId?: string;
+      issuedAfter?: string;
+    } = {},
   ): Promise<WorkLease[]> {
     return [...this.workLeases.values()]
       .filter(
         (lease) =>
           (filter.workerId === undefined || lease.workerId === filter.workerId) &&
-          (filter.status === undefined || lease.status === filter.status),
+          (filter.status === undefined || lease.status === filter.status) &&
+          (filter.projectId === undefined ||
+            lease.projectId === filter.projectId) &&
+          (filter.issuedAfter === undefined ||
+            lease.issuedAt > filter.issuedAfter),
       )
       .sort((left, right) => right.issuedAt.localeCompare(left.issuedAt))
       .map((lease) => ({ ...lease }));

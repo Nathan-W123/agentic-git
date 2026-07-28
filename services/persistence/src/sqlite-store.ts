@@ -802,7 +802,12 @@ export class SqliteCoordinationStore implements CoordinationStore {
   }
 
   public async listWorkLeases(
-    filter: { workerId?: string; status?: WorkLeaseStatus } = {},
+    filter: {
+      workerId?: string;
+      status?: WorkLeaseStatus;
+      projectId?: ProjectId;
+      issuedAfter?: string;
+    } = {},
   ): Promise<WorkLease[]> {
     const clauses: string[] = [];
     const values: string[] = [];
@@ -813,6 +818,14 @@ export class SqliteCoordinationStore implements CoordinationStore {
     if (filter.status !== undefined) {
       clauses.push("status = ?");
       values.push(filter.status);
+    }
+    if (filter.projectId !== undefined) {
+      clauses.push("project_id = ?");
+      values.push(filter.projectId);
+    }
+    if (filter.issuedAfter !== undefined) {
+      clauses.push("issued_at > ?");
+      values.push(filter.issuedAfter);
     }
     const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
     const rows = this.db

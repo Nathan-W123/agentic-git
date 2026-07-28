@@ -194,7 +194,12 @@ export class WorkerClient {
         method: "POST",
       });
     } catch (error) {
-      if (error instanceof ControlPlaneError && error.code === "lease_lost") {
+      if (
+        error instanceof ControlPlaneError &&
+        (error.code === "lease_lost" || error.code === "budget_exceeded")
+      ) {
+        // Either way the control plane has withdrawn this lease; the task no
+        // longer belongs to this worker and reporting would be refused.
         throw new LeaseLostError(leaseId);
       }
       throw error;
