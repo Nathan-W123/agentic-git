@@ -1256,10 +1256,11 @@ function renderTabStrip() {
         ${
           tab.kind === "file" && state.dirtyFiles.has(tab.data.path)
             ? '<span class="dirty-dot" title="Unsaved changes"></span>'
-            : `<span class="close" data-close-tab="${escapeHtml(tab.id)}">${icon(
-                "close",
-              )}</span>`
+            : ""
         }
+        <span class="close" data-close-tab="${escapeHtml(tab.id)}">${icon(
+          "close",
+        )}</span>
       </button>`,
     )
     .join("");

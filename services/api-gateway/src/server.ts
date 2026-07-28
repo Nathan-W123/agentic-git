@@ -2027,16 +2027,30 @@ export class ApiGateway {
     // needed to put work into the queue); running terminal commands requires
     // run_task. Canonical is untouched by everything here except `submit`,
     // which goes through the ordinary integration pipeline.
-    const workspaceMatch = matchPath(
+    // Matched in two steps because matchPath decodes every group and an
+    // absent optional group must stay absent rather than become "undefined".
+    const workspaceBaseMatch = matchPath(
       path,
       new RegExp(
-        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/workspace` +
-          `(?:/(files|file|reset|exec|submit))?$`,
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/workspace$`,
         "u",
       ),
     );
+    const workspaceActionMatch =
+      workspaceBaseMatch === undefined
+        ? matchPath(
+            path,
+            new RegExp(
+              `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/workspace` +
+                `/(files|file|reset|exec|submit)$`,
+              "u",
+            ),
+          )
+        : undefined;
+    const workspaceMatch = workspaceBaseMatch ?? workspaceActionMatch;
     if (workspaceMatch !== undefined) {
-      const [projectId = "", repositoryId = "", action] = workspaceMatch;
+      const [projectId = "", repositoryId = ""] = workspaceMatch;
+      const action = workspaceActionMatch?.[2];
       const workspaceOperations = this.options.operations.workspace;
       if (workspaceOperations === undefined) {
         throw new HttpError(
