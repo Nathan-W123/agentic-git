@@ -20,8 +20,10 @@ import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
 
 import {
   acceptWorkResult,
+  admitWorkPlan,
   leaseBundle,
   leaseWork,
+  type WorkAssignment,
 } from "./worker-operations.js";
 
 /**
@@ -120,6 +122,45 @@ function plan(
     riskLevel: "low",
     ...overrides,
   };
+}
+
+/**
+ * The plan-first step every remote result now has to pass through: the worker
+ * submits its plan and the control plane answers before any editing.
+ */
+async function admit(
+  harness: Harness,
+  assignment: WorkAssignment,
+  overrides: Partial<AgentPlan> = {},
+) {
+  return await admitWorkPlan(
+    harness.store,
+    {
+      leaseId: assignment.lease.id,
+      actorId: "user",
+      plan: plan(assignment.task.id, {
+        objective: assignment.task.objective,
+        ...overrides,
+      }),
+    },
+    { repositories: harness.repositories },
+  );
+}
+
+/** Leases and admits in one step, for tests about what happens afterwards. */
+async function leaseAndAdmit(
+  harness: Harness,
+  overrides: Partial<AgentPlan> = {},
+): Promise<WorkAssignment> {
+  const assignment = await lease(harness);
+  assert.ok(assignment);
+  const outcome = await admit(harness, assignment, overrides);
+  assert.equal(outcome.outcome, "admitted");
+  assert.equal(
+    outcome.outcome === "admitted" ? outcome.admission.status : undefined,
+    "approved",
+  );
+  return assignment;
 }
 
 function resultStub(
@@ -234,8 +275,8 @@ test("an invalid completed result fails the lease instead of retrying forever", 
   const harness = await createHarness();
   try {
     const taskId = await submit(harness);
-    const assignment = await lease(harness);
-    const leaseId = assignment?.lease.id ?? "";
+    const assignment = await leaseAndAdmit(harness);
+    const leaseId = assignment.lease.id;
 
     const rejected = await acceptWorkResult(harness.store, {
       leaseId,
@@ -263,8 +304,7 @@ test("a valid remote result is recorded, validated, and promoted", async () => {
   const harness = await createHarness();
   try {
     const taskId = await submit(harness);
-    const assignment = await lease(harness);
-    assert.ok(assignment);
+    const assignment = await leaseAndAdmit(harness);
     const repository = await harness.store.getRepository("repo_worker");
     assert.ok(repository);
     const canonical = {
@@ -349,8 +389,7 @@ test("a protected remote result waits for durable human approval", async () => {
   const harness = await createHarness();
   try {
     const taskId = await submit(harness);
-    const assignment = await lease(harness);
-    assert.ok(assignment);
+    const assignment = await leaseAndAdmit(harness, { riskLevel: "high" });
     const stored = await harness.store.getRepository("repo_worker");
     assert.ok(stored);
     const repository = {
@@ -428,8 +467,7 @@ test("a project policy forces review of an otherwise benign changeset", async ()
     });
 
     const taskId = await submit(harness);
-    const assignment = await lease(harness);
-    assert.ok(assignment);
+    const assignment = await leaseAndAdmit(harness);
     const stored = await harness.store.getRepository("repo_worker");
     assert.ok(stored);
     const repository = {
@@ -551,8 +589,9 @@ test("canonical movement requeues remote work for a fresh plan", async () => {
   const harness = await createHarness();
   try {
     const taskId = await submit(harness);
-    const assignment = await lease(harness);
-    assert.ok(assignment);
+    // Admitted at the original base, so this exercises the backstop: the plan
+    // was fine when it was approved and canonical moved during execution.
+    const assignment = await leaseAndAdmit(harness);
     const stored = await harness.store.getRepository("repo_worker");
     assert.ok(stored);
     const repository = {
@@ -721,6 +760,23 @@ test("concurrent workers in one repository cannot corrupt canonical; the loser r
     assert.ok(assignmentA && assignmentB);
     assert.equal(assignmentA.lease.baseRevision, assignmentB.lease.baseRevision);
 
+    // Disjoint plans: admission lets both run, which is the behaviour the
+    // parallelism cap exists to enable.
+    const admissions: [WorkAssignment, Partial<AgentPlan>][] = [
+      [assignmentA, {}],
+      [
+        assignmentB,
+        { expectedFiles: ["src/other.js"], expectedSymbols: ["other"] },
+      ],
+    ];
+    for (const [assignment, overrides] of admissions) {
+      const outcome = await admit(harness, assignment, overrides);
+      assert.equal(
+        outcome.outcome === "admitted" ? outcome.admission.status : outcome,
+        "approved",
+      );
+    }
+
     const repository = await harness.store.getRepository("repo_worker");
     assert.ok(repository);
     const canonical = {
@@ -827,6 +883,14 @@ test("concurrent workers in one repository cannot corrupt canonical; the loser r
       retryAssignment.lease.baseRevision,
       assignmentB.lease.baseRevision,
     );
+    const readmitted = await admit(harness, retryAssignment, {
+      expectedFiles: ["src/other.js"],
+      expectedSymbols: ["other"],
+    });
+    assert.equal(
+      readmitted.outcome === "admitted" ? readmitted.admission.status : readmitted,
+      "approved",
+    );
     const acceptedB = await acceptWorkResult(
       harness.store,
       {
@@ -907,6 +971,19 @@ test("the full remote cycle runs end to end against a Postgres store", async () 
     assert.ok(assignment);
     assert.equal(assignment.task.id, taskId);
     assert.equal(assignment.lease.baseRevision, harness.revision);
+    assert.equal(assignment.protocolVersion, 2);
+
+    // Plan first: the control plane answers before the worker edits anything,
+    // and the verdict is durable in Postgres.
+    const admitted = await admit(harness, assignment);
+    assert.equal(admitted.outcome, "admitted");
+    assert.equal(
+      admitted.outcome === "admitted" ? admitted.admission.status : undefined,
+      "approved",
+    );
+    const admittedLease = await harness.store.getWorkLease(assignment.lease.id);
+    assert.equal(admittedLease?.plan?.admission.status, "approved");
+    assert.ok((admittedLease?.plan?.admission.ownershipGrants.length ?? 0) > 0);
 
     // The worker side: reconstruct the workspace from the bundle bytes alone.
     const bundle = await leaseBundle(harness.store, assignment.lease.id);

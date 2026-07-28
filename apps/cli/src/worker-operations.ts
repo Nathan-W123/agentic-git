@@ -3,9 +3,12 @@ import path from "node:path";
 
 import { CodeIntelligenceService } from "@coord/code-intelligence";
 import {
+  DEFAULT_PLAN_RETRY_MS,
+  PlanAdmissionController,
   StoreApprovalController,
   approvalPolicyForProject,
   assertChangeSetWithinPlan,
+  type ActivePlan,
 } from "@coord/coordinator";
 import { IntegrationService } from "@coord/integration-service";
 import type {
@@ -20,12 +23,15 @@ import {
 import {
   assertAgentPlan,
   assertChangeSet,
+  normalizeRepositoryPath,
+  planAdmissionApproved,
   projectBudgets,
   type AgentPlan,
   type CanonicalVersion,
   type ChangeSet,
   type CoordinatorDecision,
   type IntegrationResult,
+  type PlanAdmission,
   type TaskDefinition,
 } from "@coord/shared-types";
 import {
@@ -68,6 +74,16 @@ function configuredRepositoryParallelism(explicit?: number): number {
   return value;
 }
 
+/**
+ * Wire version of the remote worker protocol.
+ *
+ * 1 planned and executed in one shot and posted a result.
+ * 2 submits the plan for admission first and only executes once the control
+ *   plane grants ownership, so a conflict costs a planning round trip instead
+ *   of a discarded execution.
+ */
+export const WORKER_PROTOCOL_VERSION = 2;
+
 export interface WorkAssignment {
   lease: WorkLease;
   task: SubmittedTask;
@@ -76,6 +92,10 @@ export interface WorkAssignment {
   bundleUrl: string;
   bundleRef: string;
   heartbeatIntervalMs: number;
+  /** Worker-side check that the control plane expects a plan first. */
+  protocolVersion: number;
+  /** Submit the agent's plan here before executing anything. */
+  planUrl: string;
 }
 
 export interface WorkResultInput {
@@ -280,6 +300,8 @@ export async function leaseWork(
       bundleUrl: `/api/v1/workers/leases/${leased.lease.id}/bundle`,
       bundleRef: bundleRefFor(leased.lease.id),
       heartbeatIntervalMs: HEARTBEAT_INTERVAL_MS,
+      protocolVersion: WORKER_PROTOCOL_VERSION,
+      planUrl: `/api/v1/workers/leases/${leased.lease.id}/plan`,
     };
   }
   return undefined;
@@ -309,6 +331,41 @@ export async function leaseBundle(
     lease.baseRevision,
     bundleRefFor(lease.id),
   );
+}
+
+/**
+ * Fails a lease whose worker sent something the control plane cannot use.
+ *
+ * Failing rather than releasing is deliberate at both the plan and the result
+ * stage: a malformed submission would be malformed again on the next attempt,
+ * so requeueing would loop forever.
+ */
+async function failLease(
+  store: CoordinationStore,
+  lease: WorkLease,
+  reason: string,
+  stage: string,
+): Promise<void> {
+  const now = new Date().toISOString();
+  const settled = await store.finishWorkLease(
+    lease.id,
+    "failed",
+    now,
+    reason.slice(0, 2_000),
+  );
+  if (!settled) {
+    await store.expireWorkLeases(now);
+    return;
+  }
+  await failClaimedTask(store, lease.taskId);
+  await trace(store, undefined, "task_failed", lease.taskId, {
+    projectId: lease.projectId,
+    repositoryId: lease.repositoryId,
+    workerId: lease.workerId,
+    leaseId: lease.id,
+    stage,
+    error: reason,
+  });
 }
 
 async function rejectWorkerResult(
@@ -415,6 +472,303 @@ async function requeueForCanonicalChange(
   };
 }
 
+export interface WorkPlanInput {
+  leaseId: string;
+  actorId: string;
+  plan: unknown;
+}
+
+export type WorkPlanOutcome =
+  /** The coordinator answered; `admission.status` says whether to execute. */
+  | { outcome: "admitted"; admission: PlanAdmission }
+  /** The submission was unusable; the lease and task are failed. */
+  | { outcome: "rejected"; reason: string }
+  /** The lease lapsed or was settled; stop work and re-lease. */
+  | { outcome: "lease_lost"; reason: string };
+
+interface WorkPlanServices {
+  repositories?: RepositoryService;
+  intelligence?: CodeIntelligenceService;
+  admissions?: PlanAdmissionController;
+}
+
+/** How many times admission is recomputed when a rival admission lands first. */
+const MAX_ADMISSION_ATTEMPTS = 4;
+
+/**
+ * The plans currently executing in one repository, and the exact set of
+ * leases that view was read from.
+ *
+ * The ids travel back into {@link CoordinationStore.saveWorkLeasePlan} so the
+ * store can refuse a write whose view has since changed.
+ */
+async function executingPlans(
+  store: CoordinationStore,
+  lease: WorkLease,
+): Promise<{ active: ActivePlan[]; approvedLeaseIds: string[] }> {
+  const leases = await store.listWorkLeases({
+    status: "active",
+    repositoryId: lease.repositoryId,
+  });
+  const admitted = leases.filter(
+    (candidate) =>
+      candidate.id !== lease.id &&
+      candidate.plan !== undefined &&
+      planAdmissionApproved(candidate.plan.admission),
+  );
+  const tasks = await store.listSubmittedTasks({
+    repositoryId: lease.repositoryId,
+  });
+  const agentFor = new Map(tasks.map((task) => [task.id, task.agentId]));
+  return {
+    active: admitted.map((candidate): ActivePlan => ({
+      taskId: candidate.taskId,
+      agentId: agentFor.get(candidate.taskId) ?? candidate.workerId,
+      // Guarded by the filter above.
+      plan: (candidate.plan as { plan: AgentPlan }).plan,
+    })),
+    approvedLeaseIds: admitted.map((candidate) => candidate.id).sort(),
+  };
+}
+
+/**
+ * Arbitrates a remote worker's plan before it edits anything.
+ *
+ * This is the remote half of what the local coordinator does between
+ * `requestPlan` and `sendContext`: the plan is checked against every plan
+ * currently executing in the repository, ownership is granted or withheld, and
+ * only an approved answer lets the worker spend agent time. A conflict now
+ * costs one planning round trip rather than a full execution that
+ * exact-base integration would later throw away.
+ *
+ * That backstop is untouched. Admission reduces waste; it is not what makes
+ * remote results safe.
+ */
+export async function admitWorkPlan(
+  store: CoordinationStore,
+  input: WorkPlanInput,
+  services: WorkPlanServices = {},
+): Promise<WorkPlanOutcome> {
+  const repositories = services.repositories ?? new RepositoryService();
+  const intelligence =
+    services.intelligence ?? new CodeIntelligenceService(repositories);
+  const admissions = services.admissions ?? new PlanAdmissionController();
+
+  const now = new Date().toISOString();
+  await store.expireWorkLeases(now);
+  const lease = await store.getWorkLease(input.leaseId);
+  if (lease === undefined) {
+    throw new Error(`Unknown lease: ${input.leaseId}`);
+  }
+  if (lease.status !== "active" || lease.expiresAt <= now) {
+    return { outcome: "lease_lost", reason: `lease is ${lease.status}` };
+  }
+  const task = await submittedTask(store, lease);
+  if (task === undefined || task.status !== "claimed") {
+    const reason = "The leased task is no longer claimed";
+    await failLease(store, lease, reason, "remote_plan_validation");
+    return { outcome: "rejected", reason };
+  }
+
+  let submitted: AgentPlan;
+  try {
+    const value = structuredClone(input.plan);
+    assertAgentPlan(value);
+    if (value.taskId !== task.id) {
+      throw new Error("Plan is for a different task");
+    }
+    if (value.objective.trim() !== task.objective.trim()) {
+      throw new Error("Plan objective does not match the leased task");
+    }
+    submitted = value;
+  } catch (error) {
+    const reason = `Invalid remote plan: ${errorMessage(error)}`;
+    await failLease(store, lease, reason, "remote_plan_validation");
+    return { outcome: "rejected", reason };
+  }
+
+  const storedRepository = await store.getRepository(lease.repositoryId);
+  if (storedRepository === undefined) {
+    const reason = `Unknown repository: ${lease.repositoryId}`;
+    await failLease(store, lease, reason, "remote_plan_validation");
+    return { outcome: "rejected", reason };
+  }
+  const repository = canonical(storedRepository);
+  const baseVersion = await repositories.getVersionAtRevision(
+    repository,
+    lease.baseRevision,
+  );
+
+  // Canonical moving under a plan is the cheapest possible moment to notice:
+  // the worker has planned but not edited, so requeueing costs one plan.
+  const current = await repositories.getCanonicalVersion(repository);
+  if (current.revision !== baseVersion.revision) {
+    await requeueForCanonicalChange(
+      store,
+      repositories,
+      lease,
+      baseVersion,
+      current,
+    );
+    return {
+      outcome: "admitted",
+      admission: {
+        status: "blocked",
+        taskId: task.id,
+        planRevision: 1,
+        baseRevision: lease.baseRevision,
+        ownershipGrants: [],
+        constraints: ["Plan again from the current canonical revision"],
+        blockedBy: [],
+        conflicts: [],
+        explanation:
+          "Canonical advanced before this plan was submitted; the task was " +
+          "requeued to replan",
+        requeue: true,
+        decidedAt: new Date().toISOString(),
+      },
+    };
+  }
+
+  const index = await intelligence.index(repository, baseVersion.revision);
+  const plan = intelligence.enrichPlan(submitted, index);
+  assertAgentPlan(plan);
+  await trace(store, undefined, "plan_received", task.id, {
+    projectId: task.projectId,
+    repositoryId: task.repositoryId,
+    workerId: lease.workerId,
+    leaseId: lease.id,
+    expectedFiles: plan.expectedFiles,
+    expectedSymbols: plan.expectedSymbols,
+    riskLevel: plan.riskLevel,
+    remote: true,
+  });
+
+  for (let attempt = 1; attempt <= MAX_ADMISSION_ATTEMPTS; attempt += 1) {
+    const executing = await executingPlans(store, lease);
+    const admission = admissions.admit({
+      plan,
+      agentId: task.agentId,
+      baseRevision: baseVersion.revision,
+      baseVersion: baseVersion.sequence,
+      active: executing.active,
+    });
+    const saved = await store.saveWorkLeasePlan({
+      leaseId: lease.id,
+      submission: { plan, admission },
+      observedApprovedLeaseIds: executing.approvedLeaseIds,
+    });
+    if (saved.outcome === "lease_lost") {
+      return {
+        outcome: "lease_lost",
+        reason: "lease was lost while its plan was being admitted",
+      };
+    }
+    if (saved.outcome === "stale") {
+      // Another worker was admitted between the read and the write. Its plan
+      // is now part of the executing set, so decide again against it.
+      continue;
+    }
+
+    for (const assessment of admission.conflicts) {
+      await trace(store, undefined, "conflict_detected", task.id, {
+        projectId: task.projectId,
+        repositoryId: task.repositoryId,
+        taskIds: assessment.taskIds,
+        score: assessment.score,
+        disposition: assessment.disposition,
+        evidence: assessment.evidence,
+        stage: "remote_plan_admission",
+      });
+    }
+    await trace(store, undefined, "plan_admitted", task.id, {
+      projectId: task.projectId,
+      repositoryId: task.repositoryId,
+      workerId: lease.workerId,
+      leaseId: lease.id,
+      status: admission.status,
+      blockedBy: admission.blockedBy,
+      constraints: admission.constraints,
+      explanation: admission.explanation,
+    });
+    if (admission.ownershipGrants.length > 0) {
+      await trace(store, undefined, "ownership_granted", task.id, {
+        projectId: task.projectId,
+        repositoryId: task.repositoryId,
+        leaseId: lease.id,
+        leases: admission.ownershipGrants,
+      });
+    }
+    return { outcome: "admitted", admission };
+  }
+
+  // Repeated contention is not an error, it is a busy repository. Tell the
+  // worker to wait rather than failing a task that is perfectly valid.
+  return {
+    outcome: "admitted",
+    admission: {
+      status: "sequenced",
+      taskId: task.id,
+      planRevision: 1,
+      baseRevision: baseVersion.revision,
+      ownershipGrants: [],
+      constraints: ["Resubmit the same plan after the retry interval"],
+      blockedBy: [],
+      conflicts: [],
+      explanation:
+        "Plan admission is contended in this repository; resubmit shortly",
+      retryAfterMs: DEFAULT_PLAN_RETRY_MS,
+      decidedAt: new Date().toISOString(),
+    },
+  };
+}
+
+/**
+ * Resources a result claims that its admitted plan never covered.
+ *
+ * The admitted plan is the contract ownership was granted against, so a
+ * result that widened its own scope is refused rather than re-arbitrated:
+ * by then the edits already exist and no other holder had a chance to object.
+ */
+function planScopeEscapes(admitted: AgentPlan, reported: AgentPlan): string[] {
+  const escapes: string[] = [];
+  const compare = (
+    kind: string,
+    allowedValues: readonly string[],
+    reportedValues: readonly string[] | undefined,
+    normalize: (value: string) => string = (value) => value,
+  ): void => {
+    const allowed = new Set(
+      allowedValues.map((value) => normalize(value).toLowerCase()),
+    );
+    for (const value of reportedValues ?? []) {
+      if (!allowed.has(normalize(value).toLowerCase())) {
+        escapes.push(`${kind}:${value}`);
+      }
+    }
+  };
+  compare(
+    "file",
+    admitted.expectedFiles,
+    reported.expectedFiles,
+    normalizeRepositoryPath,
+  );
+  compare("symbol", admitted.expectedSymbols, reported.expectedSymbols);
+  compare("api", admitted.expectedApis ?? [], reported.expectedApis);
+  compare("schema", admitted.expectedSchemas ?? [], reported.expectedSchemas);
+  compare(
+    "configuration",
+    admitted.expectedConfigKeys ?? [],
+    reported.expectedConfigKeys,
+  );
+  compare("test", admitted.expectedTests ?? [], reported.expectedTests);
+  compare("service", admitted.expectedServices ?? [], reported.expectedServices);
+  if (reported.riskLevel !== admitted.riskLevel) {
+    escapes.push(`riskLevel:${reported.riskLevel}`);
+  }
+  return escapes;
+}
+
 /**
  * Validates and transactionally integrates a remote worker result.
  *
@@ -428,8 +782,6 @@ export async function acceptWorkResult(
   services: WorkResultServices = {},
 ): Promise<WorkResultAcceptance> {
   const repositories = services.repositories ?? new RepositoryService();
-  const intelligence =
-    services.intelligence ?? new CodeIntelligenceService(repositories);
   const integrations =
     services.integrations ?? new IntegrationService(repositories);
   const leaseAtStart = await store.getWorkLease(input.leaseId);
@@ -524,6 +876,21 @@ export async function acceptWorkResult(
     return { accepted: true };
   }
 
+  // Plan-first: a result is only meaningful against a plan this control plane
+  // admitted. Without one, no other holder ever had the chance to object to
+  // this worker's scope, which is the whole point of admission.
+  const admitted = leaseAtStart.plan;
+  if (admitted === undefined || !planAdmissionApproved(admitted.admission)) {
+    return await rejectWorkerResult(
+      store,
+      leaseAtStart,
+      admitted === undefined
+        ? "Remote results require an admitted plan; submit the plan to the " +
+          "lease's plan endpoint before executing"
+        : `Remote plan was ${admitted.admission.status}, not approved for execution`,
+    );
+  }
+
   let rawPlan: AgentPlan;
   let changeSet: ChangeSet;
   try {
@@ -551,7 +918,10 @@ export async function acceptWorkResult(
   }
   const repository = canonical(storedRepository);
   let baseVersion: CanonicalVersion;
-  let plan: AgentPlan;
+  // The enriched plan the coordinator admitted, not the one the worker chose
+  // to report: ownership was granted against the former, so that is what the
+  // changeset is held to.
+  const plan = admitted.plan;
   try {
     baseVersion = await repositories.getVersionAtRevision(
       repository,
@@ -564,6 +934,12 @@ export async function acceptWorkResult(
     ) {
       throw new Error("Plan or changeset is for a different task");
     }
+    const escapes = planScopeEscapes(plan, rawPlan);
+    if (escapes.length > 0) {
+      throw new Error(
+        `Reported plan claims resources the admitted plan did not cover: ${escapes.join(", ")}`,
+      );
+    }
     if (
       changeSet.baseRevision !== leaseAtStart.baseRevision ||
       changeSet.baseVersion !== baseVersion.sequence
@@ -572,11 +948,9 @@ export async function acceptWorkResult(
         "Changeset base does not match the canonical version assigned by the lease",
       );
     }
-    if (changeSet.riskAssessment.level !== rawPlan.riskLevel) {
+    if (changeSet.riskAssessment.level !== plan.riskLevel) {
       throw new Error("Plan and changeset disagree about risk level");
     }
-    const index = await intelligence.index(repository, baseVersion.revision);
-    plan = intelligence.enrichPlan(rawPlan, index);
     assertChangeSetWithinPlan(plan, changeSet);
   } catch (error) {
     return await rejectWorkerResult(
@@ -617,11 +991,14 @@ export async function acceptWorkResult(
     await store.saveTaskStatus(run.id, task.id, "planning");
     await store.savePlan(run.id, task.id, plan);
     await store.savePlanRevision(run.id, task.id, {
-      revision: 1,
+      revision: admitted.admission.planRevision,
       reason: "initial",
       canonicalRevision: baseVersion.revision,
       plan,
     });
+    // The grants the plan was admitted under belong in the run record, so the
+    // history shows what this task was allowed to own, not just what it wrote.
+    await store.saveLeases(run.id, admitted.admission.ownershipGrants);
     await store.saveChangeSet(run.id, changeSet);
     await trace(store, run.id, "plan_received", task.id, {
       projectId: task.projectId,
@@ -650,17 +1027,22 @@ export async function acceptWorkResult(
     const reviewReasons = approvalPolicy.changesetReasons(plan, changeSet);
     const decision: CoordinatorDecision = {
       decision:
-        reviewReasons.length === 0 ? "approved" : "approved_with_constraints",
+        reviewReasons.length === 0 && admitted.admission.constraints.length === 0
+          ? "approved"
+          : "approved_with_constraints",
       taskId: task.id,
-      planRevision: 1,
-      ownershipGrants: [],
-      constraints:
-        reviewReasons.length === 0
+      planRevision: admitted.admission.planRevision,
+      ownershipGrants: admitted.admission.ownershipGrants,
+      constraints: [
+        ...admitted.admission.constraints,
+        ...(reviewReasons.length === 0
           ? ["Remote changeset must pass exact-base control-plane validation"]
-          : ["Remote changeset received required human approval"],
+          : ["Remote changeset received required human approval"]),
+      ],
       blockedBy: [],
       explanation:
-        "Remote plan, task identity, base revision, and file scope were verified",
+        "Plan was admitted before execution; task identity, base revision, " +
+        "and file scope were verified against it",
     };
     if (reviewReasons.length > 0) {
       await store.saveTaskStatus(
@@ -857,13 +1239,20 @@ export function workerOperations(
     sandboxOptions === undefined
       ? worktrees
       : new DockerWorkspaceManager(sandboxOptions, worktrees);
+  const intelligence = new CodeIntelligenceService(repositories);
   const services: WorkResultServices = {
     repositories,
-    intelligence: new CodeIntelligenceService(repositories),
+    intelligence,
     integrations: new IntegrationService(repositories, workspaces),
     integrationRoot: project.integrationRoot,
   };
+  const planServices: WorkPlanServices = { repositories, intelligence };
   const processing = new Map<string, Promise<WorkResultAcceptance>>();
+  // Admission reads the repository's executing plans and writes one back.
+  // Serialising per repository in the hosting process keeps a burst of
+  // simultaneous submissions from spending retries on each other; the store's
+  // own staleness check is what makes the result correct.
+  const admitting = new Map<string, Promise<unknown>>();
   return {
     leaseWork: async (input: {
       workerId: string;
@@ -872,6 +1261,22 @@ export function workerOperations(
     }) => await leaseWork(store, input, repositories, project),
     leaseBundle: async (leaseId: string) =>
       await leaseBundle(store, leaseId, repositories),
+    admitWorkPlan: async (input: WorkPlanInput) => {
+      const lease = await store.getWorkLease(input.leaseId);
+      const key = lease?.repositoryId ?? input.leaseId;
+      const queued = (admitting.get(key) ?? Promise.resolve()).then(
+        async () => await admitWorkPlan(store, input, planServices),
+        async () => await admitWorkPlan(store, input, planServices),
+      );
+      admitting.set(key, queued);
+      try {
+        return await queued;
+      } finally {
+        if (admitting.get(key) === queued) {
+          admitting.delete(key);
+        }
+      }
+    },
     acceptWorkResult: async (input: WorkResultInput) => {
       const existing = processing.get(input.leaseId);
       if (existing !== undefined) {

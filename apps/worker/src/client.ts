@@ -1,4 +1,5 @@
 import type { WorkAssignment } from "@coord/cli/worker-operations";
+import type { AgentPlan, PlanAdmission } from "@coord/shared-types";
 
 /**
  * HTTP client for the remote worker protocol.
@@ -215,6 +216,40 @@ export class WorkerClient {
       throw new Error(`Control plane returned no bundle for lease ${leaseId}`);
     }
     return bytes;
+  }
+
+  /**
+   * Submits a plan for admission before any editing.
+   *
+   * The answer is the coordinator's, not an acknowledgement: only an approved
+   * status licenses the worker to spend agent execution time.
+   */
+  public async submitPlan(
+    leaseId: string,
+    plan: AgentPlan,
+  ): Promise<PlanAdmission> {
+    try {
+      const { json } = await this.request(
+        `/api/v1/workers/leases/${leaseId}/plan`,
+        { method: "POST", body: { plan } },
+      );
+      const admission = (json as { admission?: PlanAdmission } | undefined)
+        ?.admission;
+      if (admission === undefined) {
+        throw new Error(
+          `Control plane returned no admission for lease ${leaseId}`,
+        );
+      }
+      return admission;
+    } catch (error) {
+      if (
+        error instanceof ControlPlaneError &&
+        (error.code === "lease_lost" || error.code === "budget_exceeded")
+      ) {
+        throw new LeaseLostError(leaseId);
+      }
+      throw error;
+    }
   }
 
   public async report(

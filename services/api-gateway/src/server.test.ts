@@ -174,10 +174,22 @@ async function startRuntime(
         bundleUrl: `/api/v1/workers/leases/${leased.lease.id}/bundle`,
         bundleRef: `coord-lease/${leased.lease.id}`,
         heartbeatIntervalMs: 60_000,
+        protocolVersion: 2,
+        planUrl: `/api/v1/workers/leases/${leased.lease.id}/plan`,
       };
     },
     async leaseBundle() {
       return Buffer.from("PACK-placeholder");
+    },
+    async admitWorkPlan(input) {
+      const lease = await store.getWorkLease(input.leaseId);
+      if (lease === undefined || lease.status !== "active") {
+        return { outcome: "lease_lost", reason: "lease is not active" };
+      }
+      return {
+        outcome: "admitted",
+        admission: { status: "approved", taskId: lease.taskId },
+      };
     },
     async acceptWorkResult(input) {
       await store.finishWorkLease(

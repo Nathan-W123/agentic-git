@@ -7,14 +7,20 @@ import {
   type CodexProcessRunner,
 } from "@coord/adapter-codex";
 import type { AgentAdapter } from "@coord/agent-protocol";
-import type { WorkAssignment } from "@coord/cli/worker-operations";
+import {
+  WORKER_PROTOCOL_VERSION,
+  type WorkAssignment,
+} from "@coord/cli/worker-operations";
 import type { AgentConfig, CoordinatorProject } from "@coord/cli/project";
 import { DEFAULT_PROJECT_ID } from "@coord/persistence";
 import { GitClient } from "@coord/repository-service";
-import type {
-  AgentPlan,
-  ChangeSet,
-  ScopeChangeDecision,
+import {
+  planAdmissionApproved,
+  type AgentPlan,
+  type ChangeSet,
+  type CoordinatorDecision,
+  type PlanAdmission,
+  type ScopeChangeDecision,
 } from "@coord/shared-types";
 import {
   DockerWorkspaceManager,
@@ -30,9 +36,15 @@ import { LeaseLostError, WorkerClient } from "./client.js";
  * The worker daemon.
  *
  * It owns nothing durable. Each iteration leases one task, rebuilds the
- * workspace from a bundle, runs the agent, returns a changeset, and deletes
- * everything. If it dies at any point the lease lapses and the control plane
- * hands the task to someone else.
+ * workspace from a bundle, has its agent plan, gets that plan admitted by the
+ * control plane, runs the agent, returns a changeset, and deletes everything.
+ * If it dies at any point the lease lapses and the control plane hands the
+ * task to someone else.
+ *
+ * Planning before admission is what keeps a conflict cheap. An agent that is
+ * going to collide with executing work is stopped after one planning round
+ * trip, before it edits a line, rather than after a full execution that the
+ * control plane would then discard.
  */
 
 export interface WorkerOptions {
@@ -47,6 +59,12 @@ export interface WorkerOptions {
   codexRunner?: CodexProcessRunner;
   /** Idle wait between polls when the queue is empty. */
   pollIntervalMs?: number;
+  /**
+   * How long to keep resubmitting a deferred plan before handing the lease
+   * back. Waiting keeps the already-paid planning work; giving up keeps a
+   * repository slot from being held by a task that cannot start.
+   */
+  planWaitBudgetMs?: number;
 }
 
 export interface IterationResult {
@@ -54,9 +72,25 @@ export interface IterationResult {
   taskId?: string;
   accepted?: boolean;
   reason?: string;
+  /**
+   * The plan was refused before execution. Not a failure: the task is back in
+   * the queue and no agent execution time was spent on it.
+   */
+  deferred?: boolean;
 }
 
 const DEFAULT_POLL_MS = 5_000;
+const DEFAULT_PLAN_WAIT_BUDGET_MS = 60_000;
+const MIN_PLAN_RETRY_MS = 1_000;
+
+/** Everything the agent side holds between planning and execution. */
+interface PlannedWork {
+  adapter: AgentAdapter;
+  sessionId: string;
+  plan: AgentPlan;
+  workspaceId: string;
+  workspacePath: string;
+}
 
 export class Worker {
   private identity: { id: string } | undefined;
@@ -123,7 +157,26 @@ export class Worker {
     beat.unref?.();
 
     try {
-      const result = await this.execute(assignment, scratch);
+      if ((assignment.protocolVersion ?? 1) < WORKER_PROTOCOL_VERSION) {
+        // Executing anyway would put the old plan-blind behaviour back: work
+        // would be done first and discarded on conflict afterwards.
+        throw new Error(
+          "Control plane speaks remote worker protocol " +
+            `${assignment.protocolVersion ?? 1}, which has no plan admission ` +
+            `step; this worker requires ${WORKER_PROTOCOL_VERSION}`,
+        );
+      }
+
+      const planned = await this.plan(assignment, scratch);
+      const admission = await this.awaitAdmission(assignment, planned.plan);
+      if (leaseLost) {
+        throw new LeaseLostError(assignment.lease.id);
+      }
+      if (!planAdmissionApproved(admission)) {
+        return await this.defer(assignment, planned, admission);
+      }
+
+      const result = await this.execute(assignment, planned, admission);
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
       }
@@ -155,11 +208,81 @@ export class Worker {
     }
   }
 
-  /** Materialises the workspace, runs the agent, and collects the diff. */
-  private async execute(
+  /**
+   * Submits the plan and waits out a deferral.
+   *
+   * Waiting rather than immediately giving the task back preserves the
+   * planning already paid for: the usual reason for a deferral is another
+   * worker holding the same resources, and that clears on its own. Resubmitting
+   * is a bare HTTP call — the agent sits idle, burning nothing.
+   */
+  private async awaitAdmission(
+    assignment: WorkAssignment,
+    plan: AgentPlan,
+  ): Promise<PlanAdmission> {
+    const budget =
+      this.options.planWaitBudgetMs ?? DEFAULT_PLAN_WAIT_BUDGET_MS;
+    const deadline = Date.now() + budget;
+    let admission = await this.options.client.submitPlan(
+      assignment.lease.id,
+      plan,
+    );
+    while (
+      !planAdmissionApproved(admission) &&
+      // A requeue means canonical moved: the same plan can never be admitted
+      // again, so waiting would be pointless.
+      admission.requeue !== true &&
+      !this.stopping &&
+      Date.now() < deadline
+    ) {
+      const wait = Math.max(
+        MIN_PLAN_RETRY_MS,
+        admission.retryAfterMs ?? MIN_PLAN_RETRY_MS,
+      );
+      await new Promise((resolve) => setTimeout(resolve, wait));
+      if (this.stopping) {
+        break;
+      }
+      admission = await this.options.client.submitPlan(
+        assignment.lease.id,
+        plan,
+      );
+    }
+    return admission;
+  }
+
+  /**
+   * Abandons a task whose plan was not admitted, without executing it.
+   *
+   * The lease goes back so another task can use the repository's concurrency
+   * slot — except when the control plane already requeued it, which it does
+   * when canonical moved out from under the plan.
+   */
+  private async defer(
+    assignment: WorkAssignment,
+    planned: PlannedWork,
+    admission: PlanAdmission,
+  ): Promise<IterationResult> {
+    await planned.adapter.cancel(planned.sessionId).catch(() => undefined);
+    if (admission.requeue !== true) {
+      await this.options.client
+        .release(assignment.lease.id)
+        .catch(() => undefined);
+    }
+    return {
+      worked: true,
+      taskId: assignment.task.id,
+      accepted: false,
+      deferred: true,
+      reason: `${admission.status}: ${admission.explanation}`,
+    };
+  }
+
+  /** Materialises the workspace and gets the agent's plan — no editing yet. */
+  private async plan(
     assignment: WorkAssignment,
     scratch: string,
-  ): Promise<{ plan: AgentPlan; changeSet: ChangeSet }> {
+  ): Promise<PlannedWork> {
     await mkdir(scratch, { recursive: true });
     const bundlePath = path.join(scratch, "revision.bundle");
     await writeFile(bundlePath, await this.options.client.bundle(assignment.lease.id));
@@ -234,10 +357,29 @@ export class Worker {
       canonicalVersion: assignment.canonicalVersion,
       repositoryId: assignment.repository.id,
     });
+    // The adapter separates planning from editing: requestPlan returns the
+    // agent's intent without touching the workspace, and nothing is written
+    // until sendContext. That split is what makes admission possible at all.
     const plan = await adapter.requestPlan(session.id);
+    return {
+      adapter,
+      sessionId: session.id,
+      plan,
+      workspaceId: workspace.id,
+      workspacePath,
+    };
+  }
+
+  /** Runs the agent against the ownership the control plane granted. */
+  private async execute(
+    assignment: WorkAssignment,
+    planned: PlannedWork,
+    admission: PlanAdmission,
+  ): Promise<{ plan: AgentPlan; changeSet: ChangeSet }> {
+    const { adapter, sessionId, plan } = planned;
     let eventError: unknown;
     let eventChain = Promise.resolve();
-    await adapter.streamEvents(session.id, (event) => {
+    await adapter.streamEvents(sessionId, (event) => {
       eventChain = eventChain
         .then(async () => {
           if (event.event !== "scope_change_requested") {
@@ -251,33 +393,39 @@ export class Worker {
             decision: "rejected",
             revisedPlan: plan,
             constraints: [
-              "Remote execution must remain within the leased plan",
+              "Remote execution must remain within the admitted plan",
             ],
             ownershipGrants: [],
             explanation:
-              "Scope expansion requires a new control-plane plan and lease",
+              "Scope expansion was never arbitrated; it requires a new plan " +
+              "admission and lease",
             decidedAt: new Date().toISOString(),
           };
-          await adapter.resolveScopeChange(session.id, decision);
+          await adapter.resolveScopeChange(sessionId, decision);
         })
         .catch((error: unknown) => {
           eventError = error;
         });
     });
-    await adapter.sendContext(session.id, {
-      decision: {
-        decision: "approved",
-        taskId: assignment.task.id,
-        workspaceId: workspace.id,
-        ownershipGrants: [],
-        constraints: [],
-        blockedBy: [],
-        explanation:
-          "Leased to a remote worker; control-plane verification is required",
-      },
+
+    // The agent is told what it actually owns, rather than a placeholder
+    // approval: these are the grants the control plane issued for this plan.
+    const decision: CoordinatorDecision = {
+      decision:
+        admission.status === "approved" ? "approved" : "approved_with_constraints",
+      taskId: assignment.task.id,
+      workspaceId: planned.workspaceId,
+      planRevision: admission.planRevision,
+      ownershipGrants: admission.ownershipGrants,
+      constraints: admission.constraints,
+      blockedBy: [],
+      explanation: admission.explanation,
+    };
+    await adapter.sendContext(sessionId, {
+      decision,
       canonicalVersion: assignment.canonicalVersion,
-      workspacePath,
-      planRevision: 1,
+      workspacePath: planned.workspacePath,
+      planRevision: admission.planRevision,
     });
     await eventChain;
     if (eventError !== undefined) {
@@ -285,7 +433,7 @@ export class Worker {
     }
     return {
       plan,
-      changeSet: await adapter.collectChanges(session.id),
+      changeSet: await adapter.collectChanges(sessionId),
     };
   }
 

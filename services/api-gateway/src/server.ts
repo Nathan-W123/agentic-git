@@ -122,6 +122,19 @@ export interface ApiOperations {
     repositoryId?: string;
   }): Promise<WorkAssignment | undefined>;
   leaseBundle?(leaseId: string): Promise<Buffer | undefined>;
+  /**
+   * Arbitrates a worker's plan before it executes. A deployment that omits
+   * this cannot run plan-first workers, and the endpoint says so.
+   */
+  admitWorkPlan?(input: {
+    leaseId: string;
+    actorId: string;
+    plan: unknown;
+  }): Promise<
+    | { outcome: "admitted"; admission: unknown }
+    | { outcome: "rejected"; reason: string }
+    | { outcome: "lease_lost"; reason: string }
+  >;
   acceptWorkResult?(input: {
     leaseId: string;
     status: "completed" | "failed";
@@ -148,6 +161,10 @@ export interface WorkAssignment {
   /** Branch to check out from the bundle. */
   bundleRef: string;
   heartbeatIntervalMs: number;
+  /** Remote worker protocol version this control plane speaks. */
+  protocolVersion: number;
+  /** Submit the agent's plan here for admission before executing. */
+  planUrl: string;
 }
 
 export interface ApiGatewayOptions {
@@ -735,7 +752,10 @@ export class ApiGateway {
 
     const leaseMatch = matchPath(
       path,
-      new RegExp(`^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|result|release)$`, "u"),
+      new RegExp(
+        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|plan|result|release)$`,
+        "u",
+      ),
     );
     if (leaseMatch !== undefined) {
       assertTokenScope(principal, "run_task");
@@ -859,6 +879,33 @@ export class ApiGateway {
             "Content-Length": bundle.byteLength,
           })
           .end(bundle);
+        return;
+      }
+
+      if (action === "plan" && method === "POST") {
+        const planOperation = this.options.operations.admitWorkPlan;
+        if (planOperation === undefined) {
+          throw new HttpError(
+            501,
+            "not_supported",
+            "This deployment cannot admit remote worker plans",
+          );
+        }
+        const body = objectBody(await this.readJson(request));
+        const outcome = await planOperation({
+          leaseId,
+          actorId: principal.user.id,
+          plan: body["plan"],
+        });
+        if (outcome.outcome === "lease_lost") {
+          throw new HttpError(409, "lease_lost", outcome.reason);
+        }
+        if (outcome.outcome === "rejected") {
+          // The lease is already failed by now, so this is terminal for the
+          // worker rather than something to retry with a corrected plan.
+          throw new HttpError(400, "invalid_plan", outcome.reason);
+        }
+        this.sendJson(response, 200, { admission: outcome.admission });
         return;
       }
 

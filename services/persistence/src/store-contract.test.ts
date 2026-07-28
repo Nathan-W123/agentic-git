@@ -1357,6 +1357,158 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: lease plans are recorded and serialized against each other`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "plan-fleet@example.invalid",
+        displayName: "Plan Fleet",
+        passwordDigest: "unused",
+      });
+      const firstWorker = await store.registerWorker({
+        userId: owner.id,
+        name: "worker-a",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      const secondWorker = await store.registerWorker({
+        userId: owner.id,
+        name: "worker-b",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      await store.saveRepository(REPOSITORY);
+      for (const objective of ["first", "second"]) {
+        await store.submitTask({
+          repositoryId: REPOSITORY.id,
+          objective,
+          agentId: "codex",
+          validationCommands: [],
+        });
+      }
+      const first = await store.leaseNextTask({
+        workerId: firstWorker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 2,
+      });
+      const second = await store.leaseNextTask({
+        workerId: secondWorker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 2,
+      });
+      assert.ok(first !== undefined && second !== undefined);
+
+      const submissionFor = (taskId: string, status: "approved" | "sequenced") => ({
+        plan: { ...PLAN, taskId },
+        admission: {
+          status,
+          taskId,
+          planRevision: 1,
+          baseRevision: BASE_VERSION.revision,
+          ownershipGrants: [],
+          constraints: [],
+          blockedBy: [],
+          conflicts: [],
+          explanation: "contract test",
+          decidedAt: "2026-01-01T00:00:00.000Z",
+        },
+      });
+
+      // Nothing admitted yet, so an empty observed set is the accurate view.
+      const savedFirst = await store.saveWorkLeasePlan({
+        leaseId: first.lease.id,
+        submission: submissionFor(first.task.id, "approved"),
+        observedApprovedLeaseIds: [],
+      });
+      assert.equal(savedFirst.outcome, "saved");
+      assert.equal(
+        (await store.getWorkLease(first.lease.id))?.plan?.admission.status,
+        "approved",
+      );
+
+      // The second worker decided from the same empty view. Its write is
+      // refused, because by now the first plan is executing — this is what
+      // stops two conflicting plans from both being approved.
+      const stale = await store.saveWorkLeasePlan({
+        leaseId: second.lease.id,
+        submission: submissionFor(second.task.id, "approved"),
+        observedApprovedLeaseIds: [],
+      });
+      assert.equal(stale.outcome, "stale");
+      assert.deepEqual(
+        stale.outcome === "stale" ? stale.approvedLeaseIds : [],
+        [first.lease.id],
+      );
+      assert.equal((await store.getWorkLease(second.lease.id))?.plan, undefined);
+
+      // Deciding again against the true view succeeds.
+      const retried = await store.saveWorkLeasePlan({
+        leaseId: second.lease.id,
+        submission: submissionFor(second.task.id, "sequenced"),
+        observedApprovedLeaseIds: [first.lease.id],
+      });
+      assert.equal(retried.outcome, "saved");
+
+      // A sequenced plan is not executing work, so it does not count towards
+      // the observed set the next admission has to match.
+      const resubmitted = await store.saveWorkLeasePlan({
+        leaseId: second.lease.id,
+        submission: submissionFor(second.task.id, "approved"),
+        observedApprovedLeaseIds: [first.lease.id],
+      });
+      assert.equal(resubmitted.outcome, "saved");
+
+      // Repository scoping: a lease elsewhere never enters the view.
+      assert.deepEqual(
+        (
+          await store.listWorkLeases({
+            status: "active",
+            repositoryId: REPOSITORY.id,
+          })
+        )
+          .map((lease) => lease.id)
+          .sort(),
+        [first.lease.id, second.lease.id].sort(),
+      );
+      assert.deepEqual(
+        await store.listWorkLeases({ repositoryId: "repo_absent" }),
+        [],
+      );
+
+      // A settled lease cannot record a plan.
+      assert.equal(
+        await store.finishWorkLease(
+          first.lease.id,
+          "completed",
+          new Date().toISOString(),
+          "done",
+        ),
+        true,
+      );
+      const lost = await store.saveWorkLeasePlan({
+        leaseId: first.lease.id,
+        submission: submissionFor(first.task.id, "approved"),
+        observedApprovedLeaseIds: [],
+      });
+      assert.equal(lost.outcome, "lease_lost");
+      assert.equal(
+        (
+          await store.saveWorkLeasePlan({
+            leaseId: "lease_missing",
+            submission: submissionFor("task_missing", "approved"),
+            observedApprovedLeaseIds: [],
+          })
+        ).outcome,
+        "lease_lost",
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: worker and task references are validated consistently`, async () => {
     const { store, cleanup } = await backend.open();
     try {
