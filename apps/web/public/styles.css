@@ -375,12 +375,13 @@ fieldset.field-group legend {
 }
 
 .button-primary {
-  background: #238636;
+  background: var(--accent);
   border-color: rgba(240, 246, 252, 0.1);
+  color: #04262b;
 }
 
 .button-primary:hover {
-  background: #2ea043;
+  background: #6febf8;
   border-color: rgba(240, 246, 252, 0.1);
 }
 

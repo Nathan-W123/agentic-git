@@ -41,6 +41,7 @@
   },
   "dependencies": {
     "@coord/adapter-codex": "*",
+    "@coord/adapter-prompt-cli": "*",
     "@coord/adapter-generic-cli": "*",
     "@coord/agent-protocol": "*",
     "@coord/coordinator": "*",

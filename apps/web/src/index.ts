@@ -98,7 +98,7 @@ async function main(): Promise<void> {
     async listAgents() {
       return Object.entries(project.config.agents).map(([id, agent]) => ({
         id,
-        adapter: agent.adapter === "codex" ? "codex" : "generic-cli",
+        adapter: agent.adapter ?? "generic-cli",
         default: project.config.defaultAgent === id,
       }));
     },

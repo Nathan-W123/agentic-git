@@ -6,6 +6,10 @@ import {
   CodexAdapter,
   type CodexProcessRunner,
 } from "@coord/adapter-codex";
+import {
+  createClaudeAdapter,
+  createGeminiAdapter,
+} from "@coord/adapter-prompt-cli";
 import type { AgentAdapter } from "@coord/agent-protocol";
 import {
   WORKER_PROTOCOL_VERSION,
@@ -497,6 +501,33 @@ export class Worker {
         ...(this.options.codexRunner === undefined
           ? {}
           : { runner: this.options.codexRunner }),
+      });
+    }
+    if (agent.adapter === "claude" || agent.adapter === "gemini") {
+      if (sandbox !== undefined) {
+        throw new Error(
+          `A container sandbox is configured, but ${agent.adapter} agents run ` +
+            "the vendor CLI on the worker host with its own login state. Use a " +
+            "generic-cli agent for sandboxed execution, or remove the sandbox.",
+        );
+      }
+      const create =
+        agent.adapter === "claude" ? createClaudeAdapter : createGeminiAdapter;
+      return create({
+        agentId,
+        repository: {
+          ...repository,
+          // A bundle clone is a normal repository. Worktree operations need
+          // its actual Git directory, not the working-tree root.
+          path: path.join(workspace.path, ".git"),
+        },
+        workspaces,
+        planningRoot: path.join(workspace.rootPath, "planning"),
+        ...(agent.command === undefined ? {} : { command: agent.command }),
+        ...(agent.args === undefined ? {} : { args: agent.args }),
+        ...(agent.env === undefined
+          ? {}
+          : { env: { ...process.env, ...agent.env } }),
       });
     }
     if (agent.command === undefined) {

@@ -95,6 +95,30 @@ test("a Codex agent can use the default executable", () => {
   assert.deepEqual(config.agents.codex, { adapter: "codex" });
 });
 
+test("Claude and Gemini agents default their executables; unknown adapters fail", () => {
+  const config = assertProjectConfig({
+    ...VALID,
+    agents: {
+      claude: { adapter: "claude" },
+      gemini: { adapter: "gemini", command: "gemini-preview" },
+    },
+    defaultAgent: "claude",
+  });
+  assert.deepEqual(config.agents.claude, { adapter: "claude" });
+  assert.deepEqual(config.agents.gemini, {
+    adapter: "gemini",
+    command: "gemini-preview",
+  });
+  assert.throws(
+    () =>
+      assertProjectConfig({
+        ...VALID,
+        agents: { mystery: { adapter: "copilot" } as never },
+      }),
+    /unsupported "adapter"/u,
+  );
+});
+
 test("a docker sandbox requires an image", () => {
   assert.throws(
     () => assertProjectConfig({ ...VALID, sandbox: { mode: "docker" } }),

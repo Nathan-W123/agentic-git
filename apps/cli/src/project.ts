@@ -49,7 +49,24 @@ export interface CodexAgentConfig extends AgentConfigBase {
   command?: string;
 }
 
-export type AgentConfig = GenericCliAgentConfig | CodexAgentConfig;
+/**
+ * Claude Code or Gemini CLI, driven non-interactively by the prompt-cli
+ * adapter. Credentials are the CLI's own login state (or API-key variables
+ * supplied through `env`), never stored by the platform.
+ */
+export interface PromptCliAgentConfig extends AgentConfigBase {
+  adapter: "claude" | "gemini";
+  /** Defaults to `claude` / `gemini` when omitted. */
+  command?: string;
+}
+
+export type AgentConfig =
+  | GenericCliAgentConfig
+  | CodexAgentConfig
+  | PromptCliAgentConfig;
+
+/** Adapters whose `command` defaults to the vendor CLI when omitted. */
+const OPTIONAL_COMMAND_ADAPTERS = ["codex", "claude", "gemini"] as const;
 
 export interface SandboxConfig {
   mode: "docker";
@@ -140,12 +157,14 @@ function assertAgent(name: string, value: unknown): AgentConfig {
   const agent = value as Partial<AgentConfig>;
   if (
     agent.adapter !== undefined &&
-    !["generic-cli", "codex"].includes(agent.adapter)
+    !["generic-cli", "codex", "claude", "gemini"].includes(agent.adapter)
   ) {
     fail(`agent "${name}" has an unsupported "adapter"`);
   }
+  const commandOptional = (OPTIONAL_COMMAND_ADAPTERS as readonly string[])
+    .includes(agent.adapter ?? "generic-cli");
   if (
-    agent.adapter !== "codex" &&
+    !commandOptional &&
     (typeof agent.command !== "string" ||
       agent.command.trim().length === 0 ||
       agent.command.includes("\0"))
@@ -153,7 +172,7 @@ function assertAgent(name: string, value: unknown): AgentConfig {
     fail(`agent "${name}" needs a non-empty "command"`);
   }
   if (
-    agent.adapter === "codex" &&
+    commandOptional &&
     agent.command !== undefined &&
     (typeof agent.command !== "string" ||
       agent.command.trim().length === 0 ||
@@ -190,6 +209,13 @@ function assertAgent(name: string, value: unknown): AgentConfig {
   if (agent.adapter === "codex") {
     return {
       adapter: "codex",
+      ...(agent.command === undefined ? {} : { command: agent.command }),
+      ...common,
+    };
+  }
+  if (agent.adapter === "claude" || agent.adapter === "gemini") {
+    return {
+      adapter: agent.adapter,
       ...(agent.command === undefined ? {} : { command: agent.command }),
       ...common,
     };

@@ -3,6 +3,10 @@ import path from "node:path";
 
 import { CodexAdapter } from "@coord/adapter-codex";
 import { GenericCliAdapter } from "@coord/adapter-generic-cli";
+import {
+  createClaudeAdapter,
+  createGeminiAdapter,
+} from "@coord/adapter-prompt-cli";
 import type { AgentAdapter } from "@coord/agent-protocol";
 import { Coordinator, approvalPolicyForProject } from "@coord/coordinator";
 import type {
@@ -355,6 +359,33 @@ function createAdapter(
     });
   }
 
+  if (agent.adapter === "claude" || agent.adapter === "gemini") {
+    if (sandbox !== undefined) {
+      throw new Error(
+        `${agent.adapter} agents run the vendor CLI on the host with its own ` +
+          "login state and cannot run inside the project's Docker sandbox",
+      );
+    }
+    const create =
+      agent.adapter === "claude" ? createClaudeAdapter : createGeminiAdapter;
+    return create({
+      agentId,
+      repository,
+      workspaces,
+      planningRoot,
+      ...(agent.command === undefined ? {} : { command: agent.command }),
+      ...(agent.args === undefined ? {} : { args: agent.args }),
+      ...(agent.env === undefined
+        ? {}
+        : { env: { ...process.env, ...agent.env } }),
+    });
+  }
+
+  if (agent.command === undefined) {
+    throw new Error(
+      `Agent "${agentId}" has no command; a generic-cli agent must name an executable`,
+    );
+  }
   return new GenericCliAdapter({
     agentId,
     launch: {

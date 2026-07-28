@@ -1,23 +1,23 @@
 {
-  "name": "@coord/worker",
+  "name": "@coord/adapter-prompt-cli",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
-  "bin": { "coord-worker": "./dist/index.js" },
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/worker.test.js"
+    "test": "node --test dist/index.test.js"
   },
   "dependencies": {
-    "@coord/adapter-codex": "*",
-    "@coord/adapter-prompt-cli": "*",
-    "@coord/adapter-generic-cli": "*",
     "@coord/agent-protocol": "*",
-    "@coord/api-gateway": "*",
-    "@coord/cli": "*",
-    "@coord/persistence": "*",
     "@coord/repository-service": "*",
     "@coord/shared-types": "*",
     "@coord/workspace-manager": "*"

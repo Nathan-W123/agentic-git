@@ -109,7 +109,7 @@ export interface ApiOperations {
   listAgents?(): Promise<
     Array<{
       id: string;
-      adapter: "codex" | "generic-cli";
+      adapter: "codex" | "claude" | "gemini" | "generic-cli";
       default: boolean;
     }>
   >;
