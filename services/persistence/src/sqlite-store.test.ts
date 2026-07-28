@@ -114,7 +114,7 @@ test("a database from a newer build is refused rather than downgraded", async ()
   });
 });
 
-test("audit events cannot be updated or deleted", async () => {
+test("audit events cannot be edited, or deleted without a checkpoint", async () => {
   await withDatabase(async (databasePath) => {
     const store = SqliteCoordinationStore.open(databasePath);
     const run = await store.createRun({
@@ -131,9 +131,11 @@ test("audit events cannot be updated or deleted", async () => {
         () => db.exec("UPDATE audit_events SET type = 'task_failed'"),
         /append-only/u,
       );
+      // Deletion is no longer barred outright — retention needs a way out —
+      // but only below a checkpoint, and none has been written here.
       assert.throws(
         () => db.exec("DELETE FROM audit_events"),
-        /append-only/u,
+        /may only be pruned below a recorded checkpoint/u,
       );
       const remaining = db
         .prepare("SELECT COUNT(*) AS total FROM audit_events")
@@ -164,9 +166,15 @@ test("rebuilding the audit table without the chain is detected", async () => {
     await store.close();
 
     const db = new DatabaseSync(databasePath);
-    db.exec("DROP TRIGGER audit_events_immutable_delete");
-    db.exec("DELETE FROM audit_events WHERE type = 'plan_received'");
-    db.close();
+    try {
+      // Stand in for an attacker with file access: remove the guard entirely
+      // and cut an event out of the middle, where no checkpoint would ever
+      // have allowed it.
+      db.exec("DROP TRIGGER audit_events_prune_guard");
+      db.exec("DELETE FROM audit_events WHERE type = 'plan_received'");
+    } finally {
+      db.close();
+    }
 
     const reopened = SqliteCoordinationStore.open(databasePath);
     try {

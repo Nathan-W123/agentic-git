@@ -428,6 +428,64 @@ export const MIGRATIONS: readonly Migration[] = [
          ON work_leases(repository_id, status)`,
     ],
   },
+  {
+    // Audit retention. The log was append-only with no way out, so it grew
+    // without bound and every metrics pass walked all of it. Archiving moves
+    // the cold front of the chain aside behind a checkpoint that preserves
+    // verifiability; the delete trigger becomes conditional on that checkpoint
+    // rather than absolute, so history still cannot be quietly dropped.
+    version: 11,
+    name: "audit-retention",
+    statements: [
+      `CREATE TABLE audit_checkpoints (
+        id TEXT PRIMARY KEY,
+        through_sequence INTEGER NOT NULL UNIQUE,
+        chain_hash TEXT NOT NULL,
+        segment_digest TEXT NOT NULL,
+        events INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE audit_archive (
+        sequence INTEGER PRIMARY KEY,
+        id TEXT NOT NULL UNIQUE,
+        checkpoint_id TEXT NOT NULL REFERENCES audit_checkpoints(id),
+        run_id TEXT,
+        task_id TEXT,
+        type TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        previous_hash TEXT NOT NULL,
+        chain_hash TEXT NOT NULL
+      )`,
+      // An archived event is as immutable as a live one. Deletion stays
+      // possible so an operator can reclaim space; the checkpoint keeps the
+      // segment attested afterwards.
+      `CREATE TRIGGER audit_archive_immutable_update
+        BEFORE UPDATE ON audit_archive
+        BEGIN SELECT RAISE(ABORT, 'audit_archive is append-only'); END`,
+      `DROP TRIGGER audit_events_immutable_delete`,
+      // Deleting a live event is legal only where a checkpoint already covers
+      // it, which is exactly the rows archiving has copied aside.
+      `CREATE TRIGGER audit_events_prune_guard
+        BEFORE DELETE ON audit_events
+        BEGIN
+          SELECT RAISE(
+            ABORT,
+            'audit_events may only be pruned below a recorded checkpoint'
+          )
+          WHERE NOT EXISTS (
+            SELECT 1 FROM audit_checkpoints
+            WHERE through_sequence >= OLD.sequence
+          );
+        END`,
+      `CREATE INDEX audit_by_task ON audit_events(task_id, sequence)`,
+      `CREATE INDEX audit_by_type ON audit_events(type, sequence)`,
+      `CREATE INDEX audit_by_time ON audit_events(occurred_at)`,
+      `CREATE INDEX audit_archive_by_checkpoint
+         ON audit_archive(checkpoint_id, sequence)`,
+    ],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(

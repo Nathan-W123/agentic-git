@@ -24,7 +24,7 @@ import type {
   ValidationCommand,
 } from "@coord/shared-types";
 
-import type { AuditChainVerification } from "./audit-chain.js";
+import type { AuditChainVerification, AuditCheckpoint } from "./audit-chain.js";
 
 export type RunMode = "coordinated" | "uncoordinated";
 export type RunStatus = "running" | "completed" | "failed";
@@ -378,7 +378,31 @@ export interface AppendAuditInput {
 export interface AuditEventFilter {
   afterSequence?: number;
   runId?: string;
+  taskId?: TaskId;
+  /**
+   * Matches the `projectId` stamped into an event's data. Events written
+   * before project stamping carry none and are excluded rather than guessed.
+   */
+  projectId?: ProjectId;
+  types?: AuditEventType[];
+  /** Inclusive lower bound on `occurredAt`. */
+  occurredAfter?: string;
+  /** Exclusive upper bound on `occurredAt`. */
+  occurredBefore?: string;
   limit?: number;
+}
+
+export interface ArchiveAuditInput {
+  /** Archive events at or below this sequence. */
+  throughSequence?: number;
+  /** Archive events that occurred strictly before this ISO timestamp. */
+  before?: string;
+}
+
+export interface AuditArchiveResult {
+  checkpoint: AuditCheckpoint;
+  /** The events that moved, in sequence order. */
+  events: SequencedAuditEvent[];
 }
 
 export interface ApprovalFilter {
@@ -645,6 +669,28 @@ export interface CoordinationStore {
     input: AppendAuditInput,
   ): Promise<AuditEvent>;
   listAuditEvents(filter?: AuditEventFilter): Promise<SequencedAuditEvent[]>;
+  /**
+   * Moves the oldest events out of the live log and records a checkpoint.
+   *
+   * Returns `undefined` when nothing matches. Refuses to archive a chain that
+   * does not currently verify, because a checkpoint over a broken segment
+   * would launder the break into an attestation. The live log continues from
+   * the checkpoint's chain hash, so verification survives compaction.
+   */
+  archiveAuditEvents(
+    input: ArchiveAuditInput,
+  ): Promise<AuditArchiveResult | undefined>;
+  listAuditCheckpoints(): Promise<AuditCheckpoint[]>;
+  listArchivedAuditEvents(
+    filter?: AuditEventFilter,
+  ): Promise<SequencedAuditEvent[]>;
+  /**
+   * Drops retained archive rows at or below a checkpoint to reclaim space.
+   *
+   * The checkpoint survives, so the segment stays attested; what is lost is
+   * the ability to re-derive its contents. Returns how many rows went.
+   */
+  pruneArchivedAuditEvents(throughSequence: number): Promise<number>;
 
   createApproval(input: CreateApprovalInput): Promise<ApprovalRequest>;
   getApproval(id: string): Promise<ApprovalRequest | undefined>;

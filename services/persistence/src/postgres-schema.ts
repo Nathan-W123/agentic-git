@@ -388,4 +388,66 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON work_leases(repository_id, status)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 11,
+    name: "audit-retention",
+    statements: [
+      `CREATE TABLE audit_checkpoints (
+        id TEXT PRIMARY KEY,
+        through_sequence BIGINT NOT NULL UNIQUE,
+        chain_hash TEXT NOT NULL,
+        segment_digest TEXT NOT NULL,
+        events BIGINT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE audit_archive (
+        sequence BIGINT PRIMARY KEY,
+        id TEXT NOT NULL UNIQUE,
+        checkpoint_id TEXT NOT NULL REFERENCES audit_checkpoints(id),
+        run_id TEXT,
+        task_id TEXT,
+        type TEXT NOT NULL,
+        data_json TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        payload_hash TEXT NOT NULL,
+        previous_hash TEXT NOT NULL,
+        chain_hash TEXT NOT NULL
+      )`,
+      `CREATE FUNCTION audit_archive_immutable() RETURNS trigger AS $$
+        BEGIN
+          RAISE EXCEPTION 'audit_archive is append-only';
+        END
+      $$ LANGUAGE plpgsql`,
+      `CREATE TRIGGER audit_archive_immutable_guard
+        BEFORE UPDATE ON audit_archive
+        FOR EACH ROW EXECUTE FUNCTION audit_archive_immutable()`,
+      // Split the one guard into an absolute bar on UPDATE and a
+      // checkpoint-conditional bar on DELETE.
+      `DROP TRIGGER audit_events_immutable_guard ON audit_events`,
+      `CREATE TRIGGER audit_events_immutable_update
+        BEFORE UPDATE ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION audit_events_immutable()`,
+      `CREATE FUNCTION audit_events_prune_guard() RETURNS trigger AS $$
+        BEGIN
+          IF NOT EXISTS (
+            SELECT 1 FROM audit_checkpoints
+            WHERE through_sequence >= OLD.sequence
+          ) THEN
+            RAISE EXCEPTION
+              'audit_events may only be pruned below a recorded checkpoint';
+          END IF;
+          RETURN OLD;
+        END
+      $$ LANGUAGE plpgsql`,
+      `CREATE TRIGGER audit_events_prune_guard
+        BEFORE DELETE ON audit_events
+        FOR EACH ROW EXECUTE FUNCTION audit_events_prune_guard()`,
+      `CREATE INDEX audit_by_task ON audit_events(task_id, sequence)`,
+      `CREATE INDEX audit_by_type ON audit_events(type, sequence)`,
+      `CREATE INDEX audit_by_time ON audit_events(occurred_at)`,
+      `CREATE INDEX audit_archive_by_checkpoint
+         ON audit_archive(checkpoint_id, sequence)`,
+    ],
+  },
 ];

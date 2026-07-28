@@ -1562,6 +1562,294 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: audit events filter by type, task, project, and time`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.appendAudit(undefined, {
+        type: "task_submitted",
+        taskId: "task_one",
+        data: { projectId: DEFAULT_PROJECT_ID },
+      });
+      await store.appendAudit(undefined, {
+        type: "plan_admitted",
+        taskId: "task_one",
+        data: { projectId: DEFAULT_PROJECT_ID, status: "approved" },
+      });
+      await store.appendAudit(undefined, {
+        type: "task_submitted",
+        taskId: "task_two",
+        data: { projectId: "project_other" },
+      });
+      await store.appendAudit(undefined, {
+        type: "task_failed",
+        taskId: "task_two",
+        data: {},
+      });
+
+      const byType = await store.listAuditEvents({ types: ["task_submitted"] });
+      assert.deepEqual(
+        byType.map((entry) => entry.event.taskId),
+        ["task_one", "task_two"],
+      );
+      const byTypes = await store.listAuditEvents({
+        types: ["plan_admitted", "task_failed"],
+      });
+      assert.equal(byTypes.length, 2);
+      // An empty type list means "nothing matches", not "no filter".
+      assert.deepEqual(await store.listAuditEvents({ types: [] }), []);
+
+      assert.equal(
+        (await store.listAuditEvents({ taskId: "task_one" })).length,
+        2,
+      );
+      // Project lives inside the event payload, and an event without one is
+      // excluded rather than assumed to belong to the project asked for.
+      const byProject = await store.listAuditEvents({
+        projectId: DEFAULT_PROJECT_ID,
+      });
+      assert.equal(byProject.length, 2);
+      assert.ok(
+        byProject.every((entry) => entry.event.taskId === "task_one"),
+      );
+
+      const all = await store.listAuditEvents({});
+      const second = all[1];
+      assert.ok(second !== undefined);
+      // occurredAfter is inclusive and occurredBefore exclusive. Events
+      // written in the same millisecond share a timestamp, so the bound is
+      // asserted on time rather than on sequence.
+      const from = await store.listAuditEvents({
+        occurredAfter: second.event.occurredAt,
+      });
+      assert.ok(from.length > 0);
+      assert.ok(
+        from.every(
+          (entry) => entry.event.occurredAt >= second.event.occurredAt,
+        ),
+      );
+      assert.deepEqual(
+        await store.listAuditEvents({
+          occurredBefore: all[0]?.event.occurredAt ?? "",
+        }),
+        [],
+      );
+
+      // Filters compose rather than override one another.
+      assert.equal(
+        (
+          await store.listAuditEvents({
+            taskId: "task_one",
+            types: ["plan_admitted"],
+            projectId: DEFAULT_PROJECT_ID,
+          })
+        ).length,
+        1,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: archiving compacts the audit log without breaking verification`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      for (let index = 0; index < 6; index += 1) {
+        await store.appendAudit(undefined, {
+          type: "task_submitted",
+          taskId: `task_${index}`,
+          data: { projectId: DEFAULT_PROJECT_ID, index },
+        });
+      }
+      assert.equal((await store.verifyAudit()).valid, true);
+
+      // Archiving needs an explicit boundary; a bare call would be ambiguous
+      // between "everything" and "nothing".
+      await assert.rejects(store.archiveAuditEvents({}), /boundary/u);
+
+      const archived = await store.archiveAuditEvents({ throughSequence: 4 });
+      assert.ok(archived !== undefined);
+      assert.equal(archived.checkpoint.throughSequence, 4);
+      assert.equal(archived.checkpoint.events, 4);
+      assert.equal(archived.events.length, 4);
+      assert.equal(archived.checkpoint.chainHash.length, 64);
+
+      // The live log now starts mid-chain, and verification still passes
+      // because the checkpoint carries the link it continues from.
+      const live = await store.listAuditEvents({});
+      assert.deepEqual(
+        live.map((entry) => entry.sequence),
+        [5, 6],
+      );
+      const verified = await store.verifyAudit();
+      assert.equal(verified.valid, true, JSON.stringify(verified));
+      assert.equal(verified.valid && verified.events, 2);
+      assert.equal(verified.valid && verified.archivedEvents, 4);
+
+      // Archived events are still readable, through the same filters.
+      assert.equal((await store.listArchivedAuditEvents({})).length, 4);
+      assert.equal(
+        (await store.listArchivedAuditEvents({ taskId: "task_0" })).length,
+        1,
+      );
+      const checkpoints = await store.listAuditCheckpoints();
+      assert.equal(checkpoints.length, 1);
+      assert.equal(checkpoints[0]?.id, archived.checkpoint.id);
+
+      // Appending after a compaction continues the same chain rather than
+      // starting a new one.
+      await store.appendAudit(undefined, {
+        type: "task_failed",
+        taskId: "task_after",
+        data: {},
+      });
+      assert.equal((await store.verifyAudit()).valid, true);
+
+      // Archiving the rest empties the live log entirely; the next event must
+      // still link to the newest checkpoint.
+      const rest = await store.archiveAuditEvents({ throughSequence: 7 });
+      assert.ok(rest !== undefined);
+      assert.deepEqual(await store.listAuditEvents({}), []);
+      await store.appendAudit(undefined, {
+        type: "task_submitted",
+        taskId: "task_last",
+        data: {},
+      });
+      const afterEmpty = await store.verifyAudit();
+      assert.equal(afterEmpty.valid, true, JSON.stringify(afterEmpty));
+      assert.equal(afterEmpty.valid && afterEmpty.archivedEvents, 7);
+
+      // Nothing left to archive answers undefined rather than writing an
+      // empty checkpoint.
+      assert.equal(
+        await store.archiveAuditEvents({ throughSequence: 7 }),
+        undefined,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: pruning an archive keeps the segment attested`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      for (let index = 0; index < 4; index += 1) {
+        await store.appendAudit(undefined, {
+          type: "task_submitted",
+          taskId: `task_${index}`,
+          data: {},
+        });
+      }
+      const archived = await store.archiveAuditEvents({ throughSequence: 3 });
+      assert.ok(archived !== undefined);
+
+      // Only a checkpointed range may be dropped.
+      await assert.rejects(
+        store.pruneArchivedAuditEvents(1),
+        /recorded checkpoint/u,
+      );
+
+      // Pruning takes whole segments: half a segment would stop reproducing
+      // its digest and verification would report housekeeping as tampering.
+      assert.equal(await store.pruneArchivedAuditEvents(3), 3);
+      assert.deepEqual(await store.listArchivedAuditEvents({}), []);
+      assert.equal((await store.listAuditCheckpoints()).length, 1);
+
+      // The contents are gone but the chain still verifies: the checkpoint
+      // attests the segment, which is the honest limit of what survives.
+      const verified = await store.verifyAudit();
+      assert.equal(verified.valid, true, JSON.stringify(verified));
+      assert.equal(verified.valid && verified.attestedCheckpoints, 1);
+      assert.equal(verified.valid && verified.archivedEvents, undefined);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: tampering with an archived segment is still detected`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      for (let index = 0; index < 4; index += 1) {
+        await store.appendAudit(undefined, {
+          type: "task_submitted",
+          taskId: `task_${index}`,
+          data: {},
+        });
+      }
+      const archived = await store.archiveAuditEvents({ throughSequence: 3 });
+      assert.ok(archived !== undefined);
+      assert.equal((await store.verifyAudit()).valid, true);
+
+      // Removing one archived event is the attack compaction could have
+      // opened: it is not covered by the live chain any more, so only the
+      // checkpoint digest can catch it.
+      const raw = store as unknown as {
+        db?: { exec(sql: string): void };
+        query?(sql: string): Promise<unknown>;
+        auditArchive?: unknown[];
+      };
+      if (raw.db !== undefined) {
+        raw.db.exec("DELETE FROM audit_archive WHERE sequence = 2");
+      } else if (raw.query !== undefined) {
+        await raw.query("DELETE FROM audit_archive WHERE sequence = 2");
+      } else {
+        raw.auditArchive?.splice(1, 1);
+      }
+
+      const verified = await store.verifyAudit();
+      assert.equal(verified.valid, false);
+      assert.equal(
+        verified.valid === false && verified.brokenAt,
+        archived.checkpoint.throughSequence,
+      );
+      assert.match(
+        verified.valid === false ? verified.reason : "",
+        /checkpoint digest|previous hash/u,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: audit events cannot be deleted without a checkpoint`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.appendAudit(undefined, {
+        type: "task_submitted",
+        taskId: "task_guard",
+        data: {},
+      });
+      // The guard lives in the database, not in application code, so raw SQL
+      // is the only way to prove it. In-memory has no SQL surface; its
+      // equivalent is that no delete path exists at all.
+      const raw = (
+        store as unknown as {
+          db?: { exec(sql: string): void };
+          query?(sql: string): Promise<unknown>;
+        }
+      );
+      if (raw.db !== undefined) {
+        assert.throws(
+          () => raw.db?.exec("DELETE FROM audit_events"),
+          /checkpoint/u,
+        );
+      } else if (raw.query !== undefined) {
+        await assert.rejects(
+          raw.query("DELETE FROM audit_events"),
+          /checkpoint/u,
+        );
+      }
+      assert.equal((await store.listAuditEvents({})).length, 1);
+      assert.equal((await store.verifyAudit()).valid, true);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: runs list newest first and unknown ids return undefined`, async () => {
     const { store, cleanup } = await backend.open();
     try {

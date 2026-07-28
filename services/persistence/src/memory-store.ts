@@ -24,8 +24,11 @@ import {
   GENESIS_HASH,
   chainHash,
   hashAuditPayload,
-  verifyAuditChain,
+  segmentDigest,
+  verifyArchivedChain,
+  type ArchivedSegment,
   type AuditChainVerification,
+  type AuditCheckpoint,
   type ChainedAuditEvent,
 } from "./audit-chain.js";
 import type {
@@ -39,6 +42,8 @@ import type {
   WorkLeaseStatus,
   WorkerRecord,
   ApprovalFilter,
+  ArchiveAuditInput,
+  AuditArchiveResult,
   AuditEventFilter,
   AuthSessionRecord,
   CoordinationStore,
@@ -86,6 +91,28 @@ function copy<T>(value: T): T {
 }
 
 /**
+ * The filter predicate, shared by the live log and the archive so a query
+ * cannot mean two different things depending on which side of a checkpoint an
+ * event happens to sit.
+ */
+function matchesAuditFilter(
+  entry: SequencedAuditEvent,
+  filter: AuditEventFilter,
+): boolean {
+  return (
+    (filter.runId === undefined || entry.runId === filter.runId) &&
+    (filter.taskId === undefined || entry.event.taskId === filter.taskId) &&
+    (filter.projectId === undefined ||
+      entry.event.data["projectId"] === filter.projectId) &&
+    (filter.types === undefined || filter.types.includes(entry.event.type)) &&
+    (filter.occurredAfter === undefined ||
+      entry.event.occurredAt >= filter.occurredAfter) &&
+    (filter.occurredBefore === undefined ||
+      entry.event.occurredAt < filter.occurredBefore)
+  );
+}
+
+/**
  * Non-durable store with identical semantics to the SQLite one.
  *
  * Keeps the coordinator's default behavior dependency-free and lets tests
@@ -94,6 +121,18 @@ function copy<T>(value: T): T {
 export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly runs = new Map<string, RunState>();
   private readonly audit: ChainedAuditEvent[] = [];
+  /**
+   * Monotonic, never derived from array length: archiving removes entries
+   * from the front, and a length-based sequence would then reissue numbers
+   * that the archive already holds.
+   */
+  private auditSequence = 0;
+  private readonly auditCheckpoints: AuditCheckpoint[] = [];
+  private readonly auditArchive: Array<{
+    entry: ChainedAuditEvent;
+    runId: string | undefined;
+    checkpointId: string;
+  }> = [];
   /** Run association per audit entry, parallel to {@link audit}. */
   private readonly auditRuns: Array<string | undefined> = [];
 
@@ -1164,11 +1203,18 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
     };
 
-    const previousHash = this.audit.at(-1)?.chainHash ?? GENESIS_HASH;
+    // Falls back to the newest checkpoint when the live log is empty, which
+    // is what archiving everything leaves behind; GENESIS there would fork
+    // the chain.
+    const previousHash =
+      this.audit.at(-1)?.chainHash ??
+      this.auditCheckpoints.at(-1)?.chainHash ??
+      GENESIS_HASH;
     const payloadHash = hashAuditPayload(event);
+    this.auditSequence += 1;
     this.audit.push({
       event,
-      sequence: this.audit.length + 1,
+      sequence: this.auditSequence,
       payloadHash,
       previousHash,
       chainHash: chainHash(previousHash, payloadHash),
@@ -1196,12 +1242,134 @@ export class InMemoryCoordinationStore implements CoordinationStore {
           : { runId: this.auditRuns[index] }),
         event: copy(entry.event),
       }))
-      .filter(
-        (entry) =>
-          entry.sequence > after &&
-          (filter.runId === undefined || entry.runId === filter.runId),
-      )
+      .filter((entry) => entry.sequence > after && matchesAuditFilter(entry, filter))
       .slice(0, limit);
+  }
+
+  public async listArchivedAuditEvents(
+    filter: AuditEventFilter = {},
+  ): Promise<SequencedAuditEvent[]> {
+    const after = filter.afterSequence ?? 0;
+    const limit = filter.limit ?? 500;
+    if (!Number.isSafeInteger(after) || after < 0) {
+      throw new RangeError("Audit cursor must be a non-negative safe integer");
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 5_000) {
+      throw new RangeError("Audit event limit must be between 1 and 5000");
+    }
+    return this.auditArchive
+      .map((row): SequencedAuditEvent => ({
+        sequence: row.entry.sequence,
+        ...(row.runId === undefined ? {} : { runId: row.runId }),
+        event: copy(row.entry.event),
+      }))
+      .filter((entry) => entry.sequence > after && matchesAuditFilter(entry, filter))
+      .slice(0, limit);
+  }
+
+  public async listAuditCheckpoints(): Promise<AuditCheckpoint[]> {
+    return copy(
+      [...this.auditCheckpoints].sort(
+        (left, right) => left.throughSequence - right.throughSequence,
+      ),
+    );
+  }
+
+  public async archiveAuditEvents(
+    input: ArchiveAuditInput,
+  ): Promise<AuditArchiveResult | undefined> {
+    const verification = await this.verifyAudit();
+    if (!verification.valid) {
+      throw new Error(
+        `Refusing to archive a broken audit chain: ${verification.reason}`,
+      );
+    }
+    if (input.throughSequence === undefined && input.before === undefined) {
+      throw new Error(
+        "Archiving needs a boundary: pass throughSequence or before",
+      );
+    }
+
+    const selected = this.audit.filter(
+      (entry) =>
+        (input.throughSequence === undefined ||
+          entry.sequence <= input.throughSequence) &&
+        (input.before === undefined ||
+          entry.event.occurredAt < input.before),
+    );
+    if (selected.length === 0) {
+      return undefined;
+    }
+    const last = selected.at(-1);
+    if (last === undefined) {
+      return undefined;
+    }
+    // A time bound can only cut where the sequence does, or the archive would
+    // be a set of holes rather than a prefix and nothing would link.
+    if (selected.length !== this.audit.filter(
+      (entry) => entry.sequence <= last.sequence,
+    ).length) {
+      throw new Error(
+        "Archiving must cover an unbroken prefix of the chain; the requested " +
+          "boundary would leave earlier events behind",
+      );
+    }
+
+    const checkpoint: AuditCheckpoint = {
+      id: createId("checkpoint"),
+      throughSequence: last.sequence,
+      chainHash: last.chainHash,
+      segmentDigest: segmentDigest(
+        selected.map((entry) => entry.payloadHash),
+      ),
+      events: selected.length,
+      createdAt: new Date().toISOString(),
+    };
+    const events: SequencedAuditEvent[] = [];
+    for (const entry of selected) {
+      const index = this.audit.indexOf(entry);
+      const runId = this.auditRuns[index];
+      this.auditArchive.push({
+        entry: copy(entry),
+        runId,
+        checkpointId: checkpoint.id,
+      });
+      events.push({
+        sequence: entry.sequence,
+        ...(runId === undefined ? {} : { runId }),
+        event: copy(entry.event),
+      });
+    }
+    this.audit.splice(0, selected.length);
+    this.auditRuns.splice(0, selected.length);
+    this.auditCheckpoints.push(checkpoint);
+    return { checkpoint, events };
+  }
+
+  public async pruneArchivedAuditEvents(
+    throughSequence: number,
+  ): Promise<number> {
+    const pruned = new Set(
+      this.auditCheckpoints
+        .filter((checkpoint) => checkpoint.throughSequence <= throughSequence)
+        .map((checkpoint) => checkpoint.id),
+    );
+    if (pruned.size === 0) {
+      throw new Error(
+        "Archived events can only be pruned up to a recorded checkpoint",
+      );
+    }
+    // Whole segments only. Half a segment would no longer reproduce its
+    // checkpoint digest, and verification would report the operator's own
+    // housekeeping as tampering.
+    let removed = 0;
+    for (let index = this.auditArchive.length - 1; index >= 0; index -= 1) {
+      if (pruned.has(this.auditArchive[index]?.checkpointId ?? "")) {
+        this.auditArchive.splice(index, 1);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   public async createApproval(
@@ -1333,7 +1501,20 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   }
 
   public async verifyAudit(): Promise<AuditChainVerification> {
-    return verifyAuditChain(this.audit);
+    const segments: ArchivedSegment[] = this.auditCheckpoints
+      .slice()
+      .sort((left, right) => left.throughSequence - right.throughSequence)
+      .map((checkpoint) => {
+        const entries = this.auditArchive
+          .filter((row) => row.checkpointId === checkpoint.id)
+          .sort((left, right) => left.entry.sequence - right.entry.sequence)
+          .map((row) => row.entry);
+        return {
+          checkpoint,
+          ...(entries.length === 0 ? {} : { entries }),
+        };
+      });
+    return verifyArchivedChain(segments, this.audit);
   }
 
   public async close(): Promise<void> {

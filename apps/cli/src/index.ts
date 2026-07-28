@@ -106,6 +106,10 @@ Usage:
   coord history [--json] [--db=<path>]
   coord history <run-id> [--json] [--db=<path>]
   coord verify-audit [--db=<path>]
+  coord audit [checkpoints] [--json] [--db=<path>]
+  coord audit archive (--before=<iso> | --through=<sequence>) [--json]
+  coord audit export [--json] [--db=<path>]
+  coord audit prune --through=<sequence> [--db=<path>]
   coord help
 
 Commands:
@@ -119,6 +123,7 @@ Commands:
   benchmark     Compare coordinated and uncoordinated execution.
   history       List recorded runs, or show one run in detail.
   verify-audit  Check the audit chain for tampering.
+  audit         Archive, export, and prune audit history behind checkpoints.
 
 Options:
   --live         Drive selected tasks with a real agent process instead of the
@@ -950,6 +955,121 @@ async function runVerifyAudit(flags: readonly string[]): Promise<void> {
   }
 }
 
+/**
+ * Audit retention: archive the cold front of the chain, export it, prune it.
+ *
+ * Kept as one verb with subcommands because the three steps are a sequence an
+ * operator performs together, and doing them out of order is the mistake worth
+ * making hard: pruning before exporting discards the only copy.
+ */
+async function runAudit(
+  subcommand: string | undefined,
+  flags: readonly string[],
+): Promise<void> {
+  const store = openStore(flags, "db");
+  const json = flags.includes("--json");
+  try {
+    if (subcommand === "archive") {
+      const before = flagValue(flags, "before");
+      const through = flagValue(flags, "through");
+      if (before === undefined && through === undefined) {
+        throw new Error(
+          "coord audit archive needs --before=<iso-timestamp> or --through=<sequence>",
+        );
+      }
+      const throughSequence =
+        through === undefined ? undefined : Number.parseInt(through, 10);
+      if (
+        throughSequence !== undefined &&
+        (!Number.isSafeInteger(throughSequence) || throughSequence < 1)
+      ) {
+        throw new Error("--through must be a positive sequence number");
+      }
+      const result = await store.archiveAuditEvents({
+        ...(before === undefined ? {} : { before }),
+        ...(throughSequence === undefined ? {} : { throughSequence }),
+      });
+      if (result === undefined) {
+        console.log("Nothing to archive in that range.");
+        return;
+      }
+      if (json) {
+        console.log(JSON.stringify(result, undefined, 2));
+        return;
+      }
+      console.log(
+        `Archived ${result.checkpoint.events} event(s) through sequence ` +
+          `${result.checkpoint.throughSequence}.`,
+      );
+      console.log(`Checkpoint: ${result.checkpoint.id}`);
+      console.log(`Chain hash: ${result.checkpoint.chainHash}`);
+      console.log(
+        "The live log continues from that hash; `coord verify-audit` still " +
+          "covers the whole history.",
+      );
+      return;
+    }
+
+    if (subcommand === "export") {
+      // JSONL, because an archive is a stream an operator appends to cold
+      // storage rather than a document to be read whole.
+      const events = await store.listArchivedAuditEvents({ limit: 5_000 });
+      const checkpoints = await store.listAuditCheckpoints();
+      if (json) {
+        console.log(JSON.stringify({ checkpoints, events }, undefined, 2));
+        return;
+      }
+      for (const checkpoint of checkpoints) {
+        console.log(JSON.stringify({ checkpoint }));
+      }
+      for (const entry of events) {
+        console.log(JSON.stringify(entry));
+      }
+      return;
+    }
+
+    if (subcommand === "prune") {
+      const through = flagValue(flags, "through");
+      const throughSequence = Number.parseInt(through ?? "", 10);
+      if (!Number.isSafeInteger(throughSequence) || throughSequence < 1) {
+        throw new Error("coord audit prune needs --through=<sequence>");
+      }
+      const removed = await store.pruneArchivedAuditEvents(throughSequence);
+      console.log(
+        `Dropped ${removed} archived event(s). Their checkpoints remain, so ` +
+          "the chain still verifies; the contents are gone.",
+      );
+      return;
+    }
+
+    if (subcommand === "checkpoints" || subcommand === undefined) {
+      const checkpoints = await store.listAuditCheckpoints();
+      if (json) {
+        console.log(JSON.stringify(checkpoints, undefined, 2));
+        return;
+      }
+      if (checkpoints.length === 0) {
+        console.log("No audit checkpoints; the chain has never been archived.");
+        return;
+      }
+      for (const checkpoint of checkpoints) {
+        console.log(
+          `${checkpoint.createdAt}  through ${checkpoint.throughSequence}  ` +
+            `${checkpoint.events} event(s)  ${checkpoint.id}`,
+        );
+      }
+      return;
+    }
+
+    throw new Error(
+      `Unknown audit subcommand: ${subcommand}. ` +
+        "Use archive, export, prune, or checkpoints.",
+    );
+  } finally {
+    await store.close();
+  }
+}
+
 /** Fails fast so a `--live` run never silently falls back to scripted agents. */
 function requireLiveAgentConfig(): LiveAgentConfig {
   const config = readLiveAgentConfig();
@@ -1009,6 +1129,9 @@ async function main(): Promise<void> {
       break;
     case "verify-audit":
       await runVerifyAudit(flags);
+      break;
+    case "audit":
+      await runAudit(positional[0], flags);
       break;
     case "benchmark": {
       const scenario = selectScenario(flags);

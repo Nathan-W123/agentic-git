@@ -35,8 +35,11 @@ import {
   GENESIS_HASH,
   chainHash,
   hashAuditPayload,
-  verifyAuditChain,
+  segmentDigest,
+  verifyArchivedChain,
+  type ArchivedSegment,
   type AuditChainVerification,
+  type AuditCheckpoint,
   type ChainedAuditEvent,
 } from "./audit-chain.js";
 import { LATEST_SCHEMA_VERSION } from "./schema.js";
@@ -45,6 +48,8 @@ import type {
   ApiTokenRecord,
   AppendAuditInput,
   ApprovalFilter,
+  ArchiveAuditInput,
+  AuditArchiveResult,
   AuditEventFilter,
   AuthSessionRecord,
   CoordinationStore,
@@ -1893,8 +1898,24 @@ export class PostgresCoordinationStore implements CoordinationStore {
             "SELECT chain_hash FROM audit_events ORDER BY sequence DESC LIMIT 1",
           )
         ).rows[0] as Row | undefined;
+        // Falls back to the newest checkpoint when the live log is empty,
+        // which is what archiving everything leaves behind; reading GENESIS
+        // there would silently fork the chain.
+        const checkpoint =
+          previous !== undefined
+            ? undefined
+            : ((
+                await client.query(
+                  `SELECT chain_hash FROM audit_checkpoints
+                   ORDER BY through_sequence DESC LIMIT 1`,
+                )
+              ).rows[0] as Row | undefined);
         const previousHash =
-          previous === undefined ? GENESIS_HASH : text(previous, "chain_hash");
+          previous !== undefined
+            ? text(previous, "chain_hash")
+            : checkpoint !== undefined
+              ? text(checkpoint, "chain_hash")
+              : GENESIS_HASH;
         const payloadHash = hashAuditPayload(event);
 
         await client.query(
@@ -1923,6 +1944,24 @@ export class PostgresCoordinationStore implements CoordinationStore {
   public async listAuditEvents(
     filter: AuditEventFilter = {},
   ): Promise<SequencedAuditEvent[]> {
+    return await this.selectAuditEvents("audit_events", filter);
+  }
+
+  public async listArchivedAuditEvents(
+    filter: AuditEventFilter = {},
+  ): Promise<SequencedAuditEvent[]> {
+    return await this.selectAuditEvents("audit_archive", filter);
+  }
+
+  /**
+   * The live log and the archive have identical shapes, so one query serves
+   * both and a filter can never mean two different things depending on which
+   * side of a checkpoint an event happens to sit.
+   */
+  private async selectAuditEvents(
+    table: "audit_events" | "audit_archive",
+    filter: AuditEventFilter,
+  ): Promise<SequencedAuditEvent[]> {
     const afterSequence = filter.afterSequence ?? 0;
     const limit = filter.limit ?? 500;
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
@@ -1931,19 +1970,41 @@ export class PostgresCoordinationStore implements CoordinationStore {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 5_000) {
       throw new RangeError("Audit event limit must be between 1 and 5000");
     }
-    const rows =
-      filter.runId === undefined
-        ? await this.rows(
-            `SELECT * FROM audit_events
-             WHERE sequence > $1 ORDER BY sequence LIMIT $2`,
-            [afterSequence, limit],
-          )
-        : await this.rows(
-            `SELECT * FROM audit_events
-             WHERE sequence > $1 AND run_id = $2
-             ORDER BY sequence LIMIT $3`,
-            [afterSequence, filter.runId, limit],
-          );
+    const values: unknown[] = [];
+    const clauses = [`sequence > ${bind(values, afterSequence)}`];
+    if (filter.runId !== undefined) {
+      clauses.push(`run_id = ${bind(values, filter.runId)}`);
+    }
+    if (filter.taskId !== undefined) {
+      clauses.push(`task_id = ${bind(values, filter.taskId)}`);
+    }
+    if (filter.projectId !== undefined) {
+      // Stamped inside the event payload rather than promoted to a column.
+      clauses.push(
+        `(data_json::jsonb ->> 'projectId') = ${bind(values, filter.projectId)}`,
+      );
+    }
+    if (filter.types !== undefined) {
+      if (filter.types.length === 0) {
+        return [];
+      }
+      clauses.push(
+        `type IN (${filter.types
+          .map((type) => bind(values, type))
+          .join(", ")})`,
+      );
+    }
+    if (filter.occurredAfter !== undefined) {
+      clauses.push(`occurred_at >= ${bind(values, filter.occurredAfter)}`);
+    }
+    if (filter.occurredBefore !== undefined) {
+      clauses.push(`occurred_at < ${bind(values, filter.occurredBefore)}`);
+    }
+    const rows = await this.rows(
+      `SELECT * FROM ${table} WHERE ${clauses.join(" AND ")}
+       ORDER BY sequence LIMIT ${bind(values, limit)}`,
+      values,
+    );
     return rows.map((row) => {
       const eventRunId = optionalText(row, "run_id");
       return {
@@ -1952,6 +2013,182 @@ export class PostgresCoordinationStore implements CoordinationStore {
         event: this.toAuditEvent(row),
       };
     });
+  }
+
+  private toChainedAuditEvent(row: Row): ChainedAuditEvent {
+    return {
+      event: this.toAuditEvent(row),
+      sequence: integer(row, "sequence"),
+      payloadHash: text(row, "payload_hash"),
+      previousHash: text(row, "previous_hash"),
+      chainHash: text(row, "chain_hash"),
+    };
+  }
+
+  private toCheckpoint(row: Row): AuditCheckpoint {
+    return {
+      id: text(row, "id"),
+      throughSequence: integer(row, "through_sequence"),
+      chainHash: text(row, "chain_hash"),
+      segmentDigest: text(row, "segment_digest"),
+      events: integer(row, "events"),
+      createdAt: text(row, "created_at"),
+    };
+  }
+
+  public async listAuditCheckpoints(): Promise<AuditCheckpoint[]> {
+    const rows = await this.rows(
+      "SELECT * FROM audit_checkpoints ORDER BY through_sequence",
+    );
+    return rows.map((row) => this.toCheckpoint(row));
+  }
+
+  public async archiveAuditEvents(
+    input: ArchiveAuditInput,
+  ): Promise<AuditArchiveResult | undefined> {
+    // Verified before the lock is taken: archiving a chain that is already
+    // broken would fold the break into a checkpoint and make it look settled.
+    const verification = await this.verifyAudit();
+    if (!verification.valid) {
+      throw new Error(
+        `Refusing to archive a broken audit chain: ${verification.reason}`,
+      );
+    }
+    if (input.throughSequence === undefined && input.before === undefined) {
+      throw new Error(
+        "Archiving needs a boundary: pass throughSequence or before",
+      );
+    }
+
+    return await this.transaction(
+      async (client): Promise<AuditArchiveResult | undefined> => {
+        const values: unknown[] = [];
+        const clauses: string[] = [];
+        if (input.throughSequence !== undefined) {
+          clauses.push(`sequence <= ${bind(values, input.throughSequence)}`);
+        }
+        if (input.before !== undefined) {
+          clauses.push(`occurred_at < ${bind(values, input.before)}`);
+        }
+        const rows = (
+          await client.query(
+            `SELECT * FROM audit_events WHERE ${clauses.join(" AND ")}
+             ORDER BY sequence`,
+            values,
+          )
+        ).rows as Row[];
+        if (rows.length === 0) {
+          return undefined;
+        }
+
+        const entries = rows.map((row) => this.toChainedAuditEvent(row));
+        const last = entries.at(-1);
+        if (last === undefined) {
+          return undefined;
+        }
+        // A time bound can only cut where the sequence does, or the archive
+        // would be a set of holes rather than a prefix and nothing would link.
+        const total = (
+          await client.query(
+            "SELECT COUNT(*) AS n FROM audit_events WHERE sequence <= $1",
+            [last.sequence],
+          )
+        ).rows[0] as Row;
+        if (Number(integer(total, "n")) !== entries.length) {
+          throw new Error(
+            "Archiving must cover an unbroken prefix of the chain; the " +
+              "requested boundary would leave earlier events behind",
+          );
+        }
+
+        const checkpoint: AuditCheckpoint = {
+          id: createId("checkpoint"),
+          throughSequence: last.sequence,
+          chainHash: last.chainHash,
+          segmentDigest: segmentDigest(
+            entries.map((entry) => entry.payloadHash),
+          ),
+          events: entries.length,
+          createdAt: new Date().toISOString(),
+        };
+        await client.query(
+          `INSERT INTO audit_checkpoints
+             (id, through_sequence, chain_hash, segment_digest, events, created_at)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [
+            checkpoint.id,
+            checkpoint.throughSequence,
+            checkpoint.chainHash,
+            checkpoint.segmentDigest,
+            checkpoint.events,
+            checkpoint.createdAt,
+          ],
+        );
+        for (const row of rows) {
+          await client.query(
+            `INSERT INTO audit_archive
+               (sequence, id, checkpoint_id, run_id, task_id, type, data_json,
+                occurred_at, payload_hash, previous_hash, chain_hash)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+            [
+              integer(row, "sequence"),
+              text(row, "id"),
+              checkpoint.id,
+              optionalText(row, "run_id") ?? null,
+              optionalText(row, "task_id") ?? null,
+              text(row, "type"),
+              text(row, "data_json"),
+              text(row, "occurred_at"),
+              text(row, "payload_hash"),
+              text(row, "previous_hash"),
+              text(row, "chain_hash"),
+            ],
+          );
+        }
+        // The prune guard permits this only because the checkpoint above now
+        // covers every sequence being removed.
+        await client.query("DELETE FROM audit_events WHERE sequence <= $1", [
+          checkpoint.throughSequence,
+        ]);
+
+        return {
+          checkpoint,
+          events: rows.map((row) => {
+            const eventRunId = optionalText(row, "run_id");
+            return {
+              sequence: integer(row, "sequence"),
+              ...(eventRunId === undefined ? {} : { runId: eventRunId }),
+              event: this.toAuditEvent(row),
+            };
+          }),
+        };
+      },
+      { serialize: true },
+    );
+  }
+
+  public async pruneArchivedAuditEvents(
+    throughSequence: number,
+  ): Promise<number> {
+    const covered = await this.row(
+      "SELECT COUNT(*) AS n FROM audit_checkpoints WHERE through_sequence <= $1",
+      [throughSequence],
+    );
+    if (covered === undefined || integer(covered, "n") === 0) {
+      throw new Error(
+        "Archived events can only be pruned up to a recorded checkpoint",
+      );
+    }
+    // Whole segments only. Half a segment would no longer reproduce its
+    // checkpoint digest, and verification would report the operator's own
+    // housekeeping as tampering.
+    const removed = await this.query(
+      `DELETE FROM audit_archive WHERE checkpoint_id IN (
+         SELECT id FROM audit_checkpoints WHERE through_sequence <= $1
+       )`,
+      [throughSequence],
+    );
+    return removed.rowCount ?? 0;
   }
 
   public async createApproval(
@@ -2125,17 +2362,27 @@ export class PostgresCoordinationStore implements CoordinationStore {
   }
 
   public async verifyAudit(): Promise<AuditChainVerification> {
+    const checkpoints = await this.listAuditCheckpoints();
+    const segments: ArchivedSegment[] = [];
+    for (const checkpoint of checkpoints) {
+      const archived = await this.rows(
+        "SELECT * FROM audit_archive WHERE checkpoint_id = $1 ORDER BY sequence",
+        [checkpoint.id],
+      );
+      segments.push({
+        checkpoint,
+        ...(archived.length === 0
+          ? {}
+          : { entries: archived.map((row) => this.toChainedAuditEvent(row)) }),
+      });
+    }
     const rows = await this.rows(
       "SELECT * FROM audit_events ORDER BY sequence",
     );
-    const entries: ChainedAuditEvent[] = rows.map((row) => ({
-      event: this.toAuditEvent(row),
-      sequence: integer(row, "sequence"),
-      payloadHash: text(row, "payload_hash"),
-      previousHash: text(row, "previous_hash"),
-      chainHash: text(row, "chain_hash"),
-    }));
-    return verifyAuditChain(entries);
+    return verifyArchivedChain(
+      segments,
+      rows.map((row) => this.toChainedAuditEvent(row)),
+    );
   }
 
   public async close(): Promise<void> {

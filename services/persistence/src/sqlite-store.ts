@@ -37,8 +37,11 @@ import {
   GENESIS_HASH,
   chainHash,
   hashAuditPayload,
-  verifyAuditChain,
+  segmentDigest,
+  verifyArchivedChain,
+  type ArchivedSegment,
   type AuditChainVerification,
+  type AuditCheckpoint,
   type ChainedAuditEvent,
 } from "./audit-chain.js";
 import { LATEST_SCHEMA_VERSION, MIGRATIONS } from "./schema.js";
@@ -46,6 +49,8 @@ import type {
   ApiTokenRecord,
   AppendAuditInput,
   ApprovalFilter,
+  ArchiveAuditInput,
+  AuditArchiveResult,
   AuditEventFilter,
   AuthSessionRecord,
   CoordinationStore,
@@ -1893,11 +1898,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      const previous = this.db
-        .prepare("SELECT chain_hash FROM audit_events ORDER BY sequence DESC LIMIT 1")
-        .get() as Row | undefined;
-      const previousHash =
-        previous === undefined ? GENESIS_HASH : text(previous, "chain_hash");
+      const previousHash = this.latestChainHash();
       const payloadHash = hashAuditPayload(event);
 
       this.db
@@ -1929,6 +1930,24 @@ export class SqliteCoordinationStore implements CoordinationStore {
   public async listAuditEvents(
     filter: AuditEventFilter = {},
   ): Promise<SequencedAuditEvent[]> {
+    return this.selectAuditEvents("audit_events", filter);
+  }
+
+  public async listArchivedAuditEvents(
+    filter: AuditEventFilter = {},
+  ): Promise<SequencedAuditEvent[]> {
+    return this.selectAuditEvents("audit_archive", filter);
+  }
+
+  /**
+   * The live log and the archive have identical shapes, so one query serves
+   * both and a filter can never mean two different things depending on which
+   * side of a checkpoint an event happens to sit.
+   */
+  private selectAuditEvents(
+    table: "audit_events" | "audit_archive",
+    filter: AuditEventFilter,
+  ): SequencedAuditEvent[] {
     const afterSequence = filter.afterSequence ?? 0;
     const limit = filter.limit ?? 500;
     if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
@@ -1937,22 +1956,44 @@ export class SqliteCoordinationStore implements CoordinationStore {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 5_000) {
       throw new RangeError("Audit event limit must be between 1 and 5000");
     }
-    const rows = (
-      filter.runId === undefined
-        ? this.db
-            .prepare(
-              `SELECT * FROM audit_events
-               WHERE sequence > ? ORDER BY sequence LIMIT ?`,
-            )
-            .all(afterSequence, limit)
-        : this.db
-            .prepare(
-              `SELECT * FROM audit_events
-               WHERE sequence > ? AND run_id = ?
-               ORDER BY sequence LIMIT ?`,
-            )
-            .all(afterSequence, filter.runId, limit)
-    ) as Row[];
+    const clauses = ["sequence > ?"];
+    const values: (string | number)[] = [afterSequence];
+    if (filter.runId !== undefined) {
+      clauses.push("run_id = ?");
+      values.push(filter.runId);
+    }
+    if (filter.taskId !== undefined) {
+      clauses.push("task_id = ?");
+      values.push(filter.taskId);
+    }
+    if (filter.projectId !== undefined) {
+      // Stamped inside the event payload rather than promoted to a column, so
+      // it is read back out of the JSON.
+      clauses.push("json_extract(data_json, '$.projectId') = ?");
+      values.push(filter.projectId);
+    }
+    if (filter.types !== undefined) {
+      if (filter.types.length === 0) {
+        return [];
+      }
+      clauses.push(`type IN (${filter.types.map(() => "?").join(", ")})`);
+      values.push(...filter.types);
+    }
+    if (filter.occurredAfter !== undefined) {
+      clauses.push("occurred_at >= ?");
+      values.push(filter.occurredAfter);
+    }
+    if (filter.occurredBefore !== undefined) {
+      clauses.push("occurred_at < ?");
+      values.push(filter.occurredBefore);
+    }
+    values.push(limit);
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM ${table} WHERE ${clauses.join(" AND ")}
+         ORDER BY sequence LIMIT ?`,
+      )
+      .all(...values) as Row[];
     return rows.map((row) => {
       const runId = optionalText(row, "run_id");
       return {
@@ -1961,6 +2002,217 @@ export class SqliteCoordinationStore implements CoordinationStore {
         event: this.toAuditEvent(row),
       };
     });
+  }
+
+  /**
+   * Where the next event's chain hash continues from.
+   *
+   * Falls back to the newest checkpoint when the live log is empty, which is
+   * exactly the state archiving everything leaves behind. Reading GENESIS
+   * there would silently fork the chain.
+   */
+  private latestChainHash(): string {
+    const live = this.db
+      .prepare(
+        "SELECT chain_hash FROM audit_events ORDER BY sequence DESC LIMIT 1",
+      )
+      .get() as Row | undefined;
+    if (live !== undefined) {
+      return text(live, "chain_hash");
+    }
+    const checkpoint = this.db
+      .prepare(
+        `SELECT chain_hash FROM audit_checkpoints
+         ORDER BY through_sequence DESC LIMIT 1`,
+      )
+      .get() as Row | undefined;
+    return checkpoint === undefined
+      ? GENESIS_HASH
+      : text(checkpoint, "chain_hash");
+  }
+
+  private toChainedAuditEvent(row: Row): ChainedAuditEvent {
+    return {
+      event: this.toAuditEvent(row),
+      sequence: integer(row, "sequence"),
+      payloadHash: text(row, "payload_hash"),
+      previousHash: text(row, "previous_hash"),
+      chainHash: text(row, "chain_hash"),
+    };
+  }
+
+  private toCheckpoint(row: Row): AuditCheckpoint {
+    return {
+      id: text(row, "id"),
+      throughSequence: integer(row, "through_sequence"),
+      chainHash: text(row, "chain_hash"),
+      segmentDigest: text(row, "segment_digest"),
+      events: integer(row, "events"),
+      createdAt: text(row, "created_at"),
+    };
+  }
+
+  public async listAuditCheckpoints(): Promise<AuditCheckpoint[]> {
+    const rows = this.db
+      .prepare("SELECT * FROM audit_checkpoints ORDER BY through_sequence")
+      .all() as Row[];
+    return rows.map((row) => this.toCheckpoint(row));
+  }
+
+  public async archiveAuditEvents(
+    input: ArchiveAuditInput,
+  ): Promise<AuditArchiveResult | undefined> {
+    // Verified before the write lock is taken: archiving a chain that is
+    // already broken would fold the break into a checkpoint and make it look
+    // settled from then on.
+    const verification = await this.verifyAudit();
+    if (!verification.valid) {
+      throw new Error(
+        `Refusing to archive a broken audit chain: ${verification.reason}`,
+      );
+    }
+
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const clauses: string[] = [];
+      const values: (string | number)[] = [];
+      if (input.throughSequence !== undefined) {
+        clauses.push("sequence <= ?");
+        values.push(input.throughSequence);
+      }
+      if (input.before !== undefined) {
+        clauses.push("occurred_at < ?");
+        values.push(input.before);
+      }
+      if (clauses.length === 0) {
+        throw new Error(
+          "Archiving needs a boundary: pass throughSequence or before",
+        );
+      }
+      const rows = this.db
+        .prepare(
+          `SELECT * FROM audit_events WHERE ${clauses.join(" AND ")}
+           ORDER BY sequence`,
+        )
+        .all(...values) as Row[];
+      if (rows.length === 0) {
+        this.db.exec("COMMIT");
+        return undefined;
+      }
+
+      // A time bound can only cut where the sequence does, or the archive
+      // would be a set of holes rather than a prefix and nothing would link.
+      const boundary = integer(rows[rows.length - 1] as Row, "sequence");
+      const gap = this.db
+        .prepare(
+          "SELECT COUNT(*) AS n FROM audit_events WHERE sequence <= ? AND id NOT IN (" +
+            rows.map(() => "?").join(", ") +
+            ")",
+        )
+        .get(boundary, ...rows.map((row) => text(row, "id"))) as Row;
+      if (integer(gap, "n") > 0) {
+        throw new Error(
+          "Archiving must cover an unbroken prefix of the chain; the " +
+            "requested boundary would leave earlier events behind",
+        );
+      }
+
+      const entries = rows.map((row) => this.toChainedAuditEvent(row));
+      const last = entries.at(-1);
+      if (last === undefined) {
+        throw new Error("Unreachable empty archive segment");
+      }
+      const checkpoint: AuditCheckpoint = {
+        id: createId("checkpoint"),
+        throughSequence: last.sequence,
+        chainHash: last.chainHash,
+        segmentDigest: segmentDigest(entries.map((entry) => entry.payloadHash)),
+        events: entries.length,
+        createdAt: new Date().toISOString(),
+      };
+      this.db
+        .prepare(
+          `INSERT INTO audit_checkpoints
+             (id, through_sequence, chain_hash, segment_digest, events, created_at)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          checkpoint.id,
+          checkpoint.throughSequence,
+          checkpoint.chainHash,
+          checkpoint.segmentDigest,
+          checkpoint.events,
+          checkpoint.createdAt,
+        );
+      const insert = this.db.prepare(
+        `INSERT INTO audit_archive
+           (sequence, id, checkpoint_id, run_id, task_id, type, data_json,
+            occurred_at, payload_hash, previous_hash, chain_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      );
+      for (const row of rows) {
+        insert.run(
+          integer(row, "sequence"),
+          text(row, "id"),
+          checkpoint.id,
+          optionalText(row, "run_id") ?? null,
+          optionalText(row, "task_id") ?? null,
+          text(row, "type"),
+          text(row, "data_json"),
+          text(row, "occurred_at"),
+          text(row, "payload_hash"),
+          text(row, "previous_hash"),
+          text(row, "chain_hash"),
+        );
+      }
+      // The prune guard permits this only because the checkpoint above now
+      // covers every sequence being removed.
+      this.db
+        .prepare("DELETE FROM audit_events WHERE sequence <= ?")
+        .run(checkpoint.throughSequence);
+      this.db.exec("COMMIT");
+
+      return {
+        checkpoint,
+        events: rows.map((row) => {
+          const runId = optionalText(row, "run_id");
+          return {
+            sequence: integer(row, "sequence"),
+            ...(runId === undefined ? {} : { runId }),
+            event: this.toAuditEvent(row),
+          };
+        }),
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  public async pruneArchivedAuditEvents(
+    throughSequence: number,
+  ): Promise<number> {
+    const covered = this.db
+      .prepare(
+        "SELECT COUNT(*) AS n FROM audit_checkpoints WHERE through_sequence <= ?",
+      )
+      .get(throughSequence) as Row;
+    if (integer(covered, "n") === 0) {
+      throw new Error(
+        "Archived events can only be pruned up to a recorded checkpoint",
+      );
+    }
+    // Whole segments only. Half a segment would no longer reproduce its
+    // checkpoint digest, and verification would report the operator's own
+    // housekeeping as tampering.
+    const removed = this.db
+      .prepare(
+        `DELETE FROM audit_archive WHERE checkpoint_id IN (
+           SELECT id FROM audit_checkpoints WHERE through_sequence <= ?
+         )`,
+      )
+      .run(throughSequence);
+    return Number(removed.changes);
   }
 
   public async createApproval(
@@ -2141,17 +2393,27 @@ export class SqliteCoordinationStore implements CoordinationStore {
   }
 
   public async verifyAudit(): Promise<AuditChainVerification> {
+    const checkpoints = await this.listAuditCheckpoints();
+    const segments: ArchivedSegment[] = checkpoints.map((checkpoint) => {
+      const archived = this.db
+        .prepare(
+          "SELECT * FROM audit_archive WHERE checkpoint_id = ? ORDER BY sequence",
+        )
+        .all(checkpoint.id) as Row[];
+      return {
+        checkpoint,
+        ...(archived.length === 0
+          ? {}
+          : { entries: archived.map((row) => this.toChainedAuditEvent(row)) }),
+      };
+    });
     const rows = this.db
       .prepare("SELECT * FROM audit_events ORDER BY sequence")
       .all() as Row[];
-    const entries: ChainedAuditEvent[] = rows.map((row) => ({
-      event: this.toAuditEvent(row),
-      sequence: integer(row, "sequence"),
-      payloadHash: text(row, "payload_hash"),
-      previousHash: text(row, "previous_hash"),
-      chainHash: text(row, "chain_hash"),
-    }));
-    return verifyAuditChain(entries);
+    return verifyArchivedChain(
+      segments,
+      rows.map((row) => this.toChainedAuditEvent(row)),
+    );
   }
 
   public async close(): Promise<void> {
