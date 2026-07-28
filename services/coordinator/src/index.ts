@@ -7,4 +7,5 @@ export * from "./policy.js";
 export * from "./ownership-service.js";
 export * from "./partial-admission.js";
 export * from "./plan-admission.js";
+export * from "./replay.js";
 export * from "./scope-validator.js";

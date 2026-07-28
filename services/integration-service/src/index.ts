@@ -26,6 +26,17 @@ export interface IntegrateChangeSetInput {
   commitMessage: string;
   /** Reject instead of replaying when canonical no longer matches the worker base. */
   requireExactBase?: boolean;
+  /**
+   * The one canonical revision this changeset may be replayed onto despite
+   * having been written against an older base.
+   *
+   * The caller establishes that the advance to this exact revision touched
+   * nothing the changeset depends on. Naming the revision rather than passing
+   * a boolean is what keeps the permission from outliving the check: canonical
+   * moving once more between that check and this call leaves the revisions
+   * unequal, and the result is refused as stale exactly as before.
+   */
+  replayableOnto?: string;
 }
 
 export interface IntegrationServiceOptions {
@@ -75,10 +86,14 @@ export class IntegrationService {
       input.repository,
     );
 
-    if (
-      input.requireExactBase === true &&
-      input.changeSet.baseRevision !== previousVersion.revision
-    ) {
+    const overtaken =
+      input.changeSet.baseRevision !== previousVersion.revision;
+    // The workspace below is built from current canonical and the patches are
+    // applied three-way, so replaying is not a new mechanism — this gate is
+    // the only thing that has been standing in front of it.
+    const replaying =
+      overtaken && input.replayableOnto === previousVersion.revision;
+    if (input.requireExactBase === true && overtaken && !replaying) {
       return {
         taskId: input.changeSet.taskId,
         changeSetId: input.changeSet.id,
@@ -136,6 +151,16 @@ export class IntegrationService {
         integrationWorkspace,
         declaredEntries,
       );
+      if (replaying && result.status === "integrated") {
+        result = {
+          ...result,
+          replayedFrom: input.changeSet.baseRevision,
+          explanation:
+            `${result.explanation}; replayed from ` +
+            `${input.changeSet.baseRevision.slice(0, 12)} onto a canonical ` +
+            "revision that changed nothing it depends on",
+        };
+      }
     } catch (error) {
       operationError = error;
     }

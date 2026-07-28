@@ -11,8 +11,10 @@ import {
   assertChangeSetWithinPlan,
   deferredScopeObjective,
   isDeferredScopeFollowUp,
+  replayBlockers,
   splitChangeSet,
   type ActivePlan,
+  type CanonicalAdvance,
 } from "@coord/coordinator";
 import { IntegrationService } from "@coord/integration-service";
 import type {
@@ -56,9 +58,10 @@ const HEARTBEAT_INTERVAL_MS = 60 * 1000;
 /**
  * How many remote workers may hold leases in one repository at once.
  *
- * Concurrency is optimistic: every result must still integrate from the exact
- * base it was leased at, and a result whose base went stale is requeued to
- * replan, so this bound trades duplicate agent effort against wall-clock
+ * Concurrency is optimistic: a result integrates from the base it was leased
+ * at, or — when canonical moved on without touching anything the result
+ * depends on — is replayed onto the newer revision. Anything else is requeued
+ * to replan, so this bound trades duplicate agent effort against wall-clock
  * throughput without touching correctness. Operators tune it with
  * COORD_REPOSITORY_PARALLELISM; workers cannot choose it for themselves.
  */
@@ -125,7 +128,43 @@ export interface WorkResultAcceptance {
 interface WorkResultServices {
   repositories?: RepositoryService;
   integrations?: IntegrationService;
+  /** Reads what a canonical advance changed, to decide whether it matters. */
+  intelligence?: CodeIntelligenceService;
   integrationRoot?: string;
+}
+
+/**
+ * What one canonical advance changed, in resource terms.
+ *
+ * The file list comes from Git and is exact. The resources come from indexing
+ * the revision that was advanced *to*, because that is the state a replay
+ * would land on. A file the advance deleted is absent from that index, which
+ * costs nothing: a deleted file this result also touched is already caught by
+ * the file list.
+ */
+async function canonicalAdvance(
+  repositories: RepositoryService,
+  intelligence: CodeIntelligenceService,
+  repository: CanonicalRepository,
+  from: CanonicalVersion,
+  to: CanonicalVersion,
+): Promise<CanonicalAdvance> {
+  const changedFiles = await repositories.listChangedFiles(
+    repository,
+    from.revision,
+    to.revision,
+  );
+  const index = await intelligence.index(repository, to.revision);
+  const changed = intelligence.changedResources(changedFiles, index);
+  return {
+    changedFiles,
+    changedSymbols: changed.symbols,
+    changedApis: changed.apis,
+    changedSchemas: changed.schemas,
+    changedConfigKeys: changed.configKeys,
+    changedTests: changed.tests,
+    changedServices: changed.services,
+  };
 }
 
 /** Derived from the lease so concurrent bundle requests cannot collide. */
@@ -918,6 +957,8 @@ export async function acceptWorkResult(
   const repositories = services.repositories ?? new RepositoryService();
   const integrations =
     services.integrations ?? new IntegrationService(repositories);
+  const intelligence =
+    services.intelligence ?? new CodeIntelligenceService(repositories);
   const leaseAtStart = await store.getWorkLease(input.leaseId);
   if (leaseAtStart === undefined) {
     throw new Error(`Unknown lease: ${input.leaseId}`);
@@ -1111,8 +1152,32 @@ export async function acceptWorkResult(
     return await requeueForDeferredScope(store, leaseAtStart, task, split);
   }
 
+  const promoted = split.granted;
+
+  // Canonical moving under a finished result used to end it. It still does
+  // when the advance touched anything this result depends on; when it did not,
+  // the result is replayed onto the newer revision instead of a whole agent
+  // run being spent again to rediscover the same change.
+  const replay = async (
+    current: CanonicalVersion,
+  ): Promise<string[]> =>
+    replayBlockers(
+      plan,
+      promoted,
+      await canonicalAdvance(
+        repositories,
+        intelligence,
+        repository,
+        baseVersion,
+        current,
+      ),
+    );
+
   const currentBeforeRun = await repositories.getCanonicalVersion(repository);
-  if (currentBeforeRun.revision !== baseVersion.revision) {
+  if (
+    currentBeforeRun.revision !== baseVersion.revision &&
+    (await replay(currentBeforeRun)).length > 0
+  ) {
     return await requeueForCanonicalChange(
       store,
       repositories,
@@ -1136,7 +1201,6 @@ export async function acceptWorkResult(
     scenario: "remote-worker",
     baseVersion,
   });
-  const promoted = split.granted;
   let runFinished = false;
   try {
     await store.saveTask(run.id, taskDefinition);
@@ -1258,15 +1322,35 @@ export async function acceptWorkResult(
 
     const currentBeforeIntegration =
       await repositories.getCanonicalVersion(repository);
+    let replayableOnto: string | undefined;
     if (currentBeforeIntegration.revision !== baseVersion.revision) {
-      return await requeueForCanonicalChange(
-        store,
-        repositories,
-        leaseAtStart,
-        baseVersion,
-        currentBeforeIntegration,
-        run.id,
-      );
+      const blockers = await replay(currentBeforeIntegration);
+      if (blockers.length > 0) {
+        return await requeueForCanonicalChange(
+          store,
+          repositories,
+          leaseAtStart,
+          baseVersion,
+          currentBeforeIntegration,
+          run.id,
+        );
+      }
+      // Pinned to this exact revision. If canonical moves once more before the
+      // integration reads it, the permission no longer matches and the result
+      // is refused as stale, exactly as it was before replay existed.
+      replayableOnto = currentBeforeIntegration.revision;
+      await trace(store, run.id, "canonical_changed", task.id, {
+        projectId: task.projectId,
+        repositoryId: task.repositoryId,
+        previousRevision: baseVersion.revision,
+        revision: currentBeforeIntegration.revision,
+        workerId: leaseAtStart.workerId,
+        leaseId: leaseAtStart.id,
+        replayed: true,
+        explanation:
+          "Canonical advanced without touching anything this result depends " +
+          "on, so the result was replayed rather than requeued",
+      });
     }
     const settled = await store.finishWorkLease(
       input.leaseId,
@@ -1294,6 +1378,7 @@ export async function acceptWorkResult(
       validationCommands: task.validationCommands,
       commitMessage: `coord(${task.id}): ${task.objective}`,
       requireExactBase: true,
+      ...(replayableOnto === undefined ? {} : { replayableOnto }),
     });
     await store.saveIntegration(run.id, integration);
     await trace(store, run.id, "validation_completed", task.id, {
@@ -1408,14 +1493,16 @@ export function workerOperations(
     sandboxOptions === undefined
       ? worktrees
       : new DockerWorkspaceManager(sandboxOptions, worktrees);
+  const intelligence = new CodeIntelligenceService(repositories);
   const services: WorkResultServices = {
     repositories,
     integrations: new IntegrationService(repositories, workspaces),
+    intelligence,
     integrationRoot: project.integrationRoot,
   };
   const planServices: WorkPlanServices = {
     repositories,
-    intelligence: new CodeIntelligenceService(repositories),
+    intelligence,
   };
   const processing = new Map<string, Promise<WorkResultAcceptance>>();
   // Admission reads the repository's executing plans and writes one back.

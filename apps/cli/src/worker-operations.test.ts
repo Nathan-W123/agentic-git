@@ -609,7 +609,9 @@ test("canonical movement requeues remote work for a fresh plan", async () => {
   try {
     const taskId = await submit(harness);
     // Admitted at the original base, so this exercises the backstop: the plan
-    // was fine when it was approved and canonical moved during execution.
+    // was fine when it was approved and canonical moved during execution onto
+    // the very file it declared. An advance elsewhere in the tree is replayed
+    // rather than requeued; this is the advance that cannot be.
     const assignment = await leaseAndAdmit(harness);
     const stored = await harness.store.getRepository("repo_worker");
     assert.ok(stored);
@@ -627,7 +629,10 @@ test("canonical movement requeues remote work for a fresh plan", async () => {
       repository,
       baseVersion: assignment.canonicalVersion,
     });
-    await writeFile(path.join(competing.path, "README.md"), "new canonical\n");
+    await writeFile(
+      path.join(competing.path, "src", "value.js"),
+      "export const value = 99;\n",
+    );
     const candidate = await harness.repositories.commitAll(
       competing.path,
       "advance canonical",
@@ -735,7 +740,7 @@ test("a failed result settles the task and is audited", async () => {
   }
 });
 
-test("concurrent workers in one repository cannot corrupt canonical; the loser replans", async () => {
+test("concurrent workers in one repository cannot corrupt canonical; a disjoint loser is replayed", async () => {
   const harness = await createHarness();
   try {
     const secondUser = await harness.store.createUser({
@@ -855,9 +860,13 @@ test("concurrent workers in one repository cannot corrupt canonical; the loser r
     );
     assert.equal(acceptedA.accepted, true, acceptedA.reason);
 
-    // Worker B built from the now-stale base. Its result must not integrate
-    // — and must not fail the task either: it requeues to replan.
-    const staleResult = await acceptWorkResult(
+    // Worker B built from a base canonical has now moved past. The advance
+    // was worker A rewriting src/value.js, which worker B neither touches nor
+    // depends on, so B's finished result is replayed onto the newer revision
+    // rather than thrown away. Canonical is still safe: the three-way apply,
+    // the applied-versus-declared check and the compare-and-swap promotion all
+    // still run, and B's own agent run is not spent twice.
+    const acceptedB = await acceptWorkResult(
       harness.store,
       {
         leaseId: assignmentB.lease.id,
@@ -881,60 +890,28 @@ test("concurrent workers in one repository cannot corrupt canonical; the loser r
         integrationRoot: path.join(harness.root, "integration"),
       },
     );
-    assert.equal(staleResult.accepted, false);
-    assert.equal(staleResult.requeued, true);
+    assert.equal(acceptedB.accepted, true, acceptedB.reason);
+    assert.equal(acceptedB.integrationStatus, "integrated");
     assert.equal(
       (await harness.store.listSubmittedTasks()).find(
         (task) => task.id === taskB.id,
       )?.status,
-      "submitted",
+      "integrated",
     );
-
-    // The requeued task re-leases at the promoted revision and integrates.
-    const retryAssignment = await leaseWork(harness.store, {
-      workerId: secondWorker.id,
-      projectId: DEFAULT_PROJECT_ID,
-      repositoryParallelism: 2,
-    });
-    assert.equal(retryAssignment?.task.id, taskB.id);
-    assert.ok(retryAssignment);
+    // The record says the result outlived its base rather than pretending it
+    // was an ordinary promotion.
+    const replayed = (await harness.store.getRun(acceptedB.runId ?? ""))
+      ?.integrations.at(-1);
+    assert.equal(replayed?.replayedFrom, assignmentB.lease.baseRevision);
     assert.notEqual(
-      retryAssignment.lease.baseRevision,
+      replayed?.previousVersion.revision,
       assignmentB.lease.baseRevision,
     );
-    const readmitted = await admit(harness, retryAssignment, {
-      expectedFiles: ["src/other.js"],
-      expectedSymbols: ["other"],
-    });
+    // Task B never had to be leased a second time.
     assert.equal(
-      readmitted.outcome === "admitted" ? readmitted.admission.status : readmitted,
-      "approved",
+      (await harness.store.listWorkLeases({ status: "active" })).length,
+      0,
     );
-    const acceptedB = await acceptWorkResult(
-      harness.store,
-      {
-        leaseId: retryAssignment.lease.id,
-        status: "completed",
-        actorId: "user",
-        plan: plan(taskB.id, {
-          objective: "add another module",
-          expectedFiles: ["src/other.js"],
-          expectedSymbols: ["other"],
-        }),
-        changeSet: await collect(
-          taskB.id,
-          retryAssignment.canonicalVersion,
-          "src/other.js",
-          "export const other = 1;\n",
-          ["other"],
-        ),
-      },
-      {
-        repositories: harness.repositories,
-        integrationRoot: path.join(harness.root, "integration"),
-      },
-    );
-    assert.equal(acceptedB.accepted, true, acceptedB.reason);
 
     // Canonical carries both changes, in order, with a valid audit chain.
     const version = await harness.repositories.getCanonicalVersion(canonical);
@@ -1616,10 +1593,20 @@ async function admissionWait(
   harness: Harness,
   assignment: WorkAssignment,
   services: Parameters<typeof admitWorkPlan>[2],
-): Promise<{ admission: PlanAdmission; waitedMs: number }> {
+  /**
+   * Runs once the first submission has been answered. The contested file is
+   * freed from here rather than from the start of the run, so how long the
+   * holder holds it is measured from a point both runs reach — otherwise a
+   * loaded machine makes the first round trip, not the holder, the thing being
+   * measured.
+   */
+  onFirstAnswer: () => void = () => undefined,
+): Promise<{ admission: PlanAdmission; waitedMs: number; attempts: number }> {
   const startedAt = Date.now();
-  const submit = async () =>
-    await admitWorkPlan(
+  let attempts = 0;
+  const submit = async () => {
+    attempts += 1;
+    return await admitWorkPlan(
       harness.store,
       {
         leaseId: assignment.lease.id,
@@ -1628,17 +1615,23 @@ async function admissionWait(
       },
       services,
     );
+  };
   let outcome = await submit();
+  onFirstAnswer();
   while (
     outcome.outcome === "admitted" &&
     !planAdmissionApproved(outcome.admission) &&
-    Date.now() - startedAt < 30_000
+    Date.now() - startedAt < 60_000
   ) {
     await new Promise((resolve) => setTimeout(resolve, 50));
     outcome = await submit();
   }
   assert.ok(outcome.outcome === "admitted");
-  return { admission: outcome.admission, waitedMs: Date.now() - startedAt };
+  return {
+    admission: outcome.admission,
+    waitedMs: Date.now() - startedAt,
+    attempts,
+  };
 }
 
 /** Arbitration as it was before partial admission: the whole plan or none. */
@@ -1821,9 +1814,11 @@ test("partial admission starts work that all-or-nothing arbitration would have m
     const partialHolder = await holdTheContestedFile(partial);
     const partialSplit = await leaseTheSplitTask(partial);
 
-    // The contested file frees up HOLD_MS after each run starts, so the two
-    // measurements are of the same wait and not of each other's setup.
-    const releaseAfterHold = (harness: Harness, leaseId: string): void => {
+    // The contested file is freed HOLD_MS after each run's first submission is
+    // answered, not after the run starts. Both runs therefore measure the same
+    // wait from the same point, and a loaded machine slowing a round trip down
+    // cannot be mistaken for the holder taking longer.
+    const releaseAfterHold = (harness: Harness, leaseId: string) => (): void => {
       releaseTimers.push(
         setTimeout(() => {
           void harness.store.finishWorkLease(
@@ -1836,40 +1831,55 @@ test("partial admission starts work that all-or-nothing arbitration would have m
       );
     };
 
-    releaseAfterHold(sequenced, sequencedHolder.lease.id);
-    const wholePlan = await admissionWait(sequenced, sequencedSplit, {
-      repositories: sequenced.repositories,
-      admissions: new WholePlanAdmissions(),
-    });
+    const wholePlan = await admissionWait(
+      sequenced,
+      sequencedSplit,
+      {
+        repositories: sequenced.repositories,
+        admissions: new WholePlanAdmissions(),
+      },
+      releaseAfterHold(sequenced, sequencedHolder.lease.id),
+    );
+    const split = await admissionWait(
+      partial,
+      partialSplit,
+      { repositories: partial.repositories },
+      releaseAfterHold(partial, partialHolder.lease.id),
+    );
 
-    releaseAfterHold(partial, partialHolder.lease.id);
-    const split = await admissionWait(partial, partialSplit, {
-      repositories: partial.repositories,
-    });
-
-    // All-or-nothing: nothing could start until the holder let go.
+    // All-or-nothing: refused on the first submission, and nothing could start
+    // until the holder let go — so it came back for more than one round trip
+    // and spent at least the holding period idle.
     assert.equal(wholePlan.admission.status, "approved");
+    assert.ok(
+      wholePlan.attempts > 1,
+      `all-or-nothing admission should have had to resubmit, took ${wholePlan.attempts} attempt(s)`,
+    );
     assert.ok(
       wholePlan.waitedMs >= HOLD_MS,
       `all-or-nothing admission should have waited for the holder, waited ${wholePlan.waitedMs}ms`,
     );
 
-    // Partial: admitted on the four free files on the first submission, with
-    // the holder still holding the fifth.
+    // Partial: admitted on the four free files by the first submission, with
+    // the holder still holding the fifth. This is the load-independent form of
+    // the claim — one round trip, no waiting, whatever the machine is doing.
     assert.equal(split.admission.status, "approved_with_constraints");
     assert.deepEqual(deferredFilePaths(split.admission), ["src/value.js"]);
-    assert.ok(
-      split.waitedMs < HOLD_MS,
-      `partial admission should not have waited for the holder, waited ${split.waitedMs}ms`,
-    );
-    assert.ok(
-      split.waitedMs < wholePlan.waitedMs,
-      `partial ${split.waitedMs}ms should beat all-or-nothing ${wholePlan.waitedMs}ms`,
+    assert.equal(
+      split.attempts,
+      1,
+      `partial admission should have been answered on the first submission, took ${split.attempts}`,
     );
     assert.equal(
       (await partial.store.getWorkLease(partialHolder.lease.id))?.status,
       "active",
       "the partial run must have been admitted before the holder let go",
+    );
+    // And the difference is the holding period, not noise. Both runs pay the
+    // same fixed admission cost; only one of them also sits out the wait.
+    assert.ok(
+      wholePlan.waitedMs - split.waitedMs >= HOLD_MS / 2,
+      `all-or-nothing ${wholePlan.waitedMs}ms should exceed partial ${split.waitedMs}ms by the holding period`,
     );
   } finally {
     for (const timer of releaseTimers) {
@@ -2082,6 +2092,116 @@ test("a changeset touching a file that was never arbitrated is still refused", a
     assert.equal(
       (await harness.store.getWorkLease(split.lease.id))?.status,
       "failed",
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a result is still requeued when the advance touched what it depends on", async () => {
+  // The other half of replay. Admission cannot see every way canonical moves —
+  // a local coordinator run, a rollback, an operator push — so the replay check
+  // is what stands between a finished result and a base that changed
+  // underneath it. Here canonical moves outside arbitration entirely, onto the
+  // very file this result rewrites, and the result is refused exactly as
+  // before.
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    const assignment = await leaseAndAdmit(harness);
+
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const repository = {
+      id: stored.id,
+      path: stored.path,
+      branch: stored.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+
+    // The agent's finished work, built against the leased base.
+    const agentWorkspace = await workspaces.create({
+      taskId,
+      rootPath: path.join(harness.root, "agent-workspaces"),
+      repository,
+      baseVersion: assignment.canonicalVersion,
+    });
+    await writeFile(
+      path.join(agentWorkspace.path, "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(agentWorkspace, {
+      symbolsChanged: ["value"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "raised the value",
+    });
+    await workspaces.destroy(agentWorkspace);
+
+    // Canonical moves by a route this arbitration never saw, onto the same
+    // file. This is what the check exists for.
+    const before = await harness.repositories.getCanonicalVersion(repository);
+    const outside = await workspaces.create({
+      taskId: "outside",
+      rootPath: path.join(harness.root, "outside"),
+      repository,
+      baseVersion: before,
+    });
+    await writeFile(
+      path.join(outside.path, "src", "value.js"),
+      "export const value = 7;\n",
+      "utf8",
+    );
+    const candidate = await harness.repositories.commitAll(
+      outside.path,
+      "changed outside arbitration",
+    );
+    assert.ok(candidate);
+    assert.equal(
+      await harness.repositories.promote(
+        repository,
+        candidate,
+        before.revision,
+      ),
+      true,
+    );
+    await workspaces.destroy(outside);
+
+    const outcome = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskId),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+
+    assert.equal(outcome.accepted, false);
+    assert.equal(outcome.requeued, true);
+    assert.equal(
+      (await harness.store.listSubmittedTasks()).find(
+        (task) => task.id === taskId,
+      )?.status,
+      "submitted",
+    );
+    // The outside change is still what canonical holds: nothing was replayed
+    // over the top of it.
+    const version = await harness.repositories.getCanonicalVersion(repository);
+    assert.equal(
+      await harness.repositories.readFile(
+        repository,
+        version.revision,
+        "src/value.js",
+      ),
+      "export const value = 7;\n",
     );
   } finally {
     await rm(harness.root, { recursive: true, force: true });

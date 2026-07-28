@@ -388,6 +388,13 @@ export interface IntegrationResult {
   validation: CommandResult[];
   candidateRevision?: string;
   cleanupWarnings?: string[];
+  /**
+   * The base the changeset was written against, when that is not the revision
+   * it was integrated on top of. Present only on a replay, so the history
+   * records that a result outlived its own base rather than hiding it behind
+   * an ordinary promotion.
+   */
+  replayedFrom?: string;
   explanation: string;
 }
 
