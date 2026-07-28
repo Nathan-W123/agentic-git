@@ -328,7 +328,8 @@ export type AuditEventType =
   | "task_failed"
   | "task_cancelled"
   | "cleanup_failed"
-  | "ownership_released";
+  | "ownership_released"
+  | "recovery_completed";
 
 export interface AuditEvent {
   id: string;

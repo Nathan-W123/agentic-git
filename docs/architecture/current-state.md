@@ -133,8 +133,13 @@ machine even when state lives in a shared database.
 
 The following are intentionally not represented as complete:
 
-- Automatic in-place crash resumption and cross-restart worktree garbage
-  collection. State is preserved and tasks can be retried manually.
+- In-place resumption of a half-finished agent session. Crash recovery is
+  automatic but restart-shaped: on boot (and via `coord recover`) the control
+  plane fails runs stranded in `running`, requeues claimed tasks whose
+  process died — live remote leases are left untouched — clears orphaned
+  workspace/planning/integration worktrees, and prunes their registrations
+  from the canonical mirrors. A recovered task re-runs from the queue rather
+  than resuming mid-session.
 - Redis/event-bus deployment, high availability, Kubernetes, Terraform,
   hybrid workers, and air-gapped release tooling. (A PostgreSQL storage
   backend exists; the rest of that deployment stack does not.)

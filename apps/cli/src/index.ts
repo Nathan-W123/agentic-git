@@ -23,6 +23,7 @@ import {
   taskSubmit,
 } from "./commands.js";
 import { CoordinatorProject, PROJECT_DIRECTORY } from "./project.js";
+import { recoverCoordinationState } from "./recovery.js";
 import { repoPush } from "./repo-export.js";
 import {
   createBenchmarkFixture,
@@ -95,6 +96,7 @@ Usage:
   coord approval approve <approval-id> [--comment=<text>] [--actor=<id>]
   coord approval reject <approval-id> [--comment=<text>] [--actor=<id>]
   coord doctor
+  coord recover
 
   coord demo [--live] [--scenario=<name>] [--persist[=<path>]]
   coord benchmark [--json] [--live] [--scenario=<name>] [--repeat=<n>]
@@ -743,6 +745,26 @@ async function runApproval(
   });
 }
 
+async function runRecover(): Promise<void> {
+  await withProject(async (project, store) => {
+    // Only run this when no control plane is serving this store: recovering
+    // a live deployment's state would cancel its in-flight runs.
+    const report = await recoverCoordinationState(project, store);
+    console.log(`Failed stranded runs: ${report.failedRuns.length}`);
+    console.log(`Requeued stranded tasks: ${report.requeuedTasks.length}`);
+    console.log(`Expired lapsed leases: ${report.expiredLeases.length}`);
+    console.log(
+      `Removed scratch directories: ${report.removedDirectories.length}`,
+    );
+    console.log(
+      `Pruned repository worktrees: ${report.prunedRepositories.length}`,
+    );
+    for (const warning of report.warnings) {
+      console.warn(`Warning: ${warning}`);
+    }
+  });
+}
+
 async function runDoctor(): Promise<void> {
   await withProject(async (project, store) => {
     const checks: Array<{ name: string; ok: boolean; detail: string }> = [];
@@ -901,6 +923,9 @@ async function main(): Promise<void> {
       break;
     case "doctor":
       await runDoctor();
+      break;
+    case "recover":
+      await runRecover();
       break;
     case "run":
       await runPending(flags);

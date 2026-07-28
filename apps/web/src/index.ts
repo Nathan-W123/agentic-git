@@ -10,6 +10,7 @@ import {
   taskSubmit,
 } from "@coord/cli/commands";
 import { CoordinatorProject } from "@coord/cli/project";
+import { recoverCoordinationState } from "@coord/cli/recovery";
 import { workerOperations } from "@coord/cli/worker-operations";
 import { runProcess } from "@coord/repository-service";
 
@@ -46,6 +47,28 @@ async function main(): Promise<void> {
   );
   const project = await CoordinatorProject.open(root);
   const store = project.openStore();
+
+  // Crash recovery precedes serving: everything found now is genuinely
+  // orphaned. This assumes the documented single-control-plane deployment.
+  const recovery = await recoverCoordinationState(project, store);
+  if (
+    recovery.failedRuns.length > 0 ||
+    recovery.requeuedTasks.length > 0 ||
+    recovery.expiredLeases.length > 0 ||
+    recovery.removedDirectories.length > 0
+  ) {
+    console.log(
+      "Recovered from a previous shutdown: " +
+        `${recovery.failedRuns.length} run(s) failed, ` +
+        `${recovery.requeuedTasks.length} task(s) requeued, ` +
+        `${recovery.expiredLeases.length} lease(s) expired, ` +
+        `${recovery.removedDirectories.length} scratch dir(s) removed`,
+    );
+  }
+  for (const warning of recovery.warnings) {
+    console.warn(`Recovery warning: ${warning}`);
+  }
+
   const generatedToken =
     process.env["COORD_BOOTSTRAP_TOKEN"] === undefined
       ? randomBytes(32).toString("base64url")
