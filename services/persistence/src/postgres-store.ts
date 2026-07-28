@@ -2,6 +2,7 @@ import pg from "pg";
 
 import {
   createId,
+  planAdmissionApproved,
   type AgentPlan,
   type ApprovalDecision,
   type ApprovalRequest,
@@ -71,11 +72,14 @@ import type {
   UserAccount,
   LeaseTaskInput,
   LeasedWork,
+  SaveWorkLeasePlanInput,
+  SaveWorkLeasePlanResult,
   WorkLease,
+  WorkLeasePlan,
   WorkLeaseStatus,
   WorkerRecord,
 } from "./store.js";
-import { DEFAULT_PROJECT_ID } from "./store.js";
+import { DEFAULT_PROJECT_ID, sameLeaseIdSet } from "./store.js";
 
 const { Pool } = pg;
 type PoolClient = pg.PoolClient;
@@ -817,6 +821,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
           finishedAt: undefined,
           outcome: undefined,
           detail: undefined,
+          plan: undefined,
         };
 
         await client.query(
@@ -860,6 +865,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       workerId?: string;
       status?: WorkLeaseStatus;
       projectId?: ProjectId;
+      repositoryId?: string;
       issuedAfter?: string;
     } = {},
   ): Promise<WorkLease[]> {
@@ -874,6 +880,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
     if (filter.projectId !== undefined) {
       clauses.push(`project_id = ${bind(values, filter.projectId)}`);
     }
+    if (filter.repositoryId !== undefined) {
+      clauses.push(`repository_id = ${bind(values, filter.repositoryId)}`);
+    }
     if (filter.issuedAfter !== undefined) {
       clauses.push(`issued_at > ${bind(values, filter.issuedAfter)}`);
     }
@@ -883,6 +892,57 @@ export class PostgresCoordinationStore implements CoordinationStore {
       values,
     );
     return rows.map((row) => this.toWorkLease(row));
+  }
+
+  public async saveWorkLeasePlan(
+    input: SaveWorkLeasePlanInput,
+  ): Promise<SaveWorkLeasePlanResult> {
+    // Serialized for the same reason leaseNextTask is: two workers arbitrating
+    // overlapping plans at the same moment must not both read a view that
+    // omits the other, and the loser is told to decide again.
+    return await this.transaction(
+      async (client): Promise<SaveWorkLeasePlanResult> => {
+        const row = (
+          await client.query(
+            "SELECT * FROM work_leases WHERE id = $1 AND status = 'active'",
+            [input.leaseId],
+          )
+        ).rows[0] as Row | undefined;
+        if (row === undefined) {
+          return { outcome: "lease_lost" };
+        }
+        const lease = this.toWorkLease(row);
+        const approvedLeaseIds = (
+          (
+            await client.query(
+              `SELECT * FROM work_leases
+               WHERE repository_id = $1 AND status = 'active' AND id <> $2`,
+              [lease.repositoryId, lease.id],
+            )
+          ).rows as Row[]
+        )
+          .map((candidate) => this.toWorkLease(candidate))
+          .filter(
+            (candidate) =>
+              candidate.plan !== undefined &&
+              planAdmissionApproved(candidate.plan.admission),
+          )
+          .map((candidate) => candidate.id)
+          .sort();
+        if (!sameLeaseIdSet(approvedLeaseIds, input.observedApprovedLeaseIds)) {
+          return { outcome: "stale", approvedLeaseIds };
+        }
+        await client.query(
+          "UPDATE work_leases SET plan_json = $1 WHERE id = $2",
+          [JSON.stringify(input.submission), lease.id],
+        );
+        return {
+          outcome: "saved",
+          lease: { ...lease, plan: structuredClone(input.submission) },
+        };
+      },
+      { serialize: true },
+    );
   }
 
   public async heartbeatWorkLease(
@@ -1001,6 +1061,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       finishedAt: optionalText(row, "finished_at"),
       outcome: optionalText(row, "outcome"),
       detail: optionalText(row, "detail"),
+      plan: optionalJson<WorkLeasePlan>(row, "plan_json"),
     };
   }
 

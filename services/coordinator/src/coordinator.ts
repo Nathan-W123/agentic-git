@@ -48,6 +48,10 @@ import {
 import { InMemoryAuditLog } from "./audit-log.js";
 import { ConflictDetector } from "./conflict-detector.js";
 import { OwnershipService } from "./ownership-service.js";
+import {
+  approvedSchemaResources,
+  structuralConflict,
+} from "./plan-admission.js";
 import { RunRecorder } from "./run-recorder.js";
 import { assertChangeSetWithinPlan } from "./scope-validator.js";
 
@@ -94,18 +98,6 @@ function conflictFingerprint(assessment: ConflictAssessment): string {
     disposition: assessment.disposition,
     evidence: assessment.evidence,
   });
-}
-
-function structuralConflict(assessment: ConflictAssessment): boolean {
-  return assessment.evidence.some(
-    (entry) => entry.advisory !== true && entry.score > 0,
-  );
-}
-
-function approvedSchemaResources(plan: AgentPlan): ReadonlySet<string> {
-  return new Set(
-    (plan.expectedSchemas ?? []).map((resource) => `schema\0${resource}`),
-  );
 }
 
 export interface CoordinatorDependencies {

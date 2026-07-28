@@ -1,5 +1,6 @@
 import {
   createId,
+  planAdmissionApproved,
   type AgentPlan,
   type ApprovalDecision,
   type ApprovalRequest,
@@ -32,6 +33,8 @@ import type {
   AppendAuditInput,
   LeaseTaskInput,
   LeasedWork,
+  SaveWorkLeasePlanInput,
+  SaveWorkLeasePlanResult,
   WorkLease,
   WorkLeaseStatus,
   WorkerRecord,
@@ -63,6 +66,7 @@ import type {
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
+  sameLeaseIdSet,
 } from "./store.js";
 
 interface RunState {
@@ -534,6 +538,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       finishedAt: undefined,
       outcome: undefined,
       detail: undefined,
+      plan: undefined,
     };
     candidate.status = "claimed";
     candidate.claimedAt = lease.issuedAt;
@@ -551,6 +556,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       workerId?: string;
       status?: WorkLeaseStatus;
       projectId?: string;
+      repositoryId?: string;
       issuedAfter?: string;
     } = {},
   ): Promise<WorkLease[]> {
@@ -561,11 +567,49 @@ export class InMemoryCoordinationStore implements CoordinationStore {
           (filter.status === undefined || lease.status === filter.status) &&
           (filter.projectId === undefined ||
             lease.projectId === filter.projectId) &&
+          (filter.repositoryId === undefined ||
+            lease.repositoryId === filter.repositoryId) &&
           (filter.issuedAfter === undefined ||
             lease.issuedAt > filter.issuedAfter),
       )
       .sort((left, right) => right.issuedAt.localeCompare(left.issuedAt))
       .map((lease) => ({ ...lease }));
+  }
+
+  public async saveWorkLeasePlan(
+    input: SaveWorkLeasePlanInput,
+  ): Promise<SaveWorkLeasePlanResult> {
+    const lease = this.workLeases.get(input.leaseId);
+    if (lease === undefined || lease.status !== "active") {
+      return { outcome: "lease_lost" };
+    }
+    const approvedLeaseIds = this.approvedPlanLeaseIds(
+      lease.repositoryId,
+      lease.id,
+    );
+    if (!sameLeaseIdSet(approvedLeaseIds, input.observedApprovedLeaseIds)) {
+      return { outcome: "stale", approvedLeaseIds };
+    }
+    lease.plan = structuredClone(input.submission);
+    return { outcome: "saved", lease: { ...lease } };
+  }
+
+  /** Other active leases in one repository whose plan was admitted. */
+  private approvedPlanLeaseIds(
+    repositoryId: string,
+    excludeLeaseId: string,
+  ): string[] {
+    return [...this.workLeases.values()]
+      .filter(
+        (candidate) =>
+          candidate.id !== excludeLeaseId &&
+          candidate.status === "active" &&
+          candidate.repositoryId === repositoryId &&
+          candidate.plan !== undefined &&
+          planAdmissionApproved(candidate.plan.admission),
+      )
+      .map((candidate) => candidate.id)
+      .sort();
   }
 
   public async heartbeatWorkLease(

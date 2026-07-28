@@ -4,6 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 
 import {
   createId,
+  planAdmissionApproved,
   type AgentPlan,
   type ApprovalDecision,
   type ApprovalRequest,
@@ -72,12 +73,16 @@ import type {
   UserAccount,
   LeaseTaskInput,
   LeasedWork,
+  SaveWorkLeasePlanInput,
+  SaveWorkLeasePlanResult,
   WorkLease,
+  WorkLeasePlan,
   WorkLeaseStatus,
   WorkerRecord,
 } from "./store.js";
 import {
   DEFAULT_PROJECT_ID,
+  sameLeaseIdSet,
 } from "./store.js";
 
 type Row = Record<string, unknown>;
@@ -761,6 +766,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         finishedAt: undefined,
         outcome: undefined,
         detail: undefined,
+        plan: undefined,
       };
 
       this.db
@@ -806,6 +812,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       workerId?: string;
       status?: WorkLeaseStatus;
       projectId?: ProjectId;
+      repositoryId?: string;
       issuedAfter?: string;
     } = {},
   ): Promise<WorkLease[]> {
@@ -823,6 +830,10 @@ export class SqliteCoordinationStore implements CoordinationStore {
       clauses.push("project_id = ?");
       values.push(filter.projectId);
     }
+    if (filter.repositoryId !== undefined) {
+      clauses.push("repository_id = ?");
+      values.push(filter.repositoryId);
+    }
     if (filter.issuedAfter !== undefined) {
       clauses.push("issued_at > ?");
       values.push(filter.issuedAfter);
@@ -832,6 +843,66 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(`SELECT * FROM work_leases${where} ORDER BY issued_at DESC`)
       .all(...values) as Row[];
     return rows.map((row) => this.toWorkLease(row));
+  }
+
+  public async saveWorkLeasePlan(
+    input: SaveWorkLeasePlanInput,
+  ): Promise<SaveWorkLeasePlanResult> {
+    // BEGIN IMMEDIATE takes the write lock before the admitted set is read, so
+    // two workers arbitrating overlapping plans serialise here: the second
+    // sees the first's admission and is told its view was stale.
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.db
+        .prepare("SELECT * FROM work_leases WHERE id = ? AND status = 'active'")
+        .get(input.leaseId) as Row | undefined;
+      if (row === undefined) {
+        this.db.exec("COMMIT");
+        return { outcome: "lease_lost" };
+      }
+      const lease = this.toWorkLease(row);
+      const approvedLeaseIds = this.approvedPlanLeaseIds(
+        lease.repositoryId,
+        lease.id,
+      );
+      if (!sameLeaseIdSet(approvedLeaseIds, input.observedApprovedLeaseIds)) {
+        this.db.exec("COMMIT");
+        return { outcome: "stale", approvedLeaseIds };
+      }
+      this.db
+        .prepare("UPDATE work_leases SET plan_json = ? WHERE id = ?")
+        .run(JSON.stringify(input.submission), lease.id);
+      this.db.exec("COMMIT");
+      return {
+        outcome: "saved",
+        lease: { ...lease, plan: structuredClone(input.submission) },
+      };
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Other active leases in one repository whose plan was admitted. */
+  private approvedPlanLeaseIds(
+    repositoryId: string,
+    excludeLeaseId: string,
+  ): string[] {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM work_leases
+         WHERE repository_id = ? AND status = 'active' AND id <> ?`,
+      )
+      .all(repositoryId, excludeLeaseId) as Row[];
+    return rows
+      .map((row) => this.toWorkLease(row))
+      .filter(
+        (lease) =>
+          lease.plan !== undefined &&
+          planAdmissionApproved(lease.plan.admission),
+      )
+      .map((lease) => lease.id)
+      .sort();
   }
 
   public async heartbeatWorkLease(
@@ -953,6 +1024,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       finishedAt: optionalText(row, "finished_at"),
       outcome: optionalText(row, "outcome"),
       detail: optionalText(row, "detail"),
+      plan: optionalJson<WorkLeasePlan>(row, "plan_json"),
     };
   }
 

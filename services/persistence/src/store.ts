@@ -11,6 +11,7 @@ import type {
   ConflictAssessment,
   CoordinatorDecision,
   IntegrationResult,
+  PlanAdmission,
   ProjectId,
   ResourceLease,
   ScopeChangeDecision,
@@ -138,6 +139,55 @@ export interface WorkerRecord {
 export type WorkLeaseStatus = "active" | "completed" | "failed" | "expired" | "released";
 
 /**
+ * The plan a remote worker submitted for its lease, and the coordinator's
+ * answer, recorded before any editing happens.
+ *
+ * Attaching it to the lease rather than to a run is what makes plan-time
+ * arbitration possible: the set of plans currently being executed in a
+ * repository is exactly the set of active leases carrying an approved
+ * admission, and that set is readable without knowing which runs exist yet.
+ */
+export interface WorkLeasePlan {
+  plan: AgentPlan;
+  admission: PlanAdmission;
+}
+
+export interface SaveWorkLeasePlanInput {
+  leaseId: string;
+  submission: WorkLeasePlan;
+  /**
+   * Ids of the other active leases in the same repository that already carried
+   * an approved plan when the admission was decided. The write is refused when
+   * that set has changed, so two workers arbitrating at the same moment cannot
+   * both be admitted against a stale view.
+   */
+  observedApprovedLeaseIds: readonly string[];
+}
+
+/**
+ * Order-insensitive comparison of an observed admitted set against the current
+ * one. Shared by every backend so the staleness rule cannot drift between them.
+ */
+export function sameLeaseIdSet(
+  first: readonly string[],
+  second: readonly string[],
+): boolean {
+  if (first.length !== second.length) {
+    return false;
+  }
+  const left = [...first].sort();
+  const right = [...second].sort();
+  return left.every((value, index) => value === right[index]);
+}
+
+export type SaveWorkLeasePlanResult =
+  | { outcome: "saved"; lease: WorkLease }
+  /** Another lease was admitted concurrently; re-read and decide again. */
+  | { outcome: "stale"; approvedLeaseIds: string[] }
+  /** The lease is gone, lapsed, or settled; the plan cannot be recorded. */
+  | { outcome: "lease_lost" };
+
+/**
  * An exclusive, time-bounded assignment of one task to one worker.
  *
  * The expiry is the recovery mechanism: a worker that crashes stops
@@ -159,6 +209,8 @@ export interface WorkLease {
   finishedAt: string | undefined;
   outcome: string | undefined;
   detail: string | undefined;
+  /** Set once the worker submits a plan and the coordinator answers it. */
+  plan: WorkLeasePlan | undefined;
 }
 
 export interface LeaseTaskInput {
@@ -461,9 +513,20 @@ export interface CoordinationStore {
     workerId?: string;
     status?: WorkLeaseStatus;
     projectId?: ProjectId;
+    repositoryId?: string;
     /** Only leases issued strictly after this ISO timestamp. */
     issuedAfter?: string;
   }): Promise<WorkLease[]>;
+  /**
+   * Records a plan and its admission against an active lease.
+   *
+   * Serialized against other admissions in the same repository so that two
+   * workers evaluating overlapping plans at the same moment cannot both be
+   * approved: the loser is told its view was stale and decides again.
+   */
+  saveWorkLeasePlan(
+    input: SaveWorkLeasePlanInput,
+  ): Promise<SaveWorkLeasePlanResult>;
   /** Extends an active lease. Returns undefined if it already lapsed. */
   heartbeatWorkLease(
     id: string,

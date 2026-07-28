@@ -148,6 +148,49 @@ export interface CoordinatorDecision {
   explanation: string;
 }
 
+/**
+ * How the coordinator answers a plan submitted before any editing.
+ *
+ * A local task reaches the same four outcomes through the wave scheduler in
+ * {@link CoordinatorDecision}; this is the shape a remote worker receives over
+ * the wire, where the answer must travel back to a process that has not yet
+ * spent a single agent execution token.
+ */
+export type PlanAdmissionStatus =
+  | "approved"
+  | "approved_with_constraints"
+  | "blocked"
+  | "sequenced";
+
+export interface PlanAdmission {
+  status: PlanAdmissionStatus;
+  taskId: TaskId;
+  planRevision: number;
+  /** Canonical revision the plan was evaluated against. */
+  baseRevision: string;
+  ownershipGrants: ResourceLease[];
+  constraints: string[];
+  blockedBy: TaskId[];
+  /** Structural evidence behind a non-approval, empty when approved. */
+  conflicts: ConflictAssessment[];
+  explanation: string;
+  /** How long to wait before resubmitting the same plan. Absent when approved. */
+  retryAfterMs?: number;
+  /**
+   * The plan can no longer be admitted at this base. The holder must release
+   * its lease and plan again from fresh canonical rather than resubmitting.
+   */
+  requeue?: boolean;
+  decidedAt: string;
+}
+
+export function planAdmissionApproved(admission: PlanAdmission): boolean {
+  return (
+    admission.status === "approved" ||
+    admission.status === "approved_with_constraints"
+  );
+}
+
 export interface CanonicalChangeNotice {
   previousVersion: CanonicalVersion;
   canonicalVersion: CanonicalVersion;
@@ -311,6 +354,7 @@ export type AuditEventType =
   | "repository_imported"
   | "task_submitted"
   | "plan_received"
+  | "plan_admitted"
   | "plan_revised"
   | "replan_requested"
   | "conflict_detected"

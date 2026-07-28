@@ -414,6 +414,20 @@ export const MIGRATIONS: readonly Migration[] = [
     name: "project-policy",
     statements: [`ALTER TABLE projects ADD COLUMN policy_json TEXT`],
   },
+  {
+    // Plan-first remote execution: a worker's plan and the coordinator's
+    // answer are recorded on the lease before any editing, so the set of
+    // plans currently executing in a repository is readable and a new plan
+    // can be arbitrated against it.
+    version: 10,
+    name: "remote-plan-admission",
+    statements: [
+      `ALTER TABLE work_leases ADD COLUMN plan_json TEXT`,
+      // Plan arbitration reads every active lease in one repository.
+      `CREATE INDEX work_leases_by_repository
+         ON work_leases(repository_id, status)`,
+    ],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(

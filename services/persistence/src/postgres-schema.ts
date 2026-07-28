@@ -378,4 +378,14 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
     name: "project-policy",
     statements: [`ALTER TABLE projects ADD COLUMN policy_json TEXT`],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 10,
+    name: "remote-plan-admission",
+    statements: [
+      `ALTER TABLE work_leases ADD COLUMN plan_json TEXT`,
+      `CREATE INDEX work_leases_by_repository
+         ON work_leases(repository_id, status)`,
+    ],
+  },
 ];
