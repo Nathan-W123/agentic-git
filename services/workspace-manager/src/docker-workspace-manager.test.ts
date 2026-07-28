@@ -152,6 +152,40 @@ test("the worktree git pointer is masked inside the container", () => {
   assert.ok(workspaceIndex < maskIndex, "the mask must follow the workspace mount");
 });
 
+test("the git mask resolves beside the worktree even when rootPath is the worktree", () => {
+  // An adapter reconstructing a workspace from a coordinator context only has
+  // the workspace path to work with, so it reports rootPath as the workspace
+  // itself. Deriving the mask from rootPath then placed it inside the
+  // worktree, where nothing had created it; Docker materialises a missing bind
+  // source as a directory, and mounting a directory onto .git — a file in a
+  // worktree — fails the mount, so the container died before the agent ran.
+  const manager = new DockerWorkspaceManager({ image: "coord/agent:1" });
+  const reconstructed: TaskWorkspace = {
+    ...WORKSPACE,
+    rootPath: WORKSPACE_PATH,
+  };
+
+  const args = manager.buildRunArgs(AGENT_LAUNCH, reconstructed);
+  const mask = args
+    .filter((entry, index) => args[index - 1] === "--volume")
+    .find((entry) => entry.endsWith(":/workspace/.git:ro"));
+
+  assert.ok(mask !== undefined);
+  // Beside the worktree, never within it.
+  assert.ok(
+    mask.startsWith(`${path.posix.dirname(EXPECTED_MOUNT)}/.coord-empty-git-mask:`),
+    `mask must sit beside the worktree, saw ${mask}`,
+  );
+  assert.ok(!mask.startsWith(`${EXPECTED_MOUNT}/.coord-empty-git-mask`));
+
+  // And it must agree with the mask chosen for a workspace this manager built.
+  const created = manager.buildRunArgs(AGENT_LAUNCH, WORKSPACE);
+  const createdMask = created
+    .filter((entry, index) => created[index - 1] === "--volume")
+    .find((entry) => entry.endsWith(":/workspace/.git:ro"));
+  assert.equal(mask, createdMask);
+});
+
 test("git metadata masking can be turned off", () => {
   const manager = new DockerWorkspaceManager({
     image: "coord/agent:1",

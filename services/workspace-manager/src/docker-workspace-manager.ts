@@ -319,7 +319,26 @@ export class DockerWorkspaceManager
     }
   }
 
+  /**
+   * Location of the empty file bind-mounted over the worktree's `.git`.
+   *
+   * Derived from the workspace directory's parent rather than from
+   * `rootPath`. Both name the same directory for a workspace this manager
+   * created, but a workspace can also be reconstructed from a coordinator
+   * context, which carries only the workspace path — and an adapter doing so
+   * has no parent to report, so it sets `rootPath` to the workspace itself.
+   *
+   * That mattered more than it looks. Reading `rootPath` then pointed the
+   * mask inside the worktree, where no such file exists, and Docker creates a
+   * missing bind source as a directory. Mounting a directory onto `.git`,
+   * which is a file in a worktree, fails the mount and the container exits
+   * before the agent runs.
+   */
   private gitMaskPath(workspace: TaskWorkspace): string {
-    return path.join(path.resolve(workspace.rootPath), ".coord-empty-git-mask");
+    return path.join(
+      path.dirname(path.resolve(workspace.path)),
+      ".coord-empty-git-mask",
+    );
   }
+
 }
