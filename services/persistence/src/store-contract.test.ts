@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import test from "node:test";
+import test, { after } from "node:test";
 
 import type {
   AgentPlan,
@@ -16,6 +16,11 @@ import type {
 } from "@coord/shared-types";
 
 import { InMemoryCoordinationStore } from "./memory-store.js";
+import { PostgresCoordinationStore } from "./postgres-store.js";
+import {
+  createScratchDatabase,
+  startPostgresTestServer,
+} from "./postgres-test-support.js";
 import { SqliteCoordinationStore } from "./sqlite-store.js";
 import {
   DEFAULT_ORGANIZATION_ID,
@@ -203,6 +208,38 @@ const backends: Backend[] = [
     },
   },
 ];
+
+// The Postgres backend runs against a real server — a dockerized one that
+// this suite manages, or whatever COORD_TEST_POSTGRES_URL points at. Each
+// test gets its own scratch database, mirroring each SQLite test's fresh
+// temporary file. The backend is skipped only when Docker itself is absent;
+// once a server is reachable, any failure fails the suite.
+const postgresServer =
+  process.env["COORD_SKIP_POSTGRES_TESTS"] === "1"
+    ? undefined
+    : await startPostgresTestServer();
+if (postgresServer === undefined) {
+  console.warn(
+    "postgres: contract tests skipped (Docker is unavailable and " +
+      "COORD_TEST_POSTGRES_URL is not set)",
+  );
+} else {
+  after(async () => {
+    await postgresServer.stop();
+  });
+  backends.push({
+    name: "postgres",
+    open: async () => {
+      const database = await createScratchDatabase(postgresServer.adminUrl);
+      return {
+        store: PostgresCoordinationStore.open(database.url),
+        cleanup: async () => {
+          await database.drop();
+        },
+      };
+    },
+  });
+}
 
 for (const backend of backends) {
   test(`${backend.name}: a completed run reads back in full`, async () => {

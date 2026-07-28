@@ -121,8 +121,13 @@ Hosted execution has a protocol and a working control-plane half:
 - A worker daemon that leases, clones, runs an agent, and returns a changeset,
   honoring the project container sandbox when one is configured.
 
-This is single-host today: the control plane, canonical repositories, and
-integration all share one machine.
+The coordination store itself is no longer bound to one disk: alongside the
+SQLite file, a PostgreSQL backend implements the same store contract and is
+selected by setting `COORD_DATABASE_URL` to a `postgresql://` URL. Both
+backends are validated by one parameterized contract suite; the Postgres tests
+run against a real dockerized server. Execution remains single-host today:
+the control plane, canonical repositories, and integration all share one
+machine even when state lives in a shared database.
 
 ## Later Phases
 
@@ -130,8 +135,9 @@ The following are intentionally not represented as complete:
 
 - Automatic in-place crash resumption and cross-restart worktree garbage
   collection. State is preserved and tasks can be retried manually.
-- PostgreSQL/Redis/event-bus deployment, high availability, Kubernetes,
-  Terraform, hybrid workers, and air-gapped release tooling.
+- Redis/event-bus deployment, high availability, Kubernetes, Terraform,
+  hybrid workers, and air-gapped release tooling. (A PostgreSQL storage
+  backend exists; the rest of that deployment stack does not.)
 - General declarative policy evaluation, dependency/malware scanning, signed
   artifacts, external audit anchoring, SSO, billing, and cost accounting.
 - Full IDE, presence/cursor/terminal streams, and projection of unapproved task

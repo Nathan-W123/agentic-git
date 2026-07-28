@@ -17,6 +17,10 @@
     "test": "node --test dist/audit-chain.test.js dist/sqlite-store.test.js dist/store-contract.test.js"
   },
   "dependencies": {
-    "@coord/shared-types": "*"
+    "@coord/shared-types": "*",
+    "pg": "^8.22.0"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.20.0"
   }
 }

@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
-  SqliteCoordinationStore,
+  openCoordinationStore,
   type CoordinationStore,
   type SubmittedTaskStatus,
 } from "@coord/persistence";
@@ -59,9 +59,16 @@ function flagValue(
 }
 
 function openStore(flags: readonly string[], name: string): CoordinationStore {
-  return SqliteCoordinationStore.open(
-    flagValue(flags, name, DEFAULT_DATABASE_PATH) ?? DEFAULT_DATABASE_PATH,
-  );
+  // An explicit --db flag always names a SQLite file; only in its absence can
+  // COORD_DATABASE_URL redirect the command at a shared Postgres backend.
+  const explicitPath = flagValue(flags, name, DEFAULT_DATABASE_PATH);
+  return openCoordinationStore({
+    databaseUrl:
+      explicitPath === undefined
+        ? process.env["COORD_DATABASE_URL"]
+        : undefined,
+    sqlitePath: explicitPath ?? DEFAULT_DATABASE_PATH,
+  });
 }
 
 function printHelp(): void {

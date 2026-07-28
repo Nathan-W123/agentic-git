@@ -10,7 +10,7 @@ import path from "node:path";
 
 import type { ValidationCommand } from "@coord/shared-types";
 import {
-  SqliteCoordinationStore,
+  openCoordinationStore,
   type CoordinationStore,
 } from "@coord/persistence";
 import type { DockerSandboxOptions } from "@coord/workspace-manager";
@@ -405,7 +405,12 @@ export class CoordinatorProject {
   }
 
   public openStore(): CoordinationStore {
-    return SqliteCoordinationStore.open(this.databasePath);
+    // COORD_DATABASE_URL selects the shared Postgres backend; without it the
+    // store stays a SQLite file inside the project directory.
+    return openCoordinationStore({
+      databaseUrl: process.env["COORD_DATABASE_URL"],
+      sqlitePath: this.databasePath,
+    });
   }
 
   /** Docker options derived from config, or undefined when unsandboxed. */
