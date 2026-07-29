@@ -526,7 +526,10 @@ test("a Codex worker uses the clone Git directory and configured model args", as
         exitCode: 0,
         stdout: JSON.stringify({
           taskId: task.id,
-          objective: task.objective,
+          // Real models restate the objective in their own words rather than
+          // echoing it. The worker owns making that acceptable: it submits
+          // the assigned objective and keeps this phrasing as intent.
+          objective: "Increase the exported constant in the value module",
           expectedFiles: ["src/value.js"],
           expectedSymbols: ["value"],
           dependencies: [],
@@ -573,6 +576,16 @@ test("a Codex worker uses the clone Git directory and configured model args", as
     const model = args.indexOf("--model");
     assert.equal(args[model + 1], "worker-test-model");
   }
+
+  // The paraphrase never reached the control plane as the objective — the
+  // submitted plan carries the assigned wording, and the model's own goes to
+  // intent, where advisory analysis reads it.
+  const settled = (await runtime.store.listWorkLeases({}))[0];
+  assert.equal(settled?.plan?.plan.objective, task.objective);
+  assert.equal(
+    settled?.plan?.plan.intent,
+    "Increase the exported constant in the value module",
+  );
 });
 
 test("the Codex adapter refuses to pretend it is sandboxed", async (t) => {

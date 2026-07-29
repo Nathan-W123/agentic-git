@@ -759,7 +759,16 @@ export async function admitWorkPlan(
       throw new Error("Plan is for a different task");
     }
     if (value.objective.trim() !== task.objective.trim()) {
-      throw new Error("Plan objective does not match the leased task");
+      // Strict on purpose: the objective is the task's identity, and this
+      // equality is what binds a submitted plan to the leased task. A
+      // conforming worker echoes the assigned objective verbatim and carries
+      // the model's own phrasing in `intent`; a mismatch here means the
+      // submitter is not doing that, or is submitting another task's plan.
+      throw new Error(
+        "Plan objective does not match the leased task. Workers must echo " +
+          "the assigned objective verbatim and put the agent's own wording " +
+          "in the plan's intent field",
+      );
     }
     submitted = value;
   } catch (error) {

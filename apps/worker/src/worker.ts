@@ -375,10 +375,26 @@ export class Worker {
     // agent's intent without touching the workspace, and nothing is written
     // until sendContext. That split is what makes admission possible at all.
     const plan = await adapter.requestPlan(session.id);
+    // A real model restates the objective in its own words, and the control
+    // plane compares objectives byte-for-byte — that comparison is what binds
+    // a plan, and later a result, to the leased task, and it must stay
+    // strict. So the worker satisfies it by construction: the submitted plan
+    // carries the assigned objective, and the model's own phrasing moves to
+    // `intent`, which exists precisely to hold prose for advisory analysis.
+    const modelObjective = plan.objective.trim();
+    const submitted: AgentPlan = {
+      ...plan,
+      objective: assignment.task.objective,
+      ...(plan.intent === undefined &&
+      modelObjective.length > 0 &&
+      modelObjective !== assignment.task.objective.trim()
+        ? { intent: modelObjective }
+        : {}),
+    };
     return {
       adapter,
       sessionId: session.id,
-      plan,
+      plan: submitted,
       workspaceId: workspace.id,
       workspacePath,
     };
