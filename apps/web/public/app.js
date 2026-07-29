@@ -44,8 +44,6 @@ const state = {
   activeTabId: undefined,
   panelOpen: false,
   panelTab: "terminal",
-  /** Home HUD radial menu: pinned open by clicking the core. */
-  coreMenuOpen: false,
 
   /**
    * Agent chat: the primary way work is prompted. Each entry tracks one task
@@ -1626,10 +1624,11 @@ function hudCanonical() {
 }
 
 /**
- * The task pipeline as a segmented meter: one band per status, each
- * segment's width the status's real share of the queue.
+ * The capacity bars under the clock, like the reference's drive gauges:
+ * a segmented task-pipeline band, then completion bars for runs and gates.
+ * Every width is a real share; empty wholes draw empty tracks.
  */
-function hudPipeline() {
+function hudBars() {
   const counts = [
     ["integrated", "var(--success)"],
     ["claimed", "var(--accent)"],
@@ -1642,33 +1641,51 @@ function hudPipeline() {
     state.tasks.filter((task) => task.status === status).length,
   ]);
   const total = state.tasks.length;
-  if (total === 0) {
-    return "";
-  }
-  return `<div class="hud-system">
-    <span class="hud-system-title">Task pipeline</span>
+  const pipeline =
+    total === 0
+      ? ""
+      : `<div class="hud-bar-row">
+          <div class="hud-bar-head"><span>Tasks</span><strong>${total}</strong></div>
+          <div class="hud-meter">
+            ${counts
+              .filter(([, , count]) => count > 0)
+              .map(
+                ([status, color, count]) =>
+                  `<span title="${escapeHtml(status)}: ${count}" style="width:${
+                    (100 * count) / total
+                  }%; background:${color}"></span>`,
+              )
+              .join("")}
+          </div>
+          <div class="hud-meter-legend">
+            ${counts
+              .filter(([, , count]) => count > 0)
+              .map(
+                ([status, color, count]) =>
+                  `<span><i style="background:${color}"></i>${escapeHtml(
+                    status,
+                  )} ${count}</span>`,
+              )
+              .join("")}
+          </div>
+        </div>`;
+  const bar = (label, part, whole) => `<div class="hud-bar-row">
+    <div class="hud-bar-head"><span>${escapeHtml(label)}</span>
+      <strong>${part}/${whole}</strong></div>
     <div class="hud-meter">
-      ${counts
-        .filter(([, , count]) => count > 0)
-        .map(
-          ([status, color, count]) =>
-            `<span title="${escapeHtml(status)}: ${count}" style="width:${
-              (100 * count) / total
-            }%; background:${color}"></span>`,
-        )
-        .join("")}
+      <span style="width:${whole > 0 ? (100 * part) / whole : 0}%; background:var(--accent)"></span>
     </div>
-    <div class="hud-meter-legend">
-      ${counts
-        .filter(([, , count]) => count > 0)
-        .map(
-          ([status, color, count]) =>
-            `<span><i style="background:${color}"></i>${escapeHtml(
-              status,
-            )} ${count}</span>`,
-        )
-        .join("")}
-    </div>
+  </div>`;
+  const completedRuns = state.runs.filter(
+    (run) => run.status === "completed",
+  ).length;
+  const decidedGates = state.approvals.filter(
+    (approval) => approval.status !== "pending",
+  ).length;
+  return `<div class="hud-bars">
+    ${pipeline}
+    ${bar("Runs completed", completedRuns, state.runs.length)}
+    ${bar("Gates decided", decidedGates, state.approvals.length)}
   </div>`;
 }
 
@@ -1679,52 +1696,58 @@ const SATELLITE_SHORT_LABELS = {
   admin: "Admin",
 };
 
-function coreSatellites() {
+/**
+ * The Home HUD's navigation: a dock of circular buttons along the bottom
+ * of the view, like the reference desktop's icon row. Built from the same
+ * ACTIVITIES lists the activity bar uses, so labels, badges, and admin
+ * visibility stay defined in one place even though the bar itself is
+ * hidden on this view.
+ */
+function hudDock() {
   const entries = [...ACTIVITIES, ...FOOTER_ACTIVITIES].filter(
     (entry) =>
       entry.view !== "overview" &&
       (entry.id !== "admin" || state.principal?.user?.systemAdmin),
   );
-  const count = entries.length;
-  return entries
-    .map((entry, index) => {
-      const badge =
-        entry.badge === "tasks"
-          ? state.tasks.filter((task) =>
-              ["submitted", "claimed"].includes(task.status),
-            ).length
-          : entry.badge === "approvals"
-            ? state.approvals.filter(
-                (approval) => approval.status === "pending",
+  return `<nav class="hud-dock" aria-label="Views">
+    ${entries
+      .map((entry) => {
+        const badge =
+          entry.badge === "tasks"
+            ? state.tasks.filter((task) =>
+                ["submitted", "claimed"].includes(task.status),
               ).length
-            : 0;
-      const angle = (360 / count) * index;
-      return `<button
-        class="core-sat"
-        data-open-view="${entry.view}"
-        style="--angle:${angle.toFixed(1)}deg; --sat-delay:${(index * 40).toFixed(0)}ms"
-        title="${escapeHtml(entry.label)}"
-      >
-        ${icon(entry.icon)}
-        <span class="core-sat-label">${escapeHtml(
-          SATELLITE_SHORT_LABELS[entry.id] ?? entry.label,
-        )}</span>
-        ${badge > 0 ? `<span class="core-sat-badge">${badge}</span>` : ""}
-      </button>`;
-    })
-    .join("");
+            : entry.badge === "approvals"
+              ? state.approvals.filter(
+                  (approval) => approval.status === "pending",
+                ).length
+              : 0;
+        return `<button
+          class="dock-btn"
+          data-open-view="${entry.view}"
+          title="${escapeHtml(entry.label)}"
+        >
+          <span class="dock-ring">
+            ${icon(entry.icon)}
+            ${badge > 0 ? `<span class="dock-badge">${badge}</span>` : ""}
+          </span>
+          <span class="dock-label">${escapeHtml(
+            SATELLITE_SHORT_LABELS[entry.id] ?? entry.label,
+          )}</span>
+        </button>`;
+      })
+      .join("")}
+  </nav>`;
 }
 
 /**
- * The centerpiece: a glowing core ringed by a lattice of nodes.
+ * The centerpiece: an instrument cluster around a wireframe globe.
  *
- * Nothing here invents data. The one thing it encodes is how hard the
- * platform is working right now — `load` (agents executing plus tasks the
- * coordinator has claimed) shortens the breathing period, so an idle control
- * room drifts and a busy one visibly quickens. Everything else is geometry.
- *
- * The core doubles as the view's navigation: hovering (or clicking, or
- * focusing) blooms the menu satellites out from behind the orb.
+ * Nothing here invents data. The breathing period comes from real load —
+ * `running + claimed` shortens it, so an idle control room drifts and a
+ * busy one visibly quickens. The three scale arcs are real shares (tasks
+ * integrated, runs completed, gates decided), and the four corner callouts
+ * are live queue numbers. Everything else is geometry.
  */
 function neuralCore({ running, claimed, awaiting }) {
   const load = running + claimed;
@@ -1749,28 +1772,82 @@ function neuralCore({ running, claimed, awaiting }) {
         : awaiting > 0
           ? "awaiting review"
           : "standing by";
+
+  // The instrument arcs: each is a real completion share, and an empty
+  // denominator draws an empty arc rather than a full one.
+  const share = (part, whole) =>
+    whole > 0 ? Math.max(0, Math.min(1, part / whole)) : 0;
+  const integrated = state.tasks.filter(
+    (task) => task.status === "integrated",
+  ).length;
+  const completed = state.runs.filter(
+    (run) => run.status === "completed",
+  ).length;
+  const decided = state.approvals.filter(
+    (approval) => approval.status !== "pending",
+  ).length;
+  const scaleArc = (radius, ratio, cls, label) => {
+    const circumference = 2 * Math.PI * radius;
+    return `<circle class="scale-arc ${cls}" cx="100" cy="100" r="${radius}"
+      stroke-dasharray="${(circumference * 0.62 * ratio).toFixed(1)} ${circumference.toFixed(1)}"
+      transform="rotate(122 100 100)"><title>${escapeHtml(label)}</title></circle>`;
+  };
+  const arcs = [
+    scaleArc(
+      86,
+      share(integrated, state.tasks.length),
+      "arc-tasks",
+      `Tasks integrated: ${integrated}/${state.tasks.length}`,
+    ),
+    scaleArc(
+      79,
+      share(completed, state.runs.length),
+      "arc-runs",
+      `Runs completed: ${completed}/${state.runs.length}`,
+    ),
+    scaleArc(
+      72,
+      share(decided, state.approvals.length),
+      "arc-gates",
+      `Gates decided: ${decided}/${state.approvals.length}`,
+    ),
+  ].join("");
+
+  const reads = [
+    ["nw", running, "running"],
+    ["ne", claimed, "in motion"],
+    ["sw", awaiting, "review"],
+    ["se", state.tasks.filter((task) => task.status === "submitted").length, "queued"],
+  ]
+    .map(
+      ([corner, value, label]) => `<div class="core-read core-read-${corner}">
+        <strong>${escapeHtml(String(value))}</strong>
+        <span>${escapeHtml(label)}</span>
+      </div>`,
+    )
+    .join("");
+
   return `
-    <div
-      class="neural-core${state.coreMenuOpen ? " sat-open" : ""}"
-      style="--pulse:${period}s"
-      data-load="${load}"
-    >
+    <div class="neural-core" style="--pulse:${period}s" data-load="${load}">
       <div class="core-ring core-ring-a"></div>
       <div class="core-ring core-ring-b"></div>
       <div class="core-ring core-ring-c"></div>
       <div class="core-tickring"></div>
       <div class="core-sweep"></div>
       <div class="core-lattice">${lattice}</div>
-      <button
-        class="core-orb"
-        data-core-menu="toggle"
-        title="Navigation"
-        aria-label="Toggle the radial navigation menu"
-      >
+      <!-- The instrument scale: fine and coarse tick rings, and the three
+           data arcs riding between them. -->
+      <svg class="core-scale" viewBox="0 0 200 200" aria-hidden="true">
+        <circle class="scale-fine" cx="100" cy="100" r="94"></circle>
+        <circle class="scale-coarse" cx="100" cy="100" r="90"></circle>
+        ${arcs}
+      </svg>
+      ${reads}
+      <div class="core-orb" aria-hidden="true">
         <!-- Wireframe graticule instead of a filled sphere: static latitude
              chords, and meridians whose widths run a cosine so the globe
              reads as slowly turning. -->
-        <svg class="core-globe" viewBox="0 0 100 100" aria-hidden="true">
+        <svg class="core-globe" viewBox="0 0 100 100">
           <circle class="globe-line" cx="50" cy="50" r="47"></circle>
           <line class="globe-line globe-faint" x1="3" y1="50" x2="97" y2="50"></line>
           <line class="globe-line globe-faint" x1="6.6" y1="32" x2="93.4" y2="32"></line>
@@ -1784,8 +1861,7 @@ function neuralCore({ running, claimed, awaiting }) {
           <ellipse class="globe-line globe-meridian" cx="50" cy="50" rx="47" ry="47"
             style="--lon-delay: -8s"></ellipse>
         </svg>
-      </button>
-      ${coreSatellites()}
+      </div>
       <div class="core-caption">
         <span class="core-state">${escapeHtml(phase)}</span>
         <span class="core-sub">${escapeHtml(
@@ -1838,7 +1914,10 @@ function renderOverview() {
     }
     <div class="hud-stage">
       <aside class="hud-rail">
-        ${hudClock()}
+        <div class="hud-cluster-frame">
+          ${hudClock()}
+          ${hudBars()}
+        </div>
         <div class="hud-dials">
           ${gauge(
             "Agents running",
@@ -1867,7 +1946,6 @@ function renderOverview() {
             whole: totalTasks,
           })}
         </div>
-        ${hudPipeline()}
         ${hudCoordination()}
       </aside>
       <div class="hud-center">
@@ -1915,6 +1993,7 @@ function renderOverview() {
         state.repositories.length
       } canonical source${state.repositories.length === 1 ? "" : "s"}</span>
     </div>
+    ${hudDock()}
   </div>`;
 }
 
@@ -5393,15 +5472,7 @@ async function handleClick(event) {
     renderShell();
     return;
   }
-  if (target.dataset.coreMenu) {
-    // Clicking the core pins the radial menu open for touch and keyboard;
-    // hover reveals it without pinning.
-    state.coreMenuOpen = !state.coreMenuOpen;
-    $(".neural-core")?.classList.toggle("sat-open", state.coreMenuOpen);
-    return;
-  }
   if (target.dataset.openView) {
-    state.coreMenuOpen = false;
     openView(target.dataset.openView);
     return;
   }

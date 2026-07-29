@@ -4143,104 +4143,249 @@ textarea:focus {
   pointer-events: none;
 }
 
-/* The orb is a real button now: same face, keyboard reachable. */
-button.core-orb {
+/* Instrument scale: tick rings and the three data arcs riding them. */
+.core-scale {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.core-scale circle {
+  fill: none;
+}
+
+.scale-fine {
+  stroke: rgba(79, 232, 255, 0.28);
+  stroke-width: 4;
+  stroke-dasharray: 0.6 2.5;
+}
+
+.scale-coarse {
+  stroke: rgba(79, 232, 255, 0.4);
+  stroke-width: 7;
+  stroke-dasharray: 1 28.2;
+}
+
+.scale-arc {
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  transition: stroke-dasharray 700ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.arc-tasks {
+  stroke: var(--accent);
+  filter: drop-shadow(0 0 4px rgba(79, 232, 255, 0.7));
+}
+
+.arc-runs {
+  stroke: var(--success);
+  filter: drop-shadow(0 0 4px rgba(53, 229, 160, 0.6));
+}
+
+.arc-gates {
+  stroke: var(--purple);
+  filter: drop-shadow(0 0 4px rgba(185, 140, 255, 0.6));
+}
+
+/* Corner callouts: live queue numbers anchored around the cluster. */
+.core-read {
+  position: absolute;
+  display: grid;
+  gap: 0;
+  justify-items: center;
+  font-family: var(--font-data);
+  text-transform: uppercase;
+  z-index: 2;
+}
+
+.core-read strong {
+  font-size: 17px;
+  color: #eafdff;
+  text-shadow: 0 0 14px rgba(79, 232, 255, 0.55);
+  line-height: 1.1;
+}
+
+.core-read span {
+  font-size: 8.5px;
+  letter-spacing: 0.16em;
+  color: var(--accent);
+}
+
+.core-read-nw { top: 5%; left: 2%; }
+.core-read-ne { top: 5%; right: 2%; }
+.core-read-sw { bottom: 9%; left: 2%; }
+.core-read-se { bottom: 9%; right: 2%; }
+
+/* Bottom dock: the reference desktop's circular icon row ------------------ */
+
+.hud-dock {
+  display: flex;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 30px;
+  margin-top: 14px;
+  padding: 16px 0 4px;
+}
+
+.dock-btn {
+  background: none;
   border: 0;
   padding: 0;
   cursor: pointer;
+  display: grid;
+  justify-items: center;
+  gap: 7px;
+  color: var(--accent);
 }
 
-button.core-orb:focus-visible {
-  outline: 1px solid var(--accent);
-  outline-offset: 6px;
-}
-
-/* Radial menu satellites: bloom out of the core on hover, focus, or pin. */
-.core-sat {
-  position: absolute;
-  left: 50%;
-  top: 50%;
+.dock-ring {
+  position: relative;
   width: 62px;
   height: 62px;
-  margin: -31px 0 0 -31px;
   border-radius: 50%;
-  border: 1px solid rgba(79, 232, 255, 0.5);
-  background: rgba(4, 18, 27, 0.88);
-  color: var(--accent);
   display: grid;
   place-items: center;
-  align-content: center;
-  gap: 1px;
-  cursor: pointer;
-  opacity: 0;
-  pointer-events: none;
-  transform: rotate(var(--angle)) translateY(0) rotate(calc(-1 * var(--angle)))
-    scale(0.25);
-  transition:
-    transform 420ms cubic-bezier(0.2, 1.1, 0.3, 1) var(--sat-delay, 0ms),
-    opacity 260ms ease var(--sat-delay, 0ms),
-    box-shadow 200ms ease;
-}
-
-.neural-core:hover .core-sat,
-.neural-core:focus-within .core-sat,
-.neural-core.sat-open .core-sat {
-  opacity: 1;
-  pointer-events: auto;
-  transform: rotate(var(--angle)) translateY(calc(var(--sat-orbit, 150px) * -1))
-    rotate(calc(-1 * var(--angle))) scale(1);
-}
-
-.core-sat:hover,
-.core-sat:focus-visible {
-  border-color: var(--accent);
+  border: 2px solid rgba(79, 232, 255, 0.5);
+  background: rgba(4, 18, 27, 0.85);
   box-shadow:
-    0 0 14px rgba(79, 232, 255, 0.55),
-    inset 0 0 10px rgba(79, 232, 255, 0.18);
-  outline: none;
+    inset 0 0 0 5px rgba(2, 10, 16, 0.9),
+    inset 0 0 0 6px rgba(79, 232, 255, 0.22);
+  transition: border-color 200ms ease;
 }
 
-.core-sat svg {
-  width: 17px;
-  height: 17px;
-}
-
-.core-sat-label {
-  font-family: var(--font-data);
-  font-size: 7.5px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  max-width: 54px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.core-sat-badge {
+/* The segmented halo each reference icon wears. */
+.dock-ring::before {
+  content: "";
   position: absolute;
-  top: 2px;
-  right: 4px;
-  min-width: 15px;
-  height: 15px;
+  inset: -7px;
+  border-radius: 50%;
+  border: 1px dashed rgba(79, 232, 255, 0.35);
+}
+
+.dock-ring svg {
+  width: 22px;
+  height: 22px;
+}
+
+.dock-label {
+  font-family: var(--font-data);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.16em;
+  color: var(--fg-muted);
+  transition: color 200ms ease;
+}
+
+.dock-badge {
+  position: absolute;
+  top: -3px;
+  right: -3px;
+  min-width: 16px;
+  height: 16px;
   padding: 0 4px;
   border-radius: 8px;
   background: var(--accent-strong);
   color: #01222b;
   font-family: var(--font-data);
-  font-size: 9.5px;
+  font-size: 10px;
   font-weight: 700;
-  line-height: 15px;
+  line-height: 16px;
+  text-align: center;
 }
 
-/* The caption yields to the menu so the bottom satellite lands clear. */
-.neural-core:hover .core-caption,
-.neural-core:focus-within .core-caption,
-.neural-core.sat-open .core-caption {
-  opacity: 0;
+/* Hover: the asked-for glow, breathing while the pointer stays. */
+.dock-btn:hover .dock-ring,
+.dock-btn:focus-visible .dock-ring {
+  border-color: var(--accent);
+  animation: dock-glow 1.5s ease-in-out infinite;
 }
 
-.core-caption {
-  transition: opacity 200ms ease;
+.dock-btn:hover .dock-label,
+.dock-btn:focus-visible .dock-label {
+  color: var(--accent);
+  text-shadow: 0 0 10px rgba(79, 232, 255, 0.5);
+}
+
+.dock-btn:focus-visible {
+  outline: none;
+}
+
+@keyframes dock-glow {
+  0%,
+  100% {
+    box-shadow:
+      inset 0 0 0 5px rgba(2, 10, 16, 0.9),
+      inset 0 0 0 6px rgba(79, 232, 255, 0.3),
+      0 0 10px rgba(79, 232, 255, 0.35);
+  }
+  50% {
+    box-shadow:
+      inset 0 0 0 5px rgba(2, 10, 16, 0.9),
+      inset 0 0 0 6px rgba(79, 232, 255, 0.55),
+      0 0 26px rgba(79, 232, 255, 0.85);
+  }
+}
+
+/* Capacity bars under the clock ------------------------------------------- */
+
+.hud-bars {
+  display: grid;
+  gap: 9px;
+}
+
+.hud-bar-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-family: var(--font-data);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
+  margin-bottom: 3px;
+}
+
+.hud-bar-head strong {
+  color: #d9fbff;
+  text-shadow: 0 0 10px rgba(79, 232, 255, 0.35);
+}
+
+/* Angular cluster framing -------------------------------------------------- */
+
+/* One frame around the clock and its bars, clipped like the references. */
+.hud-cluster-frame {
+  border: 1px solid var(--border-muted);
+  border-left: 2px solid var(--accent);
+  background: rgba(6, 20, 30, 0.6);
+  padding: 10px 12px 12px;
+  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
+  display: grid;
+  gap: 10px;
+}
+
+.hud-cluster-frame .hud-clock {
+  border: 0;
+  background: transparent;
+  padding: 0;
+}
+
+/* Every readout box gets the cut corner and a tick strip along the base. */
+.hud-system {
+  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 0 100%);
+}
+
+.hud-system::after {
+  content: "";
+  height: 3px;
+  margin-top: 7px;
+  background: repeating-linear-gradient(
+    90deg,
+    rgba(79, 232, 255, 0.35) 0 6px,
+    transparent 6px 11px
+  );
 }
 
 /* Responsive -------------------------------------------------------------- */

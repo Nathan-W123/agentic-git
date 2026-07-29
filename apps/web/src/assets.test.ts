@@ -377,11 +377,11 @@ test("only the Home view drops the frame for the immersive HUD", async () => {
     source,
     /"hud-immersive",\s*tab\?\.kind === "view" && tab\.view === "overview"/u,
   );
-  // The radial menu is built from the same ACTIVITIES lists the activity bar
+  // The bottom dock is built from the same ACTIVITIES lists the activity bar
   // renders, so labels, badges, and admin gating stay defined once.
   assert.match(
     source,
-    /coreSatellites[\s\S]*\[\.\.\.ACTIVITIES, \.\.\.FOOTER_ACTIVITIES\]/u,
+    /hudDock[\s\S]*\[\.\.\.ACTIVITIES, \.\.\.FOOTER_ACTIVITIES\]/u,
   );
   assert.match(source, /entry\.id !== "admin" \|\| state\.principal\?\.user\?\.systemAdmin/u);
 });
