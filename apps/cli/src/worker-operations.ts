@@ -819,6 +819,78 @@ export async function admitWorkPlan(
     };
   }
 
+  // Solo fast path: with nothing else executing in this repository there is
+  // nothing to arbitrate against, and every millisecond spent indexing,
+  // enriching and scoring would be spent comparing a plan with an empty set.
+  // The candidate is approved on the spot. This skips the wait, not the
+  // safety: the store write below is compare-and-swap on the set of admitted
+  // leases, so two workers going solo at once collide there and the loser
+  // falls through to full arbitration — and exact-base integration still
+  // gates every result at promotion time exactly as it always has.
+  {
+    const solo = await executingPlans(store, lease);
+    if (solo.active.length === 0) {
+      const admission: PlanAdmission = {
+        status: "approved",
+        taskId: task.id,
+        planRevision: 1,
+        baseRevision: baseVersion.revision,
+        ownershipGrants: [],
+        constraints: [],
+        blockedBy: [],
+        conflicts: [],
+        explanation:
+          "Approved without arbitration: no other task is executing in " +
+          "this repository. Exact-base integration remains in force.",
+        decidedAt: new Date().toISOString(),
+      };
+      const saved = await store.saveWorkLeasePlan({
+        leaseId: lease.id,
+        submission: { plan: submitted, admission },
+        observedApprovedLeaseIds: solo.approvedLeaseIds,
+      });
+      if (saved.outcome === "lease_lost") {
+        return {
+          outcome: "lease_lost",
+          reason: "lease was lost while its plan was being admitted",
+        };
+      }
+      if (saved.outcome === "already_admitted") {
+        return {
+          outcome: "admitted",
+          admission: saved.lease.plan!.admission,
+        };
+      }
+      if (saved.outcome === "saved") {
+        await trace(store, undefined, "plan_received", task.id, {
+          projectId: task.projectId,
+          repositoryId: task.repositoryId,
+          workerId: lease.workerId,
+          leaseId: lease.id,
+          expectedFiles: submitted.expectedFiles,
+          expectedSymbols: submitted.expectedSymbols,
+          riskLevel: submitted.riskLevel,
+          remote: true,
+          solo: true,
+        });
+        await trace(store, undefined, "plan_admitted", task.id, {
+          projectId: task.projectId,
+          repositoryId: task.repositoryId,
+          workerId: lease.workerId,
+          leaseId: lease.id,
+          status: admission.status,
+          blockedBy: [],
+          constraints: [],
+          explanation: admission.explanation,
+          solo: true,
+        });
+        return { outcome: "admitted", admission };
+      }
+      // "stale": another admission landed between the read and the write.
+      // The repository is no longer solo; decide the ordinary way.
+    }
+  }
+
   const index = await intelligence.index(repository, baseVersion.revision);
   // Grounded before it is enriched: verification judges what the worker's
   // agent declared, not what the index projected onto it — and it overwrites
@@ -840,12 +912,29 @@ export async function admitWorkPlan(
 
   for (let attempt = 1; attempt <= MAX_ADMISSION_ATTEMPTS; attempt += 1) {
     const executing = await executingPlans(store, lease);
+    // A plan admitted through the solo fast path was stored as declared —
+    // nothing existed to arbitrate it against, so nothing enriched it. This
+    // candidate is that something. Enrichment and grounding are deterministic
+    // functions of plan and index, so computing them now yields exactly what
+    // full admission would have stored, and the comparison loses nothing to
+    // the fast path having skipped it.
+    const active = executing.active.map((entry) =>
+      entry.plan.grounding === undefined
+        ? {
+            ...entry,
+            plan: intelligence.enrichPlan(
+              groundPlan(entry.plan, index),
+              index,
+            ),
+          }
+        : entry,
+    );
     const admission = admissions.admit({
       plan,
       agentId: task.agentId,
       baseRevision: baseVersion.revision,
       baseVersion: baseVersion.sequence,
-      active: executing.active,
+      active,
       // A task that already exists because an earlier admission was partial is
       // decided whole. One split per lineage is what stops a task from shedding
       // scope round after round, each round paying for another agent run.

@@ -2674,3 +2674,111 @@ test("a settled task leaves a handoff a later task can be seeded with", async ()
     await rm(harness.root, { recursive: true, force: true });
   }
 });
+
+test("a solo plan is approved on the spot, without arbitration machinery", async () => {
+  const harness = await createHarness();
+  try {
+    await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+
+    const outcome = await admit(harness, assignment);
+    assert.equal(outcome.outcome, "admitted");
+    const admission =
+      outcome.outcome === "admitted" ? outcome.admission : undefined;
+    assert.equal(admission?.status, "approved");
+    assert.match(admission?.explanation ?? "", /without arbitration/u);
+
+    // The stored plan is the declared plan: nothing existed to enrich or
+    // ground it against, and the next arrival computes both on the fly.
+    const stored = await harness.store.getWorkLease(assignment.lease.id);
+    assert.equal(stored?.plan?.plan.grounding, undefined);
+    assert.deepEqual(stored?.plan?.plan.expectedFiles, ["src/value.js"]);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("the second arrival is arbitrated against a fast-path plan's real footprint", async () => {
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "src/pricing/total.js":
+      "export function subtotal(lines) { return 1; }\n" +
+      "export function orderTotal(customer, lines) { return 2; }\n",
+  });
+  try {
+    // First worker goes solo on the real pricing file; its stored plan is
+    // bare — declared files only, no enrichment, no grounding.
+    await submit(harness);
+    const first = await lease(harness);
+    assert.ok(first);
+    const solo = await admit(harness, first, {
+      expectedFiles: ["src/pricing/total.js"],
+      expectedSymbols: [],
+    });
+    assert.equal(solo.outcome, "admitted");
+    assert.equal(
+      solo.outcome === "admitted" ? solo.admission.status : undefined,
+      "approved",
+    );
+
+    // Second worker declares a file that does not exist and a symbol that
+    // does not resolve — the recorded live hallucination shape. Detection
+    // requires both halves of the fix: grounding maps calculateTotal to
+    // orderTotal in src/pricing/total.js, and the fast-path plan is enriched
+    // on the fly so that file's symbols are claimed by the first task.
+    await harness.store.submitTask({
+      repositoryId: "repo_worker",
+      objective: "charge a checkout fee",
+      agentId: "generic-cli",
+      validationCommands: [],
+    });
+    const second = await lease(harness);
+    assert.ok(second);
+    const contested = await admit(harness, second, {
+      objective: second.task.objective,
+      expectedFiles: ["src/checkout.js"],
+      expectedSymbols: ["calculateTotal"],
+    });
+    assert.equal(contested.outcome, "admitted");
+    const admission =
+      contested.outcome === "admitted" ? contested.admission : undefined;
+    assert.equal(admission?.status, "sequenced");
+    assert.deepEqual(admission?.blockedBy, [first.task.id]);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a fast-path admission still lands through exact-base integration", async () => {
+  const harness = await createHarness();
+  try {
+    const taskId = await submit(harness);
+    const assignment = await leaseAndAdmit(harness);
+
+    const accepted = await acceptWorkResult(harness.store, {
+      leaseId: assignment.lease.id,
+      status: "completed",
+      actorId: "user",
+      plan: plan(taskId),
+      changeSet: resultStub(taskId, harness.revision, {
+        patches: [
+          {
+            path: "src/value.js",
+            status: "modified",
+            patch:
+              "diff --git a/src/value.js b/src/value.js\n" +
+              "--- a/src/value.js\n" +
+              "+++ b/src/value.js\n" +
+              "@@ -1 +1 @@\n" +
+              "-export const value = 1;\n" +
+              "+export const value = 2;\n",
+          },
+        ],
+      }),
+    });
+    assert.equal(accepted.accepted, true);
+    assert.equal(accepted.integrationStatus, "integrated");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});

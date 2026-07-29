@@ -212,10 +212,18 @@ export class Coordinator {
       });
     }
 
-    const initialIndex = await this.intelligence.index(
-      input.repository,
-      initialVersion.revision,
-    );
+    // A run with one task has nothing to arbitrate: no pair to assess, no
+    // wave to order. Enrichment and grounding exist to make plans comparable
+    // with each other, so a solo run skips the repository index they need —
+    // scope enforcement and exact-base integration hold the task to its
+    // declarations and its base revision either way.
+    const initialIndex =
+      input.tasks.length === 1
+        ? undefined
+        : await this.intelligence.index(
+            input.repository,
+            initialVersion.revision,
+          );
     const planned = await this.planTasks(
       input,
       initialVersion,
@@ -233,10 +241,21 @@ export class Coordinator {
         const waveVersion = await this.repositories.getCanonicalVersion(
           input.repository,
         );
-        const index = await this.intelligence.index(
-          input.repository,
-          waveVersion.revision,
+        const needsReplan = pending.filter(
+          (entry) => entry.plannedVersion.revision !== waveVersion.revision,
         );
+        // The index inside the wave loop exists for replanning, and a wave
+        // with nothing to replan — always the first, and every wave of a
+        // solo run — can skip building it: reading every source file out of
+        // git is the single most expensive control-plane step, and a task
+        // with nobody to be replanned against should not pay it.
+        const index =
+          needsReplan.length === 0
+            ? undefined
+            : await this.intelligence.index(
+                input.repository,
+                waveVersion.revision,
+              );
         // Every task still queued has to see the canonical state the previous
         // wave produced, and each of those replans is a full round trip to an
         // agent. Issued one at a time they dominate a real run: a fully
@@ -251,21 +270,19 @@ export class Coordinator {
         // between tasks changes. Initial planning is parallel for the same
         // reasons, and this makes replanning agree with it.
         await Promise.all(
-          pending
-            .filter(
-              (entry) => entry.plannedVersion.revision !== waveVersion.revision,
-            )
-            .map(
-              async (entry) =>
-                await this.replanTask(
-                  input,
-                  entry,
-                  waveVersion,
-                  index,
-                  recorder,
-                  runAudit,
-                ),
-            ),
+          needsReplan.map(async (entry) => {
+            if (index === undefined) {
+              throw new Error("Coordinator lost the index it built to replan");
+            }
+            await this.replanTask(
+              input,
+              entry,
+              waveVersion,
+              index,
+              recorder,
+              runAudit,
+            );
+          }),
         );
 
         const assessments = this.conflicts.assessAll(
@@ -448,7 +465,8 @@ export class Coordinator {
   private async planTasks(
     input: CoordinatorRunInput,
     version: CanonicalVersion,
-    index: RepositoryIndex,
+    /** Absent on a solo run, where plans are never compared with anything. */
+    index: RepositoryIndex | undefined,
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
   ): Promise<PlannedTask[]> {
@@ -477,10 +495,13 @@ export class Coordinator {
           }
           // Grounded before it is enriched: verification judges what the
           // agent declared, not what the index projected onto it.
-          const plan = this.intelligence.enrichPlan(
-            groundPlan(submitted, index),
-            index,
-          );
+          const plan =
+            index === undefined
+              ? submitted
+              : this.intelligence.enrichPlan(
+                  groundPlan(submitted, index),
+                  index,
+                );
           assertAgentPlan(plan);
           await recorder?.plan(entry.task.id, plan);
           await recorder?.planRevision(entry.task.id, {

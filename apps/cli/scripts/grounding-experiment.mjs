@@ -112,6 +112,26 @@ async function once(scenario, liveAgent, runNumber) {
       scopeChanges: run.audit.filter(
         (event) => event.type === "scope_change_requested",
       ).length,
+      scopeDecisions: run.audit
+        .filter((event) => event.type === "scope_change_decided")
+        .map((event) => ({
+          taskId: event.taskId,
+          decision: event.data.decision?.decision,
+          explanation: String(event.data.decision?.explanation ?? "").slice(
+            0,
+            300,
+          ),
+        })),
+      taskFailures: run.audit
+        .filter((event) => event.type === "task_failed")
+        .map((event) => ({
+          taskId: event.taskId,
+          stage: event.data.stage,
+          error: String(event.data.error ?? event.data.explanation ?? "").slice(
+            0,
+            300,
+          ),
+        })),
       tasks: run.tasks.map((entry) => ({
         taskId: entry.task.id,
         status: entry.status,
