@@ -218,30 +218,39 @@
         </div>
         <div class="chat-thread" id="chat-thread"></div>
         <form class="chat-input" id="chat-form">
-          <!-- Discrete pill pickers: model + reasoning effort, offering only
-               what the connected account reports. -->
-          <div class="chat-quickbar" id="chat-quickbar" hidden>
-            <select id="chat-model-select" title="Model"></select>
-            <select id="chat-effort-select" title="Reasoning effort"></select>
-          </div>
           <div class="chat-input-row">
             <textarea
               id="chat-input"
-              rows="2"
+              rows="1"
               placeholder="Ask the model anything…"
               spellcheck="true"
             ></textarea>
-            <button class="button button-primary" type="submit" id="chat-send">
-              Send
-            </button>
-            <!-- Context-window dial: fills as the last exchange approaches the
-                 window the provider CLI reported. -->
-            <span class="context-dial" id="context-dial"></span>
+            <!-- Send, with the pickers and the context dial stacked beside
+                 it so the message box keeps the width and height. -->
+            <div class="chat-send-stack">
+              <div class="chat-quickbar" id="chat-quickbar" hidden>
+                <select id="chat-model-select" title="Model"></select>
+                <select id="chat-effort-select" title="Reasoning effort"></select>
+              </div>
+              <div class="chat-send-row">
+                <button
+                  class="button button-primary"
+                  type="submit"
+                  id="chat-send"
+                >Send</button>
+                <!-- Fills as the last exchange approaches the window the
+                     provider CLI reported. -->
+                <span class="context-dial" id="context-dial"></span>
+              </div>
+            </div>
           </div>
         </form>
-        <!-- Sits below the message box: a quiet, always-there readout of what
-             the provider CLI reported. -->
-        <div class="chat-usage" id="chat-usage"></div>
+        <!-- Collapsed by default; the summary line carries the headline
+             figure the CLI reported. -->
+        <details class="chat-usage-panel" id="chat-usage-panel" hidden>
+          <summary><span id="chat-usage-summary"></span></summary>
+          <div class="chat-usage" id="chat-usage"></div>
+        </details>
       </aside>
 
       <!-- Full-screen provider connection step, opened from a provider icon. -->

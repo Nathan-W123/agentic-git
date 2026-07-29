@@ -3135,7 +3135,7 @@ function renderChatQuickbar() {
         (model) =>
           `<option value="${escapeHtml(model.id)}"${
             model.id === currentModel ? " selected" : ""
-          }>${escapeHtml(model.label)}</option>`,
+          }>${escapeHtml(shortModelLabel(model.label))}</option>`,
       )
       .join("");
   }
@@ -3157,6 +3157,15 @@ function renderChatQuickbar() {
       .join("");
   }
   quickbar.hidden = !hasModels && effortValues.length === 0;
+}
+
+/**
+ * Drops the vendor prefix from a model name for the picker. You already
+ * picked the provider, so "claude-sonnet-5" reads as "sonnet-5" here. Only
+ * the label is shortened — the value sent to the CLI is untouched.
+ */
+function shortModelLabel(label) {
+  return label.replace(/^(claude|gpt|gemini|codex)[-\s]/iu, "");
 }
 
 /** Applies a quickbar change immediately; the server validates the value. */
@@ -3462,18 +3471,29 @@ function usageMeter(report, { compact = false } = {}) {
 
 function renderChatUsage() {
   const target = $("#chat-usage");
+  const panel = $("#chat-usage-panel");
   const provider = state.chat.activeProvider;
   if (providerStatus(provider)?.connected !== true) {
     target.innerHTML = "";
+    panel.hidden = true;
     return;
   }
   const report = state.chat.usage[provider];
   if (report === undefined) {
     void loadProviderUsage(provider);
   }
+  panel.hidden = false;
+  panel.open = state.chat.usageOpen;
+  // The headline figure stays visible while collapsed; expanding shows every
+  // window the CLI reported.
+  const headline = report?.windows?.[0];
+  $("#chat-usage-summary").textContent =
+    headline === undefined
+      ? "Usage"
+      : `Usage · ${headline.label} ${headline.percentUsed}% used`;
   // Real consumption only; the context window is the dial by Send and the
   // per-turn token breakdown lives in Usage and limits.
-  target.innerHTML = usageMeter(report, { compact: true });
+  target.innerHTML = usageMeter(report);
 }
 
 /** Fetches what the provider CLI reports about consumption, once per view. */
@@ -4932,6 +4952,13 @@ async function boot() {
   });
   document.addEventListener("change", (event) => {
     void handleChange(event);
+  });
+  $("#chat-usage-panel").addEventListener("toggle", (event) => {
+    state.chat.usageOpen = event.currentTarget.open;
+    localStorage.setItem(
+      "relay.chatUsageOpen",
+      String(state.chat.usageOpen),
+    );
   });
   window.addEventListener("hashchange", () => {
     applyHash();

@@ -1057,14 +1057,33 @@ fieldset.field-group legend {
   appearance: none;
   -webkit-appearance: none;
   width: auto;
-  max-width: 55%;
+  max-width: 118px;
   background: var(--bg-hover);
   border: 1px solid var(--border-muted);
   border-radius: 999px;
   font-size: 10.5px;
-  padding: 1px 10px;
+  /* Room on the right for the chevron drawn behind the select. */
+  padding: 1px 16px 1px 9px;
   color: var(--fg-subtle);
   cursor: pointer;
+  text-overflow: ellipsis;
+}
+
+/* A chevron marks these as pickers; the native arrow is suppressed above. */
+.chat-quickbar {
+  --chevron: linear-gradient(45deg, transparent 50%, currentcolor 50%),
+    linear-gradient(135deg, currentcolor 50%, transparent 50%);
+}
+
+.chat-quickbar select {
+  background-image: var(--chevron);
+  background-position:
+    right 8px top 52%,
+    right 5px top 52%;
+  background-size:
+    3px 3px,
+    3px 3px;
+  background-repeat: no-repeat;
 }
 
 .chat-quickbar select:hover {
@@ -1074,9 +1093,47 @@ fieldset.field-group legend {
 
 /* Usage strip ------------------------------------------------------------- */
 
-.chat-usage {
-  padding: 6px 14px 8px;
+.chat-usage-panel {
+  flex: none;
   border-top: 1px solid var(--border-muted);
+  font-size: 10px;
+  color: var(--fg-subtle);
+}
+
+.chat-usage-panel[hidden] {
+  display: none;
+}
+
+.chat-usage-panel > summary {
+  cursor: pointer;
+  padding: 5px 14px 6px;
+  list-style: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-usage-panel > summary::-webkit-details-marker {
+  display: none;
+}
+
+.chat-usage-panel > summary::before {
+  content: "›";
+  font-size: 12px;
+  line-height: 1;
+  transition: transform 120ms ease;
+}
+
+.chat-usage-panel[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.chat-usage-panel > summary:hover {
+  color: var(--fg-muted);
+}
+
+.chat-usage {
+  padding: 0 14px 8px;
   flex: none;
   display: grid;
   gap: 4px;
@@ -1696,12 +1753,32 @@ button.settings-row:hover {
 .chat-input-row {
   display: flex;
   gap: 8px;
-  align-items: flex-end;
+  align-items: stretch;
+}
+
+/* Send sits under the pickers so the pair occupies one column beside the
+   message box rather than a band above it. */
+.chat-send-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: none;
+  justify-content: flex-end;
+}
+
+.chat-send-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.chat-send-row .button {
+  flex: 1;
 }
 
 .chat-input textarea {
   flex: 1;
-  min-height: 38px;
+  min-height: 30px;
   max-height: 140px;
   font-size: 12.5px;
 }
