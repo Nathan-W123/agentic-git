@@ -70,6 +70,9 @@ const state = {
     cliSessions: {},
     /** Per provider, the model/effort options the account reports. */
     options: {},
+    /** Per provider, the consumption figures its CLI publishes. */
+    usage: {},
+    usageLoading: {},
     overlayProvider: null,
     /** Which overlay screen is showing: "main" settings or "usage". */
     overlayView: "main",
@@ -3306,7 +3309,31 @@ function askBubble(message) {
       </div>`;
   }
   if (message.pending) {
-    return `<div class="chat-msg agent pending">Thinking…</div>`;
+    // Everything here is relayed from the CLI's own event stream: the status
+    // word it announced, its reasoning-token count, its reasoning summary,
+    // and the answer text so far. Nothing is simulated.
+    const status = escapeHtml(message.status ?? "working");
+    const tokens =
+      message.reasoningTokens > 0
+        ? ` · ${formatTokens(message.reasoningTokens)} reasoning tokens`
+        : "";
+    const reasoning =
+      typeof message.reasoning === "string" && message.reasoning.length > 0
+        ? `<div class="live-reasoning">${escapeHtml(message.reasoning)}</div>`
+        : message.reasoningHidden === true
+          ? `<div class="live-reasoning muted">Reasoning in progress — this CLI does not expose the text${tokens}.</div>`
+          : "";
+    const partial =
+      typeof message.content === "string" && message.content.length > 0
+        ? `<div class="answer">${escapeHtml(message.content)}</div>`
+        : "";
+    return `<div class="chat-msg agent pending">
+      <span class="live-status"><span class="live-dot"></span>${status}${
+        reasoning === "" ? escapeHtml(tokens) : ""
+      }</span>
+      ${reasoning}
+      ${partial}
+    </div>`;
   }
   const meta = providerMeta(message.provider) ?? { name: message.provider };
   const thinkingBlock = message.thinking
@@ -3397,6 +3424,42 @@ function renderContextDial() {
   </svg>`;
 }
 
+/**
+ * The consumption meter under the message box. Every percentage here is one
+ * the provider's own CLI reported; when a CLI publishes none, that is stated
+ * rather than substituted with something derived.
+ */
+function usageMeter(report, { compact = false } = {}) {
+  if (report === undefined) {
+    return "";
+  }
+  if (report.windows.length === 0) {
+    return `<div class="usage-row"><span class="muted">${escapeHtml(
+      report.unavailableReason ?? "No usage figures reported",
+    )}</span><span></span></div>`;
+  }
+  const windows = compact ? report.windows.slice(0, 2) : report.windows;
+  return windows
+    .map((window) => {
+      const percent = Math.max(0, Math.min(100, window.percentUsed));
+      return `<div class="usage-block">
+        <div class="usage-title"><span>${escapeHtml(window.label)}</span>
+          <strong>${percent}% used</strong></div>
+        <div class="usage-meter"><span class="seg-fill${
+          percent >= 90 ? " warn" : ""
+        }" style="width:${Math.max(1, percent)}%"></span></div>
+        ${
+          window.resetsAt === undefined
+            ? ""
+            : `<div class="usage-legend"><span>resets ${escapeHtml(
+                window.resetsAt,
+              )}</span></div>`
+        }
+      </div>`;
+    })
+    .join("");
+}
+
 function renderChatUsage() {
   const target = $("#chat-usage");
   const provider = state.chat.activeProvider;
@@ -3404,11 +3467,35 @@ function renderChatUsage() {
     target.innerHTML = "";
     return;
   }
-  // Only the subscription window lives here now; the context window is the
-  // dial by Send, and the token/cost breakdown is in Usage and limits.
-  target.innerHTML = windowMeter(state.chat.lastRateLimit[provider], {
-    compact: true,
-  });
+  const report = state.chat.usage[provider];
+  if (report === undefined) {
+    void loadProviderUsage(provider);
+  }
+  // Real consumption only; the context window is the dial by Send and the
+  // per-turn token breakdown lives in Usage and limits.
+  target.innerHTML = usageMeter(report, { compact: true });
+}
+
+/** Fetches what the provider CLI reports about consumption, once per view. */
+async function loadProviderUsage(provider) {
+  if (state.chat.usageLoading[provider] === true) {
+    return;
+  }
+  state.chat.usageLoading[provider] = true;
+  try {
+    const response = await api(
+      `/chat/providers/${encodeURIComponent(provider)}/usage`,
+    );
+    state.chat.usage[provider] = response.usage ?? { windows: [] };
+  } catch {
+    state.chat.usage[provider] = {
+      windows: [],
+      unavailableReason: "Usage could not be read from the CLI.",
+    };
+  } finally {
+    state.chat.usageLoading[provider] = false;
+    renderChatUsage();
+  }
 }
 
 function renderChat() {
@@ -3581,6 +3668,107 @@ async function sendChatPrompt() {
   }
 }
 
+/**
+ * Repaints only the message list. Streaming updates arrive many times a
+ * second, and a full chat re-render would fight the input and the pickers.
+ */
+function renderChatThread() {
+  const thread = $("#chat-thread");
+  if (thread === null || state.chat.mode !== "ask") {
+    return;
+  }
+  const conversation = loadConversation(state.chat.activeProvider);
+  if (conversation.length === 0) {
+    return;
+  }
+  const pinned =
+    thread.scrollHeight - thread.scrollTop - thread.clientHeight < 40;
+  thread.innerHTML = conversation.map(askBubble).join("");
+  if (pinned) {
+    thread.scrollTop = thread.scrollHeight;
+  }
+}
+
+/** Folds one CLI event into the pending bubble's live state. */
+function applyStreamEvent(pending, event) {
+  if (event.type === "status") {
+    pending.status = event.status;
+  } else if (event.type === "reasoning_start") {
+    pending.status = "reasoning";
+    pending.reasoningHidden = event.hidden === true;
+  } else if (event.type === "reasoning") {
+    pending.reasoning = `${pending.reasoning ?? ""}${event.text}`;
+    pending.reasoningHidden = false;
+  } else if (event.type === "reasoning_tokens") {
+    pending.reasoningTokens = event.tokens;
+  } else if (event.type === "text") {
+    pending.status = "responding";
+    pending.content = `${pending.content ?? ""}${event.delta}`;
+  }
+}
+
+/**
+ * Streams a completion as newline-delimited JSON. Each line is one event the
+ * provider CLI emitted; the last one carries the finished reply.
+ */
+async function streamCompletion(body, onEvent) {
+  const response = await fetch(`${API_ROOT}/chat/stream`, {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "application/x-ndjson",
+      "X-CSRF-Token": csrfToken(),
+    },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok || response.body === null) {
+    const detail = await response.json().catch(() => ({}));
+    throw new Error(
+      detail?.error?.message ?? `Request failed with status ${response.status}`,
+    );
+  }
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let reply;
+  let failure;
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (line.trim().length === 0) {
+        continue;
+      }
+      let event;
+      try {
+        event = JSON.parse(line);
+      } catch {
+        continue;
+      }
+      if (event.type === "done") {
+        reply = event.reply ?? {};
+      } else if (event.type === "error") {
+        failure = event.message ?? "The provider CLI failed";
+      } else {
+        onEvent(event);
+      }
+    }
+  }
+  if (failure !== undefined) {
+    throw new Error(failure);
+  }
+  if (reply === undefined) {
+    throw new Error("The provider stream ended without a reply");
+  }
+  return reply;
+}
+
 /** Ask mode: a real completion against the connected provider. */
 async function sendAskMessage() {
   const input = $("#chat-input");
@@ -3595,7 +3783,14 @@ async function sendAskMessage() {
   }
   const conversation = loadConversation(provider);
   conversation.push({ role: "user", content, at: new Date().toISOString() });
-  const pending = { role: "assistant", pending: true, provider };
+  const pending = {
+    role: "assistant",
+    pending: true,
+    provider,
+    status: "sending",
+    reasoningTokens: 0,
+    content: "",
+  };
   conversation.push(pending);
   state.chat.sending = true;
   input.value = "";
@@ -3605,17 +3800,19 @@ async function sendAskMessage() {
       .filter((message) => !message.pending && message.content)
       .slice(-12)
       .map((message) => ({ role: message.role, content: message.content }));
-    const response = await api("/chat/complete", {
-      method: "POST",
-      body: {
+    const reply = await streamCompletion(
+      {
         provider,
         messages: history,
         ...(state.chat.cliSessions[provider] === undefined
           ? {}
           : { cliSessionId: state.chat.cliSessions[provider] }),
       },
-    });
-    const reply = response.reply ?? {};
+      (event) => {
+        applyStreamEvent(pending, event);
+        renderChatThread();
+      },
+    );
     const index = conversation.indexOf(pending);
     conversation[index === -1 ? conversation.length - 1 : index] = {
       role: "assistant",
@@ -3856,6 +4053,7 @@ function renderUsageSheet(provider, meta, status) {
   const contextBlock = contextMeter(totals);
   const mixBlock = mixMeter(totals);
   const windowBlock = windowMeter(rate);
+  const usageBlock = usageMeter(state.chat.usage[provider]);
   return `<div class="settings-sheet">
     <button class="sheet-close" data-action="connect-close">×</button>
     <button class="sheet-back" data-action="settings-back">‹ ${escapeHtml(meta.name)} settings</button>
@@ -3882,10 +4080,13 @@ function renderUsageSheet(provider, meta, status) {
         : ""
     }
     ${
-      windowBlock === ""
-        ? ""
-        : `<p class="settings-section-label">Subscription window</p>
-          <div class="settings-card">${windowBlock}</div>`
+      usageBlock === ""
+        ? windowBlock === ""
+          ? ""
+          : `<p class="settings-section-label">Subscription window</p>
+            <div class="settings-card">${windowBlock}</div>`
+        : `<p class="settings-section-label">Plan usage</p>
+          <div class="settings-card">${usageBlock}</div>`
     }
     <p class="settings-footnote">
       Every figure comes from the provider CLI's own events — token counts and

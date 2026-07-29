@@ -332,6 +332,161 @@ test("anthropic model options come only from what the CLI itself reports", async
   assert.equal(status?.model, "claude-fable-5[1m]");
 });
 
+test("claude usage percentages are read from the CLI's own /usage report", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) => {
+        if (args[0] === "auth") {
+          return output(JSON.stringify({ loggedIn: true }));
+        }
+        if (args[1] === "/usage") {
+          return output(
+            JSON.stringify({
+              result: [
+                "You are currently using your subscription",
+                "",
+                "Current session: 36% used · resets Jul 29, 10:59am (America/Los_Angeles)",
+                "Current week (all models): 19% used · resets Jul 31, 9:59am (America/Los_Angeles)",
+                "Current week (Fable): 27% used · resets Jul 31, 10am (America/Los_Angeles)",
+                "",
+                "Last 24h · 1760 requests · 60 sessions",
+                "  95% of your usage was at >150k context",
+              ].join("\n"),
+            }),
+          );
+        }
+        return output("");
+      },
+    }),
+  });
+  const report = await service.usage({ provider: "anthropic" });
+  assert.equal(report.unavailableReason, undefined);
+  assert.deepEqual(
+    report.windows.map((window) => [window.label, window.percentUsed]),
+    [
+      ["session", 36],
+      ["week (all models)", 19],
+      ["week (Fable)", 27],
+    ],
+  );
+  assert.equal(report.windows[0]?.resetsAt, "Jul 29, 10:59am (America/Los_Angeles)");
+  // The "95% of your usage was at >150k context" line is prose, not a window.
+  assert.ok(!report.windows.some((window) => window.percentUsed === 95));
+
+  // Codex publishes no consumption figure; that must be said, not invented.
+  const codex = await service.usage({ provider: "openai" });
+  assert.deepEqual(codex.windows, []);
+  assert.match(codex.unavailableReason ?? "", /no consumption figure/iu);
+});
+
+test("streaming relays real CLI events and ends with the parsed reply", async () => {
+  const harness = await createHarness();
+  await seedCodexCache(harness.home);
+  const seenArgs: string[][] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      codex: (args) => {
+        if (args[0] === "--version") return output("codex-cli 0.146.0");
+        if (args[0] === "login") return output("Logged in using ChatGPT");
+        return output("");
+      },
+    }),
+    streamRunner: async (command, args, _options, onLine) => {
+      seenArgs.push([path.basename(String(command)), ...args]);
+      // Exactly the shape the real CLI emits, in the real order.
+      const lines = [
+        JSON.stringify({ type: "thread.started", thread_id: "th-123456789" }),
+        JSON.stringify({ type: "turn.started" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: { id: "item_0", type: "reasoning", text: "**Weighing options**" },
+        }),
+        JSON.stringify({
+          type: "item.completed",
+          item: { id: "item_1", type: "agent_message", text: "Answer." },
+        }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: 12, output_tokens: 3, reasoning_output_tokens: 7 },
+        }),
+      ];
+      for (const line of lines) onLine(line);
+      return output(lines.join("\n"));
+    },
+  });
+  await service.connect({ userId: "u", systemAdmin: true, provider: "openai" });
+  const events: Array<Record<string, unknown>> = [];
+  const reply = await service.completeStream(
+    {
+      userId: "u",
+      systemAdmin: true,
+      provider: "openai",
+      messages: [{ role: "user", content: "hi" }],
+    },
+    (event) => events.push(event as unknown as Record<string, unknown>),
+  );
+  // Reasoning text is forwarded verbatim, and only because the CLI sent it.
+  assert.deepEqual(events, [
+    { type: "status", status: "working" },
+    { type: "reasoning_start", hidden: false },
+    { type: "reasoning", text: "**Weighing options**" },
+    { type: "text", delta: "Answer." },
+  ]);
+  assert.equal(reply.text, "Answer.");
+  assert.equal(reply.usage.thinkingTokens, 7);
+  // Reasoning summaries only arrive when the CLI is asked for them.
+  assert.ok(
+    seenArgs[0]?.includes('model_reasoning_summary="detailed"'),
+    `expected the summary override, got ${JSON.stringify(seenArgs[0])}`,
+  );
+  assert.ok(seenArgs[0]?.includes("read-only"));
+});
+
+test("streaming refuses the same cases the non-streaming path refuses", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_OK),
+    streamRunner: async () => {
+      throw new Error("no CLI may be spawned for a refused request");
+    },
+  });
+  await assert.rejects(
+    service.completeStream(
+      {
+        userId: "u",
+        systemAdmin: true,
+        provider: "anthropic",
+        messages: [{ role: "user", content: "hi" }],
+      },
+      () => {},
+    ),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "not_connected",
+  );
+  await service.connect({
+    userId: "u",
+    systemAdmin: true,
+    provider: "anthropic",
+  });
+  await assert.rejects(
+    service.completeStream(
+      {
+        userId: "u",
+        systemAdmin: false,
+        provider: "anthropic",
+        messages: [{ role: "user", content: "hi" }],
+      },
+      () => {},
+    ),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "admin_required",
+  );
+});
+
 test("codex completions carry the chosen model, effort, and read-only sandbox", async () => {
   const harness = await createHarness();
   await seedCodexCache(harness.home);

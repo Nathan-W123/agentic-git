@@ -110,6 +110,13 @@ async function main(): Promise<void> {
         }),
       options: (input) =>
         providerChat.options({ provider: input.provider as ProviderId }),
+      usage: (input) =>
+        providerChat.usage({ provider: input.provider as ProviderId }),
+      completeStream: (input, onEvent) =>
+        providerChat.completeStream(
+          { ...input, provider: input.provider as ProviderId },
+          onEvent,
+        ),
       setSettings: (input) =>
         providerChat.setSettings({
           ...input,

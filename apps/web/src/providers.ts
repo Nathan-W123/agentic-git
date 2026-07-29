@@ -6,7 +6,11 @@ import path from "node:path";
 
 import { resolveClaudeCommand } from "@coord/adapter-prompt-cli";
 import type { CoordinatorProject } from "@coord/cli/project";
-import { runProcess, type ProcessOutput } from "@coord/repository-service";
+import {
+  runProcess,
+  sanitizeChildEnv,
+  type ProcessOutput,
+} from "@coord/repository-service";
 
 /**
  * Direct provider chat for the dashboard's agent panel, in the VS Code
@@ -64,6 +68,22 @@ export interface ChatRateLimit {
   windowKind?: string;
   windowStatus?: string;
   windowResetsAt?: string;
+}
+
+/** One consumption figure a CLI reports for the signed-in account. */
+export interface ProviderUsageWindow {
+  label: string;
+  percentUsed: number;
+  /** Reset moment exactly as the CLI worded it; it carries its own zone. */
+  resetsAt?: string;
+}
+
+export interface ProviderUsageReport {
+  /** Where these numbers came from, shown to the user verbatim-ish. */
+  source: string;
+  windows: ProviderUsageWindow[];
+  /** Set when the CLI publishes no consumption figure at all. */
+  unavailableReason?: string;
 }
 
 export interface ChatReply {
@@ -158,6 +178,47 @@ const PROVIDER_NAMES: Record<ProviderId, string> = {
   google: "Google",
 };
 
+/**
+ * Reads the percentages out of `claude -p "/usage" --output-format json`.
+ * The CLI prints lines like:
+ *   Current session: 36% used · resets Jul 29, 10:59am (America/Los_Angeles)
+ *   Current week (all models): 19% used · resets Jul 31, 9:59am (...)
+ * Only lines matching that shape become windows; anything else is ignored
+ * rather than guessed at.
+ */
+export function parseClaudeUsage(stdout: string): ProviderUsageReport {
+  const source = "claude /usage, as reported by the signed-in account";
+  let text: string;
+  try {
+    const envelope = JSON.parse(stdout) as { result?: unknown };
+    text = typeof envelope.result === "string" ? envelope.result : stdout;
+  } catch {
+    text = stdout;
+  }
+  const windows: ProviderUsageWindow[] = [];
+  const line =
+    /^\s*(Current [^:]+):\s*(\d{1,3})%\s*used(?:\s*·\s*resets\s*([^\n]+?))?\s*$/gimu;
+  for (const match of text.matchAll(line)) {
+    const percent = Number(match[2]);
+    if (!Number.isFinite(percent) || percent < 0 || percent > 100) {
+      continue;
+    }
+    windows.push({
+      label: (match[1] as string).replace(/^Current\s+/iu, "").trim(),
+      percentUsed: percent,
+      ...(match[3] === undefined ? {} : { resetsAt: match[3].trim() }),
+    });
+  }
+  return windows.length > 0
+    ? { source, windows }
+    : {
+        source,
+        windows: [],
+        unavailableReason:
+          "The claude CLI did not report a usage percentage in this run.",
+      };
+}
+
 /** Real `--effort` values the Claude CLI accepts. */
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5";
@@ -166,6 +227,8 @@ const DEFAULT_CLAUDE_EFFORT = "high";
 const MAX_MESSAGES = 40;
 const MAX_MESSAGE_CHARS = 32_000;
 const CLI_TIMEOUT_MS = 240_000;
+/** Usage moves slowly; re-probing on every render would be wasteful. */
+const USAGE_CACHE_MS = 120_000;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 // Square brackets appear in real Claude Code model values (e.g. the
 // "claude-fable-5[1m]" context variant it caches for its own picker).
@@ -174,8 +237,132 @@ const MODEL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,99}$/u;
 export type ProcessRunner = typeof runProcess;
 export type DetachedSpawner = (command: string, args: string[]) => void;
 
+/**
+ * Runs a CLI and hands back every stdout line the moment it arrives, while
+ * still accumulating the whole output. The accumulated text goes through the
+ * same parsers the non-streaming path uses, so live events and the final
+ * reply can never disagree about what the CLI said.
+ */
+export type StreamRunner = (
+  command: string,
+  args: readonly string[],
+  options: {
+    cwd?: string;
+    input?: string;
+    timeoutMs?: number;
+    maxOutputBytes?: number;
+  },
+  onLine: (line: string) => void,
+) => Promise<ProcessOutput>;
+
+/** What the browser is told while a reply is still being produced. */
+export type ChatStreamEvent =
+  /** Coarse progress the CLI itself announced (e.g. "requesting"). */
+  | { type: "status"; status: string }
+  /** Reasoning began. `hidden` marks a provider that withholds the text. */
+  | { type: "reasoning_start"; hidden: boolean }
+  /** Real reasoning text, only ever forwarded verbatim from the CLI. */
+  | { type: "reasoning"; text: string }
+  /** Reasoning token counts for providers that report counts but no text. */
+  | { type: "reasoning_tokens"; tokens: number }
+  /** Answer text as it is produced. */
+  | { type: "text"; delta: string }
+  | { type: "done"; reply: ChatReply }
+  | { type: "error"; message: string; code: string };
+
+async function streamProcess(
+  command: string,
+  args: readonly string[],
+  options: {
+    cwd?: string;
+    input?: string;
+    timeoutMs?: number;
+    maxOutputBytes?: number;
+  },
+  onLine: (line: string) => void,
+): Promise<ProcessOutput> {
+  const startedAt = Date.now();
+  return await new Promise<ProcessOutput>((resolve, reject) => {
+    const child = spawn(command, [...args], {
+      cwd: options.cwd,
+      env: sanitizeChildEnv(process.env),
+      shell: false,
+      windowsHide: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let pending = "";
+    let settled = false;
+    const limit = options.maxOutputBytes ?? MAX_OUTPUT_BYTES;
+    const timer =
+      options.timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            child.kill();
+          }, options.timeoutMs);
+    const finish = (result: ProcessOutput) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+      resolve(result);
+    };
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      if (stdout.length < limit) {
+        stdout += chunk;
+      }
+      pending += chunk;
+      const lines = pending.split("\n");
+      pending = lines.pop() ?? "";
+      for (const line of lines) {
+        if (line.trim().length > 0) {
+          onLine(line);
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      if (stderr.length < limit) {
+        stderr += chunk;
+      }
+    });
+    child.on("error", (error) => {
+      if (!settled) {
+        settled = true;
+        if (timer !== undefined) {
+          clearTimeout(timer);
+        }
+        reject(error);
+      }
+    });
+    child.on("close", (code) => {
+      if (pending.trim().length > 0) {
+        onLine(pending);
+      }
+      finish({
+        exitCode: code ?? 1,
+        stdout,
+        stderr,
+        durationMs: Date.now() - startedAt,
+      });
+    });
+    if (options.input !== undefined) {
+      child.stdin.end(options.input);
+    } else {
+      child.stdin.end();
+    }
+  });
+}
+
 export interface ProviderChatServiceOptions {
   runner?: ProcessRunner;
+  /** Feeds CLI stdout lines out as they arrive, for streaming replies. */
+  streamRunner?: StreamRunner;
   /** Launches a browser-opening login flow without holding the request. */
   detachedSpawner?: DetachedSpawner;
   homeDirectory?: string;
@@ -265,12 +452,18 @@ export class ProviderChatService {
     ProviderId,
     { at: number; state: ProviderCliState }
   >();
+  private readonly usageCache = new Map<
+    ProviderId,
+    { at: number; report: ProviderUsageReport }
+  >();
+  private readonly streamRunner: StreamRunner;
 
   public constructor(
     private readonly project: CoordinatorProject,
     options: ProviderChatServiceOptions = {},
   ) {
     this.runner = options.runner ?? runProcess;
+    this.streamRunner = options.streamRunner ?? streamProcess;
     this.homeDirectory = options.homeDirectory ?? os.homedir();
     this.detachedSpawner =
       options.detachedSpawner ??
@@ -335,6 +528,59 @@ export class ProviderChatService {
     }
     this.detectionCache.set(provider, { at: Date.now(), state });
     return state;
+  }
+
+  /**
+   * Reads what Claude Code's own `/usage` command reports. That command is
+   * handled inside the CLI — it costs nothing and runs no model turn — and
+   * is the only place a consumed figure is published, so its lines are
+   * parsed rather than any number being derived here.
+   */
+  public async usage(input: {
+    provider: ProviderId;
+  }): Promise<ProviderUsageReport> {
+    if (input.provider !== "anthropic") {
+      return {
+        source:
+          input.provider === "openai"
+            ? "Codex CLI"
+            : PROVIDER_NAMES[input.provider],
+        windows: [],
+        unavailableReason:
+          input.provider === "openai"
+            ? "The Codex CLI publishes no consumption figure — it reports per-turn token counts only."
+            : "No usage figures are available for this provider.",
+      };
+    }
+    const cached = this.usageCache.get(input.provider);
+    if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) {
+      return cached.report;
+    }
+    let report: ProviderUsageReport;
+    try {
+      const result = await this.runner(
+        resolveClaudeCommand("claude"),
+        ["-p", "/usage", "--output-format", "json"],
+        { timeoutMs: 60_000, maxOutputBytes: 262_144 },
+      );
+      report =
+        result.exitCode === 0
+          ? parseClaudeUsage(result.stdout)
+          : {
+              source: "claude /usage",
+              windows: [],
+              unavailableReason: "The claude CLI could not report usage.",
+            };
+    } catch (error) {
+      report = {
+        source: "claude /usage",
+        windows: [],
+        unavailableReason:
+          error instanceof Error ? error.message : String(error),
+      };
+    }
+    this.usageCache.set(input.provider, { at: Date.now(), report });
+    return report;
   }
 
   private async detectClaude(): Promise<ProviderCliState> {
@@ -800,13 +1046,45 @@ export class ProviderChatService {
 
   /* ---------------------------------------------------- completions ----- */
 
-  public async complete(input: {
+  /**
+   * Same contract as {@link complete}, but every event the CLI emits while
+   * it works is handed to `onEvent` as it arrives. The final reply still
+   * comes from the same parser the non-streaming path uses.
+   */
+  public async completeStream(
+    input: {
+      userId: string;
+      systemAdmin: boolean;
+      provider: ProviderId;
+      messages: unknown;
+      cliSessionId?: string;
+    },
+    onEvent: (event: ChatStreamEvent) => void,
+  ): Promise<ChatReply> {
+    const prompt = await this.prepareCompletion(input);
+    if (input.provider === "anthropic") {
+      return await this.streamViaClaudeCli(
+        prompt.text,
+        prompt.settings,
+        input.cliSessionId,
+        onEvent,
+      );
+    }
+    return await this.streamViaCodexCli(
+      prompt.text,
+      prompt.settings,
+      input.cliSessionId,
+      onEvent,
+    );
+  }
+
+  /** Shared gate: connection, admin, message shape. */
+  private async prepareCompletion(input: {
     userId: string;
     systemAdmin: boolean;
     provider: ProviderId;
     messages: unknown;
-    cliSessionId?: string;
-  }): Promise<ChatReply> {
+  }): Promise<{ text: string; settings: ProviderSettings }> {
     const messages = assertMessages(input.messages);
     const connection = (await this.readConnections())[input.userId]?.[
       input.provider
@@ -833,25 +1111,35 @@ export class ProviderChatService {
         "The last message must be from the user",
       );
     }
-    const settings = connection.settings ?? {};
+    if (input.provider === "google") {
+      throw new ProviderChatError(
+        409,
+        "provider_blocked",
+        "Gemini chat is unavailable until the signed-in Google account is eligible",
+      );
+    }
+    return { text: latest.content, settings: connection.settings ?? {} };
+  }
+
+  public async complete(input: {
+    userId: string;
+    systemAdmin: boolean;
+    provider: ProviderId;
+    messages: unknown;
+    cliSessionId?: string;
+  }): Promise<ChatReply> {
+    const prompt = await this.prepareCompletion(input);
     if (input.provider === "anthropic") {
       return await this.completeViaClaudeCli(
-        latest.content,
-        settings,
+        prompt.text,
+        prompt.settings,
         input.cliSessionId,
       );
     }
-    if (input.provider === "openai") {
-      return await this.completeViaCodexCli(
-        latest.content,
-        settings,
-        input.cliSessionId,
-      );
-    }
-    throw new ProviderChatError(
-      409,
-      "provider_blocked",
-      "Gemini chat is unavailable until the signed-in Google account is eligible",
+    return await this.completeViaCodexCli(
+      prompt.text,
+      prompt.settings,
+      input.cliSessionId,
     );
   }
 
@@ -870,6 +1158,232 @@ export class ProviderChatService {
         output.stdout.trim().slice(0, 400)
       }`,
     );
+  }
+
+  /**
+   * Streaming Claude Code completion. `--include-partial-messages` makes the
+   * CLI emit the answer as it is produced. Verified on this host: thinking
+   * blocks arrive with their text *redacted* (empty `thinking_delta`s) while
+   * carrying real token estimates, so reasoning is reported as hidden with
+   * live counts and never invented.
+   */
+  private async streamViaClaudeCli(
+    prompt: string,
+    settings: ProviderSettings,
+    cliSessionId: string | undefined,
+    onEvent: (event: ChatStreamEvent) => void,
+  ): Promise<ChatReply> {
+    const scratch = await this.scratchDirectory();
+    const model = settings.model ?? DEFAULT_CLAUDE_MODEL;
+    const effort = settings.effort ?? DEFAULT_CLAUDE_EFFORT;
+    const usePositional = prompt.length <= 8_000;
+    const resumable =
+      cliSessionId !== undefined && /^[A-Za-z0-9-]{8,64}$/u.test(cliSessionId);
+    const argsFor = (resume: boolean) => [
+      "-p",
+      ...(usePositional ? [prompt] : []),
+      "--output-format",
+      "stream-json",
+      "--verbose",
+      "--include-partial-messages",
+      "--model",
+      model,
+      "--effort",
+      effort,
+      ...(resume ? ["--resume", cliSessionId as string] : []),
+    ];
+    let reasoningAnnounced = false;
+    const handleLine = (line: string) => {
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      if (event["type"] === "system" && event["subtype"] === "status") {
+        const status = event["status"];
+        if (typeof status === "string") {
+          onEvent({ type: "status", status });
+        }
+        return;
+      }
+      if (
+        event["type"] === "system" &&
+        event["subtype"] === "thinking_tokens"
+      ) {
+        const tokens = event["estimated_tokens"];
+        if (typeof tokens === "number") {
+          onEvent({ type: "reasoning_tokens", tokens });
+        }
+        return;
+      }
+      if (event["type"] !== "stream_event") {
+        return;
+      }
+      const inner = event["event"] as
+        | {
+            type?: string;
+            content_block?: { type?: string };
+            delta?: { type?: string; text?: string; thinking?: string };
+          }
+        | undefined;
+      if (
+        inner?.type === "content_block_start" &&
+        inner.content_block?.type === "thinking" &&
+        !reasoningAnnounced
+      ) {
+        reasoningAnnounced = true;
+        onEvent({ type: "reasoning_start", hidden: true });
+        return;
+      }
+      if (inner?.type === "content_block_delta") {
+        if (
+          inner.delta?.type === "text_delta" &&
+          typeof inner.delta.text === "string"
+        ) {
+          onEvent({ type: "text", delta: inner.delta.text });
+        } else if (
+          inner.delta?.type === "thinking_delta" &&
+          typeof inner.delta.thinking === "string" &&
+          inner.delta.thinking.length > 0
+        ) {
+          // Only reached if a future CLI stops redacting the text.
+          onEvent({ type: "reasoning", text: inner.delta.thinking });
+        }
+      }
+    };
+    const runOnce = async (resume: boolean): Promise<ProcessOutput> =>
+      await this.streamRunner(
+        resolveClaudeCommand("claude"),
+        argsFor(resume),
+        {
+          cwd: scratch,
+          ...(usePositional ? {} : { input: prompt }),
+          timeoutMs: CLI_TIMEOUT_MS,
+          maxOutputBytes: MAX_OUTPUT_BYTES,
+        },
+        handleLine,
+      );
+    let output = await runOnce(resumable);
+    if (output.exitCode !== 0 && resumable) {
+      output = await runOnce(false);
+    }
+    if (output.exitCode !== 0) {
+      throw this.cliFailure("claude", output);
+    }
+    return parseClaudeStreamJson(output.stdout, model);
+  }
+
+  /**
+   * Streaming Codex completion. `model_reasoning_summary="detailed"` makes
+   * the CLI emit real reasoning-summary items mid-turn — verified live,
+   * arriving ~20s before the answer — which are forwarded verbatim. The CLI
+   * emits completed items rather than token deltas, so the answer still
+   * lands in one piece.
+   */
+  private async streamViaCodexCli(
+    prompt: string,
+    settings: ProviderSettings,
+    cliSessionId: string | undefined,
+    onEvent: (event: ChatStreamEvent) => void,
+  ): Promise<ChatReply> {
+    const scratch = await this.scratchDirectory();
+    const command = resolveCodexCommand(this.homeDirectory);
+    const resumable =
+      cliSessionId !== undefined &&
+      /^[A-Za-z0-9-]{8,64}$/u.test(cliSessionId);
+    const overrides = [
+      ...(settings.effort === undefined
+        ? []
+        : ["-c", `model_reasoning_effort=${JSON.stringify(settings.effort)}`]),
+      "-c",
+      'model_reasoning_summary="detailed"',
+    ];
+    const argsFor = (resume: boolean) =>
+      resume
+        ? [
+            "exec",
+            "resume",
+            cliSessionId as string,
+            "--json",
+            "--skip-git-repo-check",
+            "-c",
+            'sandbox_mode="read-only"',
+            ...overrides,
+            prompt,
+          ]
+        : [
+            "exec",
+            "--json",
+            "--skip-git-repo-check",
+            "--sandbox",
+            "read-only",
+            "-C",
+            scratch,
+            ...(settings.model === undefined ? [] : ["-m", settings.model]),
+            ...overrides,
+            prompt,
+          ];
+    let reasoningAnnounced = false;
+    const handleLine = (line: string) => {
+      let event: Record<string, unknown>;
+      try {
+        event = JSON.parse(line) as Record<string, unknown>;
+      } catch {
+        return;
+      }
+      if (event["type"] === "turn.started") {
+        onEvent({ type: "status", status: "working" });
+        return;
+      }
+      if (event["type"] !== "item.completed") {
+        return;
+      }
+      const item = event["item"] as
+        | { type?: string; text?: string }
+        | undefined;
+      if (item?.type === "reasoning" && typeof item.text === "string") {
+        if (!reasoningAnnounced) {
+          reasoningAnnounced = true;
+          onEvent({ type: "reasoning_start", hidden: false });
+        }
+        onEvent({ type: "reasoning", text: item.text });
+        return;
+      }
+      if (item?.type === "agent_message" && typeof item.text === "string") {
+        onEvent({ type: "text", delta: item.text });
+      }
+    };
+    const runOnce = async (resume: boolean): Promise<ProcessOutput> =>
+      await this.streamRunner(
+        command,
+        argsFor(resume),
+        {
+          cwd: scratch,
+          timeoutMs: CLI_TIMEOUT_MS,
+          maxOutputBytes: MAX_OUTPUT_BYTES,
+        },
+        handleLine,
+      );
+    let output = await runOnce(resumable);
+    if (output.exitCode !== 0 && resumable) {
+      output = await runOnce(false);
+    }
+    if (output.exitCode !== 0) {
+      throw this.cliFailure("codex", output);
+    }
+    const reply = parseCodexJsonl(
+      output.stdout,
+      settings.model ?? "codex default",
+    );
+    const models = await this.codexModels();
+    const contextWindow = (
+      models?.find((model) => model.id === settings.model) ?? models?.[0]
+    )?.contextWindow;
+    return {
+      ...reply,
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+    };
   }
 
   /**

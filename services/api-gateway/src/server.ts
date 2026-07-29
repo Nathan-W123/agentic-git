@@ -218,6 +218,8 @@ export interface ChatProviderOperations {
   disconnect(input: { userId: string; provider: string }): Promise<void>;
   /** Model/effort choices the connected account actually reports. */
   options(input: { provider: string }): Promise<unknown>;
+  /** Consumption the provider's own CLI publishes, when it publishes any. */
+  usage(input: { provider: string }): Promise<unknown>;
   setSettings(input: {
     userId: string;
     provider: string;
@@ -231,6 +233,20 @@ export interface ChatProviderOperations {
     messages: unknown;
     cliSessionId?: string;
   }): Promise<unknown>;
+  /**
+   * Same as {@link complete} but reports progress as the CLI produces it.
+   * Each event is relayed to the browser the moment it arrives.
+   */
+  completeStream?(
+    input: {
+      userId: string;
+      systemAdmin: boolean;
+      provider: string;
+      messages: unknown;
+      cliSessionId?: string;
+    },
+    onEvent: (event: unknown) => void,
+  ): Promise<unknown>;
 }
 
 /** Everything a worker needs to execute one task without further lookups. */
@@ -2308,7 +2324,7 @@ export class ApiGateway {
         path,
         new RegExp(
           `^${API_PREFIX}/chat/providers/(anthropic|openai|google)` +
-            `/(signin|options|settings)$`,
+            `/(signin|options|settings|usage)$`,
           "u",
         ),
       );
@@ -2330,6 +2346,12 @@ export class ApiGateway {
             options: await performChat(() =>
               chatOperations.options({ provider }),
             ),
+          });
+          return;
+        }
+        if (action === "usage" && method === "GET") {
+          this.sendJson(response, 200, {
+            usage: await performChat(() => chatOperations.usage({ provider })),
           });
           return;
         }
@@ -2397,6 +2419,64 @@ export class ApiGateway {
             }),
           ),
         });
+        return;
+      }
+      if (path === `${API_PREFIX}/chat/stream` && method === "POST") {
+        const streamOperation = chatOperations.completeStream;
+        if (streamOperation === undefined) {
+          throw new HttpError(
+            501,
+            "not_supported",
+            "Streaming chat is not configured on this deployment",
+          );
+        }
+        const body = objectBody(await this.readJson(request));
+        const provider =
+          stringField(body["provider"], "provider", { max: 20 }) ?? "";
+        if (!["anthropic", "openai", "google"].includes(provider)) {
+          throw new HttpError(400, "invalid_request", "provider is unknown");
+        }
+        const cliSessionId = stringField(
+          body["cliSessionId"],
+          "cliSessionId",
+          { max: 64, optional: true },
+        );
+        // Newline-delimited JSON: one event per line, flushed immediately so
+        // the browser sees progress rather than a buffered reply.
+        response.setHeader("Content-Type", "application/x-ndjson");
+        response.setHeader("Cache-Control", "no-store");
+        response.setHeader("X-Accel-Buffering", "no");
+        response.writeHead(200);
+        const write = (event: unknown) => {
+          if (!response.writableEnded) {
+            response.write(`${JSON.stringify(event)}\n`);
+          }
+        };
+        try {
+          const reply = await performChat(() =>
+            streamOperation(
+              {
+                ...identity,
+                provider,
+                messages: body["messages"],
+                ...(cliSessionId === undefined ? {} : { cliSessionId }),
+              },
+              write,
+            ),
+          );
+          write({ type: "done", reply });
+        } catch (error) {
+          const failure =
+            error instanceof HttpError
+              ? { code: error.code, message: error.message }
+              : {
+                  code: "chat_failed",
+                  message:
+                    error instanceof Error ? error.message : String(error),
+                };
+          write({ type: "error", ...failure });
+        }
+        response.end();
         return;
       }
       throw new HttpError(404, "not_found", "Route was not found");
