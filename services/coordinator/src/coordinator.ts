@@ -5,6 +5,7 @@ import type {
 } from "@coord/agent-protocol";
 import {
   CodeIntelligenceService,
+  groundPlan,
   type RepositoryIndex,
 } from "@coord/code-intelligence";
 import { IntegrationService } from "@coord/integration-service";
@@ -18,6 +19,7 @@ import {
   createId,
   mergePlanScope,
   normalizeRepositoryPath,
+  planGroundingConfidence,
   uniqueStrings,
   type AgentPlan,
   type ApprovalKind,
@@ -473,7 +475,12 @@ export class Coordinator {
               `Agent plan task ${submitted.taskId} does not match ${entry.task.id}`,
             );
           }
-          const plan = this.intelligence.enrichPlan(submitted, index);
+          // Grounded before it is enriched: verification judges what the
+          // agent declared, not what the index projected onto it.
+          const plan = this.intelligence.enrichPlan(
+            groundPlan(submitted, index),
+            index,
+          );
           assertAgentPlan(plan);
           await recorder?.plan(entry.task.id, plan);
           await recorder?.planRevision(entry.task.id, {
@@ -492,6 +499,7 @@ export class Coordinator {
               expectedFiles: plan.expectedFiles,
               expectedSymbols: plan.expectedSymbols,
               riskLevel: plan.riskLevel,
+              grounding: plan.grounding,
             },
           );
           return {
@@ -662,7 +670,10 @@ export class Coordinator {
         `Agent replan task ${submitted.taskId} does not match ${entry.task.id}`,
       );
     }
-    entry.plan = this.intelligence.enrichPlan(submitted, index);
+    entry.plan = this.intelligence.enrichPlan(
+      groundPlan(submitted, index),
+      index,
+    );
     entry.planRevision += 1;
     entry.plannedVersion = version;
     entry.decision.planRevision = entry.planRevision;
@@ -676,6 +687,7 @@ export class Coordinator {
       revision: entry.planRevision,
       reason: "canonical_change",
       expectedFiles: entry.plan.expectedFiles,
+      grounding: entry.plan.grounding,
     });
   }
 
@@ -687,6 +699,28 @@ export class Coordinator {
       pending.map((entry) => [entry.task.id, new Set<string>()]),
     );
     const byId = new Map(pending.map((entry) => [entry.task.id, entry]));
+    // An unverifiable plan is never proven disjoint from anything, because
+    // nothing it declares exists to compare. It still runs — in a wave of its
+    // own: behind every verifiable task, and behind every earlier
+    // unverifiable one. Edges all point one way, so no cycle is possible.
+    for (const entry of pending) {
+      if (planGroundingConfidence(entry.plan) !== "ungrounded") {
+        continue;
+      }
+      for (const other of pending) {
+        if (other === entry) {
+          continue;
+        }
+        const otherUngrounded =
+          planGroundingConfidence(other.plan) === "ungrounded";
+        if (
+          !otherUngrounded ||
+          pending.indexOf(other) < pending.indexOf(entry)
+        ) {
+          blockers.get(entry.task.id)?.add(other.task.id);
+        }
+      }
+    }
     for (const assessment of assessments) {
       if (!structuralConflict(assessment)) {
         continue;
@@ -1035,7 +1069,13 @@ export class Coordinator {
           "Scope expansion must name at least one resource and explain why",
         );
       }
-      const revisedPlan = mergePlanScope(entry.plan, request);
+      // A scope expansion is a new set of declarations, and mid-run is when
+      // an agent is most likely to name what it merely believes exists — so
+      // the revised plan is verified the same way the original was.
+      const revisedPlan = groundPlan(
+        mergePlanScope(entry.plan, request),
+        await this.intelligence.index(input.repository, waveVersion.revision),
+      );
       const activeConflict = wave
         .filter((candidate) => candidate.task.id !== entry.task.id)
         .map((candidate) => this.conflicts.assess(revisedPlan, candidate.plan))

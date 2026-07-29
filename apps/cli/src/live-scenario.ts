@@ -195,6 +195,37 @@ export const LIVE_PRICING_SCENARIO: BenchmarkScenario = {
 };
 
 /**
+ * The forced-contention pair, phrased in checkout vocabulary.
+ *
+ * Both requests necessarily change how an order total is computed, so they
+ * contend on `orderTotal` in `src/pricing/total.js` whatever the agents
+ * declare. The wording is the experiment: "checkout", "order" and "total
+ * price" invite plans that name a checkout or order module and a
+ * calculate-style total function, none of which exist under those names. A
+ * plan-time detector that only compares declared names against each other is
+ * at the mercy of both agents inventing the *same* wrong name; this scenario
+ * exists to measure exactly that, before and after grounding.
+ */
+export const LIVE_CHECKOUT_SCENARIO: BenchmarkScenario = {
+  name: "live-checkout",
+  description:
+    "Two real-agent requests that must both change the order total; objectives use checkout vocabulary that matches no real file or symbol name.",
+  seed: SEED,
+  tasks: [
+    task(
+      "task_checkout_fee",
+      "During checkout, add a flat two pound handling charge to every order's total price",
+      "codex-a",
+    ),
+    task(
+      "task_checkout_delivery",
+      "During checkout, orders of one hundred pounds or more get free delivery and every other order is charged three pounds for delivery",
+      "codex-b",
+    ),
+  ],
+};
+
+/**
  * The same repository with six requests instead of three.
  *
  * Three tasks is enough to show that a real collision is found, and not enough

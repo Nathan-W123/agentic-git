@@ -181,6 +181,19 @@ function fileReferentsFor(
 }
 
 /**
+ * Kill switch, and the control arm of the before/after measurement.
+ *
+ * With `COORD_DISABLE_PLAN_GROUNDING=1` every plan passes through unverified
+ * and arbitration behaves exactly as it did before grounding existed. That is
+ * strictly less safe — it is the recorded failure mode — so it exists only
+ * for operational rollback and for benchmarking the fix against its absence
+ * on an otherwise identical build.
+ */
+function groundingDisabled(): boolean {
+  return process.env["COORD_DISABLE_PLAN_GROUNDING"] === "1";
+}
+
+/**
  * Returns the plan with a freshly computed grounding record.
  *
  * Always overwrites any grounding already present: this is a coordinator-side
@@ -188,6 +201,11 @@ function fileReferentsFor(
  * is the index of the repository the plan will run against.
  */
 export function groundPlan(plan: AgentPlan, index: RepositoryIndex): AgentPlan {
+  if (groundingDisabled()) {
+    const { grounding: ignored, ...bare } = structuredClone(plan);
+    void ignored;
+    return bare;
+  }
   const existingPaths = new Set(index.paths.map((entry) => entry.toLowerCase()));
   const declaredFiles = uniqueRepositoryPaths(plan.expectedFiles);
   const missingFiles = declaredFiles.filter(

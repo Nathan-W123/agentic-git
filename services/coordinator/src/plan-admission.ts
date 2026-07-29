@@ -1,6 +1,7 @@
 import {
   completeAgentPlan,
   planAdmissionApproved,
+  planGroundingConfidence,
   planResourceKey,
   reducePlanScope,
   uniqueRepositoryPaths,
@@ -189,6 +190,12 @@ export class PlanAdmissionController {
   public admit(input: PlanAdmissionInput): PlanAdmission {
     const whole = this.decide(input.plan, input);
     if (planAdmissionApproved(whole) || input.partialAdmission === false) {
+      return whole;
+    }
+    // A plan whose declarations verification could not connect to the
+    // repository at all has no trustworthy line to split along: granting
+    // "the uncontested part" of a fiction grants an unknown.
+    if (planGroundingConfidence(input.plan) === "ungrounded") {
       return whole;
     }
     return this.admitPartially(input, whole) ?? whole;
@@ -489,6 +496,52 @@ export class PlanAdmissionController {
       decidedAt: new Date().toISOString(),
     };
     const others = input.active.filter((entry) => entry.taskId !== taskId);
+
+    // Verification is a precondition for concurrency, not for running. A plan
+    // that names nothing real says nothing usable about what it will touch, so
+    // conflict scoring against it is theatre: the scores would compare fiction
+    // with fact and find no overlap. Such a plan still runs — alone. The same
+    // holds from the other side: while an unverifiable plan is executing, its
+    // real footprint is unknown, and no candidate can be proven disjoint from
+    // an unknown.
+    if (others.length > 0 && planGroundingConfidence(plan) === "ungrounded") {
+      return {
+        ...shared,
+        status: "sequenced",
+        ownershipGrants: [],
+        constraints: [
+          "Plan again naming files and symbols that exist in the repository, " +
+            "or resubmit once the executing tasks integrate",
+        ],
+        blockedBy: others.map((entry) => entry.taskId).sort(),
+        conflicts: [],
+        explanation:
+          "Plan verification found none of this plan's declared files or " +
+          "symbols in the repository, so it cannot be proven disjoint from " +
+          `executing work: ${(plan.grounding?.notes ?? []).join("; ")}`,
+        retryAfterMs,
+      };
+    }
+    const ungroundedActive = others.filter(
+      (entry) => planGroundingConfidence(entry.plan) === "ungrounded",
+    );
+    if (ungroundedActive.length > 0) {
+      return {
+        ...shared,
+        status: "sequenced",
+        ownershipGrants: [],
+        constraints: [
+          "Start from canonical state after the unverifiable tasks integrate",
+        ],
+        blockedBy: ungroundedActive.map((entry) => entry.taskId).sort(),
+        conflicts: [],
+        explanation:
+          "Executing work could not be verified against the repository, so " +
+          "its real footprint is unknown: " +
+          ungroundedActive.map((entry) => entry.taskId).join(", "),
+        retryAfterMs,
+      };
+    }
 
     const assessments = others
       .map((entry) => this.conflicts.assess(plan, entry.plan))

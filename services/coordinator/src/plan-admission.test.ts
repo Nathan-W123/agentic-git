@@ -583,3 +583,109 @@ test("files are withheld before symbols, and only symbols still held follow", ()
     ),
   );
 });
+
+/** An ungrounded verification record: nothing the plan declares exists. */
+function ungrounded(candidate: AgentPlan): AgentPlan {
+  return {
+    ...candidate,
+    grounding: {
+      confidence: "ungrounded",
+      revision: "a".repeat(40),
+      missingFiles: candidate.expectedFiles,
+      unresolvedSymbols: candidate.expectedSymbols,
+      fileReferents: [],
+      symbolReferents: [],
+      notes: ["nothing this plan declares exists in the repository"],
+    },
+  };
+}
+
+test("an unverifiable plan with nothing running is approved: it runs alone", () => {
+  const admission = admit(
+    ungrounded(plan("task_a", { expectedFiles: ["src/ghost.ts"] })),
+    [],
+  );
+
+  assert.equal(admission.status, "approved");
+});
+
+test("an unverifiable plan is sequenced behind all executing work, even disjoint work", () => {
+  const admission = admit(
+    ungrounded(
+      plan("task_a", {
+        expectedFiles: ["src/ghost.ts"],
+        expectedSymbols: ["ghostSymbol"],
+      }),
+    ),
+    [
+      plan("task_b", { expectedFiles: ["src/other.ts"], expectedSymbols: [] }),
+      plan("task_c", { expectedFiles: ["src/third.ts"], expectedSymbols: [] }),
+    ],
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.deepEqual(admission.blockedBy, ["task_b", "task_c"]);
+  assert.equal(admission.ownershipGrants.length, 0);
+  assert.match(admission.explanation, /could not be proven disjoint|found none/u);
+  // No partial admission either: there is no trustworthy line to split along.
+  assert.equal(admission.deferredResources, undefined);
+});
+
+test("a verified plan is sequenced while unverifiable work is executing", () => {
+  const admission = admit(
+    plan("task_a", { expectedFiles: ["src/other.ts"], expectedSymbols: [] }),
+    [
+      ungrounded(
+        plan("task_b", {
+          expectedFiles: ["src/ghost.ts"],
+          expectedSymbols: ["ghostSymbol"],
+        }),
+      ),
+    ],
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.deepEqual(admission.blockedBy, ["task_b"]);
+  assert.match(admission.explanation, /could not be verified/u);
+});
+
+test("grounded referents sequence plans whose declared names never overlap", () => {
+  const groundedTo = (
+    candidate: AgentPlan,
+    declared: string,
+  ): AgentPlan => ({
+    ...candidate,
+    grounding: {
+      confidence: "grounded",
+      revision: "a".repeat(40),
+      missingFiles: candidate.expectedFiles,
+      unresolvedSymbols: [declared],
+      fileReferents: [],
+      symbolReferents: [
+        { declared, resolved: "orderTotal", files: ["src/pricing/total.js"] },
+      ],
+      notes: [],
+    },
+  });
+  const admission = admit(
+    groundedTo(
+      plan("task_a", {
+        expectedFiles: ["src/checkout.js"],
+        expectedSymbols: ["calculateTotal"],
+      }),
+      "calculateTotal",
+    ),
+    [
+      groundedTo(
+        plan("task_b", {
+          expectedFiles: ["src/order.js"],
+          expectedSymbols: ["computeOrderTotal"],
+        }),
+        "computeOrderTotal",
+      ),
+    ],
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.deepEqual(admission.blockedBy, ["task_b"]);
+});
