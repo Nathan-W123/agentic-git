@@ -83,6 +83,9 @@ function createAdapter(
         ...(live.executionSandbox === undefined
           ? {}
           : { executionSandbox: live.executionSandbox }),
+        ...(live.windowsSandbox === undefined
+          ? {}
+          : { windowsSandbox: live.windowsSandbox }),
       });
     }
     return new GenericCliAdapter({

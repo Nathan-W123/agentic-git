@@ -37,6 +37,8 @@ export interface LiveAgentConfig {
   taskIds: TaskId[] | "all";
   /** Codex only: the sandbox its edit phase runs under. */
   executionSandbox?: "workspace-write" | "danger-full-access";
+  /** Codex on Windows only: which native backend enforces scoped writes. */
+  windowsSandbox?: "elevated" | "unelevated";
   sandbox?: DockerSandboxOptions;
 }
 
@@ -181,9 +183,24 @@ export function readLiveAgentConfig(
       `Unsupported COORD_CODEX_SANDBOX value: ${executionSandbox}`,
     );
   }
+  // Which native Windows backend enforces workspace-write. `elevated` is the
+  // stronger default, but a Codex build shipping without its elevated setup
+  // helper denies every scoped write; `unelevated` keeps writes scoped where
+  // local policy or a broken helper rules `elevated` out.
+  const windowsSandbox = env["COORD_CODEX_WINDOWS_SANDBOX"]?.trim();
+  if (
+    windowsSandbox !== undefined &&
+    windowsSandbox !== "elevated" &&
+    windowsSandbox !== "unelevated"
+  ) {
+    throw new Error(
+      `Unsupported COORD_CODEX_WINDOWS_SANDBOX value: ${windowsSandbox}`,
+    );
+  }
   return {
     ...(adapter === undefined ? {} : { adapter }),
     ...(executionSandbox === undefined ? {} : { executionSandbox }),
+    ...(windowsSandbox === undefined ? {} : { windowsSandbox }),
     command,
     args: parseAgentArgs(env["COORD_AGENT_ARGS"]),
     taskIds: parseLiveTaskIds(env["COORD_AGENT_TASKS"]),
