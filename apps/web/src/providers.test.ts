@@ -368,6 +368,7 @@ test("claude stream-json parsing keeps every number the CLI reported", () => {
   const reply = parseClaudeStreamJson(lines, "claude-sonnet-5");
   assert.equal(reply.text, "437");
   assert.equal(reply.thinking, "23*19 = 23*20 - 23.");
+  assert.equal(reply.thinkingHidden, undefined);
   assert.deepEqual(reply.usage, {
     inputTokens: 12,
     outputTokens: 88,
@@ -390,4 +391,43 @@ test("claude stream-json parsing keeps every number the CLI reported", () => {
       ),
     /reported an error/u,
   );
+});
+
+test("redacted CLI thinking becomes hidden reasoning with real token counts", () => {
+  // What the current headless CLI actually emits (verified live): thinking
+  // blocks with empty content plus system thinking_tokens estimates.
+  const lines = [
+    JSON.stringify({
+      type: "system",
+      subtype: "thinking_tokens",
+      estimated_tokens: 50,
+    }),
+    JSON.stringify({
+      type: "system",
+      subtype: "thinking_tokens",
+      estimated_tokens: 85,
+    }),
+    JSON.stringify({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "thinking", thinking: "", signature: "abc" },
+          { type: "text", text: "306,614" },
+        ],
+      },
+    }),
+    JSON.stringify({
+      type: "result",
+      is_error: false,
+      result: "306,614",
+      session_id: "s-1",
+      total_cost_usd: 0.02,
+      usage: { input_tokens: 5, output_tokens: 40 },
+    }),
+  ].join("\n");
+  const reply = parseClaudeStreamJson(lines, "claude-sonnet-5");
+  assert.equal(reply.text, "306,614");
+  assert.equal(reply.thinking, undefined);
+  assert.equal(reply.thinkingHidden, true);
+  assert.equal(reply.usage.thinkingTokens, 85);
 });

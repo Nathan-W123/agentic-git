@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import { resolveClaudeCommand } from "@coord/adapter-prompt-cli";
 import type { CoordinatorProject } from "@coord/cli/project";
 import { runProcess, type ProcessOutput } from "@coord/repository-service";
 
@@ -267,7 +268,9 @@ export class ProviderChatService {
     }
     let available = false;
     try {
-      const result = await this.runner("claude", ["--version"], {
+      // Windows npm shims need resolving to the native executable before a
+      // shell-less spawn can find them.
+      const result = await this.runner(resolveClaudeCommand("claude"), ["--version"], {
         timeoutMs: 30_000,
         maxOutputBytes: 65_536,
       });
@@ -681,40 +684,59 @@ export class ProviderChatService {
         "The last message must be from the user",
       );
     }
-    const scratch = path.join(
-      os.tmpdir(),
-      `coord-chat-${Math.random().toString(36).slice(2, 10)}`,
-    );
+    // One stable, empty directory for every chat call: claude scopes its
+    // session store to the working directory, so --resume only works when
+    // the continuation runs from the same place.
+    const scratch = path.join(os.tmpdir(), "coord-provider-chat");
     await mkdir(scratch, { recursive: true });
     const model = defaultModel("anthropic");
-    const args = [
+    const resumable =
+      cliSessionId !== undefined && /^[A-Za-z0-9-]{8,64}$/u.test(cliSessionId);
+    // The prompt travels as a positional argument, not stdin: verified live
+    // that piped prompts make the CLI suppress its thinking blocks, and the
+    // reasoning display is the point. Cost: the prompt is visible in the
+    // host's process list for the duration of the call — acceptable for a
+    // single-owner control plane, and the reason this connection is
+    // admin-only. Very long prompts fall back to stdin (argv limits), which
+    // silently loses thinking for that one turn.
+    const usePositional = latest.content.length <= 8_000;
+    const argsFor = (resume: boolean) => [
       "-p",
+      ...(usePositional ? [latest.content] : []),
       "--output-format",
       "stream-json",
       "--verbose",
       "--model",
       model,
-      ...(cliSessionId !== undefined &&
-      /^[A-Za-z0-9-]{8,64}$/u.test(cliSessionId)
-        ? ["--resume", cliSessionId]
-        : []),
+      // High effort turns on the model's extended thinking, which is what
+      // makes reasoning content appear in the stream to display.
+      "--effort",
+      "high",
+      ...(resume ? ["--resume", cliSessionId as string] : []),
     ];
-    let output: ProcessOutput;
-    try {
-      output = await this.runner("claude", args, {
-        cwd: scratch,
-        input: latest.content,
-        timeoutMs: CLI_TIMEOUT_MS,
-        maxOutputBytes: 8 * 1024 * 1024,
-      });
-    } catch (error) {
-      throw new ProviderChatError(
-        502,
-        "cli_failed",
-        `The local claude CLI failed: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
+    const runOnce = async (resume: boolean): Promise<ProcessOutput> => {
+      try {
+        return await this.runner(resolveClaudeCommand("claude"), argsFor(resume), {
+          cwd: scratch,
+          ...(usePositional ? {} : { input: latest.content }),
+          timeoutMs: CLI_TIMEOUT_MS,
+          maxOutputBytes: 8 * 1024 * 1024,
+        });
+      } catch (error) {
+        throw new ProviderChatError(
+          502,
+          "cli_failed",
+          `The local claude CLI failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    };
+    let output = await runOnce(resumable);
+    if (output.exitCode !== 0 && resumable) {
+      // A session id can go stale (server restart, CLI cleanup). Losing the
+      // model-side memory of the thread beats failing the message.
+      output = await runOnce(false);
     }
     if (output.exitCode !== 0) {
       throw new ProviderChatError(
@@ -739,6 +761,15 @@ export function parseClaudeStreamJson(
 ): ChatReply {
   let text = "";
   let thinking = "";
+  /**
+   * Current Claude Code redacts thinking *content* in headless mode — blocks
+   * arrive with empty text plus a signature — but reports how many thinking
+   * tokens were spent via `system/thinking_tokens` events. Those counts are
+   * kept and the reasoning is marked hidden; if a future CLI ships the text,
+   * it will simply start appearing.
+   */
+  let thinkingTokens = 0;
+  let sawThinkingBlock = false;
   let usage: ChatUsage = {};
   let rateLimit: ChatRateLimit | undefined;
   let cliSessionId: string | undefined;
@@ -765,8 +796,20 @@ export function parseClaudeStreamJson(
         if (block.type === "text") {
           text += block.text ?? "";
         } else if (block.type === "thinking") {
-          thinking += (thinking.length > 0 ? "\n\n" : "") + (block.thinking ?? "");
+          sawThinkingBlock = true;
+          const content = (block.thinking ?? "").trim();
+          if (content.length > 0) {
+            thinking += (thinking.length > 0 ? "\n\n" : "") + content;
+          }
         }
+      }
+    } else if (
+      event["type"] === "system" &&
+      event["subtype"] === "thinking_tokens"
+    ) {
+      const estimated = event["estimated_tokens"];
+      if (typeof estimated === "number" && estimated > thinkingTokens) {
+        thinkingTokens = estimated;
       }
     } else if (event["type"] === "rate_limit_event") {
       const info = event["rate_limit_info"] as
@@ -831,12 +874,18 @@ export function parseClaudeStreamJson(
       `The local claude CLI reported an error: ${errorDetail.slice(0, 400)}`,
     );
   }
+  const reasonedInvisibly =
+    thinking.length === 0 && (sawThinkingBlock || thinkingTokens > 0);
   return {
     provider: "anthropic",
     model,
     text,
     ...(thinking.length > 0 ? { thinking } : {}),
-    usage,
+    ...(reasonedInvisibly ? { thinkingHidden: true } : {}),
+    usage: {
+      ...usage,
+      ...(thinkingTokens > 0 ? { thinkingTokens } : {}),
+    },
     ...(rateLimit === undefined ? {} : { rateLimit }),
     ...(cliSessionId === undefined ? {} : { cliSessionId }),
   };
