@@ -78,6 +78,8 @@ export interface ChatReply {
   rateLimit?: ChatRateLimit;
   /** Continues the CLI conversation server-side (claude session / codex thread). */
   cliSessionId?: string;
+  /** The model context window, when the CLI reports it. */
+  contextWindow?: number;
 }
 
 export interface ProviderSettings {
@@ -90,6 +92,8 @@ export interface ProviderCliState {
   loggedIn: boolean;
   /** Human-readable identity, e.g. "ChatGPT account" or an email. */
   account?: string;
+  /** Subscription/plan, when the CLI reports one (e.g. claude auth status). */
+  plan?: string;
   /** Why this provider cannot be used despite a real login, verbatim-ish. */
   blockedReason?: string;
 }
@@ -113,6 +117,7 @@ export interface ProviderModelOption {
   description?: string;
   efforts?: string[];
   defaultEffort?: string;
+  contextWindow?: number;
 }
 
 export interface ProviderOptions {
@@ -343,13 +348,20 @@ export class ProviderChatService {
       const status = JSON.parse(result.stdout) as {
         loggedIn?: boolean;
         authMethod?: string;
+        email?: string;
+        subscriptionType?: string;
       };
       return {
         detected: true,
         loggedIn: status.loggedIn === true,
-        ...(status.authMethod === undefined
+        ...(status.email !== undefined
+          ? { account: status.email }
+          : status.authMethod === undefined
+            ? {}
+            : { account: `${status.authMethod} account` }),
+        ...(status.subscriptionType === undefined
           ? {}
-          : { account: `${status.authMethod} account` }),
+          : { plan: status.subscriptionType }),
       };
     } catch {
       return { detected: true, loggedIn: false };
@@ -581,6 +593,7 @@ export class ProviderChatService {
           description?: string;
           default_reasoning_level?: string;
           supported_reasoning_levels?: Array<{ effort?: string }>;
+          context_window?: number;
         }>;
       };
       const models = (cache.models ?? [])
@@ -597,6 +610,9 @@ export class ProviderChatService {
           ...(model.default_reasoning_level === undefined
             ? {}
             : { defaultEffort: model.default_reasoning_level }),
+          ...(typeof model.context_window === 'number'
+            ? { contextWindow: model.context_window }
+            : {}),
         }));
       return models.length > 0 ? models : undefined;
     } catch {
@@ -889,10 +905,20 @@ export class ProviderChatService {
     if (output.exitCode !== 0) {
       throw this.cliFailure("codex", output);
     }
-    return parseCodexJsonl(
+    const reply = parseCodexJsonl(
       output.stdout,
       settings.model ?? "codex default",
     );
+    // The account's model cache carries the real context window; attach it
+    // so the usage view can show consumption against a true denominator.
+    const models = await this.codexModels();
+    const contextWindow = (
+      models?.find((model) => model.id === settings.model) ?? models?.[0]
+    )?.contextWindow;
+    return {
+      ...reply,
+      ...(contextWindow === undefined ? {} : { contextWindow }),
+    };
   }
 }
 
@@ -920,6 +946,7 @@ export function parseClaudeStreamJson(
   let usage: ChatUsage = {};
   let rateLimit: ChatRateLimit | undefined;
   let cliSessionId: string | undefined;
+  let contextWindow: number | undefined;
   let resultSeen = false;
   let isError = false;
   let errorDetail = "";
@@ -1006,6 +1033,17 @@ export function parseClaudeStreamJson(
       if (typeof event["session_id"] === "string") {
         cliSessionId = event["session_id"];
       }
+      const modelUsage = event["modelUsage"] as
+        | Record<string, { contextWindow?: number }>
+        | undefined;
+      for (const entry of Object.values(modelUsage ?? {})) {
+        if (
+          typeof entry?.contextWindow === "number" &&
+          entry.contextWindow > (contextWindow ?? 0)
+        ) {
+          contextWindow = entry.contextWindow;
+        }
+      }
     }
   }
 
@@ -1037,6 +1075,7 @@ export function parseClaudeStreamJson(
     },
     ...(rateLimit === undefined ? {} : { rateLimit }),
     ...(cliSessionId === undefined ? {} : { cliSessionId }),
+    ...(contextWindow === undefined ? {} : { contextWindow }),
   };
 }
 

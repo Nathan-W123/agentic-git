@@ -1041,32 +1041,31 @@ fieldset.field-group legend {
   border-color: var(--success);
 }
 
-/* Compact model/effort pickers -------------------------------------------- */
+/* Pill model/effort pickers in the input area ----------------------------- */
 
 .chat-quickbar {
   display: flex;
   gap: 6px;
-  padding: 0 14px 8px;
   flex: none;
 }
 
 .chat-quickbar select {
-  flex: 1;
-  min-width: 0;
-  background: var(--bg-surface);
-  font-size: 11px;
-  padding: 2px 6px;
-  border-radius: 5px;
-  color: var(--fg-muted);
+  appearance: none;
+  -webkit-appearance: none;
+  width: auto;
+  max-width: 55%;
+  background: var(--bg-hover);
+  border: 1px solid var(--border-muted);
+  border-radius: 999px;
+  font-size: 10.5px;
+  padding: 1px 10px;
+  color: var(--fg-subtle);
+  cursor: pointer;
 }
 
 .chat-quickbar select:hover {
   color: var(--fg);
   border-color: var(--fg-subtle);
-}
-
-.chat-quickbar select#chat-effort-select {
-  flex: 0 0 30%;
 }
 
 /* Usage strip ------------------------------------------------------------- */
@@ -1266,6 +1265,222 @@ fieldset.field-group legend {
   margin: 0;
 }
 
+/* ChatGPT-mobile-style settings sheet ------------------------------------- */
+
+.settings-sheet {
+  display: grid;
+  gap: 14px;
+  position: relative;
+}
+
+.settings-sheet .sheet-close {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--bg-hover);
+  border: 1px solid var(--border-muted);
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.settings-sheet .sheet-close:hover {
+  color: var(--fg);
+}
+
+.sheet-identity {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  padding: 6px 0 2px;
+}
+
+.sheet-avatar {
+  width: 64px;
+  height: 64px;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+  background: var(--accent-dim);
+  border: 1px solid var(--accent-strong);
+  color: var(--accent);
+  font-size: 22px;
+  font-weight: 700;
+}
+
+.sheet-name {
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.sheet-sub {
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.settings-section-label {
+  font-size: 11px;
+  color: var(--fg-subtle);
+  margin: 2px 4px -8px;
+}
+
+.settings-card {
+  background: var(--bg-canvas);
+  border: 1px solid var(--border-muted);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 11px 14px;
+  border: 0;
+  border-top: 1px solid var(--border-muted);
+  background: none;
+  color: var(--fg);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+
+.settings-row:first-child {
+  border-top: 0;
+}
+
+button.settings-row {
+  cursor: pointer;
+}
+
+button.settings-row:hover {
+  background: var(--bg-hover);
+}
+
+.settings-row svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  color: var(--fg-muted);
+}
+
+.settings-row .row-label {
+  flex: 1;
+  min-width: 0;
+}
+
+.settings-row .row-value {
+  color: var(--fg-subtle);
+  font-size: 12px;
+  max-width: 55%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-row .row-chevron {
+  color: var(--fg-subtle);
+  flex: none;
+}
+
+.settings-row.danger,
+.settings-row.danger svg {
+  color: var(--danger);
+}
+
+.settings-footnote {
+  font-size: 11px;
+  color: var(--fg-subtle);
+  margin: -6px 4px 0;
+}
+
+.sheet-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: none;
+  border: 0;
+  color: var(--accent);
+  font: inherit;
+  cursor: pointer;
+  padding: 0;
+  justify-self: start;
+}
+
+/* Usage & limits bars ------------------------------------------------------ */
+
+.usage-block {
+  display: grid;
+  gap: 6px;
+  padding: 11px 14px;
+  border-top: 1px solid var(--border-muted);
+}
+
+.usage-block:first-child {
+  border-top: 0;
+}
+
+.usage-block .usage-title {
+  display: flex;
+  justify-content: space-between;
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.usage-block .usage-title strong {
+  color: var(--fg);
+}
+
+.usage-meter {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--bg-hover);
+  overflow: hidden;
+  display: flex;
+}
+
+.usage-meter > span {
+  display: block;
+  height: 100%;
+}
+
+.usage-meter .seg-fill {
+  background: var(--accent);
+}
+
+.usage-meter .seg-input {
+  background: var(--accent);
+}
+
+.usage-meter .seg-output {
+  background: var(--success);
+}
+
+.usage-meter .seg-thinking {
+  background: var(--purple);
+}
+
+.usage-legend {
+  display: flex;
+  gap: 12px;
+  font-size: 10.5px;
+  color: var(--fg-subtle);
+  flex-wrap: wrap;
+}
+
+.usage-legend .dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 4px;
+}
+
 .connect-divider {
   display: flex;
   align-items: center;
@@ -1342,7 +1557,13 @@ fieldset.field-group legend {
 .chat-input {
   flex: none;
   border-top: 1px solid var(--border-muted);
-  padding: 10px 14px;
+  padding: 8px 14px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.chat-input-row {
   display: flex;
   gap: 8px;
   align-items: flex-end;

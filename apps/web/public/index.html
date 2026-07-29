@@ -209,12 +209,6 @@
         <!-- One icon per provider; rendered by app.js so connection dots and
              the active ring stay in one place. -->
         <div class="provider-icons" id="provider-icons"></div>
-        <!-- Compact per-provider pickers: model + reasoning effort, sourced
-             from what the connected account reports. -->
-        <div class="chat-quickbar" id="chat-quickbar" hidden>
-          <select id="chat-model-select" title="Model"></select>
-          <select id="chat-effort-select" title="Reasoning effort"></select>
-        </div>
         <div class="chat-usage" id="chat-usage"></div>
         <div class="chat-modebar">
           <div class="mode-toggle" id="chat-mode-toggle">
@@ -225,15 +219,23 @@
         </div>
         <div class="chat-thread" id="chat-thread"></div>
         <form class="chat-input" id="chat-form">
-          <textarea
-            id="chat-input"
-            rows="2"
-            placeholder="Tell the agent what to build…"
-            spellcheck="true"
-          ></textarea>
-          <button class="button button-primary" type="submit" id="chat-send">
-            Send
-          </button>
+          <!-- Discrete pill pickers: model + reasoning effort, offering only
+               what the connected account reports. -->
+          <div class="chat-quickbar" id="chat-quickbar" hidden>
+            <select id="chat-model-select" title="Model"></select>
+            <select id="chat-effort-select" title="Reasoning effort"></select>
+          </div>
+          <div class="chat-input-row">
+            <textarea
+              id="chat-input"
+              rows="2"
+              placeholder="Ask the model anything…"
+              spellcheck="true"
+            ></textarea>
+            <button class="button button-primary" type="submit" id="chat-send">
+              Send
+            </button>
+          </div>
         </form>
       </aside>
 

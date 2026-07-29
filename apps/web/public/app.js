@@ -71,6 +71,8 @@ const state = {
     /** Per provider, the model/effort options the account reports. */
     options: {},
     overlayProvider: null,
+    /** Which overlay screen is showing: "main" settings or "usage". */
+    overlayView: "main",
   },
 
   /** Explorer / workspace state, keyed by the selected repository. */
@@ -3216,6 +3218,21 @@ function addToTotals(provider, usage) {
   localStorage.setItem(totalsKey(), JSON.stringify(state.chat.totals));
 }
 
+/** Records one reply's real numbers for the Usage and limits view. */
+function recordTurn(provider, reply) {
+  addToTotals(provider, reply.usage ?? {});
+  const totals = state.chat.totals[provider];
+  totals.last = {
+    usage: reply.usage ?? {},
+    model: reply.model,
+    at: new Date().toISOString(),
+    ...(typeof reply.contextWindow === "number"
+      ? { contextWindow: reply.contextWindow }
+      : {}),
+  };
+  localStorage.setItem(totalsKey(), JSON.stringify(state.chat.totals));
+}
+
 function formatTokens(count) {
   if (typeof count !== "number") {
     return "—";
@@ -3571,7 +3588,7 @@ async function sendAskMessage() {
       model: reply.model,
       at: new Date().toISOString(),
     };
-    addToTotals(provider, reply.usage ?? {});
+    recordTurn(provider, reply);
     if (reply.rateLimit !== undefined) {
       state.chat.lastRateLimit[provider] = reply.rateLimit;
     }
@@ -3644,6 +3661,7 @@ async function sendBuildPrompt() {
 
 function openConnectOverlay(provider) {
   state.chat.overlayProvider = provider;
+  state.chat.overlayView = "main";
   void renderConnectOverlay();
   $("#connect-overlay").hidden = false;
 }
@@ -3659,6 +3677,127 @@ const SIGN_IN_LABELS = {
   google: "Sign in with Google",
 };
 
+/** One row of a settings card: icon, label, right-dim value, chevron. */
+function settingsRow({ iconName, label, value, chevron, danger, action }) {
+  const tag = action ? "button" : "div";
+  return `<${tag} class="settings-row${danger ? " danger" : ""}" ${action ?? ""} ${
+    action ? 'type="button"' : ""
+  }>
+    ${iconName ? icon(iconName) : ""}
+    <span class="row-label">${label}</span>
+    ${value !== undefined ? `<span class="row-value">${value}</span>` : ""}
+    ${chevron ? `<span class="row-chevron">${icon("chevronRight")}</span>` : ""}
+  </${tag}>`;
+}
+
+function userInitials() {
+  return (state.principal?.user?.displayName ?? "R")
+    .split(/\s+/u)
+    .map((word) => word.charAt(0))
+    .slice(0, 2)
+    .join("")
+    .toUpperCase();
+}
+
+/** The dedicated Usage and limits screen inside the settings overlay. */
+function renderUsageSheet(provider, meta, status) {
+  const totals = state.chat.totals[provider];
+  const last = totals?.last;
+  const rate = state.chat.lastRateLimit[provider];
+  const lastTokens =
+    (last?.usage?.inputTokens ?? 0) +
+    (last?.usage?.outputTokens ?? 0) +
+    (last?.usage?.thinkingTokens ?? 0);
+  const contextBlock =
+    last?.contextWindow !== undefined && lastTokens > 0
+      ? `<div class="usage-block">
+          <div class="usage-title"><span>Last exchange</span>
+            <strong>${escapeHtml(formatTokens(lastTokens))} / ${escapeHtml(
+              formatTokens(last.contextWindow),
+            )} tokens (${Math.max(1, Math.round((lastTokens / last.contextWindow) * 100))}%)</strong></div>
+          <div class="usage-meter"><span class="seg-fill" style="width:${Math.max(
+            1,
+            Math.min(100, Math.round((lastTokens / last.contextWindow) * 100)),
+          )}%"></span></div>
+          <div class="usage-legend"><span>${escapeHtml(last.model ?? "")} · context window ${escapeHtml(
+            formatTokens(last.contextWindow),
+          )} tokens, as reported by the CLI</span></div>
+        </div>`
+      : `<div class="usage-block"><div class="usage-legend"><span>
+          No context-window figure yet — the CLI reports it with each reply,
+          so send a message first.
+        </span></div></div>`;
+  const mixTotal =
+    (totals?.input ?? 0) + (totals?.output ?? 0) + (totals?.thinking ?? 0);
+  const mixBlock =
+    mixTotal > 0
+      ? `<div class="usage-block">
+          <div class="usage-title"><span>Session token mix</span>
+            <strong>${escapeHtml(formatTokens(mixTotal))} total</strong></div>
+          <div class="usage-meter">
+            <span class="seg-input" style="width:${(100 * (totals.input ?? 0)) / mixTotal}%"></span>
+            <span class="seg-output" style="width:${(100 * (totals.output ?? 0)) / mixTotal}%"></span>
+            <span class="seg-thinking" style="width:${(100 * (totals.thinking ?? 0)) / mixTotal}%"></span>
+          </div>
+          <div class="usage-legend">
+            <span><span class="dot" style="background:var(--accent)"></span>input ${escapeHtml(formatTokens(totals.input))}</span>
+            <span><span class="dot" style="background:var(--success)"></span>output ${escapeHtml(formatTokens(totals.output))}</span>
+            <span><span class="dot" style="background:var(--purple)"></span>reasoning ${escapeHtml(formatTokens(totals.thinking))}</span>
+          </div>
+        </div>`
+      : "";
+  return `<div class="settings-sheet">
+    <button class="sheet-close" data-action="connect-close">×</button>
+    <button class="sheet-back" data-action="settings-back">‹ ${escapeHtml(meta.name)} settings</button>
+    <div>
+      <p class="eyebrow">${escapeHtml(meta.company)}</p>
+      <h2>Usage and limits</h2>
+    </div>
+    <div class="settings-card">
+      ${settingsRow({ iconName: "graph", label: "Session turns", value: String(totals?.turns ?? 0) })}
+      ${settingsRow({ iconName: "runs", label: "Input tokens", value: escapeHtml(formatTokens(totals?.input ?? 0)) })}
+      ${settingsRow({ iconName: "commit", label: "Output tokens", value: escapeHtml(formatTokens(totals?.output ?? 0)) })}
+      ${settingsRow({ iconName: "tasks", label: "Reasoning tokens", value: escapeHtml(formatTokens(totals?.thinking ?? 0)) })}
+      ${
+        (totals?.costUsd ?? 0) > 0
+          ? settingsRow({ iconName: "approvals", label: "Reported cost", value: `$${totals.costUsd.toFixed(4)}` })
+          : ""
+      }
+    </div>
+    <p class="settings-section-label">Context window</p>
+    <div class="settings-card">${contextBlock}</div>
+    ${
+      mixBlock
+        ? `<p class="settings-section-label">Composition</p><div class="settings-card">${mixBlock}</div>`
+        : ""
+    }
+    ${
+      rate?.source === "cli-window"
+        ? `<p class="settings-section-label">Subscription window</p>
+          <div class="settings-card">
+            ${settingsRow({
+              iconName: "history",
+              label: escapeHtml((rate.windowKind ?? "window").replaceAll("_", " ")),
+              value: escapeHtml(
+                `${rate.windowStatus ?? "unknown"}${
+                  rate.windowResetsAt
+                    ? ` · resets ${formatDate(rate.windowResetsAt, { short: true })}`
+                    : ""
+                }`,
+              ),
+            })}
+          </div>`
+        : ""
+    }
+    <p class="settings-footnote">
+      Every figure comes from the provider CLI's own events — token counts and
+      cost from replies, the context window from the ${escapeHtml(meta.name)}
+      account's own reporting. Neither subscription CLI publishes a numeric
+      quota, so none is shown.
+    </p>
+  </div>`;
+}
+
 async function renderConnectOverlay() {
   const provider = state.chat.overlayProvider;
   if (provider === null) {
@@ -3669,9 +3808,14 @@ async function renderConnectOverlay() {
   const connected = status?.connected === true;
   const cli = status?.cli ?? { detected: false, loggedIn: false };
 
+  if (connected && state.chat.overlayView === "usage") {
+    $("#connect-card").innerHTML = renderUsageSheet(provider, meta, status);
+    return;
+  }
+
   let optionsHtml = "";
+  let options;
   if (connected) {
-    let options;
     try {
       options = (await api(`/chat/providers/${provider}/options`)).options;
     } catch {
@@ -3681,10 +3825,6 @@ async function renderConnectOverlay() {
       return;
     }
     if (options !== undefined && options !== null) {
-      // Model and effort switch from the compact pickers beside the provider
-      // icons; this card carries only what doesn't fit a small dropdown — a
-      // free-text model for providers without a published list, plus the
-      // provenance notes.
       const customModelField =
         options.models === null && options.allowCustomModel
           ? `<form data-form="provider-settings" data-provider="${provider}" class="stack" style="gap:10px">
@@ -3699,35 +3839,56 @@ async function renderConnectOverlay() {
         ${customModelField}
         ${
           options.modelListSource
-            ? `<small class="muted">${escapeHtml(options.modelListSource)}</small>`
+            ? `<p class="settings-footnote">${escapeHtml(options.modelListSource)}</p>`
             : ""
         }
         ${options.notes
-          .map((note) => `<small class="muted">${escapeHtml(note)}</small>`)
+          .map((note) => `<p class="settings-footnote">${escapeHtml(note)}</p>`)
           .join("")}`;
     }
   }
 
-  $("#connect-card").innerHTML = `
-    <div class="provider-mark">${PROVIDER_MARKS[provider]}</div>
+  $("#connect-card").innerHTML = connected
+    ? `<div class="settings-sheet">
+        <button class="sheet-close" data-action="connect-close">×</button>
+        <div class="sheet-identity">
+          <div class="sheet-avatar">${escapeHtml(userInitials())}</div>
+          <div class="sheet-name">${escapeHtml(state.principal?.user?.displayName ?? "Relay user")}</div>
+          <div class="sheet-sub">${escapeHtml(meta.company)} · connected</div>
+        </div>
+        <p class="settings-section-label">Account</p>
+        <div class="settings-card">
+          ${settingsRow({ iconName: "people", label: "Signed in as", value: escapeHtml(cli.account ?? "account") })}
+          ${settingsRow({ iconName: "shield", label: "Plan", value: escapeHtml(cli.plan ?? "not reported by the CLI") })}
+          ${settingsRow({ iconName: "gear", label: "Model", value: escapeHtml(status.model ?? "CLI default") })}
+          ${settingsRow({ iconName: "tasks", label: "Reasoning effort", value: escapeHtml(status.effort ?? "CLI default") })}
+        </div>
+        <p class="settings-section-label">Usage</p>
+        <div class="settings-card">
+          ${settingsRow({
+            iconName: "graph",
+            label: "Usage and limits",
+            chevron: true,
+            action: 'data-action="settings-open-usage"',
+          })}
+        </div>
+        <p class="settings-section-label">Connection</p>
+        <div class="settings-card">
+          ${settingsRow({
+            iconName: "close",
+            label: `Disconnect ${escapeHtml(meta.name)}`,
+            danger: true,
+            action: `data-action="provider-disconnect" data-provider="${provider}"`,
+          })}
+        </div>
+        ${optionsHtml}
+      </div>`
+    : `<div class="provider-mark">${PROVIDER_MARKS[provider]}</div>
     <div>
       <p class="eyebrow">${escapeHtml(meta.company)}</p>
-      <h2>${connected ? escapeHtml(meta.name) : `Connect ${escapeHtml(meta.name)}`}</h2>
+      <h2>Connect ${escapeHtml(meta.name)}</h2>
     </div>
-    ${
-      connected
-        ? `<p>
-            Signed in${cli.account ? ` — ${escapeHtml(cli.account)}` : ""} ·
-            model ${escapeHtml(status.model ?? "CLI default")}${
-              status.effort ? ` · effort ${escapeHtml(status.effort)}` : ""
-            }.
-          </p>
-          ${optionsHtml}
-          <div class="row-actions">
-            <button class="button button-danger" data-action="provider-disconnect" data-provider="${provider}">Disconnect</button>
-            <button class="button button-quiet" data-action="connect-close">Close</button>
-          </div>`
-        : `<p>
+    <p>
             Uses your ${escapeHtml(meta.company)} account through its own
             sign-in — no API keys. The browser flow runs on the Relay host and
             spends the host owner's account, so connecting is restricted to
@@ -3764,8 +3925,7 @@ async function renderConnectOverlay() {
           }
           <div class="row-actions">
             <button class="button button-quiet" data-action="connect-close">Cancel</button>
-          </div>`
-    }`;
+          </div>`;
 }
 
 async function connectProvider(provider) {
@@ -3773,10 +3933,7 @@ async function connectProvider(provider) {
   try {
     const response = await api(
       `/chat/providers/${encodeURIComponent(provider)}`,
-      {
-        method: "POST",
-        body: { kind, ...(apiKey === undefined ? {} : { apiKey }) },
-      },
+      { method: "POST", body: {} },
     );
     state.chat.providers = response.providers ?? state.chat.providers;
     state.chat.activeProvider = provider;
@@ -4240,6 +4397,16 @@ async function handleClick(event) {
   }
   if (target.dataset.action === "connect-close") {
     closeConnectOverlay();
+    return;
+  }
+  if (target.dataset.action === "settings-open-usage") {
+    state.chat.overlayView = "usage";
+    void renderConnectOverlay();
+    return;
+  }
+  if (target.dataset.action === "settings-back") {
+    state.chat.overlayView = "main";
+    void renderConnectOverlay();
     return;
   }
   if (target.dataset.action === "provider-connect-account") {
