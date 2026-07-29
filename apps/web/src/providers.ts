@@ -662,7 +662,9 @@ export class ProviderChatService {
       );
     }
     const options = await this.options({ provider: input.provider });
-    const settings: ProviderSettings = {};
+    // Partial updates merge: changing the effort alone must not drop the
+    // chosen model, and vice versa.
+    const settings: ProviderSettings = { ...connection.settings };
     if (input.model !== undefined && input.model.length > 0) {
       if (!MODEL_VALUE.test(input.model)) {
         throw new ProviderChatError(400, "invalid_model", "Model value is invalid");

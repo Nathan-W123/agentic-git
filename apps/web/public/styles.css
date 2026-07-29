@@ -1041,6 +1041,34 @@ fieldset.field-group legend {
   border-color: var(--success);
 }
 
+/* Compact model/effort pickers -------------------------------------------- */
+
+.chat-quickbar {
+  display: flex;
+  gap: 6px;
+  padding: 0 14px 8px;
+  flex: none;
+}
+
+.chat-quickbar select {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-surface);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 5px;
+  color: var(--fg-muted);
+}
+
+.chat-quickbar select:hover {
+  color: var(--fg);
+  border-color: var(--fg-subtle);
+}
+
+.chat-quickbar select#chat-effort-select {
+  flex: 0 0 30%;
+}
+
 /* Usage strip ------------------------------------------------------------- */
 
 .chat-usage {

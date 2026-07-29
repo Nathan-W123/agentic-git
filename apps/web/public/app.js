@@ -68,6 +68,8 @@ const state = {
     lastRateLimit: {},
     /** Per provider, the CLI session id for --resume continuity. */
     cliSessions: {},
+    /** Per provider, the model/effort options the account reports. */
+    options: {},
     overlayProvider: null,
   },
 
@@ -3070,6 +3072,96 @@ async function loadChatProviders() {
   }
 }
 
+/** Model/effort choices the connected account reports, cached per provider. */
+async function loadProviderOptions(provider) {
+  if (state.chat.options[provider] !== undefined) {
+    return state.chat.options[provider];
+  }
+  try {
+    const response = await api(`/chat/providers/${provider}/options`);
+    state.chat.options[provider] = response.options ?? null;
+  } catch {
+    state.chat.options[provider] = null;
+  }
+  return state.chat.options[provider];
+}
+
+/**
+ * The compact model/effort pickers next to the provider icons. Only what the
+ * connected account reports is offered: OpenAI gets its account's model list
+ * with per-model efforts; Anthropic gets the CLI's effort enum (its model has
+ * no published list and stays a free-text field in the settings card).
+ */
+function renderChatQuickbar() {
+  const quickbar = $("#chat-quickbar");
+  if (!quickbar) {
+    return;
+  }
+  const provider = state.chat.activeProvider;
+  const status = providerStatus(provider);
+  if (status?.connected !== true) {
+    quickbar.hidden = true;
+    return;
+  }
+  const options = state.chat.options[provider];
+  if (options === undefined) {
+    quickbar.hidden = true;
+    void loadProviderOptions(provider).then(() => renderChatQuickbar());
+    return;
+  }
+  const modelSelect = $("#chat-model-select");
+  const effortSelect = $("#chat-effort-select");
+  const currentModel = status.model ?? "";
+  const currentEffort = status.effort ?? "";
+
+  const hasModels = options !== null && options.models !== null;
+  modelSelect.hidden = !hasModels;
+  if (hasModels) {
+    modelSelect.innerHTML = options.models
+      .map(
+        (model) =>
+          `<option value="${escapeHtml(model.id)}"${
+            model.id === currentModel ? " selected" : ""
+          }>${escapeHtml(model.label)}</option>`,
+      )
+      .join("");
+  }
+  const effortValues =
+    options === null
+      ? []
+      : (options.efforts ??
+          options.models?.find((model) => model.id === currentModel)?.efforts ??
+          []);
+  effortSelect.hidden = effortValues.length === 0;
+  if (effortValues.length > 0) {
+    effortSelect.innerHTML = effortValues
+      .map(
+        (effort) =>
+          `<option value="${escapeHtml(effort)}"${
+            effort === currentEffort ? " selected" : ""
+          }>${escapeHtml(effort)}</option>`,
+      )
+      .join("");
+  }
+  quickbar.hidden = !hasModels && effortValues.length === 0;
+}
+
+/** Applies a quickbar change immediately; the server validates the value. */
+async function applyQuickSetting(field, value) {
+  const provider = state.chat.activeProvider;
+  try {
+    const response = await api(
+      `/chat/providers/${encodeURIComponent(provider)}/settings`,
+      { method: "POST", body: { [field]: value } },
+    );
+    state.chat.providers = response.providers ?? state.chat.providers;
+    renderChat();
+  } catch (error) {
+    toast(error.message, "error");
+    renderChat();
+  }
+}
+
 /* Ask-mode conversation persistence: real replies only, per project+provider. */
 
 function conversationKey(provider) {
@@ -3274,6 +3366,7 @@ function renderChat() {
     return;
   }
   renderProviderIcons();
+  renderChatQuickbar();
   renderChatUsage();
 
   const mode = state.chat.mode;
@@ -3587,60 +3680,31 @@ async function renderConnectOverlay() {
     if (state.chat.overlayProvider !== provider) {
       return;
     }
-    if (options !== undefined) {
-      const currentModel = status.model ?? "";
-      const currentEffort = status.effort ?? "";
-      const modelField =
-        options.models !== null
-          ? `<label><span>Model</span>
-              <select name="model">${options.models
-                .map(
-                  (model) =>
-                    `<option value="${escapeHtml(model.id)}"${
-                      model.id === currentModel ? " selected" : ""
-                    }>${escapeHtml(model.label)}${
-                      model.description ? ` — ${escapeHtml(model.description)}` : ""
-                    }</option>`,
-                )
-                .join("")}</select>
-              ${
-                options.modelListSource
-                  ? `<small class="muted">${escapeHtml(options.modelListSource)}</small>`
-                  : ""
-              }</label>`
-          : options.allowCustomModel
-            ? `<label><span>Model</span>
-                <input name="model" value="${escapeHtml(currentModel)}" placeholder="CLI default">
-              </label>`
-            : "";
-      const effortValues =
-        options.efforts ??
-        options.models?.find((model) => model.id === currentModel)?.efforts ??
-        options.models?.[0]?.efforts ??
-        [];
-      const effortField =
-        effortValues.length > 0
-          ? `<label><span>Reasoning effort</span>
-              <select name="effort">${effortValues
-                .map(
-                  (effort) =>
-                    `<option value="${escapeHtml(effort)}"${
-                      effort === currentEffort ? " selected" : ""
-                    }>${escapeHtml(effort)}</option>`,
-                )
-                .join("")}</select>
-            </label>`
+    if (options !== undefined && options !== null) {
+      // Model and effort switch from the compact pickers beside the provider
+      // icons; this card carries only what doesn't fit a small dropdown — a
+      // free-text model for providers without a published list, plus the
+      // provenance notes.
+      const customModelField =
+        options.models === null && options.allowCustomModel
+          ? `<form data-form="provider-settings" data-provider="${provider}" class="stack" style="gap:10px">
+              <label><span>Model (free text)</span>
+                <input name="model" value="${escapeHtml(status.model ?? "")}" placeholder="CLI default">
+              </label>
+              <p class="connect-error" id="connect-error"></p>
+              <button class="button button-quiet" type="submit">Save model</button>
+            </form>`
           : "";
       optionsHtml = `
-        <form data-form="provider-settings" data-provider="${provider}" class="stack" style="gap:10px">
-          ${modelField}
-          ${effortField}
-          ${options.notes
-            .map((note) => `<small class="muted">${escapeHtml(note)}</small>`)
-            .join("")}
-          <p class="connect-error" id="connect-error"></p>
-          <button class="button button-primary" type="submit">Save settings</button>
-        </form>`;
+        ${customModelField}
+        ${
+          options.modelListSource
+            ? `<small class="muted">${escapeHtml(options.modelListSource)}</small>`
+            : ""
+        }
+        ${options.notes
+          .map((note) => `<small class="muted">${escapeHtml(note)}</small>`)
+          .join("")}`;
     }
   }
 
@@ -4342,6 +4406,14 @@ async function handleChange(event) {
     state.explorerRepo = target.value;
     localStorage.setItem("relay.explorerRepo", state.explorerRepo);
     await refreshWorkspace();
+    return;
+  }
+  if (target.id === "chat-model-select") {
+    await applyQuickSetting("model", target.value);
+    return;
+  }
+  if (target.id === "chat-effort-select") {
+    await applyQuickSetting("effort", target.value);
     return;
   }
   if (target.id === "chat-repo-select") {

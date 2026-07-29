@@ -209,6 +209,12 @@
         <!-- One icon per provider; rendered by app.js so connection dots and
              the active ring stay in one place. -->
         <div class="provider-icons" id="provider-icons"></div>
+        <!-- Compact per-provider pickers: model + reasoning effort, sourced
+             from what the connected account reports. -->
+        <div class="chat-quickbar" id="chat-quickbar" hidden>
+          <select id="chat-model-select" title="Model"></select>
+          <select id="chat-effort-select" title="Reasoning effort"></select>
+        </div>
         <div class="chat-usage" id="chat-usage"></div>
         <div class="chat-modebar">
           <div class="mode-toggle" id="chat-mode-toggle">
