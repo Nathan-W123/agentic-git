@@ -3979,14 +3979,15 @@ textarea:focus {
 .context-block {
   position: fixed;
   z-index: 20;
-  top: calc(var(--tabstrip-height) + 8px);
-  left: 14px;
+  /* Below the day ruler, so today's number stays visible. */
+  top: calc(var(--tabstrip-height) + 44px);
+  right: 14px;
   display: flex;
   gap: 10px;
   width: auto;
   padding: 6px 10px;
   border: 1px solid var(--border-muted);
-  border-left: 2px solid var(--accent);
+  border-right: 2px solid var(--accent);
   background: rgba(4, 16, 24, 0.82);
   backdrop-filter: blur(6px);
   box-shadow: var(--glow-soft);
@@ -4006,9 +4007,8 @@ textarea:focus {
 }
 
 .hud-immersive .tab-content .view {
-  max-width: 1500px;
+  max-width: 1560px;
   margin: 0 auto;
-  padding-top: 66px;
 }
 
 /* Corner brackets framing the immersive view. */
@@ -4219,6 +4219,420 @@ textarea:focus {
 .core-read-sw { bottom: 9%; left: 2%; }
 .core-read-se { bottom: 9%; right: 2%; }
 
+/* 1:1 reference layout ----------------------------------------------------- */
+
+/* Top edge: the month ruler, today lit. */
+.hud-daystrip {
+  display: flex;
+  justify-content: space-between;
+  gap: 2px;
+  padding: 2px 4px 8px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border-muted);
+  font-family: var(--font-data);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--fg-subtle);
+}
+
+.hud-daystrip .today {
+  color: #01222b;
+  background: var(--accent);
+  padding: 0 5px;
+  border-radius: 2px;
+  font-weight: 700;
+  box-shadow: 0 0 12px rgba(79, 232, 255, 0.7);
+}
+
+/* The three-column composition of the reference desktop. */
+.hud-refgrid {
+  display: grid;
+  grid-template-columns: minmax(250px, 320px) minmax(0, 1fr) minmax(270px, 340px);
+  gap: 22px;
+  align-items: start;
+}
+
+.hud-col {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+/* Right column starts below the floating org/project pickers. */
+.hud-refgrid .hud-col:last-child {
+  padding-top: 74px;
+}
+
+.hud-centercol {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+
+/* Center title, in the reference's headline slot. */
+.hud-title {
+  text-align: center;
+  display: grid;
+  gap: 2px;
+  padding-bottom: 4px;
+}
+
+.hud-title h1 {
+  margin: 0;
+  font-family: var(--font-data);
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.42em;
+  text-indent: 0.42em;
+  text-transform: uppercase;
+  color: #eafdff;
+  text-shadow:
+    0 0 22px rgba(79, 232, 255, 0.75),
+    0 0 60px rgba(79, 232, 255, 0.3);
+}
+
+.hud-title span {
+  font-family: var(--font-data);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.28em;
+  color: var(--fg-subtle);
+}
+
+/* Clock bracket line + big ringed day. */
+.hud-clock-bracket {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 3px 8px;
+  border: 1px solid var(--border-muted);
+  border-left: 2px solid var(--accent);
+  font-family: var(--font-data);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--fg-muted);
+}
+
+.hud-clock-bracket strong {
+  color: #d9fbff;
+  text-shadow: 0 0 10px rgba(79, 232, 255, 0.4);
+}
+
+.hud-clock-row {
+  display: grid;
+  justify-items: center;
+}
+
+.hud-clock-center {
+  display: grid;
+  justify-items: center;
+  gap: 0;
+  line-height: 1;
+}
+
+.hud-clock .hud-clock-dial {
+  width: 96px;
+  height: 96px;
+}
+
+.hud-clock-month {
+  font-family: var(--font-data);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: var(--accent);
+}
+
+/* Energy ring row: percentage dial with fact lines beside it. */
+.hud-energy {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-muted);
+  border-left: 2px solid var(--accent);
+  background: rgba(6, 20, 30, 0.6);
+  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 0 100%);
+}
+
+.hud-energy .gauge-foot {
+  display: none;
+}
+
+.hud-energy-meta {
+  display: grid;
+  gap: 3px;
+  font-family: var(--font-data);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
+}
+
+/* Link circle: sockets in a ring, address and session beside. */
+.hud-linkbox {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-muted);
+  border-left: 2px solid var(--accent);
+  background: rgba(6, 20, 30, 0.6);
+  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 0 100%);
+}
+
+.hud-linkring {
+  flex: none;
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  border: 2px solid rgba(79, 232, 255, 0.4);
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 0;
+  font-family: var(--font-data);
+}
+
+.hud-linkring span {
+  font-size: 18px;
+  color: #eafdff;
+  line-height: 1;
+}
+
+.hud-linkring small {
+  font-size: 7.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--fg-subtle);
+}
+
+.hud-linkring.on {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 14px rgba(79, 232, 255, 0.45),
+    inset 0 0 10px rgba(79, 232, 255, 0.15);
+}
+
+.hud-linkmeta {
+  display: grid;
+  gap: 2px;
+  font-family: var(--font-data);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-muted);
+  min-width: 0;
+}
+
+.hud-linkmeta strong {
+  color: var(--accent);
+  text-shadow: 0 0 10px rgba(79, 232, 255, 0.4);
+}
+
+/* Console access, in the search-box slot. */
+.hud-termbox {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--border-muted);
+  border-left: 2px solid var(--accent);
+  background: rgba(6, 20, 30, 0.6);
+}
+
+.hud-termbox-row {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.hud-termbtn {
+  background: rgba(79, 232, 255, 0.07);
+  border: 1px solid var(--border);
+  color: var(--accent);
+  font-family: var(--font-data);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  padding: 4px 8px;
+  cursor: pointer;
+}
+
+.hud-termbtn:hover {
+  border-color: var(--accent);
+  box-shadow: var(--glow-soft);
+}
+
+/* Brand plate, top-right like the reference logotype. */
+.hud-brand {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  font-family: var(--font-data);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.3em;
+  color: #d9fbff;
+  text-shadow: 0 0 16px rgba(79, 232, 255, 0.5);
+}
+
+/* The hero dial: agents running, in the reference's big-degrees slot. */
+.hud-herodial {
+  display: grid;
+  justify-items: center;
+}
+
+.hud-herodial .gauge-dial {
+  width: 116px;
+  height: 116px;
+}
+
+.hud-herodial .gauge-value {
+  font-size: 34px;
+}
+
+.hud-herodial .gauge-value-long {
+  font-size: 22px;
+}
+
+/* Project plate. */
+.hud-plate {
+  gap: 2px;
+}
+
+.hud-plate-name {
+  font-size: 15px;
+  color: #eafdff;
+  text-shadow: 0 0 14px rgba(79, 232, 255, 0.4);
+}
+
+.hud-plate-sub {
+  font-family: var(--font-data);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-subtle);
+}
+
+/* SYSTEM rows with inline percent bars. */
+.hud-sysbar-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 74px 34px;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  border-top: 1px solid rgba(79, 232, 255, 0.08);
+  font-family: var(--font-data);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+}
+
+.hud-sysbar-row strong {
+  color: #d9fbff;
+  text-align: right;
+}
+
+/* Link stacks: view links and repository shortcuts. */
+.hud-link-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: none;
+  border: 0;
+  padding: 3px 0;
+  border-top: 1px solid rgba(79, 232, 255, 0.08);
+  color: var(--fg);
+  font-family: var(--font-data);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+}
+
+.hud-link-row i {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  background: rgba(79, 232, 255, 0.5);
+  box-shadow: 0 0 6px rgba(79, 232, 255, 0.5);
+}
+
+.hud-link-row:hover {
+  color: var(--accent);
+  text-shadow: 0 0 10px rgba(79, 232, 255, 0.5);
+}
+
+.hud-link-row:hover i {
+  background: var(--accent);
+}
+
+/* Feed headlines. */
+.hud-feed-row {
+  display: grid;
+  gap: 0;
+  padding: 4px 0;
+  border-top: 1px solid rgba(79, 232, 255, 0.08);
+}
+
+.hud-feed-row strong {
+  font-size: 11.5px;
+  color: var(--fg);
+  font-weight: 600;
+}
+
+.hud-feed-row span {
+  font-family: var(--font-data);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--fg-subtle);
+}
+
+/* Activity graphs under the core, in the traffic-graph slot. */
+.hud-graphs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+  width: min(100%, 560px);
+  margin-top: 4px;
+}
+
+.hud-graph {
+  display: grid;
+  gap: 4px;
+}
+
+.hud-graph-head {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--font-data);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--fg-muted);
+}
+
+.hud-graph-head strong {
+  color: #d9fbff;
+}
+
+.hud-graph svg {
+  width: 100%;
+  height: 30px;
+  overflow: visible;
+}
+
+.hud-graph rect {
+  fill: rgba(79, 232, 255, 0.65);
+  filter: drop-shadow(0 0 3px rgba(79, 232, 255, 0.5));
+}
+
 /* Bottom dock: the reference desktop's circular icon row ------------------ */
 
 .hud-dock {
@@ -4391,9 +4805,18 @@ textarea:focus {
 /* Responsive -------------------------------------------------------------- */
 
 @media (max-width: 1180px) {
-  .hud-stage {
+  .hud-stage,
+  .hud-refgrid {
     grid-template-columns: minmax(0, 1fr);
     justify-items: stretch;
+  }
+
+  .hud-centercol {
+    order: -1;
+  }
+
+  .hud-refgrid .hud-col:last-child {
+    padding-top: 0;
   }
 
   .hud-center {

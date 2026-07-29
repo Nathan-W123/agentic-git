@@ -15,6 +15,9 @@
 
 const API_ROOT = "/api/v1";
 
+/** When this dashboard session began, for the HUD's uptime readout. */
+const SESSION_STARTED = Date.now();
+
 const state = {
   principal: undefined,
   health: undefined,
@@ -1502,9 +1505,31 @@ function gauge(label, value, foot, { part = 0, whole = 0, tone = "" } = {}) {
  * hidden on this view.
  */
 /**
- * The circular calendar readout the reference HUDs carry: day of month in a
- * ring whose arc is the month's progress, with the weekday and clock beside
- * it. All of it is the machine's real clock; it re-renders with the shell.
+ * The reference desktop's top edge: a ruler of the month's days with today
+ * lit. The machine's real calendar; it re-renders with the shell.
+ */
+function hudCalendarStrip() {
+  const now = new Date();
+  const today = now.getDate();
+  const daysInMonth = new Date(
+    now.getFullYear(),
+    now.getMonth() + 1,
+    0,
+  ).getDate();
+  return `<div class="hud-daystrip" aria-hidden="true">
+    ${Array.from(
+      { length: daysInMonth },
+      (_, index) =>
+        `<span${index + 1 === today ? ' class="today"' : ""}>${String(
+          index + 1,
+        ).padStart(2, "0")}</span>`,
+    ).join("")}
+  </div>`;
+}
+
+/**
+ * The reference's top-left assembly: weekday and clock in a bracket line
+ * above a big ringed day-of-month, the ring's arc the month's progress.
  */
 function hudClock() {
   const now = new Date();
@@ -1516,27 +1541,233 @@ function hudClock() {
   ).getDate();
   const arc = GAUGE_CIRCUMFERENCE * (day / daysInMonth);
   return `<div class="hud-clock">
-    <div class="hud-clock-dial">
-      <svg viewBox="0 0 64 64" aria-hidden="true">
-        <circle class="gauge-ticks" cx="32" cy="32" r="30"></circle>
-        <circle class="gauge-track" cx="32" cy="32" r="${GAUGE_RADIUS}"></circle>
-        <circle class="gauge-arc" cx="32" cy="32" r="${GAUGE_RADIUS}"
-          stroke-dasharray="${arc.toFixed(1)} ${GAUGE_CIRCUMFERENCE.toFixed(1)}"
-          transform="rotate(-90 32 32)"></circle>
-      </svg>
-      <span class="hud-clock-day">${day}</span>
-    </div>
-    <div class="hud-clock-meta">
-      <span class="hud-clock-month">${escapeHtml(
-        now.toLocaleString("en-US", { month: "long" }),
-      )}</span>
-      <span class="hud-clock-sub">${escapeHtml(
-        now.toLocaleString("en-US", { weekday: "long" }),
-      )}</span>
-      <span class="hud-clock-sub">${escapeHtml(
+    <div class="hud-clock-bracket">
+      <span>${escapeHtml(now.toLocaleString("en-US", { weekday: "long" }))}</span>
+      <strong>${escapeHtml(
         now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
-      )}</span>
+      )}</strong>
     </div>
+    <div class="hud-clock-row">
+      <div class="hud-clock-dial">
+        <svg viewBox="0 0 64 64" aria-hidden="true">
+          <circle class="gauge-ticks" cx="32" cy="32" r="30"></circle>
+          <circle class="gauge-track" cx="32" cy="32" r="${GAUGE_RADIUS}"></circle>
+          <circle class="gauge-arc" cx="32" cy="32" r="${GAUGE_RADIUS}"
+            stroke-dasharray="${arc.toFixed(1)} ${GAUGE_CIRCUMFERENCE.toFixed(1)}"
+            transform="rotate(-90 32 32)"></circle>
+        </svg>
+        <span class="hud-clock-center">
+          <span class="hud-clock-month">${escapeHtml(
+            now.toLocaleString("en-US", { month: "short" }),
+          )}</span>
+          <span class="hud-clock-day">${day}</span>
+        </span>
+      </div>
+    </div>
+  </div>`;
+}
+
+/** Repository shortcuts, like the reference's games list: click opens history. */
+function hudShortcuts() {
+  if (state.repositories.length === 0) {
+    return "";
+  }
+  return `<div class="hud-system hud-shortcuts">
+    <span class="hud-system-title">Canonical sources</span>
+    ${state.repositories
+      .slice(0, 6)
+      .map(
+        (repository) => `<button
+          class="hud-link-row"
+          data-open-history="${escapeHtml(repository.id)}"
+          title="Open canonical history"
+        ><i></i>${escapeHtml(repository.id)}<span class="muted"> · ${escapeHtml(
+          repository.branch,
+        )}</span></button>`,
+      )
+      .join("")}
+  </div>`;
+}
+
+/** The up/down circle and address line: this dashboard's own connection. */
+function hudLinkCircle() {
+  const sockets = state.health?.webSocketConnections ?? 0;
+  const live = state.socket?.readyState === 1;
+  return `<div class="hud-linkbox">
+    <div class="hud-linkring${live ? " on" : ""}">
+      <span>${sockets}</span>
+      <small>socket${sockets === 1 ? "" : "s"}</small>
+    </div>
+    <div class="hud-linkmeta">
+      <strong>${live ? "LINK LIVE" : "LINK DOWN"}</strong>
+      <span>${escapeHtml(location.host)}</span>
+      <span>session ${escapeHtml(duration(Date.now() - SESSION_STARTED))}</span>
+    </div>
+  </div>`;
+}
+
+/** Sandbox console access, in the reference's search-box slot. */
+function hudTerminalBox() {
+  return `<div class="hud-termbox">
+    <span class="hud-system-title">Console</span>
+    <div class="hud-termbox-row">
+      <button class="hud-termbtn" data-panel-tab="terminal">▸ Terminal</button>
+      <button class="hud-termbtn" data-panel-tab="events">▸ Events</button>
+      <button class="hud-termbtn" data-action="hud-refresh">▸ Refresh</button>
+    </div>
+  </div>`;
+}
+
+/** The project plate, in the reference's "Проект" slot. All real context. */
+function hudProjectPlate() {
+  return `<div class="hud-system hud-plate">
+    <span class="hud-system-title">Project</span>
+    <strong class="hud-plate-name">${escapeHtml(
+      state.project?.name ?? "—",
+    )}</strong>
+    <span class="hud-plate-sub">${state.repositories.length} canonical source${
+      state.repositories.length === 1 ? "" : "s"
+    } · ${state.members.length} member${state.members.length === 1 ? "" : "s"}</span>
+  </div>`;
+}
+
+/** SYSTEM with right-hand percent bars, like the reference's CPU/RAM/SWAP. */
+function hudSystemBars() {
+  const docker = state.health?.docker;
+  const agents = state.agentsRunning;
+  const integrated = state.tasks.filter(
+    (task) => task.status === "integrated",
+  ).length;
+  const completed = state.runs.filter(
+    (run) => run.status === "completed",
+  ).length;
+  const pct = (part, whole) =>
+    whole > 0 ? Math.round((100 * part) / whole) : 0;
+  const barRow = (label, value) => `<div class="hud-sysbar-row">
+    <span>${escapeHtml(label)}</span>
+    <div class="hud-meter"><span style="width:${value}%; background:var(--accent)"></span></div>
+    <strong>${value}%</strong>
+  </div>`;
+  return `<div class="hud-system">
+    <span class="hud-system-title">System</span>
+    <div class="hud-sys-row"><span>Link</span><strong>${
+      state.socket?.readyState === 1 ? "live" : "connecting"
+    }</strong></div>
+    <div class="hud-sys-row"><span>Sandbox</span><strong>${escapeHtml(
+      docker?.available ? (docker.version ?? "ready") : "offline",
+    )}</strong></div>
+    ${barRow("Fleet busy", pct(agents?.busyWorkers ?? 0, agents?.workers ?? 0))}
+    ${barRow("Tasks landed", pct(integrated, state.tasks.length))}
+    ${barRow("Runs complete", pct(completed, state.runs.length))}
+  </div>`;
+}
+
+/** The vertical view links, in the reference's site-links slot. */
+function hudLinksStack() {
+  const entries = [...ACTIVITIES, ...FOOTER_ACTIVITIES].filter(
+    (entry) =>
+      entry.view !== "overview" &&
+      (entry.id !== "admin" || state.principal?.user?.systemAdmin),
+  );
+  return `<div class="hud-system hud-links">
+    <span class="hud-system-title">Views</span>
+    ${entries
+      .map(
+        (entry) => `<button class="hud-link-row" data-open-view="${entry.view}">
+          <i></i>${escapeHtml(entry.label)}
+        </button>`,
+      )
+      .join("")}
+  </div>`;
+}
+
+/** Landed-work headlines, in the reference's news slot. */
+function hudFeed() {
+  const notable = state.audit
+    .filter((record) =>
+      /promoted|integrated|decided|rollback|imported|created/u.test(
+        String(record.event?.type ?? ""),
+      ),
+    )
+    .slice(-5)
+    .reverse();
+  if (notable.length === 0) {
+    return "";
+  }
+  return `<div class="hud-system hud-feed">
+    <span class="hud-system-title">Canonical feed</span>
+    ${notable
+      .map(
+        (record) => `<div class="hud-feed-row">
+          <strong>${escapeHtml(eventTitle(record.event))}</strong>
+          <span>${escapeHtml(
+            formatDate(record.event.occurredAt, { short: true }),
+          )}</span>
+        </div>`,
+      )
+      .join("")}
+  </div>`;
+}
+
+/** Worker fleet, in the reference's USB-devices slot. */
+function hudWorkers() {
+  return `<div class="hud-system hud-devices">
+    <span class="hud-system-title">Workers</span>
+    ${
+      state.workers.length === 0
+        ? `<div class="hud-sys-row"><span>No machines listening</span><strong>0</strong></div>`
+        : state.workers
+            .slice(0, 4)
+            .map(
+              (worker) => `<div class="hud-sys-row">
+                <span>${escapeHtml(worker.name || shortId(worker.id, 12))}</span>
+                <strong>${escapeHtml(
+                  (worker.adapters ?? []).join(" · ") || "idle",
+                )}</strong>
+              </div>`,
+            )
+            .join("")
+    }
+  </div>`;
+}
+
+/**
+ * A small activity bar-graph, in the reference's traffic-graph slot: real
+ * timestamps binned over the last 24 hours.
+ */
+function hudGraph(title, stamps) {
+  const bins = 24;
+  const spanMs = 24 * 60 * 60 * 1000;
+  const now = Date.now();
+  const counts = new Array(bins).fill(0);
+  for (const stamp of stamps) {
+    const at = new Date(stamp ?? "").getTime();
+    if (!Number.isFinite(at)) {
+      continue;
+    }
+    const age = now - at;
+    if (age < 0 || age >= spanMs) {
+      continue;
+    }
+    counts[bins - 1 - Math.floor(age / (spanMs / bins))] += 1;
+  }
+  const max = Math.max(1, ...counts);
+  const total = counts.reduce((sum, value) => sum + value, 0);
+  return `<div class="hud-graph">
+    <div class="hud-graph-head">
+      <span>${escapeHtml(title)}</span>
+      <strong>${total} / 24h</strong>
+    </div>
+    <svg viewBox="0 0 ${bins * 8 - 3} 24" preserveAspectRatio="none" aria-hidden="true">
+      ${counts
+        .map((count, index) => {
+          const height = ((22 * count) / max + 1).toFixed(1);
+          return `<rect x="${index * 8}" y="${(24 - Number(height)).toFixed(
+            1,
+          )}" width="5" height="${height}"></rect>`;
+        })
+        .join("")}
+    </svg>
   </div>`;
 }
 
@@ -1559,17 +1790,6 @@ function hudList(title, rows) {
       )
       .join("")}
   </div>`;
-}
-
-function hudSystem() {
-  const docker = state.health?.docker;
-  return hudList("System", [
-    ["Link", state.socket?.readyState === 1 ? "live" : "connecting"],
-    ["Sandbox", docker?.available ? (docker.version ?? "ready") : "offline"],
-    ["Repositories", state.repositories.length],
-    ["Workers", state.workers.length],
-    ["Members", state.members.length],
-  ]);
 }
 
 /**
@@ -1608,19 +1828,6 @@ function hudSubsystems() {
     <span class="hud-system-title">Subsystems</span>
     ${providers}
   </div>`;
-}
-
-/** Canonical sources: each repository this project coordinates. */
-function hudCanonical() {
-  if (state.repositories.length === 0) {
-    return "";
-  }
-  return hudList(
-    "Canonical",
-    state.repositories
-      .slice(0, 5)
-      .map((repository) => [repository.id, repository.branch]),
-  );
 }
 
 /**
@@ -1894,13 +2101,12 @@ function renderOverview() {
   const agents = state.agentsRunning;
   const running = agents?.running ?? 0;
 
+  const integratedShare =
+    totalTasks > 0 ? Math.round((100 * integratedTasks.length) / totalTasks) : 0;
+
   return `<div class="view hud-home">
     <div class="hud-scan" aria-hidden="true"></div>
-    <header class="view-head">
-      <p class="eyebrow">Control room</p>
-      <h1>${escapeHtml(state.project?.name ?? "Overview")}</h1>
-      <p>Canonical state, active work, and decisions at a glance.</p>
-    </header>
+    ${hudCalendarStrip()}
     ${
       docker?.available === false
         ? `<div class="signal-banner warn">
@@ -1912,13 +2118,63 @@ function renderOverview() {
           </div>`
         : ""
     }
-    <div class="hud-stage">
-      <aside class="hud-rail">
+    <div class="hud-refgrid">
+      <aside class="hud-col">
         <div class="hud-cluster-frame">
           ${hudClock()}
           ${hudBars()}
         </div>
-        <div class="hud-dials">
+        <div class="hud-energy">
+          ${gauge("Accepted work", `${integratedShare}%`, "Promoted to canonical", {
+            part: integratedTasks.length,
+            whole: totalTasks,
+            tone: "good",
+          })}
+          <div class="hud-energy-meta">
+            <span>${state.repositories.length} repositories</span>
+            <span>${state.members.length} member${
+              state.members.length === 1 ? "" : "s"
+            }</span>
+            <span>${state.runs.length} execution${
+              state.runs.length === 1 ? "" : "s"
+            } recorded</span>
+          </div>
+        </div>
+        ${hudSubsystems()}
+        ${hudShortcuts()}
+        ${hudLinkCircle()}
+        ${hudTerminalBox()}
+      </aside>
+
+      <div class="hud-centercol">
+        <div class="hud-title">
+          <h1>Relay</h1>
+          <span>${escapeHtml(state.project?.name ?? "")} · control room</span>
+        </div>
+        <div class="hud-center">
+          <div class="hud-reticle" aria-hidden="true"></div>
+          ${neuralCore({
+            running,
+            claimed: activeTasks.length,
+            awaiting: pendingApprovals.length,
+          })}
+          <div class="hud-coords">
+            <span>ORG ${escapeHtml(shortId(state.organizationId, 16))}</span>
+            <span>PRJ ${escapeHtml(shortId(state.projectId, 16))}</span>
+          </div>
+        </div>
+        <div class="hud-graphs">
+          ${hudGraph("Coordination events", state.audit.map((record) => record.event?.occurredAt))}
+          ${hudGraph("Executions started", state.runs.map((run) => run.startedAt))}
+        </div>
+      </div>
+
+      <aside class="hud-col">
+        <div class="hud-brand">
+          <img src="/mark.svg" alt="" width="22" height="22">
+          <span>Relay Coordination</span>
+        </div>
+        <div class="hud-herodial">
           ${gauge(
             "Agents running",
             agents === undefined ? "—" : running,
@@ -1937,54 +2193,13 @@ function renderOverview() {
               tone: running > 0 ? "live" : "",
             },
           )}
-          ${gauge("In motion", activeTasks.length, "Claimed by the coordinator", {
-            part: activeTasks.length,
-            whole: totalTasks,
-          })}
-          ${gauge("Queued intent", pendingTasks.length, "Waiting to execute", {
-            part: pendingTasks.length,
-            whole: totalTasks,
-          })}
         </div>
+        ${hudProjectPlate()}
+        ${hudSystemBars()}
         ${hudCoordination()}
-      </aside>
-      <div class="hud-center">
-        <div class="hud-reticle" aria-hidden="true"></div>
-        ${neuralCore({
-          running,
-          claimed: activeTasks.length,
-          awaiting: pendingApprovals.length,
-        })}
-        <div class="hud-coords">
-          <span>ORG ${escapeHtml(shortId(state.organizationId, 16))}</span>
-          <span>PRJ ${escapeHtml(shortId(state.projectId, 16))}</span>
-        </div>
-      </div>
-      <aside class="hud-rail">
-        ${hudSystem()}
-        <div class="hud-dials">
-          ${gauge(
-            "Awaiting review",
-            pendingApprovals.length,
-            "Human decisions required",
-            {
-              part: pendingApprovals.length,
-              whole: state.approvals.length,
-              tone: pendingApprovals.length > 0 ? "warn" : "",
-            },
-          )}
-          ${gauge("Accepted work", integratedTasks.length, "Promoted to canonical", {
-            part: integratedTasks.length,
-            whole: totalTasks,
-            tone: "good",
-          })}
-          ${gauge("Executions", state.runs.length, "Runs recorded", {
-            part: completedRuns,
-            whole: state.runs.length,
-          })}
-        </div>
-        ${hudSubsystems()}
-        ${hudCanonical()}
+        ${hudLinksStack()}
+        ${hudFeed()}
+        ${hudWorkers()}
       </aside>
     </div>
     <div class="hud-tape">
@@ -5470,6 +5685,11 @@ async function handleClick(event) {
       state.activity = "explorer";
     }
     renderShell();
+    return;
+  }
+  if (target.dataset.action === "hud-refresh") {
+    await loadContext({ quiet: true });
+    toast("Control room refreshed");
     return;
   }
   if (target.dataset.openView) {
