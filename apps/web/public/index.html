@@ -133,17 +133,20 @@
         <div id="activity-footer" style="display: contents"></div>
       </nav>
 
+      <!-- Shown only on the Home HUD (app.js hides it elsewhere); floats
+           over the immersive view now that Home has no sidebar. -->
+      <div class="context-block" id="context-block">
+        <label for="organization-select">
+          <span>Organization</span>
+          <select id="organization-select"></select>
+        </label>
+        <label for="project-select">
+          <span>Project</span>
+          <select id="project-select"></select>
+        </label>
+      </div>
+
       <aside class="side-bar" id="side-bar" aria-label="Sidebar">
-        <div class="context-block" id="context-block">
-          <label for="organization-select">
-            <span>Organization</span>
-            <select id="organization-select"></select>
-          </label>
-          <label for="project-select">
-            <span>Project</span>
-            <select id="project-select"></select>
-          </label>
-        </div>
         <header class="side-head">
           <span id="sidebar-title">Explorer</span>
           <span class="row-actions" id="sidebar-actions"></span>

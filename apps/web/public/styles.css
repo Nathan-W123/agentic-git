@@ -3609,22 +3609,245 @@ textarea:focus {
   background: rgba(79, 232, 255, 0.07);
 }
 
+/* Immersive Home ---------------------------------------------------------- */
+/*
+ * The Home view drops the frame: no activity bar, no sidebar, no chat dock.
+ * The radial menu around the core carries navigation instead, and the
+ * org/project pickers float as HUD chips. Every other view keeps the
+ * ordinary frame.
+ */
+
+.app-shell.hud-immersive {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.app-shell.hud-immersive .activity-bar,
+.app-shell.hud-immersive .side-bar,
+.app-shell.hud-immersive .chat-panel {
+  display: none;
+}
+
+/*
+ * Fixed positioning always: as a direct grid child of the shell this element
+ * would otherwise claim a column and shove the main area sideways. A slim
+ * horizontal bar, so the view header clears it with a little top padding.
+ */
+.context-block {
+  position: fixed;
+  z-index: 20;
+  top: calc(var(--tabstrip-height) + 8px);
+  left: 14px;
+  display: flex;
+  gap: 10px;
+  width: auto;
+  padding: 6px 10px;
+  border: 1px solid var(--border-muted);
+  border-left: 2px solid var(--accent);
+  background: rgba(4, 16, 24, 0.82);
+  backdrop-filter: blur(6px);
+  box-shadow: var(--glow-soft);
+}
+
+.context-block label {
+  display: grid;
+  gap: 1px;
+}
+
+.context-block label > span {
+  font-family: var(--font-data);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  color: var(--fg-subtle);
+}
+
+.hud-immersive .tab-content .view {
+  max-width: 1500px;
+  margin: 0 auto;
+  padding-top: 66px;
+}
+
+/* Corner brackets framing the immersive view. */
+.hud-immersive .main-area {
+  position: relative;
+}
+
+.hud-immersive .main-area::before,
+.hud-immersive .main-area::after {
+  content: "";
+  position: absolute;
+  width: 26px;
+  height: 26px;
+  border: 1px solid rgba(79, 232, 255, 0.55);
+  pointer-events: none;
+  z-index: 5;
+}
+
+.hud-immersive .main-area::before {
+  top: calc(var(--tabstrip-height) + 8px);
+  left: 10px;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.hud-immersive .main-area::after {
+  bottom: 10px;
+  right: 10px;
+  border-left: 0;
+  border-top: 0;
+}
+
+/* More room for the core once the side panels are gone. */
+.hud-immersive .neural-core {
+  max-width: 380px;
+}
+
+.hud-immersive .hud-hero {
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px) minmax(0, 1fr);
+  padding: 26px 8px 30px;
+}
+
+/* Radar sweep: one slow conic blade inside the outer ring. */
+.core-sweep {
+  position: absolute;
+  inset: 4%;
+  border-radius: 50%;
+  background: conic-gradient(
+    from 0deg,
+    rgba(79, 232, 255, 0.28) 0deg,
+    rgba(79, 232, 255, 0.05) 28deg,
+    transparent 40deg 360deg
+  );
+  -webkit-mask: radial-gradient(circle, transparent 58%, #000 59% 98%, transparent 99%);
+  mask: radial-gradient(circle, transparent 58%, #000 59% 98%, transparent 99%);
+  animation: core-spin 9s linear infinite;
+  pointer-events: none;
+}
+
+/* The orb is a real button now: same face, keyboard reachable. */
+button.core-orb {
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+}
+
+button.core-orb:focus-visible {
+  outline: 1px solid var(--accent);
+  outline-offset: 6px;
+}
+
+/* Radial menu satellites: bloom out of the core on hover, focus, or pin. */
+.core-sat {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 62px;
+  height: 62px;
+  margin: -31px 0 0 -31px;
+  border-radius: 50%;
+  border: 1px solid rgba(79, 232, 255, 0.5);
+  background: rgba(4, 18, 27, 0.88);
+  color: var(--accent);
+  display: grid;
+  place-items: center;
+  align-content: center;
+  gap: 1px;
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transform: rotate(var(--angle)) translateY(0) rotate(calc(-1 * var(--angle)))
+    scale(0.25);
+  transition:
+    transform 420ms cubic-bezier(0.2, 1.1, 0.3, 1) var(--sat-delay, 0ms),
+    opacity 260ms ease var(--sat-delay, 0ms),
+    box-shadow 200ms ease;
+}
+
+.neural-core:hover .core-sat,
+.neural-core:focus-within .core-sat,
+.neural-core.sat-open .core-sat {
+  opacity: 1;
+  pointer-events: auto;
+  transform: rotate(var(--angle)) translateY(calc(var(--sat-orbit, 150px) * -1))
+    rotate(calc(-1 * var(--angle))) scale(1);
+}
+
+.core-sat:hover,
+.core-sat:focus-visible {
+  border-color: var(--accent);
+  box-shadow:
+    0 0 14px rgba(79, 232, 255, 0.55),
+    inset 0 0 10px rgba(79, 232, 255, 0.18);
+  outline: none;
+}
+
+.core-sat svg {
+  width: 17px;
+  height: 17px;
+}
+
+.core-sat-label {
+  font-family: var(--font-data);
+  font-size: 7.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  max-width: 54px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.core-sat-badge {
+  position: absolute;
+  top: 2px;
+  right: 4px;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent-strong);
+  color: #01222b;
+  font-family: var(--font-data);
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 15px;
+}
+
+/* The caption yields to the menu so the bottom satellite lands clear. */
+.neural-core:hover .core-caption,
+.neural-core:focus-within .core-caption,
+.neural-core.sat-open .core-caption {
+  opacity: 0;
+}
+
+.core-caption {
+  transition: opacity 200ms ease;
+}
+
 /* Responsive -------------------------------------------------------------- */
 
 @media (max-width: 1180px) {
-  .hud-hero {
+  .hud-hero,
+  .hud-immersive .hud-hero {
     grid-template-columns: minmax(0, 1fr);
     justify-items: center;
   }
 
-  .neural-core {
+  .neural-core,
+  .hud-immersive .neural-core {
     order: -1;
-    max-width: 240px;
+    max-width: 264px;
+    /* A tighter orbit so the menu stays on a phone screen. */
+    --sat-orbit: 104px;
   }
 
   .hud-cluster {
     grid-template-columns: repeat(3, minmax(92px, 1fr));
     width: 100%;
     max-width: 420px;
+  }
+
+  .context-block {
+    width: 200px;
   }
 }

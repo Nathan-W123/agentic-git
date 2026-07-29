@@ -369,6 +369,23 @@ test("the HUD reports agents running from the control plane's own count", async 
   assert.match(source, /Awaiting the control plane/u);
 });
 
+test("only the Home view drops the frame for the immersive HUD", async () => {
+  const source = await browserSource();
+  // The activity bar, sidebar, and chat dock disappear on Home alone; every
+  // other view keeps the ordinary frame.
+  assert.match(
+    source,
+    /"hud-immersive",\s*tab\?\.kind === "view" && tab\.view === "overview"/u,
+  );
+  // The radial menu is built from the same ACTIVITIES lists the activity bar
+  // renders, so labels, badges, and admin gating stay defined once.
+  assert.match(
+    source,
+    /coreSatellites[\s\S]*\[\.\.\.ACTIVITIES, \.\.\.FOOTER_ACTIVITIES\]/u,
+  );
+  assert.match(source, /entry\.id !== "admin" \|\| state\.principal\?\.user\?\.systemAdmin/u);
+});
+
 test("every HUD dial draws its arc from a reported share, never decoration", async () => {
   const source = await browserSource();
   const gaugeSource = source.slice(

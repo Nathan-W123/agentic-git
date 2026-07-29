@@ -44,6 +44,8 @@ const state = {
   activeTabId: undefined,
   panelOpen: false,
   panelTab: "terminal",
+  /** Home HUD radial menu: pinned open by clicking the core. */
+  coreMenuOpen: false,
 
   /**
    * Agent chat: the primary way work is prompted. Each entry tracks one task
@@ -824,6 +826,12 @@ function renderShell() {
   $("#context-block").hidden = !(
     tab?.kind === "view" && tab.view === "overview"
   );
+  // The Home HUD is immersive: no activity bar, no sidebar, no chat dock.
+  // Navigation lives in the radial menu around the core instead.
+  $("#app-shell").classList.toggle(
+    "hud-immersive",
+    tab?.kind === "view" && tab.view === "overview",
+  );
   renderActivityBar();
   renderSidebar();
   renderTabStrip();
@@ -1489,12 +1497,64 @@ function gauge(label, value, foot, { part = 0, whole = 0, tone = "" } = {}) {
 }
 
 /**
+ * The Home HUD's navigation, orbiting the core. Built from the same
+ * ACTIVITIES lists the activity bar uses, so labels, badges, and admin
+ * visibility stay defined in one place even though the bar itself is
+ * hidden on this view.
+ */
+/** Ring-sized abbreviations; anything unlisted wears its full label. */
+const SATELLITE_SHORT_LABELS = {
+  repositories: "Repos",
+  coordination: "Coord",
+  admin: "Admin",
+};
+
+function coreSatellites() {
+  const entries = [...ACTIVITIES, ...FOOTER_ACTIVITIES].filter(
+    (entry) =>
+      entry.view !== "overview" &&
+      (entry.id !== "admin" || state.principal?.user?.systemAdmin),
+  );
+  const count = entries.length;
+  return entries
+    .map((entry, index) => {
+      const badge =
+        entry.badge === "tasks"
+          ? state.tasks.filter((task) =>
+              ["submitted", "claimed"].includes(task.status),
+            ).length
+          : entry.badge === "approvals"
+            ? state.approvals.filter(
+                (approval) => approval.status === "pending",
+              ).length
+            : 0;
+      const angle = (360 / count) * index;
+      return `<button
+        class="core-sat"
+        data-open-view="${entry.view}"
+        style="--angle:${angle.toFixed(1)}deg; --sat-delay:${(index * 40).toFixed(0)}ms"
+        title="${escapeHtml(entry.label)}"
+      >
+        ${icon(entry.icon)}
+        <span class="core-sat-label">${escapeHtml(
+          SATELLITE_SHORT_LABELS[entry.id] ?? entry.label,
+        )}</span>
+        ${badge > 0 ? `<span class="core-sat-badge">${badge}</span>` : ""}
+      </button>`;
+    })
+    .join("");
+}
+
+/**
  * The centerpiece: a glowing core ringed by a lattice of nodes.
  *
  * Nothing here invents data. The one thing it encodes is how hard the
  * platform is working right now — `load` (agents executing plus tasks the
  * coordinator has claimed) shortens the breathing period, so an idle control
  * room drifts and a busy one visibly quickens. Everything else is geometry.
+ *
+ * The core doubles as the view's navigation: hovering (or clicking, or
+ * focusing) blooms the menu satellites out from behind the orb.
  */
 function neuralCore({ running, claimed, awaiting }) {
   const load = running + claimed;
@@ -1520,12 +1580,23 @@ function neuralCore({ running, claimed, awaiting }) {
           ? "awaiting review"
           : "standing by";
   return `
-    <div class="neural-core" style="--pulse:${period}s" data-load="${load}">
+    <div
+      class="neural-core${state.coreMenuOpen ? " sat-open" : ""}"
+      style="--pulse:${period}s"
+      data-load="${load}"
+    >
       <div class="core-ring core-ring-a"></div>
       <div class="core-ring core-ring-b"></div>
       <div class="core-ring core-ring-c"></div>
+      <div class="core-sweep"></div>
       <div class="core-lattice">${lattice}</div>
-      <div class="core-orb"></div>
+      <button
+        class="core-orb"
+        data-core-menu="toggle"
+        title="Navigation"
+        aria-label="Toggle the radial navigation menu"
+      ></button>
+      ${coreSatellites()}
       <div class="core-caption">
         <span class="core-state">${escapeHtml(phase)}</span>
         <span class="core-sub">${escapeHtml(
@@ -5116,7 +5187,15 @@ async function handleClick(event) {
     renderShell();
     return;
   }
+  if (target.dataset.coreMenu) {
+    // Clicking the core pins the radial menu open for touch and keyboard;
+    // hover reveals it without pinning.
+    state.coreMenuOpen = !state.coreMenuOpen;
+    $(".neural-core")?.classList.toggle("sat-open", state.coreMenuOpen);
+    return;
+  }
   if (target.dataset.openView) {
+    state.coreMenuOpen = false;
     openView(target.dataset.openView);
     return;
   }
