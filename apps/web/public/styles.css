@@ -984,6 +984,278 @@ fieldset.field-group legend {
   padding: 4px 8px;
 }
 
+/* Provider icons + connection state ------------------------------------- */
+
+.provider-icons {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  padding: 4px 14px 10px;
+  flex: none;
+}
+
+.provider-icon {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 4px 6px;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+
+.provider-icon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.provider-icon:hover {
+  background: var(--bg-hover);
+  color: var(--fg);
+}
+
+.provider-icon.active {
+  border-color: var(--accent);
+  color: var(--fg);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.provider-icon .dot {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  border: 1px solid var(--fg-subtle);
+}
+
+.provider-icon.connected .dot {
+  background: var(--success);
+  border-color: var(--success);
+}
+
+/* Usage strip ------------------------------------------------------------- */
+
+.chat-usage {
+  padding: 0 14px 8px;
+  border-bottom: 1px solid var(--border-muted);
+  flex: none;
+  display: grid;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+
+.chat-usage:empty {
+  display: none;
+}
+
+.usage-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.usage-bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--bg-hover);
+  overflow: hidden;
+}
+
+.usage-bar > span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: 2px;
+}
+
+.usage-bar.warn > span {
+  background: var(--warn);
+}
+
+/* Ask / Build mode toggle ------------------------------------------------- */
+
+.chat-modebar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--border-muted);
+  flex: none;
+}
+
+.mode-toggle {
+  display: inline-flex;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 2px;
+  gap: 2px;
+}
+
+.mode-option {
+  background: none;
+  border: 0;
+  color: var(--fg-muted);
+  font: inherit;
+  font-size: 11.5px;
+  font-weight: 600;
+  padding: 2px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.mode-option.active {
+  background: var(--accent-dim);
+  color: var(--fg);
+}
+
+.chat-modebar select {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-surface);
+  font-size: 11.5px;
+  padding: 3px 8px;
+}
+
+/* Thinking + usage inside messages ---------------------------------------- */
+
+.chat-msg details.thinking {
+  margin: 0 0 6px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: var(--bg-canvas);
+}
+
+.chat-msg details.thinking summary {
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--purple);
+  padding: 5px 10px;
+  list-style: none;
+}
+
+.chat-msg details.thinking summary::before {
+  content: "▸ ";
+}
+
+.chat-msg details.thinking[open] summary::before {
+  content: "▾ ";
+}
+
+.chat-msg details.thinking .thinking-body {
+  padding: 0 10px 8px;
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  white-space: pre-wrap;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.chat-msg .answer {
+  white-space: pre-wrap;
+}
+
+.chat-msg .usage-line {
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--fg-subtle);
+  font-family: var(--font-mono);
+}
+
+.chat-msg.pending {
+  opacity: 0.75;
+  font-style: italic;
+}
+
+/* Provider connection overlay --------------------------------------------- */
+
+.connect-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: grid;
+  place-items: center;
+  background: rgba(1, 4, 9, 0.85);
+  backdrop-filter: blur(4px);
+}
+
+.connect-overlay[hidden] {
+  display: none;
+}
+
+.connect-card {
+  width: min(440px, calc(100vw - 48px));
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 28px;
+  box-shadow: 0 24px 64px rgba(1, 4, 9, 0.7);
+  display: grid;
+  gap: 14px;
+}
+
+.connect-card .provider-mark {
+  width: 52px;
+  height: 52px;
+  border-radius: 12px;
+  display: grid;
+  place-items: center;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+}
+
+.connect-card .provider-mark svg {
+  width: 30px;
+  height: 30px;
+}
+
+.connect-card h2 {
+  margin: 0;
+  font-size: 20px;
+}
+
+.connect-card p {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 12.5px;
+}
+
+.connect-card .connect-error {
+  color: var(--danger);
+  font-size: 12px;
+  min-height: 1em;
+  margin: 0;
+}
+
+.connect-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fg-subtle);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.connect-divider::before,
+.connect-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-muted);
+}
+
 .chat-thread {
   flex: 1;
   min-height: 0;

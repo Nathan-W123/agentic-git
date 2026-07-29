@@ -196,20 +196,26 @@
           <span class="row-actions">
             <button
               class="mini-button"
+              id="chat-manage"
+              title="Manage this provider's connection"
+            >⚙</button>
+            <button
+              class="mini-button"
               id="chat-collapse"
               title="Collapse chat"
             >⇥</button>
           </span>
         </header>
-        <div class="chat-pickers">
-          <label>
-            <span>Agent</span>
-            <select id="chat-agent-select"></select>
-          </label>
-          <label>
-            <span>Repository</span>
-            <select id="chat-repo-select"></select>
-          </label>
+        <!-- One icon per provider; rendered by app.js so connection dots and
+             the active ring stay in one place. -->
+        <div class="provider-icons" id="provider-icons"></div>
+        <div class="chat-usage" id="chat-usage"></div>
+        <div class="chat-modebar">
+          <div class="mode-toggle" id="chat-mode-toggle">
+            <button class="mode-option active" data-chat-mode="ask">Ask</button>
+            <button class="mode-option" data-chat-mode="build">Build</button>
+          </div>
+          <select id="chat-repo-select" hidden></select>
         </div>
         <div class="chat-thread" id="chat-thread"></div>
         <form class="chat-input" id="chat-form">
@@ -224,6 +230,11 @@
           </button>
         </form>
       </aside>
+
+      <!-- Full-screen provider connection step, opened from a provider icon. -->
+      <div class="connect-overlay" id="connect-overlay" hidden>
+        <section class="connect-card" id="connect-card"></section>
+      </div>
 
       <footer class="status-bar" id="status-bar">
         <span class="status-item" id="status-live">

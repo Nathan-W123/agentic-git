@@ -55,6 +55,20 @@ const state = {
     tracked: [],
     sending: false,
     runAttempts: new Map(),
+
+    /** Direct provider chat (Ask mode). */
+    mode: localStorage.getItem("relay.chatMode") ?? "ask",
+    providers: [],
+    activeProvider: localStorage.getItem("relay.chatProvider") ?? "anthropic",
+    /** Per provider: [{role, content, thinking, thinkingHidden, usage, model, at}] */
+    conversations: {},
+    /** Per provider session totals, summed from real replies only. */
+    totals: {},
+    /** Per provider, the latest rate-limit snapshot a reply carried. */
+    lastRateLimit: {},
+    /** Per provider, the CLI session id for --resume continuity. */
+    cliSessions: {},
+    overlayProvider: null,
   },
 
   /** Explorer / workspace state, keyed by the selected repository. */
@@ -410,6 +424,7 @@ async function loadContext({ quiet = false } = {}) {
     }
 
     loadChatTracked();
+    loadChatTotals();
     maybeDrainChatRuns();
     renderSelectors();
     connectSocket();
@@ -3020,42 +3035,258 @@ function chatAgentBubble(entry) {
     </div>`;
 }
 
+/* Provider identity: names, marks, and the Build-mode adapter mapping. ----- */
+
+const CHAT_PROVIDERS = [
+  { id: "anthropic", name: "Claude", company: "Anthropic", adapter: "claude" },
+  { id: "openai", name: "OpenAI", company: "OpenAI", adapter: "codex" },
+  { id: "google", name: "Gemini", company: "Google", adapter: "gemini" },
+];
+
+/** Simplified original marks — evocative, not the trademarked artwork. */
+const PROVIDER_MARKS = {
+  anthropic:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="#d97757" stroke-width="2.4" stroke-linecap="round"><path d="M12 3v18M4.2 7.5l15.6 9M4.2 16.5l15.6-9"/></svg>',
+  openai:
+    '<svg viewBox="0 0 24 24" fill="none" stroke="#ffffff" stroke-width="1.9" stroke-linejoin="round"><path d="M12 3.2l7.6 4.4v8.8L12 20.8l-7.6-4.4V7.6z"/><path d="M12 8.1l4.2 2.4v4.9M12 8.1L7.8 10.5v4.9M12 15.9l4.2-2.4M12 15.9l-4.2-2.4"/></svg>',
+  google:
+    '<svg viewBox="0 0 24 24" fill="#3d8bff"><path d="M12 2c.6 5.4 4.6 9.4 10 10-5.4.6-9.4 4.6-10 10-.6-5.4-4.6-9.4-10-10 5.4-.6 9.4-4.6 10-10z"/></svg>',
+};
+
+function providerMeta(id) {
+  return CHAT_PROVIDERS.find((provider) => provider.id === id);
+}
+
+function providerStatus(id) {
+  return state.chat.providers.find((provider) => provider.id === id);
+}
+
+async function loadChatProviders() {
+  try {
+    const response = await api("/chat/providers");
+    state.chat.providers = response.providers ?? [];
+  } catch {
+    state.chat.providers = [];
+  }
+}
+
+/* Ask-mode conversation persistence: real replies only, per project+provider. */
+
+function conversationKey(provider) {
+  return `relay.pchat.${state.projectId}.${provider}`;
+}
+
+function loadConversation(provider) {
+  if (state.chat.conversations[provider] === undefined) {
+    try {
+      const raw = localStorage.getItem(conversationKey(provider));
+      state.chat.conversations[provider] = raw === null ? [] : JSON.parse(raw);
+    } catch {
+      state.chat.conversations[provider] = [];
+    }
+  }
+  return state.chat.conversations[provider];
+}
+
+function saveConversation(provider) {
+  const conversation = (state.chat.conversations[provider] ?? []).slice(-60);
+  state.chat.conversations[provider] = conversation;
+  localStorage.setItem(conversationKey(provider), JSON.stringify(conversation));
+}
+
+function totalsKey() {
+  return `relay.pchatTotals.${state.projectId}`;
+}
+
+function loadChatTotals() {
+  try {
+    const raw = localStorage.getItem(totalsKey());
+    state.chat.totals = raw === null ? {} : JSON.parse(raw);
+  } catch {
+    state.chat.totals = {};
+  }
+}
+
+function addToTotals(provider, usage) {
+  const totals = state.chat.totals[provider] ?? {
+    input: 0,
+    output: 0,
+    thinking: 0,
+    costUsd: 0,
+    turns: 0,
+  };
+  totals.input += usage.inputTokens ?? 0;
+  totals.output += usage.outputTokens ?? 0;
+  totals.thinking += usage.thinkingTokens ?? 0;
+  totals.costUsd += usage.costUsd ?? 0;
+  totals.turns += 1;
+  state.chat.totals[provider] = totals;
+  localStorage.setItem(totalsKey(), JSON.stringify(state.chat.totals));
+}
+
+function formatTokens(count) {
+  if (typeof count !== "number") {
+    return "—";
+  }
+  return count >= 10_000
+    ? `${(count / 1000).toFixed(1)}k`
+    : String(count);
+}
+
+function usageLine(message) {
+  const usage = message.usage ?? {};
+  const parts = [];
+  if (usage.inputTokens !== undefined) parts.push(`in ${formatTokens(usage.inputTokens)}`);
+  if (usage.outputTokens !== undefined) parts.push(`out ${formatTokens(usage.outputTokens)}`);
+  if (usage.thinkingTokens !== undefined) parts.push(`think ${formatTokens(usage.thinkingTokens)}`);
+  if (usage.costUsd !== undefined) parts.push(`$${usage.costUsd.toFixed(4)}`);
+  if (parts.length === 0) {
+    return "";
+  }
+  return `<div class="usage-line">${escapeHtml(parts.join(" · "))}${
+    message.model ? escapeHtml(` · ${message.model}`) : ""
+  }</div>`;
+}
+
+function askBubble(message) {
+  if (message.role === "user") {
+    return `
+      <div class="chat-msg user">${escapeHtml(message.content)}
+        <div class="meta"><span>${escapeHtml(formatDate(message.at, { short: true }))}</span></div>
+      </div>`;
+  }
+  if (message.pending) {
+    return `<div class="chat-msg agent pending">Thinking…</div>`;
+  }
+  const meta = providerMeta(message.provider) ?? { name: message.provider };
+  const thinkingBlock = message.thinking
+    ? `<details class="thinking"><summary>Reasoning</summary><div class="thinking-body">${escapeHtml(
+        message.thinking,
+      )}</div></details>`
+    : message.thinkingHidden
+      ? `<details class="thinking"><summary>Reasoning (content not exposed)</summary><div class="thinking-body">${escapeHtml(
+          `${meta.name} used ${formatTokens(message.usage?.thinkingTokens)} reasoning tokens but does not return the content.`,
+        )}</div></details>`
+      : "";
+  return `
+    <div class="chat-msg agent">
+      <span class="who">${escapeHtml(meta.name)}</span>
+      ${thinkingBlock}
+      <div class="answer">${escapeHtml(message.content)}</div>
+      ${usageLine(message)}
+    </div>`;
+}
+
+function renderProviderIcons() {
+  $("#provider-icons").innerHTML = CHAT_PROVIDERS.map((provider) => {
+    const status = providerStatus(provider.id);
+    const connected = status?.connected === true;
+    return `
+      <button
+        class="provider-icon${provider.id === state.chat.activeProvider ? " active" : ""}${
+          connected ? " connected" : ""
+        }"
+        data-chat-provider="${provider.id}"
+        title="${escapeHtml(provider.company)}${connected ? " · connected" : " · not connected"}"
+      >
+        <span class="dot"></span>
+        ${PROVIDER_MARKS[provider.id]}
+        <span>${escapeHtml(provider.name)}</span>
+      </button>`;
+  }).join("");
+}
+
+function renderChatUsage() {
+  const target = $("#chat-usage");
+  const provider = state.chat.activeProvider;
+  const status = providerStatus(provider);
+  if (status?.connected !== true) {
+    target.innerHTML = "";
+    return;
+  }
+  const totals = state.chat.totals[provider];
+  const rows = [];
+  if (totals !== undefined && totals.turns > 0) {
+    const costPart =
+      totals.costUsd > 0 ? ` · $${totals.costUsd.toFixed(4)}` : "";
+    const thinkPart =
+      totals.thinking > 0 ? ` · think ${formatTokens(totals.thinking)}` : "";
+    rows.push(
+      `<div class="usage-row"><span>Session (${totals.turns} turn${
+        totals.turns === 1 ? "" : "s"
+      })</span><span>in ${formatTokens(totals.input)} · out ${formatTokens(
+        totals.output,
+      )}${thinkPart}${costPart}</span></div>`,
+    );
+  }
+  const rateLimit = state.chat.lastRateLimit[provider];
+  if (rateLimit?.source === "response-headers") {
+    if (
+      typeof rateLimit.tokensRemaining === "number" &&
+      typeof rateLimit.tokensLimit === "number" &&
+      rateLimit.tokensLimit > 0
+    ) {
+      const fraction = rateLimit.tokensRemaining / rateLimit.tokensLimit;
+      rows.push(
+        `<div class="usage-row"><span>Rate limit tokens</span><span>${formatTokens(
+          rateLimit.tokensRemaining,
+        )} / ${formatTokens(rateLimit.tokensLimit)} left</span></div>
+         <div class="usage-bar${fraction < 0.2 ? " warn" : ""}"><span style="width:${Math.max(
+           2,
+           Math.round(fraction * 100),
+         )}%"></span></div>`,
+      );
+    }
+    if (
+      typeof rateLimit.requestsRemaining === "number" &&
+      typeof rateLimit.requestsLimit === "number"
+    ) {
+      rows.push(
+        `<div class="usage-row"><span>Rate limit requests</span><span>${rateLimit.requestsRemaining} / ${rateLimit.requestsLimit} left</span></div>`,
+      );
+    }
+  } else if (rateLimit?.source === "cli-window") {
+    const resets = rateLimit.windowResetsAt
+      ? ` · resets ${formatDate(rateLimit.windowResetsAt, { short: true })}`
+      : "";
+    rows.push(
+      `<div class="usage-row"><span>Subscription window</span><span>${escapeHtml(
+        `${(rateLimit.windowKind ?? "").replaceAll("_", " ")} · ${
+          rateLimit.windowStatus ?? "unknown"
+        }${resets}`,
+      )}</span></div>`,
+    );
+  } else if (rows.length > 0) {
+    rows.push(
+      `<div class="usage-row"><span class="muted">No quota data from this provider</span><span></span></div>`,
+    );
+  }
+  target.innerHTML = rows.join("");
+}
+
 function renderChat() {
   const shell = $("#app-shell");
   if (!shell) {
     return;
   }
   shell.classList.toggle("chat-collapsed", !state.chat.open);
-  const agentSelect = $("#chat-agent-select");
-  const repoSelect = $("#chat-repo-select");
-  if (!agentSelect) {
+  if (!$("#provider-icons")) {
     return;
   }
+  renderProviderIcons();
+  renderChatUsage();
 
-  if (
-    !state.agents.some((agent) => agent.id === state.chat.agentId)
-  ) {
-    state.chat.agentId =
-      state.agents.find((agent) => agent.default)?.id ??
-      state.agents[0]?.id ??
-      "";
-  }
+  const mode = state.chat.mode;
+  $$("#chat-mode-toggle .mode-option").forEach((option) => {
+    option.classList.toggle("active", option.dataset.chatMode === mode);
+  });
+  const repoSelect = $("#chat-repo-select");
+  repoSelect.hidden = mode !== "build";
   if (
     !state.repositories.some((repo) => repo.id === state.chat.repositoryId)
   ) {
     state.chat.repositoryId = state.repositories[0]?.id ?? "";
   }
-  agentSelect.innerHTML =
-    state.agents.length === 0
-      ? '<option value="">No agents configured</option>'
-      : state.agents
-          .map(
-            (agent) =>
-              `<option value="${escapeHtml(agent.id)}"${
-                agent.id === state.chat.agentId ? " selected" : ""
-              }>${escapeHtml(agent.id)} · ${escapeHtml(agent.adapter)}</option>`,
-          )
-          .join("");
   repoSelect.innerHTML =
     state.repositories.length === 0
       ? '<option value="">No repository</option>'
@@ -3069,40 +3300,85 @@ function renderChat() {
           .join("");
 
   const thread = $("#chat-thread");
-  const entries = state.chat.tracked;
-  if (entries.length === 0) {
-    thread.innerHTML = `<p class="chat-empty">${
-      state.agents.length === 0
-        ? "Configure an agent (claude, codex, gemini, or a generic CLI) in .coordinator/config.json to start prompting work."
-        : state.repositories.length === 0
-          ? "Import a repository, then tell your agent what to build."
-          : "Describe a change and your agent will plan it, execute it in an isolated workspace, and submit it through validation into canonical."
-    }</p>`;
+  const provider = state.chat.activeProvider;
+  const status = providerStatus(provider);
+  const meta = providerMeta(provider);
+
+  if (mode === "ask") {
+    const conversation = loadConversation(provider);
+    if (status?.connected !== true) {
+      thread.innerHTML = `<p class="chat-empty">
+        ${escapeHtml(meta?.company ?? provider)} is not connected.
+        Click its icon above to connect an API key${
+          provider === "anthropic" && status?.localCliAvailable
+            ? " or use the local claude CLI"
+            : ""
+        }.
+      </p>`;
+    } else if (conversation.length === 0) {
+      thread.innerHTML = `<p class="chat-empty">
+        Connected to ${escapeHtml(meta?.name ?? provider)}
+        (${escapeHtml(status.model ?? "")}). Ask anything — token usage and,
+        where the model exposes it, reasoning appear with each reply.
+      </p>`;
+    } else {
+      thread.innerHTML = conversation.map(askBubble).join("");
+      thread.scrollTop = thread.scrollHeight;
+    }
   } else {
-    thread.innerHTML = entries
-      .map(
-        (entry) => `
-        <div class="chat-msg user">${escapeHtml(entry.objective)}
-          <div class="meta"><span class="chip">${escapeHtml(entry.agentId)}</span>
-            <span class="chip">${escapeHtml(entry.repositoryId)}</span>
-            <span>${escapeHtml(formatDate(entry.at, { short: true }))}</span></div>
-        </div>
-        ${chatAgentBubble(entry)}`,
-      )
-      .join("");
-    thread.scrollTop = thread.scrollHeight;
+    const entries = state.chat.tracked;
+    const buildAgent = buildAgentFor(provider);
+    if (entries.length === 0) {
+      thread.innerHTML = `<p class="chat-empty">${
+        buildAgent === undefined
+          ? `No configured agent matches ${escapeHtml(
+              meta?.name ?? provider,
+            )} (adapter "${escapeHtml(meta?.adapter ?? "?")}") in .coordinator/config.json.`
+          : state.repositories.length === 0
+            ? "Import a repository, then tell your agent what to build."
+            : `Describe a change and the ${escapeHtml(
+                buildAgent.id,
+              )} agent will plan it, execute it in an isolated workspace, and submit it through validation into canonical.`
+      }</p>`;
+    } else {
+      thread.innerHTML = entries
+        .map(
+          (entry) => `
+          <div class="chat-msg user">${escapeHtml(entry.objective)}
+            <div class="meta"><span class="chip">${escapeHtml(entry.agentId)}</span>
+              <span class="chip">${escapeHtml(entry.repositoryId)}</span>
+              <span>${escapeHtml(formatDate(entry.at, { short: true }))}</span></div>
+          </div>
+          ${chatAgentBubble(entry)}`,
+        )
+        .join("");
+      thread.scrollTop = thread.scrollHeight;
+    }
   }
 
   const disabled =
-    !canRun() ||
-    state.agents.length === 0 ||
-    state.repositories.length === 0 ||
-    state.chat.sending;
+    state.chat.sending ||
+    (mode === "ask"
+      ? status?.connected !== true
+      : !canRun() ||
+        buildAgentFor(provider) === undefined ||
+        state.repositories.length === 0);
   $("#chat-input").disabled = disabled && !state.chat.sending;
   $("#chat-send").disabled = disabled;
-  $("#chat-input").placeholder = !canRun()
-    ? "Your role can watch work but not prompt it"
-    : "Tell the agent what to build…";
+  $("#chat-input").placeholder =
+    mode === "ask"
+      ? status?.connected === true
+        ? "Ask the model anything…"
+        : `Connect ${meta?.company ?? provider} to chat`
+      : !canRun()
+        ? "Your role can watch work but not prompt it"
+        : "Tell the agent what to build…";
+}
+
+/** The configured coordination agent matching a chat provider, if any. */
+function buildAgentFor(provider) {
+  const adapter = providerMeta(provider)?.adapter;
+  return state.agents.find((agent) => agent.adapter === adapter);
 }
 
 /**
@@ -3152,12 +3428,90 @@ function maybeDrainChatRuns() {
 }
 
 async function sendChatPrompt() {
+  if (state.chat.mode === "ask") {
+    await sendAskMessage();
+  } else {
+    await sendBuildPrompt();
+  }
+}
+
+/** Ask mode: a real completion against the connected provider. */
+async function sendAskMessage() {
+  const input = $("#chat-input");
+  const content = input.value.trim();
+  const provider = state.chat.activeProvider;
+  if (
+    content.length === 0 ||
+    state.chat.sending ||
+    providerStatus(provider)?.connected !== true
+  ) {
+    return;
+  }
+  const conversation = loadConversation(provider);
+  conversation.push({ role: "user", content, at: new Date().toISOString() });
+  const pending = { role: "assistant", pending: true, provider };
+  conversation.push(pending);
+  state.chat.sending = true;
+  input.value = "";
+  renderChat();
+  try {
+    const history = conversation
+      .filter((message) => !message.pending && message.content)
+      .slice(-12)
+      .map((message) => ({ role: message.role, content: message.content }));
+    const response = await api("/chat/complete", {
+      method: "POST",
+      body: {
+        provider,
+        messages: history,
+        ...(state.chat.cliSessions[provider] === undefined
+          ? {}
+          : { cliSessionId: state.chat.cliSessions[provider] }),
+      },
+    });
+    const reply = response.reply ?? {};
+    const index = conversation.indexOf(pending);
+    conversation[index === -1 ? conversation.length - 1 : index] = {
+      role: "assistant",
+      provider,
+      content: reply.text ?? "",
+      ...(reply.thinking === undefined ? {} : { thinking: reply.thinking }),
+      ...(reply.thinkingHidden === true ? { thinkingHidden: true } : {}),
+      usage: reply.usage ?? {},
+      model: reply.model,
+      at: new Date().toISOString(),
+    };
+    addToTotals(provider, reply.usage ?? {});
+    if (reply.rateLimit !== undefined) {
+      state.chat.lastRateLimit[provider] = reply.rateLimit;
+    }
+    if (reply.cliSessionId !== undefined) {
+      state.chat.cliSessions[provider] = reply.cliSessionId;
+    }
+    saveConversation(provider);
+  } catch (error) {
+    const index = conversation.indexOf(pending);
+    if (index !== -1) {
+      conversation.splice(index, 1);
+    }
+    saveConversation(provider);
+    toast(error.message, "error");
+  } finally {
+    state.chat.sending = false;
+    renderChat();
+    input.focus();
+  }
+}
+
+/** Build mode: the prompt becomes a coordinated task, as before. */
+async function sendBuildPrompt() {
   const input = $("#chat-input");
   const objective = input.value.trim();
+  const agent = buildAgentFor(state.chat.activeProvider);
   if (
     objective.length === 0 ||
     state.chat.sending ||
-    !state.chat.agentId ||
+    agent === undefined ||
     !state.chat.repositoryId
   ) {
     return;
@@ -3172,14 +3526,14 @@ async function sendChatPrompt() {
         body: {
           repositoryId: state.chat.repositoryId,
           objective,
-          agentId: state.chat.agentId,
+          agentId: agent.id,
         },
       },
     );
     state.chat.tracked.push({
       taskId: response.task.id,
       objective,
-      agentId: state.chat.agentId,
+      agentId: agent.id,
       repositoryId: state.chat.repositoryId,
       at: new Date().toISOString(),
     });
@@ -3193,6 +3547,115 @@ async function sendChatPrompt() {
     state.chat.sending = false;
     renderChat();
     input.focus();
+  }
+}
+
+/* ------------------------------------------ provider connection screen --- */
+
+function openConnectOverlay(provider) {
+  state.chat.overlayProvider = provider;
+  renderConnectOverlay();
+  $("#connect-overlay").hidden = false;
+  $("#connect-key-input")?.focus();
+}
+
+function closeConnectOverlay() {
+  state.chat.overlayProvider = null;
+  $("#connect-overlay").hidden = true;
+}
+
+function renderConnectOverlay() {
+  const provider = state.chat.overlayProvider;
+  if (provider === null) {
+    return;
+  }
+  const meta = providerMeta(provider);
+  const status = providerStatus(provider);
+  const connected = status?.connected === true;
+  const keyHints = {
+    anthropic: "console.anthropic.com → API keys",
+    openai: "platform.openai.com → API keys",
+    google: "aistudio.google.com → Get API key",
+  };
+  $("#connect-card").innerHTML = `
+    <div class="provider-mark">${PROVIDER_MARKS[provider]}</div>
+    <div>
+      <p class="eyebrow">${escapeHtml(meta.company)}</p>
+      <h2>${connected ? `Connected to ${escapeHtml(meta.name)}` : `Connect ${escapeHtml(meta.name)}`}</h2>
+    </div>
+    ${
+      connected
+        ? `<p>
+            Connected via ${escapeHtml(status.kind === "local-cli" ? "the local claude CLI" : "your API key")}
+            · model ${escapeHtml(status.model ?? "")}.
+          </p>
+          <div class="row-actions">
+            <button class="button button-danger" data-action="provider-disconnect" data-provider="${provider}">Disconnect</button>
+            <button class="button button-quiet" data-action="connect-close">Close</button>
+          </div>`
+        : `<p>
+            This connects your own ${escapeHtml(meta.company)} <strong>API key</strong> —
+            not a ${escapeHtml(meta.name)} consumer login, which providers do not
+            offer to third-party apps. The key is validated with a free call,
+            stored on this Relay host for your account only, and never shown again.
+          </p>
+          <form data-form="provider-connect" data-provider="${provider}">
+            <label>
+              <span>API key <small class="muted">(${escapeHtml(keyHints[provider])})</small></span>
+              <input
+                id="connect-key-input"
+                name="apiKey"
+                type="password"
+                autocomplete="off"
+                placeholder="${provider === "anthropic" ? "sk-ant-…" : provider === "openai" ? "sk-…" : "AIza…"}"
+              >
+            </label>
+            <p class="connect-error" id="connect-error"></p>
+            <button class="button button-primary button-wide" type="submit">
+              Validate &amp; connect
+            </button>
+          </form>
+          ${
+            provider === "anthropic" && status?.localCliAvailable === true
+              ? `<div class="connect-divider">or</div>
+                 <button class="button button-quiet button-wide" data-action="provider-connect-cli">
+                   Use the local claude CLI (detected)
+                 </button>
+                 <p class="muted" style="font-size:11.5px">
+                   Runs this host's logged-in <code>claude</code> in headless mode.
+                   System administrators only — it spends the host owner's account.
+                 </p>`
+              : ""
+          }
+          <div class="row-actions">
+            <button class="button button-quiet" data-action="connect-close">Cancel</button>
+          </div>`
+    }`;
+}
+
+async function connectProvider(provider, kind, apiKey) {
+  const errorTarget = $("#connect-error");
+  try {
+    const response = await api(
+      `/chat/providers/${encodeURIComponent(provider)}`,
+      {
+        method: "POST",
+        body: { kind, ...(apiKey === undefined ? {} : { apiKey }) },
+      },
+    );
+    state.chat.providers = response.providers ?? state.chat.providers;
+    state.chat.activeProvider = provider;
+    localStorage.setItem("relay.chatProvider", provider);
+    closeConnectOverlay();
+    toast(`${providerMeta(provider).company} connected`);
+    renderChat();
+    $("#chat-input")?.focus();
+  } catch (error) {
+    if (errorTarget) {
+      errorTarget.textContent = error.message;
+    } else {
+      toast(error.message, "error");
+    }
   }
 }
 
@@ -3339,6 +3802,14 @@ async function handleSubmit(event) {
           },
         });
         await enterApp();
+        break;
+      }
+      case "provider-connect": {
+        await connectProvider(
+          form.dataset.provider,
+          "api-key",
+          value("apiKey"),
+        );
         break;
       }
       case "github-import":
@@ -3602,6 +4073,50 @@ async function handleClick(event) {
     focusChat();
     return;
   }
+  if (target.dataset.chatProvider) {
+    const provider = target.dataset.chatProvider;
+    if (providerStatus(provider)?.connected === true) {
+      state.chat.activeProvider = provider;
+      localStorage.setItem("relay.chatProvider", provider);
+      renderChat();
+    } else {
+      openConnectOverlay(provider);
+    }
+    return;
+  }
+  if (target.dataset.chatMode) {
+    state.chat.mode = target.dataset.chatMode;
+    localStorage.setItem("relay.chatMode", state.chat.mode);
+    renderChat();
+    return;
+  }
+  if (target.id === "chat-manage") {
+    openConnectOverlay(state.chat.activeProvider);
+    return;
+  }
+  if (target.dataset.action === "connect-close") {
+    closeConnectOverlay();
+    return;
+  }
+  if (target.dataset.action === "provider-connect-cli") {
+    await connectProvider(state.chat.overlayProvider, "local-cli");
+    return;
+  }
+  if (target.dataset.action === "provider-disconnect") {
+    try {
+      await api(`/chat/providers/${encodeURIComponent(target.dataset.provider)}`, {
+        method: "DELETE",
+        body: {},
+      });
+      await loadChatProviders();
+      renderConnectOverlay();
+      renderChat();
+      toast("Provider disconnected");
+    } catch (error) {
+      toast(error.message, "error");
+    }
+    return;
+  }
   if (target.id === "chat-toggle") {
     state.chat.open = !state.chat.open;
     localStorage.setItem("relay.chatOpen", String(state.chat.open));
@@ -3731,11 +4246,6 @@ async function handleChange(event) {
     await refreshWorkspace();
     return;
   }
-  if (target.id === "chat-agent-select") {
-    state.chat.agentId = target.value;
-    localStorage.setItem("relay.chatAgent", state.chat.agentId);
-    return;
-  }
   if (target.id === "chat-repo-select") {
     state.chat.repositoryId = target.value;
     localStorage.setItem("relay.chatRepo", state.chat.repositoryId);
@@ -3767,6 +4277,7 @@ async function enterApp() {
   $("#app-shell").hidden = false;
   authMessage("");
   applyHash();
+  await loadChatProviders();
   await loadContext({ quiet: true });
   if (state.activity === "explorer") {
     void refreshWorkspace({ quiet: true });
