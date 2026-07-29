@@ -58,13 +58,20 @@ Each plan carries a confidence verdict:
 | --- | --- | --- |
 | `verified` | every declared file exists, every symbol resolves | unchanged behaviour |
 | `grounded` | some declarations corrected or novel, at least one anchor | unchanged thresholds, wider footprint |
-| `ungrounded` | nothing declared connects to the repository | no free concurrency: runs in a wave of its own, sequenced behind executing work, no partial admission |
+| `ungrounded` | nothing declared connects to the repository | no concurrency with work about the same objective; no partial admission |
 
-An `ungrounded` plan still runs — alone. Nothing can be proven disjoint from
-an unknown, so it is never scheduled beside anything, in the local wave
-scheduler and in remote plan admission alike. A truncated index never
-condemns a plan as ungrounded: the declarations may resolve in exactly the
-files the byte budget skipped.
+An `ungrounded` plan is not automatically a lying one: a task creating a new
+module declares only files that do not exist yet, and scope enforcement holds
+it to those declarations either way. What separates the hallucination from
+the honest creation — statically indistinguishable in their resource claims —
+is the stated objective. An unverifiable plan is therefore serialised
+against executing or pending work whose objective shares vocabulary with its
+own (`relatedObjectives`), in the local wave scheduler and in remote plan
+admission alike, and keeps its concurrency against unrelated work. The full
+test suite caught the blunter first version of this rule punishing a
+create-a-new-module task; the refinement is documented by tests in both
+directions. A truncated index never condemns a plan as ungrounded: the
+declarations may resolve in exactly the files the byte budget skipped.
 
 `COORD_DISABLE_PLAN_GROUNDING=1` restores the pre-verification behaviour on
 an identical build. It exists for operational rollback and for the

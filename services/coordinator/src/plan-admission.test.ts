@@ -609,34 +609,73 @@ test("an unverifiable plan with nothing running is approved: it runs alone", () 
   assert.equal(admission.status, "approved");
 });
 
-test("an unverifiable plan is sequenced behind all executing work, even disjoint work", () => {
+test("an unverifiable plan is sequenced behind executing work about the same objective", () => {
   const admission = admit(
     ungrounded(
       plan("task_a", {
+        objective: "charge a checkout handling fee on orders",
         expectedFiles: ["src/ghost.ts"],
         expectedSymbols: ["ghostSymbol"],
       }),
     ),
     [
-      plan("task_b", { expectedFiles: ["src/other.ts"], expectedSymbols: [] }),
-      plan("task_c", { expectedFiles: ["src/third.ts"], expectedSymbols: [] }),
+      plan("task_b", {
+        objective: "waive checkout delivery charges on large orders",
+        expectedFiles: ["src/other.ts"],
+        expectedSymbols: [],
+      }),
+      plan("task_c", {
+        objective: "round checkout totals for orders",
+        expectedFiles: ["src/third.ts"],
+        expectedSymbols: [],
+      }),
     ],
   );
 
   assert.equal(admission.status, "sequenced");
   assert.deepEqual(admission.blockedBy, ["task_b", "task_c"]);
   assert.equal(admission.ownershipGrants.length, 0);
-  assert.match(admission.explanation, /could not be proven disjoint|found none/u);
+  assert.match(admission.explanation, /cannot be proven disjoint|found none/u);
   // No partial admission either: there is no trustworthy line to split along.
   assert.equal(admission.deferredResources, undefined);
 });
 
-test("a verified plan is sequenced while unverifiable work is executing", () => {
+test("an unverifiable plan about something else entirely keeps its concurrency", () => {
+  // A task creating a new module declares only files that do not exist yet —
+  // indistinguishable, statically, from a hallucinated plan. What separates
+  // them is the objective, and scope enforcement holds the plan to its
+  // declared files either way.
   const admission = admit(
-    plan("task_a", { expectedFiles: ["src/other.ts"], expectedSymbols: [] }),
+    ungrounded(
+      plan("task_a", {
+        objective: "add a brand-new telemetry module",
+        expectedFiles: ["src/telemetry.ts"],
+        expectedSymbols: ["recordEvent"],
+      }),
+    ),
+    [
+      plan("task_b", {
+        objective: "raise the configured widget limit",
+        expectedFiles: ["src/other.ts"],
+        expectedSymbols: [],
+      }),
+    ],
+  );
+
+  assert.equal(admission.status, "approved");
+});
+
+test("a verified plan is sequenced while unverifiable work on the same objective executes", () => {
+  const admission = admit(
+    plan("task_a", {
+      objective: "adjust checkout pricing for orders",
+      expectedFiles: ["src/other.ts"],
+      expectedSymbols: [],
+    }),
     [
       ungrounded(
         plan("task_b", {
+          objective: "charge a checkout handling fee on orders",
           expectedFiles: ["src/ghost.ts"],
           expectedSymbols: ["ghostSymbol"],
         }),

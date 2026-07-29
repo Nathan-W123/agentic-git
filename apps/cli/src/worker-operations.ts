@@ -4,10 +4,12 @@ import path from "node:path";
 import { CodeIntelligenceService, groundPlan } from "@coord/code-intelligence";
 import {
   DEFAULT_PLAN_RETRY_MS,
+  OwnershipService,
   PlanAdmissionController,
   ScopeExpansionError,
   StoreApprovalController,
   approvalPolicyForProject,
+  approvedSchemaResources,
   assertChangeSetWithinPlan,
   deferredScopeObjective,
   isDeferredScopeFollowUp,
@@ -830,12 +832,24 @@ export async function admitWorkPlan(
   {
     const solo = await executingPlans(store, lease);
     if (solo.active.length === 0) {
+      // Ownership is still issued — the leases are the durable statement of
+      // what this task holds, and the next arrival's arbitration reads them.
+      // With no other work in the repository nothing can contest them, and a
+      // plan's own declared schemas are self-approved by the same rule the
+      // full path applies, so this cannot refuse a plan the full path would
+      // have admitted.
+      const grants = new OwnershipService().acquire(
+        submitted,
+        task.agentId,
+        baseVersion.sequence,
+        { approvedResources: approvedSchemaResources(submitted) },
+      );
       const admission: PlanAdmission = {
         status: "approved",
         taskId: task.id,
         planRevision: 1,
         baseRevision: baseVersion.revision,
-        ownershipGrants: [],
+        ownershipGrants: grants,
         constraints: [],
         blockedBy: [],
         conflicts: [],
@@ -884,6 +898,14 @@ export async function admitWorkPlan(
           explanation: admission.explanation,
           solo: true,
         });
+        if (grants.length > 0) {
+          await trace(store, undefined, "ownership_granted", task.id, {
+            projectId: task.projectId,
+            repositoryId: task.repositoryId,
+            leaseId: lease.id,
+            leases: grants,
+          });
+        }
         return { outcome: "admitted", admission };
       }
       // "stale": another admission landed between the read and the write.

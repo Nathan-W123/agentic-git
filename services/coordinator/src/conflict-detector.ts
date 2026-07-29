@@ -170,6 +170,23 @@ function words(value: string): Set<string> {
   );
 }
 
+/**
+ * Whether two plans are even about the same thing, judged from their stated
+ * intent alone.
+ *
+ * This is the only signal available against a plan whose resource claims
+ * verification could not connect to the repository: its declarations are
+ * fiction, but its objective is still an honest sentence about what it wants.
+ * Two tasks that both talk about checkout charges are plausibly after the
+ * same code however differently they misname it; a task about raising a value
+ * and a task about adding a new module share nothing worth serialising over.
+ */
+export function relatedObjectives(first: AgentPlan, second: AgentPlan): boolean {
+  const left = words(first.intent ?? first.objective);
+  const right = words(second.intent ?? second.objective);
+  return [...left].some((word) => word.length > 2 && right.has(word));
+}
+
 interface IntentResult {
   probability: number;
   resources: string[];

@@ -48,7 +48,7 @@ import {
   type ApprovalController,
 } from "./approval-service.js";
 import { InMemoryAuditLog } from "./audit-log.js";
-import { ConflictDetector } from "./conflict-detector.js";
+import { ConflictDetector, relatedObjectives } from "./conflict-detector.js";
 import { OwnershipService } from "./ownership-service.js";
 import {
   approvedSchemaResources,
@@ -720,16 +720,21 @@ export class Coordinator {
       pending.map((entry) => [entry.task.id, new Set<string>()]),
     );
     const byId = new Map(pending.map((entry) => [entry.task.id, entry]));
-    // An unverifiable plan is never proven disjoint from anything, because
-    // nothing it declares exists to compare. It still runs — in a wave of its
-    // own: behind every verifiable task, and behind every earlier
-    // unverifiable one. Edges all point one way, so no cycle is possible.
+    // An unverifiable plan is never proven disjoint from *related* work: its
+    // declarations connect to nothing that exists, so overlap scoring against
+    // it is comparing fiction with fact. When another pending task talks
+    // about the same objective, the unverifiable plan waits — behind the
+    // verifiable one, or behind the earlier-submitted one when both are
+    // unverifiable. Work about something else entirely keeps its concurrency:
+    // a plan that only creates new files is held to those declarations by
+    // scope enforcement either way. Edges all point one way, so no cycle is
+    // possible.
     for (const entry of pending) {
       if (planGroundingConfidence(entry.plan) !== "ungrounded") {
         continue;
       }
       for (const other of pending) {
-        if (other === entry) {
+        if (other === entry || !relatedObjectives(entry.plan, other.plan)) {
           continue;
         }
         const otherUngrounded =

@@ -163,12 +163,13 @@ function task(id: string): TaskDefinition {
 
 function plan(
   taskId: string,
+  objective: string,
   expectedFiles: string[],
   expectedSymbols: string[] = [],
 ): AgentPlan {
   return {
     taskId,
-    objective: taskId,
+    objective,
     expectedFiles,
     expectedSymbols,
     dependencies: [],
@@ -203,7 +204,7 @@ async function fixture(root: string): Promise<{
   };
 }
 
-test("two unverifiable plans never share a wave, even with no detected overlap", async () => {
+test("two unverifiable plans about one objective never share a wave, even with no detected overlap", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-grounding-run-"));
   try {
     const parts = await fixture(root);
@@ -213,15 +214,26 @@ test("two unverifiable plans never share a wave, even with no detected overlap",
     });
     // Neither declared file exists; neither symbol resolves; the declared
     // names of the two plans share nothing — the recorded live failure shape.
+    // The objectives, though, are visibly about the same checkout pricing.
     const agentA = new GhostAgent(
       "agent_a",
-      plan("task_a", ["src/ghost-a.txt"], ["phantomAlpha"]),
+      plan(
+        "task_a",
+        "charge a checkout handling fee on orders",
+        ["src/ghost-a.txt"],
+        ["phantomAlpha"],
+      ),
       parts.repository,
       parts.workspaces,
     );
     const agentB = new GhostAgent(
       "agent_b",
-      plan("task_b", ["src/ghost-b.txt"], ["phantomBeta"]),
+      plan(
+        "task_b",
+        "waive checkout delivery charges on orders",
+        ["src/ghost-b.txt"],
+        ["phantomBeta"],
+      ),
       parts.repository,
       parts.workspaces,
     );
@@ -265,13 +277,13 @@ test("verified disjoint plans keep their concurrency", async () => {
     });
     const agentA = new GhostAgent(
       "agent_a",
-      plan("task_a", ["src/a.txt"]),
+      plan("task_a", "polish the alpha text", ["src/a.txt"]),
       parts.repository,
       parts.workspaces,
     );
     const agentB = new GhostAgent(
       "agent_b",
-      plan("task_b", ["src/b.txt"]),
+      plan("task_b", "rewrite the beta copy", ["src/b.txt"]),
       parts.repository,
       parts.workspaces,
     );
@@ -291,6 +303,50 @@ test("verified disjoint plans keep their concurrency", async () => {
       ["integrated", "integrated"],
     );
     // Same wave: both executed against the same canonical sequence.
+    assert.equal(agentA.executionVersions[0], agentB.executionVersions[0]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an unverifiable plan about an unrelated objective keeps its concurrency", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-grounding-run-"));
+  try {
+    const parts = await fixture(root);
+    const coordinator = new Coordinator({
+      repositories: parts.repositories,
+      workspaces: parts.workspaces,
+    });
+    // A creates a brand-new file — unverifiable by construction — while B
+    // edits a real one about something else entirely. Serialising them would
+    // punish every module-creating task for the sins of hallucinating ones.
+    const agentA = new GhostAgent(
+      "agent_a",
+      plan("task_a", "add a telemetry module", ["src/telemetry.txt"]),
+      parts.repository,
+      parts.workspaces,
+    );
+    const agentB = new GhostAgent(
+      "agent_b",
+      plan("task_b", "polish the alpha text", ["src/a.txt"]),
+      parts.repository,
+      parts.workspaces,
+    );
+
+    const result = await coordinator.run({
+      repository: parts.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        { task: task("task_a"), adapter: agentA },
+        { task: task("task_b"), adapter: agentB },
+      ],
+    });
+
+    assert.deepEqual(
+      result.tasks.map((entry) => entry.status),
+      ["integrated", "integrated"],
+    );
     assert.equal(agentA.executionVersions[0], agentB.executionVersions[0]);
   } finally {
     await rm(root, { recursive: true, force: true });

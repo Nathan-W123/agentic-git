@@ -18,7 +18,7 @@ import {
 
 import type { NamedRange } from "./hunks.js";
 
-import { ConflictDetector } from "./conflict-detector.js";
+import { ConflictDetector, relatedObjectives } from "./conflict-detector.js";
 import {
   OwnershipApprovalRequiredError,
   OwnershipConflictError,
@@ -497,33 +497,45 @@ export class PlanAdmissionController {
     };
     const others = input.active.filter((entry) => entry.taskId !== taskId);
 
-    // Verification is a precondition for concurrency, not for running. A plan
-    // that names nothing real says nothing usable about what it will touch, so
-    // conflict scoring against it is theatre: the scores would compare fiction
-    // with fact and find no overlap. Such a plan still runs — alone. The same
-    // holds from the other side: while an unverifiable plan is executing, its
-    // real footprint is unknown, and no candidate can be proven disjoint from
-    // an unknown.
+    // Verification is a precondition for concurrency with *related* work, not
+    // for running. A plan that names nothing real says nothing usable about
+    // what it will touch, so conflict scoring against it is theatre: the
+    // scores would compare fiction with fact and find no overlap. But an
+    // unverifiable plan is not automatically a lying one — a task creating a
+    // new module declares only files that do not exist yet, and its write
+    // scope is still enforced against exactly those declarations. What
+    // separates the two cases is the objective: two tasks talking about the
+    // same thing plausibly want the same code however differently they
+    // misname it, so those are serialised; work about something else entirely
+    // keeps its concurrency. The same rule holds from the other side, against
+    // executing plans that could not be verified.
     if (others.length > 0 && planGroundingConfidence(plan) === "ungrounded") {
-      return {
-        ...shared,
-        status: "sequenced",
-        ownershipGrants: [],
-        constraints: [
-          "Plan again naming files and symbols that exist in the repository, " +
-            "or resubmit once the executing tasks integrate",
-        ],
-        blockedBy: others.map((entry) => entry.taskId).sort(),
-        conflicts: [],
-        explanation:
-          "Plan verification found none of this plan's declared files or " +
-          "symbols in the repository, so it cannot be proven disjoint from " +
-          `executing work: ${(plan.grounding?.notes ?? []).join("; ")}`,
-        retryAfterMs,
-      };
+      const related = others.filter((entry) =>
+        relatedObjectives(plan, entry.plan),
+      );
+      if (related.length > 0) {
+        return {
+          ...shared,
+          status: "sequenced",
+          ownershipGrants: [],
+          constraints: [
+            "Plan again naming files and symbols that exist in the repository, " +
+              "or resubmit once the executing tasks integrate",
+          ],
+          blockedBy: related.map((entry) => entry.taskId).sort(),
+          conflicts: [],
+          explanation:
+            "Plan verification found none of this plan's declared files or " +
+            "symbols in the repository, and executing work shares its stated " +
+            `objective, so the two cannot be proven disjoint: ${(plan.grounding?.notes ?? []).join("; ")}`,
+          retryAfterMs,
+        };
+      }
     }
     const ungroundedActive = others.filter(
-      (entry) => planGroundingConfidence(entry.plan) === "ungrounded",
+      (entry) =>
+        planGroundingConfidence(entry.plan) === "ungrounded" &&
+        relatedObjectives(plan, entry.plan),
     );
     if (ungroundedActive.length > 0) {
       return {
@@ -536,8 +548,8 @@ export class PlanAdmissionController {
         blockedBy: ungroundedActive.map((entry) => entry.taskId).sort(),
         conflicts: [],
         explanation:
-          "Executing work could not be verified against the repository, so " +
-          "its real footprint is unknown: " +
+          "Executing work about the same objective could not be verified " +
+          "against the repository, so its real footprint is unknown: " +
           ungroundedActive.map((entry) => entry.taskId).join(", "),
         retryAfterMs,
       };
