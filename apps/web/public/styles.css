@@ -1053,37 +1053,40 @@ fieldset.field-group legend {
   flex: none;
 }
 
+/* Each pill is a select plus a chevron, so it reads as a list to open. */
+.pill-select {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  flex: 1;
+}
+
+.pill-select::after {
+  content: "›";
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%) rotate(90deg);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--fg-subtle);
+  pointer-events: none;
+}
+
 .chat-quickbar select {
   appearance: none;
   -webkit-appearance: none;
-  width: auto;
-  max-width: 118px;
+  width: 100%;
+  min-width: 0;
   background: var(--bg-hover);
   border: 1px solid var(--border-muted);
   border-radius: 999px;
-  font-size: 10.5px;
-  /* Room on the right for the chevron drawn behind the select. */
-  padding: 1px 16px 1px 9px;
+  font-size: 9.5px;
+  /* Room on the right for the chevron. */
+  padding: 1px 14px 1px 7px;
   color: var(--fg-subtle);
   cursor: pointer;
   text-overflow: ellipsis;
-}
-
-/* A chevron marks these as pickers; the native arrow is suppressed above. */
-.chat-quickbar {
-  --chevron: linear-gradient(45deg, transparent 50%, currentcolor 50%),
-    linear-gradient(135deg, currentcolor 50%, transparent 50%);
-}
-
-.chat-quickbar select {
-  background-image: var(--chevron);
-  background-position:
-    right 8px top 52%,
-    right 5px top 52%;
-  background-size:
-    3px 3px,
-    3px 3px;
-  background-repeat: no-repeat;
 }
 
 .chat-quickbar select:hover {
@@ -1236,11 +1239,12 @@ fieldset.field-group legend {
 
 .context-dial {
   flex: none;
-  width: 22px;
-  height: 22px;
+  width: 26px;
+  height: 26px;
   display: grid;
   place-items: center;
   align-self: center;
+  justify-self: center;
 }
 
 .context-dial:empty {
@@ -1756,24 +1760,32 @@ button.settings-row:hover {
   align-items: stretch;
 }
 
-/* Send sits under the pickers so the pair occupies one column beside the
-   message box rather than a band above it. */
+/* Pickers stack above Send and the dial, and the whole control is held to a
+   narrow column so the message box keeps the width. */
 .chat-send-stack {
   display: flex;
   flex-direction: column;
   gap: 4px;
   flex: none;
+  width: 150px;
   justify-content: flex-end;
 }
 
+/* The model name earns more of the row than the effort word. */
+.chat-quickbar .pill-select:first-child {
+  flex: 1.35;
+}
+
 .chat-send-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr auto;
   align-items: center;
   gap: 6px;
 }
 
 .chat-send-row .button {
-  flex: 1;
+  width: 100%;
+  padding-inline: 10px;
 }
 
 .chat-input textarea {

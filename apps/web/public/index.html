@@ -229,8 +229,15 @@
                  it so the message box keeps the width and height. -->
             <div class="chat-send-stack">
               <div class="chat-quickbar" id="chat-quickbar" hidden>
-                <select id="chat-model-select" title="Model"></select>
-                <select id="chat-effort-select" title="Reasoning effort"></select>
+                <span class="pill-select">
+                  <select id="chat-model-select" title="Model"></select>
+                </span>
+                <span class="pill-select">
+                  <select
+                    id="chat-effort-select"
+                    title="Reasoning effort"
+                  ></select>
+                </span>
               </div>
               <div class="chat-send-row">
                 <button
