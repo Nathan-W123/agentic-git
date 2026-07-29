@@ -40,9 +40,22 @@ const state = {
   activity: "overview",
   tabs: [],
   activeTabId: undefined,
-  taskFilter: "open",
   panelOpen: false,
   panelTab: "terminal",
+
+  /**
+   * Agent chat: the primary way work is prompted. Each entry tracks one task
+   * this browser prompted; status and progress render live from state.tasks
+   * and the audit stream. Persisted per project in localStorage.
+   */
+  chat: {
+    open: localStorage.getItem("relay.chatOpen") !== "false",
+    agentId: localStorage.getItem("relay.chatAgent") ?? "",
+    repositoryId: localStorage.getItem("relay.chatRepo") ?? "",
+    tracked: [],
+    sending: false,
+    runAttempts: new Map(),
+  },
 
   /** Explorer / workspace state, keyed by the selected repository. */
   explorerRepo: localStorage.getItem("relay.explorerRepo") ?? "",
@@ -396,6 +409,8 @@ async function loadContext({ quiet = false } = {}) {
       state.explorerRepo = state.repositories[0]?.id ?? "";
     }
 
+    loadChatTracked();
+    maybeDrainChatRuns();
     renderSelectors();
     connectSocket();
     renderShell();
@@ -564,7 +579,7 @@ function timeline(events, limit = 12) {
 const ACTIVITIES = [
   { id: "overview", label: "Overview", icon: "home", view: "overview" },
   { id: "explorer", label: "Explorer", icon: "files", view: "explorer" },
-  { id: "tasks", label: "Tasks", icon: "tasks", view: "tasks", badge: "tasks" },
+  { id: "board", label: "Board", icon: "board", view: "board", badge: "tasks" },
   { id: "runs", label: "Runs", icon: "runs", view: "runs" },
   {
     id: "approvals",
@@ -586,8 +601,7 @@ const FOOTER_ACTIVITIES = [
 const VIEW_META = {
   overview: { title: "Overview", icon: "home", activity: "overview" },
   explorer: { title: "Workspace", icon: "files", activity: "explorer" },
-  tasks: { title: "Tasks", icon: "tasks", activity: "tasks" },
-  board: { title: "Board", icon: "board", activity: "tasks" },
+  board: { title: "Board", icon: "board", activity: "board" },
   runs: { title: "Runs", icon: "runs", activity: "runs" },
   approvals: { title: "Approvals", icon: "approvals", activity: "approvals" },
   repositories: { title: "Repositories", icon: "repos", activity: "repositories" },
@@ -732,7 +746,11 @@ function applyHash() {
   const [head, ...rest] = raw.split("/");
   applyingHash = true;
   try {
-    if (head === "run" && rest[0]) {
+    if (head === "tasks") {
+      // The Tasks submit-queue view was replaced by the agent chat; the
+      // board remains the queue's visibility surface for old links.
+      openView("board");
+    } else if (head === "run" && rest[0]) {
       openRunTab(decodeURIComponent(rest[0]));
     } else if (head === "approval" && rest[0]) {
       openApprovalTab(decodeURIComponent(rest[0]));
@@ -772,6 +790,7 @@ function renderShell() {
   renderActiveTabContent();
   renderStatusBar();
   renderEventsPanel();
+  renderChat();
   syncHash();
 }
 
@@ -829,7 +848,7 @@ function renderSidebar() {
   const title = {
     overview: "Overview",
     explorer: "Explorer",
-    tasks: "Tasks",
+    board: "Task board",
     runs: "Integration runs",
     approvals: "Approvals",
     repositories: "Repositories",
@@ -842,7 +861,7 @@ function renderSidebar() {
   const sidebars = {
     overview: sidebarOverview,
     explorer: sidebarExplorer,
-    tasks: sidebarTasks,
+    board: sidebarBoard,
     runs: sidebarRuns,
     approvals: sidebarApprovals,
     repositories: sidebarRepositories,
@@ -876,7 +895,7 @@ function sidebarOverview() {
         ${sideItem({
           label: "Queued tasks",
           iconName: "tasks",
-          action: 'data-open-view="tasks"',
+          action: 'data-open-view="board"',
           count: pending,
         })}
         ${sideItem({
@@ -1033,7 +1052,7 @@ function renderFileTree() {
   return renderNode(root, "", 0);
 }
 
-function sidebarTasks() {
+function sidebarBoard() {
   const counts = {};
   for (const task of state.tasks) {
     counts[task.status] = (counts[task.status] ?? 0) + 1;
@@ -1041,17 +1060,11 @@ function sidebarTasks() {
   return {
     body: `
       ${sideItem({
-        label: "All tasks",
-        iconName: "tasks",
-        action: 'data-open-view="tasks"',
-        active: activeTab()?.id === "view:tasks",
-        count: state.tasks.length,
-      })}
-      ${sideItem({
         label: "Board",
         iconName: "board",
         action: 'data-open-view="board"',
         active: activeTab()?.id === "view:board",
+        count: state.tasks.length,
       })}
       <div class="side-section">
         <h3>By status</h3>
@@ -1059,12 +1072,23 @@ function sidebarTasks() {
           .map((status) =>
             sideItem({
               label: status.replaceAll("_", " "),
-              action: `data-task-filter="${status}"`,
-              active: state.taskFilter === status,
+              action: 'data-open-view="board"',
               count: counts[status] ?? 0,
             }),
           )
           .join("")}
+      </div>
+      <div class="side-section">
+        <h3>Prompt work</h3>
+        <p class="side-empty">
+          New work starts in the agent chat on the right — pick an agent,
+          describe the change, and that agent plans and executes it.
+        </p>
+        ${sideItem({
+          label: "Focus the chat",
+          iconName: "tasks",
+          action: 'data-action="chat-focus"',
+        })}
       </div>
       ${
         canRun() && state.repositories.length > 0
@@ -1293,7 +1317,6 @@ function renderEventsPanel() {
 const viewRenderers = {
   overview: renderOverview,
   explorer: renderExplorerView,
-  tasks: renderTasks,
   board: renderBoard,
   runs: renderRuns,
   approvals: renderApprovals,
@@ -1404,7 +1427,7 @@ function renderOverview() {
   return `<div class="view">
     <header class="view-head">
       <div class="page-actions">
-        <button class="button button-primary" data-open-view="tasks">New task ↗</button>
+        <button class="button button-primary" data-action="chat-focus">Prompt an agent ↗</button>
       </div>
       <p class="eyebrow">Control room</p>
       <h1>${escapeHtml(state.project?.name ?? "Overview")}</h1>
@@ -1431,7 +1454,7 @@ function renderOverview() {
       <section class="panel">
         <header class="panel-head">
           <div><h2>Work in view</h2><p>Latest task outcomes for this project</p></div>
-          <button class="mini-button" data-open-view="tasks">Open queue</button>
+          <button class="mini-button" data-open-view="board">Open board</button>
         </header>
         <div class="table-wrap">
           ${taskTable(recentTasks, false)}
@@ -1519,133 +1542,6 @@ function taskTable(tasks, actions = true) {
     </table>`;
 }
 
-function taskIssueRow(task) {
-  return `
-    <div class="issue-row">
-      ${taskStatusIcon(task.status)}
-      <div class="issue-main">
-        <button class="issue-title" ${
-          task.runId
-            ? `data-open-run="${escapeHtml(task.runId)}"`
-            : `data-open-view="board"`
-        }>${escapeHtml(task.objective)}</button>
-        <div class="issue-meta">
-          <span>${escapeHtml(shortId(task.id, 18))}</span>
-          <span>opened ${escapeHtml(formatDate(task.submittedAt))}</span>
-          <span class="chip">${escapeHtml(task.agentId)}</span>
-          ${statusBadge(task.status)}
-        </div>
-      </div>
-      <div class="issue-side">
-        ${
-          task.runId
-            ? `<button class="mini-button" data-open-run="${escapeHtml(
-                task.runId,
-              )}">Run</button>`
-            : ""
-        }
-        ${taskActions(task)}
-      </div>
-    </div>`;
-}
-
-function renderTasks() {
-  const open = state.tasks.filter((task) =>
-    ["submitted", "claimed"].includes(task.status),
-  );
-  const closed = state.tasks.filter(
-    (task) => !["submitted", "claimed"].includes(task.status),
-  );
-  const filter = state.taskFilter;
-  const shown =
-    filter === "open"
-      ? open
-      : filter === "closed"
-        ? closed
-        : state.tasks.filter((task) => task.status === filter);
-
-  const repositoryOptions = state.repositories
-    .map(
-      (repository) =>
-        `<option value="${escapeHtml(repository.id)}">${escapeHtml(
-          repository.id,
-        )} · ${escapeHtml(repository.branch)}</option>`,
-    )
-    .join("");
-  const agentOptions = state.agents
-    .map(
-      (agent) =>
-        `<option value="${escapeHtml(agent.id)}"${
-          agent.default ? " selected" : ""
-        }>${escapeHtml(agent.id)} · ${escapeHtml(agent.adapter)}</option>`,
-    )
-    .join("");
-
-  return `<div class="view">
-    <header class="view-head">
-      <p class="eyebrow">Work queue</p>
-      <h1>Tasks</h1>
-      <p>Submit intent, choose an agent, and control the project queue.</p>
-    </header>
-    <div class="split-form">
-      <form class="form-card" data-form="task-submit">
-        <p class="eyebrow">Intent before edits</p>
-        <h2>Submit a coordinated task</h2>
-        <p>The selected agent will propose a structural plan before receiving a writable workspace.</p>
-        <label>
-          <span>Engineering objective</span>
-          <textarea name="objective" placeholder="Add password reset without changing the public user repository contract" required></textarea>
-        </label>
-        <label>
-          <span>Canonical repository</span>
-          <select name="repositoryId" required>${repositoryOptions}</select>
-        </label>
-        <label>
-          <span>Coding agent</span>
-          <select name="agentId" required>${agentOptions}</select>
-        </label>
-        <button class="button button-primary" type="submit" ${
-          state.repositories.length === 0 || state.agents.length === 0
-            ? "disabled"
-            : ""
-        }>Queue task <span aria-hidden="true">↗</span></button>
-        ${
-          state.repositories.length === 0
-            ? "<small>Import a repository before submitting work.</small>"
-            : ""
-        }
-        ${
-          state.agents.length === 0
-            ? "<small>Configure at least one agent in .coordinator/config.json.</small>"
-            : ""
-        }
-      </form>
-      <section class="issue-list">
-        <header class="issue-list-head">
-          <button class="issue-filter${filter === "open" ? " active" : ""}" data-set-task-filter="open">
-            ${icon("issueOpen")} ${open.length} Open
-          </button>
-          <button class="issue-filter${filter === "closed" ? " active" : ""}" data-set-task-filter="closed">
-            ${icon("issueClosed")} ${closed.length} Closed
-          </button>
-          ${
-            ["open", "closed"].includes(filter)
-              ? ""
-              : `<span class="chip">filter: ${escapeHtml(filter)}</span>`
-          }
-          <span class="spacer" style="flex:1"></span>
-          <span class="muted">${state.tasks.length} total</span>
-        </header>
-        ${
-          shown.length === 0
-            ? '<div class="empty-state"><div><h2>Nothing here</h2><p>No tasks match this filter.</p></div></div>'
-            : [...shown].reverse().map(taskIssueRow).join("")
-        }
-      </section>
-    </div>
-  </div>`;
-}
-
 /* Board ------------------------------------------------------------------- */
 
 /**
@@ -1691,13 +1587,16 @@ function renderBoard() {
                     formatDate(task.submittedAt, { short: true }),
                   )}</span>
                 </div>
-                ${
-                  task.runId
-                    ? `<button class="mini-button" data-open-run="${escapeHtml(
-                        task.runId,
-                      )}">Open run</button>`
-                    : ""
-                }
+                <div class="row-actions">
+                  ${
+                    task.runId
+                      ? `<button class="mini-button" data-open-run="${escapeHtml(
+                          task.runId,
+                        )}">Open run</button>`
+                      : ""
+                  }
+                  ${taskActions(task)}
+                </div>
               </article>`,
                   )
                   .join("")
@@ -1741,7 +1640,7 @@ function renderRuns() {
     </header>
     ${
       state.runs.length === 0
-        ? '<div class="empty-state"><div><h2>No integration runs</h2><p>Start a repository run from the task queue. Every plan, conflict, lease, replan, validation, and promotion will be retained here.</p><button class="button button-primary" data-open-view="tasks">Open task queue</button></div></div>'
+        ? '<div class="empty-state"><div><h2>No integration runs</h2><p>Prompt an agent in the chat to start coordinated work. Every plan, conflict, lease, replan, validation, and promotion will be retained here.</p><button class="button button-primary" data-action="chat-focus">Prompt an agent</button></div></div>'
         : `<section class="issue-list">
             <header class="issue-list-head">
               <span class="muted">${state.runs.length} run${
@@ -3030,6 +2929,280 @@ async function workspaceAction(action) {
   }
 }
 
+/* ---------------------------------------------------------- agent chat --- */
+
+/**
+ * The agent chat is how work is prompted: pick an agent, describe the change,
+ * and that agent plans and executes it through the ordinary pipeline. Under
+ * the hood a prompt is still a coordinated task — submitted with the chosen
+ * agentId, run, admitted, validated, promoted — so everything the platform
+ * guarantees about parallel work still holds; the queue just stopped being
+ * the thing you look at.
+ */
+
+function chatStorageKey() {
+  return `relay.chat.${state.projectId}`;
+}
+
+function loadChatTracked() {
+  try {
+    const raw = localStorage.getItem(chatStorageKey());
+    state.chat.tracked = raw === null ? [] : JSON.parse(raw);
+  } catch {
+    state.chat.tracked = [];
+  }
+}
+
+function saveChatTracked() {
+  state.chat.tracked = state.chat.tracked.slice(-50);
+  localStorage.setItem(chatStorageKey(), JSON.stringify(state.chat.tracked));
+}
+
+/**
+ * The most informative audit event about one task, for progress lines.
+ *
+ * A failure at run start is recorded against the repository rather than a
+ * task id, so for a failed task a repository-level task_failed event beats
+ * an older task-scoped "submitted" breadcrumb.
+ */
+function latestTaskEvent(taskId, repositoryId, status) {
+  let taskScoped;
+  for (let index = state.audit.length - 1; index >= 0; index -= 1) {
+    const record = state.audit[index];
+    const event = record.event;
+    if (event?.taskId === taskId) {
+      taskScoped ??= event;
+      if (event.type === "task_failed" || event.type === "canonical_promoted") {
+        return event;
+      }
+    }
+    if (
+      status === "failed" &&
+      taskScoped === undefined &&
+      event?.type === "task_failed" &&
+      event.taskId === undefined &&
+      event.data?.repositoryId === repositoryId
+    ) {
+      return event;
+    }
+  }
+  return taskScoped;
+}
+
+function chatAgentBubble(entry) {
+  const task = state.tasks.find((candidate) => candidate.id === entry.taskId);
+  const status = task?.status ?? "submitted";
+  const event = latestTaskEvent(entry.taskId, entry.repositoryId, status);
+  const messages = {
+    submitted: "Queued. I plan first, then execute in an isolated workspace.",
+    claimed: "Working on it — planning, then editing in my own workspace.",
+    integrated:
+      "Done. The change passed validation and was promoted to canonical.",
+    failed: "That didn't land.",
+    cancelled: "Cancelled before landing.",
+  };
+  const runId = task?.runId;
+  return `
+    <div class="chat-msg agent">
+      <span class="who">${escapeHtml(entry.agentId)}</span>
+      ${escapeHtml(messages[status] ?? status)}
+      ${
+        event !== undefined
+          ? `<div class="meta">${taskStatusIcon(status)} ${escapeHtml(
+              eventTitle(event),
+            )} · ${escapeHtml(String(eventDetail(event)).slice(0, 120))}</div>`
+          : `<div class="meta">${taskStatusIcon(status)} ${statusBadge(status)}</div>`
+      }
+      <div class="meta">
+        ${runId ? `<button class="mini-button" data-open-run="${escapeHtml(runId)}">Open run</button>` : ""}
+        ${taskActions(task ?? { id: entry.taskId, status })}
+      </div>
+    </div>`;
+}
+
+function renderChat() {
+  const shell = $("#app-shell");
+  if (!shell) {
+    return;
+  }
+  shell.classList.toggle("chat-collapsed", !state.chat.open);
+  const agentSelect = $("#chat-agent-select");
+  const repoSelect = $("#chat-repo-select");
+  if (!agentSelect) {
+    return;
+  }
+
+  if (
+    !state.agents.some((agent) => agent.id === state.chat.agentId)
+  ) {
+    state.chat.agentId =
+      state.agents.find((agent) => agent.default)?.id ??
+      state.agents[0]?.id ??
+      "";
+  }
+  if (
+    !state.repositories.some((repo) => repo.id === state.chat.repositoryId)
+  ) {
+    state.chat.repositoryId = state.repositories[0]?.id ?? "";
+  }
+  agentSelect.innerHTML =
+    state.agents.length === 0
+      ? '<option value="">No agents configured</option>'
+      : state.agents
+          .map(
+            (agent) =>
+              `<option value="${escapeHtml(agent.id)}"${
+                agent.id === state.chat.agentId ? " selected" : ""
+              }>${escapeHtml(agent.id)} · ${escapeHtml(agent.adapter)}</option>`,
+          )
+          .join("");
+  repoSelect.innerHTML =
+    state.repositories.length === 0
+      ? '<option value="">No repository</option>'
+      : state.repositories
+          .map(
+            (repo) =>
+              `<option value="${escapeHtml(repo.id)}"${
+                repo.id === state.chat.repositoryId ? " selected" : ""
+              }>${escapeHtml(repo.id)}</option>`,
+          )
+          .join("");
+
+  const thread = $("#chat-thread");
+  const entries = state.chat.tracked;
+  if (entries.length === 0) {
+    thread.innerHTML = `<p class="chat-empty">${
+      state.agents.length === 0
+        ? "Configure an agent (claude, codex, gemini, or a generic CLI) in .coordinator/config.json to start prompting work."
+        : state.repositories.length === 0
+          ? "Import a repository, then tell your agent what to build."
+          : "Describe a change and your agent will plan it, execute it in an isolated workspace, and submit it through validation into canonical."
+    }</p>`;
+  } else {
+    thread.innerHTML = entries
+      .map(
+        (entry) => `
+        <div class="chat-msg user">${escapeHtml(entry.objective)}
+          <div class="meta"><span class="chip">${escapeHtml(entry.agentId)}</span>
+            <span class="chip">${escapeHtml(entry.repositoryId)}</span>
+            <span>${escapeHtml(formatDate(entry.at, { short: true }))}</span></div>
+        </div>
+        ${chatAgentBubble(entry)}`,
+      )
+      .join("");
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  const disabled =
+    !canRun() ||
+    state.agents.length === 0 ||
+    state.repositories.length === 0 ||
+    state.chat.sending;
+  $("#chat-input").disabled = disabled && !state.chat.sending;
+  $("#chat-send").disabled = disabled;
+  $("#chat-input").placeholder = !canRun()
+    ? "Your role can watch work but not prompt it"
+    : "Tell the agent what to build…";
+}
+
+/**
+ * Kicks the coordinator for a repository so a prompted task starts without a
+ * separate "run" click. A run already in flight is fine — the task is queued
+ * behind it and picked up when the coordinator next drains the repository.
+ */
+async function ensureRepositoryRun(repositoryId, { quiet = true } = {}) {
+  state.chat.runAttempts.set(repositoryId, Date.now());
+  try {
+    await api(
+      `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(
+        repositoryId,
+      )}/run`,
+      { method: "POST", body: {} },
+    );
+  } catch (error) {
+    if (error.code !== "run_in_progress" && !quiet) {
+      toast(error.message, "error");
+    }
+  }
+}
+
+/** Restarts the run loop for chat tasks that are still waiting. */
+function maybeDrainChatRuns() {
+  if (!canRun()) {
+    return;
+  }
+  const waitingRepos = new Set(
+    state.chat.tracked
+      .filter((entry) =>
+        state.tasks.some(
+          (task) => task.id === entry.taskId && task.status === "submitted",
+        ),
+      )
+      .map((entry) => entry.repositoryId),
+  );
+  for (const repositoryId of waitingRepos) {
+    const runActive = state.runs.some(
+      (run) => run.repositoryId === repositoryId && run.status === "running",
+    );
+    const lastAttempt = state.chat.runAttempts.get(repositoryId) ?? 0;
+    if (!runActive && Date.now() - lastAttempt > 20_000) {
+      void ensureRepositoryRun(repositoryId);
+    }
+  }
+}
+
+async function sendChatPrompt() {
+  const input = $("#chat-input");
+  const objective = input.value.trim();
+  if (
+    objective.length === 0 ||
+    state.chat.sending ||
+    !state.chat.agentId ||
+    !state.chat.repositoryId
+  ) {
+    return;
+  }
+  state.chat.sending = true;
+  $("#chat-send").disabled = true;
+  try {
+    const response = await api(
+      `/projects/${encodeURIComponent(state.projectId)}/tasks`,
+      {
+        method: "POST",
+        body: {
+          repositoryId: state.chat.repositoryId,
+          objective,
+          agentId: state.chat.agentId,
+        },
+      },
+    );
+    state.chat.tracked.push({
+      taskId: response.task.id,
+      objective,
+      agentId: state.chat.agentId,
+      repositoryId: state.chat.repositoryId,
+      at: new Date().toISOString(),
+    });
+    saveChatTracked();
+    input.value = "";
+    await ensureRepositoryRun(state.chat.repositoryId);
+    await loadContext({ quiet: true });
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.chat.sending = false;
+    renderChat();
+    input.focus();
+  }
+}
+
+function focusChat() {
+  state.chat.open = true;
+  localStorage.setItem("relay.chatOpen", "true");
+  renderChat();
+  $("#chat-input")?.focus();
+}
+
 /* ------------------------------------------------------------ terminal --- */
 
 function renderTerminalContext() {
@@ -3168,18 +3341,6 @@ async function handleSubmit(event) {
         await enterApp();
         break;
       }
-      case "task-submit":
-        await mutate(
-          `/projects/${encodeURIComponent(state.projectId)}/tasks`,
-          {
-            repositoryId: value("repositoryId"),
-            objective: value("objective"),
-            agentId: value("agentId"),
-          },
-          "Task added to the coordinated queue",
-        );
-        form.reset();
-        break;
       case "github-import":
         await mutate(
           `/projects/${encodeURIComponent(
@@ -3418,16 +3579,6 @@ async function handleClick(event) {
     renderSidebar();
     return;
   }
-  if (target.dataset.setTaskFilter) {
-    state.taskFilter = target.dataset.setTaskFilter;
-    renderShell();
-    return;
-  }
-  if (target.dataset.taskFilter) {
-    state.taskFilter = target.dataset.taskFilter;
-    openView("tasks");
-    return;
-  }
   if (
     target.dataset.action?.startsWith("workspace-")
   ) {
@@ -3445,6 +3596,22 @@ async function handleClick(event) {
       state.principal = undefined;
       showAuth();
     }
+    return;
+  }
+  if (target.dataset.action === "chat-focus") {
+    focusChat();
+    return;
+  }
+  if (target.id === "chat-toggle") {
+    state.chat.open = !state.chat.open;
+    localStorage.setItem("relay.chatOpen", String(state.chat.open));
+    renderChat();
+    return;
+  }
+  if (target.id === "chat-collapse") {
+    state.chat.open = false;
+    localStorage.setItem("relay.chatOpen", "false");
+    renderChat();
     return;
   }
   if (target.id === "panel-toggle") {
@@ -3564,6 +3731,16 @@ async function handleChange(event) {
     await refreshWorkspace();
     return;
   }
+  if (target.id === "chat-agent-select") {
+    state.chat.agentId = target.value;
+    localStorage.setItem("relay.chatAgent", state.chat.agentId);
+    return;
+  }
+  if (target.id === "chat-repo-select") {
+    state.chat.repositoryId = target.value;
+    localStorage.setItem("relay.chatRepo", state.chat.repositoryId);
+    return;
+  }
   if (target.dataset.memberRole) {
     try {
       await api(
@@ -3613,6 +3790,16 @@ async function boot() {
     if (event.key === "`" && event.ctrlKey) {
       event.preventDefault();
       setPanel(!state.panelOpen);
+    }
+  });
+  $("#chat-form").addEventListener("submit", (event) => {
+    event.preventDefault();
+    void sendChatPrompt();
+  });
+  $("#chat-input").addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      void sendChatPrompt();
     }
   });
   $("#terminal-input").addEventListener("keydown", (event) => {

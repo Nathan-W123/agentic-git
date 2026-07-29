@@ -190,6 +190,41 @@
         </div>
       </div>
 
+      <aside class="chat-panel" id="chat-panel" aria-label="Agent chat">
+        <header class="chat-head">
+          <span class="chat-title">Agent chat</span>
+          <span class="row-actions">
+            <button
+              class="mini-button"
+              id="chat-collapse"
+              title="Collapse chat"
+            >⇥</button>
+          </span>
+        </header>
+        <div class="chat-pickers">
+          <label>
+            <span>Agent</span>
+            <select id="chat-agent-select"></select>
+          </label>
+          <label>
+            <span>Repository</span>
+            <select id="chat-repo-select"></select>
+          </label>
+        </div>
+        <div class="chat-thread" id="chat-thread"></div>
+        <form class="chat-input" id="chat-form">
+          <textarea
+            id="chat-input"
+            rows="2"
+            placeholder="Tell the agent what to build…"
+            spellcheck="true"
+          ></textarea>
+          <button class="button button-primary" type="submit" id="chat-send">
+            Send
+          </button>
+        </form>
+      </aside>
+
       <footer class="status-bar" id="status-bar">
         <span class="status-item" id="status-live">
           <span class="pulse-dot" id="live-dot"></span>
@@ -199,6 +234,9 @@
         <span class="spacer"></span>
         <button class="status-item" id="panel-toggle" title="Toggle terminal panel">
           Terminal
+        </button>
+        <button class="status-item" id="chat-toggle" title="Toggle agent chat">
+          Chat
         </button>
         <span class="status-item" id="updated-at"></span>
         <button class="status-item" id="refresh-button">Refresh</button>
