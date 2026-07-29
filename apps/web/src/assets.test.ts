@@ -187,3 +187,172 @@ test("the browser date formatter supports full and compact timestamps", async ()
   assert.doesNotThrow(() => formatDate(timestamp, { short: true }));
   assert.equal(formatDate("invalid"), "invalid");
 });
+
+type DispatchInput = {
+  adapter?: string;
+  agents?: Array<{ id: string; adapter: string }>;
+  workers?: Array<{ adapters?: string[] }>;
+  repositoryId?: string;
+  draft?: string;
+  lastUserMessage?: string;
+  route?: string;
+};
+type DispatchResult = {
+  ok: boolean;
+  reason?: string;
+  warning?: string;
+  objective: string;
+  route: string;
+  agentId?: string;
+  repositoryId: string;
+  workerCount: number;
+};
+
+async function dispatchPlanner(): Promise<
+  (input: DispatchInput) => DispatchResult
+> {
+  return extract<(input: DispatchInput) => DispatchResult>(
+    await browserSource(),
+    "dispatchPlan",
+    "currentDispatchPlan",
+  );
+}
+
+const CLAUDE_AGENTS = [
+  { id: "claude", adapter: "claude" },
+  { id: "codex", adapter: "codex" },
+];
+
+test("dispatch routes Claude in process and Codex to a remote worker", async () => {
+  const dispatchPlan = await dispatchPlanner();
+  const claude = dispatchPlan({
+    adapter: "claude",
+    agents: CLAUDE_AGENTS,
+    repositoryId: "core",
+    draft: "Add a health endpoint",
+  });
+  assert.equal(claude.ok, true);
+  assert.equal(claude.route, "local");
+  assert.equal(claude.agentId, "claude");
+
+  const codex = dispatchPlan({
+    adapter: "codex",
+    agents: CLAUDE_AGENTS,
+    repositoryId: "core",
+    draft: "Add a health endpoint",
+  });
+  assert.equal(codex.route, "remote");
+  assert.equal(codex.agentId, "codex");
+
+  // An explicit choice beats the per-provider default in both directions.
+  assert.equal(
+    dispatchPlan({
+      adapter: "codex",
+      agents: CLAUDE_AGENTS,
+      repositoryId: "core",
+      draft: "x",
+      route: "local",
+    }).route,
+    "local",
+  );
+});
+
+test("a remote dispatch with no worker listening says so instead of looking started", async () => {
+  const dispatchPlan = await dispatchPlanner();
+  const alone = dispatchPlan({
+    adapter: "codex",
+    agents: CLAUDE_AGENTS,
+    repositoryId: "core",
+    draft: "Add a health endpoint",
+  });
+  assert.equal(alone.ok, true);
+  assert.equal(alone.workerCount, 0);
+  assert.match(alone.warning ?? "", /no remote worker/iu);
+
+  const staffed = dispatchPlan({
+    adapter: "codex",
+    agents: CLAUDE_AGENTS,
+    workers: [{ adapters: ["codex", "claude"] }, { adapters: ["gemini"] }],
+    repositoryId: "core",
+    draft: "Add a health endpoint",
+  });
+  assert.equal(staffed.workerCount, 1);
+  assert.equal(staffed.warning, undefined);
+
+  // A local run never depends on the worker fleet.
+  assert.equal(
+    dispatchPlan({
+      adapter: "claude",
+      agents: CLAUDE_AGENTS,
+      repositoryId: "core",
+      draft: "x",
+    }).warning,
+    undefined,
+  );
+});
+
+test("dispatch falls back to the last message and refuses what it cannot submit", async () => {
+  const dispatchPlan = await dispatchPlanner();
+  // An empty composer dispatches what was last asked, so the conversation
+  // itself becomes the task.
+  assert.equal(
+    dispatchPlan({
+      adapter: "claude",
+      agents: CLAUDE_AGENTS,
+      repositoryId: "core",
+      draft: "   ",
+      lastUserMessage: "Explain and then fix the flaky test",
+    }).objective,
+    "Explain and then fix the flaky test",
+  );
+
+  assert.match(
+    dispatchPlan({
+      adapter: "claude",
+      agents: CLAUDE_AGENTS,
+      repositoryId: "core",
+    }).reason ?? "",
+    /type or send something/iu,
+  );
+  assert.match(
+    dispatchPlan({
+      adapter: "claude",
+      agents: CLAUDE_AGENTS,
+      draft: "x",
+    }).reason ?? "",
+    /repository/iu,
+  );
+  // No configured agent means no task: the coordinator would reject it.
+  assert.match(
+    dispatchPlan({
+      adapter: "gemini",
+      agents: CLAUDE_AGENTS,
+      repositoryId: "core",
+      draft: "x",
+    }).reason ?? "",
+    /adapter "gemini"/iu,
+  );
+});
+
+test("a task routed to a remote worker is never drained by the local run loop", async () => {
+  const source = await browserSource();
+  // Without this guard the dashboard kicks a local run for any waiting chat
+  // task, which claims the task in process and defeats the remote route.
+  assert.match(source, /entry\.route !== "remote" &&/u);
+  const drain = source.slice(
+    source.indexOf("function maybeDrainChatRuns"),
+    source.indexOf("function", source.indexOf("function maybeDrainChatRuns") + 10),
+  );
+  assert.match(drain, /route !== "remote"/u);
+});
+
+test("dispatch submits through the ordinary task endpoint, not a side channel", async () => {
+  const source = await browserSource();
+  const dispatch = source.slice(
+    source.indexOf("async function performDispatch"),
+    source.indexOf("Kicks the coordinator for a repository"),
+  );
+  assert.match(dispatch, /\/projects\/\$\{encodeURIComponent\(state\.projectId\)\}\/tasks/u);
+  // Only the local route asks this control plane to execute.
+  assert.match(dispatch, /plan\.route === "local"[\s\S]*ensureRepositoryRun/u);
+});

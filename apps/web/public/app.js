@@ -74,6 +74,9 @@ const state = {
     usage: {},
     usageLoading: {},
     usageOpen: localStorage.getItem("relay.chatUsageOpen") === "true",
+    /** Dispatch confirmation state; route null means "provider default". */
+    dispatchOpen: false,
+    dispatchRoute: null,
     overlayProvider: null,
     /** Which overlay screen is showing: "main" settings or "usage". */
     overlayView: "main",
@@ -3066,7 +3069,10 @@ function chatAgentBubble(entry) {
   const status = task?.status ?? "submitted";
   const event = latestTaskEvent(entry.taskId, entry.repositoryId, status);
   const messages = {
-    submitted: "Queued. I plan first, then execute in an isolated workspace.",
+    submitted:
+      entry.route === "remote"
+        ? "Queued for a remote worker to lease. It plans first, then executes in its own sandbox."
+        : "Queued. I plan first, then execute in an isolated workspace.",
     claimed: "Working on it — planning, then editing in my own workspace.",
     integrated:
       "Done. The change passed validation and was promoted to canonical.",
@@ -3366,6 +3372,22 @@ function askBubble(message) {
         <div class="meta"><span>${escapeHtml(formatDate(message.at, { short: true }))}</span></div>
       </div>`;
   }
+  // A dispatched task keeps its card in the conversation that produced it,
+  // tracking the same coordinator state the Executions view shows.
+  if (message.role === "task") {
+    return `
+      <div class="chat-msg user">${escapeHtml(message.objective)}
+        <div class="meta">
+          <span class="chip">${escapeHtml(message.agentId ?? "")}</span>
+          <span class="chip">${escapeHtml(message.repositoryId ?? "")}</span>
+          <span class="chip">${
+            message.route === "remote" ? "remote worker" : "run here"
+          }</span>
+          <span>${escapeHtml(formatDate(message.at, { short: true }))}</span>
+        </div>
+      </div>
+      ${chatAgentBubble(message)}`;
+  }
   if (message.pending) {
     // Everything here is relayed from the CLI's own event stream: the status
     // word it announced, its reasoning-token count, its reasoning summary,
@@ -3582,6 +3604,7 @@ function renderChat() {
   renderChatQuickbar();
   renderChatUsage();
   renderContextDial();
+  renderDispatchPanel();
 
   const mode = state.chat.mode;
   $$("#chat-mode-toggle .mode-option").forEach((option) => {
@@ -3686,6 +3709,232 @@ function buildAgentFor(provider) {
 }
 
 /**
+ * Decides what dispatching the current conversation would actually do.
+ *
+ * Both routes are the coordinator's own: `local` submits the task and asks
+ * the control plane to drain the repository in process, while `remote`
+ * submits it and leaves it for a registered worker to lease through the
+ * worker protocol — plan first, its own sandbox, lease-bound. The two share
+ * one queue, so the only real difference is who executes.
+ *
+ * Pure so it can be tested without a browser.
+ */
+function dispatchPlan(input) {
+  const objective = (
+    input.draft?.trim().length > 0 ? input.draft : (input.lastUserMessage ?? "")
+  ).trim();
+  const adapter = input.adapter ?? "";
+  const agent = (input.agents ?? []).find(
+    (candidate) => candidate.adapter === adapter,
+  );
+  // Codex is the provider this platform runs as a hosted worker; Claude runs
+  // in process. An explicit choice always wins over that default.
+  const route = input.route ?? (adapter === "codex" ? "remote" : "local");
+  const workers = (input.workers ?? []).filter((worker) =>
+    (worker.adapters ?? []).includes(adapter),
+  );
+  const base = {
+    objective,
+    route,
+    adapter,
+    agentId: agent?.id,
+    repositoryId: input.repositoryId ?? "",
+    workerCount: workers.length,
+  };
+  if (objective.length === 0) {
+    return { ...base, ok: false, reason: "Type or send something to dispatch." };
+  }
+  if (base.repositoryId.length === 0) {
+    return {
+      ...base,
+      ok: false,
+      reason: "Choose a repository to dispatch against.",
+    };
+  }
+  if (agent === undefined) {
+    return {
+      ...base,
+      ok: false,
+      reason: `No agent with adapter "${adapter}" is configured in .coordinator/config.json.`,
+    };
+  }
+  // A remote route with nobody listening is legitimate — the task waits in
+  // the queue — but it must never look like it started.
+  const warning =
+    route === "remote" && workers.length === 0
+      ? `No remote worker advertising "${adapter}" is connected. The task will sit queued until one registers.`
+      : undefined;
+  return {
+    ...base,
+    ok: true,
+    ...(warning === undefined ? {} : { warning }),
+  };
+}
+
+/** The dispatch plan for what is currently on screen. */
+function currentDispatchPlan() {
+  const provider = state.chat.activeProvider;
+  const conversation = loadConversation(provider);
+  const lastUser = [...conversation]
+    .reverse()
+    .find((message) => message.role === "user");
+  return dispatchPlan({
+    adapter: providerMeta(provider)?.adapter,
+    agents: state.agents,
+    workers: state.workers,
+    repositoryId: state.chat.repositoryId,
+    draft: $("#chat-input")?.value ?? "",
+    lastUserMessage: lastUser?.content ?? "",
+    ...(state.chat.dispatchRoute === null
+      ? {}
+      : { route: state.chat.dispatchRoute }),
+  });
+}
+
+function renderDispatchPanel() {
+  const panel = $("#dispatch-panel");
+  const button = $("#chat-dispatch");
+  if (panel === null || button === null) {
+    return;
+  }
+  const connected = providerStatus(state.chat.activeProvider)?.connected;
+  // Dispatch does not need a chat connection — it submits to the
+  // coordinator — but it is only meaningful in a conversation view.
+  button.hidden = state.chat.mode !== "ask";
+  if (!state.chat.dispatchOpen || state.chat.mode !== "ask") {
+    panel.hidden = true;
+    panel.innerHTML = "";
+    return;
+  }
+  const plan = currentDispatchPlan();
+  const repositories = state.repositories
+    .map(
+      (repository) =>
+        `<option value="${escapeHtml(repository.id)}"${
+          repository.id === plan.repositoryId ? " selected" : ""
+        }>${escapeHtml(repository.id)}</option>`,
+    )
+    .join("");
+  const routeOption = (value, label, detail) => `
+    <button
+      class="dispatch-route${plan.route === value ? " active" : ""}"
+      data-action="dispatch-route"
+      data-route="${value}"
+      type="button"
+    >
+      <strong>${label}</strong>
+      <span>${detail}</span>
+    </button>`;
+  panel.hidden = false;
+  panel.innerHTML = `
+    <div class="dispatch-head">
+      <strong>Dispatch as a task</strong>
+      <button class="mini-button" data-action="dispatch-close">×</button>
+    </div>
+    <p class="dispatch-objective">${escapeHtml(
+      plan.objective.length > 0 ? plan.objective : "Nothing to dispatch yet.",
+    )}</p>
+    <label class="dispatch-field">
+      <span>Repository</span>
+      <select id="dispatch-repo">${
+        repositories === "" ? "<option value=''>None</option>" : repositories
+      }</select>
+    </label>
+    <div class="dispatch-routes">
+      ${routeOption(
+        "local",
+        "Run here",
+        "The control plane plans, executes, validates and promotes in process.",
+      )}
+      ${routeOption(
+        "remote",
+        "Remote worker",
+        `Leased through the worker protocol — plan first, its own sandbox. ${
+          plan.workerCount > 0
+            ? `${plan.workerCount} worker${plan.workerCount === 1 ? "" : "s"} advertising "${escapeHtml(plan.adapter)}".`
+            : "None connected right now."
+        }`,
+      )}
+    </div>
+    ${
+      plan.ok
+        ? plan.warning === undefined
+          ? `<p class="dispatch-note">${escapeHtml(
+              `${plan.agentId} · ${plan.repositoryId}`,
+            )}</p>`
+          : `<p class="dispatch-note warn">${escapeHtml(plan.warning)}</p>`
+        : `<p class="dispatch-note warn">${escapeHtml(plan.reason)}</p>`
+    }
+    <div class="dispatch-actions">
+      <button class="button button-primary" data-action="dispatch-confirm"${
+        plan.ok ? "" : " disabled"
+      }>Dispatch</button>
+      <button class="button button-quiet" data-action="dispatch-close">Cancel</button>
+    </div>
+    ${
+      connected === true
+        ? ""
+        : `<p class="dispatch-note">This provider is not connected for chat, but dispatch runs through the coordinator, so it still works.</p>`
+    }`;
+}
+
+/** Submits the planned task and, for the local route, starts the run. */
+async function performDispatch() {
+  const plan = currentDispatchPlan();
+  if (!plan.ok) {
+    toast(plan.reason, "error");
+    return;
+  }
+  const provider = state.chat.activeProvider;
+  try {
+    const response = await api(
+      `/projects/${encodeURIComponent(state.projectId)}/tasks`,
+      {
+        method: "POST",
+        body: {
+          repositoryId: plan.repositoryId,
+          objective: plan.objective,
+          agentId: plan.agentId,
+        },
+      },
+    );
+    const entry = {
+      taskId: response.task.id,
+      objective: plan.objective,
+      agentId: plan.agentId,
+      repositoryId: plan.repositoryId,
+      route: plan.route,
+      at: new Date().toISOString(),
+    };
+    state.chat.tracked.push(entry);
+    saveChatTracked();
+    // The task card lives in the conversation it came from.
+    loadConversation(provider).push({ role: "task", ...entry });
+    saveConversation(provider);
+    if (plan.route === "local") {
+      await ensureRepositoryRun(plan.repositoryId);
+    }
+    if ($("#chat-input") !== null) {
+      $("#chat-input").value = "";
+    }
+    state.chat.dispatchOpen = false;
+    toast(
+      plan.route === "local"
+        ? "Dispatched — the coordinator is running it here."
+        : plan.warning === undefined
+          ? "Queued for a remote worker."
+          : "Queued. No remote worker is connected yet.",
+      plan.warning === undefined ? "default" : "warn",
+    );
+    await loadContext({ quiet: true });
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    renderChat();
+  }
+}
+
+/**
  * Kicks the coordinator for a repository so a prompted task starts without a
  * separate "run" click. A run already in flight is fine — the task is queued
  * behind it and picked up when the coordinator next drains the repository.
@@ -3713,10 +3962,15 @@ function maybeDrainChatRuns() {
   }
   const waitingRepos = new Set(
     state.chat.tracked
-      .filter((entry) =>
-        state.tasks.some(
-          (task) => task.id === entry.taskId && task.status === "submitted",
-        ),
+      .filter(
+        (entry) =>
+          // A task routed to a remote worker is waiting for a lease, not for
+          // this control plane. Draining it here would execute it in process
+          // and defeat the route the user chose.
+          entry.route !== "remote" &&
+          state.tasks.some(
+            (task) => task.id === entry.taskId && task.status === "submitted",
+          ),
       )
       .map((entry) => entry.repositoryId),
   );
@@ -4777,6 +5031,25 @@ async function handleClick(event) {
     renderChat();
     return;
   }
+  if (target.id === "chat-dispatch") {
+    state.chat.dispatchOpen = !state.chat.dispatchOpen;
+    renderDispatchPanel();
+    return;
+  }
+  if (target.dataset.action === "dispatch-close") {
+    state.chat.dispatchOpen = false;
+    renderDispatchPanel();
+    return;
+  }
+  if (target.dataset.action === "dispatch-route") {
+    state.chat.dispatchRoute = target.dataset.route;
+    renderDispatchPanel();
+    return;
+  }
+  if (target.dataset.action === "dispatch-confirm") {
+    await performDispatch();
+    return;
+  }
   if (target.id === "chat-manage") {
     openConnectOverlay(state.chat.activeProvider);
     return;
@@ -4969,9 +5242,10 @@ async function handleChange(event) {
     await applyQuickSetting("effort", target.value);
     return;
   }
-  if (target.id === "chat-repo-select") {
+  if (target.id === "chat-repo-select" || target.id === "dispatch-repo") {
     state.chat.repositoryId = target.value;
     localStorage.setItem("relay.chatRepo", state.chat.repositoryId);
+    renderDispatchPanel();
     return;
   }
   if (target.dataset.memberRole) {

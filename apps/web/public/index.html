@@ -217,6 +217,9 @@
           <select id="chat-repo-select" hidden></select>
         </div>
         <div class="chat-thread" id="chat-thread"></div>
+        <!-- Confirms exactly what a dispatch would submit, and where it
+             would run, before any task is created. -->
+        <div class="dispatch-panel" id="dispatch-panel" hidden></div>
         <form class="chat-input" id="chat-form">
           <div class="chat-input-row">
             <textarea
@@ -249,6 +252,13 @@
                      provider CLI reported. -->
                 <span class="context-dial" id="context-dial"></span>
               </div>
+              <!-- Turns the conversation into a real coordinator task. -->
+              <button
+                class="button button-quiet chat-dispatch"
+                type="button"
+                id="chat-dispatch"
+                title="Dispatch this as a real coordinator task"
+              >Dispatch task</button>
             </div>
           </div>
         </form>
