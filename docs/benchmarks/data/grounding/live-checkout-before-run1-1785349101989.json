@@ -1,0 +1,100 @@
+{
+  "label": "before",
+  "scenario": "live-checkout",
+  "run": 1,
+  "groundingDisabled": true,
+  "startedAt": "2026-07-29T18:12:44.459Z",
+  "elapsedMs": 337496,
+  "taskIds": [
+    "task_checkout_fee",
+    "task_checkout_delivery"
+  ],
+  "plans": [
+    {
+      "taskId": "task_checkout_fee",
+      "revision": 1,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "HANDLING_FEE",
+        "base",
+        "discounted",
+        "lines",
+        "orderTotal",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": false
+      }
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "revision": 1,
+      "expectedFiles": [
+        "src/index.js",
+        "src/pricing/delivery.js",
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "FREE_DELIVERY_THRESHOLD",
+        "STANDARD_DELIVERY_FEE",
+        "base",
+        "deliveryFor",
+        "discounted",
+        "lines",
+        "orderTotal",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": false
+      }
+    }
+  ],
+  "conflicts": [
+    {
+      "taskIds": [
+        "task_checkout_fee",
+        "task_checkout_delivery"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "structural": true,
+      "explanation": "file_overlap: src/pricing/total.js, test/pricing.test.js (+40); symbol_overlap: base, discounted, lines, orderTotal, subtotal (+175); dependency_impact: file:src/index.js, file:src/pricing/total.js, symbol:orderTotal, symbol:subtotal (+100); test_overlap: order total applies tax, subtotal sums the lines, test/pricing.test.js (+30). Structural evidence controls scheduling."
+    }
+  ],
+  "pairFlaggedAtPlanTime": true,
+  "replans": 1,
+  "scopeChanges": 0,
+  "scopeDecisions": [],
+  "taskFailures": [],
+  "tasks": [
+    {
+      "taskId": "task_checkout_fee",
+      "status": "integrated",
+      "integration": "integrated",
+      "explanation": "Promoted c00608541cd3 atomically"
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "status": "integrated",
+      "integration": "integrated",
+      "explanation": "Promoted 70460de6ab9e atomically"
+    }
+  ],
+  "metrics": {
+    "tasksCompleted": 2,
+    "integrationAttempts": 2,
+    "integrationFailures": 0,
+    "conflictWarnings": 1,
+    "undetectedConflicts": 0,
+    "elapsedMs": 336552,
+    "tokensTotal": 110273,
+    "tokensByTask": {
+      "task_checkout_fee": 46126,
+      "task_checkout_delivery": 64147
+    }
+  }
+}

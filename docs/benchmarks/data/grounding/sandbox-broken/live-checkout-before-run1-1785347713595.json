@@ -1,0 +1,69 @@
+{
+  "label": "before",
+  "scenario": "live-checkout",
+  "run": 1,
+  "groundingDisabled": true,
+  "startedAt": "2026-07-29T17:51:34.094Z",
+  "elapsedMs": 219484,
+  "taskIds": [
+    "task_checkout_fee",
+    "task_checkout_delivery"
+  ],
+  "plans": [
+    {
+      "taskId": "task_checkout_delivery",
+      "revision": 1,
+      "expectedFiles": [],
+      "expectedSymbols": [
+        "Checkout order-total calculation (exact symbol unavailable because repository inspection was blocked)"
+      ],
+      "grounding": {
+        "attached": false
+      }
+    },
+    {
+      "taskId": "task_checkout_fee",
+      "revision": 1,
+      "expectedFiles": [
+        "src/checkout.js",
+        "test/checkout.test.js"
+      ],
+      "expectedSymbols": [
+        "calculateTotal",
+        "checkout"
+      ],
+      "grounding": {
+        "attached": false
+      }
+    }
+  ],
+  "conflicts": [],
+  "pairFlaggedAtPlanTime": false,
+  "replans": 0,
+  "scopeChanges": 10,
+  "tasks": [
+    {
+      "taskId": "task_checkout_fee",
+      "status": "failed",
+      "explanation": "Session session_e6631f66-06d2-42a7-9cec-f63428c3a633 was cancelled"
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "status": "failed",
+      "explanation": "Codex exceeded the maximum scope-change rounds for task_checkout_delivery"
+    }
+  ],
+  "metrics": {
+    "tasksCompleted": 0,
+    "integrationAttempts": 0,
+    "integrationFailures": 0,
+    "conflictWarnings": 0,
+    "undetectedConflicts": 0,
+    "elapsedMs": 218609,
+    "tokensTotal": 357127,
+    "tokensByTask": {
+      "task_checkout_fee": 95063,
+      "task_checkout_delivery": 262064
+    }
+  }
+}

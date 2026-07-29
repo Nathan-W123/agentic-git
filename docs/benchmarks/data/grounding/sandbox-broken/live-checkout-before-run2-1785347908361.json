@@ -1,0 +1,84 @@
+{
+  "label": "before",
+  "scenario": "live-checkout",
+  "run": 2,
+  "groundingDisabled": true,
+  "startedAt": "2026-07-29T17:55:13.598Z",
+  "elapsedMs": 194748,
+  "taskIds": [
+    "task_checkout_fee",
+    "task_checkout_delivery"
+  ],
+  "plans": [
+    {
+      "taskId": "task_checkout_fee",
+      "revision": 1,
+      "expectedFiles": [
+        "checkout.js",
+        "checkout.test.js"
+      ],
+      "expectedSymbols": [
+        "HANDLING_CHARGE",
+        "calculateTotal"
+      ],
+      "grounding": {
+        "attached": false
+      }
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "revision": 1,
+      "expectedFiles": [
+        "checkout.js",
+        "checkout.test.js"
+      ],
+      "expectedSymbols": [
+        "checkout",
+        "deliveryCharge"
+      ],
+      "grounding": {
+        "attached": false
+      }
+    }
+  ],
+  "conflicts": [
+    {
+      "taskIds": [
+        "task_checkout_fee",
+        "task_checkout_delivery"
+      ],
+      "score": 40,
+      "disposition": "concurrent_with_notification",
+      "structural": true,
+      "explanation": "file_overlap: checkout.js, checkout.test.js (+40). Structural evidence controls scheduling."
+    }
+  ],
+  "pairFlaggedAtPlanTime": true,
+  "replans": 0,
+  "scopeChanges": 4,
+  "tasks": [
+    {
+      "taskId": "task_checkout_fee",
+      "status": "failed",
+      "explanation": "Session session_5b6c57a4-09b6-4210-b66f-2389e494ee0e was cancelled"
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "status": "failed",
+      "explanation": "Session session_ac0ec08f-5107-47be-80de-10e987c3a398 was cancelled"
+    }
+  ],
+  "metrics": {
+    "tasksCompleted": 0,
+    "integrationAttempts": 0,
+    "integrationFailures": 0,
+    "conflictWarnings": 1,
+    "undetectedConflicts": 0,
+    "elapsedMs": 193763,
+    "tokensTotal": 214085,
+    "tokensByTask": {
+      "task_checkout_fee": 120859,
+      "task_checkout_delivery": 93226
+    }
+  }
+}

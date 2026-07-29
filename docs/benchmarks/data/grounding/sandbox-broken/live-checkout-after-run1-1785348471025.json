@@ -1,0 +1,140 @@
+{
+  "label": "after",
+  "scenario": "live-checkout",
+  "run": 1,
+  "groundingDisabled": false,
+  "startedAt": "2026-07-29T18:04:05.323Z",
+  "elapsedMs": 225685,
+  "taskIds": [
+    "task_checkout_fee",
+    "task_checkout_delivery"
+  ],
+  "plans": [
+    {
+      "taskId": "task_checkout_delivery",
+      "revision": 1,
+      "expectedFiles": [
+        "checkout.js",
+        "checkout.test.js"
+      ],
+      "expectedSymbols": [
+        "checkout",
+        "deliveryCharge"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "ungrounded",
+        "missingFiles": [
+          "checkout.js",
+          "checkout.test.js"
+        ],
+        "unresolvedSymbols": [
+          "checkout",
+          "deliveryCharge"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    {
+      "taskId": "task_checkout_fee",
+      "revision": 1,
+      "expectedFiles": [
+        "src/checkout.js",
+        "test/checkout.test.js"
+      ],
+      "expectedSymbols": [
+        "HANDLING_FEE",
+        "calculateTotal",
+        "checkout"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [
+          "src/checkout.js",
+          "test/checkout.test.js"
+        ],
+        "unresolvedSymbols": [
+          "HANDLING_FEE",
+          "calculateTotal",
+          "checkout"
+        ],
+        "fileReferents": [],
+        "symbolReferents": [
+          {
+            "declared": "calculateTotal",
+            "resolved": "orderTotal",
+            "files": [
+              "src/pricing/total.js"
+            ]
+          }
+        ]
+      }
+    }
+  ],
+  "conflicts": [
+    {
+      "taskIds": [
+        "task_checkout_fee",
+        "task_checkout_delivery"
+      ],
+      "score": 35,
+      "disposition": "concurrent_with_notification",
+      "structural": true,
+      "explanation": "symbol_overlap: checkout (+35). Structural evidence controls scheduling."
+    }
+  ],
+  "pairFlaggedAtPlanTime": true,
+  "replans": 0,
+  "scopeChanges": 2,
+  "scopeDecisions": [
+    {
+      "taskId": "task_checkout_fee",
+      "decision": "rejected",
+      "explanation": "Scope expansion must name at least one resource and explain why"
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "decision": "rejected",
+      "explanation": "Scope expansion must name at least one resource and explain why"
+    }
+  ],
+  "taskFailures": [
+    {
+      "taskId": "task_checkout_fee",
+      "stage": "execution",
+      "error": "Codex could not write to the workspace under --sandbox workspace-write. The scoped-write sandbox is unavailable or misconfigured, so every edit was rejected while Codex still reported success. Run `codex doctor` to confirm the native sandbox setup, and only set executionSandbox to \"danger-full-acces"
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "stage": "execution",
+      "error": "Codex could not write to the workspace under --sandbox workspace-write. The scoped-write sandbox is unavailable or misconfigured, so every edit was rejected while Codex still reported success. Run `codex doctor` to confirm the native sandbox setup, and only set executionSandbox to \"danger-full-acces"
+    }
+  ],
+  "tasks": [
+    {
+      "taskId": "task_checkout_fee",
+      "status": "failed",
+      "explanation": "Codex could not write to the workspace under --sandbox workspace-write. The scoped-write sandbox is unavailable or misconfigured, so every edit was rejected while Codex still reported success. Run `codex doctor` to confirm the native sandbox setup, and only set executionSandbox to \"danger-full-access\" when the workspace is already isolated by other means, such as a container. Codex reported: faile"
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "status": "failed",
+      "explanation": "Codex could not write to the workspace under --sandbox workspace-write. The scoped-write sandbox is unavailable or misconfigured, so every edit was rejected while Codex still reported success. Run `codex doctor` to confirm the native sandbox setup, and only set executionSandbox to \"danger-full-access\" when the workspace is already isolated by other means, such as a container. Codex reported: faile"
+    }
+  ],
+  "metrics": {
+    "tasksCompleted": 0,
+    "integrationAttempts": 0,
+    "integrationFailures": 0,
+    "conflictWarnings": 1,
+    "undetectedConflicts": 0,
+    "elapsedMs": 219941,
+    "tokensTotal": 137868,
+    "tokensByTask": {
+      "task_checkout_fee": 70699,
+      "task_checkout_delivery": 67169
+    }
+  }
+}

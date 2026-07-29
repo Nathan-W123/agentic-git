@@ -1,0 +1,72 @@
+{
+  "label": "before-smoke",
+  "scenario": "live-checkout",
+  "run": 1,
+  "groundingDisabled": true,
+  "startedAt": "2026-07-29T17:44:16.049Z",
+  "elapsedMs": 87591,
+  "taskIds": [
+    "task_checkout_fee",
+    "task_checkout_delivery"
+  ],
+  "plans": [
+    {
+      "taskId": "task_checkout_delivery",
+      "revision": 1,
+      "expectedFiles": [
+        "checkout.js",
+        "checkout.test.js"
+      ],
+      "expectedSymbols": [
+        "checkout",
+        "deliveryCharge",
+        "orderTotal"
+      ],
+      "grounding": {
+        "attached": false
+      }
+    },
+    {
+      "taskId": "task_checkout_fee",
+      "revision": 1,
+      "expectedFiles": [],
+      "expectedSymbols": [
+        "checkout total calculation",
+        "checkout total tests",
+        "handling charge constant"
+      ],
+      "grounding": {
+        "attached": false
+      }
+    }
+  ],
+  "conflicts": [],
+  "pairFlaggedAtPlanTime": false,
+  "replans": 0,
+  "scopeChanges": 2,
+  "tasks": [
+    {
+      "taskId": "task_checkout_fee",
+      "status": "failed",
+      "explanation": "Session session_85eaaaf8-0ffe-434e-9918-0e694a12c3ef was cancelled"
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "status": "failed",
+      "explanation": "Session session_27fe17b8-f629-4fd9-b128-a936ba9208cc was cancelled"
+    }
+  ],
+  "metrics": {
+    "tasksCompleted": 0,
+    "integrationAttempts": 0,
+    "integrationFailures": 0,
+    "conflictWarnings": 0,
+    "undetectedConflicts": 0,
+    "elapsedMs": 85993,
+    "tokensTotal": 180257,
+    "tokensByTask": {
+      "task_checkout_fee": 106255,
+      "task_checkout_delivery": 74002
+    }
+  }
+}
