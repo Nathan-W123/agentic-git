@@ -32,6 +32,8 @@ const state = {
   members: [],
   metrics: undefined,
   workers: [],
+  /** Platform-wide count of agents executing right now, from the control plane. */
+  agentsRunning: undefined,
   admin: undefined,
   socket: undefined,
   refreshTimer: undefined,
@@ -383,6 +385,7 @@ async function loadContext({ quiet = false } = {}) {
         project,
         metrics,
         workers,
+        agentsRunning,
       ] = await Promise.all([
         api(`/projects/${projectId}/repositories`),
         api(`/projects/${projectId}/tasks`),
@@ -393,6 +396,7 @@ async function loadContext({ quiet = false } = {}) {
         api(`/projects/${projectId}`),
         apiOptional(`/projects/${projectId}/metrics`, { metrics: undefined }),
         apiOptional(`/workers`, { workers: [] }),
+        apiOptional(`/agents/running`, { running: undefined }),
       ]);
       state.repositories = repositories.repositories;
       state.tasks = tasks.tasks;
@@ -403,6 +407,8 @@ async function loadContext({ quiet = false } = {}) {
       state.project = project.project;
       state.metrics = metrics.metrics;
       state.workers = workers.workers ?? [];
+      state.agentsRunning =
+        agentsRunning?.running === undefined ? undefined : agentsRunning;
     } else {
       state.repositories = [];
       state.tasks = [];
@@ -413,6 +419,7 @@ async function loadContext({ quiet = false } = {}) {
       state.project = undefined;
       state.metrics = undefined;
       state.workers = [];
+      state.agentsRunning = undefined;
     }
 
     if (state.principal?.user?.systemAdmin) {
@@ -1332,6 +1339,24 @@ function renderStatusBar() {
           : "no sandbox"
       }`
     : "";
+  const running = state.agentsRunning;
+  const runningItem = $("#status-running");
+  if (runningItem !== null) {
+    // Only shown once the control plane has actually answered, so an empty
+    // fleet reads as "0 agents running" rather than as a missing number.
+    runningItem.hidden = running === undefined;
+    if (running !== undefined) {
+      runningItem.innerHTML = `${icon("runs")} ${running.running} agent${
+        running.running === 1 ? "" : "s"
+      } running${
+        running.workers > 0
+          ? ` · ${running.busyWorkers}/${running.workers} worker${
+              running.workers === 1 ? "" : "s"
+            } busy`
+          : ""
+      }`;
+    }
+  }
   const user = state.principal?.user;
   $("#status-user").textContent = user
     ? `${user.displayName} · ${currentRole().replaceAll("_", " ")}`
@@ -3727,12 +3752,15 @@ function dispatchPlan(input) {
   const agent = (input.agents ?? []).find(
     (candidate) => candidate.adapter === adapter,
   );
-  // Codex is the provider this platform runs as a hosted worker; Claude runs
-  // in process. An explicit choice always wins over that default.
-  const route = input.route ?? (adapter === "codex" ? "remote" : "local");
   const workers = (input.workers ?? []).filter((worker) =>
     (worker.adapters ?? []).includes(adapter),
   );
+  // The point of a worker fleet is that the machine with the vendor logins
+  // does the work while you are somewhere else. So whenever a worker
+  // advertises this adapter, that is the default; running inside the control
+  // plane is the fallback for when nobody is listening. An explicit choice
+  // always wins.
+  const route = input.route ?? (workers.length > 0 ? "remote" : "local");
   const base = {
     objective,
     route,
