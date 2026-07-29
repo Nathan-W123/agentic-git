@@ -131,15 +131,18 @@ export async function runCoordinatedFixture(
     store,
     approvals: new AutoApprovalController(store),
   });
+  // Adapters are built here and owned by the coordinator, so the only chance
+  // to ask what they spent is to keep the references.
+  const adapters = fixture.scenario.tasks.map((entry) => ({
+    task: entry.task,
+    adapter: createAdapter(fixture, entry.task, entry.behavior),
+  }));
   const run = await coordinator.run({
     repository: fixture.repository,
     workspaceRoot: fixture.workspaceRoot,
     integrationRoot: fixture.integrationRoot,
     scenario: fixture.scenario.name,
-    tasks: fixture.scenario.tasks.map((entry) => ({
-      task: entry.task,
-      adapter: createAdapter(fixture, entry.task, entry.behavior),
-    })),
+    tasks: adapters,
   });
 
   const attempted = run.tasks.filter((entry) => entry.integration !== undefined);
@@ -176,7 +179,40 @@ export async function runCoordinatedFixture(
       ).length,
       elapsedMs: Math.round(performance.now() - startedAt),
       finalRevision: run.canonicalVersion.revision,
+      ...tokenMetrics(adapters),
     },
+  };
+}
+
+/**
+ * What the run spent, when the agents driving it can say.
+ *
+ * Only the Codex adapter reports a figure today, and only when its transcript
+ * carried one, so the field is absent rather than zero for a scripted run —
+ * a benchmark that reported "0 tokens" for a scripted fixture would read as a
+ * measurement rather than as silence.
+ */
+function tokenMetrics(
+  entries: ReadonlyArray<{ task: TaskDefinition; adapter: AgentAdapter }>,
+): { tokensTotal?: number; tokensByTask?: Record<string, number> } {
+  const byTask: Record<string, number> = {};
+  let reported = false;
+  for (const entry of entries) {
+    const adapter = entry.adapter;
+    if (!(adapter instanceof CodexAdapter)) {
+      continue;
+    }
+    for (const usage of adapter.allTokenUsage()) {
+      reported = true;
+      byTask[usage.taskId] = (byTask[usage.taskId] ?? 0) + usage.tokens;
+    }
+  }
+  if (!reported) {
+    return {};
+  }
+  return {
+    tokensTotal: Object.values(byTask).reduce((sum, value) => sum + value, 0),
+    tokensByTask: byTask,
   };
 }
 

@@ -28,6 +28,7 @@ import {
 import {
   CodexAdapter,
   CodexWriteDeniedError,
+  parseCodexTokens,
   type CodexProcessRunner,
 } from "./index.js";
 
@@ -204,6 +205,13 @@ test("runs structured read-only planning then workspace-write execution", async 
     assert.equal(calls[0]?.executable, "codex-test");
     assert.ok(calls[0]?.args.includes("--ephemeral"));
     assert.ok(calls[0]?.args.includes("--ignore-user-config"));
+    if (process.platform === "win32") {
+      const configIndex = calls[0]?.args.indexOf("-c") ?? -1;
+      assert.equal(
+        calls[0]?.args[configIndex + 1],
+        'windows.sandbox="elevated"',
+      );
+    }
     assert.ok(calls[0]?.args.includes("gpt-test"));
     assert.equal(calls[0]?.args.at(-1), "-");
     assert.match(calls[0]?.options.input ?? "", /Update the fixture value/u);
@@ -289,6 +297,47 @@ test("rejects Codex arguments that could weaken confinement", async () => {
         }),
       /only complete --model/u,
     );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("selects a scoped native Windows sandbox even while ignoring user config", async () => {
+  const fixture = await createFixture();
+  const calls: string[][] = [];
+  const runner: CodexProcessRunner = async (_executable, args) => {
+    calls.push([...args]);
+    return output(JSON.stringify(PLAN));
+  };
+
+  try {
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      platform: "win32",
+      windowsSandbox: "unelevated",
+      runner,
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const session = await adapter.startTask({
+      task: TASK,
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+    });
+
+    await adapter.requestPlan(session.id);
+
+    const args = calls[0] ?? [];
+    const configIndex = args.indexOf("-c");
+    assert.ok(args.includes("--ignore-user-config"));
+    assert.equal(args[configIndex + 1], 'windows.sandbox="unelevated"');
+    assert.equal(args[args.indexOf("--sandbox") + 1], "read-only");
+    await adapter.cancel(session.id);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -425,7 +474,7 @@ test("a denied write fails loudly instead of reporting success", async () => {
     }),
     (error: unknown) => {
       assert.ok(error instanceof CodexWriteDeniedError);
-      assert.match(error.message, /missing the sandbox helper/u);
+      assert.match(error.message, /scoped-write sandbox is unavailable/u);
       return true;
     },
   );
@@ -492,4 +541,207 @@ test("the execution sandbox is configurable and defaults to workspace-write", as
     await fixture.workspaces.destroy(workspace);
   }
   await rm(fixture.root, { recursive: true, force: true });
+});
+
+/**
+ * Token accounting. Codex reports what a call cost on the same stream the
+ * structured result is parsed from, so the figure is only recoverable at the
+ * moment the transcript is in hand — after parsing it is gone.
+ */
+
+/** A completion envelope with the token line Codex appends after it. */
+function completedWith(tokens: string | undefined): ProcessOutput {
+  const body = JSON.stringify({
+    outcome: "completed",
+    symbolsChanged: ["value"],
+    explanation: "done",
+    requestId: "",
+    additionalFiles: [],
+    additionalSymbols: [],
+    additionalApis: [],
+    additionalSchemas: [],
+    additionalConfigKeys: [],
+    additionalTests: [],
+    additionalServices: [],
+    reason: "",
+  });
+  // Real Codex reserves stdout for the structured result under
+  // --output-schema and prints its cost to stderr, so the stub does too.
+  return output(
+    body,
+    tokens === undefined ? {} : { stderr: `codex\ntokens used\n${tokens}\n` },
+  );
+}
+
+test("parses the token figure Codex prints, and refuses to invent one", () => {
+  // The exact shapes seen from the real CLI, thousands separators and all.
+  assert.equal(parseCodexTokens("codex\nREADY\ntokens used\n14,907\n"), 14907);
+  assert.equal(parseCodexTokens("tokens used\n25,371\nResolved."), 25371);
+  assert.equal(parseCodexTokens("tokens used 1234"), 1234);
+  // Absent is undefined, never zero: "not reported" and "cost nothing" are
+  // different claims, and a total built from the second is quietly wrong.
+  assert.equal(parseCodexTokens("no usage line here"), undefined);
+  assert.equal(parseCodexTokens(""), undefined);
+});
+
+test("records what each Codex call cost, tagged by phase and in order", async () => {
+  const fixture = await createFixture();
+  // The first execution asks for more scope, so this session spends three
+  // calls. A single total would hide that; the per-call record does not.
+  let executions = 0;
+  const runner: CodexProcessRunner = async (_executable, args, options = {}) => {
+    const sandbox = args[args.indexOf("--sandbox") + 1];
+    if (sandbox === "read-only") {
+      return output(JSON.stringify(PLAN), {
+        stderr: "codex\ntokens used\n1,000\n",
+      });
+    }
+    executions += 1;
+    if (executions === 1) {
+      return output(
+        `${JSON.stringify({
+          outcome: "scope_change_requested",
+          symbolsChanged: [],
+          explanation: "needs another file",
+          requestId: "scope_1",
+          additionalFiles: ["src/other.js"],
+          additionalSymbols: [],
+          additionalApis: [],
+          additionalSchemas: [],
+          additionalConfigKeys: [],
+          additionalTests: [],
+          additionalServices: [],
+          reason: "discovered mid-run",
+        })}`,
+        { stderr: "codex\ntokens used\n2,500\n" },
+      );
+    }
+    assert.ok(options.cwd !== undefined);
+    await writeFile(
+      path.join(options.cwd, "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return completedWith("3,750");
+  };
+
+  try {
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      runner,
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const session = await adapter.startTask({
+      task: TASK,
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+    });
+    const plan = await adapter.requestPlan(session.id);
+
+    await adapter.streamEvents(session.id, (event) => {
+      if (event.event !== "scope_change_requested") {
+        return;
+      }
+      void adapter.resolveScopeChange(session.id, {
+        requestId: event.requestId ?? "scope_1",
+        taskId: TASK.id,
+        decision: "approved",
+        revisedPlan: plan,
+        constraints: [],
+        ownershipGrants: [],
+        explanation: "approved",
+        decidedAt: new Date().toISOString(),
+      });
+    });
+
+    const workspace = await fixture.workspaces.create({
+      taskId: TASK.id,
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    await adapter.sendContext(session.id, contextFor(workspace));
+    await adapter.collectChanges(session.id);
+
+    assert.deepEqual(
+      adapter.tokenUsage(session.id).map((entry) => [entry.phase, entry.tokens]),
+      [
+        ["planning", 1000],
+        ["execution", 2500],
+        ["execution", 3750],
+      ],
+    );
+    assert.equal(adapter.totalTokens(), 7250);
+    assert.deepEqual(
+      [...new Set(adapter.allTokenUsage().map((entry) => entry.taskId))],
+      [TASK.id],
+    );
+    // Durations come from the process, not from a guess.
+    assert.ok(
+      adapter.tokenUsage(session.id).every((entry) => entry.durationMs >= 0),
+    );
+
+    await fixture.workspaces.destroy(workspace);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a transcript with no token line records nothing rather than zero", async () => {
+  const fixture = await createFixture();
+  const runner: CodexProcessRunner = async (_executable, args, options = {}) => {
+    const sandbox = args[args.indexOf("--sandbox") + 1];
+    if (sandbox === "read-only") {
+      return output(JSON.stringify(PLAN));
+    }
+    assert.ok(options.cwd !== undefined);
+    await writeFile(
+      path.join(options.cwd, "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return completedWith(undefined);
+  };
+
+  try {
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      runner,
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const session = await adapter.startTask({
+      task: TASK,
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+    });
+    await adapter.requestPlan(session.id);
+    const workspace = await fixture.workspaces.create({
+      taskId: TASK.id,
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    await adapter.sendContext(session.id, contextFor(workspace));
+    await adapter.collectChanges(session.id);
+
+    // No entries at all, rather than entries reading zero.
+    assert.deepEqual(adapter.tokenUsage(session.id), []);
+    assert.equal(adapter.totalTokens(), 0);
+
+    await fixture.workspaces.destroy(workspace);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
 });

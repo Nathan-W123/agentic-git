@@ -150,6 +150,14 @@ export interface CodexAdapterOptions {
   maxOutputBytes?: number;
   ignoreUserConfig?: boolean;
   /**
+   * Native Windows sandbox backend. The stronger `elevated` backend is the
+   * default; `unelevated` remains scoped but is available when local policy
+   * blocks the administrator-approved setup.
+   */
+  windowsSandbox?: CodexWindowsSandbox;
+  /** Native platform override used by embedders and cross-platform tests. */
+  platform?: NodeJS.Platform;
+  /**
    * Sandbox Codex runs the edit phase under. Defaults to `workspace-write`,
    * which confines writes to the task workspace.
    *
@@ -163,6 +171,7 @@ export interface CodexAdapterOptions {
 }
 
 export type CodexExecutionSandbox = "workspace-write" | "danger-full-access";
+export type CodexWindowsSandbox = "elevated" | "unelevated";
 
 interface CodexCompletion {
   outcome: "completed";
@@ -199,6 +208,8 @@ interface CodexSession {
   controller: AbortController | undefined;
   active: Promise<ProcessOutput> | undefined;
   scopeDecisions: ScopeChangeDecision[];
+  /** One entry per `codex exec` invocation this session made. */
+  tokenUsage: CodexTokenUsage[];
   pendingScope: Map<
     string,
     {
@@ -241,11 +252,11 @@ function safeAdditionalArgs(values: readonly string[]): string[] {
 /**
  * Signatures Codex emits when it accepted the run but could not write.
  *
- * `--sandbox workspace-write` needs a platform sandbox helper. Where that
- * helper is missing — Windows installs report `execve wrapper helper: none` —
- * Codex silently degrades to a read-only filesystem, refuses every patch, and
- * still exits 0 reporting the task complete. Left undetected that produces an
- * empty changeset presented as success, which is worse than a crash.
+ * `--sandbox workspace-write` needs a platform sandbox backend. If that
+ * backend is unavailable or misconfigured, Codex can degrade to a read-only
+ * filesystem, refuse every patch, and still exit 0 reporting the task
+ * complete. Left undetected that produces an empty changeset presented as
+ * success, which is worse than a crash.
  */
 const WRITE_DENIED_SIGNATURES = [
   "writing is blocked by read-only sandbox",
@@ -258,9 +269,9 @@ export class CodexWriteDeniedError extends Error {
   public constructor(sandbox: string, detail: string) {
     super(
       `Codex could not write to the workspace under --sandbox ${sandbox}. ` +
-        "The platform is missing the sandbox helper that grants scoped write " +
-        "access, so every edit was rejected while Codex still reported success. " +
-        "Run `codex doctor` to confirm, and only set executionSandbox to " +
+        "The scoped-write sandbox is unavailable or misconfigured, so every " +
+        "edit was rejected while Codex still reported success. Run `codex doctor` " +
+        "to confirm the native sandbox setup, and only set executionSandbox to " +
         "\"danger-full-access\" when the workspace is already isolated by other " +
         `means, such as a container. Codex reported: ${detail}`,
     );
@@ -283,6 +294,41 @@ function assertWritesPermitted(
   if (matched !== undefined) {
     throw new CodexWriteDeniedError(sandbox, matched);
   }
+}
+
+/**
+ * What one `codex exec` invocation cost.
+ *
+ * Codex reports a single aggregate figure on stdout rather than an
+ * input/output/reasoning split, so that is what is recorded — inventing a
+ * breakdown it never reported would be worse than reporting one number.
+ */
+export interface CodexTokenUsage {
+  phase: CodexPhase;
+  tokens: number;
+  durationMs: number;
+  at: string;
+}
+
+export type CodexPhase = "planning" | "replanning" | "execution";
+
+/**
+ * Pulls the token count out of a `codex exec` transcript.
+ *
+ * The CLI prints it as a `tokens used` line followed by the figure, grouped
+ * with thousands separators. It lands on stderr whenever `--output-schema`
+ * reserves stdout for the structured result, and on stdout otherwise, so
+ * callers should offer both. Returns undefined rather than zero when the line
+ * is absent: "not reported" and "cost nothing" are different claims, and a
+ * total built from the second would be quietly wrong.
+ */
+export function parseCodexTokens(output: string): number | undefined {
+  const match = /tokens\s+used\s+([\d,]+)/iu.exec(output);
+  if (match?.[1] === undefined) {
+    return undefined;
+  }
+  const tokens = Number.parseInt(match[1].replaceAll(",", ""), 10);
+  return Number.isSafeInteger(tokens) ? tokens : undefined;
 }
 
 function parseJsonObject(output: string, operation: string): unknown {
@@ -355,6 +401,8 @@ export class CodexAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, CodexSession>();
   private readonly command: string;
   private readonly executionSandbox: CodexExecutionSandbox;
+  private readonly windowsSandbox: CodexWindowsSandbox;
+  private readonly platform: NodeJS.Platform;
   private readonly additionalArgs: string[];
   private readonly planningTimeoutMs: number;
   private readonly executionTimeoutMs: number;
@@ -380,6 +428,8 @@ export class CodexAdapter implements AgentAdapter {
       "Codex output limit",
     );
     this.executionSandbox = options.executionSandbox ?? "workspace-write";
+    this.windowsSandbox = options.windowsSandbox ?? "elevated";
+    this.platform = options.platform ?? process.platform;
     this.runner = options.runner ?? runProcess;
   }
 
@@ -425,6 +475,7 @@ export class CodexAdapter implements AgentAdapter {
       controller: undefined,
       active: undefined,
       scopeDecisions: [],
+      tokenUsage: [],
       pendingScope: new Map(),
       cancelled: false,
     };
@@ -455,6 +506,7 @@ export class CodexAdapter implements AgentAdapter {
             schemaPath,
             this.planPrompt(record.input),
             this.planningTimeoutMs,
+            "planning",
           ),
       );
       const plan = parseJsonObject(output, "planning");
@@ -522,6 +574,7 @@ export class CodexAdapter implements AgentAdapter {
             schemaPath,
             this.replanPrompt(record, request),
             this.planningTimeoutMs,
+            "replanning",
           ),
       );
       const plan = parseJsonObject(output, "replanning");
@@ -587,6 +640,7 @@ export class CodexAdapter implements AgentAdapter {
             schemaPath,
             this.executionPrompt(record, context),
             this.executionTimeoutMs,
+            "execution",
           ),
       );
       const execution = parseJsonObject(output, "executing the task");
@@ -635,6 +689,38 @@ export class CodexAdapter implements AgentAdapter {
     throw new Error(
       `Codex exceeded the maximum scope-change rounds for ${record.input.task.id}`,
     );
+  }
+
+  /**
+   * What each `codex exec` call for this session cost, in order.
+   *
+   * Reported rather than summed so a caller can see where the spend went —
+   * a plan that had to be redone and an execution that ran twice for a scope
+   * change are different stories, and both are invisible in a single total.
+   */
+  public tokenUsage(sessionId: string): CodexTokenUsage[] {
+    return [...this.requireSession(sessionId).tokenUsage];
+  }
+
+  /**
+   * Every session this adapter instance drove.
+   *
+   * Sessions outlive `collectChanges`, so a harness can total the cost after
+   * the work is finished without holding each session id itself.
+   */
+  public allTokenUsage(): Array<CodexTokenUsage & { sessionId: string; taskId: string }> {
+    return [...this.sessions.values()].flatMap((record) =>
+      record.tokenUsage.map((entry) => ({
+        ...entry,
+        sessionId: record.session.id,
+        taskId: record.input.task.id,
+      })),
+    );
+  }
+
+  /** Total tokens across every session this adapter drove. */
+  public totalTokens(): number {
+    return this.allTokenUsage().reduce((sum, entry) => sum + entry.tokens, 0);
   }
 
   public async pause(_sessionId: string): Promise<void> {
@@ -703,6 +789,7 @@ export class CodexAdapter implements AgentAdapter {
       createdAt: record.session.startedAt,
     };
     const changeSet = await this.options.workspaces.collectChangeSet(workspace, {
+      expectedFiles: plan.expectedFiles,
       symbolsChanged:
         completion.symbolsChanged.length === 0
           ? plan.expectedSymbols
@@ -780,6 +867,7 @@ export class CodexAdapter implements AgentAdapter {
     schemaPath: string,
     prompt: string,
     timeoutMs: number,
+    phase: CodexPhase,
   ): Promise<string> {
     if (record.active !== undefined) {
       throw new Error(`Session ${record.session.id} already has an active Codex process`);
@@ -800,6 +888,9 @@ export class CodexAdapter implements AgentAdapter {
       "never",
       ...(this.options.ignoreUserConfig ?? true
         ? ["--ignore-user-config"]
+        : []),
+      ...(this.platform === "win32"
+        ? ["-c", `windows.sandbox="${this.windowsSandbox}"`]
         : []),
       "-C",
       workingDirectory,
@@ -837,6 +928,21 @@ export class CodexAdapter implements AgentAdapter {
       throw new Error("Codex structured output exceeded the configured limit");
     }
     assertWritesPermitted(sandbox, output);
+    // Under `--output-schema` stdout carries nothing but the structured
+    // result, and Codex prints its banner and its own cost to stderr. Both
+    // streams are searched because a bare invocation without a schema puts the
+    // figure on stdout instead, and reading only the wrong one would silently
+    // report every run as costing nothing.
+    const tokens =
+      parseCodexTokens(output.stderr) ?? parseCodexTokens(output.stdout);
+    if (tokens !== undefined) {
+      record.tokenUsage.push({
+        phase,
+        tokens,
+        durationMs: output.durationMs,
+        at: new Date().toISOString(),
+      });
+    }
     return output.stdout;
   }
 
@@ -868,6 +974,8 @@ export class CodexAdapter implements AgentAdapter {
     return [
       "Inspect the repository and prepare a coordination plan.",
       "Do not edit files. Do not run commands that modify repository state.",
+      "Keep planning focused: inspect only enough files to establish an accurate scope.",
+      `Planning deadline: ${this.planningTimeoutMs} ms.`,
       "Return only the JSON object required by the output schema.",
       `Task id: ${input.task.id}`,
       `Objective: ${input.task.objective}`,
@@ -887,6 +995,8 @@ export class CodexAdapter implements AgentAdapter {
     return [
       "Replan the approved task against the new canonical repository state.",
       "Do not edit files. Return only the JSON object required by the schema.",
+      "Use the previous plan and canonical change first; inspect only what changed.",
+      `Planning deadline: ${this.planningTimeoutMs} ms.`,
       `Task id: ${record.input.task.id}`,
       `Objective: ${record.input.task.objective}`,
       `Previous plan: ${JSON.stringify(request.previousPlan)}`,
@@ -901,20 +1011,29 @@ export class CodexAdapter implements AgentAdapter {
     record: CodexSession,
     context: CoordinatorContext,
   ): string {
+    const approvedPlan =
+      record.plan === undefined ? undefined : { ...record.plan, commands: [] };
+    const validationLabels = record.input.task.validationCommands.map(
+      (command) => command.label,
+    );
     return [
       "Implement the approved task in the current workspace.",
+      `Execution deadline: ${this.executionTimeoutMs} ms. Prioritize a complete minimal implementation.`,
+      "Finish all required edits within the first 80% of the deadline; reserve the remainder only for required validation and the final JSON response.",
+      "The coordinator runs every required validation command after collection; do not repeat clean installs, full builds, or full test suites inside this agent session.",
+      "Do not install dependency trees, start servers or watchers, or use the network. A package-lock-only operation is allowed only when the task explicitly changes a lockfile.",
+      "Skip optional polish, broad exploration, and repeated validation. Never wait for human input.",
       "Do not modify files outside expectedFiles without first returning a scope_change_requested outcome.",
       "Do not change Git metadata.",
-      "Run relevant validation commands when feasible.",
       "Return only the JSON object required by the output schema.",
       "For completed, set outcome=completed and use empty scope-change fields.",
       "When more scope is necessary, stop, set outcome=scope_change_requested, populate every scope field, and wait for the next invocation.",
       `Task: ${record.input.task.objective}`,
-      `Approved plan: ${JSON.stringify(record.plan)}`,
+      `Approved plan: ${JSON.stringify(approvedPlan)}`,
       `Coordinator decision: ${JSON.stringify(context.decision)}`,
       `Prior scope decisions: ${JSON.stringify(record.scopeDecisions)}`,
       `Canonical revision: ${context.canonicalVersion.revision}`,
-      `Required validation commands: ${JSON.stringify(record.input.task.validationCommands)}`,
+      `Coordinator validation labels (do not execute): ${JSON.stringify(validationLabels)}`,
     ].join("\n");
   }
 

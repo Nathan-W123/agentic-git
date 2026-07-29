@@ -407,6 +407,7 @@ export type AuditEventType =
   | "organization_changed"
   | "membership_changed"
   | "project_changed"
+  | "repository_created"
   | "repository_imported"
   | "task_submitted"
   | "plan_received"
@@ -495,6 +496,16 @@ export interface BenchmarkModeResult {
   undetectedConflicts: number;
   elapsedMs: number;
   finalRevision: string;
+  /**
+   * Tokens the agents reported spending, when they report it at all.
+   *
+   * Absent rather than zero when no driver reported a figure — a scripted
+   * fixture costs nothing to run, and "0" there would read as a measurement
+   * instead of as silence. Only ever a sum of what an agent actually printed.
+   */
+  tokensTotal?: number;
+  /** The same figure split by task, so a costly outlier is visible. */
+  tokensByTask?: Record<string, number>;
 }
 
 export interface BenchmarkReport {
@@ -839,6 +850,14 @@ export function planResourceKey(type: ResourceType, id: string): string {
  * nothing and a project with no policy behaves exactly as before.
  */
 export interface ProjectApprovalPolicyConfig {
+  /**
+   * Disables durable human approval pauses for this project when false.
+   * Isolation, ownership, validation, audit, and atomic promotion still apply.
+   * Default: true.
+   */
+  enabled?: boolean;
+  /** Require a human decision when a plan claims schema resources. Default: true. */
+  requireSchemaReview?: boolean;
   /** Require a human decision on every changeset, regardless of risk. */
   requireChangesetReview?: boolean;
   /** Risk levels that require human review. Default: high and critical. */
@@ -911,6 +930,8 @@ export function assertProjectPolicy(
   }
   for (const key of Object.keys(approvals)) {
     if (
+      key !== "enabled" &&
+      key !== "requireSchemaReview" &&
       key !== "requireChangesetReview" &&
       key !== "riskLevels" &&
       key !== "protectedPaths" &&
@@ -920,6 +941,18 @@ export function assertProjectPolicy(
         `Project approval policy has an unknown field: ${key}`,
       );
     }
+  }
+  if (
+    approvals.enabled !== undefined &&
+    typeof approvals.enabled !== "boolean"
+  ) {
+    throw new TypeError("enabled must be a boolean");
+  }
+  if (
+    approvals.requireSchemaReview !== undefined &&
+    typeof approvals.requireSchemaReview !== "boolean"
+  ) {
+    throw new TypeError("requireSchemaReview must be a boolean");
   }
   if (
     approvals.requireChangesetReview !== undefined &&
