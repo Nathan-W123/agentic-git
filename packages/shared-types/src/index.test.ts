@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  arbitrationFiles,
+  arbitrationSymbols,
   assertAgentPlan,
   assertChangeSet,
   assertProjectPolicy,
@@ -9,6 +11,7 @@ import {
   normalizeRepositoryPath,
   planAdmissionApproved,
   planAdmissionPartial,
+  planGroundingConfidence,
   projectBudgets,
   reducePlanScope,
   uniqueRepositoryPaths,
@@ -225,5 +228,100 @@ test("a partial admission is an approval, and says what it withheld", () => {
   assert.equal(
     planAdmissionPartial({ ...admission, status: "sequenced" }),
     false,
+  );
+});
+
+test("arbitration views merge declared resources with grounded referents", () => {
+  const plan: AgentPlan = {
+    taskId: "task_1",
+    objective: "Change pricing",
+    expectedFiles: ["src/checkout.js"],
+    expectedSymbols: ["calculateTotal"],
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+    grounding: {
+      confidence: "grounded",
+      revision: "a".repeat(40),
+      missingFiles: ["src/checkout.js"],
+      unresolvedSymbols: ["calculateTotal"],
+      fileReferents: [{ declared: "src/checkout.js", resolved: "src/order.js" }],
+      symbolReferents: [
+        {
+          declared: "calculateTotal",
+          resolved: "orderTotal",
+          files: ["src/pricing/total.js"],
+        },
+      ],
+      notes: [],
+    },
+  };
+
+  assert.deepEqual(arbitrationFiles(plan), [
+    "src/checkout.js",
+    "src/order.js",
+    "src/pricing/total.js",
+  ]);
+  assert.deepEqual(arbitrationSymbols(plan), ["calculateTotal", "orderTotal"]);
+  assert.equal(planGroundingConfidence(plan), "grounded");
+  // Legacy plans without a grounding record behave exactly as before.
+  const { grounding: ignored, ...legacy } = plan;
+  assert.deepEqual(arbitrationFiles(legacy), ["src/checkout.js"]);
+  assert.equal(planGroundingConfidence(legacy), "verified");
+});
+
+test("reducing a plan's scope takes the withheld declaration's grounding with it", () => {
+  const plan: AgentPlan = {
+    taskId: "task_1",
+    objective: "Change pricing",
+    expectedFiles: ["src/checkout.js", "src/kept.js"],
+    expectedSymbols: ["calculateTotal"],
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+    grounding: {
+      confidence: "grounded",
+      revision: "a".repeat(40),
+      missingFiles: ["src/checkout.js"],
+      unresolvedSymbols: ["calculateTotal"],
+      fileReferents: [{ declared: "src/checkout.js", resolved: "src/order.js" }],
+      symbolReferents: [
+        {
+          declared: "calculateTotal",
+          resolved: "orderTotal",
+          files: ["src/pricing/total.js"],
+        },
+      ],
+      notes: [],
+    },
+  };
+
+  const reduced = reducePlanScope(plan, [
+    { resourceType: "file", resourceId: "src/checkout.js" },
+    { resourceType: "symbol", resourceId: "calculateTotal" },
+  ]);
+
+  assert.deepEqual(reduced.expectedFiles, ["src/kept.js"]);
+  assert.deepEqual(reduced.grounding?.missingFiles, []);
+  assert.deepEqual(reduced.grounding?.fileReferents, []);
+  assert.deepEqual(reduced.grounding?.symbolReferents, []);
+  assert.deepEqual(arbitrationFiles(reduced), ["src/kept.js"]);
+});
+
+test("rejects a malformed grounding record on an agent plan", () => {
+  assert.throws(() =>
+    assertAgentPlan({
+      taskId: "task_1",
+      objective: "Change a file",
+      expectedFiles: ["src/index.ts"],
+      expectedSymbols: [],
+      dependencies: [],
+      commands: [],
+      externalAccess: [],
+      riskLevel: "low",
+      grounding: { confidence: "certain" },
+    }),
   );
 });

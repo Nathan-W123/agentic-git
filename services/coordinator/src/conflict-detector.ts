@@ -1,7 +1,10 @@
 import {
+  arbitrationFiles,
+  arbitrationSymbols,
   completeAgentPlan,
   uniqueStrings,
   type AgentPlan,
+  type CompleteAgentPlan,
   type ConflictAssessment,
   type ConflictDisposition,
   type ConflictEvidence,
@@ -104,14 +107,23 @@ function overlap(first: readonly string[], second: readonly string[]): string[] 
   );
 }
 
+/**
+ * Files two plans collide on, judged on each plan's grounded footprint.
+ *
+ * Arbitrating on the declared lists alone means arbitrating on whatever the
+ * agents happened to type: two plans that misname the same real file in
+ * different ways would pass as disjoint. The grounded view adds the real files
+ * verification mapped those misnames to, so the collision is judged where it
+ * would actually happen.
+ */
 export function overlappingFiles(
   first: AgentPlan,
   second: AgentPlan,
 ): string[] {
-  return overlap(first.expectedFiles, second.expectedFiles);
+  return overlap(arbitrationFiles(first), arbitrationFiles(second));
 }
 
-function resourceNames(plan: Required<AgentPlan>): Set<string> {
+function resourceNames(plan: CompleteAgentPlan): Set<string> {
   return new Set(
     [
       ...plan.expectedFiles.flatMap((value) => [value, `file:${value}`]),
@@ -278,19 +290,43 @@ export class ConflictDetector {
     const left = completeAgentPlan(first);
     const right = completeAgentPlan(second);
     const intent = analyzeIntent(left, right);
+    const fileOverlap = overlappingFiles(left, right);
+    const symbolOverlap = overlap(
+      arbitrationSymbols(left),
+      arbitrationSymbols(right),
+    );
+    // Overlap found only through grounding is called out in the evidence: a
+    // reader of the audit trail should see that the agents never declared
+    // these resources — verification did, from what the declarations misnamed.
+    const groundedNote = (declared: string[], found: string[]) => {
+      const owned = new Set(declared.map((entry) => entry.toLowerCase()));
+      return found.some((entry) => !owned.has(entry.toLowerCase()))
+        ? {
+            explanation:
+              "includes resources plan verification grounded unverifiable declarations to",
+          }
+        : {};
+    };
     const items = [
       evidence(
         "file_overlap",
-        overlappingFiles(left, right),
+        fileOverlap,
         taskIds,
-        overlappingFiles(left, right).length * this.options.fileOverlapWeight,
+        fileOverlap.length * this.options.fileOverlapWeight,
+        groundedNote(
+          overlap(left.expectedFiles, right.expectedFiles),
+          fileOverlap,
+        ),
       ),
       evidence(
         "symbol_overlap",
-        overlap(left.expectedSymbols, right.expectedSymbols),
+        symbolOverlap,
         taskIds,
-        overlap(left.expectedSymbols, right.expectedSymbols).length *
-          this.options.symbolOverlapWeight,
+        symbolOverlap.length * this.options.symbolOverlapWeight,
+        groundedNote(
+          overlap(left.expectedSymbols, right.expectedSymbols),
+          symbolOverlap,
+        ),
       ),
       evidence(
         "dependency_impact",

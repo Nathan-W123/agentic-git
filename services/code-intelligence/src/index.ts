@@ -12,6 +12,8 @@ import {
 } from "@coord/shared-types";
 import ts from "typescript";
 
+export { groundPlan, identifierTokens } from "./plan-grounding.js";
+
 export type SupportedLanguage =
   | "typescript"
   | "javascript"
@@ -74,6 +76,13 @@ export interface RepositoryIndex {
   generatedAt: string;
   files: IndexedFile[];
   edges: DependencyEdge[];
+  /**
+   * Every path in the repository at this revision, indexed or not. `files`
+   * only holds what the indexer parsed, so "does this declared path exist" is
+   * a question only this complete list can answer — a README is real even
+   * though no AST was built for it.
+   */
+  paths: string[];
   truncated: boolean;
   skippedFiles: number;
 }
@@ -528,6 +537,7 @@ export class CodeIntelligenceService {
       generatedAt: new Date().toISOString(),
       files,
       edges,
+      paths: [...repositoryFiles].sort(),
       truncated: skippedFiles > 0,
       skippedFiles,
     };

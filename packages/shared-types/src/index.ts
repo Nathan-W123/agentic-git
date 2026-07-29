@@ -42,6 +42,52 @@ export interface TaskDefinition {
   projectId?: ProjectId;
 }
 
+export type PlanGroundingConfidence = "verified" | "grounded" | "ungrounded";
+
+/** A declared file that does not exist, mapped to the real file it names. */
+export interface GroundedFileReference {
+  declared: string;
+  resolved: string;
+}
+
+/** A declared symbol the repository cannot locate, mapped to its likely real
+ * counterpart, plus the files where that counterpart is declared. */
+export interface GroundedSymbolReference {
+  declared: string;
+  resolved: string;
+  files: string[];
+}
+
+/**
+ * How a plan's declarations compare against the repository they were written
+ * for, established by the coordinator from the base-revision index — never
+ * taken from the agent, which is the whole point: an agent that misnames the
+ * code it is about to edit would misname it here too.
+ *
+ * `verified` means every declared file exists and every declared symbol
+ * resolves. `grounded` means some declarations do not resolve but at least one
+ * anchors the plan to real code, whether directly or through a referent.
+ * `ungrounded` means nothing the plan names can be connected to the
+ * repository at all — arbitration has literally no true statement to work
+ * from.
+ *
+ * Referents feed conflict arbitration only. They never widen the write scope:
+ * enforcement still holds the agent to the files it declared.
+ */
+export interface PlanGrounding {
+  confidence: PlanGroundingConfidence;
+  /** Revision of the index the grounding was computed against. */
+  revision: string;
+  /** Declared files that do not exist at that revision. */
+  missingFiles: string[];
+  /** Declared symbols the index cannot locate anywhere. */
+  unresolvedSymbols: string[];
+  fileReferents: GroundedFileReference[];
+  symbolReferents: GroundedSymbolReference[];
+  /** Human-readable account of every correction, for audit trails. */
+  notes: string[];
+}
+
 export interface AgentPlan {
   taskId: TaskId;
   objective: string;
@@ -63,6 +109,12 @@ export interface AgentPlan {
   riskLevel: RiskLevel;
   /** Concise engineering intent used only for advisory intent analysis. */
   intent?: string;
+  /**
+   * Verification of these declarations against the real repository. Written
+   * by the coordinator after plan submission; anything an agent sends here is
+   * recomputed and overwritten before the plan is used for arbitration.
+   */
+  grounding?: PlanGrounding;
 }
 
 export interface CanonicalVersion {
@@ -651,6 +703,94 @@ function isValidationCommand(value: unknown): value is ValidationCommand {
   );
 }
 
+function isGroundedFileReference(
+  value: unknown,
+): value is GroundedFileReference {
+  const entry = value as Partial<GroundedFileReference>;
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof entry.declared === "string" &&
+    typeof entry.resolved === "string"
+  );
+}
+
+function isGroundedSymbolReference(
+  value: unknown,
+): value is GroundedSymbolReference {
+  const entry = value as Partial<GroundedSymbolReference>;
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof entry.declared === "string" &&
+    typeof entry.resolved === "string" &&
+    isStringArray(entry.files)
+  );
+}
+
+function isPlanGrounding(value: unknown): value is PlanGrounding {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const grounding = value as Partial<PlanGrounding>;
+  return (
+    ["verified", "grounded", "ungrounded"].includes(
+      grounding.confidence ?? "",
+    ) &&
+    typeof grounding.revision === "string" &&
+    isStringArray(grounding.missingFiles) &&
+    isStringArray(grounding.unresolvedSymbols) &&
+    Array.isArray(grounding.fileReferents) &&
+    grounding.fileReferents.every(isGroundedFileReference) &&
+    Array.isArray(grounding.symbolReferents) &&
+    grounding.symbolReferents.every(isGroundedSymbolReference) &&
+    isStringArray(grounding.notes)
+  );
+}
+
+/**
+ * The verification state arbitration should assume for a plan.
+ *
+ * A plan without a grounding record is treated as verified: every plan that
+ * existed before verification was introduced, and every scripted fixture,
+ * behaves exactly as it did.
+ */
+export function planGroundingConfidence(
+  plan: AgentPlan,
+): PlanGroundingConfidence {
+  return plan.grounding?.confidence ?? "verified";
+}
+
+/**
+ * The files arbitration must treat a plan as touching: the declared set plus
+ * every real file its unverifiable declarations were grounded to. Two plans
+ * that misname the same real file in different ways overlap here even though
+ * their declared sets are disjoint.
+ */
+export function arbitrationFiles(plan: AgentPlan): string[] {
+  const grounding = plan.grounding;
+  if (grounding === undefined) {
+    return plan.expectedFiles;
+  }
+  return uniqueRepositoryPaths([
+    ...plan.expectedFiles,
+    ...grounding.fileReferents.map((entry) => entry.resolved),
+    ...grounding.symbolReferents.flatMap((entry) => entry.files),
+  ]);
+}
+
+/** The symbols arbitration must treat a plan as claiming; see {@link arbitrationFiles}. */
+export function arbitrationSymbols(plan: AgentPlan): string[] {
+  const grounding = plan.grounding;
+  if (grounding === undefined) {
+    return plan.expectedSymbols;
+  }
+  return uniqueStrings([
+    ...plan.expectedSymbols,
+    ...grounding.symbolReferents.map((entry) => entry.resolved),
+  ]);
+}
+
 export function assertAgentPlan(value: unknown): asserts value is AgentPlan {
   if (typeof value !== "object" || value === null) {
     throw new TypeError("Agent plan must be an object");
@@ -675,7 +815,8 @@ export function assertAgentPlan(value: unknown): asserts value is AgentPlan {
     !isStringArray(plan.externalAccess) ||
     !["low", "medium", "high", "critical"].includes(plan.riskLevel ?? "") ||
     (plan.intent !== undefined &&
-      (typeof plan.intent !== "string" || plan.intent.trim().length === 0))
+      (typeof plan.intent !== "string" || plan.intent.trim().length === 0)) ||
+    (plan.grounding !== undefined && !isPlanGrounding(plan.grounding))
   ) {
     throw new TypeError("Agent plan does not match the coordination schema");
   }
@@ -799,8 +940,16 @@ export function assertChangeSet(value: unknown): asserts value is ChangeSet {
   };
 }
 
+/**
+ * A plan with every optional resource collection populated. Grounding stays
+ * optional: it is a verification verdict, not a resource collection, and
+ * there is no honest default for a plan that was never verified.
+ */
+export type CompleteAgentPlan = Required<Omit<AgentPlan, "grounding">> &
+  Pick<AgentPlan, "grounding">;
+
 /** Returns a detached plan with every optional resource collection populated. */
-export function completeAgentPlan(plan: AgentPlan): Required<AgentPlan> {
+export function completeAgentPlan(plan: AgentPlan): CompleteAgentPlan {
   return {
     ...structuredClone(plan),
     expectedApis: [...(plan.expectedApis ?? [])],
@@ -899,6 +1048,26 @@ export function reducePlanScope(
     ...(plan.expectedServices === undefined
       ? {}
       : { expectedServices: plan.expectedServices.filter(keep("service")) }),
+    // A withheld declaration takes its grounding with it: the referent only
+    // ever stood in for that declaration, and keeping it would leave the
+    // reduced plan claiming code it no longer names.
+    ...(plan.grounding === undefined
+      ? {}
+      : {
+          grounding: {
+            ...structuredClone(plan.grounding),
+            missingFiles: plan.grounding.missingFiles.filter(keep("file")),
+            unresolvedSymbols: plan.grounding.unresolvedSymbols.filter(
+              keep("symbol"),
+            ),
+            fileReferents: plan.grounding.fileReferents.filter((entry) =>
+              keep("file")(entry.declared),
+            ),
+            symbolReferents: plan.grounding.symbolReferents.filter((entry) =>
+              keep("symbol")(entry.declared),
+            ),
+          },
+        }),
   };
   assertAgentPlan(revised);
   return revised;

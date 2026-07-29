@@ -1,7 +1,7 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
-import { CodeIntelligenceService } from "@coord/code-intelligence";
+import { CodeIntelligenceService, groundPlan } from "@coord/code-intelligence";
 import {
   DEFAULT_PLAN_RETRY_MS,
   PlanAdmissionController,
@@ -820,7 +820,11 @@ export async function admitWorkPlan(
   }
 
   const index = await intelligence.index(repository, baseVersion.revision);
-  const plan = intelligence.enrichPlan(submitted, index);
+  // Grounded before it is enriched: verification judges what the worker's
+  // agent declared, not what the index projected onto it — and it overwrites
+  // any grounding the remote side sent, because a verdict about an agent's
+  // declarations is never the agent's to supply.
+  const plan = intelligence.enrichPlan(groundPlan(submitted, index), index);
   assertAgentPlan(plan);
   await trace(store, undefined, "plan_received", task.id, {
     projectId: task.projectId,
@@ -830,6 +834,7 @@ export async function admitWorkPlan(
     expectedFiles: plan.expectedFiles,
     expectedSymbols: plan.expectedSymbols,
     riskLevel: plan.riskLevel,
+    grounding: plan.grounding,
     remote: true,
   });
 

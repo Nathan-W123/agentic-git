@@ -172,3 +172,67 @@ test("rejects invalid weights and unordered thresholds", () => {
     RangeError,
   );
 });
+
+/**
+ * Replay of a recorded live failure (2026-07-29, real Codex agents on the
+ * live-pricing repository): two agents each invented a different name for the
+ * real `orderTotal` in `src/pricing/total.js`, plus file paths that do not
+ * exist. Their declared plans share nothing, so arbitration on declarations
+ * alone admitted both concurrently and one execution was thrown away at
+ * integration. Grounding maps both inventions back to the same real code.
+ */
+test("plans hallucinating different names for the same real code overlap once grounded", () => {
+  const detector = new ConflictDetector();
+  const handlingFee: AgentPlan = {
+    ...plan("task_handling_fee", ["src/checkout.js"]),
+    expectedSymbols: ["calculateTotal"],
+  };
+  const freeDelivery: AgentPlan = {
+    ...plan("task_free_delivery", ["src/order.js"]),
+    expectedSymbols: ["computeOrderTotal"],
+  };
+
+  // Before grounding: the invented names share nothing, so the detector sees
+  // no structural evidence at all — this is the recorded failure.
+  assert.equal(detector.assess(handlingFee, freeDelivery), undefined);
+
+  // After grounding (as the coordinator computes it from the real index):
+  // both symbols resolve to orderTotal, which lives in src/pricing/total.js.
+  const grounded = (candidate: AgentPlan, declared: string): AgentPlan => ({
+    ...candidate,
+    grounding: {
+      confidence: "grounded",
+      revision: "a".repeat(40),
+      missingFiles: candidate.expectedFiles,
+      unresolvedSymbols: [declared],
+      fileReferents: [],
+      symbolReferents: [
+        {
+          declared,
+          resolved: "orderTotal",
+          files: ["src/pricing/total.js"],
+        },
+      ],
+      notes: [],
+    },
+  });
+  const assessment = detector.assess(
+    grounded(handlingFee, "calculateTotal"),
+    grounded(freeDelivery, "computeOrderTotal"),
+  );
+
+  assert.ok(assessment);
+  // One shared file (20) plus one shared symbol (35): sequenced, not blocked.
+  assert.equal(assessment.score, 55);
+  assert.equal(assessment.disposition, "sequence");
+  const fileEvidence = assessment.evidence.find(
+    (entry) => entry.kind === "file_overlap",
+  );
+  const symbolEvidence = assessment.evidence.find(
+    (entry) => entry.kind === "symbol_overlap",
+  );
+  assert.deepEqual(fileEvidence?.resources, ["src/pricing/total.js"]);
+  assert.deepEqual(symbolEvidence?.resources, ["orderTotal"]);
+  // The audit trail says these resources came from verification, not the agents.
+  assert.match(fileEvidence?.explanation ?? "", /grounded/u);
+});
