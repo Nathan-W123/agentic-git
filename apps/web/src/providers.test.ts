@@ -234,16 +234,18 @@ test("openai options come from the account's own models cache and settings are v
   );
 });
 
-test("anthropic exposes no model list, says so, and validates effort against the real enum", async () => {
+test("anthropic reports no model list when the CLI offers neither source", async () => {
   const harness = await createHarness();
   const service = new ProviderChatService(harness.project, {
     homeDirectory: harness.home,
     runner: scriptedRunner(CLAUDE_OK),
   });
+  // CLAUDE_OK answers --help with the completion script, which names no
+  // quoted aliases, and no ~/.claude.json exists in this harness.
   const options = await service.options({ provider: "anthropic" });
   assert.equal(options.models, null);
+  assert.equal(options.modelListSource, undefined);
   assert.equal(options.allowCustomModel, true);
-  assert.ok(options.notes.some((note) => /does not publish a model list/u.test(note)));
   assert.deepEqual(options.efforts, ["low", "medium", "high", "xhigh", "max"]);
 
   await service.connect({
@@ -262,6 +264,72 @@ test("anthropic exposes no model list, says so, and validates effort against the
     (error: unknown) =>
       error instanceof ProviderChatError && error.code === "invalid_effort",
   );
+});
+
+test("anthropic model options come only from what the CLI itself reports", async () => {
+  const harness = await createHarness();
+  await writeFile(
+    path.join(harness.home, ".claude.json"),
+    JSON.stringify({
+      additionalModelOptionsCache: [
+        {
+          value: "claude-fable-5[1m]",
+          label: "Fable",
+          description: "Most capable",
+        },
+      ],
+    }),
+    "utf8",
+  );
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) => {
+        if (args[0] === "auth") {
+          return output(JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }));
+        }
+        if (args[0] === "--help") {
+          return output(
+            [
+              "Options:",
+              "  --model <model>                       Provide an alias for the",
+              "                                        latest model (e.g. 'fable',",
+              "                                        'opus', or 'sonnet').",
+              "  --settings <file>                     Path to a settings file",
+            ].join("\n"),
+          );
+        }
+        return output("");
+      },
+    }),
+  });
+  const options = await service.options({ provider: "anthropic" });
+  assert.ok(options.models !== null);
+  assert.deepEqual(
+    options.models.map((model) => model.id),
+    ["claude-fable-5[1m]", "fable", "opus", "sonnet"],
+  );
+  // The cache entry keeps the label the CLI wrote for it.
+  assert.equal(options.models[0]?.label, "Fable");
+  assert.match(options.modelListSource ?? "", /model cache.*aliases documented/u);
+  // A value from a different --help paragraph must not become a model.
+  assert.ok(!options.models.some((model) => model.id === "file"));
+
+  await service.connect({
+    userId: "u",
+    systemAdmin: true,
+    provider: "anthropic",
+  });
+  // Bracketed values the CLI really reports must survive validation.
+  await service.setSettings({
+    userId: "u",
+    provider: "anthropic",
+    model: "claude-fable-5[1m]",
+  });
+  const status = (await service.list({ userId: "u", systemAdmin: true })).find(
+    (provider) => provider.id === "anthropic",
+  );
+  assert.equal(status?.model, "claude-fable-5[1m]");
 });
 
 test("codex completions carry the chosen model, effort, and read-only sandbox", async () => {

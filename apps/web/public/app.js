@@ -429,6 +429,7 @@ async function loadContext({ quiet = false } = {}) {
 
     loadChatTracked();
     loadChatTotals();
+    loadRateLimits();
     maybeDrainChatRuns();
     renderSelectors();
     connectSocket();
@@ -3089,10 +3090,10 @@ async function loadProviderOptions(provider) {
 }
 
 /**
- * The compact model/effort pickers next to the provider icons. Only what the
- * connected account reports is offered: OpenAI gets its account's model list
- * with per-model efforts; Anthropic gets the CLI's effort enum (its model has
- * no published list and stays a free-text field in the settings card).
+ * The compact model/effort pickers above the message box. Only what the
+ * connected account reports is offered: OpenAI's list comes from its account
+ * cache with per-model efforts, Anthropic's from what Claude Code itself
+ * caches and documents, plus that CLI's effort enum.
  */
 function renderChatQuickbar() {
   const quickbar = $("#chat-quickbar");
@@ -3119,7 +3120,14 @@ function renderChatQuickbar() {
   const hasModels = options !== null && options.models !== null;
   modelSelect.hidden = !hasModels;
   if (hasModels) {
-    modelSelect.innerHTML = options.models
+    // A model set elsewhere (free text, or the CLI's own default) may not be
+    // in the reported list; show it rather than silently displaying another.
+    const listed = options.models.some((model) => model.id === currentModel);
+    const entries =
+      listed || currentModel === ""
+        ? options.models
+        : [{ id: currentModel, label: currentModel }, ...options.models];
+    modelSelect.innerHTML = entries
       .map(
         (model) =>
           `<option value="${escapeHtml(model.id)}"${
@@ -3199,6 +3207,39 @@ function loadChatTotals() {
   } catch {
     state.chat.totals = {};
   }
+}
+
+function rateLimitKey() {
+  return `relay.pchatWindow.${state.projectId}`;
+}
+
+/**
+ * The subscription window outlives a page load, so the last one the CLI
+ * reported is kept — but only until its own reset time, after which the
+ * figure would no longer describe anything real.
+ */
+function loadRateLimits() {
+  let stored = {};
+  try {
+    const raw = localStorage.getItem(rateLimitKey());
+    stored = raw === null ? {} : JSON.parse(raw);
+  } catch {
+    stored = {};
+  }
+  const now = Date.now();
+  state.chat.lastRateLimit = Object.fromEntries(
+    Object.entries(stored).filter(([, rate]) => {
+      const resets = Date.parse(rate?.windowResetsAt ?? "");
+      return !Number.isNaN(resets) && resets > now;
+    }),
+  );
+}
+
+function saveRateLimits() {
+  localStorage.setItem(
+    rateLimitKey(),
+    JSON.stringify(state.chat.lastRateLimit),
+  );
 }
 
 function addToTotals(provider, usage) {
@@ -3305,72 +3346,69 @@ function renderProviderIcons() {
   }).join("");
 }
 
+/**
+ * The context-window dial beside Send: a ring that fills as the last exchange
+ * approaches the window size the CLI reported. Hover carries the real numbers.
+ */
+function renderContextDial() {
+  const target = $("#context-dial");
+  if (target === null) {
+    return;
+  }
+  const provider = state.chat.activeProvider;
+  const totals = state.chat.totals[provider];
+  const last = totals?.last;
+  const tokens =
+    (last?.usage?.inputTokens ?? 0) +
+    (last?.usage?.outputTokens ?? 0) +
+    (last?.usage?.thinkingTokens ?? 0);
+  if (
+    providerStatus(provider)?.connected !== true ||
+    last?.contextWindow === undefined ||
+    tokens === 0
+  ) {
+    target.innerHTML = "";
+    target.removeAttribute("title");
+    return;
+  }
+  const fraction = Math.min(1, tokens / last.contextWindow);
+  const percent = fraction * 100;
+  const shown = percent < 1 ? "<1%" : `${Math.round(percent)}%`;
+  const radius = 8;
+  const circumference = 2 * Math.PI * radius;
+  target.title = `Context window · ${formatTokens(tokens)} / ${formatTokens(
+    last.contextWindow,
+  )} tokens (${shown})${
+    last.model === undefined ? "" : ` · ${last.model}`
+  }, as reported by the CLI`;
+  target.innerHTML = `<svg viewBox="0 0 22 22" role="img" aria-label="${escapeHtml(
+    target.title,
+  )}">
+    <circle class="dial-track" cx="11" cy="11" r="${radius}"></circle>
+    <circle
+      class="dial-fill"
+      cx="11"
+      cy="11"
+      r="${radius}"
+      stroke-dasharray="${circumference.toFixed(2)}"
+      stroke-dashoffset="${(circumference * (1 - fraction)).toFixed(2)}"
+      transform="rotate(-90 11 11)"
+    ></circle>
+  </svg>`;
+}
+
 function renderChatUsage() {
   const target = $("#chat-usage");
   const provider = state.chat.activeProvider;
-  const status = providerStatus(provider);
-  if (status?.connected !== true) {
+  if (providerStatus(provider)?.connected !== true) {
     target.innerHTML = "";
     return;
   }
-  const totals = state.chat.totals[provider];
-  const rows = [];
-  if (totals !== undefined && totals.turns > 0) {
-    const costPart =
-      totals.costUsd > 0 ? ` · $${totals.costUsd.toFixed(4)}` : "";
-    const thinkPart =
-      totals.thinking > 0 ? ` · think ${formatTokens(totals.thinking)}` : "";
-    rows.push(
-      `<div class="usage-row"><span>Session (${totals.turns} turn${
-        totals.turns === 1 ? "" : "s"
-      })</span><span>in ${formatTokens(totals.input)} · out ${formatTokens(
-        totals.output,
-      )}${thinkPart}${costPart}</span></div>`,
-    );
-  }
-  const rateLimit = state.chat.lastRateLimit[provider];
-  if (rateLimit?.source === "response-headers") {
-    if (
-      typeof rateLimit.tokensRemaining === "number" &&
-      typeof rateLimit.tokensLimit === "number" &&
-      rateLimit.tokensLimit > 0
-    ) {
-      const fraction = rateLimit.tokensRemaining / rateLimit.tokensLimit;
-      rows.push(
-        `<div class="usage-row"><span>Rate limit tokens</span><span>${formatTokens(
-          rateLimit.tokensRemaining,
-        )} / ${formatTokens(rateLimit.tokensLimit)} left</span></div>
-         <div class="usage-bar${fraction < 0.2 ? " warn" : ""}"><span style="width:${Math.max(
-           2,
-           Math.round(fraction * 100),
-         )}%"></span></div>`,
-      );
-    }
-    if (
-      typeof rateLimit.requestsRemaining === "number" &&
-      typeof rateLimit.requestsLimit === "number"
-    ) {
-      rows.push(
-        `<div class="usage-row"><span>Rate limit requests</span><span>${rateLimit.requestsRemaining} / ${rateLimit.requestsLimit} left</span></div>`,
-      );
-    }
-  } else if (rateLimit?.source === "cli-window") {
-    const resets = rateLimit.windowResetsAt
-      ? ` · resets ${formatDate(rateLimit.windowResetsAt, { short: true })}`
-      : "";
-    rows.push(
-      `<div class="usage-row"><span>Subscription window</span><span>${escapeHtml(
-        `${(rateLimit.windowKind ?? "").replaceAll("_", " ")} · ${
-          rateLimit.windowStatus ?? "unknown"
-        }${resets}`,
-      )}</span></div>`,
-    );
-  } else if (rows.length > 0) {
-    rows.push(
-      `<div class="usage-row"><span class="muted">No quota data from this provider</span><span></span></div>`,
-    );
-  }
-  target.innerHTML = rows.join("");
+  // Only the subscription window lives here now; the context window is the
+  // dial by Send, and the token/cost breakdown is in Usage and limits.
+  target.innerHTML = windowMeter(state.chat.lastRateLimit[provider], {
+    compact: true,
+  });
 }
 
 function renderChat() {
@@ -3385,6 +3423,7 @@ function renderChat() {
   renderProviderIcons();
   renderChatQuickbar();
   renderChatUsage();
+  renderContextDial();
 
   const mode = state.chat.mode;
   $$("#chat-mode-toggle .mode-option").forEach((option) => {
@@ -3591,6 +3630,7 @@ async function sendAskMessage() {
     recordTurn(provider, reply);
     if (reply.rateLimit !== undefined) {
       state.chat.lastRateLimit[provider] = reply.rateLimit;
+      saveRateLimits();
     }
     if (reply.cliSessionId !== undefined) {
       state.chat.cliSessions[provider] = reply.cliSessionId;
@@ -3699,53 +3739,123 @@ function userInitials() {
     .toUpperCase();
 }
 
-/** The dedicated Usage and limits screen inside the settings overlay. */
-function renderUsageSheet(provider, meta, status) {
-  const totals = state.chat.totals[provider];
+/**
+ * The context-window meter. Both the always-visible chat strip and the
+ * settings screen draw this, so the numbers can never disagree.
+ */
+function contextMeter(totals, { compact = false } = {}) {
   const last = totals?.last;
-  const rate = state.chat.lastRateLimit[provider];
   const lastTokens =
     (last?.usage?.inputTokens ?? 0) +
     (last?.usage?.outputTokens ?? 0) +
     (last?.usage?.thinkingTokens ?? 0);
-  const contextBlock =
-    last?.contextWindow !== undefined && lastTokens > 0
-      ? `<div class="usage-block">
-          <div class="usage-title"><span>Last exchange</span>
-            <strong>${escapeHtml(formatTokens(lastTokens))} / ${escapeHtml(
-              formatTokens(last.contextWindow),
-            )} tokens (${Math.max(1, Math.round((lastTokens / last.contextWindow) * 100))}%)</strong></div>
-          <div class="usage-meter"><span class="seg-fill" style="width:${Math.max(
-            1,
-            Math.min(100, Math.round((lastTokens / last.contextWindow) * 100)),
-          )}%"></span></div>
-          <div class="usage-legend"><span>${escapeHtml(last.model ?? "")} · context window ${escapeHtml(
-            formatTokens(last.contextWindow),
-          )} tokens, as reported by the CLI</span></div>
-        </div>`
+  if (last?.contextWindow === undefined || lastTokens === 0) {
+    return compact
+      ? ""
       : `<div class="usage-block"><div class="usage-legend"><span>
           No context-window figure yet — the CLI reports it with each reply,
           so send a message first.
         </span></div></div>`;
+  }
+  const percent = (lastTokens / last.contextWindow) * 100;
+  return `<div class="usage-block">
+    <div class="usage-title"><span>${compact ? "Context window" : "Last exchange"}</span>
+      <strong>${escapeHtml(formatTokens(lastTokens))} / ${escapeHtml(
+        formatTokens(last.contextWindow),
+      )} tokens (${Math.max(1, Math.round(percent))}%)</strong></div>
+    <div class="usage-meter"><span class="seg-fill" style="width:${Math.max(
+      1,
+      Math.min(100, Math.round(percent)),
+    )}%"></span></div>
+    ${
+      compact
+        ? ""
+        : `<div class="usage-legend"><span>${escapeHtml(last.model ?? "")} · context window ${escapeHtml(
+            formatTokens(last.contextWindow),
+          )} tokens, as reported by the CLI</span></div>`
+    }
+  </div>`;
+}
+
+/** Window lengths implied by the rate-limit kinds the CLI actually names. */
+const RATE_WINDOW_MS = {
+  five_hour: 5 * 60 * 60 * 1000,
+  seven_day: 7 * 24 * 60 * 60 * 1000,
+};
+
+/**
+ * The subscription-window meter. The CLI reports the window's kind, status,
+ * and reset time — never a consumed or remaining figure — so this tracks
+ * position in time, and says so rather than implying a usage percentage.
+ */
+function windowMeter(rate, { compact = false } = {}) {
+  if (rate?.source !== "cli-window" || rate.windowResetsAt === undefined) {
+    return "";
+  }
+  const label = compact
+    ? "Usage"
+    : `${(rate.windowKind ?? "window").replaceAll("_", " ")} window`;
+  const resets = Date.parse(rate.windowResetsAt);
+  const span = RATE_WINDOW_MS[rate.windowKind];
+  const status = rate.windowStatus ?? "unknown";
+  const resetLabel = `resets ${formatDate(rate.windowResetsAt, { short: true })}`;
+  if (span === undefined || Number.isNaN(resets)) {
+    return `<div class="usage-row"><span>${escapeHtml(label)}</span><span>${escapeHtml(
+      `${status} · ${resetLabel}`,
+    )}</span></div>`;
+  }
+  const remaining = Math.max(0, Math.min(span, resets - Date.now()));
+  const elapsed = Math.round(((span - remaining) / span) * 100);
+  const minutesLeft = Math.round(remaining / 60_000);
+  const left =
+    minutesLeft >= 60
+      ? `${Math.floor(minutesLeft / 60)}h ${minutesLeft % 60}m left`
+      : `${minutesLeft}m left`;
+  return `<div class="usage-block">
+    <div class="usage-title"><span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(left)}</strong></div>
+    <div class="usage-meter"><span class="seg-window" style="width:${Math.max(
+      1,
+      Math.min(100, elapsed),
+    )}%"></span></div>
+    <div class="usage-legend"><span>${escapeHtml(
+      compact
+        ? `${(rate.windowKind ?? "window").replaceAll("_", " ")} window · ${status} · ${resetLabel} · time elapsed, not usage`
+        : `${status} · ${resetLabel} · elapsed time in the window; this CLI reports no usage figure`,
+    )}</span></div>
+  </div>`;
+}
+
+/** The stacked input/output/reasoning meter for the session so far. */
+function mixMeter(totals) {
   const mixTotal =
     (totals?.input ?? 0) + (totals?.output ?? 0) + (totals?.thinking ?? 0);
-  const mixBlock =
-    mixTotal > 0
-      ? `<div class="usage-block">
-          <div class="usage-title"><span>Session token mix</span>
-            <strong>${escapeHtml(formatTokens(mixTotal))} total</strong></div>
-          <div class="usage-meter">
-            <span class="seg-input" style="width:${(100 * (totals.input ?? 0)) / mixTotal}%"></span>
-            <span class="seg-output" style="width:${(100 * (totals.output ?? 0)) / mixTotal}%"></span>
-            <span class="seg-thinking" style="width:${(100 * (totals.thinking ?? 0)) / mixTotal}%"></span>
-          </div>
-          <div class="usage-legend">
-            <span><span class="dot" style="background:var(--accent)"></span>input ${escapeHtml(formatTokens(totals.input))}</span>
-            <span><span class="dot" style="background:var(--success)"></span>output ${escapeHtml(formatTokens(totals.output))}</span>
-            <span><span class="dot" style="background:var(--purple)"></span>reasoning ${escapeHtml(formatTokens(totals.thinking))}</span>
-          </div>
-        </div>`
-      : "";
+  if (mixTotal === 0) {
+    return "";
+  }
+  return `<div class="usage-block">
+    <div class="usage-title"><span>Session token mix</span>
+      <strong>${escapeHtml(formatTokens(mixTotal))} total</strong></div>
+    <div class="usage-meter">
+      <span class="seg-input" style="width:${(100 * (totals.input ?? 0)) / mixTotal}%"></span>
+      <span class="seg-output" style="width:${(100 * (totals.output ?? 0)) / mixTotal}%"></span>
+      <span class="seg-thinking" style="width:${(100 * (totals.thinking ?? 0)) / mixTotal}%"></span>
+    </div>
+    <div class="usage-legend">
+      <span><span class="dot" style="background:var(--accent)"></span>input ${escapeHtml(formatTokens(totals.input))}</span>
+      <span><span class="dot" style="background:var(--success)"></span>output ${escapeHtml(formatTokens(totals.output))}</span>
+      <span><span class="dot" style="background:var(--purple)"></span>reasoning ${escapeHtml(formatTokens(totals.thinking))}</span>
+    </div>
+  </div>`;
+}
+
+/** The dedicated Usage and limits screen inside the settings overlay. */
+function renderUsageSheet(provider, meta, status) {
+  const totals = state.chat.totals[provider];
+  const rate = state.chat.lastRateLimit[provider];
+  const contextBlock = contextMeter(totals);
+  const mixBlock = mixMeter(totals);
+  const windowBlock = windowMeter(rate);
   return `<div class="settings-sheet">
     <button class="sheet-close" data-action="connect-close">×</button>
     <button class="sheet-back" data-action="settings-back">‹ ${escapeHtml(meta.name)} settings</button>
@@ -3772,22 +3882,10 @@ function renderUsageSheet(provider, meta, status) {
         : ""
     }
     ${
-      rate?.source === "cli-window"
-        ? `<p class="settings-section-label">Subscription window</p>
-          <div class="settings-card">
-            ${settingsRow({
-              iconName: "history",
-              label: escapeHtml((rate.windowKind ?? "window").replaceAll("_", " ")),
-              value: escapeHtml(
-                `${rate.windowStatus ?? "unknown"}${
-                  rate.windowResetsAt
-                    ? ` · resets ${formatDate(rate.windowResetsAt, { short: true })}`
-                    : ""
-                }`,
-              ),
-            })}
-          </div>`
-        : ""
+      windowBlock === ""
+        ? ""
+        : `<p class="settings-section-label">Subscription window</p>
+          <div class="settings-card">${windowBlock}</div>`
     }
     <p class="settings-footnote">
       Every figure comes from the provider CLI's own events — token counts and
@@ -3825,16 +3923,19 @@ async function renderConnectOverlay() {
       return;
     }
     if (options !== undefined && options !== null) {
-      const customModelField =
-        options.models === null && options.allowCustomModel
-          ? `<form data-form="provider-settings" data-provider="${provider}" class="stack" style="gap:10px">
-              <label><span>Model (free text)</span>
+      // The pill dropdown offers what the account reports; this stays for
+      // anything it doesn't list, which the CLI still accepts.
+      const customModelField = options.allowCustomModel
+        ? `<form data-form="provider-settings" data-provider="${provider}" class="stack" style="gap:10px">
+              <label><span>${
+                options.models === null ? "Model (free text)" : "Other model"
+              }</span>
                 <input name="model" value="${escapeHtml(status.model ?? "")}" placeholder="CLI default">
               </label>
               <p class="connect-error" id="connect-error"></p>
               <button class="button button-quiet" type="submit">Save model</button>
             </form>`
-          : "";
+        : "";
       optionsHtml = `
         ${customModelField}
         ${

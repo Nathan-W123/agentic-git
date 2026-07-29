@@ -209,7 +209,6 @@
         <!-- One icon per provider; rendered by app.js so connection dots and
              the active ring stay in one place. -->
         <div class="provider-icons" id="provider-icons"></div>
-        <div class="chat-usage" id="chat-usage"></div>
         <div class="chat-modebar">
           <div class="mode-toggle" id="chat-mode-toggle">
             <button class="mode-option active" data-chat-mode="ask">Ask</button>
@@ -235,8 +234,14 @@
             <button class="button button-primary" type="submit" id="chat-send">
               Send
             </button>
+            <!-- Context-window dial: fills as the last exchange approaches the
+                 window the provider CLI reported. -->
+            <span class="context-dial" id="context-dial"></span>
           </div>
         </form>
+        <!-- Sits below the message box: a quiet, always-there readout of what
+             the provider CLI reported. -->
+        <div class="chat-usage" id="chat-usage"></div>
       </aside>
 
       <!-- Full-screen provider connection step, opened from a provider icon. -->

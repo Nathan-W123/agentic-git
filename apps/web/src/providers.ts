@@ -167,7 +167,9 @@ const MAX_MESSAGES = 40;
 const MAX_MESSAGE_CHARS = 32_000;
 const CLI_TIMEOUT_MS = 240_000;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
-const MODEL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,99}$/u;
+// Square brackets appear in real Claude Code model values (e.g. the
+// "claude-fable-5[1m]" context variant it caches for its own picker).
+const MODEL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,99}$/u;
 
 export type ProcessRunner = typeof runProcess;
 export type DetachedSpawner = (command: string, args: string[]) => void;
@@ -620,6 +622,75 @@ export class ProviderChatService {
     }
   }
 
+  /**
+   * Claude Code has no model-list command, but it does leave two real traces
+   * on this machine: the option cache it writes for its own picker, and the
+   * aliases its own --help documents. Both are read here; nothing is invented,
+   * and free text stays available for anything neither source mentions.
+   */
+  private async claudeModels(): Promise<{
+    models: ProviderModelOption[];
+    sources: string[];
+  }> {
+    const models = new Map<string, ProviderModelOption>();
+    const sources: string[] = [];
+    try {
+      const config = JSON.parse(
+        await readFile(path.join(this.homeDirectory, ".claude.json"), "utf8"),
+      ) as {
+        additionalModelOptionsCache?: Array<{
+          value?: string;
+          label?: string;
+          description?: string;
+        }>;
+      };
+      for (const option of config.additionalModelOptionsCache ?? []) {
+        if (typeof option.value !== "string" || option.value.length === 0) {
+          continue;
+        }
+        models.set(option.value, {
+          id: option.value,
+          label: option.label ?? option.value,
+          ...(option.description === undefined
+            ? {}
+            : { description: option.description }),
+        });
+      }
+      if (models.size > 0) {
+        sources.push("Claude Code's own model cache (~/.claude.json)");
+      }
+    } catch {
+      // No cache on this machine yet; the aliases below still apply.
+    }
+    try {
+      const help = await this.runner(
+        resolveClaudeCommand("claude"),
+        ["--help"],
+        { timeoutMs: 30_000, maxOutputBytes: 262_144 },
+      );
+      if (help.exitCode === 0) {
+        // Reads the --model paragraph only, so unrelated quoted examples
+        // elsewhere in the help text cannot leak in as model names.
+        const paragraph = /--model <model>([\s\S]*?)(?:\n\s*-{1,2}[A-Za-z])/u
+          .exec(help.stdout)?.[1];
+        const quoted = [...(paragraph ?? "").matchAll(/'([A-Za-z0-9._:-]+)'/gu)]
+          .map((match) => match[1] as string)
+          .filter((value) => MODEL_VALUE.test(value));
+        for (const value of quoted) {
+          if (!models.has(value)) {
+            models.set(value, { id: value, label: value });
+          }
+        }
+        if (quoted.length > 0) {
+          sources.push("aliases documented by `claude --help`");
+        }
+      }
+    } catch {
+      // Help unavailable; whatever the cache provided still stands.
+    }
+    return { models: [...models.values()], sources };
+  }
+
   public async options(input: {
     provider: ProviderId;
   }): Promise<ProviderOptions> {
@@ -642,12 +713,18 @@ export class ProviderChatService {
       };
     }
     if (input.provider === "anthropic") {
+      const claude = await this.claudeModels();
       return {
-        models: null,
+        models: claude.models.length > 0 ? claude.models : null,
+        ...(claude.sources.length > 0
+          ? {
+              modelListSource: `Models read from ${claude.sources.join(" and ")}. Claude Code has no model-list command, so this is what it actually reports here.`,
+            }
+          : {}),
         efforts: [...CLAUDE_EFFORTS],
         allowCustomModel: true,
         notes: [
-          "Claude Code does not publish a model list programmatically; the value is passed to --model as-is (aliases like sonnet, opus, haiku work).",
+          "Any other model name still works — the value is passed to --model as-is.",
           "Reasoning effort maps to the CLI's real --effort option.",
         ],
       };

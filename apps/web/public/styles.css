@@ -1071,17 +1071,82 @@ fieldset.field-group legend {
 /* Usage strip ------------------------------------------------------------- */
 
 .chat-usage {
-  padding: 0 14px 8px;
-  border-bottom: 1px solid var(--border-muted);
+  padding: 6px 14px 8px;
+  border-top: 1px solid var(--border-muted);
   flex: none;
   display: grid;
-  gap: 5px;
-  font-size: 11px;
-  color: var(--fg-muted);
+  gap: 4px;
+  font-size: 10px;
+  color: var(--fg-subtle);
 }
 
 .chat-usage:empty {
   display: none;
+}
+
+/* The meters are shared with the settings screen, where each one sits in its
+   own card row. Under the message box they are quieter: thinner bars, smaller
+   type, no card chrome. */
+.chat-usage .usage-block {
+  padding: 0;
+  border-top: 0;
+  gap: 3px;
+}
+
+.chat-usage .usage-block .usage-title {
+  font-size: 10px;
+}
+
+.chat-usage .usage-block .usage-title strong {
+  font-weight: 600;
+  color: var(--fg-muted);
+}
+
+.chat-usage .usage-meter {
+  height: 3px;
+}
+
+.chat-usage .usage-legend {
+  font-size: 9.5px;
+}
+
+.usage-meter .seg-window {
+  background: var(--fg-subtle);
+}
+
+/* Context-window dial beside Send ---------------------------------------- */
+
+.context-dial {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  align-self: center;
+}
+
+.context-dial:empty {
+  display: none;
+}
+
+.context-dial svg {
+  width: 22px;
+  height: 22px;
+  overflow: visible;
+}
+
+.context-dial circle {
+  fill: none;
+  stroke-width: 2.5;
+}
+
+.context-dial .dial-track {
+  stroke: var(--bg-hover);
+}
+
+.context-dial .dial-fill {
+  stroke: var(--accent);
+  stroke-linecap: round;
 }
 
 .usage-row {
