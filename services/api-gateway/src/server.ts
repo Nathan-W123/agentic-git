@@ -777,27 +777,6 @@ export class ApiGateway {
       return;
     }
 
-    if (path === `${API_PREFIX}/agents/running` && method === "GET") {
-      // Platform-wide, not project-scoped: an active lease is one agent
-      // executing on some worker right now. Counted from leases rather than
-      // from worker registrations, because a registered worker is idle until
-      // it holds one.
-      const active = await this.options.store.listWorkLeases({
-        status: "active",
-      });
-      const workers = await this.options.store.listWorkers();
-      const byWorker = new Map<string, number>();
-      for (const lease of active) {
-        byWorker.set(lease.workerId, (byWorker.get(lease.workerId) ?? 0) + 1);
-      }
-      this.sendJson(response, 200, {
-        running: active.length,
-        workers: workers.length,
-        busyWorkers: byWorker.size,
-      });
-      return;
-    }
-
     if (path === `${API_PREFIX}/workers` && method === "GET") {
       assertTokenScope(principal, "run_task");
       const workers = await this.options.store.listWorkers();

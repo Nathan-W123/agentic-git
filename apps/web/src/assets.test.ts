@@ -357,13 +357,3 @@ test("dispatch submits through the ordinary task endpoint, not a side channel", 
   assert.match(dispatch, /plan\.route === "local"[\s\S]*ensureRepositoryRun/u);
 });
 
-test("the status bar reports agents running from the control plane's own count", async () => {
-  const source = await browserSource();
-  // Counted from active leases server-side; the client must not invent a
-  // number from worker registrations, which are idle most of the time.
-  assert.match(source, /agents\/running/u);
-  assert.match(source, /running\.running/u);
-  assert.match(source, /busyWorkers/u);
-  // Hidden until the control plane has answered, so zero means zero.
-  assert.match(source, /runningItem\.hidden = running === undefined/u);
-});

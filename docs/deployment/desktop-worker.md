@@ -69,6 +69,6 @@ immediately instead of waiting out the expiry.
 
 Submitting a task from the chat panel's **Dispatch** button defaults to the
 remote route whenever a worker advertises that adapter, and names how many
-are listening. The status bar carries the platform-wide count of agents
-executing right now, counted from active leases rather than from
-registrations, so an idle fleet reads as zero.
+are listening. The task card stays in the conversation and tracks the same
+coordinator state the Executions view shows, so you can watch a task your
+desktop is running from wherever you submitted it.
