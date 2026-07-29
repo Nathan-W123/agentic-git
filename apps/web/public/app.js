@@ -32,6 +32,8 @@ const state = {
   members: [],
   metrics: undefined,
   workers: [],
+  /** Platform-wide count of agents executing right now, from the control plane. */
+  agentsRunning: undefined,
   admin: undefined,
   socket: undefined,
   refreshTimer: undefined,
@@ -383,6 +385,7 @@ async function loadContext({ quiet = false } = {}) {
         project,
         metrics,
         workers,
+        agentsRunning,
       ] = await Promise.all([
         api(`/projects/${projectId}/repositories`),
         api(`/projects/${projectId}/tasks`),
@@ -393,6 +396,7 @@ async function loadContext({ quiet = false } = {}) {
         api(`/projects/${projectId}`),
         apiOptional(`/projects/${projectId}/metrics`, { metrics: undefined }),
         apiOptional(`/workers`, { workers: [] }),
+        apiOptional(`/agents/running`, { running: undefined }),
       ]);
       state.repositories = repositories.repositories;
       state.tasks = tasks.tasks;
@@ -403,6 +407,8 @@ async function loadContext({ quiet = false } = {}) {
       state.project = project.project;
       state.metrics = metrics.metrics;
       state.workers = workers.workers ?? [];
+      state.agentsRunning =
+        agentsRunning?.running === undefined ? undefined : agentsRunning;
     } else {
       state.repositories = [];
       state.tasks = [];
@@ -413,6 +419,7 @@ async function loadContext({ quiet = false } = {}) {
       state.project = undefined;
       state.metrics = undefined;
       state.workers = [];
+      state.agentsRunning = undefined;
     }
 
     if (state.principal?.user?.systemAdmin) {
@@ -1442,6 +1449,92 @@ function metric(label, value, foot, glyph) {
     </article>`;
 }
 
+/** Radius and sweep of every HUD dial, in the gauge SVG's own units. */
+const GAUGE_RADIUS = 26;
+const GAUGE_CIRCUMFERENCE = 2 * Math.PI * GAUGE_RADIUS;
+/** Dials are 270° with the gap at the bottom, so a full ring reads as full. */
+const GAUGE_SWEEP = 0.75;
+
+/**
+ * One HUD readout: a thin glowing arc around a count.
+ *
+ * `part`/`whole` are the real numbers the arc is drawn from — the sweep is
+ * always a share of something the control plane actually reported, never a
+ * decorative fraction. A zero or missing `whole` draws an empty track, which
+ * is the honest picture of "nothing to be a share of".
+ */
+function gauge(label, value, foot, { part = 0, whole = 0, tone = "" } = {}) {
+  const ratio =
+    whole > 0 ? Math.max(0, Math.min(1, part / whole)) : 0;
+  const arc = GAUGE_CIRCUMFERENCE * GAUGE_SWEEP;
+  const text = String(value);
+  return `
+    <article class="gauge${tone ? ` ${tone}` : ""}">
+      <div class="gauge-dial">
+        <svg viewBox="0 0 64 64" aria-hidden="true">
+          <g transform="rotate(135 32 32)">
+            <circle class="gauge-track" cx="32" cy="32" r="${GAUGE_RADIUS}"
+              stroke-dasharray="${arc} ${GAUGE_CIRCUMFERENCE}"></circle>
+            <circle class="gauge-arc" cx="32" cy="32" r="${GAUGE_RADIUS}"
+              stroke-dasharray="${arc * ratio} ${GAUGE_CIRCUMFERENCE}"></circle>
+          </g>
+        </svg>
+        <span class="gauge-value${
+          text.length > 3 ? " gauge-value-long" : ""
+        }">${escapeHtml(text)}</span>
+      </div>
+      <span class="gauge-label">${escapeHtml(label)}</span>
+      <span class="gauge-foot">${escapeHtml(foot)}</span>
+    </article>`;
+}
+
+/**
+ * The centerpiece: a glowing core ringed by a lattice of nodes.
+ *
+ * Nothing here invents data. The one thing it encodes is how hard the
+ * platform is working right now — `load` (agents executing plus tasks the
+ * coordinator has claimed) shortens the breathing period, so an idle control
+ * room drifts and a busy one visibly quickens. Everything else is geometry.
+ */
+function neuralCore({ running, claimed, awaiting }) {
+  const load = running + claimed;
+  // 6s at rest down to a 1.8s floor, so a busy core reads as urgent without
+  // becoming a strobe in someone's peripheral vision while they work.
+  const period = Math.max(1.8, 6 - load * 0.7).toFixed(2);
+  const nodes = 14;
+  const lattice = Array.from({ length: nodes }, (_, index) => {
+    const angle = (360 / nodes) * index;
+    // Two shells of nodes so the lattice reads as depth, not as a clock face.
+    const radius = index % 3 === 0 ? 96 : 74;
+    const delay = ((index * 7) % nodes) / nodes;
+    return `<i class="core-node" style="--angle:${angle}deg; --orbit:${radius}px; --delay:${delay.toFixed(
+      3,
+    )}s"></i>`;
+  }).join("");
+  const phase =
+    running > 0
+      ? "executing"
+      : claimed > 0
+        ? "coordinating"
+        : awaiting > 0
+          ? "awaiting review"
+          : "standing by";
+  return `
+    <div class="neural-core" style="--pulse:${period}s" data-load="${load}">
+      <div class="core-ring core-ring-a"></div>
+      <div class="core-ring core-ring-b"></div>
+      <div class="core-ring core-ring-c"></div>
+      <div class="core-lattice">${lattice}</div>
+      <div class="core-orb"></div>
+      <div class="core-caption">
+        <span class="core-state">${escapeHtml(phase)}</span>
+        <span class="core-sub">${escapeHtml(
+          load === 1 ? "1 unit of work in flight" : `${load} units of work in flight`,
+        )}</span>
+      </div>
+    </div>`;
+}
+
 function renderOverview() {
   if (!state.projectId) {
     return `<div class="view">${noProjectContent()}</div>`;
@@ -1456,6 +1549,15 @@ function renderOverview() {
   );
   const docker = state.health?.docker;
   const recentTasks = state.tasks.slice(-6).reverse();
+  const totalTasks = state.tasks.length;
+  const completedRuns = state.runs.filter(
+    (run) => run.status === "completed",
+  ).length;
+  // The control plane's own count of agents executing right now. Undefined
+  // means it has not answered yet — which is not the same as zero, so the
+  // dial says so rather than showing a confident nought.
+  const agents = state.agentsRunning;
+  const running = agents?.running ?? 0;
 
   return `<div class="view">
     <header class="view-head">
@@ -1477,11 +1579,61 @@ function renderOverview() {
       </div>
       <span class="chip">${escapeHtml(docker?.version ?? "local")}</span>
     </div>
-    <section class="metric-grid">
-      ${metric("Queued intent", pendingTasks.length, "Waiting for the next execution", "↗")}
-      ${metric("In motion", activeTasks.length, "Claimed by the coordinator", "◎")}
-      ${metric("Awaiting review", pendingApprovals.length, "Human decisions required", "✓")}
-      ${metric("Accepted work", integratedTasks.length, "Tasks promoted to canonical", "⌁")}
+    <section class="hud-hero">
+      <div class="hud-cluster">
+        ${gauge(
+          "Agents running",
+          agents === undefined ? "—" : running,
+          agents === undefined
+            ? "Awaiting the control plane"
+            : agents.workers > 0
+              ? `${agents.busyWorkers}/${agents.workers} worker${
+                  agents.workers === 1 ? "" : "s"
+                } busy`
+              : "No workers registered",
+          {
+            // Share of the fleet actually holding a lease, so an idle fleet
+            // draws an empty arc instead of a full one.
+            part: agents?.busyWorkers ?? 0,
+            whole: agents?.workers ?? 0,
+            tone: running > 0 ? "live" : "",
+          },
+        )}
+        ${gauge("In motion", activeTasks.length, "Claimed by the coordinator", {
+          part: activeTasks.length,
+          whole: totalTasks,
+        })}
+        ${gauge("Queued intent", pendingTasks.length, "Waiting to execute", {
+          part: pendingTasks.length,
+          whole: totalTasks,
+        })}
+      </div>
+      ${neuralCore({
+        running,
+        claimed: activeTasks.length,
+        awaiting: pendingApprovals.length,
+      })}
+      <div class="hud-cluster">
+        ${gauge(
+          "Awaiting review",
+          pendingApprovals.length,
+          "Human decisions required",
+          {
+            part: pendingApprovals.length,
+            whole: state.approvals.length,
+            tone: pendingApprovals.length > 0 ? "warn" : "",
+          },
+        )}
+        ${gauge("Accepted work", integratedTasks.length, "Promoted to canonical", {
+          part: integratedTasks.length,
+          whole: totalTasks,
+          tone: "good",
+        })}
+        ${gauge("Executions", state.runs.length, "Runs recorded for this project", {
+          part: completedRuns,
+          whole: state.runs.length,
+        })}
+      </div>
     </section>
     <div class="content-grid">
       <section class="panel">

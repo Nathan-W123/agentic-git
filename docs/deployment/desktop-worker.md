@@ -72,3 +72,8 @@ remote route whenever a worker advertises that adapter, and names how many
 are listening. The task card stays in the conversation and tracks the same
 coordinator state the Executions view shows, so you can watch a task your
 desktop is running from wherever you submitted it.
+
+The Overview's **Agents running** dial carries the platform-wide count of
+agents executing right now, counted from active leases rather than from
+registrations, so an idle fleet reads as zero rather than as the number of
+machines that once said hello.

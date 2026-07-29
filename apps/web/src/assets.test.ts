@@ -357,3 +357,29 @@ test("dispatch submits through the ordinary task endpoint, not a side channel", 
   assert.match(dispatch, /plan\.route === "local"[\s\S]*ensureRepositoryRun/u);
 });
 
+test("the HUD reports agents running from the control plane's own count", async () => {
+  const source = await browserSource();
+  // Counted from active leases server-side; the client must not invent a
+  // number from worker registrations, which are idle most of the time.
+  assert.match(source, /agents\/running/u);
+  assert.match(source, /agents\.busyWorkers/u);
+  // A dial that has not heard from the control plane says so instead of
+  // rendering a confident zero.
+  assert.match(source, /agents === undefined \? "—" : running/u);
+  assert.match(source, /Awaiting the control plane/u);
+});
+
+test("every HUD dial draws its arc from a reported share, never decoration", async () => {
+  const source = await browserSource();
+  const gaugeSource = source.slice(
+    source.indexOf("function gauge("),
+    source.indexOf("function neuralCore("),
+  );
+  // A missing or zero denominator produces an empty arc, not a full one.
+  assert.match(gaugeSource, /whole > 0 \? Math\.max\(0, Math\.min\(1, part \/ whole\)\) : 0/u);
+  // The centerpiece's only data channel is its breathing period, set from
+  // agents executing plus tasks the coordinator has claimed.
+  assert.match(source, /--pulse:\$\{period\}s/u);
+  assert.match(source, /const load = running \+ claimed/u);
+});
+

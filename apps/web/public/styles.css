@@ -1,40 +1,64 @@
 /*
- * Relay control room — dark shell styled as a hybrid of VS Code (frame:
- * activity bar, sidebar, tab strip, bottom panel, status bar) and GitHub
- * (content: issue lists, PR-style diffs, commit history).
+ * Relay control room — a heads-up display over a VS Code-shaped frame
+ * (activity bar, sidebar, tab strip, bottom panel, status bar) with
+ * GitHub-flavored content (issue lists, PR-style diffs, commit history).
+ *
+ * The theme is a thin-line HUD: near-black canvas, one cyan accent carrying
+ * borders, readouts and highlights, glowing hairline rules instead of filled
+ * chrome, and monospace for anything that is a number. Structure and markup
+ * are unchanged from the previous flat theme — every rule here is skin.
  */
 
 :root {
-  --bg-inset: #010409;
-  --bg-canvas: #0d1117;
-  --bg-surface: #161b22;
-  --bg-overlay: #1c2128;
-  --bg-hover: #21262d;
-  --bg-active: #282e36;
-  --border: #30363d;
-  --border-muted: #21262d;
-  --fg: #e6edf3;
-  --fg-muted: #9198a1;
-  --fg-subtle: #6e7681;
-  --accent: #42e3f5;
-  --accent-strong: #0e9fb8;
-  --accent-dim: rgba(66, 227, 245, 0.15);
-  --success: #3fb950;
-  --success-dim: rgba(46, 160, 67, 0.15);
-  --danger: #f85149;
-  --danger-dim: rgba(248, 81, 73, 0.15);
-  --warn: #d29922;
-  --warn-dim: rgba(187, 128, 9, 0.15);
-  --purple: #bc8cff;
-  --purple-dim: rgba(163, 113, 247, 0.18);
-  --brand: #42e3f5;
+  --bg-inset: #000306;
+  --bg-canvas: #01070c;
+  --bg-surface: rgba(6, 20, 30, 0.78);
+  --bg-overlay: rgba(8, 26, 38, 0.86);
+  --bg-hover: rgba(20, 62, 82, 0.55);
+  --bg-active: rgba(30, 86, 110, 0.6);
+  --border: rgba(79, 232, 255, 0.22);
+  --border-muted: rgba(79, 232, 255, 0.1);
+  --fg: #d3f2ff;
+  --fg-muted: #7ea9bf;
+  --fg-subtle: #567f93;
+  --accent: #4fe8ff;
+  --accent-strong: #00cdf0;
+  --accent-dim: rgba(79, 232, 255, 0.14);
+  --success: #35e5a0;
+  --success-dim: rgba(53, 229, 160, 0.14);
+  --danger: #ff5f6d;
+  --danger-dim: rgba(255, 95, 109, 0.14);
+  --warn: #ffb648;
+  --warn-dim: rgba(255, 182, 72, 0.14);
+  --purple: #b98cff;
+  --purple-dim: rgba(185, 140, 255, 0.18);
+  --brand: #4fe8ff;
   --font-ui: -apple-system, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
   --font-mono: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+  /* Numbers, identifiers, and readouts: the HUD's voice. */
+  --font-data: ui-monospace, "Cascadia Code", "SF Mono", Consolas, monospace;
+  --glow-soft: 0 0 10px rgba(79, 232, 255, 0.18);
+  --glow-edge: 0 0 0 1px rgba(79, 232, 255, 0.16),
+    0 0 14px -2px rgba(79, 232, 255, 0.28);
   --activity-width: 48px;
   --sidebar-width: 288px;
   --tabstrip-height: 37px;
   --statusbar-height: 24px;
   --radius: 6px;
+}
+
+/*
+ * Everything the HUD animates is decorative. Anyone who has asked their
+ * system for less motion gets the same layout, held still.
+ */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
 
 * {
@@ -65,8 +89,45 @@ body {
   overflow: hidden;
 }
 
+/*
+ * Two fixed texture layers behind everything: a faint survey grid, and a
+ * scan-line comb. Both are pointer-transparent and sit at the bottom of the
+ * stacking order, so no control loses a click to them.
+ */
+body::before,
+body::after {
+  content: "";
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+}
+
+body::before {
+  background-image:
+    linear-gradient(rgba(79, 232, 255, 0.045) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(79, 232, 255, 0.045) 1px, transparent 1px);
+  background-size: 46px 46px;
+  /* Brightest at the top-left corner the eye enters from, fading out under
+     the dense content areas so text never fights the grid. */
+  mask-image: radial-gradient(
+    120% 120% at 12% 0%,
+    rgba(0, 0, 0, 0.9),
+    transparent 72%
+  );
+}
+
+body::after {
+  background-image: repeating-linear-gradient(
+    to bottom,
+    rgba(79, 232, 255, 0.028) 0 1px,
+    transparent 1px 3px
+  );
+  opacity: 0.6;
+}
+
 ::selection {
-  background: rgba(66, 227, 245, 0.35);
+  background: rgba(79, 232, 255, 0.35);
 }
 
 a {
@@ -2990,5 +3051,580 @@ button.status-item:hover {
   .pr-file-tree {
     position: static;
     max-height: 200px;
+  }
+}
+
+/* ================================================================ HUD === */
+/*
+ * The heads-up layer. Everything below re-skins structure defined earlier in
+ * this file — no rule here changes layout flow, only surface: hairline glow
+ * borders in place of filled chrome, monospace for figures, and the radial
+ * readouts and animated core that carry the Overview.
+ */
+
+/* Shell: let the canvas texture through ---------------------------------- */
+
+.main-area,
+.side-bar,
+.chat-panel {
+  background: transparent;
+}
+
+.activity-bar,
+.status-bar {
+  background: linear-gradient(
+    180deg,
+    rgba(0, 8, 14, 0.92),
+    rgba(0, 4, 8, 0.96)
+  );
+}
+
+.status-bar {
+  border-top: 1px solid var(--border);
+  box-shadow: 0 -1px 12px -4px rgba(79, 232, 255, 0.35);
+  font-family: var(--font-data);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+}
+
+.status-item {
+  text-transform: uppercase;
+}
+
+/* Panels: hairline frames with lit corners -------------------------------- */
+
+.panel,
+.form-card,
+.metric {
+  position: relative;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-muted);
+  box-shadow:
+    inset 0 1px 0 rgba(79, 232, 255, 0.06),
+    0 8px 28px -20px rgba(0, 0, 0, 0.9);
+}
+
+.panel::before,
+.panel::after,
+.form-card::before,
+.form-card::after {
+  content: "";
+  position: absolute;
+  width: 10px;
+  height: 10px;
+  pointer-events: none;
+  border: 1px solid var(--accent);
+  opacity: 0.45;
+}
+
+.panel::before,
+.form-card::before {
+  top: -1px;
+  left: -1px;
+  border-right: 0;
+  border-bottom: 0;
+}
+
+.panel::after,
+.form-card::after {
+  bottom: -1px;
+  right: -1px;
+  border-left: 0;
+  border-top: 0;
+}
+
+.panel-head {
+  background: linear-gradient(
+    90deg,
+    rgba(79, 232, 255, 0.09),
+    transparent 60%
+  );
+  border-bottom: 1px solid var(--border-muted);
+}
+
+.panel-head h2 {
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  font-size: 11.5px;
+  font-family: var(--font-data);
+  color: var(--accent);
+  text-shadow: 0 0 12px rgba(79, 232, 255, 0.35);
+}
+
+/* Type: figures and labels speak monospace -------------------------------- */
+
+.eyebrow,
+.kicker,
+.side-head,
+.side-section > h3,
+.side-section-title,
+.panel-tab,
+.auth-tab,
+.chip {
+  font-family: var(--font-data);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.eyebrow,
+.kicker {
+  color: var(--accent);
+  text-shadow: 0 0 14px rgba(79, 232, 255, 0.4);
+}
+
+.view-head h1 {
+  letter-spacing: -0.01em;
+  text-shadow: 0 0 28px rgba(79, 232, 255, 0.22);
+}
+
+.metric-value,
+.gauge-value {
+  font-family: var(--font-data);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Controls: outlined, lit on contact -------------------------------------- */
+
+.button-primary {
+  background: linear-gradient(
+    180deg,
+    rgba(79, 232, 255, 0.22),
+    rgba(79, 232, 255, 0.1)
+  );
+  border: 1px solid rgba(79, 232, 255, 0.55);
+  color: #eafcff;
+  text-shadow: 0 0 10px rgba(79, 232, 255, 0.5);
+  box-shadow:
+    inset 0 0 12px rgba(79, 232, 255, 0.15),
+    0 0 16px -6px rgba(79, 232, 255, 0.6);
+}
+
+.button-primary:hover {
+  background: linear-gradient(
+    180deg,
+    rgba(79, 232, 255, 0.32),
+    rgba(79, 232, 255, 0.16)
+  );
+  box-shadow:
+    inset 0 0 14px rgba(79, 232, 255, 0.22),
+    0 0 22px -6px rgba(79, 232, 255, 0.75);
+}
+
+.button:focus-visible,
+.mini-button:focus-visible,
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow:
+    0 0 0 1px rgba(79, 232, 255, 0.35),
+    var(--glow-soft);
+}
+
+.activity-button.active {
+  color: var(--accent);
+  text-shadow: 0 0 12px rgba(79, 232, 255, 0.6);
+}
+
+.activity-button.active svg {
+  filter: drop-shadow(0 0 6px rgba(79, 232, 255, 0.55));
+}
+
+.activity-button.active::before {
+  box-shadow: 0 0 10px 1px rgba(79, 232, 255, 0.8);
+}
+
+.tab.active {
+  border-bottom-color: var(--accent);
+  box-shadow: 0 1px 12px -4px rgba(79, 232, 255, 0.7);
+}
+
+/* Radial readouts --------------------------------------------------------- */
+
+.hud-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(260px, 340px) minmax(0, 1fr);
+  align-items: center;
+  gap: 20px;
+  margin-bottom: 20px;
+  padding: 18px 8px 22px;
+  border-top: 1px solid var(--border-muted);
+  border-bottom: 1px solid var(--border-muted);
+  position: relative;
+}
+
+/* The peripheral clusters the reference HUDs push their readouts into. */
+.hud-cluster {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
+  gap: 14px 10px;
+  justify-items: center;
+}
+
+.gauge {
+  display: grid;
+  justify-items: center;
+  gap: 2px;
+  text-align: center;
+  min-width: 92px;
+}
+
+.gauge-dial {
+  position: relative;
+  width: 84px;
+  height: 84px;
+  display: grid;
+  place-items: center;
+}
+
+.gauge-dial svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.gauge-dial circle {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.gauge-track {
+  stroke: rgba(79, 232, 255, 0.13);
+}
+
+.gauge-arc {
+  stroke: var(--accent);
+  filter: drop-shadow(0 0 5px rgba(79, 232, 255, 0.75));
+  /* Dials settle into their new sweep when live data lands. */
+  transition: stroke-dasharray 700ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.gauge.good .gauge-arc {
+  stroke: var(--success);
+  filter: drop-shadow(0 0 5px rgba(53, 229, 160, 0.7));
+}
+
+.gauge.warn .gauge-arc {
+  stroke: var(--warn);
+  filter: drop-shadow(0 0 5px rgba(255, 182, 72, 0.7));
+}
+
+.gauge-value {
+  position: relative;
+  font-size: 24px;
+  font-weight: 600;
+  color: #eafdff;
+  text-shadow: 0 0 16px rgba(79, 232, 255, 0.55);
+  line-height: 1;
+}
+
+.gauge-value-long {
+  font-size: 17px;
+}
+
+/* A running count earns the only looping highlight in the cluster. */
+.gauge.live .gauge-value {
+  animation: gauge-live 2.6s ease-in-out infinite;
+}
+
+.gauge.live .gauge-arc {
+  animation: gauge-arc-live 2.6s ease-in-out infinite;
+}
+
+@keyframes gauge-live {
+  0%,
+  100% {
+    text-shadow: 0 0 16px rgba(79, 232, 255, 0.5);
+  }
+  50% {
+    text-shadow:
+      0 0 26px rgba(79, 232, 255, 0.95),
+      0 0 44px rgba(79, 232, 255, 0.4);
+  }
+}
+
+@keyframes gauge-arc-live {
+  0%,
+  100% {
+    filter: drop-shadow(0 0 5px rgba(79, 232, 255, 0.7));
+  }
+  50% {
+    filter: drop-shadow(0 0 11px rgba(79, 232, 255, 1));
+  }
+}
+
+.gauge-label {
+  font-family: var(--font-data);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--accent);
+  margin-top: 2px;
+}
+
+.gauge-foot {
+  font-size: 10.5px;
+  color: var(--fg-subtle);
+  max-width: 16ch;
+  line-height: 1.35;
+}
+
+/* Centerpiece: the coordination core -------------------------------------- */
+
+.neural-core {
+  position: relative;
+  width: 100%;
+  aspect-ratio: 1;
+  max-width: 300px;
+  margin: 0 auto;
+  display: grid;
+  place-items: center;
+  isolation: isolate;
+}
+
+/*
+ * Three hairline rings at different speeds. Counter-rotating the middle one
+ * keeps the assembly from reading as a single spinner.
+ */
+.core-ring {
+  position: absolute;
+  border-radius: 50%;
+  border: 1px solid rgba(79, 232, 255, 0.22);
+}
+
+.core-ring-a {
+  inset: 4%;
+  border-top-color: rgba(79, 232, 255, 0.85);
+  animation: core-spin 18s linear infinite;
+}
+
+.core-ring-b {
+  inset: 16%;
+  border-style: dashed;
+  border-color: rgba(79, 232, 255, 0.18);
+  border-left-color: rgba(79, 232, 255, 0.7);
+  animation: core-spin 26s linear infinite reverse;
+}
+
+.core-ring-c {
+  inset: 28%;
+  border-color: rgba(79, 232, 255, 0.14);
+  border-bottom-color: rgba(79, 232, 255, 0.6);
+  animation: core-spin 12s linear infinite;
+}
+
+@keyframes core-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/*
+ * The node lattice. Each node is placed by angle, and draws its own link back
+ * to the core as a ::before, so one element makes both the dot and its line.
+ */
+.core-lattice {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  animation: core-spin 60s linear infinite;
+}
+
+.core-node {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(79, 232, 255, 0.9);
+  transform: rotate(var(--angle)) translateY(calc(var(--orbit) * -1));
+  animation: node-flicker calc(var(--pulse, 6s) * 2) ease-in-out infinite;
+  animation-delay: var(--delay);
+}
+
+.core-node::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 1px;
+  height: var(--orbit);
+  transform: translateX(-50%);
+  background: linear-gradient(
+    to bottom,
+    rgba(79, 232, 255, 0.5),
+    rgba(79, 232, 255, 0)
+  );
+}
+
+@keyframes node-flicker {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/*
+ * The core itself. `--pulse` is set inline from real load, so the breathing
+ * period is the one part of this that carries information.
+ */
+.core-orb {
+  position: relative;
+  width: 34%;
+  aspect-ratio: 1;
+  border-radius: 50%;
+  background: radial-gradient(
+    circle at 38% 32%,
+    #ffffff 0%,
+    #a8f4ff 12%,
+    #29c6e6 42%,
+    #0a5f7d 72%,
+    #041d29 100%
+  );
+  animation: core-breathe var(--pulse, 6s) ease-in-out infinite;
+}
+
+/* A halo that expands out of the orb on the same period. */
+.core-orb::after {
+  content: "";
+  position: absolute;
+  inset: -18%;
+  border-radius: 50%;
+  border: 1px solid rgba(79, 232, 255, 0.5);
+  animation: core-halo var(--pulse, 6s) ease-out infinite;
+}
+
+@keyframes core-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+    box-shadow:
+      0 0 30px rgba(79, 232, 255, 0.45),
+      0 0 70px rgba(79, 232, 255, 0.2),
+      inset 0 0 22px rgba(255, 255, 255, 0.18);
+  }
+  50% {
+    transform: scale(1.06);
+    box-shadow:
+      0 0 46px rgba(79, 232, 255, 0.8),
+      0 0 110px rgba(79, 232, 255, 0.4),
+      inset 0 0 26px rgba(255, 255, 255, 0.3);
+  }
+}
+
+@keyframes core-halo {
+  0% {
+    transform: scale(0.9);
+    opacity: 0.85;
+  }
+  100% {
+    transform: scale(1.7);
+    opacity: 0;
+  }
+}
+
+.core-caption {
+  position: absolute;
+  bottom: -2px;
+  display: grid;
+  justify-items: center;
+  gap: 1px;
+  text-align: center;
+}
+
+.core-state {
+  font-family: var(--font-data);
+  text-transform: uppercase;
+  letter-spacing: 0.24em;
+  font-size: 11px;
+  color: var(--accent);
+  text-shadow: 0 0 16px rgba(79, 232, 255, 0.6);
+}
+
+.core-sub {
+  font-size: 10.5px;
+  color: var(--fg-subtle);
+  font-family: var(--font-data);
+}
+
+/* Metric cards elsewhere keep the same voice as the dials ----------------- */
+
+.metric-label {
+  font-family: var(--font-data);
+  text-transform: uppercase;
+  letter-spacing: 0.11em;
+  font-size: 10px;
+  color: var(--accent);
+}
+
+.metric-value {
+  text-shadow: 0 0 18px rgba(79, 232, 255, 0.35);
+}
+
+/* Banners, chips, and the live dots --------------------------------------- */
+
+.signal-banner {
+  background: linear-gradient(
+    90deg,
+    rgba(79, 232, 255, 0.1),
+    rgba(79, 232, 255, 0.02) 60%,
+    transparent
+  );
+  border: 1px solid var(--border-muted);
+  border-left: 2px solid var(--accent);
+}
+
+.health-orb,
+.pulse-dot {
+  box-shadow: 0 0 10px currentColor;
+}
+
+.chip {
+  border-color: var(--border);
+  background: rgba(79, 232, 255, 0.07);
+}
+
+/* Diffs stay legible: the HUD tint must not swallow add/remove ------------- */
+
+.diff-add {
+  background: rgba(53, 229, 160, 0.13);
+  color: #8df5c8;
+}
+
+.diff-remove {
+  background: rgba(255, 95, 109, 0.12);
+  color: #ffb1b8;
+}
+
+.diff-meta {
+  color: var(--accent);
+  background: rgba(79, 232, 255, 0.07);
+}
+
+/* Responsive -------------------------------------------------------------- */
+
+@media (max-width: 1180px) {
+  .hud-hero {
+    grid-template-columns: minmax(0, 1fr);
+    justify-items: center;
+  }
+
+  .neural-core {
+    order: -1;
+    max-width: 240px;
+  }
+
+  .hud-cluster {
+    grid-template-columns: repeat(3, minmax(92px, 1fr));
+    width: 100%;
+    max-width: 420px;
   }
 }
