@@ -14,10 +14,16 @@ import { CoordinatorProject } from "@coord/cli/project";
 import { recoverCoordinationState } from "@coord/cli/recovery";
 import { rollbackCanonical } from "@coord/cli/rollback";
 import { workerOperations } from "@coord/cli/worker-operations";
+import type { CoordinationStore } from "@coord/persistence";
 import { RepositoryService, runProcess } from "@coord/repository-service";
 
 import { loadStaticAssets } from "./assets.js";
+import {
+  acquireControlPlaneLock,
+  type ControlPlaneLock,
+} from "./control-plane-lock.js";
 import { OverlayWorkspaceService } from "./overlay.js";
+import { ProviderChatService, type ProviderId } from "./providers.js";
 
 function argument(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -81,8 +87,28 @@ async function main(): Promise<void> {
 
   const repositories = new RepositoryService();
   const overlays = new OverlayWorkspaceService(project, store, repositories);
+  const providerChat = new ProviderChatService(project);
 
   const operations: ApiOperations = {
+    chatProviders: {
+      list: (input) => providerChat.list(input),
+      connect: (input) =>
+        providerChat.connect({
+          ...input,
+          provider: input.provider as ProviderId,
+          kind: input.kind as "api-key" | "local-cli",
+        }),
+      disconnect: (input) =>
+        providerChat.disconnect({
+          ...input,
+          provider: input.provider as ProviderId,
+        }),
+      complete: (input) =>
+        providerChat.complete({
+          ...input,
+          provider: input.provider as ProviderId,
+        }),
+    },
     workspace: {
       status: (input) => overlays.status(input),
       open: (input) => overlays.open(input),

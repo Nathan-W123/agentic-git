@@ -192,6 +192,34 @@ export interface ApiOperations {
   }): Promise<unknown>;
   /** Dashboard overlay workspaces; absent on deployments without them. */
   workspace?: WorkspaceOperations;
+  /** Direct provider chat (Anthropic/OpenAI/Google); absent when unsupported. */
+  chatProviders?: ChatProviderOperations;
+}
+
+/**
+ * Direct provider chat for the dashboard panel. The gateway only routes,
+ * authenticates, and validates shapes; connections are stored per user by
+ * the implementation and every operation receives the authenticated user id
+ * plus whether they are a system administrator (the local-CLI connection is
+ * restricted to administrators because it spends the host owner's account).
+ */
+export interface ChatProviderOperations {
+  list(input: { userId: string; systemAdmin: boolean }): Promise<unknown>;
+  connect(input: {
+    userId: string;
+    systemAdmin: boolean;
+    provider: string;
+    kind: string;
+    apiKey?: string;
+  }): Promise<unknown>;
+  disconnect(input: { userId: string; provider: string }): Promise<void>;
+  complete(input: {
+    userId: string;
+    systemAdmin: boolean;
+    provider: string;
+    messages: unknown;
+    cliSessionId?: string;
+  }): Promise<unknown>;
 }
 
 /** Everything a worker needs to execute one task without further lookups. */
@@ -2180,6 +2208,111 @@ export class ApiGateway {
         return;
       }
       throw new HttpError(405, "method_not_allowed", "Unsupported method");
+    }
+
+    // ---- Direct provider chat (dashboard panel) ---------------------------
+    // Connections are per authenticated user; a user can only ever spend
+    // their own key. No organization permission is involved because nothing
+    // here touches projects, repositories, or canonical state.
+    if (path.startsWith(`${API_PREFIX}/chat/`)) {
+      const chatOperations = this.options.operations.chatProviders;
+      if (chatOperations === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment does not support provider chat",
+        );
+      }
+      const performChat = async <T>(operation: () => Promise<T>): Promise<T> => {
+        try {
+          return await operation();
+        } catch (error) {
+          const status = (error as { status?: unknown }).status;
+          const code = (error as { code?: unknown }).code;
+          if (
+            error instanceof Error &&
+            typeof status === "number" &&
+            typeof code === "string"
+          ) {
+            throw new HttpError(status, code, error.message);
+          }
+          throw error;
+        }
+      };
+      const identity = {
+        userId: principal.user.id,
+        systemAdmin: principal.user.systemAdmin,
+      };
+
+      if (path === `${API_PREFIX}/chat/providers` && method === "GET") {
+        this.sendJson(response, 200, {
+          providers: await performChat(() => chatOperations.list(identity)),
+        });
+        return;
+      }
+      const chatProviderMatch = matchPath(
+        path,
+        new RegExp(`^${API_PREFIX}/chat/providers/(anthropic|openai|google)$`, "u"),
+      );
+      if (chatProviderMatch !== undefined) {
+        const provider = chatProviderMatch[0] ?? "";
+        if (method === "POST") {
+          const body = objectBody(await this.readJson(request));
+          const kind = stringField(body["kind"], "kind", { max: 20 }) ?? "";
+          if (kind !== "api-key" && kind !== "local-cli") {
+            throw new HttpError(
+              400,
+              "invalid_request",
+              'kind must be "api-key" or "local-cli"',
+            );
+          }
+          const apiKey = stringField(body["apiKey"], "apiKey", {
+            max: 512,
+            optional: true,
+          });
+          this.sendJson(response, 200, {
+            providers: await performChat(() =>
+              chatOperations.connect({
+                ...identity,
+                provider,
+                kind,
+                ...(apiKey === undefined ? {} : { apiKey }),
+              }),
+            ),
+          });
+          return;
+        }
+        if (method === "DELETE") {
+          await performChat(() =>
+            chatOperations.disconnect({ userId: identity.userId, provider }),
+          );
+          this.sendJson(response, 200, { disconnected: true });
+          return;
+        }
+      }
+      if (path === `${API_PREFIX}/chat/complete` && method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const provider = stringField(body["provider"], "provider", { max: 20 }) ?? "";
+        if (!["anthropic", "openai", "google"].includes(provider)) {
+          throw new HttpError(400, "invalid_request", "provider is unknown");
+        }
+        const cliSessionId = stringField(body["cliSessionId"], "cliSessionId", {
+          max: 64,
+          optional: true,
+        });
+        this.sendJson(response, 200, {
+          reply: await performChat(() =>
+            chatOperations.complete({
+              ...identity,
+              provider,
+              messages: body["messages"],
+              ...(cliSessionId === undefined ? {} : { cliSessionId }),
+            }),
+          ),
+        });
+        return;
+      }
+      throw new HttpError(404, "not_found", "Route was not found");
     }
 
     const runsMatch = matchPath(
