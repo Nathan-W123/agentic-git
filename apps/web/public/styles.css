@@ -3418,6 +3418,144 @@ textarea:focus {
   fill: none;
 }
 
+.hud-sys-row.warn strong {
+  color: var(--warn);
+  text-shadow: 0 0 10px rgba(255, 182, 72, 0.4);
+}
+
+/* Subsystem status dots. */
+.hud-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-right: 6px;
+  background: var(--fg-subtle);
+  vertical-align: 1px;
+}
+
+.hud-dot.on {
+  background: var(--success);
+  box-shadow: 0 0 8px var(--success);
+}
+
+/* Segmented pipeline meter. */
+.hud-meter {
+  display: flex;
+  height: 6px;
+  margin-top: 4px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(79, 232, 255, 0.08);
+  gap: 1px;
+}
+
+.hud-meter > span {
+  display: block;
+  height: 100%;
+  min-width: 3px;
+}
+
+.hud-meter-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  margin-top: 6px;
+  font-family: var(--font-data);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+}
+
+.hud-meter-legend i {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 2px;
+  margin-right: 4px;
+  vertical-align: -1px;
+}
+
+/*
+ * Reticle: hairline crosshairs through the core with a gap at the center,
+ * ending in short perpendicular ticks. Pure decoration, behind everything.
+ */
+.hud-reticle {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.hud-reticle::before,
+.hud-reticle::after {
+  content: "";
+  position: absolute;
+}
+
+.hud-reticle::before {
+  left: 0;
+  right: 0;
+  top: 50%;
+  height: 1px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(79, 232, 255, 0.35) 12%,
+    rgba(79, 232, 255, 0.35) 30%,
+    transparent 42%,
+    transparent 58%,
+    rgba(79, 232, 255, 0.35) 70%,
+    rgba(79, 232, 255, 0.35) 88%,
+    transparent
+  );
+}
+
+.hud-reticle::after {
+  top: 0;
+  bottom: 0;
+  left: 50%;
+  width: 1px;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(79, 232, 255, 0.3) 14%,
+    rgba(79, 232, 255, 0.3) 30%,
+    transparent 40%,
+    transparent 60%,
+    rgba(79, 232, 255, 0.3) 70%,
+    rgba(79, 232, 255, 0.3) 86%,
+    transparent
+  );
+}
+
+/* Real coordinates under the core: the org and project this HUD is aimed at. */
+.hud-coords {
+  display: flex;
+  gap: 18px;
+  margin-top: 10px;
+  font-family: var(--font-data);
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  color: var(--fg-subtle);
+}
+
+/* Bottom tape line, stencilled like the reference footers. */
+.hud-tape {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 16px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border-muted);
+  font-family: var(--font-data);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.22em;
+  color: var(--fg-subtle);
+}
+
 .gauge {
   display: grid;
   justify-items: center;
@@ -3908,6 +4046,85 @@ textarea:focus {
   max-width: 380px;
 }
 
+
+/*
+ * The chunky segmented ring the reference reactor wears, drawn as a
+ * repeating conic band masked to the rim, turning very slowly against the
+ * inner rings.
+ */
+.core-tickring {
+  position: absolute;
+  inset: -1%;
+  border-radius: 50%;
+  background: repeating-conic-gradient(
+    rgba(79, 232, 255, 0.4) 0deg 4deg,
+    transparent 4deg 10deg
+  );
+  -webkit-mask: radial-gradient(circle closest-side, transparent 94%, #000 95%);
+  mask: radial-gradient(circle closest-side, transparent 94%, #000 95%);
+  animation: core-spin 80s linear infinite reverse;
+  pointer-events: none;
+}
+
+/* A faint scan band drifting down the Home view. */
+.hud-home {
+  position: relative;
+}
+
+/* The Home headline wears the stencil. */
+.hud-home .view-head h1 {
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-family: var(--font-data);
+  font-weight: 600;
+}
+
+.hud-home .view-head .eyebrow::before {
+  content: "◢ ";
+  color: var(--accent);
+}
+
+.hud-home .view-head > p:last-child {
+  font-family: var(--font-data);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--fg-subtle);
+}
+
+.hud-scan {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  z-index: 0;
+}
+
+.hud-scan::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 140px;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    rgba(79, 232, 255, 0.045) 45%,
+    rgba(79, 232, 255, 0.09) 50%,
+    rgba(79, 232, 255, 0.045) 55%,
+    transparent
+  );
+  animation: hud-scan-drift 13s linear infinite;
+}
+
+@keyframes hud-scan-drift {
+  0% {
+    top: -140px;
+  }
+  100% {
+    top: 100%;
+  }
+}
 
 /* Radar sweep: one slow conic blade inside the outer ring. */
 .core-sweep {

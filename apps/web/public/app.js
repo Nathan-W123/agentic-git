@@ -1543,31 +1543,132 @@ function hudClock() {
 }
 
 /**
- * The system readout cluster: every line is state the dashboard already
- * holds — link, sandbox, and the sizes of what this project coordinates.
+ * One peripheral readout cluster: a stencilled title over label/value rows.
+ * Every row rendered through here is state the dashboard already holds —
+ * the HUD dramatises real data, it never invents any.
  */
-function hudSystem() {
-  const docker = state.health?.docker;
-  const rows = [
-    ["Link", state.socket?.readyState === 1 ? "live" : "connecting"],
-    [
-      "Sandbox",
-      docker?.available ? (docker.version ?? "ready") : "offline",
-    ],
-    ["Repositories", state.repositories.length],
-    ["Workers", state.workers.length],
-    ["Members", state.members.length],
-  ];
+function hudList(title, rows) {
   return `<div class="hud-system">
-    <span class="hud-system-title">System</span>
+    <span class="hud-system-title">${escapeHtml(title)}</span>
     ${rows
       .map(
-        ([label, value]) => `<div class="hud-sys-row">
+        ([label, value, tone]) => `<div class="hud-sys-row${
+          tone ? ` ${tone}` : ""
+        }">
           <span>${escapeHtml(label)}</span>
           <strong>${escapeHtml(String(value))}</strong>
         </div>`,
       )
       .join("")}
+  </div>`;
+}
+
+function hudSystem() {
+  const docker = state.health?.docker;
+  return hudList("System", [
+    ["Link", state.socket?.readyState === 1 ? "live" : "connecting"],
+    ["Sandbox", docker?.available ? (docker.version ?? "ready") : "offline"],
+    ["Repositories", state.repositories.length],
+    ["Workers", state.workers.length],
+    ["Members", state.members.length],
+  ]);
+}
+
+/**
+ * Coordination telemetry, straight from the metrics endpoint the
+ * Coordination view reads. Absent metrics render as an absent cluster,
+ * never as zeros pretending to be measurements.
+ */
+function hudCoordination() {
+  const metrics = state.metrics;
+  if (!metrics) {
+    return "";
+  }
+  const { conflicts, rework, throughput, cost } = metrics;
+  return hudList("Coordination", [
+    ["Conflicts predicted", conflicts.predictions],
+    ["Confirmed", conflicts.confirmedPredictions],
+    ["Missed", conflicts.unpredictedContention, conflicts.unpredictedContention > 0 ? "warn" : ""],
+    ["Replans", rework.replansRequested],
+    ["Mean integration", duration(throughput.averageTimeToIntegrationMs)],
+    ["Lease runtime", duration(cost.leaseRuntimeMs)],
+  ]);
+}
+
+/** Model subsystems: the three provider CLIs and whether each is signed in. */
+function hudSubsystems() {
+  const providers = CHAT_PROVIDERS.map((provider) => {
+    const status = providerStatus(provider.id);
+    return `<div class="hud-sys-row">
+      <span><i class="hud-dot${
+        status?.connected ? " on" : ""
+      }"></i>${escapeHtml(provider.name)}</span>
+      <strong>${status?.connected ? "online" : "offline"}</strong>
+    </div>`;
+  }).join("");
+  return `<div class="hud-system">
+    <span class="hud-system-title">Subsystems</span>
+    ${providers}
+  </div>`;
+}
+
+/** Canonical sources: each repository this project coordinates. */
+function hudCanonical() {
+  if (state.repositories.length === 0) {
+    return "";
+  }
+  return hudList(
+    "Canonical",
+    state.repositories
+      .slice(0, 5)
+      .map((repository) => [repository.id, repository.branch]),
+  );
+}
+
+/**
+ * The task pipeline as a segmented meter: one band per status, each
+ * segment's width the status's real share of the queue.
+ */
+function hudPipeline() {
+  const counts = [
+    ["integrated", "var(--success)"],
+    ["claimed", "var(--accent)"],
+    ["submitted", "rgba(79, 232, 255, 0.35)"],
+    ["failed", "var(--danger)"],
+    ["cancelled", "var(--fg-subtle)"],
+  ].map(([status, color]) => [
+    status,
+    color,
+    state.tasks.filter((task) => task.status === status).length,
+  ]);
+  const total = state.tasks.length;
+  if (total === 0) {
+    return "";
+  }
+  return `<div class="hud-system">
+    <span class="hud-system-title">Task pipeline</span>
+    <div class="hud-meter">
+      ${counts
+        .filter(([, , count]) => count > 0)
+        .map(
+          ([status, color, count]) =>
+            `<span title="${escapeHtml(status)}: ${count}" style="width:${
+              (100 * count) / total
+            }%; background:${color}"></span>`,
+        )
+        .join("")}
+    </div>
+    <div class="hud-meter-legend">
+      ${counts
+        .filter(([, , count]) => count > 0)
+        .map(
+          ([status, color, count]) =>
+            `<span><i style="background:${color}"></i>${escapeHtml(
+              status,
+            )} ${count}</span>`,
+        )
+        .join("")}
+    </div>
   </div>`;
 }
 
@@ -1657,6 +1758,7 @@ function neuralCore({ running, claimed, awaiting }) {
       <div class="core-ring core-ring-a"></div>
       <div class="core-ring core-ring-b"></div>
       <div class="core-ring core-ring-c"></div>
+      <div class="core-tickring"></div>
       <div class="core-sweep"></div>
       <div class="core-lattice">${lattice}</div>
       <button
@@ -1706,7 +1808,6 @@ function renderOverview() {
     (approval) => approval.status === "pending",
   );
   const docker = state.health?.docker;
-  const recentTasks = state.tasks.slice(-6).reverse();
   const totalTasks = state.tasks.length;
   const completedRuns = state.runs.filter(
     (run) => run.status === "completed",
@@ -1718,6 +1819,7 @@ function renderOverview() {
   const running = agents?.running ?? 0;
 
   return `<div class="view hud-home">
+    <div class="hud-scan" aria-hidden="true"></div>
     <header class="view-head">
       <p class="eyebrow">Control room</p>
       <h1>${escapeHtml(state.project?.name ?? "Overview")}</h1>
@@ -1765,22 +1867,20 @@ function renderOverview() {
             whole: totalTasks,
           })}
         </div>
-        <section class="panel">
-          <header class="panel-head">
-            <div><h2>Work in view</h2><p>Latest task outcomes</p></div>
-            <button class="mini-button" data-open-view="board">Board</button>
-          </header>
-          <div class="table-wrap">
-            ${taskTable(recentTasks, false)}
-          </div>
-        </section>
+        ${hudPipeline()}
+        ${hudCoordination()}
       </aside>
       <div class="hud-center">
+        <div class="hud-reticle" aria-hidden="true"></div>
         ${neuralCore({
           running,
           claimed: activeTasks.length,
           awaiting: pendingApprovals.length,
         })}
+        <div class="hud-coords">
+          <span>ORG ${escapeHtml(shortId(state.organizationId, 16))}</span>
+          <span>PRJ ${escapeHtml(shortId(state.projectId, 16))}</span>
+        </div>
       </div>
       <aside class="hud-rail">
         ${hudSystem()}
@@ -1805,13 +1905,15 @@ function renderOverview() {
             whole: state.runs.length,
           })}
         </div>
-        <section class="panel">
-          <header class="panel-head">
-            <div><h2>Live ledger</h2><p>Append-only coordination events</p></div>
-          </header>
-          <div class="panel-body">${timeline(state.audit, 8)}</div>
-        </section>
+        ${hudSubsystems()}
+        ${hudCanonical()}
       </aside>
+    </div>
+    <div class="hud-tape">
+      <span>Relay :: control room</span>
+      <span>${escapeHtml(state.project?.name ?? "")} · ${
+        state.repositories.length
+      } canonical source${state.repositories.length === 1 ? "" : "s"}</span>
     </div>
   </div>`;
 }
@@ -1962,6 +2064,14 @@ function renderBoard() {
       This is a view of the task queue, not a separate tracker. A card moves
       when the coordinator moves the task.
     </p>
+    <section class="panel panel-spaced">
+      <header class="panel-head">
+        <div><h2>Work in view</h2><p>Latest task outcomes, newest first</p></div>
+      </header>
+      <div class="table-wrap">
+        ${taskTable(state.tasks.slice(-8).reverse(), false)}
+      </div>
+    </section>
   </div>`;
 }
 
@@ -2020,6 +2130,12 @@ function renderRuns() {
               .join("")}
           </section>`
     }
+    <section class="panel panel-spaced">
+      <header class="panel-head">
+        <div><h2>Live ledger</h2><p>Append-only coordination events</p></div>
+      </header>
+      <div class="panel-body">${timeline(state.audit, 12)}</div>
+    </section>
   </div>`;
 }
 
