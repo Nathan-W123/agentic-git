@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { existsSync, type Dirent } from "node:fs";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -177,6 +177,120 @@ const PROVIDER_NAMES: Record<ProviderId, string> = {
   openai: "OpenAI",
   google: "Google",
 };
+
+/** Names the window a Codex rate limit covers, from its own minute count. */
+function codexWindowLabel(minutes: number): string {
+  if (minutes % (60 * 24 * 30) === 0) {
+    const months = minutes / (60 * 24 * 30);
+    return months === 1 ? "month" : `${months} months`;
+  }
+  if (minutes % (60 * 24 * 7) === 0) {
+    const weeks = minutes / (60 * 24 * 7);
+    return weeks === 1 ? "week" : `${weeks} weeks`;
+  }
+  if (minutes % (60 * 24) === 0) {
+    const days = minutes / (60 * 24);
+    return days === 1 ? "day" : `${days} days`;
+  }
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return hours === 1 ? "hour" : `${hours} hours`;
+  }
+  return `${minutes} minutes`;
+}
+
+interface CodexRateWindow {
+  used_percent?: number;
+  window_minutes?: number;
+  resets_at?: number;
+}
+
+/**
+ * Pulls the last `rate_limits` object out of a Codex rollout file. Only
+ * windows the CLI actually filled in become bars; nulls stay absent.
+ * Exported for tests.
+ */
+export function parseCodexRateLimits(
+  contents: string,
+): ProviderUsageReport | undefined {
+  const marker = '"rate_limits":';
+  const at = contents.lastIndexOf(marker);
+  if (at === -1) {
+    return undefined;
+  }
+  // The object runs to the end of its own JSON line.
+  const lineEnd = contents.indexOf("\n", at);
+  const line = contents.slice(
+    contents.lastIndexOf("\n", at) + 1,
+    lineEnd === -1 ? undefined : lineEnd,
+  );
+  let limits:
+    | {
+        primary?: CodexRateWindow | null;
+        secondary?: CodexRateWindow | null;
+        plan_type?: string | null;
+      }
+    | undefined;
+  try {
+    const event = JSON.parse(line) as Record<string, unknown>;
+    const found = findRateLimits(event);
+    limits = found as typeof limits;
+  } catch {
+    return undefined;
+  }
+  if (limits === undefined) {
+    return undefined;
+  }
+  const windows: ProviderUsageWindow[] = [];
+  for (const [name, window] of [
+    ["primary", limits.primary],
+    ["secondary", limits.secondary],
+  ] as const) {
+    if (
+      window === null ||
+      window === undefined ||
+      typeof window.used_percent !== "number"
+    ) {
+      continue;
+    }
+    windows.push({
+      label:
+        typeof window.window_minutes === "number"
+          ? codexWindowLabel(window.window_minutes)
+          : name,
+      percentUsed: Math.max(0, Math.min(100, window.used_percent)),
+      ...(typeof window.resets_at === "number"
+        ? {
+            resetsAt: new Date(window.resets_at * 1000).toLocaleString(
+              undefined,
+              { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" },
+            ),
+          }
+        : {}),
+    });
+  }
+  return windows.length === 0
+    ? undefined
+    : { source: "Codex CLI", windows };
+}
+
+/** Finds the `rate_limits` object wherever the CLI nested it. */
+function findRateLimits(value: unknown): unknown {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  if (record["rate_limits"] !== undefined && record["rate_limits"] !== null) {
+    return record["rate_limits"];
+  }
+  for (const nested of Object.values(record)) {
+    const found = findRateLimits(nested);
+    if (found !== undefined) {
+      return found;
+    }
+  }
+  return undefined;
+}
 
 /**
  * Reads the percentages out of `claude -p "/usage" --output-format json`.
@@ -539,18 +653,25 @@ export class ProviderChatService {
   public async usage(input: {
     provider: ProviderId;
   }): Promise<ProviderUsageReport> {
-    if (input.provider !== "anthropic") {
+    if (input.provider === "google") {
       return {
-        source:
-          input.provider === "openai"
-            ? "Codex CLI"
-            : PROVIDER_NAMES[input.provider],
+        source: PROVIDER_NAMES[input.provider],
         windows: [],
         unavailableReason:
-          input.provider === "openai"
-            ? "The Codex CLI publishes no consumption figure — it reports per-turn token counts only."
-            : "No usage figures are available for this provider.",
+          "No usage figures are available for this provider.",
       };
+    }
+    if (input.provider === "openai") {
+      const cachedCodex = this.usageCache.get(input.provider);
+      if (
+        cachedCodex !== undefined &&
+        Date.now() - cachedCodex.at < USAGE_CACHE_MS
+      ) {
+        return cachedCodex.report;
+      }
+      const report = await this.codexUsage();
+      this.usageCache.set(input.provider, { at: Date.now(), report });
+      return report;
     }
     const cached = this.usageCache.get(input.provider);
     if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) {
@@ -581,6 +702,78 @@ export class ProviderChatService {
     }
     this.usageCache.set(input.provider, { at: Date.now(), report });
     return report;
+  }
+
+  /**
+   * The Codex CLI does not print rate limits on stdout, but it records them
+   * in the rollout it writes for every session: a `rate_limits` object with
+   * the percentage used, the window length, and the reset time. The newest
+   * rollout is read and those figures are reported as-is.
+   */
+  private async codexUsage(): Promise<ProviderUsageReport> {
+    const source = "Codex CLI session records (~/.codex/sessions)";
+    try {
+      const newest = await this.newestCodexRollout();
+      if (newest === undefined) {
+        return {
+          source,
+          windows: [],
+          unavailableReason:
+            "No Codex session has recorded rate limits on this machine yet.",
+        };
+      }
+      const contents = await readFile(newest, "utf8");
+      const report = parseCodexRateLimits(contents);
+      return report === undefined
+        ? {
+            source,
+            windows: [],
+            unavailableReason:
+              "The latest Codex session recorded no rate-limit figures.",
+          }
+        : { ...report, source };
+    } catch (error) {
+      return {
+        source,
+        windows: [],
+        unavailableReason:
+          error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  /** Rollouts live under sessions/YYYY/MM/DD; the newest one is the current. */
+  private async newestCodexRollout(): Promise<string | undefined> {
+    const root = path.join(this.homeDirectory, ".codex", "sessions");
+    let newest: { path: string; at: number } | undefined;
+    const walk = async (directory: string, depth: number): Promise<void> => {
+      if (depth > 4) {
+        return;
+      }
+      let entries: Dirent[];
+      try {
+        entries = await readdir(directory, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        const full = path.join(directory, entry.name);
+        if (entry.isDirectory()) {
+          await walk(full, depth + 1);
+        } else if (entry.name.endsWith(".jsonl")) {
+          try {
+            const info = await stat(full);
+            if (newest === undefined || info.mtimeMs > newest.at) {
+              newest = { path: full, at: info.mtimeMs };
+            }
+          } catch {
+            // Vanished between listing and stat; ignore.
+          }
+        }
+      }
+    };
+    await walk(root, 0);
+    return newest?.path;
   }
 
   private async detectClaude(): Promise<ProviderCliState> {

@@ -375,10 +375,58 @@ test("claude usage percentages are read from the CLI's own /usage report", async
   // The "95% of your usage was at >150k context" line is prose, not a window.
   assert.ok(!report.windows.some((window) => window.percentUsed === 95));
 
-  // Codex publishes no consumption figure; that must be said, not invented.
+  // Codex records its limits per session, and this harness has none.
   const codex = await service.usage({ provider: "openai" });
   assert.deepEqual(codex.windows, []);
-  assert.match(codex.unavailableReason ?? "", /no consumption figure/iu);
+  assert.match(codex.unavailableReason ?? "", /no Codex session/iu);
+});
+
+test("codex usage comes from the rate limits its own session records", async () => {
+  const harness = await createHarness();
+  const day = path.join(harness.home, ".codex", "sessions", "2026", "07", "29");
+  await mkdir(day, { recursive: true });
+  // The shape the CLI really writes, including the null secondary window.
+  const line = JSON.stringify({
+    type: "event_msg",
+    payload: {
+      info: { total_token_usage: { input_tokens: 41_672 } },
+      rate_limits: {
+        limit_id: "codex",
+        primary: {
+          used_percent: 2,
+          window_minutes: 10_080,
+          resets_at: 1_785_902_966,
+        },
+        secondary: null,
+        plan_type: "pro",
+      },
+    },
+  });
+  await writeFile(
+    path.join(day, "rollout-2026-07-29T10-23-07-019faee6.jsonl"),
+    `${JSON.stringify({ type: "session_meta" })}\n${line}\n`,
+    "utf8",
+  );
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({}),
+  });
+  const report = await service.usage({ provider: "openai" });
+  assert.equal(report.unavailableReason, undefined);
+  assert.equal(report.windows.length, 1);
+  assert.equal(report.windows[0]?.label, "week");
+  assert.equal(report.windows[0]?.percentUsed, 2);
+  assert.ok((report.windows[0]?.resetsAt ?? "").length > 0);
+
+  // With no rollouts at all, that is stated rather than guessed.
+  const empty = await createHarness();
+  const bare = new ProviderChatService(empty.project, {
+    homeDirectory: empty.home,
+    runner: scriptedRunner({}),
+  });
+  const none = await bare.usage({ provider: "openai" });
+  assert.deepEqual(none.windows, []);
+  assert.match(none.unavailableReason ?? "", /no Codex session/iu);
 });
 
 test("streaming relays real CLI events and ends with the parsed reply", async () => {

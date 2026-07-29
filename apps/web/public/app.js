@@ -73,6 +73,7 @@ const state = {
     /** Per provider, the consumption figures its CLI publishes. */
     usage: {},
     usageLoading: {},
+    usageOpen: localStorage.getItem("relay.chatUsageOpen") === "true",
     overlayProvider: null,
     /** Which overlay screen is showing: "main" settings or "usage". */
     overlayView: "main",
@@ -551,6 +552,7 @@ function eventTitle(event) {
     task_failed: "Task execution failed",
     task_integrated: "Task integrated",
     task_submitted: "Task submitted",
+    repository_created: "Repository created",
     workspace_created: "Isolated workspace created",
   };
   return titles[event?.type] ?? String(event?.type ?? "Coordination event")
@@ -567,6 +569,7 @@ function eventDetail(event) {
     data.error ??
     data.status ??
     (data.revision ? `Canonical ${shortId(data.revision, 12)}` : undefined) ??
+    (data.repositoryId ? `Repository ${data.repositoryId}` : undefined) ??
     (event.taskId ? `Task ${shortId(event.taskId)}` : "System event")
   );
 }
@@ -600,10 +603,10 @@ function timeline(events, limit = 12) {
  * `#tasks`-style links (and bookmarks) keep working.
  */
 const ACTIVITIES = [
-  { id: "overview", label: "Overview", icon: "home", view: "overview" },
+  { id: "overview", label: "Home", icon: "home", view: "overview" },
   { id: "explorer", label: "Explorer", icon: "files", view: "explorer" },
   { id: "board", label: "Board", icon: "board", view: "board", badge: "tasks" },
-  { id: "runs", label: "Runs", icon: "runs", view: "runs" },
+  { id: "runs", label: "Executions", icon: "runs", view: "runs" },
   {
     id: "approvals",
     label: "Approvals",
@@ -622,10 +625,10 @@ const FOOTER_ACTIVITIES = [
 ];
 
 const VIEW_META = {
-  overview: { title: "Overview", icon: "home", activity: "overview" },
+  overview: { title: "Home", icon: "home", activity: "overview" },
   explorer: { title: "Workspace", icon: "files", activity: "explorer" },
   board: { title: "Board", icon: "board", activity: "board" },
-  runs: { title: "Runs", icon: "runs", activity: "runs" },
+  runs: { title: "Executions", icon: "runs", activity: "runs" },
   approvals: { title: "Approvals", icon: "approvals", activity: "approvals" },
   repositories: { title: "Repositories", icon: "repos", activity: "repositories" },
   coordination: { title: "Coordination", icon: "graph", activity: "coordination" },
@@ -695,7 +698,7 @@ function openRunTab(runId) {
   openTab({
     id: `run:${runId}`,
     kind: "run",
-    title: `Run ${shortId(runId, 12)}`,
+    title: `Execution ${shortId(runId, 12)}`,
     icon: "runs",
     data: { runId },
   });
@@ -807,6 +810,10 @@ function syncHash() {
 /* ------------------------------------------------------ shell: render ---- */
 
 function renderShell() {
+  const tab = activeTab();
+  $("#context-block").hidden = !(
+    tab?.kind === "view" && tab.view === "overview"
+  );
   renderActivityBar();
   renderSidebar();
   renderTabStrip();
@@ -869,10 +876,10 @@ function sideItem({ label, meta, iconName, action, active, count, indent = 0, ti
 
 function renderSidebar() {
   const title = {
-    overview: "Overview",
+    overview: "Home",
     explorer: "Explorer",
     board: "Task board",
-    runs: "Integration runs",
+    runs: "Agent executions",
     approvals: "Approvals",
     repositories: "Repositories",
     coordination: "Coordination",
@@ -908,7 +915,7 @@ function sidebarOverview() {
   return {
     body: `
       ${sideItem({
-        label: "Overview",
+        label: "Home",
         iconName: "home",
         action: 'data-open-view="overview"',
         active: activeTab()?.id === "view:overview",
@@ -1115,10 +1122,10 @@ function sidebarBoard() {
       </div>
       ${
         canRun() && state.repositories.length > 0
-          ? `<div class="side-section"><h3>Run queue</h3>${state.repositories
+          ? `<div class="side-section"><h3>Execute queue</h3>${state.repositories
               .map((repository) =>
                 sideItem({
-                  label: `Run ${escapeHtml(repository.id)}`,
+                  label: `Execute ${escapeHtml(repository.id)}`,
                   iconName: "runs",
                   action: `data-run-repo="${escapeHtml(repository.id)}"`,
                 }),
@@ -1134,7 +1141,7 @@ function sidebarRuns() {
   return {
     body: `
       ${sideItem({
-        label: "All runs",
+        label: "All executions",
         iconName: "runs",
         action: 'data-open-view="runs"',
         active: activeTab()?.id === "view:runs",
@@ -1144,7 +1151,7 @@ function sidebarRuns() {
         <h3>Recent</h3>
         ${
           runs.length === 0
-            ? '<p class="side-empty">No integration runs yet.</p>'
+            ? '<p class="side-empty">No agent executions yet.</p>'
             : runs
                 .map((run) =>
                   sideItem({
@@ -1392,7 +1399,7 @@ function noProjectContent() {
       <div>
         <p class="eyebrow">Start here</p>
         <h2>Create your first project</h2>
-        <p>A project scopes repositories, tasks, approvals, runs, and live events inside an organization.</p>
+        <p>A project scopes repositories, tasks, approvals, executions, and live events inside an organization.</p>
         ${
           canManageProject()
             ? projectCreateForm()
@@ -1468,7 +1475,7 @@ function renderOverview() {
       <span class="chip">${escapeHtml(docker?.version ?? "local")}</span>
     </div>
     <section class="metric-grid">
-      ${metric("Queued intent", pendingTasks.length, "Waiting for the next run", "↗")}
+      ${metric("Queued intent", pendingTasks.length, "Waiting for the next execution", "↗")}
       ${metric("In motion", activeTasks.length, "Claimed by the coordinator", "◎")}
       ${metric("Awaiting review", pendingApprovals.length, "Human decisions required", "✓")}
       ${metric("Accepted work", integratedTasks.length, "Tasks promoted to canonical", "⌁")}
@@ -1577,7 +1584,7 @@ function taskTable(tasks, actions = true) {
  */
 const BOARD_COLUMNS = [
   ["submitted", "Queued", "Waiting for a runner or a worker"],
-  ["claimed", "In flight", "Held by a run or a remote lease"],
+  ["claimed", "In flight", "Held by an execution or a remote lease"],
   ["integrated", "Landed", "Promoted into canonical"],
   ["failed", "Failed", "Ended without landing"],
   ["cancelled", "Cancelled", "Withdrawn before landing"],
@@ -1615,7 +1622,7 @@ function renderBoard() {
                     task.runId
                       ? `<button class="mini-button" data-open-run="${escapeHtml(
                           task.runId,
-                        )}">Open run</button>`
+                        )}">Open execution</button>`
                       : ""
                   }
                   ${taskActions(task)}
@@ -1642,7 +1649,7 @@ function renderBoard() {
   </div>`;
 }
 
-/* Runs (GitHub Actions-flavored list) ------------------------------------- */
+/* Executions (GitHub Actions-flavored list) ------------------------------- */
 
 function runStatusIcon(status) {
   if (status === "completed") {
@@ -1657,16 +1664,16 @@ function runStatusIcon(status) {
 function renderRuns() {
   return `<div class="view">
     <header class="view-head">
-      <p class="eyebrow">Integration ledger</p>
-      <h1>Runs</h1>
-      <p>Inspect scheduling, replans, validation, and canonical promotions.</p>
+      <p class="eyebrow">Coordination history</p>
+      <h1>Executions</h1>
+      <p>Each execution is one coordinated attempt from a base revision through planning, agent work, validation, and promotion. Git commits remain in Repository History.</p>
     </header>
     ${
       state.runs.length === 0
-        ? '<div class="empty-state"><div><h2>No integration runs</h2><p>Prompt an agent in the chat to start coordinated work. Every plan, conflict, lease, replan, validation, and promotion will be retained here.</p><button class="button button-primary" data-action="chat-focus">Prompt an agent</button></div></div>'
+        ? '<div class="empty-state"><div><h2>No agent executions</h2><p>Prompt an agent in the chat to start coordinated work. Every plan, conflict, lease, replan, validation, and promotion will be retained here.</p><button class="button button-primary" data-action="chat-focus">Prompt an agent</button></div></div>'
         : `<section class="issue-list">
             <header class="issue-list-head">
-              <span class="muted">${state.runs.length} run${
+              <span class="muted">${state.runs.length} execution${
                 state.runs.length === 1 ? "" : "s"
               } · newest first</span>
             </header>
@@ -1766,66 +1773,91 @@ function renderApprovals() {
 /* Repositories ------------------------------------------------------------- */
 
 function renderRepositories() {
+  const repositoryActions = canRun()
+    ? `<div class="repository-action-grid">
+        <form class="form-card" data-form="repository-create">
+          <p class="eyebrow">Greenfield source</p>
+          <h2>Create repository</h2>
+          <p>Start with a new canonical Git repository and an empty initial commit. It is immediately available to agent workspaces.</p>
+          <label>
+            <span>Repository ID</span>
+            <input
+              name="id"
+              placeholder="new-product"
+              pattern="[A-Za-z0-9][A-Za-z0-9._-]*"
+              maxlength="80"
+              autocomplete="off"
+              required
+            >
+          </label>
+          <label>
+            <span>Initial branch</span>
+            <input name="branch" value="main" maxlength="240" required>
+          </label>
+          <button class="button button-primary" type="submit">Create repository</button>
+        </form>
+        <form class="form-card" data-form="github-import">
+          <p class="eyebrow">Existing source</p>
+          <h2>Import from GitHub</h2>
+          <p>Relay creates an internal bare mirror. Private tokens are passed only to Git and are never persisted.</p>
+          <label>
+            <span>Repository</span>
+            <input name="repository" placeholder="owner/repository" required>
+          </label>
+          <div class="field-pair">
+            <label><span>Local ID (optional)</span><input name="id" placeholder="core-api"></label>
+            <label><span>Branch (auto-detect)</span><input name="branch" placeholder="main"></label>
+          </div>
+          <label>
+            <span>Fine-grained token (private repositories only)</span>
+            <input name="token" type="password" autocomplete="off" placeholder="github_pat_...">
+          </label>
+          <button class="button button-primary" type="submit">Import repository</button>
+        </form>
+      </div>`
+    : '<div class="signal-banner"><span class="health-orb"></span><div><strong>Repository access is read-only</strong><span>A developer, admin, or owner can create and import canonical repositories.</span></div></div>';
+
   return `<div class="view">
     <header class="view-head">
       <p class="eyebrow">Canonical sources</p>
       <h1>Repositories</h1>
-      <p>Import GitHub mirrors and start coordinated work against them.</p>
+      <p>Create a fresh canonical source or import an existing GitHub repository.</p>
     </header>
-    <div class="split-form">
-      <form class="form-card" data-form="github-import">
-        <p class="eyebrow">Canonical mirror</p>
-        <h2>Import from GitHub</h2>
-        <p>Relay creates an internal bare mirror. Private tokens are passed only to Git and are never persisted.</p>
-        <label>
-          <span>Repository</span>
-          <input name="repository" placeholder="owner/repository" required>
-        </label>
-        <div class="field-pair">
-          <label><span>Local ID (optional)</span><input name="id" placeholder="core-api"></label>
-          <label><span>Branch (auto-detect)</span><input name="branch" placeholder="main"></label>
-        </div>
-        <label>
-          <span>Fine-grained token (private repositories only)</span>
-          <input name="token" type="password" autocomplete="off" placeholder="github_pat_...">
-        </label>
-        <button class="button button-primary" type="submit">Import repository</button>
-      </form>
-      <section class="panel">
-        <header class="panel-head"><div><h2>Linked repositories</h2><p>${state.repositories.length} canonical mirror${
-          state.repositories.length === 1 ? "" : "s"
-        }</p></div></header>
-        <div class="panel-body">
-          ${
-            state.repositories.length === 0
-              ? '<div class="empty-state"><div><h2>No repository linked</h2><p>Import a public or private GitHub repository to create the first canonical source.</p></div></div>'
-              : `<div class="card-grid">${state.repositories
-                  .map(
-                    (repository) => `
-                      <article class="repo-card">
-                        <h3>${escapeHtml(repository.id)}</h3>
-                        <p>${escapeHtml(repository.remoteUrl ?? "Local repository mirror")}</p>
-                        <div class="card-meta">
-                          <span class="chip">${escapeHtml(repository.provider ?? "local")}</span>
-                          <span class="chip">${escapeHtml(repository.branch)}</span>
-                          ${
-                            canRun()
-                              ? `<button class="mini-button" data-run-repo="${escapeHtml(
-                                  repository.id,
-                                )}">Run queue</button>`
-                              : ""
-                          }
-                          <button class="mini-button" data-open-history="${escapeHtml(
-                            repository.id,
-                          )}">History</button>
-                        </div>
-                      </article>`,
-                  )
-                  .join("")}</div>`
-          }
-        </div>
-      </section>
-    </div>
+    ${repositoryActions}
+    <section class="panel panel-spaced">
+      <header class="panel-head"><div><h2>Linked repositories</h2><p>${state.repositories.length} canonical mirror${
+        state.repositories.length === 1 ? "" : "s"
+      }</p></div></header>
+      <div class="panel-body">
+        ${
+          state.repositories.length === 0
+            ? '<div class="empty-state"><div><h2>No repository linked</h2><p>Create a new repository here or import a public or private GitHub repository.</p></div></div>'
+            : `<div class="card-grid">${state.repositories
+                .map(
+                  (repository) => `
+                    <article class="repo-card">
+                      <h3>${escapeHtml(repository.id)}</h3>
+                      <p>${escapeHtml(repository.remoteUrl ?? "Relay-created repository")}</p>
+                      <div class="card-meta">
+                        <span class="chip">${escapeHtml(repository.provider ?? "local")}</span>
+                        <span class="chip">${escapeHtml(repository.branch)}</span>
+                        ${
+                          canRun()
+                            ? `<button class="mini-button" data-run-repo="${escapeHtml(
+                                repository.id,
+                              )}">Execute queue</button>`
+                            : ""
+                        }
+                        <button class="mini-button" data-open-history="${escapeHtml(
+                          repository.id,
+                        )}">History</button>
+                      </div>
+                    </article>`,
+                )
+                .join("")}</div>`
+        }
+      </div>
+    </section>
   </div>`;
 }
 
@@ -2073,6 +2105,8 @@ const RISK_LEVELS = ["low", "medium", "high", "critical"];
  */
 function policyPayload(input) {
   const defaultRiskLevels = ["high", "critical"];
+  const approvalsEnabled = input.approvalsEnabled !== false;
+  const requireSchemaReview = input.requireSchemaReview !== false;
   const minutes = (raw, label) => {
     const text = String(raw ?? "").trim();
     if (text === "") {
@@ -2106,12 +2140,17 @@ function policyPayload(input) {
   const sameAsDefault =
     riskLevels.length === defaultRiskLevels.length &&
     defaultRiskLevels.every((level) => riskLevels.includes(level));
-  const approvals = {
-    ...(input.requireChangesetReview ? { requireChangesetReview: true } : {}),
-    ...(riskLevels.length > 0 && !sameAsDefault ? { riskLevels } : {}),
-    ...(protectedPaths.length > 0 ? { protectedPaths } : {}),
-    ...(approvalTimeoutMs === undefined ? {} : { approvalTimeoutMs }),
-  };
+  const approvals = approvalsEnabled
+    ? {
+        ...(!requireSchemaReview ? { requireSchemaReview: false } : {}),
+        ...(input.requireChangesetReview
+          ? { requireChangesetReview: true }
+          : {}),
+        ...(riskLevels.length > 0 && !sameAsDefault ? { riskLevels } : {}),
+        ...(protectedPaths.length > 0 ? { protectedPaths } : {}),
+        ...(approvalTimeoutMs === undefined ? {} : { approvalTimeoutMs }),
+      }
+    : { enabled: false };
   const budgets = {
     ...(maxTaskRuntimeMs === undefined ? {} : { maxTaskRuntimeMs }),
     ...(maxProjectRuntimeMsPerDay === undefined
@@ -2154,9 +2193,19 @@ function policyForm(manageable) {
         Empty fields fall back to the built-in defaults. Saving with everything
         empty clears the policy entirely.
       </p>
+      <label><span><input name="approvalsEnabled" type="checkbox" ${
+        approvals.enabled === false ? "" : "checked"
+      } ${disabled}> Pause work when human approval is required</span>
+        <small class="muted">Turn this off for unattended execution. Isolation, ownership, validation, audit, and atomic promotion remain enforced.</small>
+      </label>
       <label><span><input name="requireChangesetReview" type="checkbox" ${
         approvals.requireChangesetReview ? "checked" : ""
       } ${disabled}> Require human review of every changeset</span></label>
+      <label><span><input name="requireSchemaReview" type="checkbox" ${
+        approvals.requireSchemaReview === false ? "" : "checked"
+      } ${disabled}> Require human review for declared schema changes</span>
+        <small class="muted">Turn this off when protected migration paths already define the database boundary.</small>
+      </label>
       <fieldset class="field-group">
         <legend>Risk levels requiring review</legend>
         ${RISK_LEVELS.map(
@@ -2432,7 +2481,7 @@ async function renderRunTab(container, tab) {
       response.run,
     )}</div>`;
   } catch (error) {
-    container.innerHTML = `<div class="view"><div class="empty-state"><div><h2>Run unavailable</h2><p>${escapeHtml(
+    container.innerHTML = `<div class="view"><div class="empty-state"><div><h2>Execution unavailable</h2><p>${escapeHtml(
       error.message,
     )}</p></div></div></div>`;
   }
@@ -2550,7 +2599,7 @@ function renderRunDetail(detail) {
     .join("");
   return `
     <header class="pr-head">
-      <p class="eyebrow">Integration run</p>
+      <p class="eyebrow">Agent execution</p>
       <h1>${escapeHtml(run.repositoryId)}
         <span class="muted">${escapeHtml(shortId(run.id, 16))}</span></h1>
       <p class="muted">
@@ -2592,7 +2641,7 @@ function renderRunDetail(detail) {
             ? ""
             : `<section class="detail-section"><h3>Review</h3>${generalComments}</section>`
         }
-        <section class="detail-section"><h3>Run audit</h3>${timeline(
+        <section class="detail-section"><h3>Execution audit</h3>${timeline(
           detail.audit.map((event, index) => ({
             sequence: index,
             runId: run.id,
@@ -2666,7 +2715,7 @@ function renderApprovalDetail(approval, changeSet) {
       <p class="muted">
         ${statusBadge(approval.status)}
         Task <code>${escapeHtml(shortId(approval.taskId, 18))}</code>
-        · Run <button class="text-button" data-open-run="${escapeHtml(
+        · Execution <button class="text-button" data-open-run="${escapeHtml(
           approval.runId,
         )}">${escapeHtml(shortId(approval.runId, 16))}</button>
         · expires ${escapeHtml(formatDate(approval.expiresAt))}
@@ -3037,7 +3086,7 @@ function chatAgentBubble(entry) {
           : `<div class="meta">${taskStatusIcon(status)} ${statusBadge(status)}</div>`
       }
       <div class="meta">
-        ${runId ? `<button class="mini-button" data-open-run="${escapeHtml(runId)}">Open run</button>` : ""}
+        ${runId ? `<button class="mini-button" data-open-run="${escapeHtml(runId)}">Open execution</button>` : ""}
         ${taskActions(task ?? { id: entry.taskId, status })}
       </div>
     </div>`;
@@ -3350,7 +3399,9 @@ function askBubble(message) {
         message.thinking,
       )}</div></details>`
     : message.thinkingHidden
-      ? `<details class="thinking"><summary>Reasoning (content not exposed)</summary><div class="thinking-body">${escapeHtml(
+      ? // The summary reads the same either way; the detail inside says why
+        // there is nothing to show, so the label stays uncluttered.
+        `<details class="thinking"><summary>Reasoning</summary><div class="thinking-body">${escapeHtml(
           `${meta.name} used ${formatTokens(message.usage?.thinkingTokens)} reasoning tokens but does not return the content.`,
         )}</div></details>`
       : "";
@@ -4418,6 +4469,17 @@ async function handleSubmit(event) {
         await enterApp();
         break;
       }
+      case "repository-create":
+        await mutate(
+          `/projects/${encodeURIComponent(state.projectId)}/repositories`,
+          {
+            id: value("id"),
+            ...(value("branch") ? { branch: value("branch") } : {}),
+          },
+          "Canonical repository created",
+        );
+        form.reset();
+        break;
       case "provider-settings": {
         const response = await api(
           `/chat/providers/${encodeURIComponent(form.dataset.provider)}/settings`,
@@ -4485,6 +4547,8 @@ async function handleSubmit(event) {
         break;
       case "project-policy": {
         const body = policyPayload({
+          approvalsEnabled: data.get("approvalsEnabled") === "on",
+          requireSchemaReview: data.get("requireSchemaReview") === "on",
           requireChangesetReview: data.get("requireChangesetReview") === "on",
           riskLevels: data.getAll("riskLevel").map((level) => String(level)),
           protectedPaths: value("protectedPaths"),
@@ -4800,7 +4864,7 @@ async function handleClick(event) {
           state.projectId,
         )}/repositories/${encodeURIComponent(target.dataset.runRepo)}/run`,
         {},
-        "Coordinator accepted the repository run",
+        "Coordinator accepted the repository execution",
       );
     } catch (error) {
       toast(error.message, "error");
@@ -5014,8 +5078,12 @@ async function boot() {
       ? "Ready for first-run setup"
       : "Local control plane online";
     $("#gateway-status").previousElementSibling.classList.add("live");
+    const bootstrapTab = $('[data-auth-mode="bootstrap"]');
+    bootstrapTab.hidden = !state.health.setupRequired;
     if (state.health.setupRequired) {
       setAuthMode("bootstrap");
+    } else {
+      setAuthMode("login");
     }
   } catch {
     $("#gateway-status").textContent = "Control plane unavailable";
