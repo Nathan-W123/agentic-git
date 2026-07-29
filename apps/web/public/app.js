@@ -1480,6 +1480,7 @@ function gauge(label, value, foot, { part = 0, whole = 0, tone = "" } = {}) {
     <article class="gauge${tone ? ` ${tone}` : ""}">
       <div class="gauge-dial">
         <svg viewBox="0 0 64 64" aria-hidden="true">
+          <circle class="gauge-ticks" cx="32" cy="32" r="30"></circle>
           <g transform="rotate(135 32 32)">
             <circle class="gauge-track" cx="32" cy="32" r="${GAUGE_RADIUS}"
               stroke-dasharray="${arc} ${GAUGE_CIRCUMFERENCE}"></circle>
@@ -1502,6 +1503,74 @@ function gauge(label, value, foot, { part = 0, whole = 0, tone = "" } = {}) {
  * visibility stay defined in one place even though the bar itself is
  * hidden on this view.
  */
+/**
+ * The circular calendar readout the reference HUDs carry: day of month in a
+ * ring whose arc is the month's progress, with the weekday and clock beside
+ * it. All of it is the machine's real clock; it re-renders with the shell.
+ */
+function hudClock() {
+  const now = new Date();
+  const day = now.getDate();
+  const daysInMonth = new Date(
+    now.getFullYear(),
+    now.getMonth() + 1,
+    0,
+  ).getDate();
+  const arc = GAUGE_CIRCUMFERENCE * (day / daysInMonth);
+  return `<div class="hud-clock">
+    <div class="hud-clock-dial">
+      <svg viewBox="0 0 64 64" aria-hidden="true">
+        <circle class="gauge-ticks" cx="32" cy="32" r="30"></circle>
+        <circle class="gauge-track" cx="32" cy="32" r="${GAUGE_RADIUS}"></circle>
+        <circle class="gauge-arc" cx="32" cy="32" r="${GAUGE_RADIUS}"
+          stroke-dasharray="${arc.toFixed(1)} ${GAUGE_CIRCUMFERENCE.toFixed(1)}"
+          transform="rotate(-90 32 32)"></circle>
+      </svg>
+      <span class="hud-clock-day">${day}</span>
+    </div>
+    <div class="hud-clock-meta">
+      <span class="hud-clock-month">${escapeHtml(
+        now.toLocaleString("en-US", { month: "long" }),
+      )}</span>
+      <span class="hud-clock-sub">${escapeHtml(
+        now.toLocaleString("en-US", { weekday: "long" }),
+      )}</span>
+      <span class="hud-clock-sub">${escapeHtml(
+        now.toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit" }),
+      )}</span>
+    </div>
+  </div>`;
+}
+
+/**
+ * The system readout cluster: every line is state the dashboard already
+ * holds — link, sandbox, and the sizes of what this project coordinates.
+ */
+function hudSystem() {
+  const docker = state.health?.docker;
+  const rows = [
+    ["Link", state.socket?.readyState === 1 ? "live" : "connecting"],
+    [
+      "Sandbox",
+      docker?.available ? (docker.version ?? "ready") : "offline",
+    ],
+    ["Repositories", state.repositories.length],
+    ["Workers", state.workers.length],
+    ["Members", state.members.length],
+  ];
+  return `<div class="hud-system">
+    <span class="hud-system-title">System</span>
+    ${rows
+      .map(
+        ([label, value]) => `<div class="hud-sys-row">
+          <span>${escapeHtml(label)}</span>
+          <strong>${escapeHtml(String(value))}</strong>
+        </div>`,
+      )
+      .join("")}
+  </div>`;
+}
+
 /** Ring-sized abbreviations; anything unlisted wears its full label. */
 const SATELLITE_SHORT_LABELS = {
   repositories: "Repos",
@@ -1595,7 +1664,25 @@ function neuralCore({ running, claimed, awaiting }) {
         data-core-menu="toggle"
         title="Navigation"
         aria-label="Toggle the radial navigation menu"
-      ></button>
+      >
+        <!-- Wireframe graticule instead of a filled sphere: static latitude
+             chords, and meridians whose widths run a cosine so the globe
+             reads as slowly turning. -->
+        <svg class="core-globe" viewBox="0 0 100 100" aria-hidden="true">
+          <circle class="globe-line" cx="50" cy="50" r="47"></circle>
+          <line class="globe-line globe-faint" x1="3" y1="50" x2="97" y2="50"></line>
+          <line class="globe-line globe-faint" x1="6.6" y1="32" x2="93.4" y2="32"></line>
+          <line class="globe-line globe-faint" x1="6.6" y1="68" x2="93.4" y2="68"></line>
+          <line class="globe-line globe-faint" x1="15.6" y1="18" x2="84.4" y2="18"></line>
+          <line class="globe-line globe-faint" x1="15.6" y1="82" x2="84.4" y2="82"></line>
+          <ellipse class="globe-line globe-meridian" cx="50" cy="50" rx="47" ry="47"
+            style="--lon-delay: 0s"></ellipse>
+          <ellipse class="globe-line globe-meridian" cx="50" cy="50" rx="47" ry="47"
+            style="--lon-delay: -4s"></ellipse>
+          <ellipse class="globe-line globe-meridian" cx="50" cy="50" rx="47" ry="47"
+            style="--lon-delay: -8s"></ellipse>
+        </svg>
+      </button>
       ${coreSatellites()}
       <div class="core-caption">
         <span class="core-state">${escapeHtml(phase)}</span>
@@ -1630,98 +1717,101 @@ function renderOverview() {
   const agents = state.agentsRunning;
   const running = agents?.running ?? 0;
 
-  return `<div class="view">
+  return `<div class="view hud-home">
     <header class="view-head">
-      <div class="page-actions">
-        <button class="button button-primary" data-action="chat-focus">Prompt an agent ↗</button>
-      </div>
       <p class="eyebrow">Control room</p>
       <h1>${escapeHtml(state.project?.name ?? "Overview")}</h1>
       <p>Canonical state, active work, and decisions at a glance.</p>
     </header>
-    <div class="signal-banner${docker?.available === false ? " warn" : ""}">
-      <span class="health-orb${docker?.available === false ? " warn" : ""}"></span>
-      <div>
-        <strong>${docker?.available ? "Sandbox runtime ready" : "Control plane ready"}</strong>
-        <span>${escapeHtml(
-          docker?.explanation ??
-            "Repository, persistence, approvals, and live events are online.",
-        )}</span>
-      </div>
-      <span class="chip">${escapeHtml(docker?.version ?? "local")}</span>
-    </div>
-    <section class="hud-hero">
-      <div class="hud-cluster">
-        ${gauge(
-          "Agents running",
-          agents === undefined ? "—" : running,
-          agents === undefined
-            ? "Awaiting the control plane"
-            : agents.workers > 0
-              ? `${agents.busyWorkers}/${agents.workers} worker${
-                  agents.workers === 1 ? "" : "s"
-                } busy`
-              : "No workers registered",
-          {
-            // Share of the fleet actually holding a lease, so an idle fleet
-            // draws an empty arc instead of a full one.
-            part: agents?.busyWorkers ?? 0,
-            whole: agents?.workers ?? 0,
-            tone: running > 0 ? "live" : "",
-          },
-        )}
-        ${gauge("In motion", activeTasks.length, "Claimed by the coordinator", {
-          part: activeTasks.length,
-          whole: totalTasks,
-        })}
-        ${gauge("Queued intent", pendingTasks.length, "Waiting to execute", {
-          part: pendingTasks.length,
-          whole: totalTasks,
-        })}
-      </div>
-      ${neuralCore({
-        running,
-        claimed: activeTasks.length,
-        awaiting: pendingApprovals.length,
-      })}
-      <div class="hud-cluster">
-        ${gauge(
-          "Awaiting review",
-          pendingApprovals.length,
-          "Human decisions required",
-          {
-            part: pendingApprovals.length,
-            whole: state.approvals.length,
-            tone: pendingApprovals.length > 0 ? "warn" : "",
-          },
-        )}
-        ${gauge("Accepted work", integratedTasks.length, "Promoted to canonical", {
-          part: integratedTasks.length,
-          whole: totalTasks,
-          tone: "good",
-        })}
-        ${gauge("Executions", state.runs.length, "Runs recorded for this project", {
-          part: completedRuns,
-          whole: state.runs.length,
-        })}
-      </div>
-    </section>
-    <div class="content-grid">
-      <section class="panel">
-        <header class="panel-head">
-          <div><h2>Work in view</h2><p>Latest task outcomes for this project</p></div>
-          <button class="mini-button" data-open-view="board">Open board</button>
-        </header>
-        <div class="table-wrap">
-          ${taskTable(recentTasks, false)}
+    ${
+      docker?.available === false
+        ? `<div class="signal-banner warn">
+            <span class="health-orb warn"></span>
+            <div>
+              <strong>Sandbox runtime unavailable</strong>
+              <span>${escapeHtml(docker.explanation ?? "")}</span>
+            </div>
+          </div>`
+        : ""
+    }
+    <div class="hud-stage">
+      <aside class="hud-rail">
+        ${hudClock()}
+        <div class="hud-dials">
+          ${gauge(
+            "Agents running",
+            agents === undefined ? "—" : running,
+            agents === undefined
+              ? "Awaiting the control plane"
+              : agents.workers > 0
+                ? `${agents.busyWorkers}/${agents.workers} worker${
+                    agents.workers === 1 ? "" : "s"
+                  } busy`
+                : "No workers registered",
+            {
+              // Share of the fleet actually holding a lease, so an idle
+              // fleet draws an empty arc instead of a full one.
+              part: agents?.busyWorkers ?? 0,
+              whole: agents?.workers ?? 0,
+              tone: running > 0 ? "live" : "",
+            },
+          )}
+          ${gauge("In motion", activeTasks.length, "Claimed by the coordinator", {
+            part: activeTasks.length,
+            whole: totalTasks,
+          })}
+          ${gauge("Queued intent", pendingTasks.length, "Waiting to execute", {
+            part: pendingTasks.length,
+            whole: totalTasks,
+          })}
         </div>
-      </section>
-      <section class="panel">
-        <header class="panel-head">
-          <div><h2>Live ledger</h2><p>Append-only coordination events</p></div>
-        </header>
-        <div class="panel-body">${timeline(state.audit, 8)}</div>
-      </section>
+        <section class="panel">
+          <header class="panel-head">
+            <div><h2>Work in view</h2><p>Latest task outcomes</p></div>
+            <button class="mini-button" data-open-view="board">Board</button>
+          </header>
+          <div class="table-wrap">
+            ${taskTable(recentTasks, false)}
+          </div>
+        </section>
+      </aside>
+      <div class="hud-center">
+        ${neuralCore({
+          running,
+          claimed: activeTasks.length,
+          awaiting: pendingApprovals.length,
+        })}
+      </div>
+      <aside class="hud-rail">
+        ${hudSystem()}
+        <div class="hud-dials">
+          ${gauge(
+            "Awaiting review",
+            pendingApprovals.length,
+            "Human decisions required",
+            {
+              part: pendingApprovals.length,
+              whole: state.approvals.length,
+              tone: pendingApprovals.length > 0 ? "warn" : "",
+            },
+          )}
+          ${gauge("Accepted work", integratedTasks.length, "Promoted to canonical", {
+            part: integratedTasks.length,
+            whole: totalTasks,
+            tone: "good",
+          })}
+          ${gauge("Executions", state.runs.length, "Runs recorded", {
+            part: completedRuns,
+            whole: state.runs.length,
+          })}
+        </div>
+        <section class="panel">
+          <header class="panel-head">
+            <div><h2>Live ledger</h2><p>Append-only coordination events</p></div>
+          </header>
+          <div class="panel-body">${timeline(state.audit, 8)}</div>
+        </section>
+      </aside>
     </div>
   </div>`;
 }

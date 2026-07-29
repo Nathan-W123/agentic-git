@@ -3242,24 +3242,180 @@ textarea:focus {
 
 /* Radial readouts --------------------------------------------------------- */
 
-.hud-hero {
+/*
+ * The Home stage: dense data rails at the periphery, the core between them.
+ * Each rail stacks a readout cluster, a row of dials, and one of the two
+ * working panels (task outcomes on the left, the event ledger on the right).
+ */
+.hud-stage {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(260px, 340px) minmax(0, 1fr);
-  align-items: center;
-  gap: 20px;
-  margin-bottom: 20px;
-  padding: 18px 8px 22px;
+  grid-template-columns: minmax(280px, 400px) minmax(0, 1fr) minmax(280px, 400px);
+  align-items: start;
+  gap: 22px;
+  padding: 14px 0 20px;
   border-top: 1px solid var(--border-muted);
-  border-bottom: 1px solid var(--border-muted);
-  position: relative;
 }
 
-/* The peripheral clusters the reference HUDs push their readouts into. */
-.hud-cluster {
+.hud-rail {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(96px, 1fr));
-  gap: 14px 10px;
+  gap: 14px;
+  min-width: 0;
+}
+
+.hud-center {
+  display: grid;
+  place-items: center;
+  padding-top: 26px;
+  position: sticky;
+  top: 0;
+}
+
+.hud-dials {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
   justify-items: center;
+}
+
+/* Rails run compact so the periphery reads dense, like the references. */
+.hud-rail .gauge-dial {
+  width: 74px;
+  height: 74px;
+}
+
+.hud-rail .gauge-value {
+  font-size: 20px;
+}
+
+.hud-rail .panel .table-wrap,
+.hud-rail .panel .panel-body {
+  max-height: 300px;
+  overflow: auto;
+}
+
+.hud-rail .panel {
+  font-size: 12px;
+}
+
+.hud-rail .panel th,
+.hud-rail .panel td {
+  padding: 5px 8px;
+  font-size: 11px;
+}
+
+.hud-rail .panel td .muted {
+  font-size: 10px;
+}
+
+/* Clock cluster: the circular calendar from the reference HUDs. */
+.hud-clock {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-muted);
+  border-left: 2px solid var(--accent);
+  background: rgba(6, 20, 30, 0.6);
+}
+
+.hud-clock-dial {
+  position: relative;
+  width: 74px;
+  height: 74px;
+  flex: none;
+  display: grid;
+  place-items: center;
+}
+
+.hud-clock-dial svg {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+.hud-clock-dial circle {
+  fill: none;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+}
+
+.hud-clock-day {
+  font-family: var(--font-data);
+  font-size: 24px;
+  font-weight: 600;
+  color: #eafdff;
+  text-shadow: 0 0 16px rgba(79, 232, 255, 0.55);
+}
+
+.hud-clock-meta {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.hud-clock-month {
+  font-family: var(--font-data);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 13px;
+  color: var(--accent);
+  text-shadow: 0 0 12px rgba(79, 232, 255, 0.4);
+}
+
+.hud-clock-sub {
+  font-family: var(--font-data);
+  font-size: 10.5px;
+  color: var(--fg-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* System readout cluster: label/value pairs over hairline rules. */
+.hud-system {
+  display: grid;
+  gap: 0;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--border-muted);
+  border-left: 2px solid var(--accent);
+  background: rgba(6, 20, 30, 0.6);
+}
+
+.hud-system-title {
+  font-family: var(--font-data);
+  text-transform: uppercase;
+  letter-spacing: 0.18em;
+  font-size: 10px;
+  color: var(--accent);
+  margin-bottom: 4px;
+}
+
+.hud-sys-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 3px 0;
+  border-top: 1px solid rgba(79, 232, 255, 0.08);
+  font-family: var(--font-data);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--fg-muted);
+}
+
+.hud-sys-row strong {
+  color: #d9fbff;
+  font-weight: 600;
+  text-shadow: 0 0 10px rgba(79, 232, 255, 0.35);
+}
+
+/* Faint tick ring outside every dial. */
+.gauge-ticks {
+  stroke: rgba(79, 232, 255, 0.22);
+  stroke-width: 1;
+  stroke-dasharray: 1 3.1;
+  fill: none;
 }
 
 .gauge {
@@ -3473,23 +3629,73 @@ textarea:focus {
 }
 
 /*
- * The core itself. `--pulse` is set inline from real load, so the breathing
- * period is the one part of this that carries information.
+ * The core itself: a holographic wireframe globe, not a filled sphere.
+ * `--pulse` is set inline from real load, so the breathing period is the
+ * one part of this that carries information.
  */
 .core-orb {
   position: relative;
-  width: 34%;
+  width: 42%;
   aspect-ratio: 1;
   border-radius: 50%;
   background: radial-gradient(
-    circle at 38% 32%,
-    #ffffff 0%,
-    #a8f4ff 12%,
-    #29c6e6 42%,
-    #0a5f7d 72%,
-    #041d29 100%
+    circle at 50% 42%,
+    rgba(79, 232, 255, 0.2),
+    rgba(79, 232, 255, 0.05) 55%,
+    transparent 72%
   );
   animation: core-breathe var(--pulse, 6s) ease-in-out infinite;
+}
+
+.core-globe {
+  position: absolute;
+  inset: 6%;
+  width: 88%;
+  height: 88%;
+  overflow: visible;
+}
+
+.globe-line {
+  fill: none;
+  stroke: rgba(126, 240, 255, 0.75);
+  stroke-width: 1;
+  vector-effect: non-scaling-stroke;
+  filter: drop-shadow(0 0 3px rgba(79, 232, 255, 0.6));
+}
+
+.globe-faint {
+  stroke: rgba(126, 240, 255, 0.32);
+}
+
+/*
+ * Meridians: scaleX runs a cosine, which is exactly what a rotating great
+ * circle's apparent width does, so three of them phase-shifted read as one
+ * globe turning.
+ */
+.globe-meridian {
+  stroke: rgba(126, 240, 255, 0.45);
+  transform-origin: 50% 50%;
+  transform-box: fill-box;
+  animation: globe-lon 24s linear infinite;
+  animation-delay: var(--lon-delay, 0s);
+}
+
+@keyframes globe-lon {
+  0% {
+    transform: scaleX(1);
+  }
+  25% {
+    transform: scaleX(0.02);
+  }
+  50% {
+    transform: scaleX(-1);
+  }
+  75% {
+    transform: scaleX(-0.02);
+  }
+  100% {
+    transform: scaleX(1);
+  }
 }
 
 /* A halo that expands out of the orb on the same period. */
@@ -3702,10 +3908,6 @@ textarea:focus {
   max-width: 380px;
 }
 
-.hud-immersive .hud-hero {
-  grid-template-columns: minmax(0, 1fr) minmax(320px, 420px) minmax(0, 1fr);
-  padding: 26px 8px 30px;
-}
 
 /* Radar sweep: one slow conic blade inside the outer ring. */
 .core-sweep {
@@ -3827,27 +4029,24 @@ button.core-orb:focus-visible {
 /* Responsive -------------------------------------------------------------- */
 
 @media (max-width: 1180px) {
-  .hud-hero,
-  .hud-immersive .hud-hero {
+  .hud-stage {
     grid-template-columns: minmax(0, 1fr);
-    justify-items: center;
+    justify-items: stretch;
+  }
+
+  .hud-center {
+    order: -1;
+    position: static;
   }
 
   .neural-core,
   .hud-immersive .neural-core {
-    order: -1;
     max-width: 264px;
     /* A tighter orbit so the menu stays on a phone screen. */
     --sat-orbit: 104px;
   }
 
-  .hud-cluster {
-    grid-template-columns: repeat(3, minmax(92px, 1fr));
-    width: 100%;
-    max-width: 420px;
-  }
-
   .context-block {
-    width: 200px;
+    width: auto;
   }
 }
