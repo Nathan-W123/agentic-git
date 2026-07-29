@@ -17,6 +17,8 @@ import {
 import {
   DEFERRED_SCOPE_MARKER,
   PlanAdmissionController,
+  findTaskHandoffs,
+  seedContextForTask,
   type PlanAdmissionInput,
 } from "@coord/coordinator";
 import { GitClient, RepositoryService } from "@coord/repository-service";
@@ -205,6 +207,35 @@ async function leaseAndAdmit(
   );
   return assignment;
 }
+
+test("an approved remote plan is immutable across retries", async () => {
+  const harness = await createHarness();
+  try {
+    await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+
+    const first = await admit(harness, assignment);
+    assert.equal(first.outcome, "admitted");
+    assert.equal(
+      first.outcome === "admitted" ? first.admission.status : undefined,
+      "approved",
+    );
+
+    const retried = await admit(harness, assignment, {
+      expectedFiles: ["src/value.js", "src/other.js"],
+      expectedSymbols: ["value", "other"],
+    });
+    assert.deepEqual(retried, first);
+    assert.deepEqual(
+      (await harness.store.getWorkLease(assignment.lease.id))?.plan?.plan
+        .expectedFiles,
+      ["src/value.js"],
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
 
 function resultStub(
   taskId: string,
@@ -2536,6 +2567,109 @@ test("a patch reaching into a withheld symbol loses its file, not the run", asyn
     assert.deepEqual(collected?.event.data["withheldSymbols"], {
       "src/shapes.js": ["contended"],
     });
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a settled task leaves a handoff a later task can be seeded with", async () => {
+  // The compaction boundary in practice: the task finishes, and what it
+  // learned is on the record in a form a fresh session can start from without
+  // replaying anything.
+  const harness = await splitHarness();
+  try {
+    const holder = await holdTheContestedFile(harness);
+    const split = await leaseTheSplitTask(harness);
+    const admitted = await admitWorkPlan(
+      harness.store,
+      { leaseId: split.lease.id, actorId: "user", plan: splitTaskPlan(split) },
+      { repositories: harness.repositories },
+    );
+    assert.ok(admitted.outcome === "admitted");
+    assert.equal(admitted.admission.status, "approved_with_constraints");
+
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const repository = {
+      id: stored.id,
+      path: stored.path,
+      branch: stored.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId: split.task.id,
+      rootPath: path.join(harness.root, "handoff-workspace"),
+      repository,
+      baseVersion: split.canonicalVersion,
+    });
+    for (const [index, file] of FREE_FILES.entries()) {
+      await writeFile(
+        path.join(workspace.path, file),
+        `export const free${index} = ${index + 100};
+`,
+        "utf8",
+      );
+    }
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: [],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "raised the free constants",
+    });
+    await workspaces.destroy(workspace);
+
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: split.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: splitTaskPlan(split),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(accepted.accepted, true, accepted.reason);
+
+    const handoffs = await findTaskHandoffs(harness.store, {
+      taskId: split.task.id,
+    });
+    assert.equal(handoffs.length, 1, "a settled task must leave exactly one");
+    const handoff = handoffs[0];
+    assert.ok(handoff);
+
+    // Partial, because the contested file was withheld — and it names the
+    // holder rather than saying something vague about a conflict.
+    assert.equal(handoff.reason, "partially_completed");
+    assert.ok(
+      handoff.open.some(
+        (entry) =>
+          entry.item.includes("src/value.js") &&
+          entry.blockedBy.includes(holder.task.id),
+      ),
+      JSON.stringify(handoff.open),
+    );
+    // Every "done" line points at something checkable.
+    assert.ok(
+      handoff.completed.some(
+        (entry) => entry.kind === "canonical_promotion",
+      ),
+    );
+    assert.ok(
+      handoff.completed.some((entry) => entry.kind === "follow_up_task"),
+      "the queued follow-up belongs in the record",
+    );
+    // And the next session gets it as context, not as raw history.
+    const seeded = await seedContextForTask(harness.store, {
+      resources: ["src/value.js"],
+    });
+    assert.match(seeded, /Handoff from earlier work/u);
+    assert.match(seeded, /src\/value\.js/u);
+    assert.match(seeded, /Next steps/u);
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }

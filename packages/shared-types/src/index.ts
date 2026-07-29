@@ -240,6 +240,77 @@ export function deferredFilePaths(
   );
 }
 
+/**
+ * The record one task leaves for whoever picks up its unfinished business.
+ *
+ * The point of it is that it is *not* a summary of a conversation. A summary
+ * is unverifiable — it says what someone remembers, at whatever altitude they
+ * chose. Every field here is projected from evidence the control plane already
+ * holds durably: what integrated, which commands passed, which resources were
+ * withheld and by whom, what the coordinator decided and why. A reader can
+ * check any line of it against the run record, and a fresh session can be
+ * seeded with it instead of replaying raw history it has no way to audit.
+ */
+export type HandoffReason =
+  | "completed"
+  | "partially_completed"
+  | "blocked"
+  | "requeued"
+  | "failed"
+  | "long_running";
+
+/** Something that happened, and where to verify it. */
+export interface HandoffEvidence {
+  kind:
+    | "canonical_promotion"
+    | "validation"
+    | "changeset"
+    | "integration"
+    | "ownership"
+    | "follow_up_task";
+  /** A revision, changeset id, command label, or task id — never prose. */
+  reference: string;
+  detail: string;
+}
+
+/** A choice the run made, and the reason it made it. */
+export interface HandoffDecision {
+  decision: string;
+  rationale: string;
+  /** Where the decision is recorded, when it came from the control plane. */
+  reference?: string;
+}
+
+/** Work this task did not finish, and what is in the way. */
+export interface HandoffOpenItem {
+  item: string;
+  /** Task ids or resources holding it up. Empty when simply unstarted. */
+  blockedBy: string[];
+  reason: string;
+}
+
+export interface TaskHandoff {
+  version: 1;
+  taskId: TaskId;
+  runId?: string;
+  repositoryId: string;
+  projectId?: ProjectId;
+  reason: HandoffReason;
+  objective: string;
+  /** Where canonical stood when this was written. */
+  canonicalRevision: string;
+  /** What was done, each line answerable from the run record. */
+  completed: HandoffEvidence[];
+  /** What was not. */
+  open: HandoffOpenItem[];
+  decisions: HandoffDecision[];
+  /** Specific traps found the hard way, not general advice. */
+  gotchas: string[];
+  /** Concrete enough to start on without reading anything else. */
+  nextSteps: string[];
+  createdAt: string;
+}
+
 export interface CanonicalChangeNotice {
   previousVersion: CanonicalVersion;
   canonicalVersion: CanonicalVersion;
@@ -423,6 +494,8 @@ export type AuditEventType =
   | "changeset_collected"
   /** Patches a partial admission held back, kept for the follow-up task. */
   | "changeset_withheld"
+  /** A structured handoff written at a task boundary for the next session. */
+  | "handoff_recorded"
   | "approval_requested"
   | "approval_decided"
   | "validation_completed"

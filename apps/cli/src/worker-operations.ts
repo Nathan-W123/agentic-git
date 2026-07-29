@@ -12,6 +12,8 @@ import {
   deferredScopeObjective,
   isDeferredScopeFollowUp,
   replayBlockers,
+  buildTaskHandoff,
+  recordTaskHandoff,
   splitChangeSet,
   withheldPatchRecord,
   type ActivePlan,
@@ -584,10 +586,10 @@ async function queueDeferredScope(
   admission: PlanAdmission,
   split: ChangeSetSplit,
   reported: ChangeSet,
-): Promise<void> {
+): Promise<string | undefined> {
   const deferred = admission.deferredResources ?? [];
   if (deferred.length === 0) {
-    return;
+    return undefined;
   }
   const followUp = await store.submitTask({
     repositoryId: task.repositoryId,
@@ -638,6 +640,7 @@ async function queueDeferredScope(
         "against is being rewritten by whoever holds the deferred resource",
     });
   }
+  return followUp.id;
 }
 
 export interface WorkPlanInput {
@@ -736,6 +739,14 @@ export async function admitWorkPlan(
     const reason = "The leased task is no longer claimed";
     await failLease(store, lease, reason, "remote_plan_validation");
     return { outcome: "rejected", reason };
+  }
+  if (
+    lease.plan !== undefined &&
+    planAdmissionApproved(lease.plan.admission)
+  ) {
+    // An approved admission is the execution contract. Retrying the endpoint
+    // is idempotent, but no later request may widen or replace that contract.
+    return { outcome: "admitted", admission: lease.plan.admission };
   }
 
   let submitted: AgentPlan;
@@ -867,6 +878,14 @@ export async function admitWorkPlan(
       // Another worker was admitted between the read and the write. Its plan
       // is now part of the executing set, so decide again against it.
       continue;
+    }
+    if (saved.outcome === "already_admitted") {
+      // A concurrent request for this lease committed first. Return the
+      // durable contract rather than the answer computed from a stale view.
+      return {
+        outcome: "admitted",
+        admission: saved.lease.plan!.admission,
+      };
     }
 
     for (const assessment of admission.conflicts) {
@@ -1271,6 +1290,7 @@ export async function acceptWorkResult(
     baseVersion,
   });
   let runFinished = false;
+  let followUp: string | undefined;
   try {
     await store.saveTask(run.id, taskDefinition);
     await store.saveTaskStatus(run.id, task.id, "planning");
@@ -1489,7 +1509,7 @@ export async function acceptWorkResult(
       // Only now, with the granted half durably in canonical, is the deferred
       // half turned into work of its own. Queueing it earlier would leave a
       // task asking for the remainder of something that never landed.
-      await queueDeferredScope(
+      followUp = await queueDeferredScope(
         store,
         run.id,
         task,
@@ -1511,6 +1531,38 @@ export async function acceptWorkResult(
         explanation: integration.explanation,
       });
     }
+    // The task has settled either way, which is the natural boundary for a
+    // handoff: everything it will ever know is now on the record, and the next
+    // session should start from that rather than from nothing. A failure to
+    // write one must not fail an otherwise good integration.
+    await recordTaskHandoff(
+      store,
+      buildTaskHandoff({
+        taskId: task.id,
+        objective: task.objective,
+        repositoryId: task.repositoryId,
+        ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
+        runId: run.id,
+        canonicalRevision: integration.canonicalVersion.revision,
+        decision,
+        admission: admitted.admission,
+        integration,
+        changeSet: promoted,
+        followUpTaskIds: followUp === undefined ? [] : [followUp],
+        withheldFiles: split.deferred.map((patch) => patch.path).sort(),
+        reason:
+          integration.status !== "integrated"
+            ? "failed"
+            : planAdmissionPartial(admitted.admission) ||
+                split.deferred.length > 0
+              ? "partially_completed"
+              : "completed",
+        ...(integration.status === "integrated"
+          ? {}
+          : { failure: integration.explanation }),
+      }),
+      { runId: run.id },
+    ).catch(() => undefined);
     await store.finishRun(run.id, "completed", integration.canonicalVersion);
     runFinished = true;
     return {
