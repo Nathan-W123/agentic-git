@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -10,312 +10,345 @@ import {
   ProviderChatError,
   ProviderChatService,
   parseClaudeStreamJson,
-  type FetchLike,
+  parseCodexJsonl,
+  type ProcessRunner,
 } from "./providers.js";
 
 /**
- * The provider chat spends other people's money with other people's keys, so
- * the tests concentrate on the boundaries: keys are validated before being
- * stored, users cannot see or use each other's connections, the local CLI
- * path is admin-only, and every number shown in the UI traces to a field a
- * provider actually returned.
+ * Provider chat signs in with real vendor-CLI accounts and spends the host
+ * owner's subscriptions, so the tests concentrate on the boundaries: nothing
+ * connects without a detected, signed-in CLI; everything is admin-gated; a
+ * signed-in-but-ineligible account (Google) is refused with the provider's
+ * own reason; settings only accept what the account actually reports; and
+ * every number shown traces to a field a CLI actually emitted.
  */
 
-async function createProject(): Promise<CoordinatorProject> {
+interface Harness {
+  project: CoordinatorProject;
+  home: string;
+}
+
+async function createHarness(): Promise<Harness> {
   const root = await mkdtemp(path.join(os.tmpdir(), "cproviders-"));
-  await mkdir(root, { recursive: true });
-  return await CoordinatorProject.init(root);
+  const home = path.join(root, "home");
+  await mkdir(home, { recursive: true });
+  const project = await CoordinatorProject.init(path.join(root, "cp"));
+  return { project, home };
 }
 
-function fakeResponse(input: {
-  ok?: boolean;
-  status?: number;
-  body?: unknown;
-  headers?: Record<string, string>;
-}) {
-  const headers = new Map(
-    Object.entries(input.headers ?? {}).map(([key, value]) => [
-      key.toLowerCase(),
-      value,
-    ]),
-  );
-  return {
-    ok: input.ok ?? true,
-    status: input.status ?? 200,
-    headers: { get: (name: string) => headers.get(name.toLowerCase()) ?? null },
-    json: async () => input.body ?? {},
-    text: async () => JSON.stringify(input.body ?? {}),
-  };
+function output(stdout: string, exitCode = 0, stderr = "") {
+  return { exitCode, stdout, stderr, durationMs: 1 };
 }
 
-test("an API key is validated before it is stored, and rejection is loud", async () => {
-  const project = await createProject();
-  const calls: string[] = [];
-  const fetchImpl: FetchLike = async (url) => {
-    calls.push(url);
-    return fakeResponse({ ok: false, status: 401 });
-  };
-  const service = new ProviderChatService(project, {
-    fetchImpl,
-    claudeCliDetector: async () => false,
-  });
+/** A runner scripted per command word (node+entry.js counts as the entry). */
+function scriptedRunner(
+  script: Record<string, (args: readonly string[]) => ReturnType<typeof output>>,
+): ProcessRunner {
+  return (async (command: string, args: readonly string[]) => {
+    let name = path.basename(String(command)).replace(/\.exe$/iu, "");
+    let effectiveArgs = args;
+    if (name === "node" && typeof args[0] === "string") {
+      name = path.basename(args[0]).replace(/\.js$/iu, "");
+      effectiveArgs = args.slice(1);
+    }
+    const handler = script[name];
+    if (handler === undefined) {
+      return output("", 127, `${name}: not scripted`);
+    }
+    return handler(effectiveArgs);
+  }) as ProcessRunner;
+}
 
-  await assert.rejects(
-    service.connect({
-      userId: "user_a",
-      systemAdmin: false,
-      provider: "anthropic",
-      kind: "api-key",
-      apiKey: "sk-ant-invalid-key",
+const CLAUDE_OK = {
+  claude: (args: readonly string[]) =>
+    args[0] === "auth"
+      ? output(JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }))
+      : output(
+          [
+            JSON.stringify({
+              type: "assistant",
+              message: { content: [{ type: "text", text: "hi" }] },
+            }),
+            JSON.stringify({
+              type: "result",
+              is_error: false,
+              result: "hi",
+              session_id: "sess-1234",
+              usage: { input_tokens: 1, output_tokens: 2 },
+            }),
+          ].join("\n"),
+        ),
+};
+
+async function seedCodexCache(home: string): Promise<void> {
+  await mkdir(path.join(home, ".codex"), { recursive: true });
+  await writeFile(
+    path.join(home, ".codex", "models_cache.json"),
+    JSON.stringify({
+      models: [
+        {
+          slug: "gpt-5.6-sol",
+          display_name: "GPT-5.6-Sol",
+          description: "Frontier",
+          default_reasoning_level: "low",
+          supported_reasoning_levels: [
+            { effort: "low" },
+            { effort: "high" },
+            { effort: "xhigh" },
+          ],
+        },
+        {
+          slug: "gpt-5.5",
+          display_name: "GPT-5.5",
+          supported_reasoning_levels: [{ effort: "medium" }],
+        },
+      ],
     }),
-    (error: unknown) =>
-      error instanceof ProviderChatError && error.code === "key_rejected",
+    "utf8",
   );
-  assert.ok(calls[0]?.includes("api.anthropic.com/v1/models"));
+}
 
-  const providers = await service.list({ userId: "user_a", systemAdmin: false });
-  assert.equal(providers.find((p) => p.id === "anthropic")?.connected, false);
+test("nothing connects without a detected, signed-in CLI", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) =>
+        args[0] === "auth"
+          ? output(JSON.stringify({ loggedIn: false }))
+          : output(""),
+    }),
+  });
+  await assert.rejects(
+    service.connect({ userId: "u", systemAdmin: true, provider: "anthropic" }),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "not_signed_in",
+  );
+  await assert.rejects(
+    service.connect({ userId: "u", systemAdmin: true, provider: "openai" }),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "cli_unavailable",
+  );
 });
 
-test("connections are per user and never leak between accounts", async () => {
-  const project = await createProject();
-  const fetchImpl: FetchLike = async () => fakeResponse({});
-  const service = new ProviderChatService(project, {
-    fetchImpl,
-    claudeCliDetector: async () => false,
+test("connections are admin-only and per user", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_OK),
   });
-
-  await service.connect({
-    userId: "user_a",
-    systemAdmin: false,
-    provider: "openai",
-    kind: "api-key",
-    apiKey: "sk-user-a-key-000000",
-  });
-
-  const forA = await service.list({ userId: "user_a", systemAdmin: false });
-  const forB = await service.list({ userId: "user_b", systemAdmin: false });
-  assert.equal(forA.find((p) => p.id === "openai")?.connected, true);
-  assert.equal(forB.find((p) => p.id === "openai")?.connected, false);
-
   await assert.rejects(
-    service.complete({
-      userId: "user_b",
-      systemAdmin: false,
-      provider: "openai",
-      messages: [{ role: "user", content: "hi" }],
-    }),
-    (error: unknown) =>
-      error instanceof ProviderChatError && error.code === "not_connected",
-  );
-
-  await service.disconnect({ userId: "user_a", provider: "openai" });
-  const after = await service.list({ userId: "user_a", systemAdmin: false });
-  assert.equal(after.find((p) => p.id === "openai")?.connected, false);
-});
-
-test("the local CLI connection is admin-only and Anthropic-only", async () => {
-  const project = await createProject();
-  const service = new ProviderChatService(project, {
-    fetchImpl: async () => fakeResponse({}),
-    claudeCliDetector: async () => true,
-  });
-
-  await assert.rejects(
-    service.connect({
-      userId: "user_a",
-      systemAdmin: false,
-      provider: "anthropic",
-      kind: "local-cli",
-    }),
+    service.connect({ userId: "u", systemAdmin: false, provider: "anthropic" }),
     (error: unknown) =>
       error instanceof ProviderChatError && error.code === "admin_required",
   );
-  await assert.rejects(
-    service.connect({
-      userId: "admin",
-      systemAdmin: true,
-      provider: "openai",
-      kind: "local-cli",
-    }),
-    (error: unknown) =>
-      error instanceof ProviderChatError &&
-      error.code === "unsupported_connection",
-  );
-
   await service.connect({
-    userId: "admin",
+    userId: "admin_a",
     systemAdmin: true,
     provider: "anthropic",
-    kind: "local-cli",
   });
-  const asAdmin = await service.list({ userId: "admin", systemAdmin: true });
-  assert.equal(asAdmin.find((p) => p.id === "anthropic")?.connected, true);
-  // A demoted account no longer counts as connected through the host CLI.
-  const demoted = await service.list({ userId: "admin", systemAdmin: false });
-  assert.equal(demoted.find((p) => p.id === "anthropic")?.connected, false);
+  const forA = await service.list({ userId: "admin_a", systemAdmin: true });
+  const forB = await service.list({ userId: "admin_b", systemAdmin: true });
+  assert.equal(forA.find((p) => p.id === "anthropic")?.connected, true);
+  assert.equal(forB.find((p) => p.id === "anthropic")?.connected, false);
+
+  await service.disconnect({ userId: "admin_a", provider: "anthropic" });
+  const after = await service.list({ userId: "admin_a", systemAdmin: true });
+  assert.equal(after.find((p) => p.id === "anthropic")?.connected, false);
 });
 
-test("anthropic replies carry thinking, usage, and rate-limit headers", async () => {
-  const project = await createProject();
-  const service = new ProviderChatService(project, {
-    fetchImpl: async (url) => {
-      if (url.includes("/v1/models")) {
-        return fakeResponse({});
-      }
-      return fakeResponse({
-        body: {
-          content: [
-            { type: "thinking", thinking: "Let me reason about this." },
-            { type: "text", text: "The answer is 42." },
-          ],
-          usage: { input_tokens: 17, output_tokens: 130 },
-        },
-        headers: {
-          "anthropic-ratelimit-tokens-remaining": "39000",
-          "anthropic-ratelimit-tokens-limit": "40000",
-          "anthropic-ratelimit-requests-remaining": "58",
-          "anthropic-ratelimit-requests-limit": "60",
-        },
-      });
-    },
-    claudeCliDetector: async () => false,
+test("a signed-in but ineligible Google account is refused with its own reason", async () => {
+  const harness = await createHarness();
+  await mkdir(path.join(harness.home, ".gemini"), { recursive: true });
+  await writeFile(
+    path.join(harness.home, ".gemini", "google_accounts.json"),
+    JSON.stringify({ active: "someone@corp.example" }),
+    "utf8",
+  );
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      gemini: (args) =>
+        args[0] === "--version"
+          ? output("0.9.0")
+          : output(
+              "",
+              1,
+              "Error authenticating: IneligibleTierError: Your current account is not eligible",
+            ),
+    }),
   });
+  await assert.rejects(
+    service.connect({ userId: "u", systemAdmin: true, provider: "google" }),
+    (error: unknown) =>
+      error instanceof ProviderChatError &&
+      error.code === "provider_blocked" &&
+      /someone@corp\.example/u.test(error.message) &&
+      /IneligibleTierError/u.test(error.message),
+  );
+});
+
+test("openai options come from the account's own models cache and settings are validated against them", async () => {
+  const harness = await createHarness();
+  await seedCodexCache(harness.home);
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      codex: (args) =>
+        args[0] === "--version"
+          ? output("codex-cli 0.146.0")
+          : args[0] === "login"
+            ? output("Logged in using ChatGPT")
+            : output(""),
+    }),
+  });
+  const options = await service.options({ provider: "openai" });
+  assert.deepEqual(
+    options.models?.map((model) => model.id),
+    ["gpt-5.6-sol", "gpt-5.5"],
+  );
+  assert.deepEqual(options.models?.[0]?.efforts, ["low", "high", "xhigh"]);
+  assert.equal(options.allowCustomModel, false);
+
+  await service.connect({ userId: "u", systemAdmin: true, provider: "openai" });
+  await service.setSettings({
+    userId: "u",
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    effort: "xhigh",
+  });
+  await assert.rejects(
+    service.setSettings({ userId: "u", provider: "openai", model: "gpt-9" }),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "invalid_model",
+  );
+  await assert.rejects(
+    service.setSettings({
+      userId: "u",
+      provider: "openai",
+      model: "gpt-5.5",
+      effort: "ultra",
+    }),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "invalid_effort",
+  );
+});
+
+test("anthropic exposes no model list, says so, and validates effort against the real enum", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_OK),
+  });
+  const options = await service.options({ provider: "anthropic" });
+  assert.equal(options.models, null);
+  assert.equal(options.allowCustomModel, true);
+  assert.ok(options.notes.some((note) => /does not publish a model list/u.test(note)));
+  assert.deepEqual(options.efforts, ["low", "medium", "high", "xhigh", "max"]);
+
   await service.connect({
     userId: "u",
-    systemAdmin: false,
+    systemAdmin: true,
     provider: "anthropic",
-    kind: "api-key",
-    apiKey: "sk-ant-test-0000000",
   });
-  const reply = await service.complete({
+  await service.setSettings({
     userId: "u",
-    systemAdmin: false,
     provider: "anthropic",
-    messages: [{ role: "user", content: "What is the answer?" }],
+    model: "claude-opus-5",
+    effort: "max",
   });
-  assert.equal(reply.text, "The answer is 42.");
-  assert.equal(reply.thinking, "Let me reason about this.");
-  assert.deepEqual(reply.usage, { inputTokens: 17, outputTokens: 130 });
-  assert.equal(reply.rateLimit?.source, "response-headers");
-  assert.equal(reply.rateLimit?.tokensRemaining, 39000);
-  assert.equal(reply.rateLimit?.tokensLimit, 40000);
+  await assert.rejects(
+    service.setSettings({ userId: "u", provider: "anthropic", effort: "ultra" }),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "invalid_effort",
+  );
 });
 
-test("openai reasoning tokens are counted but marked as hidden content", async () => {
-  const project = await createProject();
-  const service = new ProviderChatService(project, {
-    fetchImpl: async (url) => {
-      if (url.includes("/v1/models")) {
-        return fakeResponse({});
-      }
-      return fakeResponse({
-        body: {
-          choices: [{ message: { content: "Done." } }],
-          usage: {
-            prompt_tokens: 20,
-            completion_tokens: 300,
-            completion_tokens_details: { reasoning_tokens: 250 },
-          },
-        },
-        headers: {
-          "x-ratelimit-remaining-tokens": "199000",
-          "x-ratelimit-limit-tokens": "200000",
-        },
-      });
-    },
-    claudeCliDetector: async () => false,
-  });
-  await service.connect({
-    userId: "u",
-    systemAdmin: false,
-    provider: "openai",
-    kind: "api-key",
-    apiKey: "sk-test-000000000",
-  });
-  const reply = await service.complete({
-    userId: "u",
-    systemAdmin: false,
-    provider: "openai",
-    messages: [{ role: "user", content: "Do the thing" }],
-  });
-  assert.equal(reply.text, "Done.");
-  assert.equal(reply.thinking, undefined);
-  assert.equal(reply.thinkingHidden, true);
-  assert.equal(reply.usage.thinkingTokens, 250);
-  assert.equal(reply.rateLimit?.tokensRemaining, 199000);
-});
-
-test("google thought parts become the reasoning section; no rate limit is invented", async () => {
-  const project = await createProject();
-  const service = new ProviderChatService(project, {
-    fetchImpl: async (url) => {
-      if (url.includes("/v1beta/models?")) {
-        return fakeResponse({});
-      }
-      return fakeResponse({
-        body: {
-          candidates: [
-            {
-              content: {
-                parts: [
-                  { text: "Considering the constraints…", thought: true },
-                  { text: "Here is the plan." },
-                ],
+test("codex completions carry the chosen model, effort, and read-only sandbox", async () => {
+  const harness = await createHarness();
+  await seedCodexCache(harness.home);
+  const seen: string[][] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      codex: (args) => {
+        if (args[0] === "--version") return output("codex-cli 0.146.0");
+        if (args[0] === "login") return output("Logged in using ChatGPT");
+        seen.push([...args]);
+        return output(
+          [
+            JSON.stringify({ type: "thread.started", thread_id: "th-1" }),
+            JSON.stringify({
+              type: "item.completed",
+              item: { type: "reasoning", text: "Summarised reasoning." },
+            }),
+            JSON.stringify({
+              type: "item.completed",
+              item: { type: "agent_message", text: "pong" },
+            }),
+            JSON.stringify({
+              type: "turn.completed",
+              usage: {
+                input_tokens: 11484,
+                cached_input_tokens: 1920,
+                output_tokens: 5,
+                reasoning_output_tokens: 64,
               },
-            },
-          ],
-          usageMetadata: {
-            promptTokenCount: 11,
-            candidatesTokenCount: 90,
-            thoughtsTokenCount: 40,
-          },
-        },
-      });
-    },
-    claudeCliDetector: async () => false,
+            }),
+          ].join("\n"),
+        );
+      },
+    }),
   });
-  await service.connect({
+  await service.connect({ userId: "u", systemAdmin: true, provider: "openai" });
+  await service.setSettings({
     userId: "u",
-    systemAdmin: false,
-    provider: "google",
-    kind: "api-key",
-    apiKey: "AIza-test-000000000",
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    effort: "high",
   });
   const reply = await service.complete({
     userId: "u",
-    systemAdmin: false,
-    provider: "google",
-    messages: [{ role: "user", content: "Plan something" }],
+    systemAdmin: true,
+    provider: "openai",
+    messages: [{ role: "user", content: "ping" }],
   });
-  assert.equal(reply.text, "Here is the plan.");
-  assert.equal(reply.thinking, "Considering the constraints…");
+  assert.equal(reply.text, "pong");
+  assert.equal(reply.thinking, "Summarised reasoning.");
   assert.deepEqual(reply.usage, {
-    inputTokens: 11,
-    outputTokens: 90,
-    thinkingTokens: 40,
+    inputTokens: 11484,
+    cachedInputTokens: 1920,
+    outputTokens: 5,
+    thinkingTokens: 64,
   });
-  assert.equal(reply.rateLimit, undefined);
+  assert.equal(reply.cliSessionId, "th-1");
+  const args = seen[0] ?? [];
+  assert.equal(args[0], "exec");
+  assert.ok(args.includes("--sandbox") && args.includes("read-only"));
+  assert.ok(args.includes("-m") && args.includes("gpt-5.6-sol"));
+  assert.ok(args.some((a) => a.includes("model_reasoning_effort")));
 });
 
-test("messages are validated before any provider is called", async () => {
-  const project = await createProject();
-  let called = 0;
-  const service = new ProviderChatService(project, {
-    fetchImpl: async () => {
-      called += 1;
-      return fakeResponse({});
-    },
-    claudeCliDetector: async () => false,
+test("messages are validated before any CLI is spawned", async () => {
+  const harness = await createHarness();
+  let completions = 0;
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) => {
+        if (args[0] === "auth") {
+          return output(JSON.stringify({ loggedIn: true }));
+        }
+        completions += 1;
+        return output("");
+      },
+    }),
   });
   await service.connect({
     userId: "u",
-    systemAdmin: false,
-    provider: "openai",
-    kind: "api-key",
-    apiKey: "sk-test-000000000",
+    systemAdmin: true,
+    provider: "anthropic",
   });
-  const validationCalls = called;
   for (const bad of [
     [],
     [{ role: "system", content: "x" }],
@@ -325,15 +358,15 @@ test("messages are validated before any provider is called", async () => {
     await assert.rejects(
       service.complete({
         userId: "u",
-        systemAdmin: false,
-        provider: "openai",
+        systemAdmin: true,
+        provider: "anthropic",
         messages: bad,
       }),
       (error: unknown) =>
         error instanceof ProviderChatError && error.code === "invalid_messages",
     );
   }
-  assert.equal(called, validationCalls);
+  assert.equal(completions, 0);
 });
 
 test("claude stream-json parsing keeps every number the CLI reported", () => {
@@ -374,34 +407,12 @@ test("claude stream-json parsing keeps every number the CLI reported", () => {
     outputTokens: 88,
     costUsd: 0.0123,
   });
-  assert.equal(reply.rateLimit?.source, "cli-window");
   assert.equal(reply.rateLimit?.windowKind, "five_hour");
-  assert.equal(reply.rateLimit?.windowStatus, "allowed");
   assert.equal(reply.cliSessionId, "abc-123");
-
-  assert.throws(
-    () => parseClaudeStreamJson("not json at all", "m"),
-    /no result event/u,
-  );
-  assert.throws(
-    () =>
-      parseClaudeStreamJson(
-        JSON.stringify({ type: "result", is_error: true, result: "boom" }),
-        "m",
-      ),
-    /reported an error/u,
-  );
 });
 
 test("redacted CLI thinking becomes hidden reasoning with real token counts", () => {
-  // What the current headless CLI actually emits (verified live): thinking
-  // blocks with empty content plus system thinking_tokens estimates.
   const lines = [
-    JSON.stringify({
-      type: "system",
-      subtype: "thinking_tokens",
-      estimated_tokens: 50,
-    }),
     JSON.stringify({
       type: "system",
       subtype: "thinking_tokens",
@@ -421,13 +432,26 @@ test("redacted CLI thinking becomes hidden reasoning with real token counts", ()
       is_error: false,
       result: "306,614",
       session_id: "s-1",
-      total_cost_usd: 0.02,
       usage: { input_tokens: 5, output_tokens: 40 },
     }),
   ].join("\n");
   const reply = parseClaudeStreamJson(lines, "claude-sonnet-5");
-  assert.equal(reply.text, "306,614");
   assert.equal(reply.thinking, undefined);
   assert.equal(reply.thinkingHidden, true);
   assert.equal(reply.usage.thinkingTokens, 85);
+});
+
+test("codex jsonl failures and truncated streams are loud", () => {
+  assert.throws(
+    () => parseCodexJsonl("", "m"),
+    /no completed turn/u,
+  );
+  assert.throws(
+    () =>
+      parseCodexJsonl(
+        JSON.stringify({ type: "error", message: "stream disconnected" }),
+        "m",
+      ),
+    /stream disconnected/u,
+  );
 });

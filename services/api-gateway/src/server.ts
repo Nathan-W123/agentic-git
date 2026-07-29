@@ -205,14 +205,25 @@ export interface ApiOperations {
  */
 export interface ChatProviderOperations {
   list(input: { userId: string; systemAdmin: boolean }): Promise<unknown>;
+  /** Launches the provider's own browser sign-in flow on the host. */
+  signIn(input: {
+    systemAdmin: boolean;
+    provider: string;
+  }): Promise<unknown>;
   connect(input: {
     userId: string;
     systemAdmin: boolean;
     provider: string;
-    kind: string;
-    apiKey?: string;
   }): Promise<unknown>;
   disconnect(input: { userId: string; provider: string }): Promise<void>;
+  /** Model/effort choices the connected account actually reports. */
+  options(input: { provider: string }): Promise<unknown>;
+  setSettings(input: {
+    userId: string;
+    provider: string;
+    model?: string;
+    effort?: string;
+  }): Promise<unknown>;
   complete(input: {
     userId: string;
     systemAdmin: boolean;
@@ -1666,6 +1677,42 @@ export class ApiGateway {
       this.sendJson(response, 201, { repository });
       return;
     }
+    if (repositoriesMatch !== undefined && method === "POST") {
+      const projectId = repositoriesMatch[0] ?? "";
+      const { project } = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "import_repository",
+      );
+      const body = objectBody(await this.readJson(request));
+      const branch = stringField(body["branch"], "branch", {
+        max: 240,
+        optional: true,
+      });
+      const repository = await this.performOperation(
+        "repository_creation_failed",
+        async () =>
+          await this.options.operations.createRepository({
+            projectId,
+            id: stringField(body["id"], "id", { max: 80 }) ?? "",
+            ...(branch === undefined ? {} : { branch }),
+            actorId: principal.user.id,
+          }),
+      );
+      await this.options.store.appendAudit(undefined, {
+        type: "repository_created",
+        data: {
+          organizationId: project.organizationId,
+          projectId,
+          repositoryId: repository.id,
+          branch: repository.branch,
+          actorId: principal.user.id,
+        },
+      });
+      this.sendJson(response, 201, { repository });
+      return;
+    }
 
     const tasksMatch = matchPath(
       path,
@@ -2252,32 +2299,72 @@ export class ApiGateway {
       }
       const chatProviderMatch = matchPath(
         path,
-        new RegExp(`^${API_PREFIX}/chat/providers/(anthropic|openai|google)$`, "u"),
+        new RegExp(
+          `^${API_PREFIX}/chat/providers/(anthropic|openai|google)$`,
+          "u",
+        ),
       );
-      if (chatProviderMatch !== undefined) {
-        const provider = chatProviderMatch[0] ?? "";
-        if (method === "POST") {
+      const chatProviderActionMatch = matchPath(
+        path,
+        new RegExp(
+          `^${API_PREFIX}/chat/providers/(anthropic|openai|google)` +
+            `/(signin|options|settings)$`,
+          "u",
+        ),
+      );
+      if (chatProviderActionMatch !== undefined) {
+        const [provider = "", action = ""] = chatProviderActionMatch;
+        if (action === "signin" && method === "POST") {
+          this.sendJson(response, 200, {
+            signIn: await performChat(() =>
+              chatOperations.signIn({
+                systemAdmin: identity.systemAdmin,
+                provider,
+              }),
+            ),
+          });
+          return;
+        }
+        if (action === "options" && method === "GET") {
+          this.sendJson(response, 200, {
+            options: await performChat(() =>
+              chatOperations.options({ provider }),
+            ),
+          });
+          return;
+        }
+        if (action === "settings" && method === "POST") {
           const body = objectBody(await this.readJson(request));
-          const kind = stringField(body["kind"], "kind", { max: 20 }) ?? "";
-          if (kind !== "api-key" && kind !== "local-cli") {
-            throw new HttpError(
-              400,
-              "invalid_request",
-              'kind must be "api-key" or "local-cli"',
-            );
-          }
-          const apiKey = stringField(body["apiKey"], "apiKey", {
-            max: 512,
+          const model = stringField(body["model"], "model", {
+            max: 120,
+            optional: true,
+          });
+          const effort = stringField(body["effort"], "effort", {
+            max: 20,
             optional: true,
           });
           this.sendJson(response, 200, {
             providers: await performChat(() =>
-              chatOperations.connect({
-                ...identity,
+              chatOperations.setSettings({
+                userId: identity.userId,
                 provider,
-                kind,
-                ...(apiKey === undefined ? {} : { apiKey }),
+                ...(model === undefined ? {} : { model }),
+                ...(effort === undefined ? {} : { effort }),
               }),
+            ),
+          });
+          return;
+        }
+        throw new HttpError(405, "method_not_allowed", "Unsupported method");
+      }
+      if (chatProviderMatch !== undefined) {
+        const provider = chatProviderMatch[0] ?? "";
+        if (method === "POST") {
+          // Sign-in based connection: the body carries nothing sensitive.
+          await this.readJson(request).catch(() => undefined);
+          this.sendJson(response, 200, {
+            providers: await performChat(() =>
+              chatOperations.connect({ ...identity, provider }),
             ),
           });
           return;

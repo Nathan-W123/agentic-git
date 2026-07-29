@@ -92,6 +92,11 @@ async function main(): Promise<void> {
   const operations: ApiOperations = {
     chatProviders: {
       list: (input) => providerChat.list(input),
+      signIn: (input) =>
+        providerChat.signIn({
+          ...input,
+          provider: input.provider as ProviderId,
+        }),
       connect: (input) =>
         providerChat.connect({
           ...input,
@@ -100,6 +105,13 @@ async function main(): Promise<void> {
         }),
       disconnect: (input) =>
         providerChat.disconnect({
+          ...input,
+          provider: input.provider as ProviderId,
+        }),
+      options: (input) =>
+        providerChat.options({ provider: input.provider as ProviderId }),
+      setSettings: (input) =>
+        providerChat.setSettings({
           ...input,
           provider: input.provider as ProviderId,
         }),

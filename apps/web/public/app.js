@@ -3309,11 +3309,8 @@ function renderChat() {
     if (status?.connected !== true) {
       thread.innerHTML = `<p class="chat-empty">
         ${escapeHtml(meta?.company ?? provider)} is not connected.
-        Click its icon above to connect an API key${
-          provider === "anthropic" && status?.localCliAvailable
-            ? " or use the local claude CLI"
-            : ""
-        }.
+        Click its icon above and sign in with your
+        ${escapeHtml(meta?.company ?? provider)} account.
       </p>`;
     } else if (conversation.length === 0) {
       thread.innerHTML = `<p class="chat-empty">
@@ -3554,9 +3551,8 @@ async function sendBuildPrompt() {
 
 function openConnectOverlay(provider) {
   state.chat.overlayProvider = provider;
-  renderConnectOverlay();
+  void renderConnectOverlay();
   $("#connect-overlay").hidden = false;
-  $("#connect-key-input")?.focus();
 }
 
 function closeConnectOverlay() {
@@ -3564,7 +3560,13 @@ function closeConnectOverlay() {
   $("#connect-overlay").hidden = true;
 }
 
-function renderConnectOverlay() {
+const SIGN_IN_LABELS = {
+  anthropic: "Sign in with Claude",
+  openai: "Sign in with ChatGPT",
+  google: "Sign in with Google",
+};
+
+async function renderConnectOverlay() {
   const provider = state.chat.overlayProvider;
   if (provider === null) {
     return;
@@ -3572,60 +3574,129 @@ function renderConnectOverlay() {
   const meta = providerMeta(provider);
   const status = providerStatus(provider);
   const connected = status?.connected === true;
-  const keyHints = {
-    anthropic: "console.anthropic.com → API keys",
-    openai: "platform.openai.com → API keys",
-    google: "aistudio.google.com → Get API key",
-  };
+  const cli = status?.cli ?? { detected: false, loggedIn: false };
+
+  let optionsHtml = "";
+  if (connected) {
+    let options;
+    try {
+      options = (await api(`/chat/providers/${provider}/options`)).options;
+    } catch {
+      options = undefined;
+    }
+    if (state.chat.overlayProvider !== provider) {
+      return;
+    }
+    if (options !== undefined) {
+      const currentModel = status.model ?? "";
+      const currentEffort = status.effort ?? "";
+      const modelField =
+        options.models !== null
+          ? `<label><span>Model</span>
+              <select name="model">${options.models
+                .map(
+                  (model) =>
+                    `<option value="${escapeHtml(model.id)}"${
+                      model.id === currentModel ? " selected" : ""
+                    }>${escapeHtml(model.label)}${
+                      model.description ? ` — ${escapeHtml(model.description)}` : ""
+                    }</option>`,
+                )
+                .join("")}</select>
+              ${
+                options.modelListSource
+                  ? `<small class="muted">${escapeHtml(options.modelListSource)}</small>`
+                  : ""
+              }</label>`
+          : options.allowCustomModel
+            ? `<label><span>Model</span>
+                <input name="model" value="${escapeHtml(currentModel)}" placeholder="CLI default">
+              </label>`
+            : "";
+      const effortValues =
+        options.efforts ??
+        options.models?.find((model) => model.id === currentModel)?.efforts ??
+        options.models?.[0]?.efforts ??
+        [];
+      const effortField =
+        effortValues.length > 0
+          ? `<label><span>Reasoning effort</span>
+              <select name="effort">${effortValues
+                .map(
+                  (effort) =>
+                    `<option value="${escapeHtml(effort)}"${
+                      effort === currentEffort ? " selected" : ""
+                    }>${escapeHtml(effort)}</option>`,
+                )
+                .join("")}</select>
+            </label>`
+          : "";
+      optionsHtml = `
+        <form data-form="provider-settings" data-provider="${provider}" class="stack" style="gap:10px">
+          ${modelField}
+          ${effortField}
+          ${options.notes
+            .map((note) => `<small class="muted">${escapeHtml(note)}</small>`)
+            .join("")}
+          <p class="connect-error" id="connect-error"></p>
+          <button class="button button-primary" type="submit">Save settings</button>
+        </form>`;
+    }
+  }
+
   $("#connect-card").innerHTML = `
     <div class="provider-mark">${PROVIDER_MARKS[provider]}</div>
     <div>
       <p class="eyebrow">${escapeHtml(meta.company)}</p>
-      <h2>${connected ? `Connected to ${escapeHtml(meta.name)}` : `Connect ${escapeHtml(meta.name)}`}</h2>
+      <h2>${connected ? escapeHtml(meta.name) : `Connect ${escapeHtml(meta.name)}`}</h2>
     </div>
     ${
       connected
         ? `<p>
-            Connected via ${escapeHtml(status.kind === "local-cli" ? "the local claude CLI" : "your API key")}
-            · model ${escapeHtml(status.model ?? "")}.
+            Signed in${cli.account ? ` — ${escapeHtml(cli.account)}` : ""} ·
+            model ${escapeHtml(status.model ?? "CLI default")}${
+              status.effort ? ` · effort ${escapeHtml(status.effort)}` : ""
+            }.
           </p>
+          ${optionsHtml}
           <div class="row-actions">
             <button class="button button-danger" data-action="provider-disconnect" data-provider="${provider}">Disconnect</button>
             <button class="button button-quiet" data-action="connect-close">Close</button>
           </div>`
         : `<p>
-            This connects your own ${escapeHtml(meta.company)} <strong>API key</strong> —
-            not a ${escapeHtml(meta.name)} consumer login, which providers do not
-            offer to third-party apps. The key is validated with a free call,
-            stored on this Relay host for your account only, and never shown again.
+            Uses your ${escapeHtml(meta.company)} account through its own
+            sign-in — no API keys. The browser flow runs on the Relay host and
+            spends the host owner's account, so connecting is restricted to
+            system administrators.
           </p>
-          <form data-form="provider-connect" data-provider="${provider}">
-            <label>
-              <span>API key <small class="muted">(${escapeHtml(keyHints[provider])})</small></span>
-              <input
-                id="connect-key-input"
-                name="apiKey"
-                type="password"
-                autocomplete="off"
-                placeholder="${provider === "anthropic" ? "sk-ant-…" : provider === "openai" ? "sk-…" : "AIza…"}"
-              >
-            </label>
-            <p class="connect-error" id="connect-error"></p>
-            <button class="button button-primary button-wide" type="submit">
-              Validate &amp; connect
-            </button>
-          </form>
+          <p class="muted" style="font-size:12px">
+            ${
+              cli.detected
+                ? cli.loggedIn
+                  ? `✓ CLI detected · already signed in${cli.account ? ` as ${escapeHtml(cli.account)}` : ""}`
+                  : "CLI detected · not signed in yet"
+                : `The ${escapeHtml(meta.name)} CLI was not found on this host.`
+            }
+          </p>
           ${
-            provider === "anthropic" && status?.localCliAvailable === true
-              ? `<div class="connect-divider">or</div>
-                 <button class="button button-quiet button-wide" data-action="provider-connect-cli">
-                   Use the local claude CLI (detected)
-                 </button>
-                 <p class="muted" style="font-size:11.5px">
-                   Runs this host's logged-in <code>claude</code> in headless mode.
-                   System administrators only — it spends the host owner's account.
-                 </p>`
+            cli.blockedReason
+              ? `<p class="connect-error">${escapeHtml(cli.blockedReason)}</p>`
               : ""
+          }
+          <p class="connect-error" id="connect-error"></p>
+          ${
+            cli.loggedIn
+              ? `<button class="button button-primary button-wide" data-action="provider-connect-account">
+                  Connect ${escapeHtml(meta.name)}
+                </button>`
+              : `<button class="button button-primary button-wide" data-action="provider-signin" ${
+                  cli.detected ? "" : "disabled"
+                }>
+                  ${escapeHtml(SIGN_IN_LABELS[provider])}
+                </button>
+                <button class="button button-quiet button-wide" data-action="provider-check-again">
+                  Check again
+                </button>`
           }
           <div class="row-actions">
             <button class="button button-quiet" data-action="connect-close">Cancel</button>
@@ -3633,7 +3704,7 @@ function renderConnectOverlay() {
     }`;
 }
 
-async function connectProvider(provider, kind, apiKey) {
+async function connectProvider(provider) {
   const errorTarget = $("#connect-error");
   try {
     const response = await api(
@@ -3804,12 +3875,21 @@ async function handleSubmit(event) {
         await enterApp();
         break;
       }
-      case "provider-connect": {
-        await connectProvider(
-          form.dataset.provider,
-          "api-key",
-          value("apiKey"),
+      case "provider-settings": {
+        const response = await api(
+          `/chat/providers/${encodeURIComponent(form.dataset.provider)}/settings`,
+          {
+            method: "POST",
+            body: {
+              ...(value("model") ? { model: value("model") } : {}),
+              ...(value("effort") ? { effort: value("effort") } : {}),
+            },
+          },
         );
+        state.chat.providers = response.providers ?? state.chat.providers;
+        toast("Provider settings saved");
+        void renderConnectOverlay();
+        renderChat();
         break;
       }
       case "github-import":
@@ -4098,8 +4178,26 @@ async function handleClick(event) {
     closeConnectOverlay();
     return;
   }
-  if (target.dataset.action === "provider-connect-cli") {
-    await connectProvider(state.chat.overlayProvider, "local-cli");
+  if (target.dataset.action === "provider-connect-account") {
+    await connectProvider(state.chat.overlayProvider);
+    return;
+  }
+  if (target.dataset.action === "provider-signin") {
+    try {
+      const response = await api(
+        `/chat/providers/${encodeURIComponent(state.chat.overlayProvider)}/signin`,
+        { method: "POST", body: {} },
+      );
+      toast(response.signIn?.note ?? "Sign-in started on the host");
+    } catch (error) {
+      toast(error.message, "error");
+    }
+    return;
+  }
+  if (target.dataset.action === "provider-check-again") {
+    await loadChatProviders();
+    void renderConnectOverlay();
+    renderChat();
     return;
   }
   if (target.dataset.action === "provider-disconnect") {
