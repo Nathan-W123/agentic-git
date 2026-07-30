@@ -1,0 +1,90 @@
+{
+  "label": "replan-substitution-b2",
+  "scenario": "live-checkout-trio",
+  "sample": 20,
+  "startedAt": "2026-07-30T20:24:44.945Z",
+  "elapsedMs": 115346,
+  "armOrder": [
+    "treatment",
+    "control"
+  ],
+  "taskId": "task_checkout_fee",
+  "objective": "During checkout, add a flat two pound handling charge to every order's total price",
+  "indexRevision": "8ec17f4e91c120b3fc84ff1573d47f837ae543d1",
+  "firstPlan": {
+    "expectedFiles": [
+      "checkout.js",
+      "checkout.test.js"
+    ],
+    "expectedSymbols": [
+      "calculateTotal"
+    ],
+    "intent": "Add a mandatory flat £2 handling charge to every checkout order total.",
+    "grounding": {
+      "confidence": "grounded",
+      "missingFiles": [
+        "checkout.js",
+        "checkout.test.js"
+      ],
+      "unresolvedSymbols": [
+        "calculateTotal"
+      ],
+      "fileReferents": [],
+      "symbolReferents": [
+        {
+          "declared": "calculateTotal",
+          "resolved": "orderTotal",
+          "files": [
+            "src/pricing/total.js"
+          ]
+        }
+      ]
+    }
+  },
+  "arms": {
+    "treatment": {
+      "anyHallucination": false,
+      "repeated": [],
+      "fresh": [],
+      "adopted": [
+        "orderTotal"
+      ],
+      "adoptedAll": true,
+      "expectedFiles": [
+        "src/pricing/total.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    "control": {
+      "anyHallucination": false,
+      "repeated": [],
+      "fresh": [],
+      "adopted": [
+        "orderTotal"
+      ],
+      "adoptedAll": true,
+      "expectedFiles": [
+        "src/pricing/total.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  }
+}

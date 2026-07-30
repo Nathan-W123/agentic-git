@@ -205,40 +205,54 @@ possibly discriminate between them.
 
 ### Results
 
-Twenty paired samples, scenario `live-checkout-trio`, one real Codex planning
-call and two real replan calls each. Thirteen of the twenty first plans named
-something grounding could map to real code; those thirteen are the comparison.
-Raw records in `data/grounding/*replan-substitution*`, tabulated by
+Forty paired samples in two collections, scenario `live-checkout-trio`, one real
+Codex planning call and two real replan calls each. Thirty of the forty first
+plans named something grounding could map to real code; those thirty are the
+comparison. Raw records in `data/grounding/*replan-substitution*`, tabulated by
 `scripts/summarize-replan-substitution.mjs`.
 
 | | Control | Treatment | Discordant pairs | McNemar exact |
 | --- | --- | --- | --- | --- |
-| Repeated a name it had already been corrected on | 10/13 (77%) | **2/13 (15%)** | 9 vs 1 | **p = 0.02** |
-| Declared any name that does not exist | 11/13 (85%) | 6/13 (46%) | 6 vs 1 | p = 0.13 |
-| Adopted every real name grounding resolved | 12/13 (92%) | 13/13 (100%) | 0 vs 1 | p = 1.00 |
+| Repeated a name it had already been corrected on | 19/30 (63%) | **5/30 (17%)** | 15 vs 1 | **p = 0.0005** |
+| Declared any name that does not exist | 25/30 (83%) | **13/30 (43%)** | 13 vs 1 | **p = 0.0018** |
+| Adopted every real name grounding resolved | 28/30 (93%) | 29/30 (97%) | 0 vs 1 | p = 1.00 |
 
-**The intervention works, and it works narrowly.** Substituting the real names
-into the previous plan cuts repeat-hallucination of corrected names from 77% to
-15%. That is the failure the earlier hint-based enrichment could not move at
-all.
+**Substitution works, and unlike the hint it replaces, it moves both numbers.**
+Repeat-hallucination of already-corrected names falls from 63% to 17%. Overall
+hallucination — any declaration naming something that does not exist — falls
+from 83% to 43%. Both are decisive on a paired test, and the discordant pairs
+run 15:1 and 13:1 in the treatment's favour, so this is not a couple of lucky
+samples carrying an average.
 
-It does *not* cut hallucination in general. The overall rate falls from 85% to
-46% and does not reach significance, because an agent that stops repeating
-`checkout.js` does not thereby stop inventing something new. Substitution
-closes the loop on names the coordinator has already ruled on; it says nothing
-about the next invention, which grounding must catch the same way it caught the
-first.
+The two effects are not the same size, and the gap is the informative part.
+Cutting repeat-hallucination by 46 points only buys a 40-point cut in overall
+hallucination, because an agent that stops repeating `checkout.js` sometimes
+invents something else instead. Substitution closes the loop on names the
+coordinator has already ruled on; it does not make the next declaration true,
+and grounding still has to catch that one the same way it caught the first.
+
+The first twenty samples alone put the primary metric at p = 0.02 and left the
+overall rate at p = 0.13; the second twenty resolved that, which is worth
+recording as a note on how much a paired live experiment costs before it can
+say anything — thirty usable pairs, not four.
 
 Adoption was already near-ceiling in both arms — the control's notes do name
-the real files, and the agent usually takes them. What the control does not
-stop is the agent *also* carrying the invented name forward, which is what
-puts an unverifiable declaration back into arbitration.
+the real files, and the agent usually takes them. What the control fails to
+stop is the agent *also* carrying the invented name forward, which is what puts
+an unverifiable declaration back into arbitration.
 
 ### What this measurement cannot say
 
-The Codex account this ran under has shell execution blocked by policy: every
-`powershell.exe` invocation the agent attempts is refused, so it cannot read
-the repository during planning. That is why the end-to-end scenario used for
+The Codex install this ran under could not execute shell commands at all. It is
+the same defect as the infrastructure note above, degraded further:
+`codex-windows-sandbox-setup.exe` is absent from `~/.codex` entirely, so the
+sandbox layer fails before any command runs and the agent cannot read the
+repository during planning. The router then reports `rejected: blocked by
+policy`, which reads like an account restriction and is not one — the sandbox
+log names the real cause, and the log for the day the earlier live runs
+succeeded contains no such error at all.
+
+That is why the end-to-end scenario used for
 [live-evidence.md](live-evidence.md) could not be re-run — with no successful
 executions, canonical never advances and no replan is ever requested — and it
 is why this experiment drives the replan turn directly instead.
@@ -315,8 +329,8 @@ single-developer repository.
   task will not actually touch) is still taken at its word. That failure
   mode is invisible to any static check of the declarations alone.
 - Name substitution acts only on declarations grounding could already
-  resolve. A replan that invents something new gets no help from it, and the
-  measurement above shows that is what a corrected agent tends to do next:
-  repeat-hallucination falls sharply while overall hallucination does not.
-  The floor on both is set by the matcher's reach, above, not by how the
+  resolve. A replan that invents something new gets no help from it, which is
+  why the measurement above cuts overall hallucination by less than it cuts
+  repeat-hallucination: some corrected agents simply invent elsewhere. The
+  floor on both is set by the matcher's reach, above, not by how the
   correction is worded.

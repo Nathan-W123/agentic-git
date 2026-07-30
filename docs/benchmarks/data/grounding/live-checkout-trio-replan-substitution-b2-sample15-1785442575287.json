@@ -1,0 +1,102 @@
+{
+  "label": "replan-substitution-b2",
+  "scenario": "live-checkout-trio",
+  "sample": 15,
+  "startedAt": "2026-07-30T20:14:02.405Z",
+  "elapsedMs": 132834,
+  "armOrder": [
+    "control",
+    "treatment"
+  ],
+  "taskId": "task_checkout_fee",
+  "objective": "During checkout, add a flat two pound handling charge to every order's total price",
+  "indexRevision": "b386b2f93e7acce12f10b8752d1efe7f82b548a3",
+  "firstPlan": {
+    "expectedFiles": [
+      "src/checkout.js",
+      "test/checkout.test.js"
+    ],
+    "expectedSymbols": [
+      "HANDLING_FEE",
+      "checkout order-total calculation"
+    ],
+    "intent": "Add a mandatory flat £2 handling charge to every order during checkout without removing or disabling existing price components.",
+    "grounding": {
+      "confidence": "grounded",
+      "missingFiles": [
+        "src/checkout.js",
+        "test/checkout.test.js"
+      ],
+      "unresolvedSymbols": [
+        "HANDLING_FEE",
+        "checkout order-total calculation"
+      ],
+      "fileReferents": [],
+      "symbolReferents": [
+        {
+          "declared": "checkout order-total calculation",
+          "resolved": "orderTotal",
+          "files": [
+            "src/pricing/total.js"
+          ]
+        }
+      ]
+    }
+  },
+  "arms": {
+    "control": {
+      "anyHallucination": true,
+      "repeated": [
+        "HANDLING_FEE"
+      ],
+      "fresh": [
+        "test/pricing/total.test.js"
+      ],
+      "adopted": [
+        "orderTotal"
+      ],
+      "adoptedAll": true,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing/total.test.js"
+      ],
+      "expectedSymbols": [
+        "HANDLING_FEE",
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "grounded",
+        "missingFiles": [
+          "test/pricing/total.test.js"
+        ],
+        "unresolvedSymbols": [
+          "HANDLING_FEE"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    "treatment": {
+      "anyHallucination": false,
+      "repeated": [],
+      "fresh": [],
+      "adopted": [
+        "orderTotal"
+      ],
+      "adoptedAll": true,
+      "expectedFiles": [
+        "src/pricing/total.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  }
+}

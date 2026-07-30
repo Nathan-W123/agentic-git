@@ -1,0 +1,97 @@
+{
+  "label": "replan-substitution-b2",
+  "scenario": "live-checkout-trio",
+  "sample": 11,
+  "startedAt": "2026-07-30T20:00:13.584Z",
+  "elapsedMs": 111635,
+  "armOrder": [
+    "control",
+    "treatment"
+  ],
+  "taskId": "task_checkout_fee",
+  "objective": "During checkout, add a flat two pound handling charge to every order's total price",
+  "indexRevision": "9b833ee0c8edcd60a32d10672c0e29deb8eb3640",
+  "firstPlan": {
+    "expectedFiles": [
+      "checkout.js",
+      "checkout.test.js"
+    ],
+    "expectedSymbols": [
+      "calculateTotal",
+      "checkout"
+    ],
+    "intent": "Enable a mandatory flat two-pound handling charge on every checkout total.",
+    "grounding": {
+      "confidence": "grounded",
+      "missingFiles": [
+        "checkout.js",
+        "checkout.test.js"
+      ],
+      "unresolvedSymbols": [
+        "calculateTotal",
+        "checkout"
+      ],
+      "fileReferents": [],
+      "symbolReferents": [
+        {
+          "declared": "calculateTotal",
+          "resolved": "orderTotal",
+          "files": [
+            "src/pricing/total.js"
+          ]
+        }
+      ]
+    }
+  },
+  "arms": {
+    "control": {
+      "anyHallucination": true,
+      "repeated": [],
+      "fresh": [
+        "src/pricing/total.test.js"
+      ],
+      "adopted": [
+        "orderTotal"
+      ],
+      "adoptedAll": true,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "src/pricing/total.test.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "grounded",
+        "missingFiles": [
+          "src/pricing/total.test.js"
+        ],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    "treatment": {
+      "anyHallucination": false,
+      "repeated": [],
+      "fresh": [],
+      "adopted": [
+        "orderTotal"
+      ],
+      "adoptedAll": true,
+      "expectedFiles": [
+        "src/pricing/total.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  }
+}

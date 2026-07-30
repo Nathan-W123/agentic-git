@@ -1,0 +1,74 @@
+{
+  "label": "replan-substitution-b2",
+  "scenario": "live-checkout-trio",
+  "sample": 3,
+  "startedAt": "2026-07-30T19:38:30.644Z",
+  "elapsedMs": 306784,
+  "armOrder": [
+    "control",
+    "treatment"
+  ],
+  "taskId": "task_checkout_fee",
+  "objective": "During checkout, add a flat two pound handling charge to every order's total price",
+  "indexRevision": "2cfc460e56f194ddf0a41b62093d33660c72626c",
+  "firstPlan": {
+    "expectedFiles": [],
+    "expectedSymbols": [
+      "checkout total calculation",
+      "checkout total tests"
+    ],
+    "intent": "Enable a mandatory flat £2 handling charge on every checkout order total. Repository inspection was blocked by the unavailable Windows sandbox helper, so exact file paths and symbol names could not be established without inventing scope.",
+    "grounding": {
+      "confidence": "ungrounded",
+      "missingFiles": [],
+      "unresolvedSymbols": [
+        "checkout total calculation",
+        "checkout total tests"
+      ],
+      "fileReferents": [],
+      "symbolReferents": []
+    }
+  },
+  "arms": {
+    "control": {
+      "anyHallucination": false,
+      "repeated": [],
+      "fresh": [],
+      "adopted": [],
+      "adoptedAll": false,
+      "expectedFiles": [
+        "src/pricing/total.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    "treatment": {
+      "anyHallucination": false,
+      "repeated": [],
+      "fresh": [],
+      "adopted": [],
+      "adoptedAll": false,
+      "expectedFiles": [
+        "src/pricing/total.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  }
+}
