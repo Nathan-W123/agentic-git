@@ -19,6 +19,7 @@ interface WebSocketClient {
   cursor: number;
   input: Buffer;
   closed: boolean;
+  nextAuthorizationAt: number;
 }
 
 export interface WebSocketAuthorization {
@@ -33,6 +34,10 @@ export interface AuditWebSocketOptions {
     request: IncomingMessage,
     projectId: string,
   ) => Promise<WebSocketAuthorization>;
+  reauthorize: (
+    authorization: WebSocketAuthorization,
+  ) => Promise<WebSocketAuthorization>;
+  reauthorizeIntervalMs?: number;
 }
 
 function frame(opcode: number, payload: Buffer): Buffer {
@@ -89,7 +94,9 @@ export class AuditWebSocketHub {
   private readonly runProjects = new Map<string, string | undefined>();
   private readonly path: string;
   private readonly pollIntervalMs: number;
+  private readonly reauthorizeIntervalMs: number;
   private timer: NodeJS.Timeout | undefined;
+  private polling = false;
 
   public constructor(
     private readonly store: CoordinationStore,
@@ -97,18 +104,75 @@ export class AuditWebSocketHub {
   ) {
     this.path = options.path ?? "/api/v1/events";
     this.pollIntervalMs = options.pollIntervalMs ?? 500;
+    this.reauthorizeIntervalMs = options.reauthorizeIntervalMs ?? 5_000;
+    for (const [name, value] of [
+      ["pollIntervalMs", this.pollIntervalMs],
+      ["reauthorizeIntervalMs", this.reauthorizeIntervalMs],
+    ] as const) {
+      if (!Number.isSafeInteger(value) || value < 1) {
+        throw new RangeError(`${name} must be a positive integer`);
+      }
+    }
   }
 
   public attach(server: Server): void {
     server.on("upgrade", (request, socket, head) => {
-      void this.upgrade(request, socket, head).catch(() => {
-        if (!socket.destroyed) {
-          reject(socket, 500, "WebSocket upgrade failed");
-        }
-      });
+      void this.tryUpgrade(request, socket, head)
+        .then((claimed) => {
+          if (!claimed && !socket.destroyed) {
+            reject(socket, 404, "Not Found");
+          }
+        })
+        .catch(() => {
+          if (!socket.destroyed) {
+            reject(socket, 500, "WebSocket upgrade failed");
+          }
+        });
     });
+    this.startPolling();
+  }
+
+  /**
+   * Handles an upgrade addressed to this hub's path, reporting whether it
+   * claimed the request.
+   *
+   * The gateway mounts a second WebSocket endpoint (live collaborative
+   * editing) on the same server, and Node has no way to stop an `upgrade`
+   * listener from seeing every request — so routing has to be explicit rather
+   * than each hub rejecting whatever it does not recognize.
+   */
+  public async tryUpgrade(
+    request: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+  ): Promise<boolean> {
+    let url: URL;
+    try {
+      url = new URL(request.url ?? "/", "http://localhost");
+    } catch {
+      reject(socket, 400, "Invalid request URL");
+      return true;
+    }
+    if (url.pathname !== this.path) {
+      return false;
+    }
+    await this.upgrade(request, socket, head);
+    return true;
+  }
+
+  /** Begins polling the audit log. `attach` does this for you. */
+  public startPolling(): void {
+    if (this.timer !== undefined) {
+      return;
+    }
     this.timer = setInterval(() => {
-      void this.poll();
+      if (this.polling) {
+        return;
+      }
+      this.polling = true;
+      void this.poll().finally(() => {
+        this.polling = false;
+      });
     }, this.pollIntervalMs);
     this.timer.unref?.();
   }
@@ -132,8 +196,15 @@ export class AuditWebSocketHub {
     socket: Duplex,
     head: Buffer,
   ): Promise<void> {
-    const host = request.headers.host ?? "localhost";
-    const url = new URL(request.url ?? "/", `http://${host}`);
+    let url: URL;
+    try {
+      // Upgrade routing needs only the origin-form path. Host is untrusted and
+      // must never become a URL parser input.
+      url = new URL(request.url ?? "/", "http://localhost");
+    } catch {
+      reject(socket, 400, "Invalid request URL");
+      return;
+    }
     if (url.pathname !== this.path) {
       reject(socket, 404, "Not Found");
       return;
@@ -151,7 +222,11 @@ export class AuditWebSocketHub {
       return;
     }
     const key = request.headers["sec-websocket-key"];
-    if (typeof key !== "string" || key.length > 128) {
+    if (
+      typeof key !== "string" ||
+      key.length > 128 ||
+      Buffer.from(key, "base64").byteLength !== 16
+    ) {
       reject(socket, 400, "Invalid WebSocket key");
       return;
     }
@@ -180,6 +255,7 @@ export class AuditWebSocketHub {
       cursor: parseCursor(url.searchParams.get("after")),
       input: head,
       closed: false,
+      nextAuthorizationAt: Date.now() + this.reauthorizeIntervalMs,
     };
     this.clients.add(client);
     socket.on("data", (chunk: Buffer) => {
@@ -275,6 +351,24 @@ export class AuditWebSocketHub {
       [...this.clients].map(async (client) => {
         if (client.closed) {
           return;
+        }
+        if (Date.now() >= client.nextAuthorizationAt) {
+          try {
+            const refreshed = await this.options.reauthorize({
+              principal: client.principal,
+              project: client.project,
+            });
+            if (client.closed) {
+              return;
+            }
+            client.principal = refreshed.principal;
+            client.project = refreshed.project;
+            client.nextAuthorizationAt =
+              Date.now() + this.reauthorizeIntervalMs;
+          } catch {
+            this.disconnect(client, 1008, "Authorization is no longer valid");
+            return;
+          }
         }
         try {
           const events = await this.store.listAuditEvents({

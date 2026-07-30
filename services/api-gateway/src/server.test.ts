@@ -113,7 +113,11 @@ async function rawHttp(port: number, request: string): Promise<string> {
 
 async function startRuntime(
   t: TestContext,
-  options: { allowedOrigins?: readonly string[] } = {},
+  options: {
+    allowedOrigins?: readonly string[];
+    webSocketPollIntervalMs?: number;
+    webSocketReauthorizeIntervalMs?: number;
+  } = {},
 ): Promise<TestRuntime> {
   const store = new InMemoryCoordinationStore();
   const operations: ApiOperations = {
@@ -121,6 +125,16 @@ async function startRuntime(
       return [
         { id: "test-agent", adapter: "generic-cli", default: true },
       ];
+    },
+    async createRepository(input) {
+      const repository = {
+        id: input.id,
+        path: `/canonical/${input.id}.git`,
+        branch: input.branch ?? "main",
+      };
+      await store.saveRepository(repository);
+      await store.linkRepository(input.projectId, repository.id);
+      return repository;
     },
     async importGitHub(input) {
       const repository = {
@@ -208,6 +222,15 @@ async function startRuntime(
     ...(options.allowedOrigins === undefined
       ? {}
       : { allowedOrigins: options.allowedOrigins }),
+    ...(options.webSocketPollIntervalMs === undefined
+      ? {}
+      : { webSocketPollIntervalMs: options.webSocketPollIntervalMs }),
+    ...(options.webSocketReauthorizeIntervalMs === undefined
+      ? {}
+      : {
+          webSocketReauthorizeIntervalMs:
+            options.webSocketReauthorizeIntervalMs,
+        }),
     staticAssets: new Map([
       [
         "/index.html",
@@ -266,6 +289,31 @@ test("bootstrap, sessions, CSRF, static fallback, and logout work over HTTP", as
   const me = await client.request("/api/v1/auth/me");
   assert.equal(me.status, 200);
   assert.equal(me.data.user.displayName, "Owner");
+
+  const createdRepository = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+    {
+      method: "POST",
+      body: { id: "greenfield", branch: "trunk" },
+    },
+  );
+  assert.equal(createdRepository.status, 201);
+  assert.equal(createdRepository.data.repository.id, "greenfield");
+  assert.equal(createdRepository.data.repository.branch, "trunk");
+  const repositories = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+  );
+  assert.deepEqual(
+    repositories.data.repositories.map(
+      (repository: { id: string }) => repository.id,
+    ),
+    ["greenfield"],
+  );
+  assert.equal(
+    (await runtime.store.listAuditEvents({ types: ["repository_created"] }))
+      .length,
+    1,
+  );
 
   const missingCsrf = await client.request("/api/v1/organizations", {
     method: "POST",
@@ -391,6 +439,18 @@ test("project authorization isolates tenants and enforces viewer permissions", a
     ).status,
     403,
   );
+  assert.equal(
+    (
+      await viewer.request(
+        `/api/v1/projects/${firstProject.data.project.id}/repositories`,
+        {
+          method: "POST",
+          body: { id: "viewer-cannot-create" },
+        },
+      )
+    ).status,
+    403,
+  );
   const agents = await viewer.request(
     `/api/v1/projects/${firstProject.data.project.id}/agents`,
   );
@@ -481,6 +541,40 @@ function decodeTextFrames(buffer: Buffer): string[] {
   return messages;
 }
 
+function decodeCloseCode(buffer: Buffer): number | undefined {
+  let offset = 0;
+  while (buffer.length - offset >= 2) {
+    const first = buffer[offset];
+    const second = buffer[offset + 1];
+    if (first === undefined || second === undefined) {
+      return undefined;
+    }
+    let length = second & 0x7f;
+    let header = 2;
+    if (length === 126) {
+      if (buffer.length - offset < 4) {
+        return undefined;
+      }
+      length = buffer.readUInt16BE(offset + 2);
+      header = 4;
+    } else if (length === 127) {
+      if (buffer.length - offset < 10) {
+        return undefined;
+      }
+      length = Number(buffer.readBigUInt64BE(offset + 2));
+      header = 10;
+    }
+    if (buffer.length - offset < header + length) {
+      return undefined;
+    }
+    if ((first & 0x0f) === 0x8 && length >= 2) {
+      return buffer.readUInt16BE(offset + header);
+    }
+    offset += header + length;
+  }
+  return undefined;
+}
+
 test("authenticated WebSockets stream only project-visible audit events", async (t) => {
   const runtime = await startRuntime(t);
   const client = new TestClient(runtime.origin);
@@ -556,6 +650,84 @@ test("authenticated WebSockets stream only project-visible audit events", async 
     payloads.some((entry) => entry.type === "audit"),
     true,
   );
+});
+
+test("open WebSockets are closed when their user is disabled", async (t) => {
+  const runtime = await startRuntime(t, {
+    webSocketPollIntervalMs: 10,
+    webSocketReauthorizeIntervalMs: 20,
+  });
+  const client = new TestClient(runtime.origin);
+  const setup = await bootstrap(client);
+
+  const closeCode = await new Promise<number>((resolve, reject) => {
+    const socket = net.createConnection(runtime.port, "127.0.0.1");
+    let response = Buffer.alloc(0);
+    let headersRead = false;
+    let frameBytes = Buffer.alloc(0);
+    let disabled = false;
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("Timed out waiting for WebSocket authorization refresh"));
+    }, 4_000);
+    socket.once("connect", () => {
+      const key = randomBytes(16).toString("base64");
+      socket.write(
+        `GET /api/v1/events?projectId=${DEFAULT_PROJECT_ID} HTTP/1.1\r\n` +
+          `Host: 127.0.0.1:${runtime.port}\r\n` +
+          "Upgrade: websocket\r\n" +
+          "Connection: Upgrade\r\n" +
+          `Sec-WebSocket-Key: ${key}\r\n` +
+          "Sec-WebSocket-Version: 13\r\n" +
+          `Origin: ${runtime.origin}\r\n` +
+          `Cookie: ${client.cookieHeader}\r\n\r\n`,
+      );
+    });
+    socket.on("data", (chunk: Buffer) => {
+      try {
+        if (!headersRead) {
+          response = Buffer.concat([response, chunk]);
+          const boundary = response.indexOf("\r\n\r\n");
+          if (boundary < 0) {
+            return;
+          }
+          assert.match(
+            response.subarray(0, boundary).toString("ascii"),
+            /^HTTP\/1\.1 101 /u,
+          );
+          frameBytes = response.subarray(boundary + 4);
+          headersRead = true;
+        } else {
+          frameBytes = Buffer.concat([frameBytes, chunk]);
+        }
+        const connected = decodeTextFrames(frameBytes).some(
+          (entry) => JSON.parse(entry).type === "connected",
+        );
+        if (connected && !disabled) {
+          disabled = true;
+          void runtime.store
+            .updateUser(setup.user.id, { disabled: true })
+            .catch(reject);
+        }
+        const code = decodeCloseCode(frameBytes);
+        if (code !== undefined) {
+          clearTimeout(timer);
+          socket.destroy();
+          resolve(code);
+        }
+      } catch (error) {
+        clearTimeout(timer);
+        socket.destroy();
+        reject(error);
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+
+  assert.equal(closeCode, 1008);
 });
 
 /** A bare fetch with no cookies, standing in for a CLI, worker, or agent. */

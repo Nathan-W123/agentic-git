@@ -9,6 +9,7 @@ import {
   type Server,
   type ServerResponse,
 } from "node:http";
+import type { Duplex } from "node:stream";
 
 import type {
   CoordinationStore,
@@ -42,7 +43,8 @@ import {
   permissionsForRole,
 } from "./authorization.js";
 import { RateLimiter } from "./rate-limiter.js";
-import { AuditWebSocketHub } from "./websocket.js";
+import { CollabWebSocketHub } from "./collab-websocket.js";
+import { AuditWebSocketHub, type WebSocketAuthorization } from "./websocket.js";
 
 const API_PREFIX = "/api/v1";
 const MAX_JSON_BYTES = 1024 * 1024;
@@ -113,6 +115,12 @@ export interface ApiOperations {
       default: boolean;
     }>
   >;
+  createRepository(input: {
+    projectId: string;
+    id: string;
+    branch?: string;
+    actorId: string;
+  }): Promise<StoredRepository>;
   importGitHub(input: {
     projectId: string;
     repository: string;
@@ -281,6 +289,15 @@ export interface ApiGatewayOptions {
   requestBodyLimit?: number;
   rateLimitPerMinute?: number;
   authRateLimitPerMinute?: number;
+  /** Event poll cadence; exposed for deterministic embedded runtimes/tests. */
+  webSocketPollIntervalMs?: number;
+  /** How often open event channels re-check account and membership state. */
+  webSocketReauthorizeIntervalMs?: number;
+  /**
+   * Cadence of the collaboration hub's sweep: reauthorization, in-flight agent
+   * activity, and flushing idle rooms. Exposed for tests.
+   */
+  collabTickIntervalMs?: number;
 }
 
 interface RequestContext {
@@ -433,6 +450,7 @@ function safeEqual(left: string, right: string): boolean {
 export class ApiGateway {
   public readonly server: Server;
   public readonly webSockets: AuditWebSocketHub;
+  public readonly collaboration: CollabWebSocketHub;
   private readonly auth: AuthService;
   private readonly limiter: RateLimiter;
   private readonly authLimiter: RateLimiter;
@@ -477,24 +495,108 @@ export class ApiGateway {
     this.server = createServer((request, response) => {
       void this.handle(request, response);
     });
+    const authorizeSocket = async (
+      request: IncomingMessage,
+      projectId: string,
+      permission: "view" | "submit_task",
+    ): Promise<WebSocketAuthorization> => {
+      this.assertOrigin(request);
+      const principal = await this.auth.authenticate(request.headers.cookie);
+      const { project } = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        permission,
+      );
+      return { principal, project };
+    };
+    const reauthorizeSocket = async (
+      authorization: WebSocketAuthorization,
+      permission: "view" | "submit_task",
+    ): Promise<WebSocketAuthorization> => {
+      const principal = await this.auth.refresh(authorization.principal);
+      const { project } = await authorizeProject(
+        this.options.store,
+        principal,
+        authorization.project.id,
+        permission,
+      );
+      return { principal, project };
+    };
     this.webSockets = new AuditWebSocketHub(options.store, {
-      authorize: async (request, projectId) => {
-        this.assertOrigin(request);
-        const principal = await this.auth.authenticate(request.headers.cookie);
-        const { project } = await authorizeProject(
-          this.options.store,
-          principal,
-          projectId,
-          "view",
-        );
-        return { principal, project };
-      },
+      ...(options.webSocketPollIntervalMs === undefined
+        ? {}
+        : { pollIntervalMs: options.webSocketPollIntervalMs }),
+      ...(options.webSocketReauthorizeIntervalMs === undefined
+        ? {}
+        : {
+            reauthorizeIntervalMs:
+              options.webSocketReauthorizeIntervalMs,
+          }),
+      authorize: async (request, projectId) =>
+        await authorizeSocket(request, projectId, "view"),
+      reauthorize: async (authorization) =>
+        await reauthorizeSocket(authorization, "view"),
     });
-    this.webSockets.attach(this.server);
+    // Live collaborative editing. Editing over the socket demands exactly the
+    // permission the HTTP editor routes demand, `submit_task`, so opening a
+    // second transport cannot widen what a principal may do.
+    this.collaboration = new CollabWebSocketHub(options.store, {
+      ...(options.collabTickIntervalMs === undefined
+        ? {}
+        : { tickIntervalMs: options.collabTickIntervalMs }),
+      ...(options.webSocketReauthorizeIntervalMs === undefined
+        ? {}
+        : { reauthorizeIntervalMs: options.webSocketReauthorizeIntervalMs }),
+      workspace: options.operations.workspace,
+      authorize: async (request, projectId) =>
+        await authorizeSocket(request, projectId, "submit_task"),
+      reauthorize: async (authorization) =>
+        await reauthorizeSocket(authorization, "submit_task"),
+    });
+    // One `upgrade` listener routes to both hubs: Node delivers every upgrade
+    // to every listener, so a hub that rejected unknown paths on its own would
+    // tear down the other hub's freshly negotiated socket.
+    this.server.on("upgrade", (request, socket, head) => {
+      void this.routeUpgrade(request, socket, head).catch(() => {
+        if (!socket.destroyed) {
+          socket.destroy();
+        }
+      });
+    });
+    this.webSockets.startPolling();
+    this.collaboration.start();
+  }
+
+  private async routeUpgrade(
+    request: IncomingMessage,
+    socket: Duplex,
+    head: Buffer,
+  ): Promise<void> {
+    try {
+      if (await this.collaboration.tryUpgrade(request, socket, head)) {
+        return;
+      }
+      if (await this.webSockets.tryUpgrade(request, socket, head)) {
+        return;
+      }
+      if (!socket.destroyed) {
+        socket.end(
+          "HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+      }
+    } catch {
+      if (!socket.destroyed) {
+        socket.end(
+          "HTTP/1.1 500 Internal Server Error\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+        );
+      }
+    }
   }
 
   public async close(): Promise<void> {
     this.webSockets.close();
+    this.collaboration.close();
     if (!this.server.listening) {
       return;
     }
@@ -1659,6 +1761,42 @@ export class ApiGateway {
       });
       return;
     }
+    if (repositoriesMatch !== undefined && method === "POST") {
+      const projectId = repositoriesMatch[0] ?? "";
+      const { project } = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "import_repository",
+      );
+      const body = objectBody(await this.readJson(request));
+      const branch = stringField(body["branch"], "branch", {
+        max: 240,
+        optional: true,
+      });
+      const repository = await this.performOperation(
+        "repository_creation_failed",
+        async () =>
+          await this.options.operations.createRepository({
+            projectId,
+            id: stringField(body["id"], "id", { max: 80 }) ?? "",
+            ...(branch === undefined ? {} : { branch }),
+            actorId: principal.user.id,
+          }),
+      );
+      await this.options.store.appendAudit(undefined, {
+        type: "repository_created",
+        data: {
+          organizationId: project.organizationId,
+          projectId,
+          repositoryId: repository.id,
+          branch: repository.branch,
+          actorId: principal.user.id,
+        },
+      });
+      this.sendJson(response, 201, { repository });
+      return;
+    }
 
     const githubMatch = matchPath(
       path,
@@ -1708,42 +1846,6 @@ export class ApiGateway {
           projectId,
           repositoryId: repository.id,
           provider: "github",
-          actorId: principal.user.id,
-        },
-      });
-      this.sendJson(response, 201, { repository });
-      return;
-    }
-    if (repositoriesMatch !== undefined && method === "POST") {
-      const projectId = repositoriesMatch[0] ?? "";
-      const { project } = await authorizeProject(
-        this.options.store,
-        principal,
-        projectId,
-        "import_repository",
-      );
-      const body = objectBody(await this.readJson(request));
-      const branch = stringField(body["branch"], "branch", {
-        max: 240,
-        optional: true,
-      });
-      const repository = await this.performOperation(
-        "repository_creation_failed",
-        async () =>
-          await this.options.operations.createRepository({
-            projectId,
-            id: stringField(body["id"], "id", { max: 80 }) ?? "",
-            ...(branch === undefined ? {} : { branch }),
-            actorId: principal.user.id,
-          }),
-      );
-      await this.options.store.appendAudit(undefined, {
-        type: "repository_created",
-        data: {
-          organizationId: project.organizationId,
-          projectId,
-          repositoryId: repository.id,
-          branch: repository.branch,
           actorId: principal.user.id,
         },
       });

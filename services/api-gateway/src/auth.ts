@@ -629,6 +629,72 @@ export class AuthService {
     };
   }
 
+  /**
+   * Revalidates an already authenticated long-lived channel.
+   *
+   * The original secret is intentionally not retained by WebSocket clients.
+   * Identity was proven during the upgrade; refresh checks everything that can
+   * change afterwards: session/token lifetime and revocation, account state,
+   * token scope, and organization membership.
+   */
+  public async refresh(
+    principal: AuthenticatedPrincipal,
+  ): Promise<AuthenticatedPrincipal> {
+    const nowIso = this.now().toISOString();
+    if (principal.credential === "session") {
+      if (principal.sessionId === undefined) {
+        throw new AuthenticationError("Session has expired");
+      }
+      const session = await this.store.getAuthSession(principal.sessionId);
+      if (
+        session === undefined ||
+        session.userId !== principal.user.id ||
+        session.expiresAt <= nowIso
+      ) {
+        throw new AuthenticationError("Session has expired");
+      }
+      const user = await this.store.getUser(session.userId);
+      if (user === undefined || user.disabled) {
+        throw new AuthenticationError("User account is unavailable");
+      }
+      return {
+        user: publicUser(user),
+        credential: "session",
+        sessionId: session.id,
+        memberships: await this.membershipsFor(user),
+      };
+    }
+
+    const identity = principal.token;
+    if (identity === undefined) {
+      throw new AuthenticationError("API token is invalid");
+    }
+    const token = await this.store.getApiToken(identity.id);
+    if (
+      token === undefined ||
+      token.userId !== principal.user.id ||
+      token.revokedAt !== undefined ||
+      (token.expiresAt !== undefined && token.expiresAt <= nowIso)
+    ) {
+      throw new AuthenticationError("API token is invalid");
+    }
+    const user = await this.store.getUser(token.userId);
+    if (user === undefined || user.disabled) {
+      throw new AuthenticationError("API token is invalid");
+    }
+    return {
+      user: publicUser(user),
+      credential: "api_token",
+      token: {
+        id: token.id,
+        name: token.name,
+        scopes: token.scopes,
+        organizationId: token.organizationId,
+      },
+      memberships: await this.membershipsFor(user),
+    };
+  }
+
   public async verifyCsrf(
     principal: AuthenticatedPrincipal,
     cookieHeader: string | undefined,
