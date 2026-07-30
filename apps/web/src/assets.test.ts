@@ -713,3 +713,78 @@ test("the HUD uses real counter-rotating machinery with a reduced-motion fallbac
     /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.hud-reactor-rotor[\s\S]*animation: none/u,
   );
 });
+
+test("the dispatch panel has a trigger that exists and is reachable", async () => {
+  // The panel was dead code for a release: its only trigger was a composer
+  // button removed in 7221fa1, and renderDispatchPanel early-returned when
+  // that button was null, so nothing could open it. Both the markup hook and
+  // the render guard are asserted here so the pairing cannot silently rot
+  // again.
+  const source = await browserSource();
+  const markup = await readFile(
+    path.join(
+      path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."),
+      "public",
+      "index.html",
+    ),
+    "utf8",
+  );
+
+  assert.equal(
+    source.includes('#chat-dispatch'),
+    false,
+    "the removed composer button must not be referenced again",
+  );
+  assert.match(
+    source,
+    /action: "dispatch-open"/u,
+    "the fleet dial must carry the dispatch trigger",
+  );
+  assert.match(
+    source,
+    /target\.dataset\.action === "dispatch-open"/u,
+    "the trigger must be handled on click, which is the tap path",
+  );
+  assert.match(
+    source,
+    /\(hover: hover\) and \(pointer: fine\)/u,
+    "hover must be gated on a pointer that can actually hover",
+  );
+
+  // The panel lives outside the chat aside because the immersive Home view
+  // hides that aside, and Home is where the trigger is.
+  const layerAt = markup.indexOf('id="dispatch-layer"');
+  const asideEndsAt = markup.indexOf("</aside>");
+  assert.notEqual(layerAt, -1, "the dispatch layer must exist in the markup");
+  assert.equal(
+    layerAt > asideEndsAt,
+    true,
+    "the dispatch layer must not be nested in the chat aside",
+  );
+});
+
+test("a build prompt only kicks the control plane when it is running it", async () => {
+  // sendBuildPrompt used to call ensureRepositoryRun unconditionally, which
+  // claimed the task locally before any worker could lease it — a connected
+  // fleet would sit idle while the phone's task ran on the control plane.
+  const source = await browserSource();
+  const start = source.indexOf("async function sendBuildPrompt");
+  assert.notEqual(start, -1, "sendBuildPrompt was not found in app.js");
+  const body = source.slice(start, source.indexOf("\n}", start));
+
+  assert.match(
+    body,
+    /dispatchPlan\(/u,
+    "build submission must decide its route the same way dispatch does",
+  );
+  assert.match(
+    body,
+    /plan\.route === "local"[\s\S]*ensureRepositoryRun/u,
+    "the local kick must be guarded by the route",
+  );
+  assert.match(
+    body,
+    /route: plan\.route/u,
+    "the tracked entry must record its route so refreshes do not drain it",
+  );
+});

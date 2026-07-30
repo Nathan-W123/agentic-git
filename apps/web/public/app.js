@@ -104,6 +104,8 @@ const state = {
     usageOpen: localStorage.getItem("relay.chatUsageOpen") === "true",
     /** Dispatch confirmation state; route null means "provider default". */
     dispatchOpen: false,
+    /** Opened by tap/click/keyboard, so it stays until dismissed. */
+    dispatchPinned: false,
     dispatchRoute: null,
     overlayProvider: null,
     /** Which overlay screen is showing: "main" settings or "usage". */
@@ -1592,14 +1594,32 @@ const GAUGE_SWEEP = 0.75;
  * always a share of something the control plane actually reported, never a
  * decorative fraction. A zero or missing `whole` draws an empty track, which
  * is the honest picture of "nothing to be a share of".
+ *
+ * `action` turns the readout into a real `<button>` rather than a tappable
+ * article: the "Agents running" dial opens dispatch, and a control that only
+ * answers to a pointer is unreachable by keyboard.
  */
-function gauge(label, value, foot, { part = 0, whole = 0, tone = "" } = {}) {
+function gauge(
+  label,
+  value,
+  foot,
+  { part = 0, whole = 0, tone = "", action, hint } = {},
+) {
   const ratio =
     whole > 0 ? Math.max(0, Math.min(1, part / whole)) : 0;
   const arc = GAUGE_CIRCUMFERENCE * GAUGE_SWEEP;
   const text = String(value);
+  const tag = action === undefined ? "article" : "button";
+  const attributes =
+    action === undefined
+      ? ""
+      : ` type="button" data-action="${escapeHtml(action)}"${
+          hint === undefined ? "" : ` title="${escapeHtml(hint)}"`
+        } aria-haspopup="dialog"`;
   return `
-    <article class="gauge${tone ? ` ${tone}` : ""}">
+    <${tag} class="gauge${tone ? ` ${tone}` : ""}${
+      action === undefined ? "" : " gauge-action"
+    }"${attributes}>
       <div class="gauge-dial">
         <svg viewBox="0 0 64 64" aria-hidden="true">
           <circle class="gauge-ticks" cx="32" cy="32" r="30"></circle>
@@ -1616,7 +1636,7 @@ function gauge(label, value, foot, { part = 0, whole = 0, tone = "" } = {}) {
       </div>
       <span class="gauge-label">${escapeHtml(label)}</span>
       <span class="gauge-foot">${escapeHtml(foot)}</span>
-    </article>`;
+    </${tag}>`;
 }
 
 /**
@@ -2504,6 +2524,10 @@ function renderOverview() {
               part: agents?.busyWorkers ?? 0,
               whole: agents?.workers ?? 0,
               tone: running > 0 ? "live" : "",
+              // The fleet readout is also the way to hand it work: hover
+              // here on a desktop, tap it on a phone.
+              action: "dispatch-open",
+              hint: "Dispatch a task to the fleet",
             },
           )}
           ${hudProjectPlate()}
@@ -5074,31 +5098,105 @@ function currentDispatchPlan() {
   const lastUser = [...conversation]
     .reverse()
     .find((message) => message.role === "user");
+  // Once the panel is open its own field is the objective; before that it is
+  // seeded from the composer draft, then from the last thing said in chat.
+  const typed = $("#dispatch-objective")?.value;
   return dispatchPlan({
     adapter: providerMeta(provider)?.adapter,
     agents: state.agents,
     workers: state.workers,
     repositoryId: state.chat.repositoryId,
-    draft: $("#chat-input")?.value ?? "",
-    lastUserMessage: lastUser?.content ?? "",
+    draft: typed !== undefined ? typed : ($("#chat-input")?.value ?? ""),
+    lastUserMessage: typed !== undefined ? "" : (lastUser?.content ?? ""),
     ...(state.chat.dispatchRoute === null
       ? {}
       : { route: state.chat.dispatchRoute }),
   });
 }
 
+/**
+ * Whether this device has a pointer that can hover.
+ *
+ * A touchscreen synthesises mouse events from a tap, so hover alone would
+ * either never fire or fire as a side effect of the tap that was meant to
+ * open the panel. Dispatch's whole premise is submitting from a phone while
+ * the desktop executes, so both paths have to be real: hover opens where
+ * hovering exists, tap opens where it does not.
+ *
+ * Declared below `currentDispatchPlan` on purpose: the assets tests lift
+ * `dispatchPlan` out of this file by slicing to the next function, and a
+ * top-level `window` reference inside that slice would not survive in Node.
+ */
+const DISPATCH_ANCHORED = window.matchMedia(
+  "(hover: hover) and (pointer: fine)",
+);
+
+/** Pending close from the pointer having left the trigger or the panel. */
+let dispatchCloseTimer;
+
+function cancelDispatchClose() {
+  window.clearTimeout(dispatchCloseTimer);
+  dispatchCloseTimer = undefined;
+}
+
+function openDispatch({ pinned }) {
+  cancelDispatchClose();
+  state.chat.dispatchOpen = true;
+  // Pinned means "stay until dismissed": every tap, click and keyboard
+  // activation. Only hover opens a panel that closes itself again.
+  state.chat.dispatchPinned = pinned || state.chat.dispatchPinned === true;
+  renderDispatchPanel();
+}
+
+function closeDispatch() {
+  cancelDispatchClose();
+  state.chat.dispatchOpen = false;
+  state.chat.dispatchPinned = false;
+  renderDispatchPanel();
+}
+
+/**
+ * Close after the pointer leaves, unless it lands back on the trigger or
+ * inside the panel. The delay is the gap the pointer crosses between them.
+ */
+function scheduleDispatchClose() {
+  if (state.chat.dispatchPinned === true || !state.chat.dispatchOpen) {
+    return;
+  }
+  cancelDispatchClose();
+  dispatchCloseTimer = window.setTimeout(() => {
+    if (state.chat.dispatchPinned === true) {
+      return;
+    }
+    // Ask the document where the pointer actually is rather than trusting the
+    // event that scheduled this. A periodic refresh repaints Home and destroys
+    // the dial mid-hover, which fires pointerout from a node that no longer
+    // exists and never fires a matching pointerover on its replacement — the
+    // panel would close under a stationary pointer.
+    if (
+      document.querySelector('[data-action="dispatch-open"]:hover') !== null ||
+      document.querySelector("#dispatch-panel:hover") !== null
+    ) {
+      return;
+    }
+    closeDispatch();
+  }, 260);
+}
+
 function renderDispatchPanel() {
+  const layer = $("#dispatch-layer");
   const panel = $("#dispatch-panel");
-  const button = $("#chat-dispatch");
-  if (panel === null || button === null) {
+  if (layer === null || panel === null) {
     return;
   }
   const connected = providerStatus(state.chat.activeProvider)?.connected;
-  // Dispatch does not need a chat connection — it submits to the
-  // coordinator — but it is only meaningful in a conversation view.
-  button.hidden = state.chat.mode !== "ask";
-  if (!state.chat.dispatchOpen || state.chat.mode !== "ask") {
-    panel.hidden = true;
+  // Dispatch submits to the coordinator, so it needs neither a chat
+  // connection nor a particular chat mode nor the chat panel to be on
+  // screen. It used to require all three, and its only trigger lived in the
+  // composer; opening it from Home's fleet dial has to work with the chat
+  // aside hidden entirely.
+  if (!state.chat.dispatchOpen) {
+    layer.hidden = true;
     panel.innerHTML = "";
     return;
   }
@@ -5121,15 +5219,29 @@ function renderDispatchPanel() {
       <strong>${label}</strong>
       <span>${detail}</span>
     </button>`;
-  panel.hidden = false;
+  layer.hidden = false;
+  layer.classList.toggle("pinned", state.chat.dispatchPinned === true);
+  // A background refresh repaints this panel; without carrying the caret
+  // over, a periodic loadContext would drop the user out of the objective
+  // mid-sentence.
+  const active = document.activeElement;
+  const restore =
+    active?.id === "dispatch-objective"
+      ? { start: active.selectionStart, end: active.selectionEnd }
+      : undefined;
   panel.innerHTML = `
     <div class="dispatch-head">
       <strong>Dispatch as a task</strong>
-      <button class="mini-button" data-action="dispatch-close">×</button>
+      <button class="mini-button" data-action="dispatch-close" aria-label="Close">×</button>
     </div>
-    <p class="dispatch-objective">${escapeHtml(
-      plan.objective.length > 0 ? plan.objective : "Nothing to dispatch yet.",
-    )}</p>
+    <label class="dispatch-field">
+      <span>Objective</span>
+      <!-- Editable, not a read-back of the chat draft: opened from Home
+           there is no composer to have typed in, which is exactly the case
+           dispatch exists for. -->
+      <textarea id="dispatch-objective" rows="2"
+        placeholder="What should the fleet do?">${escapeHtml(plan.objective)}</textarea>
+    </label>
     <label class="dispatch-field">
       <span>Repository</span>
       <select id="dispatch-repo">${
@@ -5172,6 +5284,85 @@ function renderDispatchPanel() {
         ? ""
         : `<p class="dispatch-note">This provider is not connected for chat, but dispatch runs through the coordinator, so it still works.</p>`
     }`;
+  if (restore !== undefined) {
+    const field = $("#dispatch-objective");
+    field?.focus();
+    field?.setSelectionRange(restore.start, restore.end);
+  }
+  positionDispatchPanel();
+}
+
+/**
+ * Re-check the plan as the objective is typed.
+ *
+ * Only the note and the confirm button change, so this updates them in place
+ * rather than repainting the panel — a full re-render on every keystroke
+ * would fight the caret and the IME. Without it the button stayed disabled
+ * at "Type or send something to dispatch" no matter what was typed, because
+ * nothing re-evaluated the plan after the panel was drawn.
+ */
+function syncDispatchAvailability() {
+  const panel = $("#dispatch-panel");
+  if (panel === null || $("#dispatch-layer")?.hidden !== false) {
+    return;
+  }
+  const plan = currentDispatchPlan();
+  const confirm = panel.querySelector('[data-action="dispatch-confirm"]');
+  if (confirm !== null) {
+    confirm.disabled = !plan.ok;
+  }
+  const note = panel.querySelector(".dispatch-note");
+  if (note !== null) {
+    const message = plan.ok
+      ? (plan.warning ?? `${plan.agentId} · ${plan.repositoryId}`)
+      : plan.reason;
+    note.textContent = message;
+    note.classList.toggle("warn", !plan.ok || plan.warning !== undefined);
+  }
+}
+
+/**
+ * Where the panel sits.
+ *
+ * Beside its trigger where there is a real pointer — the dial is in the
+ * right rail, so it opens to its left and is clamped to the viewport — and
+ * as a bottom sheet where there is not, which is the phone case dispatch is
+ * for. The sheet layout is CSS; only the anchored case needs measuring.
+ */
+function positionDispatchPanel() {
+  const layer = $("#dispatch-layer");
+  const panel = $("#dispatch-panel");
+  if (layer === null || panel === null || layer.hidden) {
+    return;
+  }
+  if (!DISPATCH_ANCHORED.matches) {
+    panel.style.removeProperty("top");
+    panel.style.removeProperty("left");
+    return;
+  }
+  const trigger = $('[data-action="dispatch-open"]');
+  if (trigger === null) {
+    // Navigating off Home takes the dial with it. An anchored panel with
+    // nothing to anchor to would hang in the corner over an unrelated view,
+    // so it goes away with its trigger.
+    panel.style.removeProperty("top");
+    panel.style.removeProperty("left");
+    closeDispatch();
+    return;
+  }
+  const anchor = trigger.getBoundingClientRect();
+  const box = panel.getBoundingClientRect();
+  const margin = 12;
+  const left = Math.max(
+    margin,
+    Math.min(anchor.left - box.width - 10, window.innerWidth - box.width - margin),
+  );
+  const top = Math.max(
+    margin,
+    Math.min(anchor.top, window.innerHeight - box.height - margin),
+  );
+  panel.style.left = `${Math.round(left)}px`;
+  panel.style.top = `${Math.round(top)}px`;
 }
 
 /** Submits the planned task and, for the local route, starts the run. */
@@ -5213,7 +5404,7 @@ async function performDispatch() {
     if ($("#chat-input") !== null) {
       $("#chat-input").value = "";
     }
-    state.chat.dispatchOpen = false;
+    closeDispatch();
     toast(
       plan.route === "local"
         ? "Dispatched — the coordinator is running it here."
@@ -5481,6 +5672,17 @@ async function sendBuildPrompt() {
   ) {
     return;
   }
+  // Build mode submits the same task dispatch does, so it must honour the
+  // same routing rule. It used to kick the repository unconditionally, which
+  // started the run in the control plane before any worker could lease it —
+  // a fleet could be connected and idle while the phone's task ran here.
+  const plan = dispatchPlan({
+    adapter: providerMeta(state.chat.activeProvider)?.adapter,
+    agents: state.agents,
+    workers: state.workers,
+    repositoryId: state.chat.repositoryId,
+    draft: objective,
+  });
   state.chat.sending = true;
   $("#chat-send").disabled = true;
   try {
@@ -5500,11 +5702,24 @@ async function sendBuildPrompt() {
       objective,
       agentId: agent.id,
       repositoryId: state.chat.repositoryId,
+      // Recorded so maybeDrainChatRuns leaves a remote task alone too — an
+      // entry with no route reads as local and gets drained on the next
+      // refresh, which would undo this.
+      route: plan.route,
       at: new Date().toISOString(),
     });
     saveChatTracked();
     input.value = "";
-    await ensureRepositoryRun(state.chat.repositoryId);
+    if (plan.route === "local") {
+      await ensureRepositoryRun(state.chat.repositoryId);
+    } else {
+      toast(
+        plan.workerCount > 0
+          ? `Queued for a remote worker (${plan.workerCount} advertising "${plan.adapter}").`
+          : "Queued. No remote worker is connected yet.",
+        plan.workerCount > 0 ? "default" : "warn",
+      );
+    }
     await loadContext({ quiet: true });
   } catch (error) {
     toast(error.message, "error");
@@ -6544,9 +6759,24 @@ async function handleClick(event) {
     renderDispatchPanel();
     return;
   }
+  if (target.dataset.action === "dispatch-open") {
+    // The tap path, and equally the click and Enter/Space paths — anything
+    // deliberate pins the panel open. On a hover-capable device the panel is
+    // usually already showing by the time this fires; clicking then keeps it.
+    if (state.chat.dispatchOpen && state.chat.dispatchPinned === true) {
+      closeDispatch();
+    } else {
+      openDispatch({ pinned: true });
+      $("#dispatch-objective")?.focus();
+    }
+    return;
+  }
+  if (target.id === "dispatch-scrim") {
+    closeDispatch();
+    return;
+  }
   if (target.dataset.action === "dispatch-close") {
-    state.chat.dispatchOpen = false;
-    renderDispatchPanel();
+    closeDispatch();
     return;
   }
   if (target.dataset.action === "dispatch-route") {
@@ -6833,6 +7063,11 @@ async function boot() {
       event.preventDefault();
       setPanel(!state.panelOpen);
     }
+    if (event.key === "Escape" && state.chat.dispatchOpen) {
+      closeDispatch();
+      $('[data-action="dispatch-open"]')?.focus();
+      return;
+    }
     if (event.key === "Escape" && state.chat.drawer === true && state.chat.open) {
       state.chat.open = false;
       renderChat();
@@ -6840,6 +7075,41 @@ async function boot() {
   });
   CHAT_DRAWER_QUERY.addEventListener("change", syncChatToViewport);
   syncChatToViewport();
+
+  // Dispatch opens on hover where hovering is real. `pointerover`/`pointerout`
+  // rather than enter/leave because the HUD re-renders and these bubble, so
+  // one delegated pair survives every repaint. The pointerType guard keeps a
+  // touchscreen's synthesised mouse events out of the hover path — there the
+  // click handler owns it.
+  document.addEventListener("pointerover", (event) => {
+    if (!DISPATCH_ANCHORED.matches || event.pointerType !== "mouse") {
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest('[data-action="dispatch-open"]')) {
+      openDispatch({ pinned: false });
+    } else if (target?.closest("#dispatch-panel")) {
+      cancelDispatchClose();
+    }
+  });
+  document.addEventListener("pointerout", (event) => {
+    if (!DISPATCH_ANCHORED.matches || event.pointerType !== "mouse") {
+      return;
+    }
+    const target = event.target instanceof Element ? event.target : null;
+    if (
+      target?.closest('[data-action="dispatch-open"]') ||
+      target?.closest("#dispatch-panel")
+    ) {
+      scheduleDispatchClose();
+    }
+  });
+  window.addEventListener("resize", () => positionDispatchPanel());
+  document.addEventListener("input", (event) => {
+    if (event.target?.id === "dispatch-objective") {
+      syncDispatchAvailability();
+    }
+  });
   $("#chat-form").addEventListener("submit", (event) => {
     event.preventDefault();
     void sendChatPrompt();

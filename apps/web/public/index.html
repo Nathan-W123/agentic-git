@@ -230,9 +230,6 @@
           <select id="chat-repo-select" hidden></select>
         </div>
         <div class="chat-thread" id="chat-thread"></div>
-        <!-- Confirms exactly what a dispatch would submit, and where it
-             would run, before any task is created. -->
-        <div class="dispatch-panel" id="dispatch-panel" hidden></div>
         <form class="chat-input" id="chat-form">
           <div class="chat-input-row">
             <textarea
@@ -284,6 +281,19 @@
       <!-- Full-screen provider connection step, opened from a provider icon. -->
       <div class="connect-overlay" id="connect-overlay" hidden>
         <section class="connect-card" id="connect-card"></section>
+      </div>
+
+      <!-- Confirms exactly what a dispatch would submit, and where it would
+           run, before any task is created.
+
+           Deliberately outside the chat aside: the Home HUD runs immersive,
+           which hides that aside entirely, and Home's "Agents running" dial
+           is what opens this. Anchored beside its trigger where there is a
+           real pointer, a bottom sheet where there is not. -->
+      <div class="dispatch-layer" id="dispatch-layer" hidden>
+        <div class="dispatch-scrim" id="dispatch-scrim"></div>
+        <div class="dispatch-panel" id="dispatch-panel" role="dialog"
+             aria-label="Dispatch as a task"></div>
       </div>
 
       <!-- Application modal. A native <dialog> so focus trapping, Esc, inertness
