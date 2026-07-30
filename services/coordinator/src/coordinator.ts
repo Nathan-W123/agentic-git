@@ -708,6 +708,10 @@ export class Coordinator {
       revision: entry.planRevision,
       reason: "canonical_change",
       expectedFiles: entry.plan.expectedFiles,
+      // The symbols matter as much as the files for reading a replan back:
+      // most of what an agent invents about this repository is a function
+      // name, and without them the record only shows half the declaration.
+      expectedSymbols: entry.plan.expectedSymbols,
       grounding: entry.plan.grounding,
     });
   }

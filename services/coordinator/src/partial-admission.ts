@@ -1,4 +1,9 @@
-import { namesTouchedByPatch, type NamedRange } from "./hunks.js";
+import {
+  dividePatchByRanges,
+  namesTouchedByPatch,
+  type LineRange,
+  type NamedRange,
+} from "./hunks.js";
 import {
   createId,
   deferredFilePaths,
@@ -19,13 +24,21 @@ import {
  * back having left them alone. Nothing here relies on that. The admitted plan
  * is the contract, and this is where the contract is enforced against the
  * bytes rather than against the agent's own account of what it did: every
- * patch is placed in exactly one of three buckets, and only the first is ever
- * applied to canonical.
+ * patch is sorted into granted, deferred, or escaped, and only the granted
+ * ones are ever applied to canonical.
+ *
+ * A patch is not always indivisible. Where the admission withheld a symbol
+ * inside a file it granted, one file's patch can end up in *both* the granted
+ * and deferred sets — split at the hunk, so the edits that stayed clear of the
+ * withheld lines land while only the trespassing hunks wait.
  */
 export interface ChangeSetSplit {
   /** Patches inside the granted scope. The only ones that reach canonical. */
   granted: ChangeSet;
-  /** Patches held back. Never applied; the work is requeued instead. */
+  /**
+   * Patches held back. Never applied; the work is requeued instead. A divided
+   * file appears here carrying only the hunks that were withheld.
+   */
   deferred: FilePatch[];
   /** Patches on files that were neither granted nor deferred. */
   escaped: string[];
@@ -34,6 +47,21 @@ export interface ChangeSetSplit {
    * unless the admission withheld something finer than a file.
    */
   withheldSymbols: Record<string, string[]>;
+  /**
+   * Files whose patch was divided instead of lost whole: the hunks clear of
+   * every withheld symbol were promoted and only the trespassing ones held
+   * back. Empty when no patch needed dividing or none could be divided.
+   */
+  divided: DividedPatch[];
+}
+
+/** One file's patch, split at the hunks that reached a withheld symbol. */
+export interface DividedPatch {
+  path: string;
+  grantedHunks: number;
+  deferredHunks: number;
+  /** The withheld symbols the deferred hunks reached into. */
+  symbols: string[];
 }
 
 /**
@@ -59,10 +87,18 @@ export function splitChangeSet(
   const withheldNames = (admission.deferredResources ?? [])
     .filter((resource) => resource.resourceType === "symbol")
     .map((resource) => resource.resourceId);
+  const withheldSet = new Set(withheldNames);
   const grantedPatches: FilePatch[] = [];
   const deferredPatches: FilePatch[] = [];
   const escaped: string[] = [];
   const withheldSymbols: Record<string, string[]> = {};
+  const divided: DividedPatch[] = [];
+
+  /** Where the withheld symbols sit in one file, as far as the index knows. */
+  const withheldRangesIn = (file: string): LineRange[] =>
+    (symbolRangesInFile?.(file) ?? []).filter((range) =>
+      withheldSet.has(range.name),
+    );
 
   for (const patch of changeSet.patches) {
     if (deferred.has(patch.path)) {
@@ -73,10 +109,7 @@ export function splitChangeSet(
       escaped.push(patch.path);
       continue;
     }
-    // The file was granted, but a symbol inside it may not have been. A patch
-    // that reached into one loses the whole file: promoting the rest would
-    // mean rewriting hunk offsets to publish half a diff, which is where this
-    // stops being a division of work and starts being a guess about meaning.
+    // The file was granted, but a symbol inside it may not have been.
     const reached =
       withheldNames.length === 0
         ? []
@@ -87,6 +120,28 @@ export function splitChangeSet(
           );
     if (reached.length > 0) {
       withheldSymbols[patch.path] = reached;
+      // One trespassing hunk used to cost the file. It no longer has to: the
+      // hunks that stay clear of the withheld lines are a patch in their own
+      // right against the same base revision, so they can be promoted while
+      // only the trespassing hunks are held back. The division is refused
+      // outright for anything the parser does not fully recognise, and for an
+      // added or deleted file, where "part of the change" is not a thing that
+      // exists — in those cases the whole file is held back as before.
+      const division =
+        patch.status === "modified"
+          ? dividePatchByRanges(patch.patch, withheldRangesIn(patch.path))
+          : undefined;
+      if (division?.granted !== undefined && division.deferred !== undefined) {
+        grantedPatches.push({ ...patch, patch: division.granted });
+        deferredPatches.push({ ...patch, patch: division.deferred });
+        divided.push({
+          path: patch.path,
+          grantedHunks: division.grantedHunks,
+          deferredHunks: division.deferredHunks,
+          symbols: reached,
+        });
+        continue;
+      }
       deferredPatches.push(patch);
       continue;
     }
@@ -107,6 +162,7 @@ export function splitChangeSet(
     deferred: deferredPatches,
     escaped: [...new Set(escaped)].sort(),
     withheldSymbols,
+    divided,
   };
 }
 

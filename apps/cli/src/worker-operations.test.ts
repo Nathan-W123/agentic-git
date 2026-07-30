@@ -3136,3 +3136,171 @@ test("a same-file loser with overlapping hunks is requeued to replan, not failed
     await rm(harness.root, { recursive: true, force: true });
   }
 });
+
+/**
+ * Two edit sites far enough apart that git emits two hunks: one inside the
+ * contended function, one well clear of it. The whole point of dividing is
+ * that these two stop sharing a fate.
+ */
+const SPACED_SHAPES = [
+  "export const keepMe = 1;",
+  "",
+  "export function alpha() {",
+  "  return keepMe;",
+  "}",
+  "",
+  "export function spacerOne() {",
+  "  return 1;",
+  "}",
+  "",
+  "export function spacerTwo() {",
+  "  return 2;",
+  "}",
+  "",
+  "export function contended() {",
+  "  return keepMe + 1;",
+  "}",
+  "",
+].join("\n");
+
+async function spacedHarness(): Promise<Harness> {
+  return await createHarness(new InMemoryCoordinationStore(), {
+    "src/spaced.js": SPACED_SHAPES,
+    "src/free.js": "export const free = 1;\n",
+  });
+}
+
+test("hunks clear of a withheld symbol land while only the trespass waits", async () => {
+  const harness = await spacedHarness();
+  try {
+    await harness.store.submitTask({
+      repositoryId: "repo_worker",
+      objective: "rework the contended helper",
+      agentId: "generic-cli",
+      validationCommands: [],
+    });
+    const holder = await leaseWork(
+      harness.store,
+      {
+        workerId: harness.workerId,
+        projectId: DEFAULT_PROJECT_ID,
+        repositoryParallelism: 2,
+      },
+      harness.repositories,
+    );
+    assert.ok(holder);
+    await admitWorkPlan(
+      harness.store,
+      {
+        leaseId: holder.lease.id,
+        actorId: "user",
+        plan: plan(holder.task.id, {
+          objective: holder.task.objective,
+          expectedFiles: ["src/other.js"],
+          expectedSymbols: ["contended"],
+        }),
+      },
+      { repositories: harness.repositories },
+    );
+
+    const split = await leaseTheSplitTask(harness);
+    const splitPlan = plan(split.task.id, {
+      objective: split.task.objective,
+      expectedFiles: ["src/spaced.js", "src/free.js"],
+      expectedSymbols: ["alpha", "contended"],
+    });
+    const admitted = await admitWorkPlan(
+      harness.store,
+      { leaseId: split.lease.id, actorId: "user", plan: splitPlan },
+      { repositories: harness.repositories },
+    );
+    assert.ok(admitted.outcome === "admitted");
+    assert.equal(admitted.admission.status, "approved_with_constraints");
+    // The agent is told which lines, not just which name.
+    assert.ok(
+      admitted.admission.constraints.some((entry) =>
+        /src\/spaced\.js lines \d+-\d+/u.test(entry),
+      ),
+      admitted.admission.constraints.join(" | "),
+    );
+
+    const stored = await harness.store.getRepository("repo_worker");
+    assert.ok(stored);
+    const repository = {
+      id: stored.id,
+      path: stored.path,
+      branch: stored.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId: split.task.id,
+      rootPath: path.join(harness.root, "divided-workspace"),
+      repository,
+      baseVersion: split.canonicalVersion,
+    });
+    // Both edits in one file: one in `alpha`, which this task owns, and one
+    // in `contended`, which it does not.
+    await writeFile(
+      path.join(workspace.path, "src", "spaced.js"),
+      SPACED_SHAPES.replace("  return keepMe;\n", "  return keepMe * 10;\n")
+        .replace("  return keepMe + 1;\n", "  return keepMe + 99;\n"),
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: ["alpha", "contended"],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "raised both constants",
+    });
+    await workspaces.destroy(workspace);
+
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: split.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: splitPlan,
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+    assert.equal(accepted.accepted, true, accepted.reason);
+
+    const version = await harness.repositories.getCanonicalVersion(repository);
+    const landed = await harness.repositories.readFile(
+      repository,
+      version.revision,
+      "src/spaced.js",
+    );
+    // The edit this task owned is in canonical; the one it did not is not.
+    assert.match(landed, /return keepMe \* 10;/u);
+    assert.match(landed, /return keepMe \+ 1;/u);
+    assert.doesNotMatch(landed, /return keepMe \+ 99;/u);
+
+    const collected = (
+      await harness.store.listAuditEvents({ taskId: split.task.id })
+    ).find((entry) => entry.event.type === "changeset_collected");
+    assert.deepEqual(collected?.event.data["dividedPatches"], [
+      {
+        path: "src/spaced.js",
+        grantedHunks: 1,
+        deferredHunks: 1,
+        symbols: ["contended"],
+      },
+    ]);
+
+    // The file is still named in the follow-up: part of its work was dropped.
+    const followUp = (
+      await harness.store.listSubmittedTasks({ status: "submitted" })
+    ).find((task) => task.objective.includes(DEFERRED_SCOPE_MARKER));
+    assert.ok(followUp);
+    assert.match(followUp.objective, /src\/spaced\.js/u);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});

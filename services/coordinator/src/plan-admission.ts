@@ -9,6 +9,7 @@ import {
   type ConflictAssessment,
   type ConflictEvidence,
   type DeferredResource,
+  type DeferredResourceLocation,
   type PlanAdmission,
   type PlanResourceRef,
   type ResourceLease,
@@ -162,6 +163,25 @@ export function deferralConstraints(
       (resource) =>
         `${resource.resourceType}:${resource.resourceId} — ${resource.reason}`,
     ),
+    // A resource withheld inside a file the agent *was* granted is the one
+    // case where the instruction is genuinely hard to follow from the name
+    // alone: the file is open in front of it and the forbidden part is not
+    // marked. Naming the lines makes it followable, and the enforcement pass
+    // holds the result to exactly those lines either way.
+    ...deferred
+      .filter((resource) => (resource.locations ?? []).length > 0)
+      .map(
+        (resource) =>
+          `${resource.resourceType}:${resource.resourceId} occupies ` +
+          (resource.locations ?? [])
+            .map(
+              (location) =>
+                `${location.file} lines ${String(location.startLine)}-` +
+                String(location.endLine),
+            )
+            .join(", ") +
+          "; edits elsewhere in those files are yours to make",
+      ),
   ];
 }
 
@@ -435,17 +455,45 @@ export class PlanAdmissionController {
     reduced: AgentPlan,
   ): DeferredResource[] {
     const locate = input.symbolRangesInFile;
-    if (
-      locate === undefined ||
-      reduced.expectedFiles.some((file) => locate(file) === undefined)
-    ) {
+    if (locate === undefined) {
       return [];
     }
-    return this.contested(input, reduced, {
+    const ranges = reduced.expectedFiles.map((file) => locate(file));
+    if (ranges.some((entry) => entry === undefined)) {
+      return [];
+    }
+    const contested = this.contested(input, reduced, {
       resourceType: "symbol",
       evidence: "symbol_overlap",
       declared: reduced.expectedSymbols,
     });
+    const placed = new Map<string, DeferredResourceLocation[]>();
+    reduced.expectedFiles.forEach((file, index) => {
+      for (const range of ranges[index] ?? []) {
+        const key = planResourceKey("symbol", range.name);
+        placed.set(key, [
+          ...(placed.get(key) ?? []),
+          { file, startLine: range.startLine, endLine: range.endLine },
+        ]);
+      }
+    });
+    // A parseable file is not enough: the index must actually locate every
+    // withheld symbol. Otherwise a patch could edit that symbol while the
+    // enforcement pass sees no matching range and incorrectly lets it through.
+    return contested.every((resource) =>
+      placed.has(planResourceKey("symbol", resource.resourceId)),
+    )
+      ? contested.map((resource) => ({
+          ...resource,
+          // Carried on the decision so the agent is told which lines, and so
+          // an audit trail records what the withholding actually meant. The
+          // enforcement pass re-derives the same ranges from the same base
+          // index rather than trusting a value that travelled over the wire.
+          locations: placed.get(
+            planResourceKey("symbol", resource.resourceId),
+          ) as DeferredResourceLocation[],
+        }))
+      : [];
   }
 
   /**

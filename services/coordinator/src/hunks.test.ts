@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  dividePatchByRanges,
   namesTouchedByPatch,
   patchedLineRanges,
   rangesOverlap,
@@ -173,4 +174,229 @@ test("a symbol that does not live in this file is not touched by it", () => {
     namesTouchedByPatch(EDIT_AT_LINE_TWO, RANGES, ["elsewhere"]),
     [],
   );
+});
+
+/**
+ * Dividing a patch at a withheld line range.
+ *
+ * The correctness that matters is not tested here but in
+ * `scripts/verify-patch-division.mjs`, which applies both halves with real git
+ * and checks the result equals the undivided patch. What these cover is the
+ * arithmetic that script would only catch by accident, and the refusals.
+ */
+
+const WITHHELD_TEN_TO_TWENTY = [{ startLine: 10, endLine: 20 }];
+
+test("hunks are sorted by whether they reach the withheld lines", () => {
+  const division = dividePatchByRanges(
+    patch(
+      "@@ -1,2 +1,2 @@",
+      " keep",
+      "-old",
+      "+new",
+      "@@ -12,2 +12,2 @@",
+      " keep",
+      "-old",
+      "+new",
+      "@@ -40,2 +40,2 @@",
+      " keep",
+      "-old",
+      "+new",
+    ),
+    WITHHELD_TEN_TO_TWENTY,
+  );
+  assert.equal(division?.grantedHunks, 2);
+  assert.equal(division?.deferredHunks, 1);
+  assert.match(division?.granted ?? "", /@@ -1,2/u);
+  assert.match(division?.granted ?? "", /@@ -40,2/u);
+  assert.doesNotMatch(division?.granted ?? "", /@@ -12,2/u);
+  assert.match(division?.deferred ?? "", /@@ -12,2/u);
+});
+
+test("the new side is renumbered for the hunks that were dropped", () => {
+  // The first hunk deletes two lines. In the whole patch the second hunk lands
+  // at new line 38; with the first hunk held back it lands at 40, because the
+  // deletion that shifted it is no longer part of this patch.
+  const division = dividePatchByRanges(
+    patch(
+      "@@ -12,4 +12,2 @@",
+      " keep",
+      "-gone",
+      "-gone",
+      " keep",
+      "@@ -40,2 +38,2 @@",
+      " keep",
+      "-old",
+      "+new",
+    ),
+    WITHHELD_TEN_TO_TWENTY,
+  );
+  assert.match(division?.granted ?? "", /@@ -40,2 \+40,2 @@/u);
+  // The deferred half is first in its own patch, so it keeps its numbering.
+  assert.match(division?.deferred ?? "", /@@ -12,4 \+12,2 @@/u);
+});
+
+test("a granted hunk that adds lines shifts the ones after it", () => {
+  const division = dividePatchByRanges(
+    patch(
+      "@@ -1,2 +1,4 @@",
+      " keep",
+      "+added",
+      "+added",
+      " keep",
+      "@@ -12,2 +14,2 @@",
+      " keep",
+      "-old",
+      "+new",
+      "@@ -40,2 +42,2 @@",
+      " keep",
+      "-old",
+      "+new",
+    ),
+    WITHHELD_TEN_TO_TWENTY,
+  );
+  // Granted keeps hunks one and three: the third still moves by the two lines
+  // the first adds, so its new start stays 42.
+  assert.match(division?.granted ?? "", /@@ -1,2 \+1,4 @@/u);
+  assert.match(division?.granted ?? "", /@@ -40,2 \+42,2 @@/u);
+});
+
+test("a pure insertion keeps git's off-by-one when it is re-emitted", () => {
+  const division = dividePatchByRanges(
+    patch("@@ -12,1 +12,1 @@", "-old", "+new", "@@ -30,0 +30,1 @@", "+added"),
+    WITHHELD_TEN_TO_TWENTY,
+  );
+  assert.match(division?.granted ?? "", /@@ -30,0 \+31,1 @@/u);
+});
+
+test("a patch with nothing outside the withheld lines is not divided", () => {
+  // Both halves must be real for a division to be worth anything; one empty
+  // side means the caller's existing all-or-nothing answer is already right.
+  const division = dividePatchByRanges(
+    patch("@@ -12,2 +12,2 @@", " keep", "-old", "+new"),
+    WITHHELD_TEN_TO_TWENTY,
+  );
+  assert.equal(division?.granted, undefined);
+  assert.equal(division?.deferredHunks, 1);
+});
+
+test("a section heading survives the round trip", () => {
+  const division = dividePatchByRanges(
+    patch(
+      "@@ -1,2 +1,2 @@ function alpha() {",
+      " keep",
+      "-old",
+      "+new",
+      "@@ -12,2 +12,2 @@ function withheld() {",
+      " keep",
+      "-old",
+      "+new",
+    ),
+    WITHHELD_TEN_TO_TWENTY,
+  );
+  assert.match(division?.granted ?? "", /@@ function alpha\(\) \{/u);
+  assert.match(division?.deferred ?? "", /@@ function withheld\(\) \{/u);
+});
+
+test("a no-newline marker makes a patch indivisible", () => {
+  // The marker's meaning depends on the hunk being the file's last, and
+  // dropping a sibling can change that.
+  assert.equal(
+    dividePatchByRanges(
+      patch(
+        "@@ -1,1 +1,1 @@",
+        "-old",
+        "+new",
+        "@@ -12,1 +12,1 @@",
+        "-old",
+        "\\ No newline at end of file",
+        "+new",
+      ),
+      WITHHELD_TEN_TO_TWENTY,
+    ),
+    undefined,
+  );
+});
+
+test("a header whose counts do not match its body is refused", () => {
+  // The signature of a misparse. Re-emitting it would produce a patch that
+  // applies somewhere other than where it says.
+  assert.equal(
+    dividePatchByRanges(
+      patch("@@ -1,9 +1,9 @@", " keep", "-old", "+new"),
+      WITHHELD_TEN_TO_TWENTY,
+    ),
+    undefined,
+  );
+});
+
+test("a binary patch is refused rather than guessed at", () => {
+  assert.equal(
+    dividePatchByRanges(
+      [
+        "diff --git a/src/a.bin b/src/a.bin",
+        "index 1111111..2222222 100644",
+        "GIT binary patch",
+        "literal 4",
+        "Lc$@(#0000",
+        "",
+      ].join("\n"),
+      WITHHELD_TEN_TO_TWENTY,
+    ),
+    undefined,
+  );
+});
+
+test("a patch covering two files is refused", () => {
+  // This divider re-emits one preamble; a second file's header would be
+  // silently dropped or duplicated.
+  assert.equal(
+    dividePatchByRanges(
+      patch(
+        "@@ -1,1 +1,1 @@",
+        "-old",
+        "+new",
+        "diff --git a/src/b.ts b/src/b.ts",
+        "--- a/src/b.ts",
+        "+++ b/src/b.ts",
+        "@@ -12,1 +12,1 @@",
+        "-old",
+        "+new",
+      ),
+      WITHHELD_TEN_TO_TWENTY,
+    ),
+    undefined,
+  );
+});
+
+test("withholding nothing divides nothing", () => {
+  assert.equal(
+    dividePatchByRanges(patch("@@ -1,1 +1,1 @@", "-old", "+new"), []),
+    undefined,
+  );
+});
+
+test("the git preamble is carried onto both halves", () => {
+  const division = dividePatchByRanges(
+    [
+      "diff --git a/src/a.ts b/src/a.ts",
+      "index 1111111111111111111111111111111111111111..2222222222222222222222222222222222222222 100644",
+      "--- a/src/a.ts",
+      "+++ b/src/a.ts",
+      "@@ -1,1 +1,1 @@",
+      "-old",
+      "+new",
+      "@@ -12,1 +12,1 @@",
+      "-old",
+      "+new",
+    ].join("\n"),
+    WITHHELD_TEN_TO_TWENTY,
+  );
+  // The preimage blob is what `git apply --3way` reconstructs from, and both
+  // halves share it: they are written against the same base revision.
+  for (const half of [division?.granted, division?.deferred]) {
+    assert.match(half ?? "", /^diff --git a\/src\/a\.ts b\/src\/a\.ts$/mu);
+    assert.match(half ?? "", /^index 1111111/mu);
+    assert.match(half ?? "", /^--- a\/src\/a\.ts$/mu);
+  }
 });

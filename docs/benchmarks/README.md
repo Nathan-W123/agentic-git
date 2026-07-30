@@ -68,6 +68,18 @@ This scenario was the original file-only detector's known miss. It now serves
 as a regression test for Level 3 dependency coordination and dynamic
 replanning.
 
+## Other measurements in this directory
+
+Scenario runs answer "does coordination pay for itself". These answer narrower
+questions about one mechanism each, and are listed here so they are findable:
+
+| Page | Question | Driven by |
+| --- | --- | --- |
+| [live-evidence.md](live-evidence.md) | Does the advantage survive real agents? | `coord benchmark --live` |
+| [plan-grounding.md](plan-grounding.md) | What is verifying an agent's declarations worth? | `scripts/grounding-experiment.mjs` |
+| [partial-admission-granularity.md](partial-admission-granularity.md) | How much uncontested work does a withholding discard? | `scripts/measure-hunk-withholding.mjs`, `scripts/verify-patch-division.mjs` |
+| [performance.md](performance.md) | Where does a coordinated run spend its time? | `--json` timings |
+
 ## Metrics
 
 | Metric | Meaning |

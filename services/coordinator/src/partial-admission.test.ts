@@ -227,9 +227,9 @@ test("a patch that stays clear of a withheld symbol is promoted", () => {
   assert.deepEqual(split.withheldSymbols, {});
 });
 
-test("a patch reaching into a withheld symbol loses the whole file", () => {
-  // Promoting the rest would mean rewriting hunk offsets to publish half a
-  // diff. The file goes to the follow-up intact instead.
+test("a patch with nothing outside the withheld symbol loses the file", () => {
+  // There is nothing to divide: every hunk reaches the withheld lines, so the
+  // file goes to the follow-up intact.
   const split = splitChangeSet(
     admittedPlan(["src/a.ts"]),
     symbolAdmission(["withheld"]),
@@ -243,6 +243,127 @@ test("a patch reaching into a withheld symbol loses the whole file", () => {
     ["src/a.ts"],
   );
   assert.deepEqual(split.withheldSymbols, { "src/a.ts": ["withheld"] });
+  assert.deepEqual(split.divided, []);
+});
+
+/**
+ * Dividing a patch rather than losing the file to it.
+ *
+ * The unit of withholding used to be the file even when the contest was a
+ * symbol inside it: one trespassing hunk cost every other edit in that file a
+ * whole follow-up task. What is enforced now is the line range, so the hunks
+ * that stayed clear of it are promoted with the rest of the changeset.
+ */
+
+function multiHunkPatch(path: string, ...headers: string[]): ChangeSet {
+  return {
+    ...changeSet([]),
+    patches: [
+      {
+        path,
+        status: "modified",
+        patch:
+          `--- a/${path}\n+++ b/${path}\n` +
+          headers.map((header) => `${header}\n keep\n-old\n+new\n`).join(""),
+      },
+    ],
+  };
+}
+
+test("hunks clear of a withheld symbol are promoted, not lost with it", () => {
+  const split = splitChangeSet(
+    admittedPlan(["src/a.ts"]),
+    symbolAdmission(["withheld"]),
+    // Three edits: one before the withheld window, one inside it, one after.
+    multiHunkPatch(
+      "src/a.ts",
+      "@@ -6,2 +6,2 @@",
+      "@@ -12,2 +12,2 @@",
+      "@@ -40,2 +40,2 @@",
+    ),
+    () => RANGES,
+  );
+
+  assert.deepEqual(
+    split.granted.patches.map((entry) => entry.path),
+    ["src/a.ts"],
+  );
+  const promoted = split.granted.patches[0]?.patch ?? "";
+  assert.match(promoted, /@@ -6,2/u);
+  assert.match(promoted, /@@ -40,2/u);
+  assert.doesNotMatch(promoted, /@@ -12,2/u);
+
+  // The trespassing hunk still goes back, and only it.
+  assert.equal(split.deferred.length, 1);
+  const held = split.deferred[0]?.patch ?? "";
+  assert.match(held, /@@ -12,2/u);
+  assert.doesNotMatch(held, /@@ -6,2/u);
+  assert.doesNotMatch(held, /@@ -40,2/u);
+
+  assert.deepEqual(split.withheldSymbols, { "src/a.ts": ["withheld"] });
+  assert.deepEqual(split.divided, [
+    {
+      path: "src/a.ts",
+      grantedHunks: 2,
+      deferredHunks: 1,
+      symbols: ["withheld"],
+    },
+  ]);
+});
+
+test("a divided file keeps its own identity on both halves", () => {
+  // Both halves describe the same path at the same base revision; nothing
+  // about the file's identity changes because the patch was split.
+  const split = splitChangeSet(
+    admittedPlan(["src/a.ts"]),
+    symbolAdmission(["withheld"]),
+    multiHunkPatch("src/a.ts", "@@ -6,2 +6,2 @@", "@@ -12,2 +12,2 @@"),
+    () => RANGES,
+  );
+
+  assert.equal(split.granted.patches[0]?.path, "src/a.ts");
+  assert.equal(split.granted.patches[0]?.status, "modified");
+  assert.equal(split.deferred[0]?.path, "src/a.ts");
+  assert.equal(split.deferred[0]?.status, "modified");
+  // The promoted changeset is a derived artifact and says so.
+  assert.notEqual(split.granted.id, "changeset_agent");
+});
+
+test("an added or deleted file is never divided", () => {
+  // "Part of a file being created" is not a thing that exists; the whole
+  // creation is either granted or held back.
+  const created = multiHunkPatch(
+    "src/a.ts",
+    "@@ -6,2 +6,2 @@",
+    "@@ -12,2 +12,2 @@",
+  );
+  const split = splitChangeSet(
+    admittedPlan(["src/a.ts"]),
+    symbolAdmission(["withheld"]),
+    {
+      ...created,
+      patches: created.patches.map((entry) => ({ ...entry, status: "added" })),
+    },
+    () => RANGES,
+  );
+
+  assert.deepEqual(split.granted.patches, []);
+  assert.equal(split.deferred.length, 1);
+  assert.deepEqual(split.divided, []);
+});
+
+test("a file that cannot be located is held whole rather than divided", () => {
+  // No ranges means no line to divide at, and the fail-closed answer stands.
+  const split = splitChangeSet(
+    admittedPlan(["src/a.ts"]),
+    symbolAdmission(["withheld"]),
+    multiHunkPatch("src/a.ts", "@@ -6,2 +6,2 @@", "@@ -12,2 +12,2 @@"),
+    () => undefined,
+  );
+
+  assert.deepEqual(split.granted.patches, []);
+  assert.equal(split.deferred.length, 1);
+  assert.deepEqual(split.divided, []);
 });
 
 test("a granted file that cannot be read is held back, not waved through", () => {

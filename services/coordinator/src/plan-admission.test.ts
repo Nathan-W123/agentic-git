@@ -522,6 +522,35 @@ test("a symbol is withheld while the file holding it is granted", () => {
   );
 });
 
+test("a withheld symbol says which lines it occupies in the granted file", () => {
+  // The file is open in front of the agent and the forbidden part is not
+  // marked. Naming the lines is what makes the instruction followable — and
+  // it is the same range the enforcement pass divides the patch at, so what
+  // the agent is told and what it is held to are the same claim.
+  const { candidate, running } = contestedSymbolPlans();
+  const admission = admit(candidate, [running], new PlanAdmissionController(), {
+    symbolRangesInFile: (file: string) => SYMBOL_RANGES[file] ?? [],
+  });
+
+  const withheld = admission.deferredResources?.find(
+    (resource) => resource.resourceType === "symbol",
+  );
+  assert.deepEqual(withheld?.locations, [
+    { file: "src/a.ts", startLine: 10, endLine: 20 },
+  ]);
+  assert.ok(
+    admission.constraints.some((entry) =>
+      entry.includes("src/a.ts lines 10-20"),
+    ),
+    `constraints did not name the lines: ${admission.constraints.join(" | ")}`,
+  );
+  // A withheld *file* has no location: the whole file is the answer.
+  const withheldFile = admission.deferredResources?.find(
+    (resource) => resource.resourceType === "file",
+  );
+  assert.equal(withheldFile?.locations, undefined);
+});
+
 test("a symbol is not withheld when a granted file cannot be read", () => {
   // src/a.ts has no line positions, so "did this patch touch `shared`" has no
   // answer for it. Withholding the symbol would be an instruction with nothing
@@ -529,6 +558,22 @@ test("a symbol is not withheld when a granted file cannot be read", () => {
   const { candidate, running } = contestedSymbolPlans();
   const admission = admit(candidate, [running], new PlanAdmissionController(), {
     symbolRangesInFile: () => undefined,
+  });
+
+  assert.equal(admission.status, "sequenced");
+  assert.equal(admission.ownershipGrants.length, 0);
+  assert.equal(admission.deferredResources, undefined);
+});
+
+test("a symbol is not withheld when the index has no range for it", () => {
+  const { candidate, running } = contestedSymbolPlans();
+  const admission = admit(candidate, [running], new PlanAdmissionController(), {
+    // The file parsed, but the contested symbol is absent from its ranges.
+    // Treating an empty range set as enforceable would make partial admission
+    // fail open when the index is incomplete.
+    symbolRangesInFile: () => [
+      { name: "alpha", startLine: 1, endLine: 5 },
+    ],
   });
 
   assert.equal(admission.status, "sequenced");
