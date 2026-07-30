@@ -14,6 +14,18 @@ test("loads every control-room asset with an explicit content type", async () =>
     "text/javascript; charset=utf-8",
   );
   assert.equal(
+    assets.get("/jarvis.css")?.contentType,
+    "text/css; charset=utf-8",
+  );
+  assert.equal(
+    assets.get("/hud-interface-bg.png")?.contentType,
+    "image/png",
+  );
+  assert.equal(
+    assets.get("/hud-reactor-rotor.png")?.contentType,
+    "image/png",
+  );
+  assert.equal(
     assets.get("/editor.js")?.contentType,
     "text/javascript; charset=utf-8",
   );
@@ -52,6 +64,17 @@ async function browserSource(): Promise<string> {
   return await readFile(path.join(packageRoot, "public", "app.js"), "utf8");
 }
 
+async function hudStyleSource(): Promise<string> {
+  const packageRoot = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    "..",
+  );
+  return await readFile(
+    path.join(packageRoot, "public", "jarvis.css"),
+    "utf8",
+  );
+}
+
 /** Lifts one self-contained top-level function out of the browser bundle. */
 function extract<T>(source: string, name: string, nextName: string): T {
   const start = source.indexOf(`function ${name}`);
@@ -64,6 +87,8 @@ function extract<T>(source: string, name: string, nextName: string): T {
 }
 
 type PolicyInput = {
+  approvalsEnabled?: boolean;
+  requireSchemaReview?: boolean;
   requireChangesetReview?: boolean;
   riskLevels?: string[];
   protectedPaths?: string;
@@ -128,6 +153,59 @@ test("the policy form distinguishes an empty field from a configured one", async
   });
 });
 
+test("the policy form can explicitly enable unattended execution", async () => {
+  const policyPayload = extract<(input: PolicyInput) => PolicyBody>(
+    await browserSource(),
+    "policyPayload",
+    "minutesValue",
+  );
+
+  assert.deepEqual(
+    policyPayload({
+      approvalsEnabled: false,
+      requireChangesetReview: true,
+      riskLevels: ["low", "medium", "high", "critical"],
+      protectedPaths: "package.json",
+    }),
+    {
+      policy: {
+        version: 1,
+        approvals: { enabled: false },
+      },
+    },
+  );
+});
+
+test("the policy form can keep critical gates without generic schema pauses", async () => {
+  const policyPayload = extract<(input: PolicyInput) => PolicyBody>(
+    await browserSource(),
+    "policyPayload",
+    "minutesValue",
+  );
+
+  assert.deepEqual(
+    policyPayload({
+      requireSchemaReview: false,
+      riskLevels: ["critical"],
+      protectedPaths: "authentication/**\ndatabase/migrations/**\nsecrets/**",
+    }),
+    {
+      policy: {
+        version: 1,
+        approvals: {
+          requireSchemaReview: false,
+          riskLevels: ["critical"],
+          protectedPaths: [
+            "authentication/**",
+            "database/migrations/**",
+            "secrets/**",
+          ],
+        },
+      },
+    },
+  );
+});
+
 test("selecting exactly the default risk levels stores nothing", async () => {
   const policyPayload = extract<(input: PolicyInput) => PolicyBody>(
     await browserSource(),
@@ -188,6 +266,32 @@ test("the browser date formatter supports full and compact timestamps", async ()
   assert.equal(formatDate("invalid"), "invalid");
 });
 
+test("repository creation and execution terminology are present in the product surface", async () => {
+  const source = await browserSource();
+  assert.match(source, /data-form="repository-create"/u);
+  assert.match(source, /Create repository/u);
+  assert.match(source, /Git commits remain in Repository History/u);
+  assert.match(source, /label: "Executions"/u);
+});
+
+test("organization and project context is limited to the Home view", async () => {
+  const source = await browserSource();
+  assert.match(source, /\$\("#context-block"\)\.hidden = !\(/u);
+  assert.match(source, /tab\?\.kind === "view" && tab\.view === "overview"/u);
+});
+
+test("first-run setup is exposed only while the control plane needs an owner", async () => {
+  const source = await browserSource();
+  assert.match(
+    source,
+    /bootstrapTab\.hidden = !state\.health\.setupRequired/u,
+  );
+  assert.match(
+    source,
+    /state\.health\.setupRequired[\s\S]*setAuthMode\("bootstrap"\)[\s\S]*setAuthMode\("login"\)/u,
+  );
+});
+
 type DispatchInput = {
   adapter?: string;
   agents?: Array<{ id: string; adapter: string }>;
@@ -223,21 +327,35 @@ const CLAUDE_AGENTS = [
   { id: "codex", adapter: "codex" },
 ];
 
-test("dispatch routes Claude in process and Codex to a remote worker", async () => {
+test("dispatch prefers the machine that advertises the adapter", async () => {
   const dispatchPlan = await dispatchPlanner();
-  const claude = dispatchPlan({
+  // A desktop running the worker daemon with its own Claude login is the
+  // point of the fleet: the phone submits, the desktop executes.
+  const withDesktop = dispatchPlan({
+    adapter: "claude",
+    agents: CLAUDE_AGENTS,
+    workers: [{ adapters: ["claude", "codex"] }],
+    repositoryId: "core",
+    draft: "Add a health endpoint",
+  });
+  assert.equal(withDesktop.ok, true);
+  assert.equal(withDesktop.route, "remote");
+  assert.equal(withDesktop.agentId, "claude");
+
+  // With nobody listening, the control plane is the only thing that can run
+  // it, so that is the default rather than a queue nothing will drain.
+  const alone = dispatchPlan({
     adapter: "claude",
     agents: CLAUDE_AGENTS,
     repositoryId: "core",
     draft: "Add a health endpoint",
   });
-  assert.equal(claude.ok, true);
-  assert.equal(claude.route, "local");
-  assert.equal(claude.agentId, "claude");
+  assert.equal(alone.route, "local");
 
   const codex = dispatchPlan({
     adapter: "codex",
     agents: CLAUDE_AGENTS,
+    workers: [{ adapters: ["codex"] }],
     repositoryId: "core",
     draft: "Add a health endpoint",
   });
@@ -259,11 +377,13 @@ test("dispatch routes Claude in process and Codex to a remote worker", async () 
 
 test("a remote dispatch with no worker listening says so instead of looking started", async () => {
   const dispatchPlan = await dispatchPlanner();
+  // Choosing remote explicitly with nobody listening must still be honest.
   const alone = dispatchPlan({
     adapter: "codex",
     agents: CLAUDE_AGENTS,
     repositoryId: "core",
     draft: "Add a health endpoint",
+    route: "remote",
   });
   assert.equal(alone.ok, true);
   assert.equal(alone.workerCount, 0);
@@ -369,6 +489,22 @@ test("the HUD reports agents running from the control plane's own count", async 
   assert.match(source, /Awaiting the control plane/u);
 });
 
+test("every HUD link indicator follows the WebSocket lifecycle", async () => {
+  const source = await browserSource();
+  assert.match(source, /function syncHudSocketIndicators/u);
+  assert.match(
+    source,
+    /addEventListener\("open"[\s\S]*syncHudSocketIndicators\("live"\)/u,
+  );
+  assert.match(
+    source,
+    /addEventListener\("close"[\s\S]*syncHudSocketIndicators\("connecting"\)/u,
+  );
+  assert.match(source, /data-hud-socket-label="top"/u);
+  assert.match(source, /data-hud-socket-label="compact"/u);
+  assert.match(source, /data-hud-socket-label="detail"/u);
+});
+
 test("only the Home view drops the frame for the immersive HUD", async () => {
   const source = await browserSource();
   // The activity bar, sidebar, and chat dock disappear on Home alone; every
@@ -400,3 +536,124 @@ test("every HUD dial draws its arc from a reported share, never decoration", asy
   assert.match(source, /const load = running \+ claimed/u);
 });
 
+type CoreSatelliteInput = {
+  audit?: Array<{ event?: { type?: string } }>;
+  runs?: Array<{ status?: string }>;
+};
+type CoreSatelliteStat = {
+  position: string;
+  label: string;
+  value: number;
+  context: string;
+  view: string;
+};
+
+test("the core satellites expose real telemetry not repeated in the main readouts", async () => {
+  const source = await browserSource();
+  const coreSatelliteStats = extract<
+    (input?: CoreSatelliteInput) => CoreSatelliteStat[]
+  >(source, "coreSatelliteStats", "hudCoreSatellites");
+
+  const stats = coreSatelliteStats({
+    audit: [
+      { event: { type: "plan_revised" } },
+      { event: { type: "task_submitted" } },
+      { event: { type: "plan_revised" } },
+      { event: { type: "scope_change_requested" } },
+    ],
+    runs: [
+      { status: "completed" },
+      { status: "failed" },
+      { status: "failed" },
+      { status: "running" },
+    ],
+  });
+
+  assert.deepEqual(
+    stats.map(({ label, value, view }) => ({ label, value, view })),
+    [
+      { label: "Plan revisions", value: 2, view: "coordination" },
+      { label: "Scope requests", value: 1, view: "coordination" },
+      { label: "Failed runs", value: 2, view: "runs" },
+      { label: "Audit depth", value: 4, view: "coordination" },
+    ],
+  );
+  assert.match(source, /data-hud-satellite="\$\{position\}"/u);
+  assert.match(source, /class="hud-core-satellites"[\s\S]*role="group"/u);
+  assert.match(source, /tabindex="0"/u);
+  assert.match(source, /Hover or focus to reveal extended telemetry/u);
+  assert.doesNotMatch(
+    source,
+    /<aside class="signal-banner warn" aria-label="Sandbox runtime warning">/u,
+  );
+  assert.match(source, /<span>Sandbox<\/span><strong>/u);
+});
+
+type TerminalSnapshot = {
+  project?: { name?: string };
+  socket?: { readyState?: number };
+  health?: { docker?: { available?: boolean } };
+  tasks?: Array<{ status?: string }>;
+  runs?: Array<{ status?: string }>;
+  approvals?: Array<{ status?: string }>;
+  repositories?: Array<{ id: string; branch?: string }>;
+};
+
+type TerminalProductResult = {
+  handled: boolean;
+  clear?: boolean;
+  view?: string;
+  lines: Array<{ kind: string; text: string }>;
+};
+
+test("the terminal keeps product commands useful without a sandbox", async () => {
+  const source = await browserSource();
+  const terminalProductCommand = extract<
+    (command: string, snapshot: TerminalSnapshot) => TerminalProductResult
+  >(source, "terminalProductCommand", "renderTerminalContext");
+  const snapshot = {
+    project: { name: "Relay" },
+    socket: { readyState: 1 },
+    health: { docker: { available: false } },
+    tasks: [{ status: "claimed" }, { status: "submitted" }],
+    runs: [{ status: "completed" }, { status: "failed" }],
+    approvals: [{ status: "pending" }],
+    repositories: [{ id: "relay", branch: "main" }],
+  };
+
+  assert.deepEqual(
+    terminalProductCommand("tasks", snapshot).lines.map((line) => line.text),
+    ["Tasks: claimed 1 | submitted 1"],
+  );
+  assert.match(
+    terminalProductCommand("status", snapshot).lines
+      .map((line) => line.text)
+      .join("\n"),
+    /Sandbox: offline/u,
+  );
+  assert.equal(terminalProductCommand("open tasks", snapshot).view, "board");
+  assert.equal(terminalProductCommand("clear", snapshot).clear, true);
+  assert.equal(terminalProductCommand("git status", snapshot).handled, false);
+});
+
+test("the HUD uses real counter-rotating machinery with a reduced-motion fallback", async () => {
+  const source = await hudStyleSource();
+  const browser = await browserSource();
+  assert.match(browser, /src="\/hud-reactor-rotor\.png"/u);
+  assert.doesNotMatch(source, /hud-plate-drift/u);
+  assert.match(source, /hud-plate-energy 6\.4s/u);
+  assert.match(source, /hud-rotor-clockwise 34s linear infinite/u);
+  assert.match(source, /hud-rotor-counter 19s linear infinite/u);
+  assert.match(
+    source,
+    /@keyframes hud-rotor-clockwise[\s\S]*rotate\(360deg\)/u,
+  );
+  assert.match(
+    source,
+    /@keyframes hud-rotor-counter[\s\S]*rotate\(0deg\)/u,
+  );
+  assert.match(
+    source,
+    /@media \(prefers-reduced-motion: reduce\)[\s\S]*\.hud-reactor-rotor[\s\S]*animation: none/u,
+  );
+});

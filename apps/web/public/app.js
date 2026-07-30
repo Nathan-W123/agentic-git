@@ -94,7 +94,13 @@ const state = {
   expandedDirs: new Set(),
   dirtyFiles: new Set(),
 
-  terminal: { lines: [], busy: false, history: [], historyIndex: -1 },
+  terminal: {
+    lines: [],
+    busy: false,
+    welcomed: false,
+    history: [],
+    historyIndex: -1,
+  },
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -469,6 +475,36 @@ async function loadContext({ quiet = false } = {}) {
 
 /* ------------------------------------------------------------- socket ---- */
 
+function syncHudSocketIndicators(status) {
+  const labels = {
+    live: {
+      top: "link established",
+      compact: "live",
+      detail: "LINK LIVE",
+    },
+    connecting: {
+      top: "link connecting",
+      compact: "connecting",
+      detail: "LINK CONNECTING",
+    },
+    offline: {
+      top: "link offline",
+      compact: "offline",
+      detail: "LINK DOWN",
+    },
+  }[status];
+  $$("[data-hud-socket-label]").forEach((element) => {
+    element.textContent =
+      labels?.[element.dataset.hudSocketLabel] ?? labels?.compact ?? "offline";
+  });
+  $$("[data-hud-socket-ring]").forEach((element) => {
+    element.classList.toggle("on", status === "live");
+  });
+  $$("[data-hud-socket-dot]").forEach((element) => {
+    element.classList.toggle("idle", status !== "live");
+  });
+}
+
 function closeSocket() {
   if (state.socket) {
     state.socket.onclose = null;
@@ -479,6 +515,7 @@ function closeSocket() {
   if ($("#live-label")) {
     $("#live-label").textContent = "Offline";
   }
+  syncHudSocketIndicators("offline");
 }
 
 function connectSocket() {
@@ -494,10 +531,12 @@ function connectSocket() {
     )}&after=${after}`,
   );
   state.socket = socket;
+  syncHudSocketIndicators("connecting");
   socket.addEventListener("open", () => {
     $("#live-dot").classList.remove("error");
     $("#live-dot").classList.add("live");
     $("#live-label").textContent = "Live";
+    syncHudSocketIndicators("live");
   });
   socket.addEventListener("message", (message) => {
     try {
@@ -541,6 +580,7 @@ function connectSocket() {
     }
     $("#live-dot").classList.remove("live");
     $("#live-label").textContent = "Reconnecting";
+    syncHudSocketIndicators("connecting");
     window.setTimeout(() => {
       if (state.socket === socket) {
         connectSocket();
@@ -1594,12 +1634,14 @@ function hudLinkCircle() {
   const sockets = state.health?.webSocketConnections ?? 0;
   const live = state.socket?.readyState === 1;
   return `<div class="hud-linkbox">
-    <div class="hud-linkring${live ? " on" : ""}">
+    <div class="hud-linkring${live ? " on" : ""}" data-hud-socket-ring>
       <span>${sockets}</span>
       <small>socket${sockets === 1 ? "" : "s"}</small>
     </div>
     <div class="hud-linkmeta">
-      <strong>${live ? "LINK LIVE" : "LINK DOWN"}</strong>
+      <strong data-hud-socket-label="detail">${
+        live ? "LINK LIVE" : "LINK DOWN"
+      }</strong>
       <span>${escapeHtml(location.host)}</span>
       <span>session ${escapeHtml(duration(Date.now() - SESSION_STARTED))}</span>
     </div>
@@ -1611,9 +1653,15 @@ function hudTerminalBox() {
   return `<div class="hud-termbox">
     <span class="hud-system-title">Console</span>
     <div class="hud-termbox-row">
-      <button class="hud-termbtn" data-panel-tab="terminal">▸ Terminal</button>
-      <button class="hud-termbtn" data-panel-tab="events">▸ Events</button>
-      <button class="hud-termbtn" data-action="hud-refresh">▸ Refresh</button>
+      <button class="hud-termbtn" data-panel-tab="terminal">${icon(
+        "terminal",
+      )}<span>Terminal</span></button>
+      <button class="hud-termbtn" data-panel-tab="events">${icon(
+        "graph",
+      )}<span>Events</span></button>
+      <button class="hud-termbtn" data-action="hud-refresh">${icon(
+        "history",
+      )}<span>Refresh</span></button>
     </div>
   </div>`;
 }
@@ -1650,7 +1698,7 @@ function hudSystemBars() {
   </div>`;
   return `<div class="hud-system">
     <span class="hud-system-title">System</span>
-    <div class="hud-sys-row"><span>Link</span><strong>${
+    <div class="hud-sys-row"><span>Link</span><strong data-hud-socket-label="compact">${
       state.socket?.readyState === 1 ? "live" : "connecting"
     }</strong></div>
     <div class="hud-sys-row"><span>Sandbox</span><strong>${escapeHtml(
@@ -2078,6 +2126,163 @@ function neuralCore({ running, claimed, awaiting }) {
     </div>`;
 }
 
+/**
+ * Live telemetry placed inside the generated diagnostic ring.
+ *
+ * The backdrop owns the visual geometry; this layer carries only product
+ * state. That keeps the centerpiece dense without disguising decorative
+ * marks as measurements.
+ */
+function coreSatelliteStats({ audit = [], runs = [] } = {}) {
+  const auditCount = (type) =>
+    audit.filter((record) => record.event?.type === type).length;
+
+  return [
+    {
+      position: "nw",
+      label: "Plan revisions",
+      value: auditCount("plan_revised"),
+      context: "audit signal",
+      view: "coordination",
+    },
+    {
+      position: "ne",
+      label: "Scope requests",
+      value: auditCount("scope_change_requested"),
+      context: "planning",
+      view: "coordination",
+    },
+    {
+      position: "sw",
+      label: "Failed runs",
+      value: runs.filter((run) => run.status === "failed").length,
+      context: "execution",
+      view: "runs",
+    },
+    {
+      position: "se",
+      label: "Audit depth",
+      value: audit.length,
+      context: "retained events",
+      view: "coordination",
+    },
+  ];
+}
+
+function hudCoreSatellites() {
+  return `<div
+    class="hud-core-satellites"
+    role="group"
+    aria-label="Extended coordination telemetry"
+  >
+    ${coreSatelliteStats(state)
+      .map(
+        ({ position, label, value, context, view }, index) =>
+          `<button
+            type="button"
+            class="hud-mini-orb hud-mini-orb-${position}"
+            data-open-view="${view}"
+            data-hud-satellite="${position}"
+            style="--orb-delay: ${index * 65}ms"
+            aria-label="${escapeHtml(`${label}: ${value}. Open ${view}.`)}"
+          >
+            <span>${escapeHtml(label)}</span>
+            <strong>${escapeHtml(String(value))}</strong>
+            <small>${escapeHtml(context)}</small>
+          </button>`,
+      )
+      .join("")}
+  </div>`;
+}
+
+function hudCoreTelemetry({
+  running,
+  pendingTasks,
+  activeTasks,
+  integratedTasks,
+  pendingApprovals,
+}) {
+  const totalTasks = state.tasks.length;
+  const acceptance =
+    totalTasks > 0
+      ? Math.round((100 * integratedTasks.length) / totalTasks)
+      : 0;
+  const completedRuns = state.runs.filter(
+    (run) => run.status === "completed",
+  ).length;
+  const runningRun = state.runs.find((run) => run.status === "running");
+  const focusTask = activeTasks[0] ?? pendingTasks[0] ?? state.tasks.at(-1);
+  const latestAudit = state.audit.at(-1)?.event;
+  const phase =
+    running > 0 || runningRun
+      ? "executing"
+      : activeTasks.length > 0
+        ? "coordinating"
+        : pendingApprovals.length > 0
+          ? "review gate"
+          : pendingTasks.length > 0
+            ? "queue ready"
+            : "standing by";
+  const focus =
+    focusTask?.objective ??
+    (latestAudit ? eventTitle(latestAudit) : "Control plane synchronized");
+  const focusMeta = runningRun
+    ? `Run ${shortId(runningRun.id, 14)} is active`
+    : latestAudit
+      ? `Last signal ${formatDate(latestAudit.occurredAt, { short: true })}`
+      : "No coordination events recorded";
+  const replans = state.metrics?.rework?.replansRequested;
+
+  const readout = (label, value, action = "") => {
+    const tag = action ? "button" : "div";
+    return `
+    <${tag} class="hud-core-readout"${action}${
+      action ? ' type="button"' : ""
+    }>
+      <span>${escapeHtml(label)}</span>
+      <strong>${escapeHtml(String(value))}</strong>
+    </${tag}>`;
+  };
+
+  return `<section
+    class="hud-core-telemetry"
+    aria-label="Live coordination core. Hover or focus to reveal extended telemetry."
+    tabindex="0"
+  >
+    ${hudCoreSatellites()}
+    <div class="hud-core-signal">
+      <span class="pulse-dot${running > 0 ? "" : " idle"}"></span>
+      <span>coordination core</span>
+      <strong>${escapeHtml(phase)}</strong>
+    </div>
+    <div class="hud-core-score">
+      <strong>${acceptance}<sup>%</sup></strong>
+      <span>canonical acceptance</span>
+    </div>
+    <div class="hud-core-readouts">
+      ${readout("Agents live", running)}
+      ${readout("In motion", activeTasks.length, ' data-open-view="runs"')}
+      ${readout("Queued", pendingTasks.length, ' data-open-view="board"')}
+      ${readout(
+        "Review gates",
+        pendingApprovals.length,
+        ' data-open-view="approvals"',
+      )}
+    </div>
+    <div class="hud-core-focus">
+      <span>Current coordination focus</span>
+      <strong>${escapeHtml(focus)}</strong>
+      <small>${escapeHtml(focusMeta)}</small>
+    </div>
+    <div class="hud-core-foot">
+      <span>${completedRuns}/${state.runs.length} executions complete</span>
+      <span>${
+        replans === undefined ? "replans unavailable" : `${replans} replans`
+      }</span>
+    </div>
+  </section>`;
+}
+
 function renderOverview() {
   if (!state.projectId) {
     return `<div class="view">${noProjectContent()}</div>`;
@@ -2090,7 +2295,6 @@ function renderOverview() {
   const pendingApprovals = state.approvals.filter(
     (approval) => approval.status === "pending",
   );
-  const docker = state.health?.docker;
   const totalTasks = state.tasks.length;
   const completedRuns = state.runs.filter(
     (run) => run.status === "completed",
@@ -2103,28 +2307,42 @@ function renderOverview() {
 
   const integratedShare =
     totalTasks > 0 ? Math.round((100 * integratedTasks.length) / totalTasks) : 0;
+  const latestApproval = pendingApprovals[0];
+  const latestEvent = state.audit.at(-1)?.event;
 
-  return `<div class="view hud-home">
-    <div class="hud-scan" aria-hidden="true"></div>
+  return `<div class="view hud-home hud-home-v2">
+    <div class="hud-interface-plate" aria-hidden="true"></div>
     ${hudCalendarStrip()}
-    ${
-      docker?.available === false
-        ? `<div class="signal-banner warn">
-            <span class="health-orb warn"></span>
-            <div>
-              <strong>Sandbox runtime unavailable</strong>
-              <span>${escapeHtml(docker.explanation ?? "")}</span>
-            </div>
-          </div>`
-        : ""
-    }
-    <div class="hud-refgrid">
-      <aside class="hud-col">
-        <div class="hud-cluster-frame">
+    <header class="hud-v2-header">
+      <div class="hud-v2-brand">
+        <img src="/mark.svg" alt="" width="24" height="24">
+        <span>Relay coordination network</span>
+      </div>
+      <div class="hud-v2-title">
+        <span>Autonomous development control plane</span>
+        <h1>Relay</h1>
+        <p>${escapeHtml(state.project?.name ?? "")} / live operations</p>
+      </div>
+      <div class="hud-v2-link">
+        <span class="pulse-dot${
+          state.socket?.readyState === 1 ? "" : " idle"
+        }" data-hud-socket-dot></span>
+        <span data-hud-socket-label="top">${
+          state.socket?.readyState === 1
+            ? "link established"
+            : "link connecting"
+        }</span>
+        <strong>${escapeHtml(shortId(state.projectId, 16))}</strong>
+      </div>
+    </header>
+
+    <div class="hud-v2-grid">
+      <aside class="hud-v2-rail hud-v2-rail-left" aria-label="Project telemetry">
+        <section class="hud-v2-module hud-v2-time">
           ${hudClock()}
           ${hudBars()}
-        </div>
-        <div class="hud-energy">
+        </section>
+        <section class="hud-v2-module hud-v2-acceptance">
           ${gauge("Accepted work", `${integratedShare}%`, "Promoted to canonical", {
             part: integratedTasks.length,
             whole: totalTasks,
@@ -2139,42 +2357,56 @@ function renderOverview() {
               state.runs.length === 1 ? "" : "s"
             } recorded</span>
           </div>
-        </div>
-        ${hudSubsystems()}
-        ${hudShortcuts()}
-        ${hudLinkCircle()}
-        ${hudTerminalBox()}
+        </section>
+        <section class="hud-v2-module">${hudSubsystems()}</section>
+        <section class="hud-v2-module">${hudShortcuts()}</section>
+        <section class="hud-v2-module hud-v2-connection">
+          ${hudLinkCircle()}
+          ${hudTerminalBox()}
+        </section>
       </aside>
 
-      <div class="hud-centercol">
-        <div class="hud-title">
-          <h1>Relay</h1>
-          <span>${escapeHtml(state.project?.name ?? "")} · control room</span>
+      <main class="hud-v2-center">
+        <div class="hud-reactor-rotors" aria-hidden="true">
+          <img
+            class="hud-reactor-rotor hud-reactor-rotor-outer"
+            src="/hud-reactor-rotor.png"
+            alt=""
+          >
+          <img
+            class="hud-reactor-rotor hud-reactor-rotor-inner"
+            src="/hud-reactor-rotor.png"
+            alt=""
+          >
         </div>
-        <div class="hud-center">
-          <div class="hud-reticle" aria-hidden="true"></div>
-          ${neuralCore({
-            running,
-            claimed: activeTasks.length,
-            awaiting: pendingApprovals.length,
-          })}
-          <div class="hud-coords">
-            <span>ORG ${escapeHtml(shortId(state.organizationId, 16))}</span>
-            <span>PRJ ${escapeHtml(shortId(state.projectId, 16))}</span>
-          </div>
+        ${hudCoreTelemetry({
+          running,
+          pendingTasks,
+          activeTasks,
+          integratedTasks,
+          pendingApprovals,
+        })}
+        <div class="hud-v2-graphs">
+          ${hudGraph(
+            "Coordination signals",
+            state.audit.map((record) => record.event?.occurredAt),
+          )}
+          ${hudGraph(
+            "Executions started",
+            state.runs.map((run) => run.startedAt),
+          )}
         </div>
-        <div class="hud-graphs">
-          ${hudGraph("Coordination events", state.audit.map((record) => record.event?.occurredAt))}
-          ${hudGraph("Executions started", state.runs.map((run) => run.startedAt))}
+        <div class="hud-v2-coordinates">
+          <span>ORG ${escapeHtml(shortId(state.organizationId, 18))}</span>
+          <span>PRJ ${escapeHtml(shortId(state.projectId, 18))}</span>
+          <span>${state.repositories.length} canonical source${
+            state.repositories.length === 1 ? "" : "s"
+          }</span>
         </div>
-      </div>
+      </main>
 
-      <aside class="hud-col">
-        <div class="hud-brand">
-          <img src="/mark.svg" alt="" width="22" height="22">
-          <span>Relay Coordination</span>
-        </div>
-        <div class="hud-herodial">
+      <aside class="hud-v2-rail hud-v2-rail-right" aria-label="System telemetry">
+        <section class="hud-v2-module hud-v2-agent-module">
           ${gauge(
             "Agents running",
             agents === undefined ? "—" : running,
@@ -2193,21 +2425,49 @@ function renderOverview() {
               tone: running > 0 ? "live" : "",
             },
           )}
-        </div>
-        ${hudProjectPlate()}
-        ${hudSystemBars()}
-        ${hudCoordination()}
-        ${hudLinksStack()}
-        ${hudFeed()}
-        ${hudWorkers()}
+          ${hudProjectPlate()}
+        </section>
+        <section class="hud-v2-module">${hudSystemBars()}</section>
+        <section class="hud-v2-module">${hudCoordination()}</section>
+        <section class="hud-v2-module hud-v2-gate">
+          <span class="hud-system-title">Human gate</span>
+          <div class="hud-gate-count">
+            <strong>${pendingApprovals.length}</strong>
+            <span>awaiting review</span>
+          </div>
+          ${
+            latestApproval
+              ? `<button data-open-approval="${escapeHtml(
+                  latestApproval.id,
+                )}" class="hud-gate-action">
+                  <span>${escapeHtml(
+                    latestApproval.kind ?? "approval",
+                  )}</span>
+                  <strong>${escapeHtml(shortId(latestApproval.id, 20))}</strong>
+                </button>`
+              : `<span class="hud-module-empty">No review gate is blocking work</span>`
+          }
+        </section>
+        <section class="hud-v2-module hud-v2-feed">${hudFeed()}</section>
+        <section class="hud-v2-module hud-v2-workers${
+          state.workers.length === 0 ? " is-empty" : ""
+        }">${hudWorkers()}</section>
       </aside>
     </div>
-    <div class="hud-tape">
-      <span>Relay :: control room</span>
-      <span>${escapeHtml(state.project?.name ?? "")} · ${
-        state.repositories.length
-      } canonical source${state.repositories.length === 1 ? "" : "s"}</span>
-    </div>
+
+    <aside class="hud-v2-event-tape" aria-label="Latest coordination event">
+      <span>Latest network signal</span>
+      <strong>${
+        latestEvent
+          ? escapeHtml(eventTitle(latestEvent))
+          : "No coordination events recorded"
+      }</strong>
+      <span>${
+        latestEvent
+          ? escapeHtml(formatDate(latestEvent.occurredAt, { short: true }))
+          : "waiting"
+      }</span>
+    </aside>
     ${hudDock()}
   </div>`;
 }
@@ -5313,27 +5573,179 @@ function focusChat() {
 
 /* ------------------------------------------------------------ terminal --- */
 
+/**
+ * Product commands remain useful when the optional Docker sandbox is offline.
+ * Unknown commands deliberately fall through to the workspace executor.
+ */
+function terminalProductCommand(command, snapshot = state) {
+  const tokens = String(command ?? "")
+    .trim()
+    .split(/\s+/u)
+    .filter(Boolean);
+  if (tokens[0]?.toLowerCase() === "relay") {
+    tokens.shift();
+  }
+  const verb = tokens.shift()?.toLowerCase() ?? "";
+  const statusCounts = (items = []) => {
+    const counts = new Map();
+    for (const item of items) {
+      const status = String(item?.status ?? "unknown");
+      counts.set(status, (counts.get(status) ?? 0) + 1);
+    }
+    return [...counts.entries()]
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([status, count]) => `${status} ${count}`)
+      .join(" | ");
+  };
+  const output = (...lines) => ({
+    handled: true,
+    lines: lines.map((text) => ({ kind: "out", text })),
+  });
+
+  if (verb === "help" || verb === "?") {
+    return output(
+      "Relay commands: status, tasks, runs, agents, approvals, repos, whoami, open <view>, clear",
+      "Other commands run inside the selected repository workspace when its sandbox is online.",
+    );
+  }
+  if (verb === "status") {
+    const socketLive = snapshot.socket?.readyState === 1;
+    const sandboxReady = snapshot.health?.docker?.available === true;
+    return output(
+      `Project: ${snapshot.project?.name ?? "none selected"}`,
+      `Control link: ${socketLive ? "live" : "connecting"}`,
+      `Sandbox: ${sandboxReady ? "ready" : "offline"}`,
+      `Tasks: ${snapshot.tasks?.length ?? 0} | Executions: ${
+        snapshot.runs?.length ?? 0
+      } | Pending approvals: ${
+        snapshot.approvals?.filter((approval) => approval.status === "pending")
+          .length ?? 0
+      }`,
+    );
+  }
+  if (verb === "tasks") {
+    return output(
+      snapshot.tasks?.length > 0
+        ? `Tasks: ${statusCounts(snapshot.tasks)}`
+        : "Tasks: none recorded",
+    );
+  }
+  if (verb === "runs" || verb === "executions") {
+    return output(
+      snapshot.runs?.length > 0
+        ? `Executions: ${statusCounts(snapshot.runs)}`
+        : "Executions: none recorded",
+    );
+  }
+  if (verb === "agents") {
+    const agents = snapshot.agentsRunning;
+    return output(
+      agents === undefined
+        ? "Agents: control-plane count unavailable"
+        : `Agents: ${agents.running ?? 0} running | ${
+            agents.busyWorkers ?? 0
+          }/${agents.workers ?? 0} workers busy`,
+    );
+  }
+  if (verb === "approvals") {
+    return output(
+      snapshot.approvals?.length > 0
+        ? `Approvals: ${statusCounts(snapshot.approvals)}`
+        : "Approvals: none recorded",
+    );
+  }
+  if (verb === "repos" || verb === "repositories") {
+    return output(
+      snapshot.repositories?.length > 0
+        ? snapshot.repositories
+            .map(
+              (repository) =>
+                `${repository.id} (${repository.branch ?? "default branch"})`,
+            )
+            .join("\n")
+        : "Repositories: none connected",
+    );
+  }
+  if (verb === "whoami") {
+    const user = snapshot.principal?.user;
+    return output(
+      user
+        ? `${user.email ?? user.name ?? user.id} | ${
+            user.systemAdmin ? "system admin" : "member"
+          }`
+        : "Identity unavailable",
+    );
+  }
+  if (verb === "clear" || verb === "cls") {
+    return { handled: true, clear: true, lines: [] };
+  }
+  if (verb === "open") {
+    const aliases = {
+      tasks: "board",
+      executions: "runs",
+      reviews: "approvals",
+      repos: "repositories",
+    };
+    const requested = (tokens[0] ?? "").toLowerCase();
+    const view = aliases[requested] ?? requested;
+    const allowed = new Set([
+      "overview",
+      "board",
+      "runs",
+      "approvals",
+      "repositories",
+      "coordination",
+      "explorer",
+      "settings",
+    ]);
+    if (!allowed.has(view)) {
+      return output(
+        "Open requires one of: overview, board, runs, approvals, repositories, coordination, explorer, settings",
+      );
+    }
+    return {
+      handled: true,
+      view,
+      lines: [{ kind: "sys", text: `Opening ${view}...` }],
+    };
+  }
+  return { handled: false, lines: [] };
+}
+
 function renderTerminalContext() {
   const target = $("#terminal-context");
   if (!target) {
     return;
   }
-  if (!state.explorerRepo) {
-    target.textContent = "no repository selected";
-    return;
-  }
   const sandbox = state.workspace?.sandbox;
-  target.textContent = `${state.explorerRepo} · ${
-    state.workspace?.exists
+  const input = $("#terminal-input");
+  const productContext = state.project?.name ?? "no project selected";
+  const workspaceContext = !state.explorerRepo
+    ? "product commands"
+    : state.workspace?.exists
       ? sandbox?.available
         ? `sandboxed bash (${sandbox.image})`
-        : "sandbox unavailable"
-      : "no workspace open"
-  }`;
+        : "sandbox offline"
+      : "workspace closed";
+  target.textContent = `${productContext} | ${workspaceContext}`;
+  if (input) {
+    input.placeholder = sandbox?.available
+      ? "Run a sandbox command or type help"
+      : "Type help, status, tasks, runs, agents...";
+    input.setAttribute(
+      "aria-label",
+      sandbox?.available
+        ? "Relay terminal and sandbox command input"
+        : "Relay product command input; workspace sandbox offline",
+    );
+  }
 }
 
 function terminalPrint(kind, text) {
   const scroll = $("#terminal-scroll");
+  if (!scroll) {
+    return;
+  }
   for (const line of String(text ?? "").split("\n")) {
     const element = document.createElement("span");
     element.className = `terminal-line ${kind}`;
@@ -5343,11 +5755,54 @@ function terminalPrint(kind, text) {
   scroll.scrollTop = scroll.scrollHeight;
 }
 
+function ensureTerminalIntro() {
+  if (state.terminal.welcomed) {
+    return;
+  }
+  state.terminal.welcomed = true;
+  terminalPrint("sys", "RELAY COMMAND CONSOLE | live product telemetry");
+  terminalPrint(
+    "out",
+    "Type help for Relay commands. Workspace commands are isolated in the repository sandbox.",
+  );
+  if (state.health?.docker?.available === false) {
+    terminalPrint(
+      "err",
+      "Sandbox offline. Product telemetry commands remain available.",
+    );
+  }
+}
+
 async function runTerminalCommand(command) {
   if (state.terminal.busy) {
     return;
   }
   terminalPrint("cmd", command);
+  const productCommand = terminalProductCommand(command);
+  if (productCommand.handled) {
+    if (productCommand.clear) {
+      $("#terminal-scroll")?.replaceChildren();
+    }
+    for (const line of productCommand.lines) {
+      terminalPrint(line.kind, line.text);
+    }
+    if (productCommand.view) {
+      setPanel(false);
+      openView(productCommand.view);
+    }
+    return;
+  }
+  if (state.health?.docker?.available === false) {
+    terminalPrint(
+      "err",
+      "Sandbox runtime is offline, so repository shell commands cannot run.",
+    );
+    terminalPrint(
+      "sys",
+      "Relay commands still work. Type help to list them.",
+    );
+    return;
+  }
   if (!state.projectId || !state.explorerRepo) {
     terminalPrint("sys", "Select a repository in the Explorer first.");
     return;
@@ -5360,7 +5815,11 @@ async function runTerminalCommand(command) {
     return;
   }
   state.terminal.busy = true;
-  $("#terminal-input").disabled = true;
+  const input = $("#terminal-input");
+  if (input) {
+    input.readOnly = true;
+    input.setAttribute("aria-busy", "true");
+  }
   try {
     const response = await api(`${workspaceBase()}/exec`, {
       method: "POST",
@@ -5384,9 +5843,11 @@ async function runTerminalCommand(command) {
     terminalPrint("err", error.message);
   } finally {
     state.terminal.busy = false;
-    const input = $("#terminal-input");
-    input.disabled = false;
-    input.focus();
+    if (input) {
+      input.readOnly = false;
+      input.removeAttribute("aria-busy");
+      input.focus();
+    }
   }
 }
 
@@ -5403,7 +5864,13 @@ function setPanel(open, tab) {
     view.hidden = view.dataset.panelView !== state.panelTab;
   });
   if (open && state.panelTab === "terminal") {
-    $("#terminal-input")?.focus();
+    ensureTerminalIntro();
+    renderTerminalContext();
+    const input = $("#terminal-input");
+    if (input) {
+      input.readOnly = state.terminal.busy;
+    }
+    window.requestAnimationFrame(() => input?.focus());
   }
 }
 

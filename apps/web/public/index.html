@@ -11,6 +11,7 @@
     <link rel="icon" href="/mark.svg" type="image/svg+xml">
     <link rel="manifest" href="/manifest.webmanifest">
     <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/jarvis.css">
     <title>Relay Control Room</title>
   </head>
   <body>
@@ -42,7 +43,12 @@
           <button class="auth-tab active" data-auth-mode="login" role="tab">
             Sign in
           </button>
-          <button class="auth-tab" data-auth-mode="bootstrap" role="tab">
+          <button
+            class="auth-tab"
+            data-auth-mode="bootstrap"
+            role="tab"
+            hidden
+          >
             First run
           </button>
         </div>
@@ -135,7 +141,11 @@
 
       <!-- Shown only on the Home HUD (app.js hides it elsewhere); floats
            over the immersive view now that Home has no sidebar. -->
-      <div class="context-block" id="context-block">
+      <section
+        class="context-block"
+        id="context-block"
+        aria-label="Organization and project context"
+      >
         <label for="organization-select">
           <span>Organization</span>
           <select id="organization-select"></select>
@@ -144,7 +154,7 @@
           <span>Project</span>
           <select id="project-select"></select>
         </label>
-      </div>
+      </section>
 
       <aside class="side-bar" id="side-bar" aria-label="Sidebar">
         <header class="side-head">

@@ -8,9 +8,12 @@ import type { StaticAsset } from "@coord/api-gateway";
 const PUBLIC_FILES = [
   ["index.html", "text/html; charset=utf-8"],
   ["styles.css", "text/css; charset=utf-8"],
+  ["jarvis.css", "text/css; charset=utf-8"],
   ["app.js", "text/javascript; charset=utf-8"],
   ["editor.js", "text/javascript; charset=utf-8"],
   ["mark.svg", "image/svg+xml"],
+  ["hud-interface-bg.png", "image/png"],
+  ["hud-reactor-rotor.png", "image/png"],
   ["manifest.webmanifest", "application/manifest+json"],
 ] as const;
 
