@@ -34,11 +34,27 @@
   --font-mono: "Cascadia Code", Consolas, monospace;
   --activity-width: 54px;
   --sidebar-width: 300px;
-  --radius: 1px;
   --glow-soft: 0 0 18px rgba(22, 191, 255, 0.18);
   --glow-edge:
     0 0 0 1px rgba(22, 191, 255, 0.13),
     0 0 24px -8px rgba(22, 191, 255, 0.4);
+}
+
+/*
+ * Geometry stays Home's, not the app's.
+ *
+ * This file's palette and type are the product's voice everywhere, but its
+ * hard-edged 1px radius is Home's instrument-plate language. Declared on
+ * :root it also reached `styles.css`'s components, which encode affordance in
+ * shape: pills (`.chip`, `.status`) are readouts, rounded rectangles
+ * (`.button`, `.mini-button`, inputs) are controls. Collapsing both to 1px
+ * made every readout look like a button — an `EXPIRES 1:54 PM` chip
+ * indistinguishable from the `Inspect` next to it. Scoping the override to
+ * Home keeps the HUD sharp and leaves the rest of the app's shape language
+ * intact.
+ */
+.hud-home-v2 {
+  --radius: 1px;
 }
 
 body {
@@ -214,7 +230,6 @@ button {
 .issue-row,
 .repository-card,
 .approval-card {
-  border-radius: 0;
   border-color: rgba(22, 191, 255, 0.2);
   background: rgba(3, 14, 22, 0.84);
   box-shadow:
@@ -246,16 +261,6 @@ button {
 .metric-value {
   color: #e6faff;
   font-size: 30px;
-}
-
-.button,
-.mini-button,
-.chip,
-.status,
-input,
-select,
-textarea {
-  border-radius: 0;
 }
 
 .button {
