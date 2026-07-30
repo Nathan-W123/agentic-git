@@ -197,8 +197,15 @@ export async function runCoordinatedFixture(
  */
 function tokenMetrics(
   entries: ReadonlyArray<{ task: TaskDefinition; adapter: AgentAdapter }>,
-): { tokensTotal?: number; tokensByTask?: Record<string, number> } {
+): {
+  tokensTotal?: number;
+  tokensByTask?: Record<string, number>;
+  tokensByPhase?: Record<string, number>;
+} {
   const byTask: Record<string, number> = {};
+  // Where the spend went matters as much as the total: a replan-cost
+  // experiment needs the replanning phase separable from everything else.
+  const byPhase: Record<string, number> = {};
   let reported = false;
   for (const entry of entries) {
     const adapter = entry.adapter;
@@ -208,6 +215,7 @@ function tokenMetrics(
     for (const usage of adapter.allTokenUsage()) {
       reported = true;
       byTask[usage.taskId] = (byTask[usage.taskId] ?? 0) + usage.tokens;
+      byPhase[usage.phase] = (byPhase[usage.phase] ?? 0) + usage.tokens;
     }
   }
   if (!reported) {
@@ -216,6 +224,7 @@ function tokenMetrics(
   return {
     tokensTotal: Object.values(byTask).reduce((sum, value) => sum + value, 0),
     tokensByTask: byTask,
+    tokensByPhase: byPhase,
   };
 }
 

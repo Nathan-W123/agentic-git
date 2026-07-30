@@ -1000,23 +1000,36 @@ export class CodexAdapter implements AgentAdapter {
       `Task id: ${record.input.task.id}`,
       `Objective: ${record.input.task.objective}`,
       `Previous plan: ${JSON.stringify(request.previousPlan)}`,
-      // The model already reasoned about this task once; hand that reasoning
-      // back instead of making it re-derive everything from the tree.
-      ...(request.previousPlan.intent === undefined
-        ? []
-        : [`Your previous stated intent: ${request.previousPlan.intent}`]),
-      // And hand back what verification made of its previous declarations:
-      // a name the coordinator could not find is a name not to declare again.
-      ...((request.previousPlan.grounding?.notes.length ?? 0) === 0
+      // COORD_COLD_REPLAN=1 strips the warm-start lines below, restoring the
+      // pre-enrichment replan prompt on an identical build. It exists for
+      // measuring the enrichment against its absence, and as a rollback.
+      ...(process.env["COORD_COLD_REPLAN"] === "1"
         ? []
         : [
-            "Coordinator verification of your previous declarations: " +
-              (request.previousPlan.grounding?.notes ?? []).join("; "),
+            // The model already reasoned about this task once; hand that
+            // reasoning back instead of making it re-derive everything.
+            ...(request.previousPlan.intent === undefined
+              ? []
+              : [
+                  `Your previous stated intent: ${request.previousPlan.intent}`,
+                ]),
+            // And what verification made of its previous declarations: a name
+            // the coordinator could not find is a name not to declare again.
+            ...((request.previousPlan.grounding?.notes.length ?? 0) === 0
+              ? []
+              : [
+                  "Coordinator verification of your previous declarations: " +
+                    (request.previousPlan.grounding?.notes ?? []).join("; "),
+                ]),
           ]),
       `Canonical change: ${JSON.stringify(request.canonicalChange)}`,
       `Coordinator constraints: ${JSON.stringify(request.constraints)}`,
       "Account for changed dependencies and remove stale file assumptions.",
-      "Declare only files and symbols that exist at the new revision, plus any you will create.",
+      ...(process.env["COORD_COLD_REPLAN"] === "1"
+        ? []
+        : [
+            "Declare only files and symbols that exist at the new revision, plus any you will create.",
+          ]),
       "List all affected symbols, APIs, schemas, configuration keys, tests, and services.",
     ].join("\n");
   }

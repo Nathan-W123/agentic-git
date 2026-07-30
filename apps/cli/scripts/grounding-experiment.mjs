@@ -109,6 +109,13 @@ async function once(scenario, liveAgent, runNumber) {
       pairFlaggedAtPlanTime: pairFlagged,
       replans: run.audit.filter((event) => event.type === "replan_requested")
         .length,
+      replanOutcomes: run.audit
+        .filter((event) => event.type === "plan_revised")
+        .map((event) => ({
+          taskId: event.taskId,
+          revision: event.data.revision,
+          grounding: summarizeGrounding(event.data.grounding),
+        })),
       scopeChanges: run.audit.filter(
         (event) => event.type === "scope_change_requested",
       ).length,
@@ -147,6 +154,7 @@ async function once(scenario, liveAgent, runNumber) {
         elapsedMs: metrics.elapsedMs,
         tokensTotal: metrics.tokensTotal,
         tokensByTask: metrics.tokensByTask,
+        tokensByPhase: metrics.tokensByPhase,
       },
     };
   } finally {

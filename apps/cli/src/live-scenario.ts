@@ -226,6 +226,29 @@ export const LIVE_CHECKOUT_SCENARIO: BenchmarkScenario = {
 };
 
 /**
+ * The forced-contention pair plus a third contender, for replan-heavy runs.
+ *
+ * All three requests must change how an order total is computed or shown, so
+ * a correct scheduler fully serialises them: the second task replans once and
+ * the third twice, giving each run around three real replan round trips —
+ * which is what an experiment about replan cost needs runs to contain.
+ */
+export const LIVE_CHECKOUT_TRIO_SCENARIO: BenchmarkScenario = {
+  name: "live-checkout-trio",
+  description:
+    "Three real-agent requests that all touch the order total; objectives use checkout vocabulary that matches no real file or symbol name.",
+  seed: SEED,
+  tasks: [
+    ...LIVE_CHECKOUT_SCENARIO.tasks,
+    task(
+      "task_checkout_rounding",
+      "During checkout, round the order's total price to whole pence so customers never see long decimals",
+      "codex-c",
+    ),
+  ],
+};
+
+/**
  * The same repository with six requests instead of three.
  *
  * Three tasks is enough to show that a real collision is found, and not enough

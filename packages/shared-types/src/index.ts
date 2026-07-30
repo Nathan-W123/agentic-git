@@ -631,6 +631,8 @@ export interface BenchmarkModeResult {
   tokensTotal?: number;
   /** The same figure split by task, so a costly outlier is visible. */
   tokensByTask?: Record<string, number>;
+  /** Same figures grouped by adapter phase: planning, replanning, execution. */
+  tokensByPhase?: Record<string, number>;
 }
 
 export interface BenchmarkReport {
