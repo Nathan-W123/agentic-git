@@ -76,6 +76,9 @@ import type {
   SubmittedTask,
   SubmittedTaskCompletionStatus,
   SubmittedTaskFilter,
+  RecordTokenUsageInput,
+  TokenUsageFilter,
+  TokenUsageRecord,
   SubmittedTaskStatus,
   UserAccount,
   LeaseTaskInput,
@@ -868,6 +871,14 @@ export class SqliteCoordinationStore implements CoordinationStore {
         return { outcome: "lease_lost" };
       }
       const lease = this.toWorkLease(row);
+      if (
+        input.replaceApproved !== true &&
+        lease.plan !== undefined &&
+        planAdmissionApproved(lease.plan.admission)
+      ) {
+        this.db.exec("COMMIT");
+        return { outcome: "already_admitted", lease };
+      }
       const approvedLeaseIds = this.approvedPlanLeaseIds(
         lease.repositoryId,
         lease.id,
@@ -1033,6 +1044,97 @@ export class SqliteCoordinationStore implements CoordinationStore {
       detail: optionalText(row, "detail"),
       plan: optionalJson<WorkLeasePlan>(row, "plan_json"),
     };
+  }
+
+  private toTokenUsage(row: Row): TokenUsageRecord {
+    return {
+      id: String(row["id"]),
+      usageKey: String(row["usage_key"]),
+      projectId: (row["project_id"] as string | null) ?? undefined,
+      repositoryId: String(row["repository_id"]),
+      taskId: String(row["task_id"]),
+      leaseId: (row["lease_id"] as string | null) ?? undefined,
+      runId: (row["run_id"] as string | null) ?? undefined,
+      agentId: String(row["agent_id"]),
+      phase: row["phase"] as TokenUsageRecord["phase"],
+      inputTokens: Number(row["input_tokens"]),
+      outputTokens: Number(row["output_tokens"]),
+      totalTokens: Number(row["total_tokens"]),
+      recordedAt: String(row["recorded_at"]),
+    };
+  }
+
+  public async recordTokenUsage(
+    input: RecordTokenUsageInput,
+  ): Promise<TokenUsageRecord> {
+    // Upsert, not insert: the worker reports the same lease and phase again
+    // with a larger running total, and summing those snapshots would inflate
+    // the bill by the heartbeat rate.
+    this.db
+      .prepare(
+        `INSERT INTO token_usage
+           (id, usage_key, project_id, repository_id, task_id, lease_id,
+            run_id, agent_id, phase, input_tokens, output_tokens,
+            total_tokens, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(usage_key) DO UPDATE SET
+           input_tokens = excluded.input_tokens,
+           output_tokens = excluded.output_tokens,
+           total_tokens = excluded.total_tokens,
+           run_id = COALESCE(excluded.run_id, token_usage.run_id),
+           recorded_at = excluded.recorded_at`,
+      )
+      .run(
+        createId("usage"),
+        input.usageKey,
+        input.projectId ?? null,
+        input.repositoryId,
+        input.taskId,
+        input.leaseId ?? null,
+        input.runId ?? null,
+        input.agentId,
+        input.phase,
+        input.inputTokens ?? 0,
+        input.outputTokens ?? 0,
+        input.totalTokens,
+        input.recordedAt,
+      );
+    const row = this.db
+      .prepare("SELECT * FROM token_usage WHERE usage_key = ?")
+      .get(input.usageKey) as Row;
+    return this.toTokenUsage(row);
+  }
+
+  public async listTokenUsage(
+    filter: TokenUsageFilter = {},
+  ): Promise<TokenUsageRecord[]> {
+    const clauses: string[] = [];
+    const values: string[] = [];
+    if (filter.projectId !== undefined) {
+      clauses.push("project_id = ?");
+      values.push(filter.projectId);
+    }
+    if (filter.repositoryId !== undefined) {
+      clauses.push("repository_id = ?");
+      values.push(filter.repositoryId);
+    }
+    if (filter.taskId !== undefined) {
+      clauses.push("task_id = ?");
+      values.push(filter.taskId);
+    }
+    if (filter.leaseId !== undefined) {
+      clauses.push("lease_id = ?");
+      values.push(filter.leaseId);
+    }
+    if (filter.recordedAfter !== undefined) {
+      clauses.push("recorded_at >= ?");
+      values.push(filter.recordedAfter);
+    }
+    const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
+    const rows = this.db
+      .prepare(`SELECT * FROM token_usage${where} ORDER BY recorded_at ASC`)
+      .all(...values) as Row[];
+    return rows.map((row) => this.toTokenUsage(row));
   }
 
   public async createApiToken(token: ApiTokenRecord): Promise<void> {

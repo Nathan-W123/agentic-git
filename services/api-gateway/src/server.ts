@@ -190,6 +190,20 @@ export interface ApiOperations {
     | { outcome: "rejected"; reason: string }
     | { outcome: "lease_lost"; reason: string }
   >;
+  /**
+   * Arbitrates a scope expansion an agent asked for mid-execution. A
+   * deployment that omits this refuses the request rather than pretending to
+   * decide it, which is what the worker did unconditionally before.
+   */
+  arbitrateScopeChange?(input: {
+    leaseId: string;
+    actorId: string;
+    request: unknown;
+  }): Promise<
+    | { outcome: "decided"; decision: unknown }
+    | { outcome: "rejected"; reason: string }
+    | { outcome: "lease_lost"; reason: string }
+  >;
   acceptWorkResult?(input: {
     leaseId: string;
     status: "completed" | "failed";
@@ -980,7 +994,7 @@ export class ApiGateway {
     const leaseMatch = matchPath(
       path,
       new RegExp(
-        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|plan|result|release)$`,
+        `^${API_PREFIX}/workers/leases/([^/]+)/(heartbeat|bundle|plan|scope|result|release)$`,
         "u",
       ),
     );
@@ -1012,6 +1026,15 @@ export class ApiGateway {
 
       if (action === "heartbeat" && method === "POST") {
         const now = new Date();
+        // A heartbeat may carry the agent's running token total. Recording it
+        // here rather than only at the end is what makes a token budget a cap
+        // instead of a post-mortem: an overspending task is stopped while it
+        // is still spending.
+        const reported = await this.recordLeaseTokenUsage(
+          request,
+          lease,
+          now.toISOString(),
+        );
 
         // Cost control: a lease past the project's per-task runtime budget
         // is failed rather than extended. Failing (not releasing) is
@@ -1019,11 +1042,23 @@ export class ApiGateway {
         // burn the budget again.
         if (lease.projectId !== undefined) {
           const project = await this.options.store.getProject(lease.projectId);
-          const maxTaskRuntimeMs = projectBudgets(
-            project?.policy,
-          ).maxTaskRuntimeMs;
+          const leaseBudgets = projectBudgets(project?.policy);
+          const maxTaskRuntimeMs = leaseBudgets.maxTaskRuntimeMs;
           const runtimeMs =
             now.getTime() - new Date(lease.issuedAt).getTime();
+          const maxTaskTokens = leaseBudgets.maxTaskTokens;
+          if (maxTaskTokens !== undefined && reported > maxTaskTokens) {
+            await this.failLeaseOnBudget(lease, now, {
+              detail:
+                `Task exceeded the project token budget of ${maxTaskTokens} tokens`,
+              data: { tokensSpent: reported, maxTaskTokens },
+            });
+            throw new HttpError(
+              409,
+              "budget_exceeded",
+              "This task exceeded the project's token budget; stop work",
+            );
+          }
           if (maxTaskRuntimeMs !== undefined && runtimeMs > maxTaskRuntimeMs) {
             const failed = await this.options.store.finishWorkLease(
               leaseId,
@@ -1136,6 +1171,31 @@ export class ApiGateway {
         return;
       }
 
+      if (action === "scope" && method === "POST") {
+        const scopeOperation = this.options.operations.arbitrateScopeChange;
+        if (scopeOperation === undefined) {
+          throw new HttpError(
+            501,
+            "not_supported",
+            "This deployment cannot arbitrate remote scope changes",
+          );
+        }
+        const body = objectBody(await this.readJson(request));
+        const outcome = await scopeOperation({
+          leaseId,
+          actorId: principal.user.id,
+          request: body["request"],
+        });
+        if (outcome.outcome === "lease_lost") {
+          throw new HttpError(409, "lease_lost", outcome.reason);
+        }
+        if (outcome.outcome === "rejected") {
+          throw new HttpError(400, "invalid_scope_change", outcome.reason);
+        }
+        this.sendJson(response, 200, { decision: outcome.decision });
+        return;
+      }
+
       if (action === "release" && method === "POST") {
         const released = await this.options.store.finishWorkLease(
           leaseId,
@@ -1157,6 +1217,17 @@ export class ApiGateway {
 
       if (action === "result" && method === "POST") {
         const body = objectBody(await this.readJson(request));
+        // Final spend, recorded but not enforced: the tokens are already gone
+        // by the time a result exists, and failing finished work over its bill
+        // would waste the very thing the budget exists to protect. The cap is
+        // enforced at heartbeat, while the spending is still happening.
+        if (Array.isArray(body["tokenUsage"])) {
+          await this.recordReportedTokenUsage(
+            lease,
+            body["tokenUsage"],
+            new Date().toISOString(),
+          );
+        }
         const status = body["status"];
         if (status !== "completed" && status !== "failed") {
           throw new HttpError(
@@ -2970,6 +3041,134 @@ export class ApiGateway {
         error instanceof Error ? error.message : "Operation could not be completed",
       );
     }
+  }
+
+  /**
+   * Records the token totals a worker attached to a lease request.
+   *
+   * Returns everything reported for the lease so far, which is what a
+   * per-task cap is measured against. A request that carries no usage — an
+   * agent that does not report, or a bodyless heartbeat from an older worker
+   * — writes nothing and simply reads the existing total back, so adding
+   * accounting cannot break a worker that knows nothing about it.
+   *
+   * Malformed figures are dropped rather than rejected. The alternative is
+   * failing a running task over a miscounted bill, and a gap in the data is
+   * the honest record of an agent that could not say what it spent.
+   */
+  private async recordLeaseTokenUsage(
+    request: IncomingMessage,
+    lease: WorkLease,
+    at: string,
+  ): Promise<number> {
+    const declared = Number.parseInt(
+      request.headers["content-length"] ?? "0",
+      10,
+    );
+    if (Number.isFinite(declared) && declared > 0) {
+      const body = await this.readJson(request).catch(() => undefined);
+      const entries = (body as { tokenUsage?: unknown } | undefined)
+        ?.tokenUsage;
+      if (Array.isArray(entries)) {
+        await this.recordReportedTokenUsage(lease, entries, at);
+      }
+    }
+    return (
+      await this.options.store.listTokenUsage({ leaseId: lease.id })
+    ).reduce((sum, entry) => sum + entry.totalTokens, 0);
+  }
+
+  /** Writes one batch of reported phase totals against a lease. */
+  private async recordReportedTokenUsage(
+    lease: WorkLease,
+    entries: readonly unknown[],
+    at: string,
+  ): Promise<void> {
+    const task = (
+      await this.options.store.listSubmittedTasks({
+        repositoryId: lease.repositoryId,
+      })
+    ).find((entry) => entry.id === lease.taskId);
+    for (const raw of entries) {
+      const entry = raw as Record<string, unknown>;
+      const phase = entry["phase"];
+      const total = entry["totalTokens"];
+      if (
+        (phase !== "planning" && phase !== "execution") ||
+        typeof total !== "number" ||
+        !Number.isSafeInteger(total) ||
+        total < 0
+      ) {
+        continue;
+      }
+      const count = (key: string): number | undefined => {
+        const value = entry[key];
+        return typeof value === "number" &&
+          Number.isSafeInteger(value) &&
+          value >= 0
+          ? value
+          : undefined;
+      };
+      await this.options.store.recordTokenUsage({
+        // One row per lease and phase, carrying the running total: the worker
+        // re-reports a larger figure as it goes, and summing those snapshots
+        // would multiply the bill by the heartbeat rate.
+        usageKey: `${lease.id}:${phase}`,
+        ...(lease.projectId === undefined
+          ? {}
+          : { projectId: lease.projectId }),
+        repositoryId: lease.repositoryId,
+        taskId: lease.taskId,
+        leaseId: lease.id,
+        agentId: task?.agentId ?? lease.workerId,
+        phase,
+        ...(count("inputTokens") === undefined
+          ? {}
+          : { inputTokens: count("inputTokens")! }),
+        ...(count("outputTokens") === undefined
+          ? {}
+          : { outputTokens: count("outputTokens")! }),
+        totalTokens: total,
+        recordedAt: at,
+      });
+    }
+  }
+
+  /** Settles a lease and its task after a budget was exceeded. */
+  private async failLeaseOnBudget(
+    lease: WorkLease,
+    now: Date,
+    input: { detail: string; data: Readonly<Record<string, unknown>> },
+  ): Promise<void> {
+    const failed = await this.options.store.finishWorkLease(
+      lease.id,
+      "failed",
+      now.toISOString(),
+      input.detail,
+    );
+    if (!failed) {
+      return;
+    }
+    const task = (
+      await this.options.store.listSubmittedTasks({
+        repositoryId: lease.repositoryId,
+      })
+    ).find((entry) => entry.id === lease.taskId);
+    if (task?.status === "claimed") {
+      await this.options.store.completeSubmittedTask(task.id, "failed");
+    }
+    await this.options.store.appendAudit(undefined, {
+      type: "task_failed",
+      taskId: lease.taskId,
+      data: {
+        projectId: lease.projectId,
+        repositoryId: lease.repositoryId,
+        workerId: lease.workerId,
+        leaseId: lease.id,
+        stage: "budget_enforcement",
+        ...input.data,
+      },
+    });
   }
 
   private async readJson(request: IncomingMessage): Promise<unknown> {

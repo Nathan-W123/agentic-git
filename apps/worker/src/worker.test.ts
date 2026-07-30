@@ -15,7 +15,7 @@ import {
 import { RepositoryService } from "@coord/repository-service";
 
 import { WorkerClient } from "./client.js";
-import { Worker } from "./worker.js";
+import { Worker, workerScratchPath } from "./worker.js";
 
 /**
  * The whole hosted-execution loop over real HTTP: a worker leases a task from
@@ -68,6 +68,9 @@ const AGENT = [
   "    return;",
   "  }",
   '  if (message.type === "context") {',
+  '    if (started.objective === "hang until stopped") {',
+  "      return;",
+  "    }",
   '    if (started.objective === "request extra scope") {',
   "      pendingContext = message;",
   "      send({",
@@ -76,7 +79,8 @@ const AGENT = [
   '          event: "scope_change_requested",',
   '          requestId: "scope_remote_test",',
   '          additionalFiles: ["src/extra.js"],',
-  '          reason: "test remote scope handling",',
+  '          additionalSymbols: ["extra"],',
+  '          reason: "the value depends on a constant that lives in extra.js",',
   "        },",
   "      });",
   "      return;",
@@ -91,13 +95,19 @@ const AGENT = [
   "    return;",
   "  }",
   '  if (message.type === "scope_decision") {',
-  '    if (message.decision.decision !== "rejected") process.exit(9);',
-  '    const file = path.join(pendingContext.workspacePath, "src", "value.js");',
+  "    const granted =",
+  '      message.decision.decision === "approved" ||',
+  '      message.decision.decision === "approved_with_constraints";',
+  "    const root = pendingContext.workspacePath;",
+  '    const file = path.join(root, "src", "value.js");',
   '    fs.writeFileSync(file, "export const value = 2;\\n", "utf8");',
+  "    if (granted) {",
+  '      fs.writeFileSync(path.join(root, "src", "extra.js"), "export const extra = 2;\\n", "utf8");',
+  "    }",
   "    send({",
   '      type: "done",',
   '      symbolsChanged: ["value"],',
-  '      explanation: "continued within approved scope",',
+  '      explanation: "scope decision was " + message.decision.decision,',
   "    });",
   "    return;",
   "  }",
@@ -144,6 +154,13 @@ async function startRuntime(t: TestContext): Promise<Runtime> {
     "export const value = 1;\n",
     "utf8",
   );
+  // A second real file, so the scope-expansion tests ask for something that
+  // exists rather than for a name nothing in the repository can ground.
+  await writeFile(
+    path.join(sourcePath, "src", "extra.js"),
+    "export const extra = 1;\n",
+    "utf8",
+  );
   await repositories.commitAll(sourcePath, "seed");
   const canonical = await repositories.importLocalRepository(
     sourcePath,
@@ -160,6 +177,9 @@ async function startRuntime(t: TestContext): Promise<Runtime> {
   });
 
   const operations: ApiOperations = {
+    async createRepository() {
+      throw new Error("not used");
+    },
     async importGitHub() {
       throw new Error("not used");
     },
@@ -230,6 +250,31 @@ function makeWorker(runtime: Runtime): Worker {
   });
 }
 
+test("lease ids cannot select or collapse the worker scratch root", () => {
+  const root = path.resolve("worker-scratch");
+  const scratch = workerScratchPath(root, "../../../../\0");
+  assert.equal(path.dirname(scratch), root);
+  assert.match(path.basename(scratch), /^lease-[a-f0-9]{24}$/u);
+  assert.notEqual(scratch, root);
+});
+
+test("worker polling and admission budgets reject unsafe values", async (t) => {
+  const runtime = await startRuntime(t);
+  const options = {
+    client: new WorkerClient({
+      serverUrl: runtime.origin,
+      token: runtime.token,
+    }),
+    project: runtime.project,
+    workspaceRoot: path.join(runtime.root, "invalid-options"),
+  };
+  assert.throws(() => new Worker({ ...options, pollIntervalMs: 0 }), /positive/u);
+  assert.throws(
+    () => new Worker({ ...options, planWaitBudgetMs: -1 }),
+    /non-negative/u,
+  );
+});
+
 test("an idle worker reports no work rather than failing", async (t) => {
   const runtime = await startRuntime(t);
   const worker = makeWorker(runtime);
@@ -298,7 +343,7 @@ test("a worker executes a leased task end to end over HTTP", async (t) => {
   assert.deepEqual(await worker.runOnce(), { worked: false });
 });
 
-test("remote agents are constrained to their original plan", async (t) => {
+test("a mid-run scope expansion is arbitrated and granted", async (t) => {
   const runtime = await startRuntime(t);
   const worker = makeWorker(runtime);
   await worker.register();
@@ -315,10 +360,185 @@ test("remote agents are constrained to their original plan", async (t) => {
     (entry) => entry.id === task.id,
   );
   assert.equal(storedTask?.status, "integrated");
+
+  // Nothing else is executing, so the coordinator grants the expansion — and
+  // the grant is what lets a patch on the new file reach canonical instead of
+  // being refused as a scope escape.
+  const run = await runtime.store.getRun(storedTask?.runId ?? "");
+  assert.deepEqual(
+    run?.changeSets[0]?.patches.map((patch) => patch.path).sort(),
+    ["src/extra.js", "src/value.js"],
+  );
+  const decided = (await runtime.store.listAudit()).find(
+    (event) => event.type === "scope_change_decided",
+  );
+  assert.equal(
+    (decided?.data["decision"] as { decision?: string } | undefined)?.decision,
+    "approved",
+  );
+
+  const repository = await runtime.store.getRepository(runtime.repositoryId);
+  assert.ok(repository);
+  const repositories = new RepositoryService();
+  const canonical = {
+    id: repository.id,
+    path: repository.path,
+    branch: repository.branch,
+  };
+  const version = await repositories.getCanonicalVersion(canonical);
+  assert.equal(
+    await repositories.readFile(canonical, version.revision, "src/extra.js"),
+    "export const extra = 2;\n",
+  );
+});
+
+test("a scope expansion another task holds is deferred, not refused", async (t) => {
+  const runtime = await startRuntime(t);
+
+  // A rival worker is already executing with an admitted plan on the very
+  // file the agent is about to ask for.
+  const rival = new WorkerClient({
+    serverUrl: runtime.origin,
+    token: runtime.token,
+  });
+  const rivalId = (
+    await rival.register({
+      name: "rival",
+      adapters: ["generic-cli"],
+      version: "1.0.0",
+    })
+  ).id;
+  const held = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "rewrite the extra constant",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const expanding = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "request extra scope",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const rivalAssignment = await rival.lease(rivalId, DEFAULT_PROJECT_ID);
+  assert.equal(rivalAssignment?.task.id, held.id);
+  assert.ok(rivalAssignment);
+  const rivalAdmission = await rival.submitPlan(rivalAssignment.lease.id, {
+    taskId: held.id,
+    objective: held.objective,
+    expectedFiles: ["src/extra.js"],
+    expectedSymbols: ["extra"],
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  });
+  assert.equal(rivalAdmission.status, "approved");
+
+  const worker = makeWorker(runtime);
+  await worker.register();
+  const result = await worker.runOnce();
+  assert.equal(result.taskId, expanding.id);
+  assert.equal(result.accepted, true, result.reason);
+
+  // Deferred, with the holder named — not a flat refusal, and not a failure.
+  // The agent stayed inside the scope it already owned and its work landed.
+  const decided = (await runtime.store.listAudit()).find(
+    (event) => event.type === "scope_change_decided",
+  );
+  const decision = decided?.data["decision"] as
+    | { decision?: string; blockedBy?: string[]; retryAfterMs?: number }
+    | undefined;
+  assert.equal(decision?.decision, "deferred");
+  assert.deepEqual(decision?.blockedBy, [held.id]);
+  assert.ok((decision?.retryAfterMs ?? 0) > 0);
+
+  const storedTask = (await runtime.store.listSubmittedTasks()).find(
+    (entry) => entry.id === expanding.id,
+  );
+  assert.equal(storedTask?.status, "integrated");
   const run = await runtime.store.getRun(storedTask?.runId ?? "");
   assert.deepEqual(run?.changeSets[0]?.patches.map((patch) => patch.path), [
     "src/value.js",
   ]);
+});
+
+test("a task past its token budget is stopped while it is still spending", async (t) => {
+  const runtime = await startRuntime(t);
+  await runtime.store.updateProject(DEFAULT_PROJECT_ID, {
+    policy: { version: 1, budgets: { maxTaskTokens: 5_000 } },
+  });
+
+  const client = new WorkerClient({
+    serverUrl: runtime.origin,
+    token: runtime.token,
+  });
+  const workerId = (
+    await client.register({
+      name: "spender",
+      adapters: ["generic-cli"],
+      version: "1.0.0",
+    })
+  ).id;
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const assignment = await client.lease(workerId, DEFAULT_PROJECT_ID);
+  assert.equal(assignment?.task.id, task.id);
+  assert.ok(assignment);
+
+  // Under the cap: the lease is extended and the spend is on the record.
+  await client.heartbeat(assignment.lease.id, [
+    { phase: "planning", totalTokens: 1_200, inputTokens: 1_000 },
+  ]);
+  const recorded = await runtime.store.listTokenUsage({
+    leaseId: assignment.lease.id,
+  });
+  assert.equal(recorded.length, 1);
+  assert.equal(recorded[0]?.totalTokens, 1_200);
+  assert.equal(recorded[0]?.agentId, "local");
+
+  // Over the cap, reported mid-flight. The enforcement point is here rather
+  // than at the result, because by then the tokens are already gone.
+  await assert.rejects(
+    client.heartbeat(assignment.lease.id, [
+      { phase: "planning", totalTokens: 1_200 },
+      { phase: "execution", totalTokens: 9_000 },
+    ]),
+    /no longer active|Lease/u,
+  );
+
+  assert.equal(
+    (await runtime.store.getWorkLease(assignment.lease.id))?.status,
+    "failed",
+  );
+  assert.equal(
+    (await runtime.store.listSubmittedTasks()).find(
+      (entry) => entry.id === task.id,
+    )?.status,
+    "failed",
+  );
+  // The running total replaced its predecessor rather than accumulating, so
+  // the recorded bill is what was spent, not what was reported.
+  assert.equal(
+    (await runtime.store.listTokenUsage({ taskId: task.id })).reduce(
+      (sum, entry) => sum + entry.totalTokens,
+      0,
+    ),
+    10_200,
+  );
+  const audit = await runtime.store.listAudit();
+  assert.ok(
+    audit.some(
+      (event) =>
+        event.type === "task_failed" &&
+        event.data["stage"] === "budget_enforcement" &&
+        event.data["maxTaskTokens"] === 5_000,
+    ),
+  );
 });
 
 test("a worker whose plan is sequenced never runs its agent", async (t) => {
@@ -441,25 +661,46 @@ test("an agent failure is reported, not swallowed", async (t) => {
 test("stopping a worker hands its lease back immediately", async (t) => {
   const runtime = await startRuntime(t);
   const worker = makeWorker(runtime);
-  const workerId = await worker.register();
+  await worker.register();
 
   await runtime.store.submitTask({
     repositoryId: runtime.repositoryId,
-    objective: "objective",
+    objective: "hang until stopped",
     agentId: "local",
     validationCommands: [],
   });
 
-  // Lease directly so a lease is held with no execution in flight.
-  const client = new WorkerClient({
-    serverUrl: runtime.origin,
-    token: runtime.token,
-  });
-  const assignment = await client.lease(workerId, DEFAULT_PROJECT_ID);
-  assert.notEqual(assignment, undefined);
-  await client.release(assignment?.lease.id ?? "");
+  const iteration = worker.runOnce();
+  const deadline = Date.now() + 10_000;
+  let lease = (await runtime.store.listWorkLeases({ status: "active" }))[0];
+  while (
+    lease?.plan?.admission.status !== "approved" &&
+    Date.now() < deadline
+  ) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    lease = (await runtime.store.listWorkLeases({ status: "active" }))[0];
+  }
+  assert.equal(lease?.plan?.admission.status, "approved");
 
-  // Released rather than left to expire, so the task is available at once.
+  await worker.stop();
+  const result = await Promise.race([
+    iteration,
+    new Promise<never>((_resolve, reject) => {
+      const timeout = setTimeout(
+        () => reject(new Error("The cancelled agent did not stop")),
+        10_000,
+      );
+      timeout.unref?.();
+    }),
+  ]);
+  assert.equal(result.accepted, false);
+  assert.equal(
+    (await runtime.store.listWorkLeases({}))[0]?.status,
+    "released",
+  );
+  // Released rather than left to expire, so the task is available at once,
+  // and the cancelled agent process cannot continue writing in the scratch
+  // directory after shutdown.
   assert.equal(
     (await runtime.store.listSubmittedTasks({ status: "submitted" })).length,
     1,

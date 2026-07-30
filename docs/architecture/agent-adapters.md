@@ -20,14 +20,21 @@ validation → promotion). Which one runs is chosen per agent in
 | Adapter | Drives | How |
 | --- | --- | --- |
 | `claude` | Claude Code CLI | `claude -p --output-format json`; planning under `--permission-mode plan` (edits structurally refused), execution under `--dangerously-skip-permissions` inside the granted worktree |
-| `codex` | OpenAI Codex CLI | `codex exec` with `--output-schema` enforcement; planning read-only, execution under Codex's `workspace-write` sandbox |
+| `codex` | OpenAI Codex CLI | `codex exec` with `--output-schema` enforcement; planning read-only, execution under Codex's `workspace-write` sandbox; native Windows explicitly uses the `elevated` backend |
 | `gemini` | Gemini CLI | `gemini -p --output-format json`; planning in a disposable worktree, execution with `--yolo` auto-approval |
 | `generic-cli` | anything | Your executable speaks the NDJSON protocol in `docs/protocol/generic-cli.md` over stdin/stdout |
 
 `command` overrides the executable path; `args` accepts only a single
 `--model <id>` pair for claude/codex/gemini (anything else is rejected so
 configuration cannot weaken the enforced invocation mode); `env` adds
-environment variables for the process.
+environment variables for the process. `planningTimeoutMs` and
+`executionTimeoutMs` put hard deadlines on the corresponding provider calls;
+the defaults are deliberately generous, so latency-sensitive local projects
+should set them explicitly. Claude agents may also set `effort` to `low`,
+`medium`, `high`, `xhigh`, or `max`; this is passed through as Claude's safe
+`--effort` option and does not alter permissions. A Codex agent can set
+`"windowsSandbox": "unelevated"` when administrator-approved elevated setup is
+blocked by local policy; both modes retain scoped filesystem boundaries.
 
 ## The workflow, end to end
 
@@ -62,3 +69,30 @@ agents, which the platform can fully confine because it owns the process it
 launches. If you need container isolation for a vendor CLI, wrap it as a
 generic-cli agent inside an image with credentials injected, and accept that
 protocol translation is on you.
+
+The refusal is not a missing feature waiting on adapter work. All three
+adapters funnel every invocation through one injectable process runner, so
+wrapping them in `DockerWorkspaceManager` would be a small change. What blocks
+it is the sandbox itself: it runs `--network none`, and a vendor CLI with no
+route to its provider's API cannot do anything at all — a DNS lookup for a
+vendor endpoint inside the sandbox fails with `EAI_AGAIN`, while the same
+lookup on a bridged network resolves. Widening the network would trade
+deny-default egress for unrestricted egress, which is worse than what the
+vendor CLI's own sandbox already gives you. The real dependency is a per-task
+egress allowlist. Their credentials are the second obstacle: subscription
+logins live in the host home directory, which the container deliberately
+cannot see, so only an API-key deployment (injected through `env`, which
+becomes `--env` on the container) would be reachable even with egress.
+`docs/protocol/remote-workers.md` records the measurements.
+
+## Cost reporting
+
+Adapters may report what a session spent, and the coordinator records it per
+task and per project so a project's token budgets can be enforced. The Codex
+adapter parses the figure the CLI prints. A `generic-cli` agent may attach
+`{"tokens": {"total": n, "input": n, "output": n}}` to its `done` message.
+
+Reporting is optional and never inferred. Claude Code and Gemini CLI are not
+parsed for usage today, so agents on those adapters are recorded as having
+reported nothing — which is different from having spent nothing, and is what
+a project with a token budget will see.

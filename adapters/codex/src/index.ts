@@ -7,12 +7,15 @@ import {
   type AgentCapabilities,
   type AgentEvent,
   type AgentSession,
+  type AgentTokenUsage,
   type CoordinatorContext,
   type StartTaskInput,
 } from "@coord/agent-protocol";
 import {
   assertAgentPlan,
   createId,
+  scopeChangeGranted,
+  substituteGroundedNames,
   type AgentPlan,
   type ChangeSet,
   type ReplanRequest,
@@ -675,7 +678,7 @@ export class CodexAdapter implements AgentAdapter {
       });
       const decision = await pending;
       record.scopeDecisions.push(structuredClone(decision));
-      if (decision.decision !== "rejected") {
+      if (scopeChangeGranted(decision)) {
         record.plan = structuredClone(decision.revisedPlan);
       }
       this.emit(record, {
@@ -721,6 +724,23 @@ export class CodexAdapter implements AgentAdapter {
   /** Total tokens across every session this adapter drove. */
   public totalTokens(): number {
     return this.allTokenUsage().reduce((sum, entry) => sum + entry.tokens, 0);
+  }
+
+  /**
+   * The protocol-shaped view of {@link tokenUsage}, for cost accounting.
+   *
+   * Replanning is charged to planning: the coordinator's budgets are about
+   * what a task cost, and the finer story — a plan that had to be redone
+   * versus one that did not — stays available in {@link tokenUsage} for
+   * anyone asking that question instead.
+   */
+  public reportedTokenUsage(sessionId: string): AgentTokenUsage[] {
+    const totals = new Map<AgentTokenUsage["phase"], number>();
+    for (const entry of this.requireSession(sessionId).tokenUsage) {
+      const phase = entry.phase === "execution" ? "execution" : "planning";
+      totals.set(phase, (totals.get(phase) ?? 0) + entry.tokens);
+    }
+    return [...totals].map(([phase, totalTokens]) => ({ phase, totalTokens }));
   }
 
   public async pause(_sessionId: string): Promise<void> {
@@ -988,6 +1008,52 @@ export class CodexAdapter implements AgentAdapter {
     ].join("\n");
   }
 
+  /**
+   * The previous plan as the agent should see it, and what was corrected.
+   *
+   * `COORD_UNGROUNDED_REPLAN=1` hands back the plan verbatim instead, which is
+   * what this prompt did before substitution existed. It is the control arm of
+   * the before/after measurement and the operational rollback, in the same
+   * shape as `COORD_COLD_REPLAN` and `COORD_DISABLE_PLAN_GROUNDING`.
+   */
+  private groundedPreviousPlan(request: ReplanRequest): string[] {
+    if (process.env["COORD_UNGROUNDED_REPLAN"] === "1") {
+      return [`Previous plan: ${JSON.stringify(request.previousPlan)}`];
+    }
+    const view = substituteGroundedNames(request.previousPlan);
+    if (view.substitutions.length === 0 && view.inventedFiles.length === 0) {
+      return [`Previous plan: ${JSON.stringify(view.plan)}`];
+    }
+    return [
+      // The corrected plan is what the prompt asserts. Telling an agent that a
+      // name was wrong still leaves the wrong name as the only concrete thing
+      // in front of it; telling it the right name does not.
+      "Previous plan, with every name the coordinator could resolve already " +
+        `replaced by the real one: ${JSON.stringify(view.plan)}`,
+      ...view.substitutions.map((entry) =>
+        entry.kind === "file"
+          ? `The file you called ${entry.declared} does not exist. The real ` +
+            `file is ${entry.resolved.join(" or ")}. Declare that path.`
+          : `The symbol you called ${entry.declared} does not exist. The real ` +
+            `symbol is ${entry.resolved.join(" or ")}` +
+            (entry.files.length === 0
+              ? ""
+              : `, declared in ${entry.files.join(", ")}`) +
+            ". Declare that name.",
+      ),
+      ...(view.inventedFiles.length === 0 && view.inventedSymbols.length === 0
+        ? []
+        : [
+            "These names match nothing in the repository and the coordinator " +
+              "could not work out what they meant, so it is treating them as " +
+              "things you intend to create: " +
+              [...view.inventedFiles, ...view.inventedSymbols].join(", ") +
+              ". If you are not creating them, they were mistakes — open the " +
+              "repository and declare what is really there.",
+          ]),
+    ];
+  }
+
   private replanPrompt(
     record: CodexSession,
     request: ReplanRequest,
@@ -999,7 +1065,7 @@ export class CodexAdapter implements AgentAdapter {
       `Planning deadline: ${this.planningTimeoutMs} ms.`,
       `Task id: ${record.input.task.id}`,
       `Objective: ${record.input.task.objective}`,
-      `Previous plan: ${JSON.stringify(request.previousPlan)}`,
+      ...this.groundedPreviousPlan(request),
       // COORD_COLD_REPLAN=1 strips the warm-start lines below, restoring the
       // pre-enrichment replan prompt on an identical build. It exists for
       // measuring the enrichment against its absence, and as a rollback.
@@ -1013,9 +1079,12 @@ export class CodexAdapter implements AgentAdapter {
               : [
                   `Your previous stated intent: ${request.previousPlan.intent}`,
                 ]),
-            // And what verification made of its previous declarations: a name
-            // the coordinator could not find is a name not to declare again.
-            ...((request.previousPlan.grounding?.notes.length ?? 0) === 0
+            // And what verification made of its previous declarations. These
+            // notes quote every invented name back verbatim, which is the
+            // opposite of what substitution is for, so they are only included
+            // when substitution is off.
+            ...(process.env["COORD_UNGROUNDED_REPLAN"] !== "1" ||
+            (request.previousPlan.grounding?.notes.length ?? 0) === 0
               ? []
               : [
                   "Coordinator verification of your previous declarations: " +

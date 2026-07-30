@@ -75,6 +75,9 @@ import type {
   SubmittedTask,
   SubmittedTaskCompletionStatus,
   SubmittedTaskFilter,
+  RecordTokenUsageInput,
+  TokenUsageFilter,
+  TokenUsageRecord,
   SubmittedTaskStatus,
   UserAccount,
   LeaseTaskInput,
@@ -919,6 +922,13 @@ export class PostgresCoordinationStore implements CoordinationStore {
           return { outcome: "lease_lost" };
         }
         const lease = this.toWorkLease(row);
+        if (
+          input.replaceApproved !== true &&
+          lease.plan !== undefined &&
+          planAdmissionApproved(lease.plan.admission)
+        ) {
+          return { outcome: "already_admitted", lease };
+        }
         const approvedLeaseIds = (
           (
             await client.query(
@@ -1070,6 +1080,102 @@ export class PostgresCoordinationStore implements CoordinationStore {
       detail: optionalText(row, "detail"),
       plan: optionalJson<WorkLeasePlan>(row, "plan_json"),
     };
+  }
+
+  private toTokenUsage(row: Row): TokenUsageRecord {
+    return {
+      id: String(row["id"]),
+      usageKey: String(row["usage_key"]),
+      projectId: (row["project_id"] as string | null) ?? undefined,
+      repositoryId: String(row["repository_id"]),
+      taskId: String(row["task_id"]),
+      leaseId: (row["lease_id"] as string | null) ?? undefined,
+      runId: (row["run_id"] as string | null) ?? undefined,
+      agentId: String(row["agent_id"]),
+      phase: row["phase"] as TokenUsageRecord["phase"],
+      inputTokens: Number(row["input_tokens"]),
+      outputTokens: Number(row["output_tokens"]),
+      totalTokens: Number(row["total_tokens"]),
+      recordedAt: String(row["recorded_at"]),
+    };
+  }
+
+  public async recordTokenUsage(
+    input: RecordTokenUsageInput,
+  ): Promise<TokenUsageRecord> {
+    // Upsert for the same reason the SQLite backend does: reports carry a
+    // running total, so the newest one replaces its predecessor.
+    const rows = (
+      await this.query(
+        `INSERT INTO token_usage
+           (id, usage_key, project_id, repository_id, task_id, lease_id,
+            run_id, agent_id, phase, input_tokens, output_tokens,
+            total_tokens, recorded_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+         ON CONFLICT (usage_key) DO UPDATE SET
+           input_tokens = EXCLUDED.input_tokens,
+           output_tokens = EXCLUDED.output_tokens,
+           total_tokens = EXCLUDED.total_tokens,
+           run_id = COALESCE(EXCLUDED.run_id, token_usage.run_id),
+           recorded_at = EXCLUDED.recorded_at
+         RETURNING *`,
+        [
+          createId("usage"),
+          input.usageKey,
+          input.projectId ?? null,
+          input.repositoryId,
+          input.taskId,
+          input.leaseId ?? null,
+          input.runId ?? null,
+          input.agentId,
+          input.phase,
+          input.inputTokens ?? 0,
+          input.outputTokens ?? 0,
+          input.totalTokens,
+          input.recordedAt,
+        ],
+      )
+    ).rows as Row[];
+    const row = rows[0];
+    if (row === undefined) {
+      throw new Error("Token usage upsert returned no row");
+    }
+    return this.toTokenUsage(row);
+  }
+
+  public async listTokenUsage(
+    filter: TokenUsageFilter = {},
+  ): Promise<TokenUsageRecord[]> {
+    const clauses: string[] = [];
+    const values: unknown[] = [];
+    const bind = (column: string, value: unknown): void => {
+      values.push(value);
+      clauses.push(`${column} = $${values.length}`);
+    };
+    if (filter.projectId !== undefined) {
+      bind("project_id", filter.projectId);
+    }
+    if (filter.repositoryId !== undefined) {
+      bind("repository_id", filter.repositoryId);
+    }
+    if (filter.taskId !== undefined) {
+      bind("task_id", filter.taskId);
+    }
+    if (filter.leaseId !== undefined) {
+      bind("lease_id", filter.leaseId);
+    }
+    if (filter.recordedAfter !== undefined) {
+      values.push(filter.recordedAfter);
+      clauses.push(`recorded_at >= $${values.length}`);
+    }
+    const where = clauses.length === 0 ? "" : ` WHERE ${clauses.join(" AND ")}`;
+    const rows = (
+      await this.query(
+        `SELECT * FROM token_usage${where} ORDER BY recorded_at ASC`,
+        values,
+      )
+    ).rows as Row[];
+    return rows.map((row) => this.toTokenUsage(row));
   }
 
   public async createApiToken(token: ApiTokenRecord): Promise<void> {

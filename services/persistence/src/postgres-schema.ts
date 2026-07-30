@@ -473,4 +473,29 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON changeset_comments(change_set_id, created_at)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 13,
+    name: "token-usage-accounting",
+    statements: [
+      `CREATE TABLE token_usage (
+        id TEXT PRIMARY KEY,
+        usage_key TEXT NOT NULL UNIQUE,
+        project_id TEXT,
+        repository_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        lease_id TEXT,
+        run_id TEXT,
+        agent_id TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        input_tokens BIGINT NOT NULL,
+        output_tokens BIGINT NOT NULL,
+        total_tokens BIGINT NOT NULL,
+        recorded_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX token_usage_by_task ON token_usage(task_id, recorded_at)`,
+      `CREATE INDEX token_usage_by_project
+         ON token_usage(project_id, recorded_at)`,
+    ],
+  },
 ];

@@ -511,6 +511,39 @@ export const MIGRATIONS: readonly Migration[] = [
          ON changeset_comments(change_set_id, created_at)`,
     ],
   },
+  {
+    // Model spend, as reported by the agents that incurred it.
+    //
+    // Separate from the runtime budgets already enforced on leases because it
+    // answers a different question: wall-clock says how long a task held a
+    // worker, tokens say what it cost. Rows are per (task, phase, worker
+    // report) rather than aggregated, so a project total is a sum that can
+    // always be broken back down — and so a re-report of the same running
+    // total replaces its predecessor instead of double-counting, which is
+    // what `usage_key` uniqueness is for.
+    version: 13,
+    name: "token-usage-accounting",
+    statements: [
+      `CREATE TABLE token_usage (
+        id TEXT PRIMARY KEY,
+        usage_key TEXT NOT NULL UNIQUE,
+        project_id TEXT,
+        repository_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        lease_id TEXT,
+        run_id TEXT,
+        agent_id TEXT NOT NULL,
+        phase TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        total_tokens INTEGER NOT NULL,
+        recorded_at TEXT NOT NULL
+      )`,
+      `CREATE INDEX token_usage_by_task ON token_usage(task_id, recorded_at)`,
+      `CREATE INDEX token_usage_by_project
+         ON token_usage(project_id, recorded_at)`,
+    ],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(

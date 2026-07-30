@@ -158,6 +158,123 @@ test("recovery fails stranded runs and their in-flight tasks", async () => {
   }
 });
 
+test("recovery integrates a changeset the crash stranded before promotion", async () => {
+  const fixture = await createFixture();
+  try {
+    const { store } = fixture;
+    // The queue task the crashed process was working through, claimed but
+    // never completed — exactly the state a crash between collecting a
+    // changeset and promoting it leaves behind.
+    const submitted = await store.submitTask({
+      repositoryId: "repo_recover",
+      objective: "raise the value",
+      agentId: "generic-cli",
+      validationCommands: [],
+    });
+    await store.claimSubmittedTasks("repo_recover");
+
+    const run = await store.createRun({
+      repository: {
+        id: "repo_recover",
+        path: fixture.canonical.path,
+        branch: "main",
+      },
+      mode: "coordinated",
+      baseVersion: fixture.version,
+    });
+    await store.saveTask(run.id, {
+      id: submitted.id,
+      objective: "raise the value",
+      agentId: "generic-cli",
+      validationCommands: [],
+    });
+    await store.saveTaskStatus(run.id, submitted.id, "running");
+
+    // A real unified diff, because recovery integrates it for real: the
+    // patch is applied three-way, compared against its declaration, and
+    // promoted by compare-and-swap like any other changeset.
+    const patch = [
+      "diff --git a/value.js b/value.js",
+      "--- a/value.js",
+      "+++ b/value.js",
+      "@@ -1 +1 @@",
+      "-export const v = 1;",
+      "+export const v = 2;",
+      "",
+    ].join("\n");
+    await store.saveChangeSet(run.id, {
+      id: "cs_stranded",
+      taskId: submitted.id,
+      baseVersion: fixture.version.sequence,
+      baseRevision: fixture.version.revision,
+      patches: [{ path: "value.js", status: "modified", patch }],
+      symbolsChanged: ["v"],
+      commandsRun: [],
+      tests: [],
+      dependenciesChanged: [],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "raised the value",
+      createdAt: new Date().toISOString(),
+    });
+
+    const report = await recoverCoordinationState(
+      fixture.project,
+      fixture.store,
+      fixture.repositories,
+    );
+
+    assert.deepEqual(report.resumedTasks, [submitted.id]);
+    // Resumed, not restarted: the task is finished, not back in the queue.
+    assert.deepEqual(report.requeuedTasks, []);
+    assert.deepEqual(report.failedRuns, []);
+
+    const tasks = await store.listSubmittedTasks();
+    assert.equal(
+      tasks.find((task) => task.id === submitted.id)?.status,
+      "integrated",
+    );
+
+    // Canonical really moved; the work was promoted, not merely marked done.
+    const version = await fixture.repositories.getCanonicalVersion(
+      fixture.canonical,
+    );
+    assert.notEqual(version.revision, fixture.version.revision);
+    assert.equal(
+      await fixture.repositories.readFile(
+        fixture.canonical,
+        version.revision,
+        "value.js",
+      ),
+      "export const v = 2;\n",
+    );
+
+    const detail = await store.getRun(run.id);
+    assert.equal(detail?.run.status, "completed");
+    assert.equal(detail?.tasks[0]?.status, "integrated");
+    assert.equal(detail?.integrations.at(-1)?.status, "integrated");
+    const audit = await store.listAudit();
+    assert.ok(
+      audit.some(
+        (event) =>
+          event.type === "canonical_promoted" &&
+          event.data["stage"] === "crash_recovery",
+      ),
+    );
+
+    // Idempotent: the changeset now has an integration record, so a second
+    // pass must not re-apply it.
+    const again = await recoverCoordinationState(
+      fixture.project,
+      fixture.store,
+      fixture.repositories,
+    );
+    assert.deepEqual(again.resumedTasks, []);
+    assert.deepEqual(again.failedRuns, []);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("recovery clears orphaned worktrees and prunes their registrations", async () => {
   const fixture = await createFixture();
   try {

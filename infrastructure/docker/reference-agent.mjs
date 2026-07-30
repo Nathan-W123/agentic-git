@@ -23,6 +23,27 @@ const PLAN = {
   riskLevel: "low",
 };
 
+/**
+ * The task this session was started for.
+ *
+ * The local benchmark always starts `task_cap_value`, so echoing the assigned
+ * identity changes nothing there. It is what makes the agent usable from a
+ * remote worker, where the control plane mints the task id and refuses a plan
+ * that names a different one.
+ */
+let assignment;
+
+function plan() {
+  if (assignment === undefined) {
+    return PLAN;
+  }
+  return {
+    ...PLAN,
+    taskId: assignment.taskId,
+    objective: assignment.objective ?? PLAN.objective,
+  };
+}
+
 const CAP_TEST = [
   'import assert from "node:assert/strict";',
   'import test from "node:test";',
@@ -46,13 +67,69 @@ function log(message) {
 let paused = false;
 let pendingContext;
 
-function handleContext(message) {
+/**
+ * Confinement probes, run from inside the container the coordinator launched.
+ *
+ * The point is where they run. A verification script on the host can inspect
+ * the flags the coordinator passed; only the agent process can report what
+ * those flags actually produced around it. Every verdict is folded into the
+ * completion explanation, which travels with the changeset and is persisted,
+ * so a run that integrates carries its own evidence of isolation.
+ *
+ * Enabled by COORD_SANDBOX_PROBE so the agent stays usable unconfined.
+ */
+async function probeConfinement(workspacePath) {
+  const verdicts = [];
+
+  try {
+    fs.writeFileSync("/coord-rootfs-probe", "x");
+    verdicts.push("rootfs=WRITABLE");
+  } catch {
+    verdicts.push("rootfs=readonly");
+  }
+
+  try {
+    const stat = fs.statSync(path.join(workspacePath, ".git"));
+    // A worktree's .git is a file and a clone's is a directory. Either is
+    // masked when it carries nothing: the host path inside it is what must
+    // not be visible.
+    const empty = stat.isFile()
+      ? stat.size === 0
+      : fs.readdirSync(path.join(workspacePath, ".git")).length === 0;
+    verdicts.push(empty ? "git=masked" : "git=EXPOSED");
+  } catch {
+    verdicts.push("git=absent");
+  }
+
+  const dns = await new Promise((resolve) => {
+    import("node:dns")
+      .then((module) => {
+        module.lookup("example.com", (error) => {
+          resolve(error ? "network=denied" : "network=REACHED");
+        });
+      })
+      .catch(() => resolve("network=denied"));
+  });
+  verdicts.push(dns);
+
+  return verdicts;
+}
+
+async function handleContext(message) {
   const workspacePath = message.workspacePath;
   log(`workspace ${workspacePath}`);
   send({
     type: "event",
     event: { event: "progress", message: "capping increment at ten" },
   });
+
+  const probe =
+    process.env.COORD_SANDBOX_PROBE === "1"
+      ? await probeConfinement(workspacePath)
+      : undefined;
+  if (probe !== undefined) {
+    log(`confinement ${probe.join(" ")}`);
+  }
 
   const sourcePath = path.join(workspacePath, "src", "counter.js");
   const source = fs.readFileSync(sourcePath, "utf8");
@@ -79,17 +156,27 @@ function handleContext(message) {
   send({
     type: "done",
     symbolsChanged: ["increment"],
-    explanation: "capped the incremented value at ten",
+    explanation:
+      "capped the incremented value at ten" +
+      (probe === undefined ? "" : ` [sandbox ${probe.join(" ")}]`),
+  });
+}
+
+/** Editing is asynchronous now; a rejection must still reach the coordinator. */
+function runContext(message) {
+  handleContext(message).catch((error) => {
+    send({ type: "error", message: String(error?.message ?? error) });
   });
 }
 
 function handle(message) {
   switch (message.type) {
     case "start":
+      assignment = { taskId: message.taskId, objective: message.objective };
       log(`session ${message.sessionId} for ${message.taskId}`);
       return;
     case "plan_request":
-      send({ type: "plan", plan: PLAN });
+      send({ type: "plan", plan: plan() });
       return;
     case "replan_request":
       log(
@@ -98,7 +185,7 @@ function handle(message) {
       send({
         type: "plan",
         plan: {
-          ...PLAN,
+          ...plan(),
           objective: message.request.previousPlan.objective,
         },
       });
@@ -107,7 +194,7 @@ function handle(message) {
       if (paused) {
         pendingContext = message;
       } else {
-        handleContext(message);
+        runContext(message);
       }
       return;
     case "pause":
@@ -118,7 +205,7 @@ function handle(message) {
       if (pendingContext !== undefined) {
         const context = pendingContext;
         pendingContext = undefined;
-        handleContext(context);
+        runContext(context);
       }
       return;
     case "scope_decision":

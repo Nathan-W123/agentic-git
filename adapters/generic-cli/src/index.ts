@@ -5,11 +5,13 @@ import {
   type AgentCapabilities,
   type AgentEvent,
   type AgentSession,
+  type AgentTokenUsage,
   type CoordinatorContext,
   type StartTaskInput,
 } from "@coord/agent-protocol";
 import {
   createId,
+  scopeChangeGranted,
   type AgentPlan,
   type ChangeSet,
   type ReplanRequest,
@@ -298,6 +300,8 @@ interface CliSession {
   completion: { symbolsChanged: string[]; explanation: string } | undefined;
   events: AgentEvent[];
   eventHandlers: Set<(event: AgentEvent) => void>;
+  /** What the agent said it spent. Empty when it said nothing. */
+  tokenUsage: AgentTokenUsage[];
   cancelled: boolean;
   paused: boolean;
 }
@@ -311,7 +315,37 @@ interface CliSession {
 export class GenericCliAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, CliSession>();
 
-  public constructor(private readonly options: GenericCliAdapterOptions) {}
+  public constructor(private readonly options: GenericCliAdapterOptions) {
+    for (const [name, value] of [
+      ["requestTimeoutMs", options.requestTimeoutMs],
+      ["executionTimeoutMs", options.executionTimeoutMs],
+    ] as const) {
+      if (
+        value !== undefined &&
+        (!Number.isSafeInteger(value) || value < 1)
+      ) {
+        throw new RangeError(`${name} must be a positive integer`);
+      }
+    }
+    if (
+      options.launch.command.trim().length === 0 ||
+      options.launch.command.includes("\0")
+    ) {
+      throw new Error(
+        "Agent command must be non-empty and contain no NUL bytes",
+      );
+    }
+    if (options.launch.args.some((argument) => argument.includes("\0"))) {
+      throw new Error("Agent arguments must contain no NUL bytes");
+    }
+    if (
+      Object.values(options.launch.env ?? {}).some(
+        (value) => value?.includes("\0") === true,
+      )
+    ) {
+      throw new Error("Agent environment values must contain no NUL bytes");
+    }
+  }
 
   public async getCapabilities(): Promise<AgentCapabilities> {
     return {
@@ -341,6 +375,7 @@ export class GenericCliAdapter implements AgentAdapter {
       completion: undefined,
       events: [],
       eventHandlers: new Set(),
+      tokenUsage: [],
       cancelled: false,
       paused: false,
     };
@@ -514,6 +549,18 @@ export class GenericCliAdapter implements AgentAdapter {
         symbolsChanged: done.symbolsChanged,
         explanation: done.explanation,
       };
+      if (done.tokens !== undefined) {
+        record.tokenUsage.push({
+          phase: "execution",
+          totalTokens: done.tokens.total,
+          ...(done.tokens.input === undefined
+            ? {}
+            : { inputTokens: done.tokens.input }),
+          ...(done.tokens.output === undefined
+            ? {}
+            : { outputTokens: done.tokens.output }),
+        });
+      }
       this.emitEvent(record, {
         event: "completed",
         occurredAt: new Date().toISOString(),
@@ -555,7 +602,10 @@ export class GenericCliAdapter implements AgentAdapter {
         `Scope decision ${decision.taskId} does not match ${record.input.task.id}`,
       );
     }
-    if (decision.decision !== "rejected") {
+    // Only a grant widens the plan. A deferral or a refusal leaves the
+    // previously approved scope in force, which is what the agent is still
+    // held to when its changeset is collected.
+    if (scopeChangeGranted(decision)) {
       record.plan = structuredClone(decision.revisedPlan);
     }
     this.requireProcess(record).send({
@@ -602,6 +652,7 @@ export class GenericCliAdapter implements AgentAdapter {
     return await this.options.workspaces.collectChangeSet(
       this.toWorkspace(record, context),
       {
+        expectedFiles: plan?.expectedFiles ?? [],
         symbolsChanged: [...symbolsChanged],
         riskAssessment: { level: plan?.riskLevel ?? "medium", reasons: [] },
         agentExplanation:
@@ -622,6 +673,13 @@ export class GenericCliAdapter implements AgentAdapter {
     if (!record.cancelled && record.completion === undefined) {
       record.eventHandlers.add(handler);
     }
+  }
+
+  /** What this session's agent reported spending; empty when it reported none. */
+  public reportedTokenUsage(sessionId: string): AgentTokenUsage[] {
+    return this.requireSession(sessionId).tokenUsage.map((entry) => ({
+      ...entry,
+    }));
   }
 
   private spawnAgent(

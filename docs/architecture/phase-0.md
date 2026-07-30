@@ -19,7 +19,9 @@ workspace starts from an explicit revision. Integration:
 1. Reads latest canonical.
 2. Creates a detached temporary worktree.
 3. Applies the structured patch with Git three-way support.
-4. Runs validation commands without a shell.
+4. Runs validation commands without shell interpolation. Native Windows
+   `.cmd`/`.bat` shims use a constrained `cmd.exe` launcher that preserves
+   argument boundaries and rejects expansion or control metacharacters.
 5. Commits the candidate with hooks disabled.
 6. Updates `refs/heads/main` only when it still equals the revision read in
    step 1.
@@ -53,9 +55,11 @@ network, CPU, or memory.
 - no inherited host environment,
 - masked worktree Git metadata.
 
-Docker behavior and command construction are unit tested. The live
-`npm run verify:docker` proof remains pending only because the latest audit host
-does not provide a Docker daemon.
+Docker behavior and command construction are unit tested, and the live proof
+is no longer pending: `npm run verify:docker` passes against a real daemon for
+the local path, and `npm run verify:remote-docker` does the same for hosted
+execution, where the agent probes its own confinement from inside the
+container. See [Phase 2](phase-2.md).
 
 ## Validation Integrity
 

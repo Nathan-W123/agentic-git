@@ -16,16 +16,19 @@ from a customer-hosted or on-premises environment. See
 [instructions.md](instructions.md) for the authoritative scope, phases, and
 architecture rules.
 
-**Current deployment status.** The control plane runs as a single host today.
-Remote execution exists — workers authenticate with API tokens and lease tasks
-over HTTP — but multi-tenant hosting, shared storage, and cross-device
-deployment are not built. The [current capability matrix](docs/architecture/current-state.md)
-records the exact implemented and later-phase boundary.
+**Current deployment status.** One active control-plane process owns canonical
+Git repositories and integration. Remote workers can execute on other machines
+over HTTP, and coordination state can live in PostgreSQL for shared access.
+High availability, shared canonical object storage, and the broader hosted
+deployment stack are not built. The
+[current capability matrix](docs/architecture/current-state.md) records the
+exact implemented and later-phase boundary.
 
 ## Implemented
 
-- Generic JSONL and native Codex adapters with plan, execute, pause, resume,
-  cancel, scope-change, and replan behavior.
+- Generic JSONL, Codex, Claude, and Gemini adapters with plan, execute,
+  cancel, scope-change, and replan behavior; the generic protocol also
+  supports pause and resume.
 - Greenfield project start, local Git import, and credential-safe GitHub
   import over HTTPS or SSH.
 - One-way export back to GitHub on a dedicated branch, refused when upstream
@@ -38,22 +41,26 @@ records the exact implemented and later-phase boundary.
   failure propagation, and atomic compare-and-swap integration.
 - Canonical-change indexing, durable plan revisions, live scope negotiation,
   and agent replanning against fresh canonical worktrees.
-- SQLite task queues, tenant/project isolation, approvals, full changesets,
-  integration history, and append-only hash-chained audit.
+- SQLite and PostgreSQL task queues, tenant/project isolation, approvals, full
+  changesets, integration history, audit compaction, and hash-chain
+  verification across archived and live events.
 - A versioned HTTP API with sessions, CSRF protection, RBAC, rate limiting,
   security headers, and project-scoped WebSocket events.
-- A responsive control room for setup, tasks, runs, diffs, replans, approvals,
-  repositories, teams, project settings, and system administration.
+- A responsive control room for setup, tasks, board, runs, diffs, replans,
+  approvals, review comments, repository history, pipeline-safe rollback,
+  workers, teams, project settings, and system administration.
+- Per-user browser overlay workspaces with Monaco editing, bounded
+  Docker-sandbox commands, and submission through ordinary admission,
+  approval, validation, and compare-and-swap promotion.
 - Deterministic coordinated-versus-uncoordinated benchmarks.
 
-## Planned: Version-Control Parity
+## Version-Control Surfaces
 
-Every promotion already creates a Git commit; Phase 2 surfaces that history
-as product features (see instructions.md, sections 18 and 25): canonical
-version history browsing, pipeline-safe rollback to a previous version —
-submitted, conflict-checked, validated, and promoted like any other change,
-never a raw reset — review comment threads on diffs, and task-board views
-over the existing task queue.
+Every promotion creates a Git commit. Canonical history browsing,
+pipeline-safe rollback to a previous version, review comment threads on diffs,
+and task-board views are implemented in the API and control room. Rollback is
+submitted, conflict-checked, validated, policy-gated, and promoted like any
+other change; it is never a raw reset.
 
 By design, there is no direct branch/merge/reset access to the canonical
 repository outside the coordinator's pipeline, in any phase. An
@@ -78,15 +85,21 @@ npm.cmd run check
 npm.cmd run benchmark
 ```
 
-Docker runtime verification is separate:
+Docker runtime verification is separate, and covers both execution paths:
 
 ```powershell
+docker build -f infrastructure/docker/agent.Dockerfile -t coord/reference-agent:1 .
 npm.cmd run verify:docker
+npm.cmd run verify:remote-docker
 ```
 
-The Docker daemon was unavailable in the latest audit environment. Container
-argument and policy behavior is unit tested, but the live runtime script must
-also pass on a Docker-capable host before treating that boundary as deployed.
+`verify:docker` covers the local path: one process owning canonical, creating
+worktrees, and running an agent in a container. `verify:remote-docker` covers
+hosted execution — a real control plane on a real port, a real worker daemon
+leasing a task and running its agent in a container, and the changeset coming
+back through admission, validation, and promotion. Both pass against a live
+daemon; the confinement checks in the remote run are made from inside the
+container by the agent itself and travel back with its changeset.
 
 ## Project CLI
 
@@ -95,6 +108,7 @@ you want `.coordinator` state:
 
 ```powershell
 node C:\path\to\coordinator\apps\cli\dist\index.js init
+node C:\path\to\coordinator\apps\cli\dist\index.js repo create new-product
 node C:\path\to\coordinator\apps\cli\dist\index.js repo add C:\path\to\repo --id=core
 node C:\path\to\coordinator\apps\cli\dist\index.js task submit --objective="Implement the approved change"
 node C:\path\to\coordinator\apps\cli\dist\index.js run
@@ -104,6 +118,7 @@ Operational commands include:
 
 ```powershell
 node apps/cli/dist/index.js repo github owner/repository
+node apps/cli/dist/index.js repo create new-product --branch=main
 node apps/cli/dist/index.js repo push --branch=coord/release
 node apps/cli/dist/index.js repo list
 node apps/cli/dist/index.js task list
@@ -120,7 +135,9 @@ node apps/cli/dist/index.js doctor
 
 Configure agents and repository validation commands in
 `.coordinator/config.json`. The default configuration is intentionally missing
-an agent so a project cannot silently execute with an unintended provider.
+an agent so a project cannot silently execute with an unintended provider. Its
+portable validation baseline is `git diff --check`; replace or extend that
+command with the repository's real test and build commands.
 
 ## Web Control Room
 
@@ -160,7 +177,9 @@ npm.cmd run benchmark -- --live
 Add `COORD_AGENT_SANDBOX=docker` and
 `COORD_AGENT_IMAGE=<image>` to confine that process. The native Codex project
 adapter uses ephemeral `codex exec` processes with read-only planning and
-workspace-write execution.
+workspace-write execution. On native Windows it explicitly selects Codex's
+preferred `elevated` sandbox backend so scoped writes keep working even while
+personal Codex configuration is ignored.
 
 See the [generic agent protocol](docs/protocol/generic-cli.md), the
 [coordination architecture](docs/architecture/coordination.md), the

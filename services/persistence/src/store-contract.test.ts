@@ -1460,6 +1460,21 @@ for (const backend of backends) {
       });
       assert.equal(resubmitted.outcome, "saved");
 
+      // Once approved, the plan is the worker's execution contract. A retry
+      // may observe it, but can never replace it with a wider plan.
+      const wider = submissionFor(second.task.id, "approved");
+      wider.plan.expectedFiles = ["src/value.ts", "src/secret.ts"];
+      const immutable = await store.saveWorkLeasePlan({
+        leaseId: second.lease.id,
+        submission: wider,
+        observedApprovedLeaseIds: [first.lease.id],
+      });
+      assert.equal(immutable.outcome, "already_admitted");
+      assert.deepEqual(
+        (await store.getWorkLease(second.lease.id))?.plan?.plan.expectedFiles,
+        PLAN.expectedFiles,
+      );
+
       // Repository scoping: a lease elsewhere never enters the view.
       assert.deepEqual(
         (
@@ -1942,6 +1957,76 @@ for (const backend of backends) {
       }
       assert.equal((await store.listAuditEvents({})).length, 1);
       assert.equal((await store.verifyAudit()).valid, true);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: reported token usage replaces its own running total`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const base = {
+        projectId: DEFAULT_PROJECT_ID,
+        repositoryId: REPOSITORY.id,
+        taskId: TASK.id,
+        leaseId: "lease_1",
+        agentId: TASK.agentId,
+      } as const;
+
+      await store.recordTokenUsage({
+        ...base,
+        usageKey: "lease_1:planning",
+        phase: "planning",
+        totalTokens: 400,
+        recordedAt: "2026-01-01T00:00:00.000Z",
+      });
+      // The worker reports a running total, not an increment, so a second
+      // report of the same phase must overwrite rather than accumulate —
+      // otherwise the bill grows with the heartbeat rate rather than with
+      // what was actually spent.
+      const updated = await store.recordTokenUsage({
+        ...base,
+        usageKey: "lease_1:planning",
+        phase: "planning",
+        inputTokens: 900,
+        outputTokens: 100,
+        totalTokens: 1_000,
+        recordedAt: "2026-01-01T00:01:00.000Z",
+      });
+      assert.equal(updated.totalTokens, 1_000);
+      assert.equal(updated.inputTokens, 900);
+
+      await store.recordTokenUsage({
+        ...base,
+        usageKey: "lease_1:execution",
+        phase: "execution",
+        totalTokens: 2_500,
+        recordedAt: "2026-01-01T00:02:00.000Z",
+      });
+
+      const forLease = await store.listTokenUsage({ leaseId: "lease_1" });
+      assert.equal(forLease.length, 2);
+      assert.equal(
+        forLease.reduce((sum, entry) => sum + entry.totalTokens, 0),
+        3_500,
+      );
+
+      // The two filters a budget is actually enforced through.
+      assert.equal(
+        (await store.listTokenUsage({ projectId: DEFAULT_PROJECT_ID })).length,
+        2,
+      );
+      assert.equal(
+        (
+          await store.listTokenUsage({
+            recordedAfter: "2026-01-01T00:01:30.000Z",
+          })
+        ).length,
+        1,
+      );
+      assert.deepEqual(await store.listTokenUsage({ taskId: "task_other" }), []);
     } finally {
       await store.close();
       await cleanup();

@@ -15,6 +15,7 @@ import type { ApprovalStatus } from "@coord/shared-types";
 import { runBenchmark, runCoordinatedFixture } from "./benchmark.js";
 import {
   repoAdd,
+  repoCreate,
   repoImportGitHub,
   resolveRepository,
   runPendingTasks,
@@ -24,6 +25,7 @@ import {
 } from "./commands.js";
 import { computeCoordinationMetrics } from "@coord/coordinator";
 
+import { formatCliError } from "./error-format.js";
 import { CoordinatorProject, PROJECT_DIRECTORY } from "./project.js";
 import { recoverCoordinationState } from "./recovery.js";
 import { repoPush } from "./repo-export.js";
@@ -84,6 +86,7 @@ function printHelp(): void {
 
 Usage:
   coord init
+  coord repo create <name> [--branch=<name>] [--default]
   coord repo add <path> [--id=<name>] [--branch=<name>] [--default]
   coord repo github <owner/name|url> [--id=<name>] [--branch=<name>] [--default]
   coord repo push [--repo=<id>] [--branch=<target>] [--update-existing]
@@ -431,6 +434,30 @@ async function runRepo(
   flags: readonly string[],
 ): Promise<void> {
   switch (subcommand) {
+    case "create": {
+      const id = positional[0];
+      if (id === undefined) {
+        throw new Error(
+          "Usage: coord repo create <name> [--branch=<name>] [--default]",
+        );
+      }
+      await withProject(async (project, store) => {
+        const branch = flagValue(flags, "branch");
+        const repository = await repoCreate(project, store, {
+          id,
+          ...(branch === undefined ? {} : { branch }),
+          setDefault: flags.includes("--default"),
+        });
+        console.log(
+          `Created ${repository.id} (branch ${repository.branch})\n` +
+            `Canonical mirror: ${repository.path}`,
+        );
+        if (project.config.defaultRepository === repository.id) {
+          console.log(`Default repository is now ${repository.id}`);
+        }
+      });
+      break;
+    }
     case "add": {
       const sourcePath = positional[0];
       if (sourcePath === undefined) {
@@ -508,7 +535,10 @@ async function runRepo(
       await withProject(async (project, store) => {
         const repositories = await store.listRepositories();
         if (repositories.length === 0) {
-          console.log("No repositories registered. Use `coord repo add <path>`.");
+          console.log(
+            "No repositories registered. Use `coord repo create <name>`, " +
+              "`coord repo add <path>`, or `coord repo github <owner/name>`.",
+          );
           return;
         }
         for (const repository of repositories) {
@@ -812,6 +842,9 @@ async function runRecover(): Promise<void> {
     // Only run this when no control plane is serving this store: recovering
     // a live deployment's state would cancel its in-flight runs.
     const report = await recoverCoordinationState(project, store);
+    console.log(
+      `Resumed tasks from a recorded changeset: ${report.resumedTasks.length}`,
+    );
     console.log(`Failed stranded runs: ${report.failedRuns.length}`);
     console.log(`Requeued stranded tasks: ${report.requeuedTasks.length}`);
     console.log(`Expired lapsed leases: ${report.expiredLeases.length}`);
@@ -1173,7 +1206,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  const message = error instanceof Error ? error.stack ?? error.message : error;
-  console.error(message);
+  console.error(formatCliError(error));
   process.exitCode = 1;
 });

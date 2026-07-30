@@ -162,6 +162,18 @@ export interface SaveWorkLeasePlanInput {
    * both be admitted against a stale view.
    */
   observedApprovedLeaseIds: readonly string[];
+  /**
+   * Replace an approved contract instead of refusing to.
+   *
+   * An approved admission is normally immutable: it is what ownership was
+   * granted against, and letting a later request widen it would let a worker
+   * grant itself scope nobody arbitrated. Mid-execution scope arbitration is
+   * the one caller that legitimately produces a wider contract, because the
+   * widening has just been decided against every other holder — through the
+   * same conflict and ownership services, under the same staleness check
+   * below, which is what makes it a decision rather than a claim.
+   */
+  replaceApproved?: boolean;
 }
 
 /**
@@ -182,6 +194,8 @@ export function sameLeaseIdSet(
 
 export type SaveWorkLeasePlanResult =
   | { outcome: "saved"; lease: WorkLease }
+  /** This lease already has an approved contract, which is immutable. */
+  | { outcome: "already_admitted"; lease: WorkLease }
   /** Another lease was admitted concurrently; re-read and decide again. */
   | { outcome: "stale"; approvedLeaseIds: string[] }
   /** The lease is gone, lapsed, or settled; the plan cannot be recorded. */
@@ -437,6 +451,57 @@ export interface AuditArchiveResult {
   events: SequencedAuditEvent[];
 }
 
+/** Which half of an agent's work spent the tokens. */
+export type TokenUsagePhase = "planning" | "execution";
+
+export interface RecordTokenUsageInput {
+  /**
+   * Identity of the measurement, not of the row.
+   *
+   * A worker reports a *running total* as it goes, so the same lease and
+   * phase are reported repeatedly with a larger figure. Keying on
+   * (lease, task, phase) and replacing makes those reports idempotent:
+   * the stored figure is the latest total rather than a sum of snapshots.
+   */
+  usageKey: string;
+  projectId?: ProjectId;
+  repositoryId: string;
+  taskId: TaskId;
+  leaseId?: string;
+  runId?: string;
+  agentId: string;
+  phase: TokenUsagePhase;
+  inputTokens?: number;
+  outputTokens?: number;
+  totalTokens: number;
+  recordedAt: string;
+}
+
+export interface TokenUsageRecord {
+  id: string;
+  usageKey: string;
+  projectId: ProjectId | undefined;
+  repositoryId: string;
+  taskId: TaskId;
+  leaseId: string | undefined;
+  runId: string | undefined;
+  agentId: string;
+  phase: TokenUsagePhase;
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  recordedAt: string;
+}
+
+export interface TokenUsageFilter {
+  projectId?: ProjectId;
+  repositoryId?: string;
+  taskId?: TaskId;
+  leaseId?: string;
+  /** Only usage recorded at or after this ISO timestamp. */
+  recordedAfter?: string;
+}
+
 export interface ApprovalFilter {
   organizationId?: string;
   projectId?: ProjectId;
@@ -601,6 +666,17 @@ export interface CoordinationStore {
   ): Promise<boolean>;
   /** Lapses active leases past their expiry and requeues their tasks. */
   expireWorkLeases(now: string): Promise<WorkLease[]>;
+
+  /**
+   * Records what an agent reported spending.
+   *
+   * Upserts on `usageKey`, because a worker reports a running total rather
+   * than increments: the last report for one lease and phase is the truth,
+   * and adding them up would multiply the bill by however often the worker
+   * happened to heartbeat.
+   */
+  recordTokenUsage(input: RecordTokenUsageInput): Promise<TokenUsageRecord>;
+  listTokenUsage(filter?: TokenUsageFilter): Promise<TokenUsageRecord[]>;
 
   createApiToken(token: ApiTokenRecord): Promise<void>;
   getApiToken(id: string): Promise<ApiTokenRecord | undefined>;

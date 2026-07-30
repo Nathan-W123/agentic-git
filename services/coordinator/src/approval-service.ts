@@ -12,10 +12,13 @@ import {
 } from "@coord/persistence";
 
 export interface ApprovalPolicyOptions {
+  enabled?: boolean;
+  requireSchemaReview?: boolean;
   requireChangesetReview?: boolean;
   riskLevels?: readonly RiskLevel[];
   pathPatterns?: readonly string[];
   approvalTimeoutMs?: number;
+  requireRemotePlanReview?: boolean;
 }
 
 const DEFAULT_PATH_PATTERNS = [
@@ -50,15 +53,26 @@ function globRegex(pattern: string): RegExp {
 }
 
 export class ApprovalPolicy {
+  private readonly enabled: boolean;
   private readonly riskLevels: ReadonlySet<RiskLevel>;
   private readonly pathPatterns: ReadonlyArray<{
     pattern: string;
     regex: RegExp;
   }>;
   public readonly timeoutMs: number;
+  public readonly requireSchemaReview: boolean;
   public readonly requireChangesetReview: boolean;
+  /**
+   * Whether a remote worker's plan is gated before it executes.
+   *
+   * Kept separate from {@link planReasons} rather than folded into it: the
+   * reasons a plan is risky are the same locally and remotely, and only the
+   * decision to stop for them at admission time is a project's to make.
+   */
+  public readonly requireRemotePlanReview: boolean;
 
   public constructor(options: ApprovalPolicyOptions = {}) {
+    this.enabled = options.enabled ?? true;
     this.riskLevels = new Set(options.riskLevels ?? ["high", "critical"]);
     this.pathPatterns = (options.pathPatterns ?? DEFAULT_PATH_PATTERNS).map(
       (pattern) => ({ pattern, regex: globRegex(pattern) }),
@@ -67,18 +81,45 @@ export class ApprovalPolicy {
     if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs < 1_000) {
       throw new RangeError("Approval timeout must be at least one second");
     }
+    this.requireSchemaReview = options.requireSchemaReview ?? true;
     this.requireChangesetReview = options.requireChangesetReview ?? false;
+    this.requireRemotePlanReview = options.requireRemotePlanReview ?? false;
+  }
+
+  /**
+   * Why a remote worker's plan must wait for a person, or nothing.
+   *
+   * Empty unless the project asked for the gate. The reasons themselves are
+   * {@link planReasons} — the same ones the local scheduler stops on — so a
+   * project cannot end up with a plan that is risky enough to gate in one
+   * execution mode and not the other.
+   */
+  public remotePlanReasons(plan: AgentPlan): string[] {
+    return this.requireRemotePlanReview ? this.planReasons(plan) : [];
   }
 
   public planReasons(plan: AgentPlan): string[] {
+    if (!this.enabled) {
+      return [];
+    }
     return this.reasons(plan, plan.expectedFiles);
   }
 
-  public changesetReasons(plan: AgentPlan, changeSet: ChangeSet): string[] {
-    const reasons = this.reasons(
-      plan,
-      changeSet.patches.map((patch) => patch.path),
-    );
+  public changesetReasons(
+    plan: AgentPlan,
+    changeSet: ChangeSet,
+    options: { planWasReviewed?: boolean } = {},
+  ): string[] {
+    if (!this.enabled) {
+      return [];
+    }
+    const reasons =
+      options.planWasReviewed === true
+        ? this.escalatedChangesetReasons(plan, changeSet)
+        : this.reasons(
+            plan,
+            changeSet.patches.map((patch) => patch.path),
+          );
     if (this.requireChangesetReview) {
       reasons.push("Project policy requires human review of every changeset");
     }
@@ -86,10 +127,18 @@ export class ApprovalPolicy {
   }
 
   public scopeReasons(
-    plan: AgentPlan,
+    _plan: AgentPlan,
     request: ScopeChangeRequest,
   ): string[] {
-    return this.reasons(plan, request.additionalFiles);
+    if (!this.enabled) {
+      return [];
+    }
+    const reasons =
+      this.requireSchemaReview && request.additionalSchemas.length > 0
+        ? ["Scope expansion changes one or more schemas"]
+        : [];
+    reasons.push(...this.pathReasons(request.additionalFiles));
+    return [...new Set(reasons)];
   }
 
   private reasons(plan: AgentPlan, files: readonly string[]): string[] {
@@ -97,9 +146,33 @@ export class ApprovalPolicy {
     if (this.riskLevels.has(plan.riskLevel)) {
       reasons.push(`Task risk level is ${plan.riskLevel}`);
     }
-    if ((plan.expectedSchemas?.length ?? 0) > 0) {
+    if (
+      this.requireSchemaReview &&
+      (plan.expectedSchemas?.length ?? 0) > 0
+    ) {
       reasons.push("Task changes one or more schemas");
     }
+    reasons.push(...this.pathReasons(files));
+    return [...new Set(reasons)];
+  }
+
+  private escalatedChangesetReasons(
+    plan: AgentPlan,
+    changeSet: ChangeSet,
+  ): string[] {
+    if (
+      changeSet.riskAssessment.level !== plan.riskLevel &&
+      this.riskLevels.has(changeSet.riskAssessment.level)
+    ) {
+      return [
+        `Changeset risk level increased to ${changeSet.riskAssessment.level}`,
+      ];
+    }
+    return [];
+  }
+
+  private pathReasons(files: readonly string[]): string[] {
+    const reasons: string[] = [];
     for (const file of files) {
       const match = this.pathPatterns.find((entry) => entry.regex.test(file));
       if (match !== undefined) {

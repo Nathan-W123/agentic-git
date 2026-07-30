@@ -95,10 +95,35 @@ When dropping the contested files is not enough, a **symbol** can be withheld
 while the file holding it is granted. That needs the repository index to say
 which lines the symbol occupies at the base revision, which is the same
 coordinate system the old side of a diff hunk is measured in. The patch body is
-walked — not just the hunk header, whose context lines are not changes — and a
-patch that reaches into those lines loses its whole file. Promoting the rest
-would mean rewriting hunk offsets to publish half a diff, which is where this
-would stop being a division of work and start being a guess about meaning.
+walked — not just the hunk header, whose context lines are not changes — so a
+hunk is judged by the lines it changes rather than by the context it carries.
+Those line ranges travel on the decision as `locations`, so the agent is told
+which lines of a file it otherwise owns are not its to edit, and the same
+ranges are what the result is held to.
+
+A patch that reaches into a withheld symbol is **divided at the hunk**, not
+lost whole. The hunks clear of the withheld lines are a valid patch against the
+same base revision — no hunk is rewritten, only renumbered on the new side,
+which is the side renumbering is defined for — so they are promoted while only
+the trespassing hunks are held back. On this repository's own history, the
+hunks that used to be discarded alongside a trespassing one account for
+[54–75% of the changed lines](../benchmarks/partial-admission-granularity.md)
+in a contested file.
+
+Division is refused rather than guessed at wherever the patch is not a plain
+single-file modification the parser fully recognises: a binary patch, a
+multi-file patch, a `\ No newline at end of file` marker, a header whose counts
+disagree with its body, or a file being added or deleted. Those fall back to
+losing the file, as before. Hunks are also not independent — a rename in one
+and its call sites in another are one change — so a division can produce a
+granted half that does not build. That is caught where every other broken
+changeset is caught: the granted half is validated transactionally before
+promotion, and a failure leaves canonical untouched.
+
+What is *not* divisible is a contested **file**. See
+[the granularity note](../benchmarks/partial-admission-granularity.md#what-is-still-withheld-whole-and-why)
+for why withholding a line range of a file the other holder owns outright
+cannot be made sound without changing what a file lease means.
 
 Enforceability is the limit throughout. A symbol is only withheld when *every*
 file still being granted can be parsed; one unreadable file among them and the
@@ -223,6 +248,7 @@ first sweeps expired leases, so recovery needs no separate reaper process.
 | `POST` | `/api/v1/workers/leases/{id}/heartbeat` | Extend. `409 lease_lost` if lapsed |
 | `GET` | `/api/v1/workers/leases/{id}/bundle` | Workspace contents as a Git bundle |
 | `POST` | `/api/v1/workers/leases/{id}/plan` | Submit a plan for admission |
+| `POST` | `/api/v1/workers/leases/{id}/scope` | Ask to widen the admitted scope mid-run |
 | `POST` | `/api/v1/workers/leases/{id}/result` | Return a changeset or a failure |
 | `POST` | `/api/v1/workers/leases/{id}/release` | Give the task back |
 
@@ -236,6 +262,110 @@ another task, or against a different objective than the one leased. An
 unusable plan fails the lease rather than requeueing it, because the same plan
 would be rejected again on the next attempt.
 
+`POST .../scope` takes `{ "request": ScopeChangeRequest }` and returns
+`{ "decision": ScopeChangeDecision }`. See
+[Scope expansion mid-execution](#scope-expansion-mid-execution).
+
+`POST .../heartbeat` optionally takes `{ "tokenUsage": AgentTokenUsage[] }`,
+and `POST .../result` accepts the same field. See
+[Cost controls](#cost-controls).
+
+## Human approval at admission time
+
+A project can move its review gate from the changeset to the plan by setting
+`approvals.requireRemotePlanReview`. The reasons are unchanged — the plan's
+risk level, a schema claim, a protected path — so a plan that would stop the
+local scheduler now also stops a remote worker, before the agent runs rather
+than after.
+
+A gated plan comes back `sequenced` with `awaitingApproval: true` and the
+`approvalId` a reviewer will decide. The worker keeps its lease, keeps
+heartbeating, and resubmits, switching from its ordinary deferral budget to
+`planApprovalWaitMs` — waiting for a person is not the same wait as waiting
+for another worker's lease, which clears in seconds. Resubmission is
+idempotent: the same approval, never a second one queued behind the first.
+
+An approved plan proceeds to ordinary arbitration. A rejected or expired one
+fails the lease and the task, because a reviewer's "no" is not a transient
+condition to retry through.
+
+The gate opens the task's run early — an approval has to belong to one — and
+the admission carries that `runId` forward so the result reuses it rather than
+splitting one task's history across two records. A plan waiting on a reviewer
+is therefore visible in run history while it waits, instead of appearing only
+once the work is finished.
+
+The cost is a second blocking gate per task, and a worker holding a repository
+concurrency slot while a person is asked. That is why it is off by default.
+
+## Scope expansion mid-execution
+
+A remote agent that discovers it needs a file outside its admitted plan asks,
+and the coordinator arbitrates. The worker cannot answer this itself — it has
+no view of what other tasks own — so it forwards the request and the control
+plane runs the widened plan through the same `ConflictDetector`,
+`OwnershipService`, and `PlanAdmissionController` an initial admission uses,
+against the plans on every other active lease.
+
+| Decision | Meaning | What the agent does |
+| --- | --- | --- |
+| `approved` / `approved_with_constraints` | Nothing else holds the resources | Continue with the wider plan |
+| `deferred` | Another executing task holds them | Continue in current scope; ask again after `retryAfterMs` |
+| `rejected` | Ordering cannot separate the two, or a reviewer said no | Continue in current scope |
+
+A deferral names its holders in `blockedBy`. It is deliberately distinct from
+a refusal: the resource will be free later, and telling an agent "never" when
+the truth is "not yet" throws away work it could still do.
+
+A grant replaces the admitted contract on the lease with the revised plan.
+That replacement is the one write allowed to overwrite an approved admission,
+and it carries the same compare-and-swap check every admission does, so a
+rival admitted between the decision and the write invalidates it and the
+answer comes back as a deferral instead. Nothing about result enforcement
+relaxes: the contract is widened *before* the edits arrive, so the changeset
+is still split and checked against a scope the control plane issued, and a
+patch outside it is still refused.
+
+The project's approval policy still applies. A scope expansion touching a
+schema or a protected path waits for a reviewer, and the request stays open
+while it does — the same way a gated changeset does. An expansion that needs
+a reviewer on a task with no run is refused rather than waved through, since
+there is nowhere to record the request.
+
+## Cost controls
+
+Model spend is accounted per task and per project, and capped.
+
+Reporting is the agent's and is optional throughout: the Codex adapter parses
+the figure the CLI prints, and a generic-CLI agent may attach
+`{"tokens": {"total": n}}` to its `done` message. An agent that reports
+nothing is recorded as having reported nothing — an invented figure would be
+worse than an absent one, because a budget would then be enforced against
+fiction.
+
+The worker sends the running total up with its heartbeat, and the final figure
+with its result. Each report carries a cumulative per-phase total rather than
+an increment, and the store keys on `(lease, phase)` and replaces, so the
+recorded bill tracks what was spent rather than how often the worker happened
+to heartbeat.
+
+Two budgets sit alongside the two runtime ones in
+`budgets` (see [deployment](../deployment.md)):
+
+| Budget | Enforced at | Effect |
+| --- | --- | --- |
+| `maxTaskTokens` | Heartbeat | The lease and task fail — while the spending is still happening |
+| `maxProjectTokensPerDay` | Lease | The project stops receiving workers; tasks stay queued |
+
+Enforcing the per-task cap at heartbeat rather than at the result is the whole
+point: by the time a result exists the tokens are gone, and failing finished
+work over its bill would waste the very thing the budget protects. The result
+endpoint therefore records the final spend without enforcing anything.
+
+Tokens and runtime are separate limits because they answer different
+questions — a task can be quick and expensive, or slow and cheap — so neither
+substitutes for the other.
+
 ## Materialising a workspace
 
 The control plane does not run a Git server. It packages the leased revision as
@@ -246,8 +376,9 @@ curl -H "Authorization: Bearer $TOKEN" .../bundle -o revision.bundle
 git clone --branch "$BUNDLE_REF" revision.bundle workspace
 ```
 
-Only the leased revision is included, so a worker never receives history it was
-not assigned.
+The bundle advertises only the leased ref, not the current canonical tip or
+unrelated branches. Git bundles necessarily include ancestors reachable from
+that revision so the worker can materialize a valid repository.
 
 Two details are load-bearing. Git refuses to bundle a bare commit — a bundle
 carries refs, not commits — so the control plane creates a short-lived branch
@@ -271,7 +402,8 @@ task, and accepting both would let two workers write results for one task.
 ## What a worker never gets
 
 - The canonical repository path, or any filesystem access to it
-- History beyond the revision it was leased
+- Newer canonical revisions or unrelated branch refs. Ancestors reachable
+  from the leased revision are present because Git needs them to clone it.
 - Another tenant's leases — every lease action verifies the worker belongs to
   the calling user, and returns `404` rather than `403` so lease ids cannot be
   probed
@@ -293,8 +425,8 @@ Each iteration leases a task, fetches the bundle, clones it, has the agent
 plan, gets that plan admitted, runs the agent, returns a changeset, and deletes
 the workspace. It owns nothing durable.
 
-Splitting planning from execution costs the worker nothing to arrange: both
-adapters already separate them. `requestPlan` returns the agent's intent
+Splitting planning from execution costs the worker nothing to arrange: all
+shipped adapters separate them. `requestPlan` returns the agent's intent
 without touching the workspace, and nothing is written until `sendContext`. The
 worker simply holds the session between the two while the control plane
 answers, and the agent is then told what it actually owns rather than a
@@ -302,11 +434,13 @@ placeholder approval.
 
 Three behaviours matter. A **heartbeat runs alongside execution**, because an
 agent can take far longer than the lease and the control plane would otherwise
-reclaim work still in progress — it also runs while a deferred plan waits.
-**Shutdown releases the held lease**, so a planned restart makes the task
-available immediately rather than after the expiry. And a **deferred plan is
-never a failure**: the task returns to the queue, and `IterationResult.deferred`
-distinguishes it from work that went wrong.
+reclaim work still in progress — it also runs while a deferred plan waits, and
+carries the agent's running token total with it. **Lease loss or shutdown
+actively cancels the agent and releases the held lease**, so withdrawn work
+stops and a planned restart makes the task available immediately rather than
+after the expiry. And a **deferred plan is never a failure**: the task returns
+to the queue, and `IterationResult.deferred` distinguishes it from work that
+went wrong.
 
 A lost lease is never reported as a result: by then another worker may hold the
 task, so the run is abandoned instead.
@@ -317,24 +451,80 @@ The worker honours the project's sandbox configuration, wrapping the agent in
 `DockerWorkspaceManager` when one is set. With none configured the agent runs
 unconfined, which is only defensible on a single-tenant worker.
 
-The Codex adapter cannot currently be combined with a container sandbox — it
-confines itself through Codex's own `--sandbox` flag rather than a
-`WorkspaceSandbox` — so the worker refuses that combination rather than running
-unconfined while appearing sandboxed.
+**This is verified live, not merely implemented.** `npm run verify:remote-docker`
+starts a real control plane on a real port, registers a real worker daemon,
+and drives one task through the whole protocol — lease, bundle, clone, plan,
+admission, containerized execution, result, validation, promotion — against a
+live Docker daemon. It asserts confinement from *inside* the container rather
+than from the flags the host passed: with `COORD_SANDBOX_PROBE=1` the
+reference agent probes its own surroundings and reports the verdicts in its
+completion explanation, which travels with the changeset and is persisted. A
+run that integrates therefore carries its own evidence:
+
+```
+[PASS] the containerized agent reported denied network, read-only root, and
+       masked git - rootfs=readonly git=masked network=denied
+```
+
+### Why the vendor CLIs stay on the host
+
+Only generic-CLI agents get container confinement. Codex, Claude Code, and
+Gemini CLI run on the worker host under their own vendor sandboxing, and the
+worker refuses to combine them with a Docker sandbox rather than running
+unconfined while appearing sandboxed. That refusal is not an oversight, and it
+is not merely a packaging problem:
+
+1. **The sandbox denies egress; the CLIs require it.** The container runs
+   `--network none`, and a DNS lookup for a vendor endpoint inside it fails
+   with `EAI_AGAIN`; the same lookup on a bridged network resolves. A vendor
+   CLI with no route to its provider's API cannot do anything at all. A
+   project *can* set `sandbox.network`, but that trades deny-default egress
+   for unrestricted egress, which is strictly worse than the status quo: the
+   vendor CLI's own sandbox at least confines the filesystem. Closing this
+   properly needs the per-task egress allowlist below, not a wider network.
+2. **Their credentials are host login state.** All three authenticate against
+   the CLI's own session in the user's home directory. The container has a
+   read-only root, no home, and does not inherit host environment variables —
+   deliberately. An API key can be injected today through an agent's `env`
+   block, which becomes `--env` on the container, so an API-key deployment is
+   reachable; a subscription login is not, and making it reachable would mean
+   mounting a long-lived credential store into a container running untrusted
+   agent code.
+3. **Codex would be doubly sandboxed.** It confines its edit phase through its
+   own `--sandbox workspace-write`, which needs a platform sandbox backend.
+   Inside a container with `--cap-drop ALL` and `--security-opt
+   no-new-privileges` that either fails or has to be disabled, at which point
+   the container is the only sandbox and Codex's flag is decoration.
+
+Mechanically, the wiring is small — all three adapters funnel every invocation
+through one injectable process runner, and `DockerWorkspaceManager.wrapLaunch`
+produces exactly the command and arguments such a runner takes. The blocker is
+the egress allowlist, not the adapters.
+
+### Where validation runs
+
+Integration compiles and tests on the control plane, but **not as the control
+plane** when a sandbox is configured: `workerOperations` builds its
+`IntegrationService` on the same `DockerWorkspaceManager` the agents use, so a
+repository's own commands run in a container with a read-only root, no
+network, and only the candidate worktree mounted. The live verification above
+covers this too — it runs `node --test` over the candidate tree, including the
+test file the agent added, inside the reference image.
+
+Two honest limits remain. Without a configured sandbox, validation still runs
+as the control-plane process. And validation runs on the control-plane *host*
+rather than on the worker, because the tree being validated does not exist
+anywhere else: it is the three-way merge of the result onto current canonical,
+which only the control plane can build. Shipping that merged tree back to a
+worker to test would mean handing a worker canonical content it is
+specifically not given, and trusting its self-reported pass — which is a
+weaker guarantee than running it under confinement here, not a stronger one.
 
 ## Not yet built
 
-- Container isolation has still never run against a Docker daemon. Hosted
-  execution is exactly the case it exists for: untrusted agents from different
-  tenants on shared compute. `npm run verify:docker` covers it in one command.
-- Validation on workers. Integration still compiles and tests on the control
-  plane, so a repository's own test commands run with control-plane privileges.
-- Per-task credentials and an egress allowlist.
-- Human approval at admission time. The local coordinator gates a risky *plan*
-  on a reviewer before granting a workspace; remotely, the approval gate still
-  sits at the changeset. Moving it earlier would catch a high-risk plan before
-  the agent runs, at the cost of a second blocking gate per task.
-- Scope expansion mid-execution. A remote agent's `scope_change_requested` is
-  refused rather than arbitrated, because the expanded scope was never admitted
-  and no other holder had a chance to object. Handling it properly means a
-  scope-change round trip against the same admission logic.
+- Per-task credentials and an egress allowlist. The allowlist is the
+  dependency for containerizing the vendor CLIs, above.
+- Validation executed by the worker itself, as opposed to under confinement on
+  the control-plane host. See the limits above.
+- Cost accounting beyond tokens: no per-model pricing, invoicing, or billing
+  integration. What exists is token counts and caps.

@@ -62,6 +62,22 @@ export type AgentEvent =
       occurredAt: string;
     };
 
+/**
+ * Model spend one agent reported for one phase of one session.
+ *
+ * Optional throughout, because it is the agent's to report and not every CLI
+ * says. A coordinator that receives nothing records nothing rather than
+ * guessing: an invented number would be worse than an absent one, since a
+ * budget would then be enforced against fiction.
+ */
+export interface AgentTokenUsage {
+  phase: "planning" | "execution";
+  /** Cumulative for the phase, not an increment since the last report. */
+  totalTokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
+}
+
 export interface AgentAdapter {
   getCapabilities(): Promise<AgentCapabilities>;
 
@@ -96,4 +112,14 @@ export interface AgentAdapter {
     sessionId: string,
     handler: (event: AgentEvent) => void,
   ): Promise<void>;
+
+  /**
+   * What this session has spent so far, if the underlying tool reports it.
+   *
+   * Synchronous and safe to call at any point, including mid-execution, so a
+   * worker can send a running total up with its heartbeat and the control
+   * plane can stop a task that is burning through its budget rather than
+   * discovering the overspend once the bill has been paid.
+   */
+  reportedTokenUsage?(sessionId: string): AgentTokenUsage[];
 }

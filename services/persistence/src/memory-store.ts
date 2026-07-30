@@ -68,6 +68,9 @@ import type {
   SubmittedTask,
   SubmittedTaskCompletionStatus,
   SubmittedTaskFilter,
+  RecordTokenUsageInput,
+  TokenUsageFilter,
+  TokenUsageRecord,
   UserAccount,
 } from "./store.js";
 import {
@@ -147,6 +150,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly projectRepositories = new Set<string>();
   private readonly authSessions = new Map<string, AuthSessionRecord>();
   private readonly apiTokens = new Map<string, ApiTokenRecord>();
+  /** Keyed by usage key so a re-reported running total replaces its predecessor. */
+  private readonly tokenUsage = new Map<string, TokenUsageRecord>();
   private readonly workers = new Map<string, WorkerRecord>();
   private readonly workLeases = new Map<string, WorkLease>();
   private readonly approvals = new Map<string, ApprovalRequest>();
@@ -625,6 +630,13 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     if (lease === undefined || lease.status !== "active") {
       return { outcome: "lease_lost" };
     }
+    if (
+      input.replaceApproved !== true &&
+      lease.plan !== undefined &&
+      planAdmissionApproved(lease.plan.admission)
+    ) {
+      return { outcome: "already_admitted", lease: structuredClone(lease) };
+    }
     const approvedLeaseIds = this.approvedPlanLeaseIds(
       lease.repositoryId,
       lease.id,
@@ -716,6 +728,48 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       }
     }
     return settled.map((lease) => ({ ...lease }));
+  }
+
+  public async recordTokenUsage(
+    input: RecordTokenUsageInput,
+  ): Promise<TokenUsageRecord> {
+    const existing = this.tokenUsage.get(input.usageKey);
+    const record: TokenUsageRecord = {
+      id: existing?.id ?? createId("usage"),
+      usageKey: input.usageKey,
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      taskId: input.taskId,
+      leaseId: input.leaseId,
+      runId: input.runId,
+      agentId: input.agentId,
+      phase: input.phase,
+      inputTokens: input.inputTokens ?? 0,
+      outputTokens: input.outputTokens ?? 0,
+      totalTokens: input.totalTokens,
+      recordedAt: input.recordedAt,
+    };
+    this.tokenUsage.set(input.usageKey, record);
+    return { ...record };
+  }
+
+  public async listTokenUsage(
+    filter: TokenUsageFilter = {},
+  ): Promise<TokenUsageRecord[]> {
+    return [...this.tokenUsage.values()]
+      .filter(
+        (record) =>
+          (filter.projectId === undefined ||
+            record.projectId === filter.projectId) &&
+          (filter.repositoryId === undefined ||
+            record.repositoryId === filter.repositoryId) &&
+          (filter.taskId === undefined || record.taskId === filter.taskId) &&
+          (filter.leaseId === undefined || record.leaseId === filter.leaseId) &&
+          (filter.recordedAfter === undefined ||
+            record.recordedAt >= filter.recordedAfter),
+      )
+      .sort((left, right) => left.recordedAt.localeCompare(right.recordedAt))
+      .map((record) => ({ ...record }));
   }
 
   public async createApiToken(token: ApiTokenRecord): Promise<void> {

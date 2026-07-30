@@ -215,6 +215,20 @@ export type PlanAdmissionStatus =
   | "sequenced";
 
 /**
+ * Where a withheld resource lives, at the base revision the plan was written
+ * against.
+ *
+ * Line numbers are the only coordinate a diff and a repository index have in
+ * common, which is what makes this the unit a withholding can be *checked* in
+ * rather than merely stated. Both ends are 1-based and inclusive.
+ */
+export interface DeferredResourceLocation {
+  file: string;
+  startLine: number;
+  endLine: number;
+}
+
+/**
  * A resource a plan declared that its admission withheld while granting the
  * rest of the plan.
  *
@@ -230,6 +244,17 @@ export interface DeferredResource {
   /** Executing tasks that hold the resource right now. */
   heldBy: TaskId[];
   reason: string;
+  /**
+   * Where this resource sits inside files the plan *was* granted, when the
+   * index could locate it.
+   *
+   * Present only for a resource finer than a file. It is what turns "leave
+   * `orderTotal` alone" into a claim about lines, so the enforcement pass can
+   * promote the hunks of a granted file that stay clear of it instead of
+   * losing the whole file to one trespassing hunk. Absent means the withheld
+   * resource could not be located, and the coarse answer stands.
+   */
+  locations?: DeferredResourceLocation[];
 }
 
 export interface PlanAdmission {
@@ -257,6 +282,23 @@ export interface PlanAdmission {
    * its lease and plan again from fresh canonical rather than resubmitting.
    */
   requeue?: boolean;
+  /**
+   * A human is being asked about this plan before it may execute.
+   *
+   * A holder that sees this waits far longer than an ordinary deferral: what
+   * it is waiting for is a person, not a lease. It keeps heartbeating, so the
+   * lease survives the wait, and resubmits until the decision lands.
+   */
+  awaitingApproval?: boolean;
+  /** The durable approval request behind {@link awaitingApproval}. */
+  approvalId?: string;
+  /**
+   * Run this admission is recorded against, present once anything durable has
+   * been written for the task — today, an approval request, which needs a run
+   * to belong to. The result path reuses it rather than opening a second run
+   * for the same work.
+   */
+  runId?: string;
   decidedAt: string;
 }
 
@@ -400,6 +442,13 @@ export interface ScopeChangeRequest {
 export type ScopeChangeDecisionKind =
   | "approved"
   | "approved_with_constraints"
+  /**
+   * Not now. Another task holds what was asked for, and will not hold it
+   * forever — so unlike a rejection this is worth asking about again once
+   * `retryAfterMs` has passed. The agent continues within its current scope
+   * meanwhile rather than stopping.
+   */
+  | "deferred"
   | "rejected";
 
 export interface ScopeChangeDecision {
@@ -410,7 +459,27 @@ export interface ScopeChangeDecision {
   constraints: string[];
   ownershipGrants: ResourceLease[];
   explanation: string;
+  /** Tasks holding the requested resources, on a deferral or a refusal. */
+  blockedBy?: TaskId[];
+  /** How long to wait before asking again. Present only on a deferral. */
+  retryAfterMs?: number;
   decidedAt: string;
+}
+
+/**
+ * Whether a scope decision actually widened what the agent may write.
+ *
+ * The distinction that matters everywhere downstream is granted versus not,
+ * not which flavour of "not". Deferral and refusal both leave the previously
+ * approved plan in force, and reading this rather than comparing against
+ * `"rejected"` is what keeps a new outcome from silently being treated as a
+ * grant.
+ */
+export function scopeChangeGranted(decision: ScopeChangeDecision): boolean {
+  return (
+    decision.decision === "approved" ||
+    decision.decision === "approved_with_constraints"
+  );
 }
 
 export type ApprovalKind = "changeset" | "scope_change" | "policy_override";
@@ -789,6 +858,112 @@ export function arbitrationFiles(plan: AgentPlan): string[] {
   ]);
 }
 
+/** One declaration verification could map to real code, and what it maps to. */
+export interface GroundedSubstitution {
+  kind: "file" | "symbol";
+  declared: string;
+  /** Real names the index says the declaration meant, best first. */
+  resolved: string[];
+  /** Files the real symbols are declared in. Empty for a file substitution. */
+  files: string[];
+}
+
+export interface GroundedPlanView {
+  /** The plan with every resolvable misname replaced by the real name. */
+  plan: AgentPlan;
+  substitutions: GroundedSubstitution[];
+  /** Declarations nothing in the repository matches, so plausibly new. */
+  inventedFiles: string[];
+  inventedSymbols: string[];
+}
+
+/**
+ * A plan rewritten to say what verification decided it meant.
+ *
+ * Grounding already computes this mapping, and until now it was used in two
+ * places: arbitration, which scores a plan on its referents, and correction,
+ * which fixes a plan after the agent has produced it. What it was never used
+ * for is the thing the agent actually reads. A replan prompt that hands back
+ * the previous plan verbatim hands back `src/checkout.js` — the invented name,
+ * in the most authoritative position in the prompt — and then appends a note
+ * saying it does not exist. This substitutes first and reports second.
+ *
+ * The grounding record itself is dropped from the returned plan. It is the
+ * coordinator's verdict about declarations that no longer appear, and its
+ * `missingFiles` list is a verbatim copy of exactly the names not to repeat.
+ *
+ * Declarations that ground to nothing are left alone and reported separately:
+ * a plan for a new module names files that do not exist yet, and that is not
+ * an error to correct.
+ */
+export function substituteGroundedNames(plan: AgentPlan): GroundedPlanView {
+  const grounding = plan.grounding;
+  if (grounding === undefined) {
+    return {
+      plan,
+      substitutions: [],
+      inventedFiles: [],
+      inventedSymbols: [],
+    };
+  }
+  const substitutions: GroundedSubstitution[] = [];
+  const fileFor = new Map<string, string[]>();
+  for (const entry of grounding.fileReferents) {
+    fileFor.set(entry.declared, [
+      ...(fileFor.get(entry.declared) ?? []),
+      entry.resolved,
+    ]);
+  }
+  const symbolFor = new Map<string, { resolved: string[]; files: string[] }>();
+  for (const entry of grounding.symbolReferents) {
+    const existing = symbolFor.get(entry.declared) ?? { resolved: [], files: [] };
+    symbolFor.set(entry.declared, {
+      resolved: [...existing.resolved, entry.resolved],
+      files: [...existing.files, ...entry.files],
+    });
+  }
+
+  for (const [declared, resolved] of fileFor) {
+    substitutions.push({ kind: "file", declared, resolved, files: [] });
+  }
+  for (const [declared, entry] of symbolFor) {
+    substitutions.push({
+      kind: "symbol",
+      declared,
+      resolved: entry.resolved,
+      files: uniqueRepositoryPaths(entry.files),
+    });
+  }
+  substitutions.sort(
+    (left, right) =>
+      left.kind.localeCompare(right.kind) ||
+      left.declared.localeCompare(right.declared),
+  );
+
+  const { grounding: dropped, ...bare } = structuredClone(plan);
+  void dropped;
+  return {
+    plan: {
+      ...bare,
+      expectedFiles: uniqueRepositoryPaths(
+        plan.expectedFiles.flatMap((file) => fileFor.get(file) ?? [file]),
+      ),
+      expectedSymbols: uniqueStrings(
+        plan.expectedSymbols.flatMap(
+          (symbol) => symbolFor.get(symbol)?.resolved ?? [symbol],
+        ),
+      ),
+    },
+    substitutions,
+    inventedFiles: grounding.missingFiles.filter(
+      (file) => !fileFor.has(file),
+    ),
+    inventedSymbols: grounding.unresolvedSymbols.filter(
+      (symbol) => !symbolFor.has(symbol),
+    ),
+  };
+}
+
 /** The symbols arbitration must treat a plan as claiming; see {@link arbitrationFiles}. */
 export function arbitrationSymbols(plan: AgentPlan): string[] {
   const grounding = plan.grounding;
@@ -1112,6 +1287,19 @@ export interface ProjectApprovalPolicyConfig {
   requireSchemaReview?: boolean;
   /** Require a human decision on every changeset, regardless of risk. */
   requireChangesetReview?: boolean;
+  /**
+   * Move the gate for remote work forward to plan admission.
+   *
+   * The local coordinator has always paused a risky *plan* before handing an
+   * agent a workspace; remotely the only gate was at the changeset, by which
+   * point the agent has already run. With this on, a remote plan whose
+   * reasons would have stopped it locally — its risk level, a schema claim, a
+   * protected path — waits for a reviewer before the worker executes it.
+   *
+   * Off by default, because it costs a second blocking gate per task and a
+   * worker holding a repository slot while a person is asked. Default: false.
+   */
+  requireRemotePlanReview?: boolean;
   /** Risk levels that require human review. Default: high and critical. */
   riskLevels?: RiskLevel[];
   /** Glob patterns whose files require human review when touched. */
@@ -1133,6 +1321,24 @@ export interface ProjectBudgetPolicyConfig {
    * until usage rolls out of the window. Tasks stay queued, not failed.
    */
   maxProjectRuntimeMsPerDay?: number;
+  /**
+   * Hard cap on the model tokens one task may spend.
+   *
+   * Enforced at heartbeat alongside the runtime cap, against the running
+   * total the worker reports as it goes: a task past the cap is failed rather
+   * than extended. Runtime and tokens answer different questions — a task can
+   * be quick and expensive, or slow and cheap — so neither substitutes for
+   * the other. Only spend an agent actually reports is counted; an agent that
+   * reports nothing cannot be capped this way.
+   */
+  maxTaskTokens?: number;
+  /**
+   * Rolling 24-hour cap on the project's total reported token spend.
+   * Enforced at lease time exactly as the runtime budget is: an exhausted
+   * project stops receiving workers until usage rolls out of the window, and
+   * tasks stay queued rather than failing.
+   */
+  maxProjectTokensPerDay?: number;
 }
 
 export interface ProjectPolicy {
@@ -1185,6 +1391,7 @@ export function assertProjectPolicy(
       key !== "enabled" &&
       key !== "requireSchemaReview" &&
       key !== "requireChangesetReview" &&
+      key !== "requireRemotePlanReview" &&
       key !== "riskLevels" &&
       key !== "protectedPaths" &&
       key !== "approvalTimeoutMs"
@@ -1211,6 +1418,12 @@ export function assertProjectPolicy(
     typeof approvals.requireChangesetReview !== "boolean"
   ) {
     throw new TypeError("requireChangesetReview must be a boolean");
+  }
+  if (
+    approvals.requireRemotePlanReview !== undefined &&
+    typeof approvals.requireRemotePlanReview !== "boolean"
+  ) {
+    throw new TypeError("requireRemotePlanReview must be a boolean");
   }
   if (approvals.riskLevels !== undefined) {
     if (
@@ -1255,6 +1468,8 @@ export function assertProjectPolicy(
 }
 
 const MAX_BUDGET_MS = 30 * 24 * 60 * 60 * 1000;
+/** A trillion tokens: far above any real cap, low enough to catch a typo. */
+const MAX_BUDGET_TOKENS = 1_000_000_000_000;
 
 function assertBudgetPolicy(value: unknown): void {
   if (value === undefined) {
@@ -1264,8 +1479,14 @@ function assertBudgetPolicy(value: unknown): void {
     throw new TypeError("Project policy budgets must be an object");
   }
   const budgets = value as Partial<ProjectBudgetPolicyConfig>;
+  const known = [
+    "maxTaskRuntimeMs",
+    "maxProjectRuntimeMsPerDay",
+    "maxTaskTokens",
+    "maxProjectTokensPerDay",
+  ];
   for (const key of Object.keys(budgets)) {
-    if (key !== "maxTaskRuntimeMs" && key !== "maxProjectRuntimeMsPerDay") {
+    if (!known.includes(key)) {
       throw new TypeError(`Project budget policy has an unknown field: ${key}`);
     }
   }
@@ -1277,6 +1498,17 @@ function assertBudgetPolicy(value: unknown): void {
     ) {
       throw new TypeError(
         `${key} must be an integer between 1 ms and thirty days`,
+      );
+    }
+  }
+  for (const key of ["maxTaskTokens", "maxProjectTokensPerDay"] as const) {
+    const limit = budgets[key];
+    if (
+      limit !== undefined &&
+      (!Number.isSafeInteger(limit) || limit < 1 || limit > MAX_BUDGET_TOKENS)
+    ) {
+      throw new TypeError(
+        `${key} must be an integer between 1 and ${MAX_BUDGET_TOKENS} tokens`,
       );
     }
   }

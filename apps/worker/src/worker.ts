@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
@@ -10,7 +11,11 @@ import {
   createClaudeAdapter,
   createGeminiAdapter,
 } from "@coord/adapter-prompt-cli";
-import type { AgentAdapter } from "@coord/agent-protocol";
+import type {
+  AgentAdapter,
+  AgentEvent,
+  AgentTokenUsage,
+} from "@coord/agent-protocol";
 import {
   WORKER_PROTOCOL_VERSION,
   type WorkAssignment,
@@ -25,6 +30,7 @@ import {
   type CoordinatorDecision,
   type PlanAdmission,
   type ScopeChangeDecision,
+  type ScopeChangeRequest,
 } from "@coord/shared-types";
 import {
   DockerWorkspaceManager,
@@ -69,6 +75,16 @@ export interface WorkerOptions {
    * repository slot from being held by a task that cannot start.
    */
   planWaitBudgetMs?: number;
+  /**
+   * How long to hold a lease whose plan is waiting on a human reviewer.
+   *
+   * Deliberately separate from {@link planWaitBudgetMs}: that budget is sized
+   * for another worker letting go of a resource, which happens in seconds,
+   * while this one is sized for a person noticing a review request. Giving up
+   * on the ordinary budget would throw away an approval already in someone's
+   * queue and make the next lease ask for it again.
+   */
+  planApprovalWaitMs?: number;
 }
 
 export interface IterationResult {
@@ -91,7 +107,21 @@ export interface IterationResult {
 
 const DEFAULT_POLL_MS = 5_000;
 const DEFAULT_PLAN_WAIT_BUDGET_MS = 60_000;
+/** A working day, so a review request raised in the morning is still live. */
+const DEFAULT_PLAN_APPROVAL_WAIT_MS = 8 * 60 * 60 * 1000;
 const MIN_PLAN_RETRY_MS = 1_000;
+
+/** A lease id is remote input, so it never becomes a filesystem segment. */
+export function workerScratchPath(
+  workspaceRoot: string,
+  leaseId: string,
+): string {
+  const digest = createHash("sha256")
+    .update(leaseId, "utf8")
+    .digest("hex")
+    .slice(0, 24);
+  return path.join(path.resolve(workspaceRoot), `lease-${digest}`);
+}
 
 /** Everything the agent side holds between planning and execution. */
 interface PlannedWork {
@@ -106,8 +136,34 @@ export class Worker {
   private identity: { id: string } | undefined;
   private stopping = false;
   private activeLease: string | undefined;
+  private activeSession:
+    | { adapter: AgentAdapter; sessionId: string }
+    | undefined;
+  private activeCancellation: Promise<void> | undefined;
+  private cancellationRequested = false;
+  private admissionWait: AbortController | undefined;
+  private iterationInProgress = false;
 
-  public constructor(private readonly options: WorkerOptions) {}
+  public constructor(private readonly options: WorkerOptions) {
+    const pollInterval = options.pollIntervalMs ?? DEFAULT_POLL_MS;
+    const planWaitBudget =
+      options.planWaitBudgetMs ?? DEFAULT_PLAN_WAIT_BUDGET_MS;
+    const approvalWait =
+      options.planApprovalWaitMs ?? DEFAULT_PLAN_APPROVAL_WAIT_MS;
+    if (!Number.isSafeInteger(pollInterval) || pollInterval < 1) {
+      throw new RangeError("pollIntervalMs must be a positive integer");
+    }
+    if (!Number.isSafeInteger(planWaitBudget) || planWaitBudget < 0) {
+      throw new RangeError(
+        "planWaitBudgetMs must be a non-negative integer",
+      );
+    }
+    if (!Number.isSafeInteger(approvalWait) || approvalWait < 0) {
+      throw new RangeError(
+        "planApprovalWaitMs must be a non-negative integer",
+      );
+    }
+  }
 
   public get workerId(): string | undefined {
     return this.identity?.id;
@@ -137,6 +193,21 @@ export class Worker {
    * test without an infinite loop.
    */
   public async runOnce(): Promise<IterationResult> {
+    if (this.stopping) {
+      return { worked: false };
+    }
+    if (this.iterationInProgress) {
+      throw new Error("A worker iteration is already in progress");
+    }
+    this.iterationInProgress = true;
+    try {
+      return await this.performIteration();
+    } finally {
+      this.iterationInProgress = false;
+    }
+  }
+
+  private async performIteration(): Promise<IterationResult> {
     const workerId = this.identity?.id ?? (await this.register());
     const assignment = await this.options.client.lease(
       workerId,
@@ -146,23 +217,59 @@ export class Worker {
     if (assignment === undefined) {
       return { worked: false };
     }
+    if (this.stopping) {
+      // stop() may race an in-flight lease request. Hand back anything that
+      // arrived after shutdown began instead of starting new agent work.
+      await this.options.client
+        .release(assignment.lease.id)
+        .catch(() => undefined);
+      return { worked: false };
+    }
+    if (
+      !Number.isSafeInteger(assignment.heartbeatIntervalMs) ||
+      assignment.heartbeatIntervalMs < 1
+    ) {
+      await this.options.client
+        .release(assignment.lease.id)
+        .catch(() => undefined);
+      return {
+        worked: true,
+        taskId: assignment.task.id,
+        accepted: false,
+        reason: "Control plane returned an invalid heartbeat interval",
+      };
+    }
 
     this.activeLease = assignment.lease.id;
-    const scratch = path.join(
+    this.activeSession = undefined;
+    this.activeCancellation = undefined;
+    this.cancellationRequested = false;
+    this.admissionWait = new AbortController();
+    const scratch = workerScratchPath(
       this.options.workspaceRoot,
-      assignment.lease.id.replaceAll(/[^A-Za-z0-9_-]/gu, "").slice(-12),
+      assignment.lease.id,
     );
 
     // Heartbeat runs alongside execution: an agent can take many minutes, far
     // longer than the lease, so without this the control plane would reclaim a
     // task that is still being worked on.
     let leaseLost = false;
+    let heartbeat: Promise<void> | undefined;
     const beat = setInterval(() => {
-      void this.options.client.heartbeat(assignment.lease.id).catch((error) => {
-        if (error instanceof LeaseLostError) {
-          leaseLost = true;
-        }
-      });
+      if (heartbeat !== undefined || leaseLost) {
+        return;
+      }
+      heartbeat = this.options.client
+        .heartbeat(assignment.lease.id, this.spentSoFar())
+        .catch(async (error) => {
+          if (error instanceof LeaseLostError) {
+            leaseLost = true;
+            await this.cancelActiveSession();
+          }
+        })
+        .finally(() => {
+          heartbeat = undefined;
+        });
     }, Math.max(1_000, assignment.heartbeatIntervalMs));
     beat.unref?.();
 
@@ -178,6 +285,9 @@ export class Worker {
       }
 
       const planned = await this.plan(assignment, scratch);
+      if (leaseLost) {
+        throw new LeaseLostError(assignment.lease.id);
+      }
       const admission = await this.awaitAdmission(assignment, planned.plan);
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
@@ -190,11 +300,15 @@ export class Worker {
       if (leaseLost) {
         throw new LeaseLostError(assignment.lease.id);
       }
-      const accepted = await this.options.client.report(assignment.lease.id, {
-        status: "completed",
-        plan: result.plan,
-        changeSet: result.changeSet,
-      });
+      const accepted = await this.options.client.report(
+        assignment.lease.id,
+        {
+          status: "completed",
+          plan: result.plan,
+          changeSet: result.changeSet,
+        },
+        this.spentSoFar(),
+      );
       const withheld = (admission.deferredResources ?? []).map(
         (resource) => `${resource.resourceType}:${resource.resourceId}`,
       );
@@ -217,7 +331,12 @@ export class Worker {
       return { worked: true, taskId: assignment.task.id, accepted: false, reason: detail };
     } finally {
       clearInterval(beat);
+      await heartbeat?.catch(() => undefined);
+      await this.cancelActiveSession();
       this.activeLease = undefined;
+      this.activeSession = undefined;
+      this.activeCancellation = undefined;
+      this.admissionWait = undefined;
       await rm(scratch, { recursive: true, force: true }).catch(() => undefined);
     }
   }
@@ -236,33 +355,74 @@ export class Worker {
   ): Promise<PlanAdmission> {
     const budget =
       this.options.planWaitBudgetMs ?? DEFAULT_PLAN_WAIT_BUDGET_MS;
-    const deadline = Date.now() + budget;
+    const approvalBudget =
+      this.options.planApprovalWaitMs ?? DEFAULT_PLAN_APPROVAL_WAIT_MS;
+    let deadline = Math.min(Number.MAX_SAFE_INTEGER, Date.now() + budget);
     let admission = await this.options.client.submitPlan(
       assignment.lease.id,
       plan,
     );
+    // Waiting on a reviewer is a different kind of waiting. The lease is kept
+    // alive by the heartbeat either way, so extending the deadline costs only
+    // the repository slot — which is the trade a project makes when it turns
+    // the gate on.
+    const extend = (current: PlanAdmission): void => {
+      if (current.awaitingApproval === true) {
+        deadline = Math.max(deadline, Date.now() + approvalBudget);
+      }
+    };
+    extend(admission);
     while (
       !planAdmissionApproved(admission) &&
       // A requeue means canonical moved: the same plan can never be admitted
       // again, so waiting would be pointless.
       admission.requeue !== true &&
       !this.stopping &&
+      !this.cancellationRequested &&
       Date.now() < deadline
     ) {
-      const wait = Math.max(
-        MIN_PLAN_RETRY_MS,
-        admission.retryAfterMs ?? MIN_PLAN_RETRY_MS,
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) {
+        break;
+      }
+      const requested =
+        Number.isSafeInteger(admission.retryAfterMs) &&
+        (admission.retryAfterMs ?? 0) > 0
+          ? admission.retryAfterMs!
+          : MIN_PLAN_RETRY_MS;
+      const wait = Math.min(
+        remaining,
+        Math.max(MIN_PLAN_RETRY_MS, requested),
       );
-      await new Promise((resolve) => setTimeout(resolve, wait));
-      if (this.stopping) {
+      await this.waitForAdmissionRetry(wait);
+      if (this.stopping || this.cancellationRequested) {
         break;
       }
       admission = await this.options.client.submitPlan(
         assignment.lease.id,
         plan,
       );
+      extend(admission);
     }
     return admission;
+  }
+
+  private async waitForAdmissionRetry(milliseconds: number): Promise<void> {
+    const signal = this.admissionWait?.signal;
+    await new Promise<void>((resolve) => {
+      const timer = setTimeout(finish, milliseconds);
+      timer.unref?.();
+      function finish(): void {
+        signal?.removeEventListener("abort", finish);
+        clearTimeout(timer);
+        resolve();
+      }
+      if (signal?.aborted === true) {
+        finish();
+      } else {
+        signal?.addEventListener("abort", finish, { once: true });
+      }
+    });
   }
 
   /**
@@ -371,6 +531,11 @@ export class Worker {
       canonicalVersion: assignment.canonicalVersion,
       repositoryId: assignment.repository.id,
     });
+    this.activeSession = { adapter, sessionId: session.id };
+    if (this.cancellationRequested) {
+      await this.cancelActiveSession();
+      throw new LeaseLostError(assignment.lease.id);
+    }
     // The adapter separates planning from editing: requestPlan returns the
     // agent's intent without touching the workspace, and nothing is written
     // until sendContext. That split is what makes admission possible at all.
@@ -425,23 +590,10 @@ export class Worker {
           if (event.event !== "scope_change_requested") {
             return;
           }
-          const decision: ScopeChangeDecision = {
-            requestId:
-              event.requestId?.trim() ||
-              `scope_${assignment.task.id}_${Date.now()}`,
-            taskId: assignment.task.id,
-            decision: "rejected",
-            revisedPlan: plan,
-            constraints: [
-              "Remote execution must remain within the admitted plan",
-            ],
-            ownershipGrants: [],
-            explanation:
-              "Scope expansion was never arbitrated; it requires a new plan " +
-              "admission and lease",
-            decidedAt: new Date().toISOString(),
-          };
-          await adapter.resolveScopeChange(sessionId, decision);
+          await adapter.resolveScopeChange(
+            sessionId,
+            await this.arbitrateScope(assignment, plan, event),
+          );
         })
         .catch((error: unknown) => {
           eventError = error;
@@ -477,6 +629,65 @@ export class Worker {
     };
   }
 
+  /**
+   * Puts a mid-run scope request to the coordinator.
+   *
+   * The worker holds no view of what other tasks own, so it cannot answer
+   * this itself — which is why it used to refuse outright. It forwards
+   * instead, and the coordinator arbitrates the widened plan against every
+   * other active lease and answers grant, defer, or refuse.
+   *
+   * A transport failure is not silently turned into a grant. The agent is
+   * told the expansion was not granted and continues inside the scope it
+   * already owns, which is the same scope the control plane will hold its
+   * changeset to.
+   */
+  private async arbitrateScope(
+    assignment: WorkAssignment,
+    plan: AgentPlan,
+    event: Extract<AgentEvent, { event: "scope_change_requested" }>,
+  ): Promise<ScopeChangeDecision> {
+    const requestId =
+      event.requestId?.trim() || `scope_${assignment.task.id}_${Date.now()}`;
+    const request: ScopeChangeRequest = {
+      id: requestId,
+      taskId: assignment.task.id,
+      additionalFiles: [...event.additionalFiles],
+      additionalSymbols: [...(event.additionalSymbols ?? [])],
+      additionalApis: [...(event.additionalApis ?? [])],
+      additionalSchemas: [...(event.additionalSchemas ?? [])],
+      additionalConfigKeys: [...(event.additionalConfigKeys ?? [])],
+      additionalTests: [...(event.additionalTests ?? [])],
+      additionalServices: [...(event.additionalServices ?? [])],
+      reason: event.reason,
+      occurredAt: event.occurredAt,
+    };
+    try {
+      return await this.options.client.requestScopeChange(
+        assignment.lease.id,
+        request,
+      );
+    } catch (error) {
+      if (error instanceof LeaseLostError) {
+        throw error;
+      }
+      return {
+        requestId,
+        taskId: assignment.task.id,
+        decision: "rejected",
+        revisedPlan: plan,
+        constraints: [
+          "Remote execution must remain within the admitted plan",
+        ],
+        ownershipGrants: [],
+        explanation:
+          "The coordinator could not be reached to arbitrate this expansion: " +
+          (error instanceof Error ? error.message : String(error)),
+        decidedAt: new Date().toISOString(),
+      };
+    }
+  }
+
   private adapterFor(
     assignment: WorkAssignment,
     workspace: TaskWorkspace,
@@ -491,7 +702,7 @@ export class Worker {
       branch: assignment.repository.branch,
     };
 
-    if ((agent.adapter ?? "generic-cli") === "codex") {
+    if (agent.adapter === "codex") {
       if (sandbox !== undefined) {
         // CodexAdapter confines the agent through Codex's own --sandbox flag,
         // not through a WorkspaceSandbox, so the two cannot be combined yet.
@@ -513,6 +724,15 @@ export class Worker {
         planningRoot: path.join(workspace.rootPath, "planning"),
         ...(agent.command === undefined ? {} : { command: agent.command }),
         ...(agent.args === undefined ? {} : { args: agent.args }),
+        ...(agent.planningTimeoutMs === undefined
+          ? {}
+          : { planningTimeoutMs: agent.planningTimeoutMs }),
+        ...(agent.executionTimeoutMs === undefined
+          ? {}
+          : { executionTimeoutMs: agent.executionTimeoutMs }),
+        ...(agent.windowsSandbox === undefined
+          ? {}
+          : { windowsSandbox: agent.windowsSandbox }),
         ...(agent.env === undefined ? {} : { env: { ...process.env, ...agent.env } }),
         ...(this.options.codexRunner === undefined
           ? {}
@@ -541,6 +761,13 @@ export class Worker {
         planningRoot: path.join(workspace.rootPath, "planning"),
         ...(agent.command === undefined ? {} : { command: agent.command }),
         ...(agent.args === undefined ? {} : { args: agent.args }),
+        ...(agent.planningTimeoutMs === undefined
+          ? {}
+          : { planningTimeoutMs: agent.planningTimeoutMs }),
+        ...(agent.executionTimeoutMs === undefined
+          ? {}
+          : { executionTimeoutMs: agent.executionTimeoutMs }),
+        ...(agent.effort === undefined ? {} : { effort: agent.effort }),
         ...(agent.env === undefined
           ? {}
           : { env: { ...process.env, ...agent.env } }),
@@ -562,6 +789,9 @@ export class Worker {
       },
       repository,
       workspaces,
+      ...(agent.executionTimeoutMs === undefined
+        ? {}
+        : { executionTimeoutMs: agent.executionTimeoutMs }),
       ...(sandbox === undefined ? {} : { sandbox }),
     });
   }
@@ -594,7 +824,7 @@ export class Worker {
   }
 
   /**
-   * Stops after the current task and hands any held lease back.
+   * Cancels the current agent and hands any held lease back.
    *
    * Releasing is what makes a planned shutdown immediate: without it the task
    * would sit unavailable until the lease expired on its own.
@@ -602,8 +832,45 @@ export class Worker {
   public async stop(): Promise<void> {
     this.stopping = true;
     const lease = this.activeLease;
-    if (lease !== undefined) {
-      await this.options.client.release(lease).catch(() => undefined);
+    await Promise.all([
+      this.cancelActiveSession(),
+      lease === undefined
+        ? Promise.resolve()
+        : this.options.client.release(lease).catch(() => undefined),
+    ]);
+  }
+
+  /**
+   * What the running agent says it has spent so far.
+   *
+   * Empty when the adapter cannot report, which is most of them: reporting is
+   * optional throughout, and a coordinator that received nothing records
+   * nothing rather than inventing a figure a budget would then be enforced
+   * against.
+   */
+  private spentSoFar(): AgentTokenUsage[] {
+    const active = this.activeSession;
+    if (active === undefined) {
+      return [];
     }
+    try {
+      return active.adapter.reportedTokenUsage?.(active.sessionId) ?? [];
+    } catch {
+      // Accounting must never be able to kill a run.
+      return [];
+    }
+  }
+
+  private cancelActiveSession(): Promise<void> {
+    this.cancellationRequested = true;
+    this.admissionWait?.abort();
+    const active = this.activeSession;
+    if (active === undefined) {
+      return Promise.resolve();
+    }
+    this.activeCancellation ??= active.adapter
+      .cancel(active.sessionId)
+      .catch(() => undefined);
+    return this.activeCancellation;
   }
 }

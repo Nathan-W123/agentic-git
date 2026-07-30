@@ -1,5 +1,11 @@
 import type { WorkAssignment } from "@coord/cli/worker-operations";
-import type { AgentPlan, PlanAdmission } from "@coord/shared-types";
+import type { AgentTokenUsage } from "@coord/agent-protocol";
+import type {
+  AgentPlan,
+  PlanAdmission,
+  ScopeChangeDecision,
+  ScopeChangeRequest,
+} from "@coord/shared-types";
 
 /**
  * HTTP client for the remote worker protocol.
@@ -103,9 +109,8 @@ export class WorkerClient {
       init.timeoutMs ?? this.timeoutMs,
     );
     timer.unref?.();
-    let response: Response;
     try {
-      response = await this.fetchImpl(`${this.base}${path}`, {
+      const response = await this.fetchImpl(`${this.base}${path}`, {
         method: init.method ?? "GET",
         headers,
         signal: controller.signal,
@@ -114,50 +119,82 @@ export class WorkerClient {
           ? {}
           : { body: JSON.stringify(init.body) }),
       });
+
+      if (response.status === 204) {
+        return { status: 204 };
+      }
+      if (init.expectBinary === true && response.ok) {
+        return {
+          status: response.status,
+          bytes: await this.readBundle(response),
+        };
+      }
+
+      const text = await response.text();
+      const json: unknown = text.length === 0 ? undefined : JSON.parse(text);
+      if (!response.ok) {
+        const error = (json as { error?: { code?: string; message?: string } })
+          ?.error;
+        throw new ControlPlaneError(
+          response.status,
+          error?.code ?? "request_failed",
+          error?.message ?? `Request to ${path} failed with ${response.status}`,
+        );
+      }
+      return { status: response.status, json };
     } finally {
+      // A fetch resolves as soon as headers arrive. Keeping the deadline alive
+      // through body parsing prevents a peer from holding a worker forever
+      // with a response that starts promptly and then stalls.
       clearTimeout(timer);
     }
+  }
 
-    if (response.status === 204) {
-      return { status: 204 };
-    }
-    if (init.expectBinary === true && response.ok) {
-      const declaredLength = Number.parseInt(
-        response.headers.get("content-length") ?? "",
-        10,
-      );
+  private async readBundle(response: Response): Promise<Buffer> {
+    const contentLength = response.headers.get("content-length");
+    if (contentLength !== null) {
+      const declaredLength = Number(contentLength);
       if (
-        Number.isFinite(declaredLength) &&
-        declaredLength > this.maxBundleBytes
+        !Number.isSafeInteger(declaredLength) ||
+        declaredLength < 0
       ) {
+        await response.body?.cancel().catch(() => undefined);
+        throw new Error("Repository bundle has an invalid Content-Length");
+      }
+      if (declaredLength > this.maxBundleBytes) {
+        await response.body?.cancel().catch(() => undefined);
         throw new Error(
           `Repository bundle exceeds ${this.maxBundleBytes} bytes`,
         );
       }
-      const bytes = Buffer.from(await response.arrayBuffer());
-      if (bytes.byteLength > this.maxBundleBytes) {
-        throw new Error(
-          `Repository bundle exceeds ${this.maxBundleBytes} bytes`,
-        );
-      }
-      return {
-        status: response.status,
-        bytes,
-      };
     }
 
-    const text = await response.text();
-    const json: unknown = text.length === 0 ? undefined : JSON.parse(text);
-    if (!response.ok) {
-      const error = (json as { error?: { code?: string; message?: string } })
-        ?.error;
-      throw new ControlPlaneError(
-        response.status,
-        error?.code ?? "request_failed",
-        error?.message ?? `Request to ${path} failed with ${response.status}`,
-      );
+    if (response.body === null) {
+      return Buffer.alloc(0);
     }
-    return { status: response.status, json };
+    const reader = response.body.getReader();
+    const chunks: Buffer[] = [];
+    let total = 0;
+    try {
+      while (true) {
+        const next = await reader.read();
+        if (next.done) {
+          break;
+        }
+        const chunk = Buffer.from(next.value);
+        total += chunk.byteLength;
+        if (total > this.maxBundleBytes) {
+          await reader.cancel("bundle size limit exceeded").catch(() => undefined);
+          throw new Error(
+            `Repository bundle exceeds ${this.maxBundleBytes} bytes`,
+          );
+        }
+        chunks.push(chunk);
+      }
+    } finally {
+      reader.releaseLock();
+    }
+    return Buffer.concat(chunks, total);
   }
 
   public async register(input: {
@@ -189,10 +226,22 @@ export class WorkerClient {
     return status === 204 ? undefined : (json as WorkAssignment);
   }
 
-  public async heartbeat(leaseId: string): Promise<void> {
+  /**
+   * Extends the lease, and carries the agent's running spend up with it.
+   *
+   * The usage rides on the heartbeat rather than getting an endpoint of its
+   * own because the two answer the same question at the same moment: the
+   * control plane is already deciding whether this task may keep going, and
+   * what it has cost so far is part of that decision.
+   */
+  public async heartbeat(
+    leaseId: string,
+    tokenUsage: readonly AgentTokenUsage[] = [],
+  ): Promise<void> {
     try {
       await this.request(`/api/v1/workers/leases/${leaseId}/heartbeat`, {
         method: "POST",
+        ...(tokenUsage.length === 0 ? {} : { body: { tokenUsage } }),
       });
     } catch (error) {
       if (
@@ -252,6 +301,46 @@ export class WorkerClient {
     }
   }
 
+  /**
+   * Asks the coordinator to widen the admitted scope, mid-execution.
+   *
+   * Uses the long result timeout rather than the ordinary request timeout: a
+   * project may gate the expansion on a reviewer, and the control plane holds
+   * the request open while that person decides, exactly as it does for a
+   * gated changeset.
+   */
+  public async requestScopeChange(
+    leaseId: string,
+    request: ScopeChangeRequest,
+  ): Promise<ScopeChangeDecision> {
+    try {
+      const { json } = await this.request(
+        `/api/v1/workers/leases/${leaseId}/scope`,
+        {
+          method: "POST",
+          body: { request },
+          timeoutMs: this.resultTimeoutMs,
+        },
+      );
+      const decision = (json as { decision?: ScopeChangeDecision } | undefined)
+        ?.decision;
+      if (decision === undefined) {
+        throw new Error(
+          `Control plane returned no scope decision for lease ${leaseId}`,
+        );
+      }
+      return decision;
+    } catch (error) {
+      if (
+        error instanceof ControlPlaneError &&
+        (error.code === "lease_lost" || error.code === "budget_exceeded")
+      ) {
+        throw new LeaseLostError(leaseId);
+      }
+      throw error;
+    }
+  }
+
   public async report(
     leaseId: string,
     result:
@@ -262,12 +351,18 @@ export class WorkerClient {
           detail?: string;
         }
       | { status: "failed"; detail: string },
+    tokenUsage: readonly AgentTokenUsage[] = [],
   ): Promise<{ accepted: boolean; reason?: string }> {
     const { json } = await this.request(
       `/api/v1/workers/leases/${leaseId}/result`,
       {
         method: "POST",
-        body: result,
+        // Final spend travels with the result so the last of it is recorded
+        // even when the run finished between two heartbeats.
+        body: {
+          ...result,
+          ...(tokenUsage.length === 0 ? {} : { tokenUsage }),
+        },
         timeoutMs: this.resultTimeoutMs,
       },
     );

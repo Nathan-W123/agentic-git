@@ -4,22 +4,24 @@ This document maps the repository to `instructions.md`. It distinguishes
 implemented behavior from later product phases so missing work is explicit.
 
 `instructions.md` describes a multi-developer, multi-device platform. What is
-implemented today runs as a single-host control plane with remote worker
-execution over HTTP. Cross-device deployment, shared canonical storage, and
-multi-tenant hosting remain later phases.
+implemented today uses one active control-plane process with remote worker
+execution over HTTP and either SQLite or PostgreSQL coordination state.
+Workers can run on other devices; canonical Git storage and integration remain
+on the control-plane host. High availability and shared canonical object
+storage remain later phases.
 
 ## Required MVP
 
 | Requirement | Status | Evidence |
 | --- | --- | --- |
 | GitHub repository import | Implemented | HTTPS/SSH normalization, optional token injection through Git environment, rollback on failed imports |
-| Two coding-agent adapters | Implemented | Generic JSONL adapter and native Codex adapter |
+| At least two coding-agent adapters | Implemented and exceeded | Generic JSONL, Codex, Claude, and Gemini adapters |
 | Task submission | Implemented | Durable project queue through CLI and API/web |
 | Agent plan submission | Implemented | Validated plans are required before workspace execution |
 | File-level ownership | Implemented | Expiring resource leases and scheduling decisions |
-| Isolated Docker workspaces | Implemented, runtime proof pending | Deny-default network, read-only root, dropped capabilities, CPU, memory, PID, and timeout controls; live daemon unavailable in the latest audit |
+| Isolated Docker workspaces | Implemented and runtime verified | Live verification confirms deny-default network, workspace-only writes, masked Git metadata, read-only root, and successful containerized coordination |
 | Live task status | Implemented | Durable state plus project-scoped WebSocket audit updates |
-| Diff collection | Implemented | Host-collected structured patches retained in SQLite |
+| Diff collection | Implemented | Host-collected structured patches retained in the configured coordination store |
 | Automated tests | Implemented | Validation commands run in temporary integration snapshots |
 | Sequential atomic integration | Implemented | Git three-way application and compare-and-swap canonical promotion |
 | Git commit creation | Implemented | Every promoted changeset creates a canonical checkpoint |
@@ -37,18 +39,23 @@ The local Phase 1 product surface is complete:
   and viewer RBAC.
 - Task submission, queue filtering, cancellation, retry, repository runs, and
   live status.
-- Run history and detail views for plans, conflicts, plan revisions, scope
+- Execution history and detail views for plans, conflicts, plan revisions, scope
   decisions, patches, validation, integrations, and audit events.
 - Approval queue, reasons, diff review, approve/reject decisions, and durable
   reviewer comments.
-- Credential-safe GitHub import and repository status.
+- Greenfield repository creation, credential-safe GitHub import, and
+  repository status.
 - Team membership, role controls, project and organization settings, user
   creation, account disabling, and system-admin controls.
 - Responsive desktop/mobile layout and project-scoped WebSocket refreshes.
+- Board, canonical history, pipeline-safe rollback, registered-worker fleet,
+  coordination metrics, and diff-anchored review comments.
+- Per-user Git overlay workspaces with Monaco editing, bounded one-shot
+  commands inside the configured Docker sandbox, and pipeline submission.
 
-The web product is a control room, not a full browser IDE. Presence, cursors,
-terminals, Monaco editing, and unapproved overlay projection remain later
-surfaces, consistent with the MVP non-goals.
+The web product is still a control room rather than a collaborative IDE.
+Presence, shared cursors, PTY terminal streams, and projection of agents'
+unapproved in-flight edits remain later surfaces.
 
 ## Deeper Coordination
 
@@ -87,19 +94,20 @@ Dynamic replanning is implemented end to end:
 5. During execution, a structured scope request is checked against active
    work. Conflict-free resources receive new leases; protected scope waits for
    human approval; conflicting scope is rejected with evidence.
-6. Generic and Codex adapters support replanning. The generic protocol also
-   carries pause, resume, cancel, and scope-decision messages.
+6. Generic, Codex, Claude, and Gemini adapters support replanning. The generic
+   protocol also carries pause, resume, cancel, and scope-decision messages.
 
 Plan revisions, scope requests, decisions, approvals, and canonical-change
 evidence survive process and browser restarts in the coordination store.
 
 ## Repository Lifecycle
 
-- Greenfield start: importing a path that is not yet a repository, or one with
-  no commits, initializes it and makes an initial commit. Any files already
-  present become that commit. A repository that already has history is never
-  modified, and a missing branch there is still an error rather than an
-  invented commit.
+- Greenfield start: `coord repo create` and the web repository form create an
+  empty canonical repository with an initial commit. Importing a path that is
+  not yet a repository, or one with no commits, also initializes it; any files
+  already present become that commit. A repository that already has history
+  is never modified, and a missing branch there is still an error rather than
+  an invented commit.
 - Import records the upstream tip as `refs/coord/imported/<branch>` inside the
   canonical mirror, so the mirror itself knows what it diverged from.
 - Export publishes canonical state with `coord repo push`. It targets a
@@ -116,8 +124,9 @@ Hosted execution has a protocol and a working control-plane half:
   by headless clients without cookies or CSRF.
 - A worker protocol with exclusive expiring leases, heartbeats, release, and
   requeue on expiry, so a worker that dies cannot strand a task.
-- Workspace materialization by Git bundle, so a worker receives only the
-  revision it was leased and the control plane runs no Git server.
+- Workspace materialization by Git bundle, so a worker receives one advertised
+  lease ref plus the ancestors Git needs to materialize it, but no newer
+  canonical tip or unrelated branch ref.
 - A worker daemon that leases, clones, runs an agent, and returns a changeset,
   honoring the project container sandbox when one is configured.
 - Plan-first admission (protocol version 2): the worker's agent plans, the
@@ -128,6 +137,27 @@ Hosted execution has a protocol and a working control-plane half:
   serialized in the store, so concurrent workers cannot both be admitted
   against a stale view. Exact-base integration and requeue-to-replan remain
   the backstop underneath. See docs/protocol/remote-workers.md.
+- An optional human gate at admission time (`requireRemotePlanReview`), so a
+  risky *plan* stops for a reviewer before the agent runs rather than after.
+  The reasons are the ones the local scheduler already stops on, the approval
+  record is the same durable one, and the worker waits on a separate,
+  much longer budget because waiting for a person is not waiting for a lease.
+- Mid-execution scope arbitration. A remote agent that needs a file outside
+  its admitted plan is answered rather than refused: the widened plan goes
+  through the same admission machinery against every other active lease and
+  comes back granted, deferred (with the holders named and a retry interval),
+  or refused with a reason. A grant replaces the admitted contract before the
+  edits arrive, so result enforcement is unchanged.
+- Token cost accounting and caps. Agents that report their spend have it
+  recorded per task and per project; `maxTaskTokens` is enforced at heartbeat,
+  while the spending is still happening, and `maxProjectTokensPerDay` throttles
+  leasing the way the runtime budget does. Reporting is optional and never
+  inferred, so an agent that says nothing is recorded as having said nothing.
+
+Container isolation for hosted execution is verified against a live Docker
+daemon, not merely implemented: `npm run verify:remote-docker` drives the whole
+protocol end to end with the agent in a container, and the agent probes its own
+confinement from inside and reports the verdicts with its changeset.
 
 Phase 2's coordination surfaces are reachable from the control room, not only
 from the API and CLI: a Coordination route showing prediction quality, rework,
@@ -151,30 +181,54 @@ The coordination store itself is no longer bound to one disk: alongside the
 SQLite file, a PostgreSQL backend implements the same store contract and is
 selected by setting `COORD_DATABASE_URL` to a `postgresql://` URL. Both
 backends are validated by one parameterized contract suite; the Postgres tests
-run against a real dockerized server. Execution remains single-host today:
-the control plane, canonical repositories, and integration all share one
-machine even when state lives in a shared database.
+run against a real dockerized server when Docker is available. Agent execution
+can be remote, while the control plane, canonical repositories, and integration
+still share one host even when state lives in a shared database.
 
 ## Later Phases
 
 The following are intentionally not represented as complete:
 
-- In-place resumption of a half-finished agent session. Crash recovery is
-  automatic but restart-shaped: on boot (and via `coord recover`) the control
-  plane fails runs stranded in `running`, requeues claimed tasks whose
-  process died — live remote leases are left untouched — clears orphaned
+- In-place resumption of a half-finished *agent session*. This is an
+  architectural limit rather than a to-do: agents are stateless child
+  processes whose reasoning lives in their own memory and whose edits live in
+  a workspace the crash orphaned, so nothing durable describes where one had
+  got to. A task killed while its agent was thinking genuinely has to run
+  again.
+
+  The pipeline behind the agent does now resume. A changeset is written to the
+  store the moment it is collected, before anything is validated or promoted,
+  so a crash in that window leaves a complete durable description of finished
+  work. On boot (and via `coord recover`) the control plane integrates it —
+  three-way apply, declared-versus-applied comparison, validation under the
+  project's sandbox, compare-and-swap promotion, exactly as the normal path —
+  instead of failing the task and paying for the agent run a second time.
+  Recovery still fails what it cannot resume, requeues claimed tasks whose
+  process died (live remote leases are left untouched), clears orphaned
   workspace/planning/integration worktrees, and prunes their registrations
-  from the canonical mirrors. A recovered task re-runs from the queue rather
-  than resuming mid-session.
+  from the canonical mirrors. `coord recover` reports resumed tasks alongside
+  failed runs.
 - Redis/event-bus deployment, high availability, Kubernetes, Terraform,
   hybrid workers, and air-gapped release tooling. (A PostgreSQL storage
   backend exists; the rest of that deployment stack does not.)
 - Dependency/malware scanning, signed artifacts, external audit anchoring,
-  SSO, and billing. (Declarative per-project policy now governs approvals
-  and runtime budgets — see docs/deployment.md — but model-cost accounting
-  and payment plumbing do not exist.)
-- Full IDE, presence/cursor/terminal streams, and projection of unapproved task
-  overlays.
+  SSO, and billing. (Declarative per-project policy governs approvals,
+  runtime budgets, and token budgets — see docs/deployment.md. Token counts
+  are accounted and capped; per-model pricing, invoicing, and payment
+  plumbing do not exist.)
+- Container isolation for the vendor CLIs. Codex, Claude Code, and Gemini CLI
+  run on the host under their own sandboxing, because the container denies
+  egress by default and a vendor CLI cannot reach its provider's API without
+  it, and because their credentials are host login state the container
+  deliberately cannot see. The dependency is a per-task egress allowlist, not
+  adapter work; docs/protocol/remote-workers.md records the evidence.
+- Validation executed by the worker rather than by the control-plane host.
+  With a sandbox configured it already runs in a container rather than as the
+  control-plane process, but the tree being validated is the merge of a result
+  onto current canonical, which exists only on the control plane.
+- Collaborative IDE presence/cursors, PTY terminal streams, and projection of
+  agents' unapproved in-flight edits. Per-user human overlay editing and
+  bounded sandbox commands are already implemented.
 - Broad language-server coverage, cross-repository planning, learned
   scheduling, and automatic semantic conflict resolution.
 - Continuous external Git synchronization, release/tag management, pull-request

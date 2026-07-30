@@ -526,6 +526,114 @@ test("a protected remote result waits for durable human approval", async () => {
   }
 });
 
+test("a gated remote plan waits for a reviewer before any agent runs", async () => {
+  const harness = await createHarness();
+  try {
+    // The gate the local coordinator has always had, asked for remotely.
+    await harness.store.updateProject(DEFAULT_PROJECT_ID, {
+      policy: {
+        version: 1,
+        approvals: { requireRemotePlanReview: true, riskLevels: ["high"] },
+      },
+    });
+
+    const taskId = await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+
+    const pending = await admit(harness, assignment, { riskLevel: "high" });
+    assert.equal(pending.outcome, "admitted");
+    const first =
+      pending.outcome === "admitted" ? pending.admission : undefined;
+    assert.equal(first?.status, "sequenced");
+    assert.equal(first?.awaitingApproval, true);
+    assert.ok(first?.approvalId);
+    assert.ok(first?.runId);
+    // Not approved: the worker has no licence to execute, which is the whole
+    // point of moving the gate ahead of execution.
+    assert.equal(first === undefined ? true : planAdmissionApproved(first), false);
+    assert.match(first?.explanation ?? "", /waiting for human approval/u);
+
+    const approval = await approvalFor(harness, taskId);
+    assert.equal(approval.kind, "policy_override");
+    assert.ok(
+      approval.reasons.some((reason) => reason.includes("risk level is high")),
+    );
+
+    // Resubmitting while the reviewer is still deciding is idempotent: the
+    // same approval, not a second one queued behind the first.
+    const again = await admit(harness, assignment, { riskLevel: "high" });
+    assert.equal(
+      again.outcome === "admitted" ? again.admission.approvalId : undefined,
+      approval.id,
+    );
+    assert.equal((await harness.store.listApprovals({ taskId })).length, 1);
+
+    await harness.store.decideApproval({
+      approvalId: approval.id,
+      status: "approved",
+      decidedBy: "reviewer",
+      comment: "Reviewed the plan before it ran",
+      decidedAt: new Date().toISOString(),
+    });
+
+    const admitted = await admit(harness, assignment, { riskLevel: "high" });
+    assert.equal(admitted.outcome, "admitted");
+    const decision =
+      admitted.outcome === "admitted" ? admitted.admission : undefined;
+    assert.ok(decision && planAdmissionApproved(decision));
+    // The run opened to carry the approval is the run the result will use.
+    assert.equal(decision?.runId, first?.runId);
+    assert.ok((decision?.ownershipGrants.length ?? 0) > 0);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a rejected remote plan fails its lease instead of executing", async () => {
+  const harness = await createHarness();
+  try {
+    await harness.store.updateProject(DEFAULT_PROJECT_ID, {
+      policy: {
+        version: 1,
+        approvals: { requireRemotePlanReview: true, riskLevels: ["high"] },
+      },
+    });
+
+    const taskId = await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+    await admit(harness, assignment, { riskLevel: "high" });
+
+    const approval = await approvalFor(harness, taskId);
+    await harness.store.decideApproval({
+      approvalId: approval.id,
+      status: "rejected",
+      decidedBy: "reviewer",
+      comment: "Too risky to run unattended",
+      decidedAt: new Date().toISOString(),
+    });
+
+    const refused = await admit(harness, assignment, { riskLevel: "high" });
+    assert.equal(refused.outcome, "rejected");
+    assert.match(
+      refused.outcome === "rejected" ? refused.reason : "",
+      /not approved/u,
+    );
+
+    // Failed, not requeued: the same plan would be refused again, and a
+    // reviewer's "no" is not a transient condition to retry through.
+    assert.equal(
+      (await harness.store.getWorkLease(assignment.lease.id))?.status,
+      "failed",
+    );
+    const tasks = await harness.store.listSubmittedTasks();
+    assert.equal(tasks.find((task) => task.id === taskId)?.status, "failed");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
 test("a project policy forces review of an otherwise benign changeset", async () => {
   const harness = await createHarness();
   try {
@@ -595,6 +703,59 @@ test("a project policy forces review of an otherwise benign changeset", async ()
     const result = await resultPromise;
     assert.equal(result.accepted, true, result.reason);
     assert.equal(result.integrationStatus, "integrated");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("an exhausted daily token budget stops leasing until cleared", async () => {
+  const harness = await createHarness();
+  try {
+    await harness.store.updateProject(DEFAULT_PROJECT_ID, {
+      policy: {
+        version: 1,
+        budgets: { maxProjectTokensPerDay: 10_000 },
+      },
+    });
+
+    await submit(harness);
+    const first = await lease(harness);
+    assert.ok(first, "the untouched budget must admit the first lease");
+
+    // The spend an agent reported, recorded against the lease that incurred
+    // it — the same write the heartbeat performs in the running system.
+    await harness.store.recordTokenUsage({
+      usageKey: `${first.lease.id}:execution`,
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: "repo_worker",
+      taskId: first.task.id,
+      leaseId: first.lease.id,
+      agentId: first.task.agentId,
+      phase: "execution",
+      totalTokens: 12_000,
+      recordedAt: new Date().toISOString(),
+    });
+    await harness.store.finishWorkLease(
+      first.lease.id,
+      "completed",
+      new Date().toISOString(),
+      "spent the budget",
+    );
+    await harness.store.completeSubmittedTask(first.task.id, "integrated");
+
+    // Queued, not failed: a token budget throttles spend exactly as the
+    // runtime budget throttles time, and neither discards work.
+    const queued = await submit(harness);
+    assert.equal(await lease(harness), undefined);
+    assert.equal(
+      (await harness.store.listSubmittedTasks()).find(
+        (task) => task.id === queued,
+      )?.status,
+      "submitted",
+    );
+
+    await harness.store.updateProject(DEFAULT_PROJECT_ID, { policy: null });
+    assert.equal((await lease(harness))?.task.id, queued);
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }

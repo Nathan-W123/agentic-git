@@ -35,12 +35,16 @@ import {
 import {
   assertAgentPlan,
   assertChangeSet,
+  createId,
   deferredFilePaths,
+  mergePlanScope,
   normalizeRepositoryPath,
   planAdmissionApproved,
   planAdmissionPartial,
   projectBudgets,
   reducePlanScope,
+  uniqueRepositoryPaths,
+  uniqueStrings,
   type AgentPlan,
   type CanonicalVersion,
   type ChangeSet,
@@ -49,6 +53,8 @@ import {
   type IntegrationResult,
   type PlanAdmission,
   type ResourceType,
+  type ScopeChangeDecision,
+  type ScopeChangeRequest,
   type TaskDefinition,
 } from "@coord/shared-types";
 import {
@@ -275,7 +281,26 @@ export async function leaseWork(
   // rolls out of the 24-hour window. Tasks stay queued rather than failing —
   // the budget throttles spend, it does not discard work.
   const projectRecord = await store.getProject(input.projectId);
-  const budget = projectBudgets(projectRecord?.policy).maxProjectRuntimeMsPerDay;
+  const budgets = projectBudgets(projectRecord?.policy);
+  const budget = budgets.maxProjectRuntimeMsPerDay;
+  // The same throttle applied to spend rather than to time. A task can be
+  // quick and expensive, so this is a separate limit rather than a proxy for
+  // the runtime one, and it is checked the same way: sum what has been
+  // reported inside the window and stop handing out work when it is used up.
+  if (budgets.maxProjectTokensPerDay !== undefined) {
+    const windowStart = new Date(
+      Date.now() - 24 * 60 * 60 * 1000,
+    ).toISOString();
+    const spent = (
+      await store.listTokenUsage({
+        projectId: input.projectId,
+        recordedAfter: windowStart,
+      })
+    ).reduce((sum, entry) => sum + entry.totalTokens, 0);
+    if (spent >= budgets.maxProjectTokensPerDay) {
+      return undefined;
+    }
+  }
   if (budget !== undefined) {
     const now = Date.now();
     const windowStart = new Date(now - 24 * 60 * 60 * 1000).toISOString();
@@ -645,6 +670,169 @@ async function queueDeferredScope(
   return followUp.id;
 }
 
+/**
+ * The human gate in front of a remote plan.
+ *
+ * `pending` is not a failure and not a refusal: the reviewer has not answered
+ * yet. The worker keeps its lease, keeps heartbeating, and resubmits, because
+ * what it is waiting for is a person rather than another worker's lease.
+ */
+type PlanGate =
+  | { outcome: "approved"; runId: string }
+  | { outcome: "pending"; admission: PlanAdmission }
+  | { outcome: "refused"; reason: string };
+
+/** Short enough that an approval is picked up promptly, long enough to idle. */
+const APPROVAL_POLL_RETRY_MS = 5_000;
+
+/**
+ * Asks a reviewer about a remote plan before any agent time is spent on it.
+ *
+ * The local coordinator has always gated a risky plan between `requestPlan`
+ * and `sendContext`. Remotely the only gate was at the changeset, which is
+ * after the agent has run — the review could reject work that had already
+ * been paid for, and could not prevent a high-risk plan from executing at
+ * all. This closes that asymmetry, using the same reasons the local gate
+ * uses and the same durable approval record, so one queue serves both.
+ *
+ * It is judged on the plan the worker submitted rather than on the enriched
+ * one, deliberately: what a reviewer is being asked to sanction is what the
+ * agent said it would do, not what the index later inferred from it.
+ *
+ * An approval needs a run to belong to, so a gated plan opens its run early
+ * and the result path reuses it. That has a second benefit — a plan waiting
+ * on a reviewer is visible in run history while it waits, instead of
+ * appearing only once the work is finished.
+ */
+async function gateRemotePlan(
+  store: CoordinationStore,
+  lease: WorkLease,
+  task: SubmittedTask,
+  repository: { id: string; path: string; branch: string },
+  baseVersion: CanonicalVersion,
+  plan: AgentPlan,
+  reasons: readonly string[],
+  organizationId: string | undefined,
+  timeoutMs: number,
+): Promise<PlanGate> {
+  const now = new Date().toISOString();
+  const previous = lease.plan?.admission;
+  let runId = previous?.runId;
+
+  const pendingAdmission = (
+    approvalId: string,
+    openRunId: string,
+  ): PlanAdmission => ({
+    status: "sequenced",
+    taskId: task.id,
+    planRevision: 1,
+    baseRevision: baseVersion.revision,
+    ownershipGrants: [],
+    constraints: [
+      "Hold this plan until a reviewer decides; do not start editing",
+    ],
+    blockedBy: [],
+    conflicts: [],
+    explanation: `Plan is waiting for human approval: ${reasons.join("; ")}`,
+    retryAfterMs: APPROVAL_POLL_RETRY_MS,
+    awaitingApproval: true,
+    approvalId,
+    runId: openRunId,
+    decidedAt: new Date().toISOString(),
+  });
+
+  if (previous?.approvalId !== undefined && runId !== undefined) {
+    await store.expireApprovals(now);
+    const current = await store.getApproval(previous.approvalId);
+    if (current !== undefined) {
+      if (current.status === "approved") {
+        await trace(store, runId, "approval_decided", task.id, {
+          projectId: task.projectId,
+          approvalId: current.id,
+          status: current.status,
+          decidedBy: current.decidedBy,
+          stage: "remote_plan_admission",
+        });
+        return { outcome: "approved", runId };
+      }
+      if (current.status === "pending") {
+        return {
+          outcome: "pending",
+          admission: pendingAdmission(current.id, runId),
+        };
+      }
+      const reason =
+        `Remote plan was not approved: approval ${current.id} is ` +
+        `${current.status}${
+          current.decisionComment === undefined
+            ? ""
+            : ` (${current.decisionComment})`
+        }`;
+      await trace(store, runId, "approval_decided", task.id, {
+        projectId: task.projectId,
+        approvalId: current.id,
+        status: current.status,
+        decidedBy: current.decidedBy,
+        stage: "remote_plan_admission",
+      });
+      await store
+        .saveTaskStatus(runId, task.id, "failed", reason)
+        .catch(() => undefined);
+      await store.finishRun(runId, "failed").catch(() => undefined);
+      return { outcome: "refused", reason };
+    }
+  }
+
+  if (runId === undefined) {
+    const run = await store.createRun({
+      repository,
+      ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
+      mode: "coordinated",
+      scenario: "remote-worker",
+      baseVersion,
+    });
+    runId = run.id;
+    await store.saveTask(runId, {
+      id: task.id,
+      objective: task.objective,
+      agentId: task.agentId,
+      validationCommands: task.validationCommands,
+      ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
+    });
+    await store.savePlan(runId, task.id, plan);
+  }
+  await store.saveTaskStatus(
+    runId,
+    task.id,
+    "awaiting_approval",
+    reasons.join("; "),
+  );
+  const request = await store.createApproval({
+    ...(organizationId === undefined ? {} : { organizationId }),
+    ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
+    repositoryId: task.repositoryId,
+    runId,
+    taskId: task.id,
+    kind: "policy_override",
+    requestedBy: task.agentId,
+    requiredRole: "reviewer",
+    reasons: [...reasons],
+    expiresAt: new Date(Date.now() + timeoutMs).toISOString(),
+  });
+  await trace(store, runId, "approval_requested", task.id, {
+    projectId: task.projectId,
+    repositoryId: task.repositoryId,
+    workerId: lease.workerId,
+    leaseId: lease.id,
+    approvalId: request.id,
+    kind: request.kind,
+    reasons: request.reasons,
+    expiresAt: request.expiresAt,
+    stage: "remote_plan_admission",
+  });
+  return { outcome: "pending", admission: pendingAdmission(request.id, runId) };
+}
+
 export interface WorkPlanInput {
   leaseId: string;
   actorId: string;
@@ -830,6 +1018,56 @@ export async function admitWorkPlan(
     };
   }
 
+  // The human gate, when the project asked for one. It sits ahead of every
+  // arbitration path below — including the solo fast path — because its
+  // question is not "does this collide" but "should this run at all", and
+  // that answer does not change with how busy the repository is.
+  const gateProject =
+    task.projectId === undefined
+      ? undefined
+      : await store.getProject(task.projectId);
+  const gatePolicy = approvalPolicyForProject(gateProject?.policy);
+  const gateReasons = gatePolicy.remotePlanReasons(submitted);
+  let gatedRunId: string | undefined;
+  if (gateReasons.length > 0) {
+    const gate = await gateRemotePlan(
+      store,
+      lease,
+      task,
+      storedRepository,
+      baseVersion,
+      submitted,
+      gateReasons,
+      gateProject?.organizationId,
+      gatePolicy.timeoutMs,
+    );
+    if (gate.outcome === "refused") {
+      await failLease(store, lease, gate.reason, "remote_plan_approval");
+      return { outcome: "rejected", reason: gate.reason };
+    }
+    if (gate.outcome === "pending") {
+      const saved = await store.saveWorkLeasePlan({
+        leaseId: lease.id,
+        submission: { plan: submitted, admission: gate.admission },
+        observedApprovedLeaseIds: (await executingPlans(store, lease))
+          .approvedLeaseIds,
+      });
+      if (saved.outcome === "lease_lost") {
+        return {
+          outcome: "lease_lost",
+          reason: "lease was lost while its plan awaited approval",
+        };
+      }
+      // A "stale" write only means another lease was admitted meanwhile. The
+      // approval is durable either way, and the next resubmission finds it
+      // through the lease record it did manage to write, or opens a fresh
+      // one. Returning the pending answer keeps the worker waiting rather
+      // than sending it back to plan a task a reviewer is already looking at.
+      return { outcome: "admitted", admission: gate.admission };
+    }
+    gatedRunId = gate.runId;
+  }
+
   // Solo fast path: with nothing else executing in this repository there is
   // nothing to arbitrate against, and every millisecond spent indexing,
   // enriching and scoring would be spent comparing a plan with an empty set.
@@ -865,6 +1103,7 @@ export async function admitWorkPlan(
         explanation:
           "Approved without arbitration: no other task is executing in " +
           "this repository. Exact-base integration remains in force.",
+        ...(gatedRunId === undefined ? {} : { runId: gatedRunId }),
         decidedAt: new Date().toISOString(),
       };
       const saved = await store.saveWorkLeasePlan({
@@ -960,7 +1199,7 @@ export async function admitWorkPlan(
           }
         : entry,
     );
-    const admission = admissions.admit({
+    const decided = admissions.admit({
       plan,
       agentId: task.agentId,
       baseRevision: baseVersion.revision,
@@ -980,6 +1219,11 @@ export async function admitWorkPlan(
       symbolRangesInFile: (file) =>
         intelligence.symbolRangesInFile(index, file),
     });
+    // A gated plan already opened its run to hang the approval off. Carrying
+    // that id forward is what keeps the result path from opening a second one
+    // and splitting one task's history across two records.
+    const admission: PlanAdmission =
+      gatedRunId === undefined ? decided : { ...decided, runId: gatedRunId };
     // What is recorded against the lease is what was actually granted. On a
     // partial admission that is the reduced plan, and recording the whole one
     // would be a lie with consequences: this record is the view every later
@@ -1071,6 +1315,441 @@ export async function admitWorkPlan(
       decidedAt: new Date().toISOString(),
     },
   };
+}
+
+export interface WorkScopeInput {
+  leaseId: string;
+  actorId: string;
+  request: unknown;
+}
+
+export type WorkScopeOutcome =
+  /** The coordinator answered; `decision.decision` says what the agent may do. */
+  | { outcome: "decided"; decision: ScopeChangeDecision }
+  /** The submission was unusable; the lease and task are failed. */
+  | { outcome: "rejected"; reason: string }
+  /** The lease lapsed or was settled; stop work and re-lease. */
+  | { outcome: "lease_lost"; reason: string };
+
+/** Reads one string array off an untrusted request body. */
+function scopeList(value: unknown, field: string): string[] {
+  if (value === undefined) {
+    return [];
+  }
+  if (
+    !Array.isArray(value) ||
+    value.some((entry) => typeof entry !== "string")
+  ) {
+    throw new Error(`${field} must be an array of strings`);
+  }
+  return value as string[];
+}
+
+function parseScopeRequest(
+  value: unknown,
+  taskId: string,
+): ScopeChangeRequest {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new Error("Scope change request must be an object");
+  }
+  const body = value as Record<string, unknown>;
+  const reason =
+    typeof body["reason"] === "string" ? body["reason"].trim() : "";
+  const request: ScopeChangeRequest = {
+    id:
+      typeof body["id"] === "string" && body["id"].trim().length > 0
+        ? body["id"].trim().slice(0, 200)
+        : createId("scope"),
+    taskId,
+    additionalFiles: uniqueRepositoryPaths(
+      scopeList(body["additionalFiles"], "additionalFiles").map(
+        normalizeRepositoryPath,
+      ),
+    ),
+    additionalSymbols: uniqueStrings(
+      scopeList(body["additionalSymbols"], "additionalSymbols"),
+    ),
+    additionalApis: uniqueStrings(
+      scopeList(body["additionalApis"], "additionalApis"),
+    ),
+    additionalSchemas: uniqueStrings(
+      scopeList(body["additionalSchemas"], "additionalSchemas"),
+    ),
+    additionalConfigKeys: uniqueStrings(
+      scopeList(body["additionalConfigKeys"], "additionalConfigKeys"),
+    ),
+    additionalTests: uniqueStrings(
+      scopeList(body["additionalTests"], "additionalTests"),
+    ),
+    additionalServices: uniqueStrings(
+      scopeList(body["additionalServices"], "additionalServices"),
+    ),
+    reason,
+    occurredAt:
+      typeof body["occurredAt"] === "string"
+        ? body["occurredAt"]
+        : new Date().toISOString(),
+  };
+  const named =
+    request.additionalFiles.length +
+    request.additionalSymbols.length +
+    request.additionalApis.length +
+    request.additionalSchemas.length +
+    request.additionalConfigKeys.length +
+    request.additionalTests.length +
+    request.additionalServices.length;
+  if (named === 0 || reason.length === 0) {
+    throw new Error(
+      "Scope expansion must name at least one resource and explain why",
+    );
+  }
+  return request;
+}
+
+/**
+ * Arbitrates a scope expansion an agent asked for while it was already running.
+ *
+ * The local coordinator has always answered this question properly: it merges
+ * the request into the plan, verifies the result against the repository,
+ * assesses it against everything else in the wave, and grants ownership when
+ * nothing collides. Remotely the answer was a flat refusal, for a defensible
+ * but temporary reason — the expanded scope had never been admitted and no
+ * other holder had been given a chance to object.
+ *
+ * This gives the remote path the same answer through the same machinery. The
+ * revised plan goes through the same {@link PlanAdmissionController} an
+ * initial admission uses, against the plans on every other active lease, so a
+ * grant means the widened scope was arbitrated exactly as the original was.
+ * Three outcomes are possible instead of one:
+ *
+ * - **granted** when nothing else holds the resources. The admitted contract
+ *   on the lease is replaced with the revised plan, which is what lets the
+ *   result carry patches on the new files without being refused as a scope
+ *   escape.
+ * - **deferred** when another executing task holds them. Nothing is refused
+ *   permanently: the holder is named, a retry interval is returned, and the
+ *   agent carries on inside its current scope in the meantime.
+ * - **refused** when ordering cannot separate the two, or when a reviewer
+ *   said no to a request the project's policy gated.
+ *
+ * Nothing about result enforcement is relaxed. A grant widens the contract
+ * *before* the edits arrive, so the changeset is still split and checked
+ * against a contract the control plane issued, and a patch outside it is
+ * still refused.
+ */
+export async function arbitrateScopeChange(
+  store: CoordinationStore,
+  input: WorkScopeInput,
+  services: WorkPlanServices = {},
+): Promise<WorkScopeOutcome> {
+  const repositories = services.repositories ?? new RepositoryService();
+  const intelligence =
+    services.intelligence ?? new CodeIntelligenceService(repositories);
+  const admissions = services.admissions ?? new PlanAdmissionController();
+
+  const now = new Date().toISOString();
+  await store.expireWorkLeases(now);
+  const lease = await store.getWorkLease(input.leaseId);
+  if (lease === undefined) {
+    throw new Error(`Unknown lease: ${input.leaseId}`);
+  }
+  if (lease.status !== "active" || lease.expiresAt <= now) {
+    return { outcome: "lease_lost", reason: `lease is ${lease.status}` };
+  }
+  const task = await submittedTask(store, lease);
+  if (task === undefined || task.status !== "claimed") {
+    const reason = "The leased task is no longer claimed";
+    await failLease(store, lease, reason, "remote_scope_validation");
+    return { outcome: "rejected", reason };
+  }
+  const admitted = lease.plan;
+  if (admitted === undefined || !planAdmissionApproved(admitted.admission)) {
+    // Nothing to widen. An agent that has not been admitted is not executing,
+    // so a scope request from it is a protocol error rather than a decision.
+    const reason =
+      "Scope expansion requires an approved admission; submit and get a plan " +
+      "admitted before asking to widen it";
+    await failLease(store, lease, reason, "remote_scope_validation");
+    return { outcome: "rejected", reason };
+  }
+
+  let request: ScopeChangeRequest;
+  try {
+    request = parseScopeRequest(input.request, task.id);
+  } catch (error) {
+    // Not fatal to the lease: the agent is mid-run and doing useful work
+    // inside a scope it already owns. A malformed ask is refused, and the
+    // run continues.
+    return {
+      outcome: "decided",
+      decision: {
+        requestId: createId("scope"),
+        taskId: task.id,
+        decision: "rejected",
+        revisedPlan: admitted.plan,
+        constraints: ["Continue within the admitted plan"],
+        ownershipGrants: [],
+        explanation: errorMessage(error),
+        decidedAt: new Date().toISOString(),
+      },
+    };
+  }
+
+  const storedRepository = await store.getRepository(lease.repositoryId);
+  if (storedRepository === undefined) {
+    const reason = `Unknown repository: ${lease.repositoryId}`;
+    await failLease(store, lease, reason, "remote_scope_validation");
+    return { outcome: "rejected", reason };
+  }
+  const repository = canonical(storedRepository);
+  let baseVersion: CanonicalVersion;
+  try {
+    baseVersion = await repositories.getVersionAtRevision(
+      repository,
+      lease.baseRevision,
+    );
+  } catch (error) {
+    const reason = `Leased base revision is unusable: ${errorMessage(error)}`;
+    await failLease(store, lease, reason, "remote_scope_validation");
+    return { outcome: "rejected", reason };
+  }
+
+  const runId = admitted.admission.runId;
+  await trace(store, runId, "scope_change_requested", task.id, {
+    projectId: task.projectId,
+    repositoryId: task.repositoryId,
+    workerId: lease.workerId,
+    leaseId: lease.id,
+    request,
+    remote: true,
+  });
+  if (runId !== undefined) {
+    await store.saveScopeChange(runId, request).catch(() => undefined);
+  }
+
+  const refuse = (
+    explanation: string,
+    blockedBy: readonly string[] = [],
+  ): ScopeChangeDecision => ({
+    requestId: request.id,
+    taskId: task.id,
+    decision: "rejected",
+    revisedPlan: admitted.plan,
+    constraints: ["Continue within the admitted plan"],
+    ownershipGrants: [],
+    ...(blockedBy.length === 0 ? {} : { blockedBy: [...blockedBy] }),
+    explanation,
+    decidedAt: new Date().toISOString(),
+  });
+
+  const record = async (
+    decision: ScopeChangeDecision,
+  ): Promise<WorkScopeOutcome> => {
+    if (runId !== undefined) {
+      await store
+        .saveScopeChangeDecision(runId, decision)
+        .catch(() => undefined);
+    }
+    await trace(store, runId, "scope_change_decided", task.id, {
+      projectId: task.projectId,
+      repositoryId: task.repositoryId,
+      workerId: lease.workerId,
+      leaseId: lease.id,
+      decision,
+      remote: true,
+    });
+    return { outcome: "decided", decision };
+  };
+
+  // A mid-run expansion is where an agent is most likely to name what it
+  // merely believes exists, so the revised plan is verified against the
+  // repository exactly as the original was. Enrichment then gives it the
+  // derived claims arbitration compares on.
+  const index = await intelligence.index(repository, baseVersion.revision);
+  const revisedPlan = intelligence.enrichPlan(
+    groundPlan(mergePlanScope(admitted.plan, request), index),
+    index,
+  );
+
+  const executing = await executingPlans(store, lease);
+  const active = executing.active.map((entry) =>
+    entry.plan.grounding === undefined
+      ? {
+          ...entry,
+          plan: intelligence.enrichPlan(groundPlan(entry.plan, index), index),
+        }
+      : entry,
+  );
+  const admission = admissions.admit({
+    plan: revisedPlan,
+    agentId: task.agentId,
+    baseRevision: baseVersion.revision,
+    baseVersion: baseVersion.sequence,
+    active,
+    // All or nothing. A partial answer here would tell an agent already
+    // mid-edit that it has some of what it asked for, and the reason partial
+    // admission is safe — it happens before any editing, where a reduced
+    // scope can still shape the whole run — does not hold at this point.
+    partialAdmission: false,
+  });
+
+  if (!planAdmissionApproved(admission)) {
+    if (admission.status === "sequenced") {
+      return await record({
+        requestId: request.id,
+        taskId: task.id,
+        decision: "deferred",
+        revisedPlan: admitted.plan,
+        constraints: [
+          "Keep working inside the admitted plan; ask again after the retry " +
+            "interval if the expansion is still needed",
+        ],
+        ownershipGrants: [],
+        blockedBy: [...admission.blockedBy],
+        retryAfterMs: admission.retryAfterMs ?? DEFAULT_PLAN_RETRY_MS,
+        explanation: `Scope expansion is held by executing work: ${admission.explanation}`,
+        decidedAt: new Date().toISOString(),
+      });
+    }
+    return await record(
+      refuse(
+        `Scope expansion cannot be granted: ${admission.explanation}`,
+        admission.blockedBy,
+      ),
+    );
+  }
+
+  // Ownership says yes; the project's policy may still want a person. This
+  // blocks the request the same way the changeset gate blocks a result, and
+  // the worker's client allows for that.
+  const project =
+    task.projectId === undefined
+      ? undefined
+      : await store.getProject(task.projectId);
+  const approvalPolicy = approvalPolicyForProject(project?.policy);
+  const reasons = approvalPolicy.scopeReasons(revisedPlan, request);
+  if (reasons.length > 0) {
+    if (runId === undefined) {
+      // An approval has to belong to a run, and an ungated task has none
+      // until its result arrives. Refusing is the conservative answer: the
+      // expansion needed a reviewer and could not get one.
+      return await record(
+        refuse(
+          "Scope expansion requires human approval, but this task has no run " +
+            "to record the request against. Enable requireRemotePlanReview " +
+            `for this project to gate it: ${reasons.join("; ")}`,
+        ),
+      );
+    }
+    const review = await new StoreApprovalController(
+      store,
+      approvalPolicy.timeoutMs,
+    ).review({
+      ...(project === undefined
+        ? {}
+        : { organizationId: project.organizationId }),
+      ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
+      repositoryId: task.repositoryId,
+      runId,
+      taskId: task.id,
+      kind: "scope_change",
+      requestedBy: task.agentId,
+      reasons,
+      scopeChangeId: request.id,
+      onRequested: async (created) => {
+        await trace(store, runId, "approval_requested", task.id, {
+          projectId: task.projectId,
+          approvalId: created.id,
+          kind: created.kind,
+          reasons: created.reasons,
+          expiresAt: created.expiresAt,
+          stage: "remote_scope_change",
+        });
+      },
+    });
+    await trace(store, runId, "approval_decided", task.id, {
+      projectId: task.projectId,
+      approvalId: review.request.id,
+      status: review.request.status,
+      decidedBy: review.request.decidedBy,
+      stage: "remote_scope_change",
+    });
+    if (!review.approved) {
+      return await record(
+        refuse(
+          `Scope expansion was not approved: ${review.explanation}`,
+        ),
+      );
+    }
+  }
+
+  // The widened contract replaces the narrower one. This is the only write
+  // that may do so, and it carries the same staleness check every admission
+  // does, so a rival admitted between the read and the write invalidates it.
+  const widened: PlanAdmission = {
+    ...admission,
+    ...(runId === undefined ? {} : { runId }),
+  };
+  const saved = await store.saveWorkLeasePlan({
+    leaseId: lease.id,
+    submission: { plan: revisedPlan, admission: widened },
+    observedApprovedLeaseIds: executing.approvedLeaseIds,
+    replaceApproved: true,
+  });
+  if (saved.outcome === "lease_lost") {
+    return {
+      outcome: "lease_lost",
+      reason: "lease was lost while the expansion was being decided",
+    };
+  }
+  if (saved.outcome !== "saved") {
+    // Another lease was admitted while this was being decided, so the answer
+    // was computed against a view that no longer holds. Deferring rather than
+    // refusing is right: asking again re-decides against the new view.
+    return await record({
+      requestId: request.id,
+      taskId: task.id,
+      decision: "deferred",
+      revisedPlan: admitted.plan,
+      constraints: ["Ask again; another plan was admitted while deciding"],
+      ownershipGrants: [],
+      retryAfterMs: DEFAULT_PLAN_RETRY_MS,
+      explanation:
+        "Another plan was admitted in this repository while the expansion " +
+        "was being arbitrated, so the decision was made against a stale view",
+      decidedAt: new Date().toISOString(),
+    });
+  }
+
+  if (admission.ownershipGrants.length > 0) {
+    await trace(store, runId, "ownership_granted", task.id, {
+      projectId: task.projectId,
+      repositoryId: task.repositoryId,
+      leaseId: lease.id,
+      leases: admission.ownershipGrants,
+      stage: "remote_scope_change",
+    });
+  }
+  return await record({
+    requestId: request.id,
+    taskId: task.id,
+    decision:
+      admission.status === "approved" && reasons.length === 0
+        ? "approved"
+        : "approved_with_constraints",
+    revisedPlan,
+    constraints: [
+      ...admission.constraints,
+      ...(reasons.length === 0
+        ? []
+        : ["Scope expansion received required human approval"]),
+    ],
+    ownershipGrants: admission.ownershipGrants,
+    explanation:
+      "Scope expansion was arbitrated against executing work and granted; " +
+      "the admitted plan now covers it",
+    decidedAt: new Date().toISOString(),
+  });
 }
 
 /**
@@ -1411,13 +2090,21 @@ export async function acceptWorkResult(
     validationCommands: task.validationCommands,
     ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
   };
-  const run = await store.createRun({
-    repository: storedRepository,
-    ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
-    mode: "coordinated",
-    scenario: "remote-worker",
-    baseVersion,
-  });
+  // A plan gated at admission time already has a run: the approval it waited
+  // on had to belong to one. Reusing it keeps the reviewer's decision and the
+  // integration it authorised in the same history.
+  const run =
+    admitted.admission.runId === undefined
+      ? await store.createRun({
+          repository: storedRepository,
+          ...(task.projectId === undefined
+            ? {}
+            : { projectId: task.projectId }),
+          mode: "coordinated",
+          scenario: "remote-worker",
+          baseVersion,
+        })
+      : { id: admitted.admission.runId };
   let runFinished = false;
   let followUp: string | undefined;
   try {
@@ -1464,6 +2151,12 @@ export async function acceptWorkResult(
             ...(Object.keys(split.withheldSymbols).length === 0
               ? {}
               : { withheldSymbols: split.withheldSymbols }),
+            // Recorded separately from the withheld list because it is the
+            // opposite fact: these files were *not* lost whole, and the run
+            // record should say how much of each survived.
+            ...(split.divided.length === 0
+              ? {}
+              : { dividedPatches: split.divided }),
           }),
     });
 
@@ -1809,6 +2502,24 @@ export function workerOperations(
       const run = async () => await admitWorkPlan(store, input, planServices);
       // Chained on settlement, not on success: one failed admission must not
       // wedge every later submission in the repository.
+      const queued = (admitting.get(key) ?? Promise.resolve()).then(run, run);
+      admitting.set(key, queued);
+      try {
+        return await queued;
+      } finally {
+        if (admitting.get(key) === queued) {
+          admitting.delete(key);
+        }
+      }
+    },
+    // Serialised alongside admission for the same repository: a widening reads
+    // the executing set and writes a wider contract back into it, which is the
+    // same read-decide-write an admission performs.
+    arbitrateScopeChange: async (input: WorkScopeInput) => {
+      const lease = await store.getWorkLease(input.leaseId);
+      const key = lease?.repositoryId ?? input.leaseId;
+      const run = async () =>
+        await arbitrateScopeChange(store, input, planServices);
       const queued = (admitting.get(key) ?? Promise.resolve()).then(run, run);
       admitting.set(key, queued);
       try {

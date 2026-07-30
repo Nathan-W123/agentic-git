@@ -21,9 +21,18 @@ export function approvalPolicyForProject(
   assertProjectPolicy(policy);
   const approvals = policy.approvals ?? {};
   return new ApprovalPolicy({
+    ...(approvals.enabled === undefined
+      ? {}
+      : { enabled: approvals.enabled }),
+    ...(approvals.requireSchemaReview === undefined
+      ? {}
+      : { requireSchemaReview: approvals.requireSchemaReview }),
     ...(approvals.requireChangesetReview === undefined
       ? {}
       : { requireChangesetReview: approvals.requireChangesetReview }),
+    ...(approvals.requireRemotePlanReview === undefined
+      ? {}
+      : { requireRemotePlanReview: approvals.requireRemotePlanReview }),
     ...(approvals.riskLevels === undefined
       ? {}
       : { riskLevels: approvals.riskLevels }),

@@ -126,7 +126,7 @@ Worker environment:
 | `COORD_PROJECT_ROOT` | Directory with the worker's `.coordinator/config.json` (agents, sandbox). | working directory |
 | `COORD_WORKER_ROOT` | Where leased workspaces are materialized. | `.coordinator/worker` |
 | `COORD_WORKER_NAME` | Display name in the workers list. | hostname-derived |
-| `COORD_PROJECT_ID` | Only lease work for this project. | all projects the token can reach |
+| `COORD_PROJECT_ID` | Only lease work for this project. | `project_local` |
 | `COORD_REPOSITORY` | Only lease work for this repository. | any |
 
 A worker that shuts down cleanly releases its lease immediately; one that
@@ -145,13 +145,16 @@ evaluate it; a project without a policy uses the built-in defaults.
   "version": 1,
   "approvals": {
     "requireChangesetReview": false,
+    "requireRemotePlanReview": false,
     "riskLevels": ["high", "critical"],
     "protectedPaths": ["secrets/**", "infrastructure/production/**"],
     "approvalTimeoutMs": 86400000
   },
   "budgets": {
     "maxTaskRuntimeMs": 1800000,
-    "maxProjectRuntimeMsPerDay": 28800000
+    "maxProjectRuntimeMsPerDay": 28800000,
+    "maxTaskTokens": 2000000,
+    "maxProjectTokensPerDay": 50000000
   }
 }
 ```
@@ -159,12 +162,22 @@ evaluate it; a project without a policy uses the built-in defaults.
 - `approvals` controls when a changeset needs a human: always, by risk
   level, or when protected paths are touched. `protectedPaths` *replaces*
   the default protected set when present.
-- `budgets` are runtime cost controls for remote execution. A task past
-  `maxTaskRuntimeMs` is failed at its next heartbeat; a project past its
-  rolling 24-hour `maxProjectRuntimeMsPerDay` stops receiving workers —
-  queued tasks wait rather than fail. Budgets are throttles, not hard
-  accounting: two workers leasing at the same instant can overshoot by at
-  most one task's runtime.
+- `requireRemotePlanReview` moves the gate for remote work forward to plan
+  admission, so a risky plan stops a worker before its agent runs rather than
+  after. The reasons are the same ones the local scheduler stops on. It is off
+  by default because it costs a second blocking gate per task and holds a
+  repository concurrency slot while a person is asked.
+- `budgets` are cost controls for remote execution, in two currencies. A task
+  past `maxTaskRuntimeMs` or `maxTaskTokens` is failed at its next heartbeat —
+  while it is still spending, which is the only moment stopping it saves
+  anything. A project past its rolling 24-hour `maxProjectRuntimeMsPerDay` or
+  `maxProjectTokensPerDay` stops receiving workers; queued tasks wait rather
+  than fail. Budgets are throttles, not hard accounting: two workers leasing at
+  the same instant can overshoot by at most one task.
+- Token budgets only see spend an agent actually reports. The Codex adapter
+  parses the figure its CLI prints and a generic-CLI agent may attach one to
+  its `done` message; an agent that reports nothing cannot be capped this way,
+  and is recorded as having reported nothing rather than as having spent zero.
 
 ## Production notes
 

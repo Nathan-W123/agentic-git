@@ -22,6 +22,7 @@
     "benchmark": "npm run build --silent && node apps/cli/dist/index.js benchmark",
     "web": "npm run build --silent && node apps/web/dist/index.js",
     "verify:docker": "npm run build --silent && node scripts/verify-docker-sandbox.mjs",
+    "verify:remote-docker": "npm run build --silent && node scripts/verify-remote-docker.mjs",
     "clean": "turbo run clean"
   },
   "devDependencies": {

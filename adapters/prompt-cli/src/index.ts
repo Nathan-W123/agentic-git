@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import path from "node:path";
 
 import {
@@ -11,6 +12,7 @@ import {
 import {
   assertAgentPlan,
   createId,
+  scopeChangeGranted,
   type AgentPlan,
   type ChangeSet,
   type ReplanRequest,
@@ -74,15 +76,32 @@ export interface PromptCliProfile {
    * Arguments for the read-only planning invocation. The prompt is appended
    * as the final positional argument.
    */
-  planningArgs(model: string | undefined): string[];
+  planningArgs(
+    model: string | undefined,
+    effort: PromptCliEffort | undefined,
+    jsonSchema: string | undefined,
+  ): string[];
   /** Arguments for the workspace-writing execution invocation. */
-  executionArgs(model: string | undefined): string[];
+  executionArgs(
+    model: string | undefined,
+    effort: PromptCliEffort | undefined,
+    jsonSchema: string | undefined,
+  ): string[];
   /**
    * Unwraps the CLI's stdout into the model's text answer, or throws when
    * the envelope itself reports failure.
    */
   unwrap(stdout: string): string;
 }
+
+export const PROMPT_CLI_EFFORTS = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
+export type PromptCliEffort = (typeof PROMPT_CLI_EFFORTS)[number];
 
 /**
  * Claude Code headless mode: `claude -p <prompt> --output-format json`.
@@ -95,20 +114,24 @@ export interface PromptCliProfile {
 export const CLAUDE_PROFILE: PromptCliProfile = {
   name: "claude",
   defaultCommand: "claude",
-  planningArgs: (model) => [
+  planningArgs: (model, effort, jsonSchema) => [
     "-p",
     "--output-format",
     "json",
     "--permission-mode",
     "plan",
     ...(model === undefined ? [] : ["--model", model]),
+    ...(effort === undefined ? [] : ["--effort", effort]),
+    ...(jsonSchema === undefined ? [] : ["--json-schema", jsonSchema]),
   ],
-  executionArgs: (model) => [
+  executionArgs: (model, effort, jsonSchema) => [
     "-p",
     "--output-format",
     "json",
     "--dangerously-skip-permissions",
     ...(model === undefined ? [] : ["--model", model]),
+    ...(effort === undefined ? [] : ["--effort", effort]),
+    ...(jsonSchema === undefined ? [] : ["--json-schema", jsonSchema]),
   ],
   unwrap: (stdout) => {
     const envelope = parseJson(stdout, "the Claude result envelope");
@@ -145,13 +168,13 @@ export const CLAUDE_PROFILE: PromptCliProfile = {
 export const GEMINI_PROFILE: PromptCliProfile = {
   name: "gemini",
   defaultCommand: "gemini",
-  planningArgs: (model) => [
+  planningArgs: (model, _effort, _jsonSchema) => [
     "-p",
     "--output-format",
     "json",
     ...(model === undefined ? [] : ["--model", model]),
   ],
-  executionArgs: (model) => [
+  executionArgs: (model, _effort, _jsonSchema) => [
     "-p",
     "--output-format",
     "json",
@@ -190,6 +213,8 @@ export interface PromptCliAdapterOptions {
    * this adapter enforces.
    */
   args?: readonly string[];
+  /** Claude reasoning effort. Unsupported by the Gemini profile. */
+  effort?: PromptCliEffort;
   env?: NodeJS.ProcessEnv;
   planningTimeoutMs?: number;
   executionTimeoutMs?: number;
@@ -262,10 +287,10 @@ function parseJson(text: string, what: string): unknown {
 /**
  * Extracts the JSON object a model was asked to answer with.
  *
- * Neither CLI enforces output schemas, so the JSON may arrive wrapped in a
- * code fence or preceded by prose. The extractor takes the substring between
- * the first `{` and the last `}` — and then real parsing and validation
- * decide whether it is acceptable. No repair is attempted beyond that.
+ * Gemini does not enforce an output schema, and custom profiles may also
+ * return JSON wrapped in a code fence or prose. The extractor takes the
+ * substring between the first `{` and the last `}` — and then real parsing
+ * and validation decide whether it is acceptable. No repair is attempted.
  */
 export function extractJsonObject(answer: string, what: string): unknown {
   const start = answer.indexOf("{");
@@ -357,11 +382,11 @@ function assertExecutionResult(
 
 const PLAN_SHAPE_INSTRUCTIONS = [
   "Answer with exactly one JSON object and nothing else. No prose, no code fence.",
-  "The object must have these keys (use empty arrays / empty strings where nothing applies):",
+  "The object must have exactly these keys (use empty arrays where nothing applies):",
   '  taskId, objective, expectedFiles, expectedSymbols, expectedApis, expectedSchemas,',
   '  expectedConfigKeys, expectedTests, expectedServices, dependencies,',
   '  commands (array of {executable, args, label}), externalAccess,',
-  '  riskLevel ("low"|"medium"|"high"|"critical"), intent',
+  '  riskLevel ("low"|"medium"|"high"|"critical"), intent (a non-empty concise string)',
 ].join("\n");
 
 const COMPLETION_SHAPE_INSTRUCTIONS = [
@@ -372,6 +397,171 @@ const COMPLETION_SHAPE_INSTRUCTIONS = [
   "For completed, use empty scope fields. For scope_change_requested, fill every scope field.",
 ].join("\n");
 
+const STRING_ARRAY_JSON_SCHEMA = {
+  type: "array",
+  items: { type: "string" },
+} as const;
+
+const PLAN_JSON_SCHEMA = JSON.stringify({
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    taskId: { type: "string", minLength: 1 },
+    objective: { type: "string", minLength: 1 },
+    expectedFiles: STRING_ARRAY_JSON_SCHEMA,
+    expectedSymbols: STRING_ARRAY_JSON_SCHEMA,
+    expectedApis: STRING_ARRAY_JSON_SCHEMA,
+    expectedSchemas: STRING_ARRAY_JSON_SCHEMA,
+    expectedConfigKeys: STRING_ARRAY_JSON_SCHEMA,
+    expectedTests: STRING_ARRAY_JSON_SCHEMA,
+    expectedServices: STRING_ARRAY_JSON_SCHEMA,
+    dependencies: STRING_ARRAY_JSON_SCHEMA,
+    commands: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          executable: { type: "string", minLength: 1 },
+          args: STRING_ARRAY_JSON_SCHEMA,
+          label: { type: "string", minLength: 1 },
+        },
+        required: ["executable", "args", "label"],
+      },
+    },
+    externalAccess: STRING_ARRAY_JSON_SCHEMA,
+    riskLevel: {
+      type: "string",
+      enum: ["low", "medium", "high", "critical"],
+    },
+    intent: { type: "string", minLength: 1 },
+  },
+  required: [
+    "taskId",
+    "objective",
+    "expectedFiles",
+    "expectedSymbols",
+    "expectedApis",
+    "expectedSchemas",
+    "expectedConfigKeys",
+    "expectedTests",
+    "expectedServices",
+    "dependencies",
+    "commands",
+    "externalAccess",
+    "riskLevel",
+    "intent",
+  ],
+});
+
+const COMPLETION_JSON_SCHEMA = JSON.stringify({
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    outcome: {
+      type: "string",
+      enum: ["completed", "scope_change_requested"],
+    },
+    symbolsChanged: STRING_ARRAY_JSON_SCHEMA,
+    explanation: { type: "string" },
+    requestId: { type: "string" },
+    additionalFiles: STRING_ARRAY_JSON_SCHEMA,
+    additionalSymbols: STRING_ARRAY_JSON_SCHEMA,
+    additionalApis: STRING_ARRAY_JSON_SCHEMA,
+    additionalSchemas: STRING_ARRAY_JSON_SCHEMA,
+    additionalConfigKeys: STRING_ARRAY_JSON_SCHEMA,
+    additionalTests: STRING_ARRAY_JSON_SCHEMA,
+    additionalServices: STRING_ARRAY_JSON_SCHEMA,
+    reason: { type: "string" },
+  },
+  required: [
+    "outcome",
+    "symbolsChanged",
+    "explanation",
+    "requestId",
+    "additionalFiles",
+    "additionalSymbols",
+    "additionalApis",
+    "additionalSchemas",
+    "additionalConfigKeys",
+    "additionalTests",
+    "additionalServices",
+    "reason",
+  ],
+});
+
+function environmentPath(
+  environment: Readonly<Record<string, string | undefined>> | undefined,
+): string | undefined {
+  if (environment === undefined) {
+    return process.env.PATH;
+  }
+  const pathEntry = Object.entries(environment).find(
+    ([name]) => name.toLowerCase() === "path",
+  );
+  return pathEntry?.[1] ?? process.env.PATH;
+}
+
+/**
+ * Claude's npm `.cmd` shim cannot safely carry a JSON schema through `cmd.exe`.
+ * Official Windows installs place a native executable beside the shim's
+ * package, which also gives timeout handling a process it can terminate.
+ */
+export function resolveClaudeCommand(
+  command: string,
+  pathValue = process.env.PATH,
+): string {
+  if (process.platform !== "win32") {
+    return command;
+  }
+  const commandName = path.win32.basename(command).toLowerCase();
+  if (commandName !== "claude" && commandName !== "claude.cmd") {
+    return command;
+  }
+
+  const hasDirectory = command.includes("/") || command.includes("\\");
+  const wrapperNames =
+    commandName === "claude.cmd" ? ["claude.cmd"] : ["claude.cmd", "claude"];
+  const wrappers = hasDirectory
+    ? [path.resolve(command)]
+    : (pathValue ?? "")
+        .split(path.delimiter)
+        .map((entry) => entry.trim().replace(/^"(.*)"$/u, "$1"))
+        .filter((entry) => entry.length > 0)
+        .flatMap((entry) =>
+          wrapperNames.map((name) => path.resolve(entry, name)),
+        );
+
+  for (const wrapper of wrappers) {
+    if (!existsSync(wrapper)) {
+      continue;
+    }
+    const directory = path.dirname(wrapper);
+    const candidates = [
+      path.join(
+        directory,
+        "node_modules",
+        "@anthropic-ai",
+        "claude-code",
+        "bin",
+        "claude.exe",
+      ),
+      path.join(
+        path.dirname(directory),
+        "@anthropic-ai",
+        "claude-code",
+        "bin",
+        "claude.exe",
+      ),
+    ];
+    const nativeCommand = candidates.find((candidate) => existsSync(candidate));
+    if (nativeCommand !== undefined) {
+      return nativeCommand;
+    }
+  }
+  return command;
+}
+
 /**
  * Drives Claude Code or Gemini CLI through the coordinator's plan-first
  * lifecycle. See the profiles above for the exact invocations.
@@ -379,6 +569,7 @@ const COMPLETION_SHAPE_INSTRUCTIONS = [
 export class PromptCliAdapter implements AgentAdapter {
   private readonly sessions = new Map<string, PromptCliSession>();
   private readonly command: string;
+  private readonly effort: PromptCliEffort | undefined;
   private readonly model: string | undefined;
   private readonly planningTimeoutMs: number;
   private readonly executionTimeoutMs: number;
@@ -388,8 +579,25 @@ export class PromptCliAdapter implements AgentAdapter {
 
   public constructor(private readonly options: PromptCliAdapterOptions) {
     this.profile = options.profile;
-    this.command = options.command?.trim() || this.profile.defaultCommand;
+    const configuredCommand =
+      options.command?.trim() || this.profile.defaultCommand;
+    this.command =
+      this.profile.name === "claude"
+        ? resolveClaudeCommand(configuredCommand, environmentPath(options.env))
+        : configuredCommand;
     this.model = safeAdditionalArgs(options.args ?? []);
+    this.effort = options.effort;
+    if (
+      this.effort !== undefined &&
+      !(PROMPT_CLI_EFFORTS as readonly string[]).includes(this.effort)
+    ) {
+      throw new Error(
+        `Prompt-CLI effort must be one of ${PROMPT_CLI_EFFORTS.join(", ")}`,
+      );
+    }
+    if (this.effort !== undefined && this.profile.name !== "claude") {
+      throw new Error("Prompt-CLI effort is supported only by Claude");
+    }
     this.planningTimeoutMs = positiveInteger(
       options.planningTimeoutMs,
       DEFAULT_PLANNING_TIMEOUT_MS,
@@ -557,7 +765,13 @@ export class PromptCliAdapter implements AgentAdapter {
       const stdout = await this.run(
         record,
         context.workspacePath,
-        this.profile.executionArgs(this.model),
+        this.profile.executionArgs(
+          this.model,
+          this.effort,
+          this.profile.name === "claude"
+            ? COMPLETION_JSON_SCHEMA
+            : undefined,
+        ),
         this.executionPrompt(record, context),
         this.executionTimeoutMs,
       );
@@ -596,7 +810,7 @@ export class PromptCliAdapter implements AgentAdapter {
       });
       const decision = await pending;
       record.scopeDecisions.push(structuredClone(decision));
-      if (decision.decision !== "rejected") {
+      if (scopeChangeGranted(decision)) {
         record.plan = structuredClone(decision.revisedPlan);
       }
       this.emit(record, {
@@ -683,6 +897,7 @@ export class PromptCliAdapter implements AgentAdapter {
     const changeSet = await this.options.workspaces.collectChangeSet(
       workspace,
       {
+        expectedFiles: plan.expectedFiles,
         symbolsChanged:
           completion.symbolsChanged.length === 0
             ? plan.expectedSymbols
@@ -726,7 +941,11 @@ export class PromptCliAdapter implements AgentAdapter {
     const stdout = await this.run(
       record,
       workingDirectory,
-      this.profile.planningArgs(this.model),
+      this.profile.planningArgs(
+        this.model,
+        this.effort,
+        this.profile.name === "claude" ? PLAN_JSON_SCHEMA : undefined,
+      ),
       prompt,
       this.planningTimeoutMs,
     );
@@ -860,6 +1079,8 @@ export class PromptCliAdapter implements AgentAdapter {
     return [
       "Inspect the repository in the current directory and prepare a coordination plan.",
       "Do not edit files. Do not run commands that modify repository state.",
+      "Keep planning focused: inspect only enough files to establish an accurate scope.",
+      `Planning deadline: ${this.planningTimeoutMs} ms.`,
       `Task id: ${input.task.id}`,
       `Objective: ${input.task.objective}`,
       `Canonical revision: ${input.canonicalVersion.revision}`,
@@ -879,6 +1100,8 @@ export class PromptCliAdapter implements AgentAdapter {
     return [
       "Replan the approved task against the new canonical repository state in the current directory.",
       "Do not edit files.",
+      "Use the previous plan and canonical change first; inspect only what changed.",
+      `Planning deadline: ${this.planningTimeoutMs} ms.`,
       `Task id: ${record.input.task.id}`,
       `Objective: ${record.input.task.objective}`,
       `Previous plan: ${JSON.stringify(request.previousPlan)}`,
@@ -893,17 +1116,26 @@ export class PromptCliAdapter implements AgentAdapter {
     record: PromptCliSession,
     context: CoordinatorContext,
   ): string {
+    const approvedPlan =
+      record.plan === undefined ? undefined : { ...record.plan, commands: [] };
+    const validationLabels = record.input.task.validationCommands.map(
+      (command) => command.label,
+    );
     return [
       "Implement the approved task in the current workspace directory.",
+      `Execution deadline: ${this.executionTimeoutMs} ms. Prioritize a complete minimal implementation.`,
+      "Finish all required edits within the first 80% of the deadline; reserve the remainder only for required validation and the final JSON response.",
+      "The coordinator runs every required validation command after collection; do not repeat clean installs, full builds, or full test suites inside this agent session.",
+      "Do not install dependency trees, start servers or watchers, or use the network. A package-lock-only operation is allowed only when the task explicitly changes a lockfile.",
+      "Skip optional polish, broad exploration, and repeated validation. Never wait for human input.",
       "Do not modify files outside expectedFiles without first answering with a scope_change_requested outcome.",
       "Do not change Git metadata.",
-      "Run relevant validation commands when feasible.",
       `Task: ${record.input.task.objective}`,
-      `Approved plan: ${JSON.stringify(record.plan)}`,
+      `Approved plan: ${JSON.stringify(approvedPlan)}`,
       `Coordinator decision: ${JSON.stringify(context.decision)}`,
       `Prior scope decisions: ${JSON.stringify(record.scopeDecisions)}`,
       `Canonical revision: ${context.canonicalVersion.revision}`,
-      `Required validation commands: ${JSON.stringify(record.input.task.validationCommands)}`,
+      `Coordinator validation labels (do not execute): ${JSON.stringify(validationLabels)}`,
       COMPLETION_SHAPE_INSTRUCTIONS,
     ].join("\n");
   }

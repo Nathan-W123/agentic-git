@@ -95,6 +95,14 @@ export interface DoneMessage {
   type: "done";
   symbolsChanged: string[];
   explanation: string;
+  /**
+   * What the run cost, if the agent knows.
+   *
+   * Optional and never inferred: an agent that reports nothing is recorded as
+   * having reported nothing, because a budget enforced against an invented
+   * figure would be worse than one enforced against a gap in the data.
+   */
+  tokens?: { total: number; input?: number; output?: number };
 }
 
 export interface ErrorMessage {
@@ -203,6 +211,42 @@ function optionalStringArray(
     );
   }
   return [...(value as string[])];
+}
+
+/**
+ * Reads an optional token report off a `done` message.
+ *
+ * Anything unusable — a missing total, a negative figure, a non-object —
+ * yields undefined rather than throwing. A miscounted bill must not fail a
+ * run whose code is fine; it is recorded as unreported, and a project with a
+ * token budget sees the gap instead of a wrong number.
+ */
+function parseTokenReport(
+  value: unknown,
+): { total: number; input?: number; output?: number } | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const record = value as Record<string, unknown>;
+  const count = (key: string): number | undefined => {
+    const entry = record[key];
+    return typeof entry === "number" &&
+      Number.isSafeInteger(entry) &&
+      entry >= 0
+      ? entry
+      : undefined;
+  };
+  const total = count("total");
+  if (total === undefined) {
+    return undefined;
+  }
+  const input = count("input");
+  const output = count("output");
+  return {
+    total,
+    ...(input === undefined ? {} : { input }),
+    ...(output === undefined ? {} : { output }),
+  };
 }
 
 export function parseAgentEvent(value: unknown): AgentEvent {
@@ -321,6 +365,9 @@ export function parseAgentMessage(line: string): AgentMessage {
         symbolsChanged: optionalStringArray(record, "symbolsChanged", "done"),
         explanation:
           typeof record["explanation"] === "string" ? record["explanation"] : "",
+        ...(parseTokenReport(record["tokens"]) === undefined
+          ? {}
+          : { tokens: parseTokenReport(record["tokens"])! }),
       };
     case "error":
       return {
