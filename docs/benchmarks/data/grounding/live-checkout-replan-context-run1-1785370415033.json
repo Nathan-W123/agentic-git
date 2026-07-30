@@ -1,0 +1,123 @@
+{
+  "label": "replan-context",
+  "scenario": "live-checkout",
+  "run": 1,
+  "groundingDisabled": false,
+  "startedAt": "2026-07-30T00:08:02.735Z",
+  "elapsedMs": 332086,
+  "taskIds": [
+    "task_checkout_fee",
+    "task_checkout_delivery"
+  ],
+  "plans": [
+    {
+      "taskId": "task_checkout_delivery",
+      "revision": 1,
+      "expectedFiles": [
+        "src/index.js",
+        "src/pricing/delivery.js",
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "DELIVERY_CHARGE",
+        "FREE_DELIVERY_THRESHOLD",
+        "base",
+        "deliveryFor",
+        "discounted",
+        "lines",
+        "orderTotal",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [
+          "src/pricing/delivery.js"
+        ],
+        "unresolvedSymbols": [
+          "DELIVERY_CHARGE",
+          "FREE_DELIVERY_THRESHOLD",
+          "deliveryFor"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    {
+      "taskId": "task_checkout_fee",
+      "revision": 1,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "base",
+        "discounted",
+        "lines",
+        "order total applies tax and handling charge",
+        "orderTotal",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "order total applies tax and handling charge"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  ],
+  "conflicts": [
+    {
+      "taskIds": [
+        "task_checkout_fee",
+        "task_checkout_delivery"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "structural": true,
+      "explanation": "file_overlap: src/pricing/total.js, test/pricing.test.js (+40); symbol_overlap: base, discounted, lines, orderTotal, subtotal (+175); dependency_impact: file:src/index.js, file:src/pricing/total.js, symbol:orderTotal, symbol:subtotal (+100); test_overlap: order total applies tax, subtotal sums the lines, test/pricing.test.js (+30). Structural evidence controls scheduling."
+    }
+  ],
+  "pairFlaggedAtPlanTime": true,
+  "replans": 1,
+  "scopeChanges": 0,
+  "scopeDecisions": [],
+  "taskFailures": [
+    {
+      "taskId": "task_checkout_delivery",
+      "stage": "execution",
+      "error": "Codex could not write to the workspace under --sandbox workspace-write. The scoped-write sandbox is unavailable or misconfigured, so every edit was rejected while Codex still reported success. Run `codex doctor` to confirm the native sandbox setup, and only set executionSandbox to \"danger-full-acces"
+    }
+  ],
+  "tasks": [
+    {
+      "taskId": "task_checkout_fee",
+      "status": "integrated",
+      "integration": "integrated",
+      "explanation": "Promoted 27cba152c98d atomically"
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "status": "failed",
+      "explanation": "Codex could not write to the workspace under --sandbox workspace-write. The scoped-write sandbox is unavailable or misconfigured, so every edit was rejected while Codex still reported success. Run `codex doctor` to confirm the native sandbox setup, and only set executionSandbox to \"danger-full-access\" when the workspace is already isolated by other means, such as a container. Codex reported: faile"
+    }
+  ],
+  "metrics": {
+    "tasksCompleted": 1,
+    "integrationAttempts": 1,
+    "integrationFailures": 0,
+    "conflictWarnings": 1,
+    "undetectedConflicts": 0,
+    "elapsedMs": 331369,
+    "tokensTotal": 106076,
+    "tokensByTask": {
+      "task_checkout_fee": 66737,
+      "task_checkout_delivery": 39339
+    }
+  }
+}
