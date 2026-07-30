@@ -1,0 +1,216 @@
+{
+  "label": "cold-replan",
+  "scenario": "live-checkout-trio",
+  "run": 2,
+  "groundingDisabled": false,
+  "startedAt": "2026-07-30T02:48:25.933Z",
+  "elapsedMs": 321375,
+  "taskIds": [
+    "task_checkout_fee",
+    "task_checkout_delivery",
+    "task_checkout_rounding"
+  ],
+  "plans": [
+    {
+      "taskId": "task_checkout_rounding",
+      "revision": 1,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "base",
+        "discounted",
+        "lines",
+        "order total rounds to whole pence",
+        "orderTotal",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "order total rounds to whole pence"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "revision": 1,
+      "expectedFiles": [
+        "src/index.js",
+        "src/pricing/delivery.js",
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "DELIVERY_FEE",
+        "FREE_DELIVERY_THRESHOLD",
+        "base",
+        "deliveryFor",
+        "discounted",
+        "lines",
+        "orderTotal",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [
+          "src/pricing/delivery.js"
+        ],
+        "unresolvedSymbols": [
+          "DELIVERY_FEE",
+          "FREE_DELIVERY_THRESHOLD",
+          "deliveryFor"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    {
+      "taskId": "task_checkout_fee",
+      "revision": 1,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "base",
+        "discounted",
+        "lines",
+        "orderTotal",
+        "pricing test: order total applies tax and handling charge",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "pricing test: order total applies tax and handling charge"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  ],
+  "conflicts": [
+    {
+      "taskIds": [
+        "task_checkout_fee",
+        "task_checkout_delivery"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "structural": true,
+      "explanation": "file_overlap: src/pricing/total.js, test/pricing.test.js (+40); symbol_overlap: base, discounted, lines, orderTotal, subtotal (+175); dependency_impact: file:src/index.js, file:src/pricing/total.js, symbol:orderTotal, symbol:subtotal (+100); api_overlap: orderTotal(customer, lines) (+30); test_overlap: order total applies tax, subtotal sums the lines, test/pricing.test.js (+30). Structural evidence controls scheduling."
+    },
+    {
+      "taskIds": [
+        "task_checkout_fee",
+        "task_checkout_rounding"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "structural": true,
+      "explanation": "file_overlap: src/pricing/total.js, test/pricing.test.js (+40); symbol_overlap: base, discounted, lines, orderTotal, subtotal (+175); dependency_impact: symbol:orderTotal, symbol:subtotal (+50); api_overlap: orderTotal(customer, lines) (+30); test_overlap: order total applies tax, subtotal sums the lines, test/pricing.test.js (+30). Structural evidence controls scheduling."
+    },
+    {
+      "taskIds": [
+        "task_checkout_delivery",
+        "task_checkout_rounding"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "structural": true,
+      "explanation": "file_overlap: src/pricing/total.js, test/pricing.test.js (+40); symbol_overlap: base, discounted, lines, orderTotal, subtotal (+175); dependency_impact: file:src/index.js, file:src/pricing/total.js, symbol:orderTotal, symbol:subtotal (+100); api_overlap: orderTotal(customer, lines) (+30); test_overlap: order total applies tax and handling charge, subtotal sums the lines, test/pricing.test.js (+30). Structural evidence controls scheduling."
+    }
+  ],
+  "pairFlaggedAtPlanTime": true,
+  "replans": 2,
+  "replanOutcomes": [
+    {
+      "taskId": "task_checkout_delivery",
+      "revision": 2,
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [
+          "src/pricing/delivery.js"
+        ],
+        "unresolvedSymbols": [
+          "DELIVERY_FEE",
+          "FREE_DELIVERY_THRESHOLD",
+          "deliveryFor"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    {
+      "taskId": "task_checkout_rounding",
+      "revision": 2,
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "order total rounds final tax-and-handling total to whole pence"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  ],
+  "scopeChanges": 0,
+  "scopeDecisions": [],
+  "taskFailures": [
+    {
+      "taskId": "task_checkout_delivery",
+      "error": "<stdin>:19: new blank line at EOF.\n+\nApplied patch to 'src/index.js' cleanly.\nFalling back to direct application...\nApplied patch to 'src/pricing/total.js' cleanly.\n<stdin>:94: new blank line at EOF.\n+\nApplied patch to 'test/pricing.test.js' cleanly.\nerror: 2 lines add whitespace errors."
+    }
+  ],
+  "tasks": [
+    {
+      "taskId": "task_checkout_fee",
+      "status": "integrated",
+      "integration": "integrated",
+      "explanation": "Promoted d35557f2ec17 atomically"
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "status": "failed",
+      "integration": "conflict",
+      "explanation": "<stdin>:19: new blank line at EOF.\n+\nApplied patch to 'src/index.js' cleanly.\nFalling back to direct application...\nApplied patch to 'src/pricing/total.js' cleanly.\n<stdin>:94: new blank line at EOF.\n+\nApplied patch to 'test/pricing.test.js' cleanly.\nerror: 2 lines add whitespace errors."
+    },
+    {
+      "taskId": "task_checkout_rounding",
+      "status": "integrated",
+      "integration": "integrated",
+      "explanation": "Promoted d49af6730077 atomically"
+    }
+  ],
+  "metrics": {
+    "tasksCompleted": 2,
+    "integrationAttempts": 3,
+    "integrationFailures": 1,
+    "conflictWarnings": 3,
+    "undetectedConflicts": 0,
+    "elapsedMs": 319629,
+    "tokensTotal": 204341,
+    "tokensByTask": {
+      "task_checkout_fee": 41428,
+      "task_checkout_delivery": 95306,
+      "task_checkout_rounding": 67607
+    },
+    "tokensByPhase": {
+      "planning": 64518,
+      "execution": 103531,
+      "replanning": 36292
+    }
+  }
+}

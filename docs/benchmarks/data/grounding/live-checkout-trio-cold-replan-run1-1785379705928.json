@@ -1,0 +1,211 @@
+{
+  "label": "cold-replan",
+  "scenario": "live-checkout-trio",
+  "run": 1,
+  "groundingDisabled": false,
+  "startedAt": "2026-07-30T02:38:03.568Z",
+  "elapsedMs": 622305,
+  "taskIds": [
+    "task_checkout_fee",
+    "task_checkout_delivery",
+    "task_checkout_rounding"
+  ],
+  "plans": [
+    {
+      "taskId": "task_checkout_rounding",
+      "revision": 1,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "base",
+        "discounted",
+        "lines",
+        "orderTotal",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "revision": 1,
+      "expectedFiles": [
+        "src/index.js",
+        "src/pricing/delivery.js",
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "DELIVERY_FEE",
+        "FREE_DELIVERY_THRESHOLD",
+        "base",
+        "deliveryFor",
+        "discounted",
+        "lines",
+        "orderTotal",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [
+          "src/pricing/delivery.js"
+        ],
+        "unresolvedSymbols": [
+          "DELIVERY_FEE",
+          "FREE_DELIVERY_THRESHOLD",
+          "deliveryFor"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    {
+      "taskId": "task_checkout_fee",
+      "revision": 1,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "HANDLING_CHARGE",
+        "base",
+        "discounted",
+        "lines",
+        "orderTotal",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "HANDLING_CHARGE"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  ],
+  "conflicts": [
+    {
+      "taskIds": [
+        "task_checkout_fee",
+        "task_checkout_delivery"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "structural": true,
+      "explanation": "file_overlap: src/pricing/total.js, test/pricing.test.js (+40); symbol_overlap: base, discounted, lines, orderTotal, subtotal (+175); dependency_impact: file:src/index.js, file:src/pricing/total.js, symbol:orderTotal, symbol:subtotal (+100); test_overlap: order total applies tax, subtotal sums the lines, test/pricing.test.js (+30). Structural evidence controls scheduling."
+    },
+    {
+      "taskIds": [
+        "task_checkout_fee",
+        "task_checkout_rounding"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "structural": true,
+      "explanation": "file_overlap: src/pricing/total.js, test/pricing.test.js (+40); symbol_overlap: base, discounted, lines, orderTotal, subtotal (+175); dependency_impact: symbol:orderTotal, symbol:subtotal (+50); test_overlap: order total applies tax, subtotal sums the lines, test/pricing.test.js (+30). Structural evidence controls scheduling."
+    },
+    {
+      "taskIds": [
+        "task_checkout_delivery",
+        "task_checkout_rounding"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "structural": true,
+      "explanation": "file_overlap: src/pricing/total.js, test/pricing.test.js (+40); symbol_overlap: HANDLING_CHARGE, base, discounted, lines, orderTotal, returningCustomer, subtotal (+245); dependency_impact: file:src/index.js, file:src/pricing/total.js, src/pricing/total.js, symbol:HANDLING_CHARGE, symbol:orderTotal, symbol:subtotal, test/pricing.test.js (+175); test_overlap: order total applies one flat handling charge regardless of lines or discounts, order total applies tax, subtotal sums the lines, test/pricing.test.js (+40). Structural evidence controls scheduling."
+    }
+  ],
+  "pairFlaggedAtPlanTime": true,
+  "replans": 2,
+  "replanOutcomes": [
+    {
+      "taskId": "task_checkout_delivery",
+      "revision": 2,
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [
+          "src/pricing/delivery.js"
+        ],
+        "unresolvedSymbols": [
+          "DELIVERY_FEE",
+          "FREE_DELIVERY_THRESHOLD",
+          "deliveryFor"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    {
+      "taskId": "task_checkout_rounding",
+      "revision": 2,
+      "grounding": {
+        "attached": true,
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  ],
+  "scopeChanges": 0,
+  "scopeDecisions": [],
+  "taskFailures": [
+    {
+      "taskId": "task_checkout_delivery",
+      "error": "Applied patch to 'src/index.js' cleanly.\nFalling back to direct application...\nApplied patch to 'src/pricing/total.js' cleanly.\n<stdin>:102: new blank line at EOF.\n+\nApplied patch to 'test/pricing.test.js' cleanly.\nerror: 1 line adds whitespace errors."
+    }
+  ],
+  "tasks": [
+    {
+      "taskId": "task_checkout_fee",
+      "status": "integrated",
+      "integration": "integrated",
+      "explanation": "Promoted 619e21db6386 atomically"
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "status": "failed",
+      "integration": "conflict",
+      "explanation": "Applied patch to 'src/index.js' cleanly.\nFalling back to direct application...\nApplied patch to 'src/pricing/total.js' cleanly.\n<stdin>:102: new blank line at EOF.\n+\nApplied patch to 'test/pricing.test.js' cleanly.\nerror: 1 line adds whitespace errors."
+    },
+    {
+      "taskId": "task_checkout_rounding",
+      "status": "integrated",
+      "integration": "integrated",
+      "explanation": "Promoted aaa8ed558100 atomically"
+    }
+  ],
+  "metrics": {
+    "tasksCompleted": 2,
+    "integrationAttempts": 3,
+    "integrationFailures": 1,
+    "conflictWarnings": 3,
+    "undetectedConflicts": 0,
+    "elapsedMs": 617975,
+    "tokensTotal": 257042,
+    "tokensByTask": {
+      "task_checkout_fee": 73233,
+      "task_checkout_delivery": 93639,
+      "task_checkout_rounding": 90170
+    },
+    "tokensByPhase": {
+      "planning": 74641,
+      "execution": 130327,
+      "replanning": 52074
+    }
+  }
+}

@@ -1,0 +1,208 @@
+{
+  "label": "warm-replan",
+  "scenario": "live-checkout-trio",
+  "run": 1,
+  "groundingDisabled": false,
+  "startedAt": "2026-07-30T03:07:08.685Z",
+  "elapsedMs": 653355,
+  "taskIds": [
+    "task_checkout_fee",
+    "task_checkout_delivery",
+    "task_checkout_rounding"
+  ],
+  "plans": [
+    {
+      "taskId": "task_checkout_rounding",
+      "revision": 1,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "base",
+        "discounted",
+        "lines",
+        "orderTotal",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "revision": 1,
+      "expectedFiles": [
+        "src/index.js",
+        "src/pricing/delivery.js",
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "DELIVERY_CHARGE",
+        "DELIVERY_THRESHOLD",
+        "base",
+        "deliveryFor",
+        "discounted",
+        "lines",
+        "orderTotal",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [
+          "src/pricing/delivery.js"
+        ],
+        "unresolvedSymbols": [
+          "DELIVERY_CHARGE",
+          "DELIVERY_THRESHOLD",
+          "deliveryFor"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    {
+      "taskId": "task_checkout_fee",
+      "revision": 1,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "base",
+        "discounted",
+        "lines",
+        "orderTotal",
+        "subtotal"
+      ],
+      "grounding": {
+        "attached": true,
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  ],
+  "conflicts": [
+    {
+      "taskIds": [
+        "task_checkout_fee",
+        "task_checkout_delivery"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "structural": true,
+      "explanation": "file_overlap: src/pricing/total.js, test/pricing.test.js (+40); symbol_overlap: base, discounted, lines, orderTotal, subtotal (+175); dependency_impact: file:src/index.js, file:src/pricing/total.js, symbol:orderTotal, symbol:subtotal (+100); api_overlap: orderTotal(customer, lines) (+30); test_overlap: order total applies tax, subtotal sums the lines, test/pricing.test.js (+30). Structural evidence controls scheduling."
+    },
+    {
+      "taskIds": [
+        "task_checkout_fee",
+        "task_checkout_rounding"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "structural": true,
+      "explanation": "file_overlap: src/pricing/total.js, test/pricing.test.js (+40); symbol_overlap: base, discounted, lines, orderTotal, subtotal (+175); dependency_impact: symbol:orderTotal, symbol:subtotal (+50); api_overlap: orderTotal(customer, lines) (+30); test_overlap: order total applies tax, subtotal sums the lines, test/pricing.test.js (+30). Structural evidence controls scheduling."
+    },
+    {
+      "taskIds": [
+        "task_checkout_delivery",
+        "task_checkout_rounding"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "structural": true,
+      "explanation": "file_overlap: src/pricing/total.js, test/pricing.test.js (+40); symbol_overlap: base, discounted, lines, orderTotal, subtotal (+175); dependency_impact: symbol:orderTotal, symbol:subtotal (+50); api_overlap: orderTotal(customer, lines) (+30); test_overlap: order total applies tax and a flat £2 handling charge, subtotal sums the lines, test/pricing.test.js (+30). Structural evidence controls scheduling."
+    }
+  ],
+  "pairFlaggedAtPlanTime": true,
+  "replans": 2,
+  "replanOutcomes": [
+    {
+      "taskId": "task_checkout_delivery",
+      "revision": 2,
+      "grounding": {
+        "attached": true,
+        "confidence": "grounded",
+        "missingFiles": [
+          "src/pricing/delivery.js"
+        ],
+        "unresolvedSymbols": [
+          "DELIVERY_CHARGE",
+          "DELIVERY_THRESHOLD",
+          "deliveryFor"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    {
+      "taskId": "task_checkout_rounding",
+      "revision": 2,
+      "grounding": {
+        "attached": true,
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  ],
+  "scopeChanges": 0,
+  "scopeDecisions": [],
+  "taskFailures": [
+    {
+      "taskId": "task_checkout_delivery",
+      "stage": "execution",
+      "error": "Codex could not write to the workspace under --sandbox workspace-write. The scoped-write sandbox is unavailable or misconfigured, so every edit was rejected while Codex still reported success. Run `codex doctor` to confirm the native sandbox setup, and only set executionSandbox to \"danger-full-acces"
+    }
+  ],
+  "tasks": [
+    {
+      "taskId": "task_checkout_fee",
+      "status": "integrated",
+      "integration": "integrated",
+      "explanation": "Promoted 6e1a72da43dd atomically"
+    },
+    {
+      "taskId": "task_checkout_delivery",
+      "status": "failed",
+      "explanation": "Codex could not write to the workspace under --sandbox workspace-write. The scoped-write sandbox is unavailable or misconfigured, so every edit was rejected while Codex still reported success. Run `codex doctor` to confirm the native sandbox setup, and only set executionSandbox to \"danger-full-access\" when the workspace is already isolated by other means, such as a container. Codex reported: faile"
+    },
+    {
+      "taskId": "task_checkout_rounding",
+      "status": "integrated",
+      "integration": "integrated",
+      "explanation": "Promoted ce723f19230e atomically"
+    }
+  ],
+  "metrics": {
+    "tasksCompleted": 2,
+    "integrationAttempts": 2,
+    "integrationFailures": 0,
+    "conflictWarnings": 3,
+    "undetectedConflicts": 0,
+    "elapsedMs": 651118,
+    "tokensTotal": 204769,
+    "tokensByTask": {
+      "task_checkout_fee": 59349,
+      "task_checkout_delivery": 55097,
+      "task_checkout_rounding": 90323
+    },
+    "tokensByPhase": {
+      "planning": 78960,
+      "execution": 73892,
+      "replanning": 51917
+    }
+  }
+}
