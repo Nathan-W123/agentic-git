@@ -3060,7 +3060,22 @@ button.status-item:hover {
  * this file — no rule here changes layout flow, only surface: hairline glow
  * borders in place of filled chrome, monospace for figures, and the radial
  * readouts and animated core that carry the Overview.
+ *
+ * --hud-ink is the layer's single glow color. The app frame keeps the theme
+ * cyan; the Home view re-inks itself in the reference desktop's electric
+ * blue by overriding the variable (and the accent tokens its children use).
  */
+
+:root {
+  --hud-ink: #4fe8ff;
+}
+
+.hud-home {
+  --hud-ink: #35a3ff;
+  --accent: #35a3ff;
+  --accent-strong: #0d7fe8;
+  --accent-dim: rgba(53, 163, 255, 0.14);
+}
 
 /* Shell: let the canvas texture through ---------------------------------- */
 
@@ -3081,7 +3096,7 @@ button.status-item:hover {
 
 .status-bar {
   border-top: 1px solid var(--border);
-  box-shadow: 0 -1px 12px -4px rgba(79, 232, 255, 0.35);
+  box-shadow: 0 -1px 12px -4px color-mix(in srgb, var(--hud-ink) 35%, transparent);
   font-family: var(--font-data);
   font-size: 11px;
   letter-spacing: 0.04em;
@@ -3100,7 +3115,7 @@ button.status-item:hover {
   background: var(--bg-surface);
   border: 1px solid var(--border-muted);
   box-shadow:
-    inset 0 1px 0 rgba(79, 232, 255, 0.06),
+    inset 0 1px 0 color-mix(in srgb, var(--hud-ink) 6%, transparent),
     0 8px 28px -20px rgba(0, 0, 0, 0.9);
 }
 
@@ -3136,7 +3151,7 @@ button.status-item:hover {
 .panel-head {
   background: linear-gradient(
     90deg,
-    rgba(79, 232, 255, 0.09),
+    color-mix(in srgb, var(--hud-ink) 9%, transparent),
     transparent 60%
   );
   border-bottom: 1px solid var(--border-muted);
@@ -3148,7 +3163,7 @@ button.status-item:hover {
   font-size: 11.5px;
   font-family: var(--font-data);
   color: var(--accent);
-  text-shadow: 0 0 12px rgba(79, 232, 255, 0.35);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--hud-ink) 35%, transparent);
 }
 
 /* Type: figures and labels speak monospace -------------------------------- */
@@ -3169,12 +3184,12 @@ button.status-item:hover {
 .eyebrow,
 .kicker {
   color: var(--accent);
-  text-shadow: 0 0 14px rgba(79, 232, 255, 0.4);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--hud-ink) 40%, transparent);
 }
 
 .view-head h1 {
   letter-spacing: -0.01em;
-  text-shadow: 0 0 28px rgba(79, 232, 255, 0.22);
+  text-shadow: 0 0 28px color-mix(in srgb, var(--hud-ink) 22%, transparent);
 }
 
 .metric-value,
@@ -3188,26 +3203,26 @@ button.status-item:hover {
 .button-primary {
   background: linear-gradient(
     180deg,
-    rgba(79, 232, 255, 0.22),
-    rgba(79, 232, 255, 0.1)
+    color-mix(in srgb, var(--hud-ink) 22%, transparent),
+    color-mix(in srgb, var(--hud-ink) 10%, transparent)
   );
-  border: 1px solid rgba(79, 232, 255, 0.55);
+  border: 1px solid color-mix(in srgb, var(--hud-ink) 55%, transparent);
   color: #eafcff;
-  text-shadow: 0 0 10px rgba(79, 232, 255, 0.5);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--hud-ink) 50%, transparent);
   box-shadow:
-    inset 0 0 12px rgba(79, 232, 255, 0.15),
-    0 0 16px -6px rgba(79, 232, 255, 0.6);
+    inset 0 0 12px color-mix(in srgb, var(--hud-ink) 15%, transparent),
+    0 0 16px -6px color-mix(in srgb, var(--hud-ink) 60%, transparent);
 }
 
 .button-primary:hover {
   background: linear-gradient(
     180deg,
-    rgba(79, 232, 255, 0.32),
-    rgba(79, 232, 255, 0.16)
+    color-mix(in srgb, var(--hud-ink) 32%, transparent),
+    color-mix(in srgb, var(--hud-ink) 16%, transparent)
   );
   box-shadow:
-    inset 0 0 14px rgba(79, 232, 255, 0.22),
-    0 0 22px -6px rgba(79, 232, 255, 0.75);
+    inset 0 0 14px color-mix(in srgb, var(--hud-ink) 22%, transparent),
+    0 0 22px -6px color-mix(in srgb, var(--hud-ink) 75%, transparent);
 }
 
 .button:focus-visible,
@@ -3218,26 +3233,26 @@ textarea:focus {
   outline: none;
   border-color: var(--accent);
   box-shadow:
-    0 0 0 1px rgba(79, 232, 255, 0.35),
+    0 0 0 1px color-mix(in srgb, var(--hud-ink) 35%, transparent),
     var(--glow-soft);
 }
 
 .activity-button.active {
   color: var(--accent);
-  text-shadow: 0 0 12px rgba(79, 232, 255, 0.6);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--hud-ink) 60%, transparent);
 }
 
 .activity-button.active svg {
-  filter: drop-shadow(0 0 6px rgba(79, 232, 255, 0.55));
+  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--hud-ink) 55%, transparent));
 }
 
 .activity-button.active::before {
-  box-shadow: 0 0 10px 1px rgba(79, 232, 255, 0.8);
+  box-shadow: 0 0 10px 1px color-mix(in srgb, var(--hud-ink) 80%, transparent);
 }
 
 .tab.active {
   border-bottom-color: var(--accent);
-  box-shadow: 0 1px 12px -4px rgba(79, 232, 255, 0.7);
+  box-shadow: 0 1px 12px -4px color-mix(in srgb, var(--hud-ink) 70%, transparent);
 }
 
 /* Radial readouts --------------------------------------------------------- */
@@ -3346,7 +3361,7 @@ textarea:focus {
   font-size: 24px;
   font-weight: 600;
   color: #eafdff;
-  text-shadow: 0 0 16px rgba(79, 232, 255, 0.55);
+  text-shadow: 0 0 16px color-mix(in srgb, var(--hud-ink) 55%, transparent);
 }
 
 .hud-clock-meta {
@@ -3361,7 +3376,7 @@ textarea:focus {
   letter-spacing: 0.18em;
   font-size: 13px;
   color: var(--accent);
-  text-shadow: 0 0 12px rgba(79, 232, 255, 0.4);
+  text-shadow: 0 0 12px color-mix(in srgb, var(--hud-ink) 40%, transparent);
 }
 
 .hud-clock-sub {
@@ -3373,13 +3388,18 @@ textarea:focus {
 }
 
 /* System readout cluster: label/value pairs over hairline rules. */
+/*
+ * Readout clusters float on the canvas — no card chrome. The title carries
+ * the reference's double-rule header, and a junction square ties the widget
+ * to its column's spine.
+ */
 .hud-system {
   display: grid;
   gap: 0;
-  padding: 8px 10px 10px;
-  border: 1px solid var(--border-muted);
-  border-left: 2px solid var(--accent);
-  background: rgba(6, 20, 30, 0.6);
+  position: relative;
+  padding: 0 0 2px;
+  border: 0;
+  background: none;
 }
 
 .hud-system-title {
@@ -3388,7 +3408,22 @@ textarea:focus {
   letter-spacing: 0.18em;
   font-size: 10px;
   color: var(--accent);
-  margin-bottom: 4px;
+  text-shadow: 0 0 10px color-mix(in srgb, var(--hud-ink) 45%, transparent);
+  margin-bottom: 6px;
+  padding-bottom: 4px;
+  position: relative;
+  /* The reference's double-rule header. */
+  border-bottom: 1px solid color-mix(in srgb, var(--hud-ink) 55%, transparent);
+}
+
+.hud-system-title::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 22%;
+  bottom: -3px;
+  height: 1px;
+  background: color-mix(in srgb, var(--hud-ink) 30%, transparent);
 }
 
 .hud-sys-row {
@@ -3396,7 +3431,7 @@ textarea:focus {
   justify-content: space-between;
   align-items: baseline;
   padding: 3px 0;
-  border-top: 1px solid rgba(79, 232, 255, 0.08);
+  border-top: 1px solid color-mix(in srgb, var(--hud-ink) 8%, transparent);
   font-family: var(--font-data);
   font-size: 10.5px;
   text-transform: uppercase;
@@ -3407,12 +3442,12 @@ textarea:focus {
 .hud-sys-row strong {
   color: #d9fbff;
   font-weight: 600;
-  text-shadow: 0 0 10px rgba(79, 232, 255, 0.35);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--hud-ink) 35%, transparent);
 }
 
 /* Faint tick ring outside every dial. */
 .gauge-ticks {
-  stroke: rgba(79, 232, 255, 0.22);
+  stroke: color-mix(in srgb, var(--hud-ink) 22%, transparent);
   stroke-width: 1;
   stroke-dasharray: 1 3.1;
   fill: none;
@@ -3446,7 +3481,7 @@ textarea:focus {
   margin-top: 4px;
   border-radius: 3px;
   overflow: hidden;
-  background: rgba(79, 232, 255, 0.08);
+  background: color-mix(in srgb, var(--hud-ink) 8%, transparent);
   gap: 1px;
 }
 
@@ -3501,12 +3536,12 @@ textarea:focus {
   background: linear-gradient(
     90deg,
     transparent,
-    rgba(79, 232, 255, 0.35) 12%,
-    rgba(79, 232, 255, 0.35) 30%,
+    color-mix(in srgb, var(--hud-ink) 35%, transparent) 12%,
+    color-mix(in srgb, var(--hud-ink) 35%, transparent) 30%,
     transparent 42%,
     transparent 58%,
-    rgba(79, 232, 255, 0.35) 70%,
-    rgba(79, 232, 255, 0.35) 88%,
+    color-mix(in srgb, var(--hud-ink) 35%, transparent) 70%,
+    color-mix(in srgb, var(--hud-ink) 35%, transparent) 88%,
     transparent
   );
 }
@@ -3519,12 +3554,12 @@ textarea:focus {
   background: linear-gradient(
     180deg,
     transparent,
-    rgba(79, 232, 255, 0.3) 14%,
-    rgba(79, 232, 255, 0.3) 30%,
+    color-mix(in srgb, var(--hud-ink) 30%, transparent) 14%,
+    color-mix(in srgb, var(--hud-ink) 30%, transparent) 30%,
     transparent 40%,
     transparent 60%,
-    rgba(79, 232, 255, 0.3) 70%,
-    rgba(79, 232, 255, 0.3) 86%,
+    color-mix(in srgb, var(--hud-ink) 30%, transparent) 70%,
+    color-mix(in srgb, var(--hud-ink) 30%, transparent) 86%,
     transparent
   );
 }
@@ -3587,12 +3622,12 @@ textarea:focus {
 }
 
 .gauge-track {
-  stroke: rgba(79, 232, 255, 0.13);
+  stroke: color-mix(in srgb, var(--hud-ink) 13%, transparent);
 }
 
 .gauge-arc {
   stroke: var(--accent);
-  filter: drop-shadow(0 0 5px rgba(79, 232, 255, 0.75));
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--hud-ink) 75%, transparent));
   /* Dials settle into their new sweep when live data lands. */
   transition: stroke-dasharray 700ms cubic-bezier(0.22, 1, 0.36, 1);
 }
@@ -3612,7 +3647,7 @@ textarea:focus {
   font-size: 24px;
   font-weight: 600;
   color: #eafdff;
-  text-shadow: 0 0 16px rgba(79, 232, 255, 0.55);
+  text-shadow: 0 0 16px color-mix(in srgb, var(--hud-ink) 55%, transparent);
   line-height: 1;
 }
 
@@ -3632,22 +3667,22 @@ textarea:focus {
 @keyframes gauge-live {
   0%,
   100% {
-    text-shadow: 0 0 16px rgba(79, 232, 255, 0.5);
+    text-shadow: 0 0 16px color-mix(in srgb, var(--hud-ink) 50%, transparent);
   }
   50% {
     text-shadow:
-      0 0 26px rgba(79, 232, 255, 0.95),
-      0 0 44px rgba(79, 232, 255, 0.4);
+      0 0 26px color-mix(in srgb, var(--hud-ink) 95%, transparent),
+      0 0 44px color-mix(in srgb, var(--hud-ink) 40%, transparent);
   }
 }
 
 @keyframes gauge-arc-live {
   0%,
   100% {
-    filter: drop-shadow(0 0 5px rgba(79, 232, 255, 0.7));
+    filter: drop-shadow(0 0 5px color-mix(in srgb, var(--hud-ink) 70%, transparent));
   }
   50% {
-    filter: drop-shadow(0 0 11px rgba(79, 232, 255, 1));
+    filter: drop-shadow(0 0 11px color-mix(in srgb, var(--hud-ink) 100%, transparent));
   }
 }
 
@@ -3687,27 +3722,27 @@ textarea:focus {
 .core-ring {
   position: absolute;
   border-radius: 50%;
-  border: 1px solid rgba(79, 232, 255, 0.22);
+  border: 1px solid color-mix(in srgb, var(--hud-ink) 22%, transparent);
 }
 
 .core-ring-a {
   inset: 4%;
-  border-top-color: rgba(79, 232, 255, 0.85);
+  border-top-color: color-mix(in srgb, var(--hud-ink) 85%, transparent);
   animation: core-spin 18s linear infinite;
 }
 
 .core-ring-b {
   inset: 16%;
   border-style: dashed;
-  border-color: rgba(79, 232, 255, 0.18);
-  border-left-color: rgba(79, 232, 255, 0.7);
+  border-color: color-mix(in srgb, var(--hud-ink) 18%, transparent);
+  border-left-color: color-mix(in srgb, var(--hud-ink) 70%, transparent);
   animation: core-spin 26s linear infinite reverse;
 }
 
 .core-ring-c {
   inset: 28%;
-  border-color: rgba(79, 232, 255, 0.14);
-  border-bottom-color: rgba(79, 232, 255, 0.6);
+  border-color: color-mix(in srgb, var(--hud-ink) 14%, transparent);
+  border-bottom-color: color-mix(in srgb, var(--hud-ink) 60%, transparent);
   animation: core-spin 12s linear infinite;
 }
 
@@ -3735,7 +3770,7 @@ textarea:focus {
   height: 5px;
   border-radius: 50%;
   background: var(--accent);
-  box-shadow: 0 0 8px rgba(79, 232, 255, 0.9);
+  box-shadow: 0 0 8px color-mix(in srgb, var(--hud-ink) 90%, transparent);
   transform: rotate(var(--angle)) translateY(calc(var(--orbit) * -1));
   animation: node-flicker calc(var(--pulse, 6s) * 2) ease-in-out infinite;
   animation-delay: var(--delay);
@@ -3751,7 +3786,7 @@ textarea:focus {
   transform: translateX(-50%);
   background: linear-gradient(
     to bottom,
-    rgba(79, 232, 255, 0.5),
+    color-mix(in srgb, var(--hud-ink) 50%, transparent),
     rgba(79, 232, 255, 0)
   );
 }
@@ -3778,8 +3813,8 @@ textarea:focus {
   border-radius: 50%;
   background: radial-gradient(
     circle at 50% 42%,
-    rgba(79, 232, 255, 0.2),
-    rgba(79, 232, 255, 0.05) 55%,
+    color-mix(in srgb, var(--hud-ink) 20%, transparent),
+    color-mix(in srgb, var(--hud-ink) 5%, transparent) 55%,
     transparent 72%
   );
   animation: core-breathe var(--pulse, 6s) ease-in-out infinite;
@@ -3798,7 +3833,7 @@ textarea:focus {
   stroke: rgba(126, 240, 255, 0.75);
   stroke-width: 1;
   vector-effect: non-scaling-stroke;
-  filter: drop-shadow(0 0 3px rgba(79, 232, 255, 0.6));
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--hud-ink) 60%, transparent));
 }
 
 .globe-faint {
@@ -3842,7 +3877,7 @@ textarea:focus {
   position: absolute;
   inset: -18%;
   border-radius: 50%;
-  border: 1px solid rgba(79, 232, 255, 0.5);
+  border: 1px solid color-mix(in srgb, var(--hud-ink) 50%, transparent);
   animation: core-halo var(--pulse, 6s) ease-out infinite;
 }
 
@@ -3851,15 +3886,15 @@ textarea:focus {
   100% {
     transform: scale(1);
     box-shadow:
-      0 0 30px rgba(79, 232, 255, 0.45),
-      0 0 70px rgba(79, 232, 255, 0.2),
+      0 0 30px color-mix(in srgb, var(--hud-ink) 45%, transparent),
+      0 0 70px color-mix(in srgb, var(--hud-ink) 20%, transparent),
       inset 0 0 22px rgba(255, 255, 255, 0.18);
   }
   50% {
     transform: scale(1.06);
     box-shadow:
-      0 0 46px rgba(79, 232, 255, 0.8),
-      0 0 110px rgba(79, 232, 255, 0.4),
+      0 0 46px color-mix(in srgb, var(--hud-ink) 80%, transparent),
+      0 0 110px color-mix(in srgb, var(--hud-ink) 40%, transparent),
       inset 0 0 26px rgba(255, 255, 255, 0.3);
   }
 }
@@ -3890,7 +3925,7 @@ textarea:focus {
   letter-spacing: 0.24em;
   font-size: 11px;
   color: var(--accent);
-  text-shadow: 0 0 16px rgba(79, 232, 255, 0.6);
+  text-shadow: 0 0 16px color-mix(in srgb, var(--hud-ink) 60%, transparent);
 }
 
 .core-sub {
@@ -3910,7 +3945,7 @@ textarea:focus {
 }
 
 .metric-value {
-  text-shadow: 0 0 18px rgba(79, 232, 255, 0.35);
+  text-shadow: 0 0 18px color-mix(in srgb, var(--hud-ink) 35%, transparent);
 }
 
 /* Banners, chips, and the live dots --------------------------------------- */
@@ -3918,8 +3953,8 @@ textarea:focus {
 .signal-banner {
   background: linear-gradient(
     90deg,
-    rgba(79, 232, 255, 0.1),
-    rgba(79, 232, 255, 0.02) 60%,
+    color-mix(in srgb, var(--hud-ink) 10%, transparent),
+    color-mix(in srgb, var(--hud-ink) 2%, transparent) 60%,
     transparent
   );
   border: 1px solid var(--border-muted);
@@ -3933,7 +3968,7 @@ textarea:focus {
 
 .chip {
   border-color: var(--border);
-  background: rgba(79, 232, 255, 0.07);
+  background: color-mix(in srgb, var(--hud-ink) 7%, transparent);
 }
 
 /* Diffs stay legible: the HUD tint must not swallow add/remove ------------- */
@@ -3950,7 +3985,7 @@ textarea:focus {
 
 .diff-meta {
   color: var(--accent);
-  background: rgba(79, 232, 255, 0.07);
+  background: color-mix(in srgb, var(--hud-ink) 7%, transparent);
 }
 
 /* Immersive Home ---------------------------------------------------------- */
@@ -4022,7 +4057,7 @@ textarea:focus {
   position: absolute;
   width: 26px;
   height: 26px;
-  border: 1px solid rgba(79, 232, 255, 0.55);
+  border: 1px solid color-mix(in srgb, var(--hud-ink) 55%, transparent);
   pointer-events: none;
   z-index: 5;
 }
@@ -4057,7 +4092,7 @@ textarea:focus {
   inset: -1%;
   border-radius: 50%;
   background: repeating-conic-gradient(
-    rgba(79, 232, 255, 0.4) 0deg 4deg,
+    color-mix(in srgb, var(--hud-ink) 40%, transparent) 0deg 4deg,
     transparent 4deg 10deg
   );
   -webkit-mask: radial-gradient(circle closest-side, transparent 94%, #000 95%);
@@ -4109,9 +4144,9 @@ textarea:focus {
   background: linear-gradient(
     180deg,
     transparent,
-    rgba(79, 232, 255, 0.045) 45%,
-    rgba(79, 232, 255, 0.09) 50%,
-    rgba(79, 232, 255, 0.045) 55%,
+    color-mix(in srgb, var(--hud-ink) 4.5%, transparent) 45%,
+    color-mix(in srgb, var(--hud-ink) 9%, transparent) 50%,
+    color-mix(in srgb, var(--hud-ink) 4.5%, transparent) 55%,
     transparent
   );
   animation: hud-scan-drift 13s linear infinite;
@@ -4133,8 +4168,8 @@ textarea:focus {
   border-radius: 50%;
   background: conic-gradient(
     from 0deg,
-    rgba(79, 232, 255, 0.28) 0deg,
-    rgba(79, 232, 255, 0.05) 28deg,
+    color-mix(in srgb, var(--hud-ink) 28%, transparent) 0deg,
+    color-mix(in srgb, var(--hud-ink) 5%, transparent) 28deg,
     transparent 40deg 360deg
   );
   -webkit-mask: radial-gradient(circle, transparent 58%, #000 59% 98%, transparent 99%);
@@ -4158,13 +4193,13 @@ textarea:focus {
 }
 
 .scale-fine {
-  stroke: rgba(79, 232, 255, 0.28);
+  stroke: color-mix(in srgb, var(--hud-ink) 28%, transparent);
   stroke-width: 4;
   stroke-dasharray: 0.6 2.5;
 }
 
 .scale-coarse {
-  stroke: rgba(79, 232, 255, 0.4);
+  stroke: color-mix(in srgb, var(--hud-ink) 40%, transparent);
   stroke-width: 7;
   stroke-dasharray: 1 28.2;
 }
@@ -4177,7 +4212,7 @@ textarea:focus {
 
 .arc-tasks {
   stroke: var(--accent);
-  filter: drop-shadow(0 0 4px rgba(79, 232, 255, 0.7));
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--hud-ink) 70%, transparent));
 }
 
 .arc-runs {
@@ -4204,7 +4239,7 @@ textarea:focus {
 .core-read strong {
   font-size: 17px;
   color: #eafdff;
-  text-shadow: 0 0 14px rgba(79, 232, 255, 0.55);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--hud-ink) 55%, transparent);
   line-height: 1.1;
 }
 
@@ -4226,13 +4261,25 @@ textarea:focus {
   display: flex;
   justify-content: space-between;
   gap: 2px;
-  padding: 2px 4px 8px;
-  margin-bottom: 10px;
-  border-bottom: 1px solid var(--border-muted);
+  padding: 2px 4px 6px;
+  margin-bottom: 8px;
   font-family: var(--font-data);
   font-size: 11px;
   letter-spacing: 0.06em;
   color: var(--fg-subtle);
+  /* Ruled like the reference: a hairline with tick marks under the days. */
+  background:
+    repeating-linear-gradient(
+        90deg,
+        color-mix(in srgb, var(--hud-ink) 30%, transparent) 0 1px,
+        transparent 1px 33px
+      )
+      bottom / 100% 5px no-repeat,
+    linear-gradient(
+        color-mix(in srgb, var(--hud-ink) 35%, transparent),
+        color-mix(in srgb, var(--hud-ink) 35%, transparent)
+      )
+      bottom 5px left 0 / 100% 1px no-repeat;
 }
 
 .hud-daystrip .today {
@@ -4241,7 +4288,7 @@ textarea:focus {
   padding: 0 5px;
   border-radius: 2px;
   font-weight: 700;
-  box-shadow: 0 0 12px rgba(79, 232, 255, 0.7);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--hud-ink) 70%, transparent);
 }
 
 /* The three-column composition of the reference desktop. */
@@ -4287,8 +4334,8 @@ textarea:focus {
   text-transform: uppercase;
   color: #eafdff;
   text-shadow:
-    0 0 22px rgba(79, 232, 255, 0.75),
-    0 0 60px rgba(79, 232, 255, 0.3);
+    0 0 22px color-mix(in srgb, var(--hud-ink) 75%, transparent),
+    0 0 60px color-mix(in srgb, var(--hud-ink) 30%, transparent);
 }
 
 .hud-title span {
@@ -4299,14 +4346,14 @@ textarea:focus {
   color: var(--fg-subtle);
 }
 
-/* Clock bracket line + big ringed day. */
+/* Clock bracket line + big ringed day: corner brackets, no filled box. */
 .hud-clock-bracket {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  padding: 3px 8px;
-  border: 1px solid var(--border-muted);
-  border-left: 2px solid var(--accent);
+  gap: 10px;
+  padding: 3px 10px;
+  position: relative;
   font-family: var(--font-data);
   font-size: 10.5px;
   text-transform: uppercase;
@@ -4314,9 +4361,29 @@ textarea:focus {
   color: var(--fg-muted);
 }
 
+.hud-clock-bracket::before,
+.hud-clock-bracket::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 8px;
+  border: 1px solid color-mix(in srgb, var(--hud-ink) 60%, transparent);
+}
+
+.hud-clock-bracket::before {
+  left: 0;
+  border-right: 0;
+}
+
+.hud-clock-bracket::after {
+  right: 0;
+  border-left: 0;
+}
+
 .hud-clock-bracket strong {
   color: #d9fbff;
-  text-shadow: 0 0 10px rgba(79, 232, 255, 0.4);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--hud-ink) 40%, transparent);
 }
 
 .hud-clock-row {
@@ -4349,11 +4416,19 @@ textarea:focus {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 10px;
-  border: 1px solid var(--border-muted);
-  border-left: 2px solid var(--accent);
-  background: rgba(6, 20, 30, 0.6);
-  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 0 100%);
+  padding: 0;
+  border: 0;
+  background: none;
+  position: relative;
+}
+
+/* A dashed halo makes the energy ring its own instrument, like the ref. */
+.hud-energy .gauge-dial::after {
+  content: "";
+  position: absolute;
+  inset: -7px;
+  border-radius: 50%;
+  border: 1px dashed color-mix(in srgb, var(--hud-ink) 40%, transparent);
 }
 
 .hud-energy .gauge-foot {
@@ -4375,11 +4450,9 @@ textarea:focus {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 8px 10px;
-  border: 1px solid var(--border-muted);
-  border-left: 2px solid var(--accent);
-  background: rgba(6, 20, 30, 0.6);
-  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 0 100%);
+  padding: 0;
+  border: 0;
+  background: none;
 }
 
 .hud-linkring {
@@ -4387,7 +4460,7 @@ textarea:focus {
   width: 62px;
   height: 62px;
   border-radius: 50%;
-  border: 2px solid rgba(79, 232, 255, 0.4);
+  border: 2px solid color-mix(in srgb, var(--hud-ink) 40%, transparent);
   display: grid;
   place-items: center;
   align-content: center;
@@ -4411,8 +4484,8 @@ textarea:focus {
 .hud-linkring.on {
   border-color: var(--accent);
   box-shadow:
-    0 0 14px rgba(79, 232, 255, 0.45),
-    inset 0 0 10px rgba(79, 232, 255, 0.15);
+    0 0 14px color-mix(in srgb, var(--hud-ink) 45%, transparent),
+    inset 0 0 10px color-mix(in srgb, var(--hud-ink) 15%, transparent);
 }
 
 .hud-linkmeta {
@@ -4428,17 +4501,16 @@ textarea:focus {
 
 .hud-linkmeta strong {
   color: var(--accent);
-  text-shadow: 0 0 10px rgba(79, 232, 255, 0.4);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--hud-ink) 40%, transparent);
 }
 
 /* Console access, in the search-box slot. */
 .hud-termbox {
   display: grid;
   gap: 6px;
-  padding: 8px 10px 10px;
-  border: 1px solid var(--border-muted);
-  border-left: 2px solid var(--accent);
-  background: rgba(6, 20, 30, 0.6);
+  padding: 0;
+  border: 0;
+  background: none;
 }
 
 .hud-termbox-row {
@@ -4448,7 +4520,7 @@ textarea:focus {
 }
 
 .hud-termbtn {
-  background: rgba(79, 232, 255, 0.07);
+  background: color-mix(in srgb, var(--hud-ink) 7%, transparent);
   border: 1px solid var(--border);
   color: var(--accent);
   font-family: var(--font-data);
@@ -4475,7 +4547,7 @@ textarea:focus {
   text-transform: uppercase;
   letter-spacing: 0.3em;
   color: #d9fbff;
-  text-shadow: 0 0 16px rgba(79, 232, 255, 0.5);
+  text-shadow: 0 0 16px color-mix(in srgb, var(--hud-ink) 50%, transparent);
 }
 
 /* The hero dial: agents running, in the reference's big-degrees slot. */
@@ -4505,7 +4577,7 @@ textarea:focus {
 .hud-plate-name {
   font-size: 15px;
   color: #eafdff;
-  text-shadow: 0 0 14px rgba(79, 232, 255, 0.4);
+  text-shadow: 0 0 14px color-mix(in srgb, var(--hud-ink) 40%, transparent);
 }
 
 .hud-plate-sub {
@@ -4523,7 +4595,7 @@ textarea:focus {
   align-items: center;
   gap: 8px;
   padding: 3px 0;
-  border-top: 1px solid rgba(79, 232, 255, 0.08);
+  border-top: 1px solid color-mix(in srgb, var(--hud-ink) 8%, transparent);
   font-family: var(--font-data);
   font-size: 10.5px;
   text-transform: uppercase;
@@ -4544,7 +4616,7 @@ textarea:focus {
   background: none;
   border: 0;
   padding: 3px 0;
-  border-top: 1px solid rgba(79, 232, 255, 0.08);
+  border-top: 1px solid color-mix(in srgb, var(--hud-ink) 8%, transparent);
   color: var(--fg);
   font-family: var(--font-data);
   font-size: 11px;
@@ -4559,13 +4631,13 @@ textarea:focus {
   flex: none;
   width: 7px;
   height: 7px;
-  background: rgba(79, 232, 255, 0.5);
-  box-shadow: 0 0 6px rgba(79, 232, 255, 0.5);
+  background: color-mix(in srgb, var(--hud-ink) 50%, transparent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--hud-ink) 50%, transparent);
 }
 
 .hud-link-row:hover {
   color: var(--accent);
-  text-shadow: 0 0 10px rgba(79, 232, 255, 0.5);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--hud-ink) 50%, transparent);
 }
 
 .hud-link-row:hover i {
@@ -4577,7 +4649,7 @@ textarea:focus {
   display: grid;
   gap: 0;
   padding: 4px 0;
-  border-top: 1px solid rgba(79, 232, 255, 0.08);
+  border-top: 1px solid color-mix(in srgb, var(--hud-ink) 8%, transparent);
 }
 
 .hud-feed-row strong {
@@ -4629,8 +4701,8 @@ textarea:focus {
 }
 
 .hud-graph rect {
-  fill: rgba(79, 232, 255, 0.65);
-  filter: drop-shadow(0 0 3px rgba(79, 232, 255, 0.5));
+  fill: color-mix(in srgb, var(--hud-ink) 65%, transparent);
+  filter: drop-shadow(0 0 3px color-mix(in srgb, var(--hud-ink) 50%, transparent));
 }
 
 /* Bottom dock: the reference desktop's circular icon row ------------------ */
@@ -4662,11 +4734,11 @@ textarea:focus {
   border-radius: 50%;
   display: grid;
   place-items: center;
-  border: 2px solid rgba(79, 232, 255, 0.5);
+  border: 2px solid color-mix(in srgb, var(--hud-ink) 50%, transparent);
   background: rgba(4, 18, 27, 0.85);
   box-shadow:
     inset 0 0 0 5px rgba(2, 10, 16, 0.9),
-    inset 0 0 0 6px rgba(79, 232, 255, 0.22);
+    inset 0 0 0 6px color-mix(in srgb, var(--hud-ink) 22%, transparent);
   transition: border-color 200ms ease;
 }
 
@@ -4676,7 +4748,7 @@ textarea:focus {
   position: absolute;
   inset: -7px;
   border-radius: 50%;
-  border: 1px dashed rgba(79, 232, 255, 0.35);
+  border: 1px dashed color-mix(in srgb, var(--hud-ink) 35%, transparent);
 }
 
 .dock-ring svg {
@@ -4720,7 +4792,7 @@ textarea:focus {
 .dock-btn:hover .dock-label,
 .dock-btn:focus-visible .dock-label {
   color: var(--accent);
-  text-shadow: 0 0 10px rgba(79, 232, 255, 0.5);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--hud-ink) 50%, transparent);
 }
 
 .dock-btn:focus-visible {
@@ -4732,14 +4804,14 @@ textarea:focus {
   100% {
     box-shadow:
       inset 0 0 0 5px rgba(2, 10, 16, 0.9),
-      inset 0 0 0 6px rgba(79, 232, 255, 0.3),
-      0 0 10px rgba(79, 232, 255, 0.35);
+      inset 0 0 0 6px color-mix(in srgb, var(--hud-ink) 30%, transparent),
+      0 0 10px color-mix(in srgb, var(--hud-ink) 35%, transparent);
   }
   50% {
     box-shadow:
       inset 0 0 0 5px rgba(2, 10, 16, 0.9),
-      inset 0 0 0 6px rgba(79, 232, 255, 0.55),
-      0 0 26px rgba(79, 232, 255, 0.85);
+      inset 0 0 0 6px color-mix(in srgb, var(--hud-ink) 55%, transparent),
+      0 0 26px color-mix(in srgb, var(--hud-ink) 85%, transparent);
   }
 }
 
@@ -4764,20 +4836,18 @@ textarea:focus {
 
 .hud-bar-head strong {
   color: #d9fbff;
-  text-shadow: 0 0 10px rgba(79, 232, 255, 0.35);
+  text-shadow: 0 0 10px color-mix(in srgb, var(--hud-ink) 35%, transparent);
 }
 
 /* Angular cluster framing -------------------------------------------------- */
 
 /* One frame around the clock and its bars, clipped like the references. */
 .hud-cluster-frame {
-  border: 1px solid var(--border-muted);
-  border-left: 2px solid var(--accent);
-  background: rgba(6, 20, 30, 0.6);
-  padding: 10px 12px 12px;
-  clip-path: polygon(0 0, calc(100% - 16px) 0, 100% 16px, 100% 100%, 0 100%);
+  border: 0;
+  background: none;
+  padding: 0;
   display: grid;
-  gap: 10px;
+  gap: 12px;
 }
 
 .hud-cluster-frame .hud-clock {
@@ -4786,20 +4856,98 @@ textarea:focus {
   padding: 0;
 }
 
-/* Every readout box gets the cut corner and a tick strip along the base. */
-.hud-system {
-  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 0 100%);
-}
-
+/* A dashed tick strip closes each floating cluster, like the references. */
 .hud-system::after {
   content: "";
   height: 3px;
   margin-top: 7px;
   background: repeating-linear-gradient(
     90deg,
-    rgba(79, 232, 255, 0.35) 0 6px,
+    color-mix(in srgb, var(--hud-ink) 35%, transparent) 0 6px,
     transparent 6px 11px
   );
+}
+
+/*
+ * Column spines: a continuous hairline down each side column with a
+ * junction square where every instrument hangs off it — the traced-circuit
+ * look that chains the reference's widgets together.
+ */
+.hud-refgrid .hud-col {
+  position: relative;
+  padding-left: 16px;
+}
+
+.hud-refgrid .hud-col::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 6px;
+  bottom: 6px;
+  width: 1px;
+  background: linear-gradient(
+    180deg,
+    transparent,
+    color-mix(in srgb, var(--hud-ink) 45%, transparent) 6%,
+    color-mix(in srgb, var(--hud-ink) 45%, transparent) 94%,
+    transparent
+  );
+}
+
+.hud-refgrid .hud-col > * {
+  position: relative;
+}
+
+.hud-refgrid .hud-col > *::before {
+  content: "";
+  position: absolute;
+  left: -16px;
+  top: 7px;
+  width: 10px;
+  height: 1px;
+  background: color-mix(in srgb, var(--hud-ink) 55%, transparent);
+}
+
+/* The right column hangs off its right edge instead. */
+.hud-refgrid .hud-col:last-child {
+  padding-left: 0;
+  padding-right: 16px;
+}
+
+.hud-refgrid .hud-col:last-child::before {
+  left: auto;
+  right: 0;
+}
+
+.hud-refgrid .hud-col:last-child > *::before {
+  left: auto;
+  right: -16px;
+}
+
+/*
+ * The vast concentric ring assembly behind the whole view — the layered
+ * back-plate that makes the reference read as one machine rather than a
+ * page of widgets.
+ */
+.hud-home::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 300px;
+  width: 1150px;
+  height: 1150px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  pointer-events: none;
+  background: repeating-radial-gradient(
+    circle,
+    transparent 0 118px,
+    color-mix(in srgb, var(--hud-ink) 7%, transparent) 118px 119px,
+    transparent 119px 240px
+  );
+  -webkit-mask: radial-gradient(circle, #000 30%, transparent 72%);
+  mask: radial-gradient(circle, #000 30%, transparent 72%);
+  z-index: 0;
 }
 
 /* Responsive -------------------------------------------------------------- */
