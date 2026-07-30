@@ -18,6 +18,7 @@
     "@coord/api-gateway": "*",
     "@coord/cli": "*",
     "@coord/code-intelligence": "*",
+    "@coord/collab": "*",
     "@coord/coordinator": "*",
     "@coord/integration-service": "*",
     "@coord/persistence": "*",

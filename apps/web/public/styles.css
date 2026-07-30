@@ -2946,6 +2946,61 @@ button.status-item:hover {
   position: relative;
 }
 
+/* Live editing ------------------------------------------------------------ */
+/* Per-participant colours are injected as a <style> element by editor.js,
+   because the colour is data (assigned per user) rather than design. These
+   rules carry everything that is not the colour. */
+
+.collab-presence {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.chip.collab-peer {
+  gap: 5px;
+}
+
+.collab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  flex: none;
+}
+
+/* A remote caret is a zero-width decoration, so it is drawn as a border. */
+.collab-caret {
+  position: relative;
+  z-index: 5;
+  pointer-events: none;
+}
+
+.collab-caret::after {
+  content: "";
+  position: absolute;
+  top: -1.05em;
+  left: -1px;
+  padding: 0 4px;
+  border-radius: 3px 3px 3px 0;
+  font-family: var(--font-sans);
+  font-size: 10px;
+  line-height: 1.5;
+  white-space: nowrap;
+  color: #06121c;
+  font-weight: 600;
+  opacity: 0.88;
+  transition: opacity 120ms ease-in-out;
+}
+
+.editor-mount:hover .collab-caret::after {
+  opacity: 1;
+}
+
+.collab-selection {
+  border-radius: 2px;
+}
+
 .editor-placeholder {
   display: grid;
   place-items: center;

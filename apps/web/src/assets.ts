@@ -53,10 +53,32 @@ export function defaultMonacoDirectory(): string | undefined {
   }
 }
 
+/**
+ * The compiled collaborative-editing engine (`@coord/collab/dist`).
+ *
+ * The same module runs in the gateway and in the browser: operational
+ * transformation only converges if both sides transform identically, and
+ * shipping one build is how that is guaranteed rather than hoped for. The
+ * dashboard has no bundler, so it is served as plain ES modules — same-origin,
+ * because the gateway's CSP allows no external scripts.
+ */
+export function defaultCollabDirectory(): string | undefined {
+  try {
+    const require = createRequire(import.meta.url);
+    return path.join(
+      path.dirname(require.resolve("@coord/collab/package.json")),
+      "dist",
+    );
+  } catch {
+    return undefined;
+  }
+}
+
 async function loadDirectory(
   assets: Map<string, StaticAsset>,
   root: string,
   urlPrefix: string,
+  skip?: (relative: string) => boolean,
 ): Promise<void> {
   const entries = await readdir(root, { withFileTypes: true, recursive: true });
   await Promise.all(
@@ -75,6 +97,9 @@ async function loadDirectory(
       if (contentType === undefined) {
         return;
       }
+      if (skip?.(relative.replaceAll(path.sep, "/")) === true) {
+        return;
+      }
       assets.set(`${urlPrefix}${relative.replaceAll(path.sep, "/")}`, {
         body: await readFile(filePath),
         contentType,
@@ -87,6 +112,8 @@ export async function loadStaticAssets(
   directory = defaultPublicDirectory(),
   /** `false` disables the vendored editor entirely (used by tests). */
   monacoDirectory: string | false | undefined = defaultMonacoDirectory(),
+  /** `false` disables live collaborative editing (used by tests). */
+  collabDirectory: string | false | undefined = defaultCollabDirectory(),
 ): Promise<ReadonlyMap<string, StaticAsset>> {
   const root = path.resolve(directory);
   const assets = new Map<string, StaticAsset>();
@@ -106,6 +133,21 @@ export async function loadStaticAssets(
   // editor tab reports that its assets are unavailable.
   if (monacoDirectory !== undefined && monacoDirectory !== false) {
     await loadDirectory(assets, path.resolve(monacoDirectory), "/vendor/monaco/vs/");
+  }
+  if (collabDirectory !== undefined && collabDirectory !== false) {
+    try {
+      await loadDirectory(
+        assets,
+        path.resolve(collabDirectory),
+        "/vendor/collab/",
+        // The package's test scaffolding compiles alongside its sources and
+        // imports node builtins; it has no business being served.
+        (relative) => relative.endsWith(".test.js") || relative === "random.js",
+      );
+    } catch {
+      // An unbuilt or missing engine costs live collaboration, not the
+      // dashboard: the editor falls back to the single-user save path.
+    }
   }
   return assets;
 }

@@ -561,7 +561,15 @@ export type AuditEventType =
   /** A human overlay workspace was created from the dashboard. */
   | "workspace_created"
   /** A sandboxed terminal command ran in an overlay workspace. */
-  | "workspace_command_executed";
+  | "workspace_command_executed"
+  /**
+   * Someone joined a live editing session on another user's overlay. Recorded
+   * because it is the one way a user's unsubmitted work becomes visible to
+   * anybody else.
+   */
+  | "workspace_collaboration_joined"
+  /** A live editing session flushed a shared document into the overlay. */
+  | "workspace_collaboration_saved";
 
 export interface AuditEvent {
   id: string;

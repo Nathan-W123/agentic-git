@@ -51,9 +51,65 @@ test("serves the vendored Monaco build same-origin under /vendor", async () => {
 });
 
 test("a missing vendor directory degrades to dashboard-only assets", async () => {
-  const assets = await loadStaticAssets(undefined, false);
+  const assets = await loadStaticAssets(undefined, false, false);
   assert.equal(assets.get("/app.js") !== undefined, true);
   assert.equal(assets.get("/vendor/monaco/vs/loader.js"), undefined);
+  assert.equal(assets.get("/vendor/collab/index.js"), undefined);
+});
+
+test("serves the collaboration engine the gateway itself runs", async () => {
+  const assets = await loadStaticAssets();
+  // Operational transformation only converges if both ends transform
+  // identically, so the browser loads the very same compiled module the
+  // gateway imports rather than a second implementation of it.
+  for (const asset of [
+    "/vendor/collab/index.js",
+    "/vendor/collab/client.js",
+    "/vendor/collab/text-operation.js",
+  ]) {
+    assert.equal(
+      assets.get(asset)?.contentType,
+      "text/javascript; charset=utf-8",
+      `${asset} should be served`,
+    );
+  }
+});
+
+test("does not serve the collaboration package's test scaffolding", async () => {
+  const assets = await loadStaticAssets();
+  // Those modules import node builtins and would fail to load in a browser;
+  // more to the point, nothing should ship to clients that is not needed.
+  for (const asset of [
+    "/vendor/collab/random.js",
+    "/vendor/collab/client.test.js",
+    "/vendor/collab/text-operation.test.js",
+    "/vendor/collab/convergence.test.js",
+  ]) {
+    assert.equal(assets.get(asset), undefined, `${asset} should not be served`);
+  }
+});
+
+test("the collaboration engine is browser-safe", async () => {
+  const assets = await loadStaticAssets();
+  // A single `node:` import anywhere in the served graph breaks the editor at
+  // load time, and only in a browser — no test that runs under node would
+  // catch it.
+  for (const [url, asset] of assets) {
+    if (!url.startsWith("/vendor/collab/")) {
+      continue;
+    }
+    const source = asset.body.toString("utf8");
+    assert.equal(
+      /from\s+"node:/u.test(source),
+      false,
+      `${url} imports a node builtin`,
+    );
+    assert.equal(
+      /\brequire\(/u.test(source),
+      false,
+      `${url} is not an ES module`,
+    );
+  }
 });
 
 async function browserSource(): Promise<string> {
