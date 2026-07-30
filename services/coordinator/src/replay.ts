@@ -59,12 +59,43 @@ export function replayBlockers(
   changeSet: ChangeSet,
   advance: CanonicalAdvance,
 ): string[] {
+  const assessment = assessReplay(plan, changeSet, advance);
+  return [...new Set([...assessment.semantic, ...assessment.textual])].sort();
+}
+
+/**
+ * The same question as {@link replayBlockers}, answered in two grades.
+ *
+ * `semantic` blockers mean the advance invalidated what this result *knows*:
+ * a dependency it read, a symbol, API, schema, configuration key, test or
+ * service it claimed. No textual operation can clear those — the agent's
+ * reasoning is stale and only a replan refreshes it.
+ *
+ * `textual` blockers mean only that both sides wrote the same file, with
+ * nothing finer contested. That is exactly the situation `git apply --3way`
+ * exists for: if the hunks are disjoint the merge is clean and free, and the
+ * integration validation gate still decides whether the merged tree is
+ * healthy. A caller may attempt integration despite purely-textual blockers
+ * and fall back to the paid replan only when the three-way apply reports a
+ * real conflict.
+ */
+export interface ReplayAssessment {
+  semantic: string[];
+  textual: string[];
+}
+
+export function assessReplay(
+  plan: AgentPlan,
+  changeSet: ChangeSet,
+  advance: CanonicalAdvance,
+): ReplayAssessment {
   const complete = completeAgentPlan(plan);
   const dependsOn = new Set(complete.dependencies.map(key));
   const touched = (type: string, value: string): boolean =>
     dependsOn.has(key(value)) || dependsOn.has(`${type}:${key(value)}`);
 
-  const blockers: string[] = [];
+  const semantic: string[] = [];
+  const textual: string[] = [];
   const files = new Set(
     [
       ...changeSet.patches.map((patch) => patch.path),
@@ -72,8 +103,10 @@ export function replayBlockers(
     ].map(key),
   );
   for (const file of advance.changedFiles) {
-    if (files.has(key(file)) || touched("file", file)) {
-      blockers.push(`file:${file}`);
+    if (touched("file", file)) {
+      semantic.push(`file:${file}`);
+    } else if (files.has(key(file))) {
+      textual.push(`file:${file}`);
     }
   }
 
@@ -85,7 +118,7 @@ export function replayBlockers(
     const owned = new Set(claimed.map(key));
     for (const value of changed) {
       if (owned.has(key(value)) || touched(type, value)) {
-        blockers.push(`${type}:${value}`);
+        semantic.push(`${type}:${value}`);
       }
     }
   };
@@ -100,5 +133,8 @@ export function replayBlockers(
   axis("test", complete.expectedTests, advance.changedTests);
   axis("service", complete.expectedServices, advance.changedServices);
 
-  return [...new Set(blockers)].sort();
+  return {
+    semantic: [...new Set(semantic)].sort(),
+    textual: [...new Set(textual)].sort(),
+  };
 }

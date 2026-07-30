@@ -2782,3 +2782,196 @@ test("a fast-path admission still lands through exact-base integration", async (
     await rm(harness.root, { recursive: true, force: true });
   }
 });
+
+/** Shared-mode prose file where concurrent same-file work is legitimate. */
+const GUIDE = Array.from(
+  { length: 40 },
+  (_, index) => `Guide line ${String(index + 1)}.`,
+).join("\n") + "\n";
+
+async function collectEdit(
+  harness: Harness,
+  taskId: string,
+  baseVersion: { sequence: number; revision: string; branch: string; createdAt: string },
+  edit: (content: string) => string,
+) {
+  const repository = await harness.store.getRepository("repo_worker");
+  assert.ok(repository);
+  const canonicalRepo = {
+    id: repository.id,
+    path: repository.path,
+    branch: repository.branch,
+  };
+  const workspaces = new GitWorktreeWorkspaceManager(
+    harness.repositories.getGitClient(),
+  );
+  const workspace = await workspaces.create({
+    taskId,
+    rootPath: path.join(harness.root, "merge-workspaces"),
+    repository: canonicalRepo,
+    baseVersion,
+  });
+  const target = path.join(workspace.path, "docs", "guide.md");
+  await writeFile(target, edit(await readFile(target, "utf8")), "utf8");
+  const changeSet = await workspaces.collectChangeSet(workspace, {
+    symbolsChanged: [],
+    riskAssessment: { level: "low", reasons: [] },
+    agentExplanation: "edited the guide",
+  });
+  await workspaces.destroy(workspace);
+  return changeSet;
+}
+
+/**
+ * One admitted task on a shared prose file, with canonical advanced under it
+ * by an external edit to the same file — a human push, or a local
+ * coordinator run the lease system never saw.
+ */
+async function externalAdvanceOnGuide(harness: Harness) {
+  const taskB = await harness.store.submitTask({
+    repositoryId: "repo_worker",
+    objective: "correct the closing summary",
+    agentId: "generic-cli",
+    validationCommands: [],
+  });
+  const assignmentB = await leaseWork(harness.store, {
+    workerId: harness.workerId,
+    projectId: DEFAULT_PROJECT_ID,
+  });
+  assert.ok(assignmentB);
+  const outcome = await admit(harness, assignmentB, {
+    objective: assignmentB.task.objective,
+    expectedFiles: ["docs/guide.md"],
+    expectedSymbols: [],
+  });
+  assert.equal(
+    outcome.outcome === "admitted" ? outcome.admission.status : outcome,
+    "approved",
+  );
+
+  const repository = await harness.store.getRepository("repo_worker");
+  assert.ok(repository);
+  const canonicalRepo = {
+    id: repository.id,
+    path: repository.path,
+    branch: repository.branch,
+  };
+  const workspaces = new GitWorktreeWorkspaceManager(
+    harness.repositories.getGitClient(),
+  );
+  const competing = await workspaces.create({
+    taskId: "external-edit",
+    rootPath: path.join(harness.root, "external"),
+    repository: canonicalRepo,
+    baseVersion: assignmentB.canonicalVersion,
+  });
+  const target = path.join(competing.path, "docs", "guide.md");
+  await writeFile(
+    target,
+    (await readFile(target, "utf8")).replace(
+      "Guide line 1.",
+      "Guide line 1, expanded externally.",
+    ),
+    "utf8",
+  );
+  const candidate = await harness.repositories.commitAll(
+    competing.path,
+    "advance canonical",
+  );
+  assert.ok(candidate);
+  assert.equal(
+    await harness.repositories.promote(
+      canonicalRepo,
+      candidate,
+      assignmentB.canonicalVersion.revision,
+    ),
+    true,
+  );
+  await workspaces.destroy(competing);
+  return { taskB, assignmentB };
+}
+
+test("a same-file loser with disjoint hunks is merged for free instead of replanned", async () => {
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+  });
+  try {
+    const { taskB, assignmentB } = await externalAdvanceOnGuide(harness);
+    const acceptedB = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignmentB.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: taskB.objective,
+          expectedFiles: ["docs/guide.md"],
+          expectedSymbols: [],
+        }),
+        changeSet: await collectEdit(
+          harness,
+          taskB.id,
+          assignmentB.canonicalVersion,
+          (content) =>
+            content.replace("Guide line 40.", "Guide line 40, corrected."),
+        ),
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+
+    // The free three-way merge landed the disjoint hunks; no replan was paid.
+    assert.equal(acceptedB.accepted, true, acceptedB.reason);
+    assert.equal(acceptedB.integrationStatus, "integrated");
+    assert.equal(acceptedB.requeued, undefined);
+    const tasks = await harness.store.listSubmittedTasks();
+    assert.ok(tasks.every((entry) => entry.status === "integrated"));
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a same-file loser with overlapping hunks is requeued to replan, not failed", async () => {
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+  });
+  try {
+    const { taskB, assignmentB } = await externalAdvanceOnGuide(harness);
+    const acceptedB = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignmentB.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: taskB.objective,
+          expectedFiles: ["docs/guide.md"],
+          expectedSymbols: [],
+        }),
+        changeSet: await collectEdit(
+          harness,
+          taskB.id,
+          assignmentB.canonicalVersion,
+          // Same line the winner rewrote: the merge must conflict.
+          (content) => content.replace("Guide line 1.", "Guide line 1, redone."),
+        ),
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+
+    // Losing the free bet costs what it always cost: a requeue to replan.
+    assert.equal(acceptedB.accepted, false);
+    assert.equal(acceptedB.requeued, true);
+    const taskAfter = (await harness.store.listSubmittedTasks()).find(
+      (entry) => entry.id === taskB.id,
+    );
+    assert.equal(taskAfter?.status, "submitted");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});

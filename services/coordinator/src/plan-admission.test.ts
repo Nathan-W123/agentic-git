@@ -728,3 +728,65 @@ test("grounded referents sequence plans whose declared names never overlap", () 
   assert.equal(admission.status, "sequenced");
   assert.deepEqual(admission.blockedBy, ["task_b"]);
 });
+
+test("a grounded plan is partially admitted with only its misnamed piece withheld", () => {
+  // The candidate hallucinated: src/checkout.js does not exist and grounding
+  // mapped it (and calculateTotal) to the real total.js/orderTotal that the
+  // executing task holds. Its second declared file is real and uncontested.
+  // Minimal withholding means: defer the misnamed carrier and its symbol,
+  // grant the free file — not refuse the whole plan, and not withhold the
+  // free file too.
+  const candidate: AgentPlan = {
+    ...plan("task_a", {
+      objective: "charge a checkout handling fee on orders",
+      expectedFiles: ["src/checkout.js", "src/format/currency.js"],
+      expectedSymbols: ["calculateTotal", "formatPrice"],
+    }),
+    grounding: {
+      confidence: "grounded",
+      revision: "a".repeat(40),
+      missingFiles: ["src/checkout.js"],
+      unresolvedSymbols: ["calculateTotal"],
+      fileReferents: [
+        { declared: "src/checkout.js", resolved: "src/pricing/total.js" },
+      ],
+      symbolReferents: [
+        {
+          declared: "calculateTotal",
+          resolved: "orderTotal",
+          files: ["src/pricing/total.js"],
+        },
+      ],
+      notes: [],
+    },
+  };
+  const holder = plan("task_b", {
+    objective: "waive checkout delivery charges on orders",
+    expectedFiles: ["src/pricing/total.js"],
+    expectedSymbols: ["orderTotal"],
+  });
+
+  const admission = admit(candidate, [holder], new PlanAdmissionController(), {
+    // Both granted-file range lookups succeed; neither declares the referent.
+    symbolRangesInFile: (file) =>
+      file === "src/format/currency.js"
+        ? [{ name: "formatPrice", startLine: 1, endLine: 3 }]
+        : [],
+  });
+
+  assert.equal(admission.status, "approved_with_constraints");
+  const deferred = (admission.deferredResources ?? []).map(
+    (resource) => `${resource.resourceType}:${resource.resourceId}`,
+  );
+  assert.deepEqual(deferred.sort(), [
+    "file:src/checkout.js",
+    "symbol:calculateTotal",
+  ]);
+  // The withholding names the real code it protects.
+  assert.match(
+    (admission.deferredResources ?? [])
+      .map((resource) => resource.reason)
+      .join(" "),
+    /via grounded referent/u,
+  );
+});

@@ -238,7 +238,11 @@ export class PlanAdmissionController {
     let deferred =
       contested.length === 0
         ? []
-        : [...contested, ...this.derivedFrom(input, contested)];
+        : [
+            ...contested,
+            ...this.derivedFrom(input, contested),
+            ...this.carriedSymbols(input, contested),
+          ];
     let reduced =
       deferred.length === 0 ? input.plan : reducePlanScope(input.plan, deferred);
     // Nothing left to work on: the holder would burn an agent run to produce
@@ -348,6 +352,64 @@ export class PlanAdmissionController {
     );
   }
 
+  /**
+   * Declared symbols whose contest exists only through grounding, withheld
+   * alongside the files that made them contested.
+   *
+   * A hallucinated plan's symbol claim (`calculateTotal`, grounded to
+   * `orderTotal`) collides through its referent, and the ordinary
+   * symbol-withholding stage cannot touch it: that stage requires the
+   * withheld symbol to be locatable in a granted file, and a misname is
+   * locatable nowhere. But when the referent is provably absent from every
+   * file still being granted — the granted files all parse, and none of them
+   * declares it — no patch this plan is allowed to produce can reach the real
+   * symbol's definition, so withholding the misnamed declaration is sound:
+   * reduction strips the declaration and its referents together, and the
+   * remainder genuinely stops claiming the contested code. A patch could
+   * still *introduce* a fresh definition under the withheld name in a granted
+   * file; that is new code, not an edit to what the other holder owns.
+   */
+  private carriedSymbols(
+    input: PlanAdmissionInput,
+    withheldFiles: readonly DeferredResource[],
+  ): DeferredResource[] {
+    const grounding = input.plan.grounding;
+    const locate = input.symbolRangesInFile;
+    if (grounding === undefined || locate === undefined) {
+      return [];
+    }
+    const withheld = new Set(withheldFiles.map((entry) => entry.resourceId));
+    const remaining = input.plan.expectedFiles.filter(
+      (file) => !withheld.has(file),
+    );
+    const ranges = remaining.map((file) => locate(file));
+    if (ranges.some((entry) => entry === undefined)) {
+      return [];
+    }
+    const located = new Set(
+      ranges
+        .flatMap((entry) => entry ?? [])
+        .map((range) => range.name.toLowerCase()),
+    );
+    const contested = this.contested(input, input.plan, {
+      resourceType: "symbol",
+      evidence: "symbol_overlap",
+      declared: input.plan.expectedSymbols,
+    });
+    return contested.filter((resource) => {
+      const referents = grounding.symbolReferents.filter(
+        (entry) => entry.declared === resource.resourceId,
+      );
+      return (
+        referents.length > 0 &&
+        !located.has(resource.resourceId.toLowerCase()) &&
+        referents.every(
+          (entry) => !located.has(entry.resolved.toLowerCase()),
+        )
+      );
+    });
+  }
+
   /** Declared files that executing work is holding, with who holds each. */
   private contestedFiles(input: PlanAdmissionInput): DeferredResource[] {
     return this.contested(input, input.plan, {
@@ -449,9 +511,54 @@ export class PlanAdmissionController {
       );
     }
 
+    // A grounded plan's conflicts surface under the *real* names verification
+    // mapped its declarations to, but the only thing withholding can act on
+    // is a declaration — that is what reduction removes and enforcement holds
+    // the agent to. So a contested referent is charged to the declaration
+    // that carries it: withhold `src/checkout.js` because the `total.js` it
+    // really names is held by someone else.
+    const carriers = new Map<string, string>();
+    const grounding = candidate.grounding;
+    if (grounding !== undefined) {
+      if (kind.resourceType === "file") {
+        for (const entry of grounding.fileReferents) {
+          carriers.set(entry.resolved.toLowerCase(), entry.declared);
+        }
+      }
+      if (kind.resourceType === "symbol") {
+        for (const entry of grounding.symbolReferents) {
+          carriers.set(entry.resolved.toLowerCase(), entry.declared);
+        }
+      }
+    }
+
     const declared = new Set(kind.declared);
-    return [...contested]
-      .filter(([id]) => declared.has(id))
+    const withholdable = new Map<
+      string,
+      { heldBy: Set<TaskId>; reasons: Set<string> }
+    >();
+    for (const [id, entry] of contested) {
+      const carrier = declared.has(id)
+        ? id
+        : carriers.get(id.toLowerCase());
+      if (carrier === undefined || !declared.has(carrier)) {
+        continue;
+      }
+      const merged = withholdable.get(carrier) ?? {
+        heldBy: new Set<TaskId>(),
+        reasons: new Set<string>(),
+      };
+      for (const holder of entry.heldBy) {
+        merged.heldBy.add(holder);
+      }
+      for (const reason of entry.reasons) {
+        merged.reasons.add(
+          carrier === id ? reason : `via grounded referent ${id}: ${reason}`,
+        );
+      }
+      withholdable.set(carrier, merged);
+    }
+    return [...withholdable]
       .sort(([left], [right]) => left.localeCompare(right))
       .map(([id, entry]): DeferredResource => ({
         resourceType: kind.resourceType,

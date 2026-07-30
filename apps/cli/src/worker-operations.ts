@@ -13,7 +13,7 @@ import {
   assertChangeSetWithinPlan,
   deferredScopeObjective,
   isDeferredScopeFollowUp,
-  replayBlockers,
+  assessReplay,
   buildTaskHandoff,
   recordTaskHandoff,
   splitChangeSet,
@@ -1371,10 +1371,8 @@ export async function acceptWorkResult(
   // when the advance touched anything this result depends on; when it did not,
   // the result is replayed onto the newer revision instead of a whole agent
   // run being spent again to rediscover the same change.
-  const replay = async (
-    current: CanonicalVersion,
-  ): Promise<string[]> =>
-    replayBlockers(
+  const replay = async (current: CanonicalVersion) =>
+    assessReplay(
       plan,
       promoted,
       await canonicalAdvance(
@@ -1386,10 +1384,16 @@ export async function acceptWorkResult(
       ),
     );
 
+  // Semantic blockers end the replay question: the advance invalidated what
+  // this result knows, and only a replan refreshes that. Purely textual
+  // blockers — both sides wrote the same file, nothing finer contested — go
+  // through to integration, whose three-way apply merges disjoint hunks for
+  // free and reports a real conflict otherwise. The paid replan becomes the
+  // fallback instead of the default.
   const currentBeforeRun = await repositories.getCanonicalVersion(repository);
   if (
     currentBeforeRun.revision !== baseVersion.revision &&
-    (await replay(currentBeforeRun)).length > 0
+    (await replay(currentBeforeRun)).semantic.length > 0
   ) {
     return await requeueForCanonicalChange(
       store,
@@ -1540,9 +1544,10 @@ export async function acceptWorkResult(
     const currentBeforeIntegration =
       await repositories.getCanonicalVersion(repository);
     let replayableOnto: string | undefined;
+    let textualMergeAttempt = false;
     if (currentBeforeIntegration.revision !== baseVersion.revision) {
       const blockers = await replay(currentBeforeIntegration);
-      if (blockers.length > 0) {
+      if (blockers.semantic.length > 0) {
         return await requeueForCanonicalChange(
           store,
           repositories,
@@ -1556,6 +1561,7 @@ export async function acceptWorkResult(
       // integration reads it, the permission no longer matches and the result
       // is refused as stale, exactly as it was before replay existed.
       replayableOnto = currentBeforeIntegration.revision;
+      textualMergeAttempt = blockers.textual.length > 0;
       await trace(store, run.id, "canonical_changed", task.id, {
         projectId: task.projectId,
         repositoryId: task.repositoryId,
@@ -1564,9 +1570,15 @@ export async function acceptWorkResult(
         workerId: leaseAtStart.workerId,
         leaseId: leaseAtStart.id,
         replayed: true,
-        explanation:
-          "Canonical advanced without touching anything this result depends " +
-          "on, so the result was replayed rather than requeued",
+        ...(textualMergeAttempt
+          ? { textualBlockers: blockers.textual }
+          : {}),
+        explanation: textualMergeAttempt
+          ? "Canonical advanced into files this result also writes, but " +
+            "nothing it depends on; attempting a free three-way merge before " +
+            "paying for a replan"
+          : "Canonical advanced without touching anything this result depends " +
+            "on, so the result was replayed rather than requeued",
       });
     }
     const settled = await store.finishWorkLease(
@@ -1641,6 +1653,23 @@ export async function acceptWorkResult(
         admitted.admission,
         split,
         changeSet,
+      );
+    } else if (
+      textualMergeAttempt &&
+      ["conflict", "validation_failed"].includes(integration.status)
+    ) {
+      // The free merge was a bet, and it lost — overlapping hunks, or a
+      // clean merge the repository's own tests rejected. Losing the bet
+      // costs what it always cost: the requeue-to-replan this path took
+      // unconditionally before the bet existed. The task is not wrong, so
+      // it is not failed.
+      return await requeueForCanonicalChange(
+        store,
+        repositories,
+        leaseAtStart,
+        baseVersion,
+        currentBeforeIntegration,
+        run.id,
       );
     } else {
       await store.saveTaskStatus(
