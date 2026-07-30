@@ -10,6 +10,7 @@ import {
   deferredFilePaths,
   normalizeRepositoryPath,
   planAdmissionApproved,
+  substituteGroundedNames,
   planAdmissionPartial,
   planGroundingConfidence,
   projectBudgets,
@@ -324,4 +325,126 @@ test("rejects a malformed grounding record on an agent plan", () => {
       grounding: { confidence: "certain" },
     }),
   );
+});
+
+/**
+ * Rewriting a plan to say what verification decided it meant.
+ *
+ * Arbitration already reasons over referents. This is the same mapping pointed
+ * at the agent instead: the previous plan a replan is shown carries the real
+ * names, not the invented ones it is being asked not to repeat.
+ */
+
+const HALLUCINATED: AgentPlan = {
+  taskId: "task_1",
+  objective: "Change pricing",
+  expectedFiles: ["src/checkout.js", "src/pricing/total.js", "src/brand-new.js"],
+  expectedSymbols: ["calculateTotal", "brandNewHelper"],
+  dependencies: [],
+  commands: [],
+  externalAccess: [],
+  riskLevel: "low",
+  grounding: {
+    confidence: "grounded",
+    revision: "a".repeat(40),
+    missingFiles: ["src/checkout.js", "src/brand-new.js"],
+    unresolvedSymbols: ["calculateTotal", "brandNewHelper"],
+    fileReferents: [
+      { declared: "src/checkout.js", resolved: "src/order.js" },
+    ],
+    symbolReferents: [
+      {
+        declared: "calculateTotal",
+        resolved: "orderTotal",
+        files: ["src/pricing/total.js"],
+      },
+    ],
+    notes: ["declared file src/checkout.js does not exist"],
+  },
+};
+
+test("a resolvable misname is replaced by the name it really meant", () => {
+  const view = substituteGroundedNames(HALLUCINATED);
+
+  assert.ok(!view.plan.expectedFiles.includes("src/checkout.js"));
+  assert.ok(view.plan.expectedFiles.includes("src/order.js"));
+  assert.ok(!view.plan.expectedSymbols.includes("calculateTotal"));
+  assert.ok(view.plan.expectedSymbols.includes("orderTotal"));
+  // A declaration that already resolved is untouched.
+  assert.ok(view.plan.expectedFiles.includes("src/pricing/total.js"));
+});
+
+test("a declaration that grounds to nothing is reported, not rewritten", () => {
+  // A plan for a new module names files that do not exist yet. Correcting
+  // those would be inventing a correction.
+  const view = substituteGroundedNames(HALLUCINATED);
+
+  assert.ok(view.plan.expectedFiles.includes("src/brand-new.js"));
+  assert.ok(view.plan.expectedSymbols.includes("brandNewHelper"));
+  assert.deepEqual(view.inventedFiles, ["src/brand-new.js"]);
+  assert.deepEqual(view.inventedSymbols, ["brandNewHelper"]);
+});
+
+test("every substitution is reported with where the real code lives", () => {
+  const view = substituteGroundedNames(HALLUCINATED);
+
+  assert.deepEqual(view.substitutions, [
+    {
+      kind: "file",
+      declared: "src/checkout.js",
+      resolved: ["src/order.js"],
+      files: [],
+    },
+    {
+      kind: "symbol",
+      declared: "calculateTotal",
+      resolved: ["orderTotal"],
+      files: ["src/pricing/total.js"],
+    },
+  ]);
+});
+
+test("the grounding record is dropped rather than carried forward", () => {
+  // Its missingFiles list is a verbatim copy of exactly the names the agent
+  // should not repeat, which is the last thing to put back in front of it.
+  const view = substituteGroundedNames(HALLUCINATED);
+  assert.equal(view.plan.grounding, undefined);
+  assert.doesNotMatch(JSON.stringify(view.plan), /src\/checkout\.js/u);
+});
+
+test("an ambiguous misname keeps every candidate it could mean", () => {
+  const view = substituteGroundedNames({
+    ...HALLUCINATED,
+    expectedFiles: ["order.js"],
+    expectedSymbols: [],
+    grounding: {
+      ...HALLUCINATED.grounding!,
+      missingFiles: ["order.js"],
+      unresolvedSymbols: [],
+      fileReferents: [
+        { declared: "order.js", resolved: "src/order.js" },
+        { declared: "order.js", resolved: "src/legacy/order.js" },
+      ],
+      symbolReferents: [],
+    },
+  });
+
+  assert.deepEqual(view.plan.expectedFiles, [
+    "src/legacy/order.js",
+    "src/order.js",
+  ]);
+  assert.deepEqual(view.substitutions[0]?.resolved, [
+    "src/order.js",
+    "src/legacy/order.js",
+  ]);
+});
+
+test("a plan with no grounding record is returned exactly as it came", () => {
+  const { grounding: ignored, ...bare } = HALLUCINATED;
+  void ignored;
+  const view = substituteGroundedNames(bare);
+
+  assert.equal(view.plan, bare);
+  assert.deepEqual(view.substitutions, []);
+  assert.deepEqual(view.inventedFiles, []);
 });

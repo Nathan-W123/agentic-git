@@ -160,6 +160,99 @@ Windows sandbox setup helper; every scoped write fails with
 Even with that, roughly one execution in five produced no edits and was
 correctly failed by the adapter rather than integrated empty.
 
+## Putting the corrected names in front of the agent
+
+Grounding corrects a plan *after* the agent produces it. That fixes
+arbitration, and does nothing about the next turn: a replan was handed its
+previous plan verbatim — invented names and all, in the most authoritative
+position in the prompt — with the correction appended as a note. An earlier
+experiment enriched that note and [measured no
+improvement](live-evidence.md); roughly half of revised plans still named
+something that does not exist.
+
+The stronger intervention is to substitute rather than annotate.
+`substituteGroundedNames` rewrites the previous plan so `expectedFiles` and
+`expectedSymbols` carry the names verification resolved to, drops the grounding
+record (whose `missingFiles` list is a verbatim copy of exactly the names not
+to repeat), and states each correction positively — "the file you called
+`src/checkout.js` does not exist; the real file is `src/pricing/total.js`" —
+instead of only denying the invented one. Declarations that ground to nothing
+are left alone and reported separately, because a plan for a new module names
+files that do not exist yet and that is not an error to correct.
+
+`COORD_UNGROUNDED_REPLAN=1` restores the previous prompt on an identical build.
+It is the control arm and the operational rollback, in the same shape as
+`COORD_DISABLE_PLAN_GROUNDING` and `COORD_COLD_REPLAN`.
+
+### Design
+
+`scripts/replan-substitution-experiment.mjs` runs one real Codex planning call
+per sample and then replans **the same plan twice**, once per arm, from a fresh
+session each time. Pairing on the first plan is the methodological change from
+the earlier experiment, where each arm planned independently and the arms were
+compared across different first plans — plan-to-plan variance dominated, which
+is a large part of why that experiment could not resolve anything at four runs
+per arm. Arm order alternates by sample.
+
+Both arms carry the same information. The control's verification notes name the
+real files and symbols too; what differs is where that information sits and how
+it is phrased. This is a test of presentation, not of information availability.
+
+Scored only on the samples where the intervention had anything to do — where
+grounding resolved at least one declaration to a real name. A first plan with
+nothing to correct produces an identical prompt in both arms and cannot
+possibly discriminate between them.
+
+### Results
+
+Twenty paired samples, scenario `live-checkout-trio`, one real Codex planning
+call and two real replan calls each. Thirteen of the twenty first plans named
+something grounding could map to real code; those thirteen are the comparison.
+Raw records in `data/grounding/*replan-substitution*`, tabulated by
+`scripts/summarize-replan-substitution.mjs`.
+
+| | Control | Treatment | Discordant pairs | McNemar exact |
+| --- | --- | --- | --- | --- |
+| Repeated a name it had already been corrected on | 10/13 (77%) | **2/13 (15%)** | 9 vs 1 | **p = 0.02** |
+| Declared any name that does not exist | 11/13 (85%) | 6/13 (46%) | 6 vs 1 | p = 0.13 |
+| Adopted every real name grounding resolved | 12/13 (92%) | 13/13 (100%) | 0 vs 1 | p = 1.00 |
+
+**The intervention works, and it works narrowly.** Substituting the real names
+into the previous plan cuts repeat-hallucination of corrected names from 77% to
+15%. That is the failure the earlier hint-based enrichment could not move at
+all.
+
+It does *not* cut hallucination in general. The overall rate falls from 85% to
+46% and does not reach significance, because an agent that stops repeating
+`checkout.js` does not thereby stop inventing something new. Substitution
+closes the loop on names the coordinator has already ruled on; it says nothing
+about the next invention, which grounding must catch the same way it caught the
+first.
+
+Adoption was already near-ceiling in both arms — the control's notes do name
+the real files, and the agent usually takes them. What the control does not
+stop is the agent *also* carrying the invented name forward, which is what
+puts an unverifiable declaration back into arbitration.
+
+### What this measurement cannot say
+
+The Codex account this ran under has shell execution blocked by policy: every
+`powershell.exe` invocation the agent attempts is refused, so it cannot read
+the repository during planning. That is why the end-to-end scenario used for
+[live-evidence.md](live-evidence.md) could not be re-run — with no successful
+executions, canonical never advances and no replan is ever requested — and it
+is why this experiment drives the replan turn directly instead.
+
+The consequence for interpretation is real and cuts both ways. A blind agent
+hallucinates far more than a sighted one (15 of 20 first plans named something
+that does not exist), which is what made the corrigible stratum large enough to
+measure at all. It also means the agent had no independent way to check either
+arm's claims, so both were taken more or less on faith. The result is a clean
+measurement of *presentation* under conditions where presentation is all the
+agent has. Whether the same gap holds when the agent can open the file is not
+something these twenty samples can answer.
+
+
 ## The solo fast path
 
 `admitWorkPlan` used to build the repository index — one `git show` per
@@ -221,3 +314,9 @@ single-developer repository.
   plan that declares plausible-but-wrong *existing* files (real files the
   task will not actually touch) is still taken at its word. That failure
   mode is invisible to any static check of the declarations alone.
+- Name substitution acts only on declarations grounding could already
+  resolve. A replan that invents something new gets no help from it, and the
+  measurement above shows that is what a corrected agent tends to do next:
+  repeat-hallucination falls sharply while overall hallucination does not.
+  The floor on both is set by the matcher's reach, above, not by how the
+  correction is worded.

@@ -89,6 +89,12 @@ async function once(scenario, liveAgent, runNumber) {
       scenario: scenario.name,
       run: runNumber,
       groundingDisabled: process.env.COORD_DISABLE_PLAN_GROUNDING === "1",
+      // Which replan prompt the arm ran. Recorded per run rather than taken
+      // from the label, so a mislabelled collection is still readable.
+      replanPrompt: {
+        cold: process.env.COORD_COLD_REPLAN === "1",
+        ungroundedNames: process.env.COORD_UNGROUNDED_REPLAN === "1",
+      },
       startedAt: new Date(startedAt).toISOString(),
       elapsedMs: Date.now() - startedAt,
       taskIds,
@@ -114,6 +120,8 @@ async function once(scenario, liveAgent, runNumber) {
         .map((event) => ({
           taskId: event.taskId,
           revision: event.data.revision,
+          expectedFiles: event.data.expectedFiles,
+          expectedSymbols: event.data.expectedSymbols,
           grounding: summarizeGrounding(event.data.grounding),
         })),
       scopeChanges: run.audit.filter(

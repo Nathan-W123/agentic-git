@@ -89,12 +89,16 @@ touches, asks what withholding that one symbol would cost.
 One symbol contested inside a file the plan otherwise owns is exactly what
 `contestedSymbols` produces, so the corpus is the shape the code meets.
 
-| Window | Trespassing cases | Divided | Changed lines promoted | Hunks promoted |
-| --- | --- | --- | --- | --- |
-| 2 commits | 127 | 121 | 3,395 / 6,230 (**54%**) | 845 / 1,311 (64%) |
-| 5 commits | 165 | 158 | 9,603 / 15,052 (**64%**) | 2,145 / 3,007 (71%) |
-| 15 commits | 223 | 208 | 26,674 / 35,864 (**74%**) | 4,013 / 5,122 (78%) |
-| 40 commits | 438 | 421 | 86,701 / 115,779 (**75%**) | 11,110 / 12,996 (85%) |
+All four windows below end at `8b920d79`; re-running against a later `HEAD`
+measures a different corpus, so the base is recorded to keep the figures
+checkable.
+
+| Window | Base | Trespassing cases | Divided | Changed lines promoted | Hunks promoted |
+| --- | --- | --- | --- | --- | --- |
+| 2 commits | `5e0194ba` | 127 | 121 | 3,395 / 6,230 (**54%**) | 845 / 1,311 (64%) |
+| 5 commits | `9e252efd` | 165 | 158 | 9,603 / 15,052 (**64%**) | 2,145 / 3,007 (71%) |
+| 15 commits | `963b0b05` | 223 | 208 | 26,674 / 35,864 (**74%**) | 4,013 / 5,122 (78%) |
+| 40 commits | `9b317344` | 438 | 421 | 86,701 / 115,779 (**75%**) | 11,110 / 12,996 (85%) |
 
 Before this change every one of those figures was **0%**: a trespassing hunk
 cost the whole file. No case in any window was indivisible; the cases that

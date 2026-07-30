@@ -745,3 +745,150 @@ test("a transcript with no token line records nothing rather than zero", async (
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+/**
+ * What a replan is shown about the names its previous turn got wrong.
+ *
+ * The measured failure this addresses: an agent told "checkout.js does not
+ * exist" re-declared it anyway about half the time, because the prompt's most
+ * authoritative content — the previous plan, quoted verbatim — still said
+ * `checkout.js`. Substitution puts the real name there instead, and states the
+ * correction positively rather than as a denial.
+ */
+
+const HALLUCINATED_PLAN: AgentPlan = {
+  taskId: TASK.id,
+  objective: TASK.objective,
+  expectedFiles: ["src/checkout.js"],
+  expectedSymbols: ["calculateOrderTotal", "brandNewHelper"],
+  dependencies: [],
+  commands: [],
+  externalAccess: [],
+  riskLevel: "low",
+  intent: "raise the value",
+  grounding: {
+    confidence: "grounded",
+    revision: "a".repeat(40),
+    missingFiles: ["src/checkout.js"],
+    unresolvedSymbols: ["calculateOrderTotal", "brandNewHelper"],
+    fileReferents: [
+      { declared: "src/checkout.js", resolved: "src/value.js" },
+    ],
+    symbolReferents: [
+      {
+        declared: "calculateOrderTotal",
+        resolved: "value",
+        files: ["src/value.js"],
+      },
+    ],
+    notes: ["declared file src/checkout.js does not exist"],
+  },
+};
+
+async function replanPromptFor(
+  environment: NodeJS.ProcessEnv,
+): Promise<string> {
+  const fixture = await createFixture();
+  const prompts: string[] = [];
+  const runner: CodexProcessRunner = async (_executable, args, options = {}) => {
+    prompts.push(options.input ?? "");
+    return output(
+      JSON.stringify(
+        args.includes("read-only")
+          ? { ...HALLUCINATED_PLAN, grounding: undefined }
+          : {},
+      ),
+    );
+  };
+  const restore = { ...process.env };
+  try {
+    Object.assign(process.env, environment);
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      runner,
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const session = await adapter.startTask({
+      task: TASK,
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+    });
+    await adapter.requestPlan(session.id);
+    await adapter.requestReplan(session.id, {
+      taskId: TASK.id,
+      previousPlan: HALLUCINATED_PLAN,
+      canonicalChange: {
+        previousVersion: baseVersion,
+        canonicalVersion: baseVersion,
+        changedFiles: ["src/value.js"],
+        changedSymbols: [],
+        changedApis: [],
+        changedSchemas: [],
+        changedConfigKeys: [],
+        changedTests: [],
+        changedServices: [],
+        reason: "another task integrated",
+      },
+      constraints: [],
+    });
+    return prompts.at(-1) ?? "";
+  } finally {
+    for (const key of Object.keys(environment)) {
+      if (restore[key] === undefined) {
+        delete process.env[key];
+      } else {
+        process.env[key] = restore[key];
+      }
+    }
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+}
+
+test("a replan is handed the real names, not the ones it invented", async () => {
+  const prompt = await replanPromptFor({});
+
+  // The corrected plan is what the prompt asserts.
+  assert.match(prompt, /"expectedFiles":\["src\/value\.js"\]/u);
+  assert.match(prompt, /"expectedSymbols":\[[^\]]*"value"/u);
+  // And the correction is stated as a fact about where the code is.
+  assert.match(
+    prompt,
+    /The file you called src\/checkout\.js does not exist\. The real file is src\/value\.js\./u,
+  );
+  assert.match(
+    prompt,
+    /The symbol you called calculateOrderTotal does not exist\. The real symbol is value, declared in src\/value\.js\./u,
+  );
+});
+
+test("the invented name appears only where it is being corrected", async () => {
+  const prompt = await replanPromptFor({});
+  const mentions = prompt.split("src/checkout.js").length - 1;
+  assert.equal(mentions, 1);
+  // The grounding record is dropped rather than serialised: its missingFiles
+  // list is a verbatim copy of exactly the names not to repeat.
+  assert.doesNotMatch(prompt, /"missingFiles"/u);
+  assert.doesNotMatch(prompt, /Coordinator verification of your previous/u);
+});
+
+test("a name that grounds to nothing is reported as a creation, not an error", async () => {
+  const prompt = await replanPromptFor({});
+  assert.match(prompt, /treating them as things you intend to create: brandNewHelper/u);
+  // It stays in the plan: the agent may well be about to write it.
+  assert.match(prompt, /"brandNewHelper"/u);
+});
+
+test("COORD_UNGROUNDED_REPLAN restores the prompt substitution replaced", async () => {
+  const prompt = await replanPromptFor({ COORD_UNGROUNDED_REPLAN: "1" });
+
+  assert.match(prompt, /Previous plan: \{/u);
+  assert.match(prompt, /"expectedFiles":\["src\/checkout\.js"\]/u);
+  assert.match(prompt, /Coordinator verification of your previous declarations/u);
+  assert.doesNotMatch(prompt, /The real file is/u);
+});
