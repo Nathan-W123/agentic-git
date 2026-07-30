@@ -276,10 +276,22 @@
         </details>
       </aside>
 
+      <!-- Dismiss target for the chat drawer at widths where it overlays the
+           view instead of sitting beside it. Inert (and invisible) above that
+           breakpoint, where the panel is part of the grid. -->
+      <div class="chat-scrim" id="chat-scrim"></div>
+
       <!-- Full-screen provider connection step, opened from a provider icon. -->
       <div class="connect-overlay" id="connect-overlay" hidden>
         <section class="connect-card" id="connect-card"></section>
       </div>
+
+      <!-- Application modal. A native <dialog> so focus trapping, Esc, inertness
+           of the page behind it, and the top layer are the platform's job.
+           Body is written by showDialog(). -->
+      <dialog class="app-dialog" id="app-dialog">
+        <form method="dialog" class="app-dialog-form" id="app-dialog-form"></form>
+      </dialog>
 
       <footer class="status-bar" id="status-bar">
         <span class="status-item" id="status-live">

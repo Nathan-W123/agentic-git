@@ -21,6 +21,20 @@ const SESSION_STARTED = Date.now();
 const state = {
   principal: undefined,
   health: undefined,
+  /**
+   * Whether `loadContext` has ever completed.
+   *
+   * Every "do you have a project?" branch reads `state.projectId`, which is
+   * also empty before the first fetch resolves. Without this flag those
+   * branches cannot tell "you have no project" from "we have not asked yet",
+   * and a returning user is shown the first-run onboarding screen while their
+   * context is still in flight — or whenever the socket drops. It latches on
+   * once and never clears: a refresh that fails later must not re-assert
+   * first-run.
+   */
+  contextLoaded: false,
+  /** Message from the first context load, when it failed outright. */
+  contextError: undefined,
   organizations: [],
   organizationId: localStorage.getItem("relay.organization") ?? "",
   projects: [],
@@ -62,8 +76,17 @@ const state = {
     runAttempts: new Map(),
 
     /** Direct provider chat (Ask mode). */
+    /** Whether the panel is currently an overlay drawer (narrow viewports). */
+    drawer: undefined,
     mode: localStorage.getItem("relay.chatMode") ?? "ask",
     providers: [],
+    /**
+     * Whether `/chat/providers` has answered yet. Probing a provider shells
+     * out to its CLI, so the answer can take seconds; until it arrives the
+     * icons report "connecting" rather than asserting "not connected", which
+     * was a false negative for every already-connected account.
+     */
+    providersLoaded: false,
     activeProvider: localStorage.getItem("relay.chatProvider") ?? "anthropic",
     /** Per provider: [{role, content, thinking, thinkingHidden, usage, model, at}] */
     conversations: {},
@@ -349,6 +372,7 @@ function renderSelectors() {
 }
 
 async function loadContext({ quiet = false } = {}) {
+  state.contextError = undefined;
   try {
     state.principal = await api("/auth/me");
     const organizations = await api("/organizations");
@@ -450,6 +474,7 @@ async function loadContext({ quiet = false } = {}) {
       state.explorerRepo = state.repositories[0]?.id ?? "";
     }
 
+    state.contextLoaded = true;
     loadChatTracked();
     loadChatTotals();
     loadRateLimits();
@@ -468,6 +493,14 @@ async function loadContext({ quiet = false } = {}) {
       state.principal = undefined;
       showAuth();
       return;
+    }
+    // A spinner that never resolves misrepresents state just as badly as the
+    // onboarding screen did. If we have never had context, say so and offer a
+    // retry; once context exists, a failed refresh is only a toast — the
+    // screen still holds real data.
+    if (state.contextLoaded === false) {
+      state.contextError = error.message;
+      renderShell();
     }
     toast(error.message, "error");
   }
@@ -1452,7 +1485,55 @@ function renderActiveTabContent() {
   }
 }
 
+/**
+ * What a project-scoped view shows before we know whether there is a project.
+ *
+ * Deliberately not `noProjectContent()`: telling a returning user to "create
+ * your first project" while their context is still loading is a false claim
+ * about their account, and it happened on every cold load and every socket
+ * reconnect.
+ */
+function loadingContent(label = "Loading your control room") {
+  return `
+    <div class="loading-state" role="status" aria-live="polite" aria-busy="true">
+      <div class="loading-state-head">
+        <span class="loading-spinner" aria-hidden="true"></span>
+        <p>${escapeHtml(label)}</p>
+      </div>
+      <div class="skeleton-stack" aria-hidden="true">
+        <div class="skeleton skeleton-row"></div>
+        <div class="skeleton skeleton-row"></div>
+        <div class="skeleton skeleton-row short"></div>
+      </div>
+    </div>`;
+}
+
+/** True while the first context fetch is still outstanding. */
+function contextPending() {
+  return state.contextLoaded === false;
+}
+
+/** The failed-first-load state: an explanation and a way out, not a spinner. */
+function contextErrorContent() {
+  return `
+    <div class="empty-state">
+      <div>
+        <p class="eyebrow">Control plane</p>
+        <h2>Could not load your control room</h2>
+        <p>${escapeHtml(state.contextError ?? "The control plane did not respond.")}</p>
+        <p class="muted">Your projects are unaffected — this browser could not reach the gateway.</p>
+        <button class="button button-primary" data-action="retry-context">Try again</button>
+      </div>
+    </div>`;
+}
+
 function noProjectContent() {
+  if (state.contextLoaded === false && state.contextError !== undefined) {
+    return contextErrorContent();
+  }
+  if (contextPending()) {
+    return loadingContent();
+  }
   return `
     <div class="empty-state">
       <div>
@@ -3386,25 +3467,78 @@ function renderAdmin() {
 
 /* ------------------------------------------- tab content: detail tabs ---- */
 
+/**
+ * Render a unified diff with a line-number gutter.
+ *
+ * Old and new line numbers are tracked separately from the `@@` hunk headers,
+ * the way a code host does it: a removed line numbers only on the left, an
+ * added line only on the right, context on both. Without the gutter there was
+ * no way to cite a line, which is the first thing review needs.
+ *
+ * Git's own header lines (`diff --git`, `index`, `---`, `+++`) carry no line
+ * number and are marked so they can wrap instead of being clipped — the
+ * `index` blob pair is wider than the container in the narrower of the two
+ * places this component renders.
+ */
 function diffHtml(patch) {
   if (!patch) {
     return '<div class="detail-item">No textual diff was recorded.</div>';
   }
-  return `<pre class="diff">${String(patch)
+  let oldLine = 0;
+  let newLine = 0;
+  const gutter = (value) =>
+    `<span class="diff-num">${value === null ? "" : value}</span>`;
+  const rows = String(patch)
     .split("\n")
     .map((line) => {
-      const kind = line.startsWith("+++") || line.startsWith("---")
-        ? "diff-meta"
-        : line.startsWith("+")
-          ? "diff-add"
-          : line.startsWith("-")
-            ? "diff-remove"
-            : line.startsWith("@@") || line.startsWith("diff ")
-              ? "diff-meta"
-              : "";
-      return `<span class="diff-line ${kind}">${escapeHtml(line || " ")}</span>`;
+      const isHeader =
+        line.startsWith("diff ") ||
+        line.startsWith("index ") ||
+        line.startsWith("--- ") ||
+        line.startsWith("+++ ") ||
+        line.startsWith("new file") ||
+        line.startsWith("deleted file") ||
+        line.startsWith("similarity index") ||
+        line.startsWith("rename ");
+      if (isHeader) {
+        return `<span class="diff-line diff-meta diff-header">${gutter(null)}${gutter(
+          null,
+        )}<span class="diff-text">${escapeHtml(line)}</span></span>`;
+      }
+      const hunk = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);
+      if (hunk) {
+        oldLine = Number(hunk[1]);
+        newLine = Number(hunk[2]);
+        return `<span class="diff-line diff-hunk">${gutter(null)}${gutter(
+          null,
+        )}<span class="diff-text">${escapeHtml(line)}</span></span>`;
+      }
+      if (line.startsWith("+")) {
+        const at = newLine++;
+        return `<span class="diff-line diff-add">${gutter(null)}${gutter(
+          at,
+        )}<span class="diff-text">${escapeHtml(line)}</span></span>`;
+      }
+      if (line.startsWith("-")) {
+        const at = oldLine++;
+        return `<span class="diff-line diff-remove">${gutter(at)}${gutter(
+          null,
+        )}<span class="diff-text">${escapeHtml(line)}</span></span>`;
+      }
+      if (line.startsWith("\\")) {
+        // "\ No newline at end of file" belongs to the previous line.
+        return `<span class="diff-line diff-meta">${gutter(null)}${gutter(
+          null,
+        )}<span class="diff-text">${escapeHtml(line)}</span></span>`;
+      }
+      const oldAt = oldLine++;
+      const newAt = newLine++;
+      return `<span class="diff-line">${gutter(oldAt)}${gutter(
+        newAt,
+      )}<span class="diff-text">${escapeHtml(line || " ")}</span></span>`;
     })
-    .join("")}</pre>`;
+    .join("");
+  return `<pre class="diff has-gutter">${rows}</pre>`;
 }
 
 /**
@@ -3413,16 +3547,18 @@ function diffHtml(patch) {
  * Rendered inline under the diff it is about rather than in a separate tab:
  * a remark about a hunk is only useful next to the hunk.
  */
-function commentThread(comments, changeSetId, filePath, runId) {
+function commentThread(comments, changeSetId, filePath, runId, options = {}) {
+  const { allowCompose = true } = options;
   const entries = comments
     .map(
       (comment) => `
       <article class="comment${comment.resolvedAt ? " resolved" : ""}">
+        <p class="comment-author">${escapeHtml(
+          comment.author ?? comment.authorId ?? "Reviewer",
+        )}</p>
         <p class="comment-body">${escapeHtml(comment.body)}</p>
         <div class="comment-meta">
-          <span class="muted">${escapeHtml(
-            formatDate(comment.createdAt, { short: true }),
-          )}</span>
+          <span class="muted">${escapeHtml(formatDate(comment.createdAt))}</span>
           ${
             comment.resolvedAt
               ? '<span class="chip">resolved</span>'
@@ -3436,23 +3572,32 @@ function commentThread(comments, changeSetId, filePath, runId) {
       </article>`,
     )
     .join("");
-  const form = canReview()
-    ? `<form class="comment-form" data-form="comment-add"
+  const form =
+    canReview() && allowCompose
+      ? `<form class="comment-form" data-form="comment-add"
          data-run-id="${escapeHtml(runId)}"
          data-changeset-id="${escapeHtml(changeSetId)}"
          ${filePath === undefined ? "" : `data-file-path="${escapeHtml(filePath)}"`}>
-        <textarea name="body" rows="2" placeholder="${
+        <p class="comment-form-label">${
           filePath === undefined
             ? "Comment on this changeset"
-            : `Comment on ${escapeHtml(filePath)}`
-        }" required></textarea>
+            : `Comment on <code>${escapeHtml(filePath)}</code>`
+        }</p>
+        <textarea name="body" rows="2" placeholder="Leave a review comment" required></textarea>
         <button class="mini-button" type="submit">Comment</button>
       </form>`
-    : "";
+      : "";
   if (entries.length === 0 && form.length === 0) {
     return "";
   }
-  return `<div class="comment-thread">${entries}${form}</div>`;
+  const count = comments.length;
+  const heading =
+    count === 0
+      ? ""
+      : `<p class="comment-thread-head">${count} comment${count === 1 ? "" : "s"}${
+          filePath === undefined ? " on this changeset" : ""
+        }</p>`;
+  return `<div class="comment-thread">${heading}${entries}${form}</div>`;
 }
 
 async function renderRunTab(container, tab) {
@@ -3569,6 +3714,11 @@ function renderRunDetail(detail) {
       </div>`,
     )
     .join("");
+  // One composer per screen. Every file already carries its own anchored
+  // form; a second, identically styled "Comment on this changeset" box 40px
+  // below it was indistinguishable and easy to post to by mistake. The
+  // changeset-level composer is offered only when there is no file to anchor
+  // to — otherwise that section shows existing changeset comments as a thread.
   const generalComments = detail.changeSets
     .map((changeSet) =>
       commentThread(
@@ -3580,6 +3730,7 @@ function renderRunDetail(detail) {
         changeSet.id,
         undefined,
         runId,
+        { allowCompose: patchEntries.length === 0 },
       ),
     )
     .join("");
@@ -3774,7 +3925,10 @@ async function renderHistoryTab(container, tab) {
                 <code>${escapeHtml(shortId(version.revision, 12))}</code>
                 · #${version.sequence}
                 · ${escapeHtml(version.author)}
-                · ${escapeHtml(formatDate(version.createdAt, { short: true }))}
+                <!-- Full date, not the short time-only form: this view is
+                     chronology, and "3:06 PM" against "9:42 PM" gave no way
+                     to tell today's commit from one three weeks old. -->
+                · ${escapeHtml(formatDate(version.createdAt))}
               </p>
             </div>
             ${
@@ -3798,15 +3952,128 @@ async function renderHistoryTab(container, tab) {
   }
 }
 
+/**
+ * The application's modal dialog.
+ *
+ * Replaces `window.prompt` for consequential actions. A browser prompt is
+ * chrome from a different product, it cannot carry the app's tone or an
+ * explanation, and it renders the most destructive action in the product —
+ * rollback — as an unstyled OS box.
+ *
+ * Resolves to an object of the field values, or `null` if the user backed
+ * out (Cancel, Esc, or the backdrop). Built on `<dialog>`, so focus trapping,
+ * Esc handling, and page inertness come from the platform rather than from
+ * bespoke key handlers.
+ */
+function showDialog({
+  eyebrow,
+  title,
+  description,
+  tone = "default",
+  confirmLabel = "Confirm",
+  cancelLabel = "Cancel",
+  field,
+}) {
+  const dialog = $("#app-dialog");
+  const form = $("#app-dialog-form");
+  if (!dialog || !form || typeof dialog.showModal !== "function") {
+    return Promise.resolve(null);
+  }
+  const inputId = "app-dialog-field";
+  form.innerHTML = `
+    ${eyebrow ? `<p class="eyebrow">${escapeHtml(eyebrow)}</p>` : ""}
+    <h2>${escapeHtml(title)}</h2>
+    ${description ? `<p class="muted">${escapeHtml(description)}</p>` : ""}
+    ${
+      field
+        ? `<label for="${inputId}"><span>${escapeHtml(field.label)}</span>
+             ${
+               field.multiline
+                 ? `<textarea id="${inputId}" name="${escapeHtml(field.name)}" rows="3"
+                      placeholder="${escapeHtml(field.placeholder ?? "")}"
+                      ${field.required ? "required" : ""}></textarea>`
+                 : `<input id="${inputId}" name="${escapeHtml(field.name)}" type="text"
+                      placeholder="${escapeHtml(field.placeholder ?? "")}"
+                      ${field.required ? "required" : ""}>`
+             }
+           </label>`
+        : ""
+    }
+    <div class="app-dialog-actions">
+      <button type="button" class="button" value="cancel" data-dialog-cancel>${escapeHtml(cancelLabel)}</button>
+      <button type="submit" class="button ${
+        tone === "destructive" ? "button-danger" : "button-primary"
+      }" value="confirm">${escapeHtml(confirmLabel)}</button>
+    </div>`;
+  dialog.classList.toggle("destructive", tone === "destructive");
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      form.removeEventListener("submit", onSubmit);
+      dialog.removeEventListener("close", onClose);
+      dialog.removeEventListener("click", onBackdrop);
+      cancel?.removeEventListener("click", onCancel);
+      if (dialog.open) {
+        dialog.close();
+      }
+      resolve(value);
+    };
+    const onSubmit = (event) => {
+      // `method="dialog"` closes on submit; read the values first.
+      const data = new FormData(form);
+      const values = {};
+      for (const [key, value] of data.entries()) {
+        values[key] = String(value).trim();
+      }
+      void event;
+      finish(values);
+    };
+    // Esc, and any close that did not come through submit.
+    const onClose = () => finish(null);
+    const onCancel = () => finish(null);
+    // A click on the dialog element itself is a click on its backdrop; the
+    // form fills the dialog, so anything inside hits the form instead.
+    const onBackdrop = (event) => {
+      if (event.target === dialog) {
+        finish(null);
+      }
+    };
+    const cancel = form.querySelector("[data-dialog-cancel]");
+    form.addEventListener("submit", onSubmit);
+    dialog.addEventListener("close", onClose);
+    dialog.addEventListener("click", onBackdrop);
+    cancel?.addEventListener("click", onCancel);
+    dialog.showModal();
+    form.querySelector(`#${inputId}`)?.focus();
+  });
+}
+
 async function requestRollback(repositoryId, revision) {
-  const reason = window.prompt(
-    `Roll ${repositoryId} back to ${shortId(revision, 12)}?\n\n` +
-      "The revert goes through validation and approval like any other change. " +
-      "Give a reason for the record:",
-  );
-  if (reason === null) {
+  const answer = await showDialog({
+    eyebrow: "Canonical history",
+    title: `Roll ${repositoryId} back to ${shortId(revision, 12)}?`,
+    description:
+      "The revert goes through validation and approval like any other change, " +
+      "so this does not rewrite history — it moves the record forward.",
+    tone: "destructive",
+    confirmLabel: "Submit rollback",
+    field: {
+      name: "reason",
+      label: "Reason for the record",
+      placeholder: "Why this revert is needed",
+      required: true,
+      multiline: true,
+    },
+  });
+  if (answer === null) {
     return;
   }
+  const reason = answer.reason;
   toast("Rollback submitted; it may wait for approval", "default");
   try {
     const response = await api(
@@ -4113,6 +4380,8 @@ async function loadChatProviders() {
     state.chat.providers = response.providers ?? [];
   } catch {
     state.chat.providers = [];
+  } finally {
+    state.chat.providersLoaded = true;
   }
 }
 
@@ -4420,16 +4689,22 @@ function askBubble(message) {
 }
 
 function renderProviderIcons() {
+  // Before the probe answers, connection is unknown rather than absent.
+  const pending = state.chat.providersLoaded === false;
   $("#provider-icons").innerHTML = CHAT_PROVIDERS.map((provider) => {
     const status = providerStatus(provider.id);
     const connected = status?.connected === true;
+    const stateClass = pending ? " connecting" : connected ? " connected" : "";
+    const stateLabel = pending
+      ? " · checking connection"
+      : connected
+        ? " · connected"
+        : " · not connected";
     return `
       <button
-        class="provider-icon${provider.id === state.chat.activeProvider ? " active" : ""}${
-          connected ? " connected" : ""
-        }"
+        class="provider-icon${provider.id === state.chat.activeProvider ? " active" : ""}${stateClass}"
         data-chat-provider="${provider.id}"
-        title="${escapeHtml(provider.company)}${connected ? " · connected" : " · not connected"}"
+        title="${escapeHtml(provider.company)}${stateLabel}"
       >
         <span class="dot"></span>
         ${PROVIDER_MARKS[provider.id]}
@@ -4574,12 +4849,47 @@ async function loadProviderUsage(provider) {
   }
 }
 
+/**
+ * Below this width the chat panel cannot sit beside the view without starving
+ * it, so it becomes an overlay drawer instead. Kept in sync with the matching
+ * breakpoint in styles.css.
+ */
+const CHAT_DRAWER_QUERY = window.matchMedia("(max-width: 1100px)");
+
+/**
+ * Reconcile the chat panel with the viewport.
+ *
+ * As a drawer it covers the view, so it must not be open by default — the
+ * panel used to stay open across the breakpoint and hide the right 380px of
+ * every screen, including the controls needed to close it. Crossing back into
+ * the wide layout restores whatever the user last chose there.
+ */
+function syncChatToViewport() {
+  const drawer = CHAT_DRAWER_QUERY.matches;
+  if (drawer === state.chat.drawer) {
+    return;
+  }
+  state.chat.drawer = drawer;
+  state.chat.open = drawer
+    ? false
+    : localStorage.getItem("relay.chatOpen") !== "false";
+  // Before sign-in the panel's contents do not exist yet; renderShell paints
+  // it once the app shell is revealed.
+  if ($("#app-shell")?.hidden === false) {
+    renderChat();
+  }
+}
+
 function renderChat() {
   const shell = $("#app-shell");
   if (!shell) {
     return;
   }
   shell.classList.toggle("chat-collapsed", !state.chat.open);
+  shell.classList.toggle(
+    "chat-drawer-open",
+    state.chat.open && state.chat.drawer === true,
+  );
   if (!$("#provider-icons")) {
     return;
   }
@@ -6315,6 +6625,18 @@ async function handleClick(event) {
     renderChat();
     return;
   }
+  if (target.dataset.action === "retry-context") {
+    renderShell();
+    await loadContext({ quiet: true });
+    return;
+  }
+  if (target.id === "chat-scrim") {
+    // Dismissing the drawer is a viewport-local gesture, not a preference:
+    // the wide layout should still open the panel next time.
+    state.chat.open = false;
+    renderChat();
+    return;
+  }
   if (target.id === "panel-toggle") {
     setPanel(!state.panelOpen);
     return;
@@ -6472,7 +6794,14 @@ async function enterApp() {
   $("#app-shell").hidden = false;
   authMessage("");
   applyHash();
-  await loadChatProviders();
+  // Provider probing shells out to each CLI and can take seconds. It used to
+  // be awaited here, which held the whole control room on an empty shell — and
+  // an empty shell renders as first-run onboarding. It is not on the critical
+  // path for showing the app, so it runs alongside and repaints when it lands.
+  void loadChatProviders().then(() => {
+    renderProviderIcons();
+    renderChatQuickbar();
+  });
   await loadContext({ quiet: true });
   if (state.activity === "explorer") {
     void refreshWorkspace({ quiet: true });
@@ -6504,7 +6833,13 @@ async function boot() {
       event.preventDefault();
       setPanel(!state.panelOpen);
     }
+    if (event.key === "Escape" && state.chat.drawer === true && state.chat.open) {
+      state.chat.open = false;
+      renderChat();
+    }
   });
+  CHAT_DRAWER_QUERY.addEventListener("change", syncChatToViewport);
+  syncChatToViewport();
   $("#chat-form").addEventListener("submit", (event) => {
     event.preventDefault();
     void sendChatPrompt();

@@ -5038,3 +5038,465 @@ textarea:focus {
     width: auto;
   }
 }
+
+/* ============================================== UX audit remediation === */
+/*
+ * Fixes for the 2026-07-30 UX audit. Grouped here rather than edited in
+ * place so the remediation reads as one change set; each block names the
+ * defect it closes.
+ */
+
+/* Loading state ----------------------------------------------------------
+ *
+ * Previously there was none: every project-scoped view fell through to the
+ * first-run onboarding screen while context was in flight, telling returning
+ * users they had no project. */
+
+.loading-state {
+  display: grid;
+  gap: 18px;
+  padding: 32px 0;
+  max-width: 720px;
+}
+
+.loading-state-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fg-muted);
+  font-size: 12.5px;
+}
+
+.loading-state-head p {
+  margin: 0;
+}
+
+.loading-spinner {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  border: 1.5px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: loading-spin 720ms linear infinite;
+}
+
+@keyframes loading-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+.skeleton-stack {
+  display: grid;
+  gap: 10px;
+}
+
+.skeleton-row {
+  height: 46px;
+  margin: 0;
+}
+
+.skeleton-row.short {
+  width: 55%;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loading-spinner {
+    animation: none;
+    border-top-color: var(--border);
+  }
+
+  .skeleton {
+    animation: none;
+  }
+}
+
+/* Provider connection: unknown is not "disconnected" ---------------------- */
+
+.provider-icon.connecting .dot {
+  background: var(--fg-subtle);
+  animation: provider-probe 1.1s ease-in-out infinite;
+}
+
+@keyframes provider-probe {
+  50% {
+    opacity: 0.3;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .provider-icon.connecting .dot {
+    animation: none;
+  }
+}
+
+/* Chat panel: a drawer, not an unannounced overlay ------------------------
+ *
+ * At <=1100px the panel used to switch to position:fixed while the main area
+ * kept laying out at full width beneath it, hiding the right 380px of every
+ * screen. It is now a dismissible drawer that is closed by default, is opaque
+ * (it was 0.98 alpha over a textured canvas, so content ghosted through), and
+ * never covers the activity bar. */
+
+.chat-scrim {
+  display: none;
+}
+
+@media (max-width: 1100px) {
+  /* `.app-shell` qualifier only to outrank jarvis.css's `.chat-panel`
+     background, which loads after this file: as a docked column its 0.98
+     alpha is fine, but as an overlay the view ghosted through it. */
+  .app-shell .chat-panel {
+    position: fixed;
+    right: 0;
+    top: 0;
+    bottom: var(--statusbar-height);
+    left: auto;
+    width: min(380px, calc(100vw - var(--activity-width)));
+    z-index: 40;
+    background: #010509;
+    backdrop-filter: blur(14px);
+    box-shadow: -24px 0 48px rgba(1, 4, 9, 0.62);
+    border-left: 1px solid var(--border);
+  }
+
+  .app-shell.chat-drawer-open .chat-scrim {
+    display: block;
+    position: fixed;
+    inset: 0 0 var(--statusbar-height) var(--activity-width);
+    z-index: 39;
+    background: rgba(1, 4, 9, 0.55);
+    backdrop-filter: blur(1px);
+  }
+}
+
+/* Status bar: keep the essential controls on screen -----------------------
+ *
+ * The bar is a non-wrapping flex row with overflow:hidden, so at 390px four
+ * items — including Sign out — sat up to 344px past the viewport edge and
+ * were unreachable. Low-value readouts drop out first; identity and sign-out
+ * are the last to go. */
+
+@media (max-width: 1100px) {
+  #status-docker,
+  #updated-at {
+    display: none;
+  }
+}
+
+@media (max-width: 700px) {
+  #panel-toggle,
+  #refresh-button {
+    display: none;
+  }
+
+  .status-bar {
+    padding: 0 4px;
+  }
+
+  .status-item {
+    padding: 0 6px;
+  }
+}
+
+@media (max-width: 480px) {
+  #status-user {
+    display: none;
+  }
+
+  #live-label {
+    display: none;
+  }
+}
+
+/* Board: the clipped Failed / Cancelled columns ---------------------------
+ *
+ * Five 240px columns need 1248px; with the sidebar and chat dock open at
+ * 1600px the grid got 806px, so 442px — the Failed column and all of
+ * Cancelled — sat outside the scrollport. It did scroll, but with an overlay
+ * scrollbar and no fade the columns just appeared sliced mid-card.
+ *
+ * Rather than dress up the scroll, the row now wraps: columns keep their
+ * 240px floor and flow onto a second line when they cannot all fit. Nothing
+ * is ever off-screen, so no affordance is needed to find it. The scrollbar
+ * below is the fallback for viewports too narrow for even one column. */
+
+.board-grid {
+  grid-auto-flow: row;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  scrollbar-color: var(--border) transparent;
+  scrollbar-width: thin;
+}
+
+.board-grid::-webkit-scrollbar {
+  height: 10px;
+}
+
+.board-grid::-webkit-scrollbar-track {
+  background: var(--bg-inset);
+  border-radius: var(--radius);
+}
+
+.board-grid::-webkit-scrollbar-thumb {
+  background: var(--bg-active);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.board-grid::-webkit-scrollbar-thumb:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+/* Settings: real controls instead of OS chrome ---------------------------
+ *
+ * Eight native checkboxes rendered at 13px in Windows' #0078d4 with a white
+ * tick, and a <fieldset> with the browser's default border and legend notch —
+ * the only elements in the product drawn by the OS rather than the product. */
+
+input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 15px;
+  height: 15px;
+  flex: none;
+  margin: 0 8px 0 0;
+  vertical-align: -2px;
+  background: var(--bg-canvas);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  display: inline-grid;
+  place-content: center;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+input[type="checkbox"]::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  transform: scale(0);
+  transition: transform 110ms ease-in-out;
+  background: var(--bg-inset);
+  clip-path: polygon(14% 46%, 0 60%, 39% 100%, 100% 22%, 86% 8%, 39% 72%);
+}
+
+input[type="checkbox"]:checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+input[type="checkbox"]:checked::before {
+  transform: scale(1);
+}
+
+input[type="checkbox"]:hover:not(:disabled) {
+  border-color: var(--accent);
+}
+
+input[type="checkbox"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+input[type="checkbox"]:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  input[type="checkbox"],
+  input[type="checkbox"]::before {
+    transition: none;
+  }
+}
+
+fieldset.field-group {
+  border: 1px solid var(--border-muted);
+  background: var(--bg-canvas);
+  gap: 6px 18px;
+  padding: 10px 12px;
+  margin: 0;
+}
+
+/* The default legend cuts a notch in the border. Take it out of the border
+   box entirely and set it as the same eyebrow used elsewhere in the form. */
+fieldset.field-group legend {
+  float: left;
+  width: 100%;
+  padding: 0 0 8px;
+  font-family: var(--font-data);
+  font-size: 10.5px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+
+fieldset.field-group::after {
+  content: "";
+  display: table;
+  clear: both;
+}
+
+fieldset.field-group label.inline {
+  text-transform: capitalize;
+}
+
+/* Helper copy under a checkbox belongs under its label, not under the box. */
+label > small.muted {
+  display: block;
+  margin-top: 3px;
+  padding-left: 23px;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* Diff review ------------------------------------------------------------
+ *
+ * Line numbers, a gutter, and headers that wrap. The `index <sha>..<sha>`
+ * line was hard-clipped at the container edge — `white-space: pre` with no
+ * wrap and, in the run view's narrower column, nothing to scroll — so the
+ * content was simply lost. */
+
+.diff.has-gutter .diff-line {
+  display: grid;
+  grid-template-columns: 3.5em 3.5em minmax(0, 1fr);
+  padding: 0;
+  min-width: 100%;
+}
+
+.diff-num {
+  padding: 0 8px;
+  text-align: right;
+  color: var(--fg-subtle);
+  background: rgba(1, 6, 11, 0.55);
+  border-right: 1px solid var(--border-muted);
+  user-select: none;
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+.diff-text {
+  padding: 0 12px;
+  white-space: pre;
+  overflow-wrap: normal;
+}
+
+/* Git's own header lines carry no line number and no code; let them wrap
+   rather than disappear off the edge. */
+.diff-header .diff-text,
+.diff-hunk .diff-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.diff-hunk {
+  color: var(--accent);
+  background: color-mix(in srgb, var(--hud-ink) 9%, transparent);
+  border-block: 1px solid var(--border-muted);
+}
+
+.diff-header {
+  color: var(--fg-subtle);
+  background: rgba(1, 6, 11, 0.4);
+  font-size: 11px;
+}
+
+.diff-add .diff-num,
+.diff-remove .diff-num {
+  background: rgba(1, 6, 11, 0.28);
+}
+
+/* Review threads ---------------------------------------------------------- */
+
+.comment-thread-head {
+  margin: 0;
+  font-family: var(--font-data);
+  font-size: 10.5px;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+
+.comment-author {
+  margin: 0 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+/* The composer states its own anchor, so a file thread and a changeset
+   thread are no longer two identical boxes distinguished only by a
+   placeholder. */
+.comment-form-label {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--fg-muted);
+}
+
+.comment-form-label code {
+  font-family: var(--font-mono);
+  color: var(--fg);
+}
+
+/* Application modal ------------------------------------------------------
+ *
+ * Replaces window.prompt() for rollback. */
+
+.app-dialog {
+  width: min(460px, calc(100vw - 40px));
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-overlay);
+  color: var(--fg);
+  box-shadow: 0 28px 72px rgba(1, 4, 9, 0.72);
+}
+
+.app-dialog::backdrop {
+  background: rgba(1, 4, 9, 0.72);
+  backdrop-filter: blur(3px);
+}
+
+.app-dialog.destructive {
+  border-color: color-mix(in srgb, var(--danger) 55%, var(--border));
+}
+
+.app-dialog-form {
+  display: grid;
+  gap: 12px;
+  padding: 22px 24px 20px;
+}
+
+.app-dialog-form h2 {
+  margin: 0;
+  font-size: 16px;
+  line-height: 1.35;
+}
+
+.app-dialog-form p {
+  margin: 0;
+}
+
+.app-dialog-form .muted {
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.app-dialog-form label {
+  display: grid;
+  gap: 5px;
+}
+
+.app-dialog-form label > span {
+  font-size: 11.5px;
+  color: var(--fg-muted);
+}
+
+.app-dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  margin-top: 2px;
+}
