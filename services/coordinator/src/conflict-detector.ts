@@ -401,9 +401,32 @@ export class ConflictDetector {
       100,
       items.reduce((total, entry) => total + entry.score, 0),
     );
+    // Advisory evidence is reported but never priced into the disposition.
+    //
+    // It used to be summed into the same total the thresholds are read
+    // against, and the guard meant to hold it back only caught pairs with *no*
+    // structural evidence at all. So on a pair with some structural evidence,
+    // advisory contribution could carry the total across a threshold and turn
+    // a concurrent pair into a sequenced one. Measured on the team-queue runs,
+    // the intent signal fired four times and was wrong four times, so what
+    // that bought was lost parallelism on noise. Scheduling now reads only
+    // evidence that has been shown to predict a collision.
+    const schedulingScore = Math.min(
+      100,
+      items.reduce(
+        (total, entry) => total + (entry.advisory === true ? 0 : entry.score),
+        0,
+      ),
+    );
     const structural = items.some((entry) => entry.advisory !== true);
-    let disposition = dispositionFor(score, this.options.thresholds);
-    if (!structural && ["sequence", "block"].includes(disposition)) {
+    const advisory = items.some(
+      (entry) => entry.advisory === true && entry.score > 0,
+    );
+    let disposition = dispositionFor(schedulingScore, this.options.thresholds);
+    // Advisory evidence can still ask a human to look, which costs nothing and
+    // keeps the signal visible while its accuracy is being established. It can
+    // never take the next step to sequence or block.
+    if (advisory && disposition === "concurrent") {
       disposition = "concurrent_with_notification";
     }
     const explanation = items
@@ -420,7 +443,7 @@ export class ConflictDetector {
       explanation:
         `${explanation}. ` +
         (structural
-          ? "Structural evidence controls scheduling."
+          ? `Structural evidence controls scheduling (${schedulingScore} of ${score}).`
           : "Intent-only evidence is advisory and never blocks automatically."),
     };
   }

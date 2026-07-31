@@ -28,8 +28,21 @@ LLM on the scheduling path.
 | `intent_conflict` | Objectives contain a known incompatible intent pair |
 
 Structural evidence can notify, sequence, or block according to configurable
-weights and thresholds. Intent evidence remains advisory even at a high score.
-Every assessment stores its score, resources, explanation, and disposition.
+weights and thresholds. Intent evidence is advisory: it is scored and recorded,
+and it can raise a pair to `concurrent_with_notification` so a human looks, but
+it is excluded from the total the thresholds are read against and so can never
+sequence or block. Every assessment stores its score, resources, explanation,
+and disposition; the explanation names the structural subtotal the disposition
+was actually computed from.
+
+Until 2026-07-31 this was only half true. The advisory score was summed into
+the same total as the structural scores, and the guard that kept intent
+evidence from blocking applied only to pairs with no structural evidence
+whatsoever — so on a pair with any structural evidence at all, intent could
+push the total across a threshold. Measured against the team-queue runs, the
+shipped intent signal fired on four pairs and was wrong on all four, so the
+only thing that behaviour bought was lost parallelism. See
+`docs/benchmarks/intent-signal.md`.
 
 ## Scheduling And Ownership
 

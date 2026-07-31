@@ -129,6 +129,48 @@ test("intent-only evidence remains advisory even above blocking thresholds", () 
   assert.equal(detector.conflictsForScheduling(remove, add), false);
 });
 
+/**
+ * The regression the 2026-07-31 audit found: advisory evidence could not block
+ * on its own, but it could push a pair that had *some* structural evidence
+ * over the next threshold, because both were summed into the score the
+ * thresholds read. Here the file overlap alone scores 20 — concurrent — and
+ * the advisory intent score is large enough to reach `block` if it were
+ * counted. It must not be.
+ */
+test("advisory evidence cannot lift a disposition past notification", () => {
+  const detector = new ConflictDetector({
+    fileOverlapWeight: 20,
+    semanticConflictWeight: 100,
+    thresholds: {
+      concurrentMaximum: 20,
+      notifyMaximum: 45,
+      sequenceMaximum: 70,
+    },
+  });
+  const remove = {
+    ...plan("remove", ["src/shared.ts"]),
+    objective: "Remove password authentication",
+    intent: "Remove password authentication",
+  };
+  const add = {
+    ...plan("add", ["src/shared.ts"]),
+    objective: "Add password reset authentication",
+    intent: "Add password reset authentication",
+  };
+  const assessment = detector.assess(remove, add);
+
+  assert.ok(assessment);
+  // Reported score still totals every piece of evidence: 20 structural + 90
+  // advisory. The disposition is computed from the 20 alone.
+  assert.equal(assessment.score, 100);
+  assert.equal(assessment.disposition, "concurrent_with_notification");
+  assert.match(assessment.explanation, /Structural evidence controls scheduling \(20 of 100\)/u);
+  assert.equal(
+    assessment.evidence.some((entry) => entry.kind === "intent_conflict"),
+    true,
+  );
+});
+
 test("custom thresholds change scheduling disposition without changing evidence", () => {
   const detector = new ConflictDetector({
     fileOverlapWeight: 20,
