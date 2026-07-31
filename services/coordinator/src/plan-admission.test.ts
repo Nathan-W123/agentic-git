@@ -8,6 +8,7 @@ import {
 } from "@coord/shared-types";
 
 import {
+  BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
   PlanAdmissionController,
   approvedSchemaResources,
   structuralConflict,
@@ -56,7 +57,10 @@ function admit(
   overrides: Partial<
     Pick<
       PlanAdmissionInput,
-      "partialAdmission" | "resourcesInFile" | "symbolRangesInFile"
+      | "partialAdmission"
+      | "resourcesInFile"
+      | "symbolRangesInFile"
+      | "blockedAttempts"
     >
   > = {},
 ) {
@@ -138,6 +142,56 @@ test("evidence past the sequencing threshold blocks rather than orders", () => {
   assert.equal(admission.status, "blocked");
   assert.deepEqual(admission.blockedBy, ["task_b"]);
   assert.equal(admission.ownershipGrants.length, 0);
+});
+
+test("a plan refused twice on the same collision is sequenced, not blocked again", () => {
+  // The livelock this exists to break: "plan again with a narrower scope" is
+  // advice a task that must change one contended function cannot take, so it
+  // returns the same plan and is refused identically, forever, paying a
+  // planning round each turn. Past the bound the answer becomes "wait".
+  const files = Array.from({ length: 6 }, (_, index) => `src/f${index}.ts`);
+  const candidate = plan("task_a", {
+    expectedFiles: files,
+    expectedSymbols: [],
+  });
+  const active = [plan("task_b", { expectedFiles: files, expectedSymbols: [] })];
+
+  const first = admit(candidate, active, new PlanAdmissionController(), {
+    blockedAttempts: 0,
+  });
+  assert.equal(first.status, "blocked");
+
+  const escalated = admit(candidate, active, new PlanAdmissionController(), {
+    blockedAttempts: BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
+  });
+
+  assert.equal(escalated.status, "sequenced");
+  // Sequencing is a stricter promise than blocking, not a weaker one: the
+  // task still gets nothing to run with, it is merely told to wait for a
+  // named holder instead of to think again.
+  assert.deepEqual(escalated.blockedBy, ["task_b"]);
+  assert.equal(escalated.ownershipGrants.length, 0);
+  assert.equal(planAdmissionApproved(escalated), false);
+  assert.match(escalated.explanation, /narrowing has already been asked for/u);
+  // The evidence that justified refusing is carried forward rather than
+  // dropped, so escalating cannot launder a conflict out of the record.
+  assert.equal(escalated.conflicts.length, first.conflicts.length);
+  assert.ok(escalated.conflicts.every(structuralConflict));
+});
+
+test("escalation never turns a clean plan into a conflicted one", () => {
+  // The bound is a liveness rule and must not manufacture contention: a plan
+  // with nothing to collide against is approved no matter how many times some
+  // earlier plan for this task was refused.
+  const admission = admit(
+    plan("task_a", { expectedFiles: ["src/a.ts"], expectedSymbols: ["a"] }),
+    [plan("task_b", { expectedFiles: ["src/b.ts"], expectedSymbols: ["b"] })],
+    new PlanAdmissionController(),
+    { blockedAttempts: 99 },
+  );
+
+  assert.equal(planAdmissionApproved(admission), true);
+  assert.deepEqual(admission.blockedBy, []);
 });
 
 test("ownership refuses an overlap that conflict scoring lets through", () => {

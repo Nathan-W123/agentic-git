@@ -708,6 +708,105 @@ test("a project policy forces review of an otherwise benign changeset", async ()
   }
 });
 
+test("a task waiting on running work goes to the back of the lease queue", async () => {
+  const harness = await createHarness();
+  try {
+    // `waiting` was refused and told to wait for `blocker`, which is still
+    // executing. `ready` has never been refused. Leasing is where planning is
+    // paid for, so handing a worker the waiting task would buy a full planning
+    // round to be told to wait again — 74% of planning calls in the ten-task
+    // live run were exactly that.
+    const blocker = await submit(harness);
+    const held = await lease(harness);
+    assert.ok(held);
+    assert.equal(held.task.id, blocker);
+
+    const waiting = await submit(harness);
+    const ready = await submit(harness);
+    await harness.store.appendAudit(undefined, {
+      type: "plan_admitted",
+      taskId: waiting,
+      data: { status: "sequenced", blockedBy: [blocker] },
+    });
+
+    const next = await lease(harness);
+    assert.ok(next);
+    assert.equal(
+      next.task.id,
+      ready,
+      "the task with nothing in its way must be leased first",
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a waiting task is still leased when nothing else can run", async () => {
+  const harness = await createHarness();
+  try {
+    // Postponed, never excluded. If the queue holds nothing but tasks waiting
+    // on a blocker, a worker must still take one — otherwise the ordering
+    // preference becomes a starvation bug, and the deadlock it causes would be
+    // worse than the replanning it saves.
+    const blocker = await submit(harness);
+    const held = await lease(harness);
+    assert.ok(held);
+
+    const waiting = await submit(harness);
+    await harness.store.appendAudit(undefined, {
+      type: "plan_admitted",
+      taskId: waiting,
+      data: { status: "sequenced", blockedBy: [held.task.id] },
+    });
+    void blocker;
+
+    const next = await lease(harness);
+    assert.ok(next, "the only remaining task must still be leasable");
+    assert.equal(next.task.id, waiting);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a task whose blocker has finished is not postponed", async () => {
+  const harness = await createHarness();
+  try {
+    // The refusal is a fact about a moment, not a standing property. Once the
+    // blocker settles the task is ready, and reading the live lease table
+    // rather than trusting the old answer is what makes that true.
+    const blocker = await submit(harness);
+    const held = await lease(harness);
+    assert.ok(held);
+
+    const waiting = await submit(harness);
+    const ready = await submit(harness);
+    await harness.store.appendAudit(undefined, {
+      type: "plan_admitted",
+      taskId: waiting,
+      data: { status: "sequenced", blockedBy: [blocker] },
+    });
+
+    await harness.store.finishWorkLease(
+      held.lease.id,
+      "completed",
+      new Date().toISOString(),
+      "blocker integrated",
+    );
+    await harness.store.completeSubmittedTask(blocker, "integrated");
+
+    const next = await lease(harness);
+    assert.ok(next);
+    assert.equal(
+      next.task.id,
+      waiting,
+      "with its blocker gone the waiting task returns to submission order",
+    );
+    void ready;
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
 test("an exhausted daily token budget stops leasing until cleared", async () => {
   const harness = await createHarness();
   try {

@@ -59,6 +59,22 @@ export interface PlanAdmissionInput {
   /** How long a deferred holder should wait before resubmitting. */
   retryAfterMs?: number;
   /**
+   * How many times this task has already been refused outright on this same
+   * collision, counted by the caller from the admission record.
+   *
+   * A `blocked` answer tells the holder to plan again with a narrower scope.
+   * That is sound advice exactly once, and only for a task that has scope to
+   * shed. A task whose whole purpose is to change one contended function has
+   * none: it replans, produces a materially identical plan, collides
+   * identically, and is told to narrow again — forever, at the price of a full
+   * planning round each time. A ten-task live run stalled four tasks that way
+   * and spent 75% of its tokens on planning before the budget ran out.
+   *
+   * Past {@link BLOCKED_ATTEMPTS_BEFORE_SEQUENCING} the answer changes from
+   * "plan again" to "wait your turn". See {@link PlanAdmissionController.decide}.
+   */
+  blockedAttempts?: number;
+  /**
    * Whether a plan that only partly collides may be admitted on the rest of
    * its declared resources. Defaults to on. Turning it off restores strict
    * all-or-nothing arbitration, which is what a follow-up task gets: splitting
@@ -97,6 +113,22 @@ export interface PlanAdmissionInput {
  * worker picks up a freed slot well inside one lease period.
  */
 export const DEFAULT_PLAN_RETRY_MS = 15_000;
+
+/**
+ * Refusals to spend on "plan again with a narrower scope" before giving up on
+ * narrowing and simply making the task wait.
+ *
+ * Two, because the first refusal is information the agent has not had yet —
+ * it did not know the resource was held — and the second establishes that
+ * knowing did not change the plan. A third would cost another planning round
+ * to learn the same thing.
+ *
+ * This is a liveness bound, not a safety valve. Escalating goes from refusing
+ * the plan to *sequencing* it behind the holder, which is a stricter promise
+ * about ordering, not a weaker one: the task still does not run until the
+ * blocker integrates. What stops is the pointless replanning while it waits.
+ */
+export const BLOCKED_ATTEMPTS_BEFORE_SEQUENCING = 2;
 
 /**
  * Resources a plan may claim in `approval_required` mode.
@@ -721,7 +753,46 @@ export class PlanAdmissionController {
     // A "block" disposition is the detector saying the two plans are not
     // separable by ordering. Sequencing would just move the collision later,
     // so the plan is refused outright and the holder must plan again.
+    //
+    // Unless it has already been told that, twice, and come back with the same
+    // collision. Then "plan again" has been shown not to work for this task,
+    // and repeating it is a loop with no exit: the run that exposed this
+    // stranded four tasks replanning identically until the budget expired.
+    // Waiting is the answer that terminates, because the blocker does
+    // eventually integrate, and it concedes nothing — the task is still
+    // refused permission to run now.
     if (blocking.length > 0) {
+      const exhausted =
+        (input.blockedAttempts ?? 0) >= BLOCKED_ATTEMPTS_BEFORE_SEQUENCING;
+      const blockedBy = blocking.map((assessment) =>
+        otherTask(assessment, taskId),
+      );
+      const collisions = blocking
+        .map(
+          (assessment) =>
+            `${otherTask(assessment, taskId)} (${assessment.score})`,
+        )
+        .join(", ");
+      if (exhausted) {
+        return {
+          ...shared,
+          status: "sequenced",
+          ownershipGrants: [],
+          constraints: [
+            "Start from canonical state after the blocking tasks integrate",
+            "Do not narrow this plan further; it is queued behind the " +
+              "conflicting work rather than competing with it",
+          ],
+          blockedBy,
+          conflicts: blocking,
+          explanation:
+            "Plan collides beyond the sequencing threshold with " +
+            `${collisions}, and narrowing has already been asked for ` +
+            `${String(input.blockedAttempts ?? 0)} times without separating ` +
+            "them. Sequenced behind the holder instead of replanned again.",
+          retryAfterMs,
+        };
+      }
       return {
         ...shared,
         status: "blocked",
@@ -729,16 +800,11 @@ export class PlanAdmissionController {
         constraints: [
           "Plan again with a narrower scope, or wait for the conflicting task to settle",
         ],
-        blockedBy: blocking.map((assessment) => otherTask(assessment, taskId)),
+        blockedBy,
         conflicts: blocking,
         explanation:
           "Plan collides with executing work beyond the sequencing threshold: " +
-          blocking
-            .map(
-              (assessment) =>
-                `${otherTask(assessment, taskId)} (${assessment.score})`,
-            )
-            .join(", "),
+          collisions,
         retryAfterMs,
       };
     }

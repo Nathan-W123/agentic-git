@@ -56,6 +56,7 @@ import {
   type ScopeChangeDecision,
   type ScopeChangeRequest,
   type TaskDefinition,
+  type TaskId,
 } from "@coord/shared-types";
 import {
   DockerWorkspaceManager,
@@ -333,10 +334,29 @@ export async function leaseWork(
       : { repositoryId: input.repositoryId }),
   });
 
+  // Tasks known to be waiting on someone else go to the back of the queue.
+  //
+  // Planning is the expensive half of a lease and it happens before the
+  // coordinator is ever consulted, so leasing a task whose last answer was
+  // "wait for task X, which is still running" buys a full planning round to be
+  // told the same thing again. In the ten-task live run 74% of planning calls
+  // ended in a deferral at ~23,000 tokens each — the single largest line in
+  // the bill, and almost all of it spent re-deriving plans that were already
+  // known to be unschedulable.
+  //
+  // This is an ordering preference, never an exclusion: if everything is
+  // waiting, the loop below still takes the first candidate. A task cannot be
+  // starved by it, only postponed behind work that can actually run.
+  const waiting = await tasksWaitingOnActiveWork(store, pending);
+  const ordered = [
+    ...pending.filter((task) => !waiting.has(task.id)),
+    ...pending.filter((task) => waiting.has(task.id)),
+  ];
+
   // Try every compatible candidate rather than only the first: another
   // worker polling at the same moment may have claimed it, or its
   // repository may be at its parallelism cap while a later task's is not.
-  for (const next of pending) {
+  for (const next of ordered) {
     const required = adapterName(project, next);
     if (required !== undefined && !worker.adapters.includes(required)) {
       continue;
@@ -857,6 +877,100 @@ interface WorkPlanServices {
 const MAX_ADMISSION_ATTEMPTS = 4;
 
 /**
+ * Tasks whose most recent admission sequenced them behind work that is still
+ * executing.
+ *
+ * The blocker has to be checked, not just remembered: a task sequenced behind
+ * something that has since integrated is ready now, and treating it as waiting
+ * would postpone it forever. So the answer is recomputed from the live lease
+ * table every time, and a task only counts as waiting while at least one of
+ * the tasks named in its last refusal still holds an active lease.
+ */
+async function tasksWaitingOnActiveWork(
+  store: CoordinationStore,
+  pending: readonly SubmittedTask[],
+): Promise<Set<TaskId>> {
+  if (pending.length === 0) {
+    return new Set();
+  }
+  const active = new Set(
+    (await store.listWorkLeases({ status: "active" })).map(
+      (lease) => lease.taskId,
+    ),
+  );
+  if (active.size === 0) {
+    return new Set();
+  }
+  const waiting = new Set<TaskId>();
+  for (const task of pending) {
+    const events = await store.listAuditEvents({
+      taskId: task.id,
+      types: ["plan_admitted"],
+    });
+    const last = events.at(-1);
+    if (last === undefined) {
+      continue;
+    }
+    const status = last.event.data["status"];
+    if (status !== "sequenced" && status !== "blocked") {
+      continue;
+    }
+    const blockedBy = last.event.data["blockedBy"];
+    if (!Array.isArray(blockedBy) || blockedBy.length === 0) {
+      continue;
+    }
+    if (blockedBy.map(String).some((id) => active.has(id as TaskId))) {
+      waiting.add(task.id);
+    }
+  }
+  return waiting;
+}
+
+/**
+ * How many times running this task has just been refused on the same
+ * collision, counted backwards from the most recent admission.
+ *
+ * "The same collision" is what makes this a liveness signal rather than a
+ * blunt attempt counter: a task refused twice by two *different* holders is
+ * making progress through a queue, and telling it to stop narrowing would be
+ * wrong. So the run is counted only while the blocking set stays identical,
+ * and any admission that is not a block — an approval, a sequencing, a
+ * requeue — ends it.
+ *
+ * The admission record is the source because the count has to outlive the
+ * lease. The loop this exists to break releases its lease on every turn, and
+ * the next turn may be a different worker entirely, so anything held in memory
+ * would reset exactly when it mattered.
+ */
+async function consecutiveBlockedAdmissions(
+  store: CoordinationStore,
+  taskId: TaskId,
+): Promise<number> {
+  const events = await store.listAuditEvents({
+    taskId,
+    types: ["plan_admitted"],
+  });
+  let signature: string | undefined;
+  let count = 0;
+  for (const entry of [...events].reverse()) {
+    if (entry.event.data["status"] !== "blocked") {
+      break;
+    }
+    const blockedBy = entry.event.data["blockedBy"];
+    const current = Array.isArray(blockedBy)
+      ? [...blockedBy].map(String).sort().join(",")
+      : "";
+    if (signature === undefined) {
+      signature = current;
+    } else if (signature !== current) {
+      break;
+    }
+    count += 1;
+  }
+  return count;
+}
+
+/**
  * The plans currently executing in one repository, and the exact set of
  * leases that view was read from.
  *
@@ -1180,6 +1294,12 @@ export async function admitWorkPlan(
     remote: true,
   });
 
+  // How often this task has already been sent away to narrow a plan it cannot
+  // narrow. Read from the admission record rather than tracked in memory: the
+  // count has to survive the lease being released and the task being picked up
+  // by a different worker, which is precisely the path the loop takes.
+  const blockedAttempts = await consecutiveBlockedAdmissions(store, task.id);
+
   for (let attempt = 1; attempt <= MAX_ADMISSION_ATTEMPTS; attempt += 1) {
     const executing = await executingPlans(store, lease);
     // A plan admitted through the solo fast path was stored as declared —
@@ -1218,6 +1338,7 @@ export async function admitWorkPlan(
       // is the coordinate system a diff hunk's old side is measured in.
       symbolRangesInFile: (file) =>
         intelligence.symbolRangesInFile(index, file),
+      blockedAttempts,
     });
     // A gated plan already opened its run to hang the approval off. Carrying
     // that id forward is what keeps the result path from opening a second one
