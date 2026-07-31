@@ -131,6 +131,23 @@ export const DEFAULT_PLAN_RETRY_MS = 15_000;
 export const BLOCKED_ATTEMPTS_BEFORE_SEQUENCING = 2;
 
 /**
+ * Outright refusals a task may accumulate over its whole life before it is
+ * sequenced regardless of how they were spaced.
+ *
+ * The consecutive bound above is the ordinary path and it has one blind spot:
+ * a task whose refusals are interleaved with other non-approving answers never
+ * builds an unbroken run, so the count keeps resetting while the planning
+ * rounds keep being paid for. This is the backstop for that, and it is
+ * deliberately loose — four refusals is already twice the point at which
+ * narrowing was shown not to work, so reaching it means something stranger is
+ * happening and waiting is the safe response.
+ *
+ * Like the consecutive bound this only ever converts a refusal into a wait. It
+ * cannot admit anything.
+ */
+export const BLOCKED_ADMISSION_LIFETIME_CAP = 4;
+
+/**
  * Resources a plan may claim in `approval_required` mode.
  *
  * Naming a schema in the plan is what makes the claim legitimate: the change

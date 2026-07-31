@@ -40,7 +40,7 @@ import {
   type WorkspaceSandbox,
 } from "@coord/workspace-manager";
 
-import { LeaseLostError, WorkerClient } from "./client.js";
+import { LeaseLostError, WorkerClient, isTransportFailure } from "./client.js";
 
 /**
  * The worker daemon.
@@ -103,6 +103,14 @@ export interface IterationResult {
    * granted and the remainder was queued as a follow-up task.
    */
   deferredResources?: string[];
+  /**
+   * The iteration ended because the control plane could not be reached, not
+   * because anything about the task was wrong. The lease was released and the
+   * task is queued again; a harness counting failures should count these
+   * apart, because attributing them to coordination is how an infrastructure
+   * problem gets mistaken for a scheduling result.
+   */
+  transport?: boolean;
 }
 
 const DEFAULT_POLL_MS = 5_000;
@@ -324,6 +332,27 @@ export class Worker {
       if (error instanceof LeaseLostError) {
         // The task belongs to someone else now; reporting would be a lie.
         return { worked: true, taskId: assignment.task.id, accepted: false, reason: detail };
+      }
+      // A task is failed when the *work* failed — the agent could not do it,
+      // the plan was refused, the result would not validate. A control plane
+      // this worker could not reach says nothing about any of that, and
+      // failing the task on it discards work for a reason that has nothing to
+      // do with the work. The client already retries a dropped connection; one
+      // that outlives those retries means the control plane is unreachable
+      // now, which is a condition that clears. So the lease is released
+      // instead and the task goes back on the queue for whoever can reach it.
+      if (isTransportFailure(error)) {
+        await this.options.client
+          .release(assignment.lease.id)
+          .catch(() => undefined);
+        return {
+          worked: true,
+          taskId: assignment.task.id,
+          accepted: false,
+          deferred: true,
+          transport: true,
+          reason: `control plane unreachable, task requeued: ${detail}`,
+        };
       }
       await this.options.client
         .report(assignment.lease.id, { status: "failed", detail: detail.slice(0, 2000) })

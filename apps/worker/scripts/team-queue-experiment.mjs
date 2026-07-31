@@ -675,10 +675,21 @@ function summarize(iterations, records, tasks) {
    * comparison between arms is only meaningful if both arms actually attempted
    * the same work.
    */
-  const transportFailures = iterations.filter((entry) =>
-    /fetch failed|operation was aborted|ECONNRESET|socket hang up|ECONNREFUSED/iu.test(
-      String(entry.reason ?? ""),
-    ),
+  const transportFailures = iterations.filter(
+    (entry) =>
+      entry.transport === true ||
+      /fetch failed|operation was aborted|ECONNRESET|socket hang up|ECONNREFUSED/iu.test(
+        String(entry.reason ?? ""),
+      ),
+  ).length;
+  /**
+   * Transport losses the worker survived by requeueing rather than failing the
+   * task. Counted apart from the total because the two say different things: a
+   * dropped connection that costs a lease is noise, and one that costs a task
+   * is the defect this run exists to check is gone.
+   */
+  const transportRequeues = iterations.filter(
+    (entry) => entry.transport === true,
   ).length;
 
   const events = (type) => audit.filter((event) => event.type === type);
@@ -688,6 +699,7 @@ function summarize(iterations, records, tasks) {
 
   return {
     transportFailures,
+    transportRequeues,
     tasksIntegrated: tasks.filter((task) => task.status === "integrated").length,
     tasksFailed: tasks.filter((task) => task.status === "failed").length,
     tasksOutstanding: tasks.filter(
@@ -884,6 +896,7 @@ async function once() {
         worked: entry.worked,
         accepted: entry.accepted,
         deferred: entry.deferred,
+        transport: entry.transport,
         deferredResources: entry.deferredResources,
         tokens: (entry.usage ?? []).reduce((sum, u) => sum + u.tokens, 0),
         reason:
@@ -913,7 +926,7 @@ console.log(
     `conflicts=${String(m.conflictsDetected)} ` +
     `replans=${String(m.planTimeRequeues)}p/${String(m.resultTimeRequeues)}r ` +
     `tokens=${String(m.tokensTotal ?? m.observedTokensTotal ?? "n/a")} ` +
-    `transportFails=${String(m.transportFailures)} ` +
+    `transportFails=${String(m.transportFailures)}(requeued ${String(m.transportRequeues)}) ` +
     `elapsed=${String(Math.round(record.elapsedMs / 1000))}s ` +
     `wall=${String(Math.round(record.wallClockMs / 1000))}s ` +
     `mergeConflicts=${String(record.outcome.conflictedFiles ?? 0)} ` +

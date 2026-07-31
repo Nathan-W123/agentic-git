@@ -6,6 +6,8 @@ import {
   DEFAULT_PLAN_RETRY_MS,
   OwnershipService,
   PlanAdmissionController,
+  BLOCKED_ADMISSION_LIFETIME_CAP,
+  BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
   ScopeExpansionError,
   StoreApprovalController,
   approvalPolicyForProject,
@@ -65,6 +67,20 @@ import {
 } from "@coord/workspace-manager";
 
 import type { CoordinatorProject } from "./project.js";
+
+/**
+ * Restores the admission loop as it behaved before it was bounded.
+ *
+ * Both halves of the fix go away together: refusals stop being counted, so a
+ * plan is told to narrow however many times it collides, and tasks known to be
+ * waiting stop being deprioritised, so a worker is handed its own dead end
+ * again. That is the exact prior behaviour on an identical build, which is
+ * what a control arm has to be — the same shape as COORD_COLD_REPLAN and
+ * COORD_UNGROUNDED_REPLAN, and the rollback if the bound misbehaves.
+ */
+function legacyAdmissionLoop(): boolean {
+  return process.env["COORD_LEGACY_ADMISSION_LOOP"] === "1";
+}
 
 /** A worker holds a task for this long before it must heartbeat again. */
 export const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
@@ -347,7 +363,9 @@ export async function leaseWork(
   // This is an ordering preference, never an exclusion: if everything is
   // waiting, the loop below still takes the first candidate. A task cannot be
   // starved by it, only postponed behind work that can actually run.
-  const waiting = await tasksWaitingOnActiveWork(store, pending);
+  const waiting = legacyAdmissionLoop()
+    ? new Set<TaskId>()
+    : await tasksWaitingOnActiveWork(store, pending);
   const ordered = [
     ...pending.filter((task) => !waiting.has(task.id)),
     ...pending.filter((task) => waiting.has(task.id)),
@@ -927,47 +945,54 @@ async function tasksWaitingOnActiveWork(
 }
 
 /**
- * How many times running this task has just been refused on the same
- * collision, counted backwards from the most recent admission.
+ * How often running this task has been refused outright: in an unbroken run
+ * ending at the most recent admission, and over the task's whole life.
  *
- * "The same collision" is what makes this a liveness signal rather than a
- * blunt attempt counter: a task refused twice by two *different* holders is
- * making progress through a queue, and telling it to stop narrowing would be
- * wrong. So the run is counted only while the blocking set stays identical,
- * and any admission that is not a block — an approval, a sequencing, a
- * requeue — ends it.
+ * Deliberately blind to *which* task did the blocking. An earlier version
+ * counted only while the blocking set stayed identical, on the reasoning that
+ * a task refused by two different holders is making progress through a queue.
+ * That reasoning is wrong in exactly the case this mechanism exists for: three
+ * tasks contending for one function block each other in a rotating order, so
+ * the blocking set changes every turn, the run resets every turn, and the
+ * escalation is never reached. The loop survives the fix meant to break it.
+ *
+ * Escalating on a genuine queue costs nothing anyway, which is what makes the
+ * blunter rule safe. Sequencing behind whoever currently holds the resource is
+ * the correct answer whether that holder is the same one as last time or not —
+ * it grants no permission to execute either way.
+ *
+ * `total` is the backstop. A task that alternates between refusals and other
+ * non-approving answers never builds a consecutive run, so the unbroken count
+ * alone still has a hole; the lifetime count has none, because it only ever
+ * rises.
  *
  * The admission record is the source because the count has to outlive the
  * lease. The loop this exists to break releases its lease on every turn, and
  * the next turn may be a different worker entirely, so anything held in memory
  * would reset exactly when it mattered.
  */
-async function consecutiveBlockedAdmissions(
+export async function blockedAdmissionHistory(
   store: CoordinationStore,
   taskId: TaskId,
-): Promise<number> {
+): Promise<{ consecutive: number; total: number }> {
   const events = await store.listAuditEvents({
     taskId,
     types: ["plan_admitted"],
   });
-  let signature: string | undefined;
-  let count = 0;
+  let consecutive = 0;
+  let counting = true;
+  let total = 0;
   for (const entry of [...events].reverse()) {
-    if (entry.event.data["status"] !== "blocked") {
-      break;
+    if (entry.event.data["status"] === "blocked") {
+      total += 1;
+      if (counting) {
+        consecutive += 1;
+      }
+      continue;
     }
-    const blockedBy = entry.event.data["blockedBy"];
-    const current = Array.isArray(blockedBy)
-      ? [...blockedBy].map(String).sort().join(",")
-      : "";
-    if (signature === undefined) {
-      signature = current;
-    } else if (signature !== current) {
-      break;
-    }
-    count += 1;
+    counting = false;
   }
-  return count;
+  return { consecutive, total };
 }
 
 /**
@@ -1298,7 +1323,19 @@ export async function admitWorkPlan(
   // narrow. Read from the admission record rather than tracked in memory: the
   // count has to survive the lease being released and the task being picked up
   // by a different worker, which is precisely the path the loop takes.
-  const blockedAttempts = await consecutiveBlockedAdmissions(store, task.id);
+  const refusals = legacyAdmissionLoop()
+    ? { consecutive: 0, total: 0 }
+    : await blockedAdmissionHistory(store, task.id);
+  const blockedAttempts = Math.max(
+    refusals.consecutive,
+    // The lifetime count is scaled so it only overrides the consecutive one
+    // when refusals have accumulated well past the point where narrowing was
+    // ever going to work, which is the alternating case the unbroken run
+    // cannot see.
+    refusals.total >= BLOCKED_ADMISSION_LIFETIME_CAP
+      ? BLOCKED_ATTEMPTS_BEFORE_SEQUENCING
+      : 0,
+  );
 
   for (let attempt = 1; attempt <= MAX_ADMISSION_ATTEMPTS; attempt += 1) {
     const executing = await executingPlans(store, lease);

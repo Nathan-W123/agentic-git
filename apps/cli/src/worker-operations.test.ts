@@ -15,6 +15,8 @@ import {
   startPostgresTestServer,
 } from "@coord/persistence/testing";
 import {
+  BLOCKED_ADMISSION_LIFETIME_CAP,
+  BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
   DEFERRED_SCOPE_MARKER,
   PlanAdmissionController,
   findTaskHandoffs,
@@ -36,6 +38,7 @@ import {
   acceptWorkResult,
   admitWorkPlan,
   leaseBundle,
+  blockedAdmissionHistory,
   leaseWork,
   type WorkAssignment,
 } from "./worker-operations.js";
@@ -703,6 +706,95 @@ test("a project policy forces review of an otherwise benign changeset", async ()
     const result = await resultPromise;
     assert.equal(result.accepted, true, result.reason);
     assert.equal(result.integrationStatus, "integrated");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("rotating blockers still reach the escalation bound", async () => {
+  const harness = await createHarness();
+  try {
+    // The hole an earlier version of this had. Three tasks contending for one
+    // function block each other in a rotating order, so the *set* doing the
+    // blocking changes every turn. Counting only unbroken runs of one
+    // signature reset on every turn and the bound was never reached: the loop
+    // survived the fix meant to break it. The count is blind to who blocked.
+    const taskId = await submit(harness);
+    for (const blocker of ["task_alpha", "task_beta", "task_alpha"]) {
+      await harness.store.appendAudit(undefined, {
+        type: "plan_admitted",
+        taskId,
+        data: { status: "blocked", blockedBy: [blocker] },
+      });
+    }
+
+    const history = await blockedAdmissionHistory(harness.store, taskId);
+    assert.equal(history.consecutive, 3);
+    assert.equal(history.total, 3);
+    assert.equal(
+      history.consecutive >= BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
+      true,
+      "a rotating conflict must still escalate",
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("interleaved refusals reach the lifetime backstop", async () => {
+  const harness = await createHarness();
+  try {
+    // The remaining hole once blocker identity is ignored: refusals separated
+    // by other non-approving answers never build an unbroken run, so the
+    // consecutive count keeps resetting while planning rounds keep being paid
+    // for. The lifetime count only ever rises, so it has no such gap.
+    const taskId = await submit(harness);
+    for (const status of [
+      "blocked",
+      "sequenced",
+      "blocked",
+      "sequenced",
+      "blocked",
+      "sequenced",
+      "blocked",
+    ]) {
+      await harness.store.appendAudit(undefined, {
+        type: "plan_admitted",
+        taskId,
+        data: { status, blockedBy: ["task_alpha"] },
+      });
+    }
+
+    const history = await blockedAdmissionHistory(harness.store, taskId);
+    assert.equal(history.consecutive, 1, "the unbroken run stays short");
+    assert.equal(history.total, 4);
+    assert.equal(
+      history.total >= BLOCKED_ADMISSION_LIFETIME_CAP,
+      true,
+      "the lifetime backstop must catch what the unbroken run cannot",
+    );
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("an approval resets the unbroken refusal run", async () => {
+  const harness = await createHarness();
+  try {
+    // Escalation is for a task that cannot get in, not for one that has been
+    // getting in. A refusal after an approval starts a fresh run.
+    const taskId = await submit(harness);
+    for (const status of ["blocked", "blocked", "approved", "blocked"]) {
+      await harness.store.appendAudit(undefined, {
+        type: "plan_admitted",
+        taskId,
+        data: { status, blockedBy: [] },
+      });
+    }
+
+    const history = await blockedAdmissionHistory(harness.store, taskId);
+    assert.equal(history.consecutive, 1);
+    assert.equal(history.total, 3);
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }

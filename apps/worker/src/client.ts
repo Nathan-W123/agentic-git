@@ -36,6 +36,60 @@ export class ControlPlaneError extends Error {
   }
 }
 
+/**
+ * Whether a failure was the connection rather than the request.
+ *
+ * The distinction decides a task's fate, so both places that need it read the
+ * same predicate. The client retries these; a worker that still sees one after
+ * the retries releases its lease instead of failing the task, because an
+ * unreachable control plane says nothing about whether the work was any good.
+ *
+ * Timeouts are deliberately excluded. An aborted request may have been
+ * received and acted on, so treating it as "never happened" could double-apply
+ * a result. A connection that could not be established, or that the peer closed
+ * under us, demonstrably carried nothing.
+ *
+ * A `ControlPlaneError` is an answer from a control plane that was reached, and
+ * is never a transport failure however unwelcome its status.
+ */
+export function isTransportFailure(error: unknown): boolean {
+  if (
+    !(error instanceof Error) ||
+    error.name === "AbortError" ||
+    error instanceof ControlPlaneError
+  ) {
+    return false;
+  }
+  const codes = new Set([
+    "ECONNRESET",
+    "ECONNREFUSED",
+    "EPIPE",
+    "ENOTFOUND",
+    "EAI_AGAIN",
+    "UND_ERR_SOCKET",
+  ]);
+  const seen = new Set<unknown>();
+  for (
+    let cause: unknown = error;
+    cause instanceof Error && !seen.has(cause);
+    cause = (cause as { cause?: unknown }).cause
+  ) {
+    seen.add(cause);
+    const code = (cause as { code?: unknown }).code;
+    if (typeof code === "string" && codes.has(code)) {
+      return true;
+    }
+    if (
+      /socket hang up|other side closed|fetch failed|network error/iu.test(
+        cause.message,
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 export interface WorkerIdentity {
   id: string;
   name: string;
@@ -52,6 +106,13 @@ export interface WorkerClientOptions {
   /** Result posts can remain open while a human approval gate is pending. */
   resultTimeoutMs?: number;
   maxBundleBytes?: number;
+  /**
+   * Total tries for a request whose connection failed before it was sent.
+   * One means the previous behaviour: no retry at all.
+   */
+  connectionAttempts?: number;
+  /** First backoff between connection retries; doubles, with jitter. */
+  connectionBackoffMs?: number;
 }
 
 export class WorkerClient {
@@ -60,6 +121,8 @@ export class WorkerClient {
   private readonly timeoutMs: number;
   private readonly resultTimeoutMs: number;
   private readonly maxBundleBytes: number;
+  private readonly connectionAttempts: number;
+  private readonly connectionBackoffMs: number;
 
   public constructor(private readonly options: WorkerClientOptions) {
     const server = new URL(options.serverUrl);
@@ -76,10 +139,14 @@ export class WorkerClient {
     this.resultTimeoutMs =
       options.resultTimeoutMs ?? 25 * 60 * 60 * 1000;
     this.maxBundleBytes = options.maxBundleBytes ?? 256 * 1024 * 1024;
+    this.connectionAttempts = options.connectionAttempts ?? 3;
+    this.connectionBackoffMs = options.connectionBackoffMs ?? 250;
     for (const [name, value] of [
       ["requestTimeoutMs", this.timeoutMs],
       ["resultTimeoutMs", this.resultTimeoutMs],
       ["maxBundleBytes", this.maxBundleBytes],
+      ["connectionAttempts", this.connectionAttempts],
+      ["connectionBackoffMs", this.connectionBackoffMs],
     ] as const) {
       if (!Number.isSafeInteger(value) || value < 1) {
         throw new RangeError(`${name} must be a positive integer`);
@@ -87,6 +154,24 @@ export class WorkerClient {
     }
   }
 
+  /**
+   * One attempt, retried only when the connection itself failed.
+   *
+   * A control plane sharing a process with the workers it serves stalls its
+   * event loop under load, and Node closes idle keep-alive sockets after five
+   * seconds. The next request reuses a socket the server has already gone away
+   * from, and fetch rejects before anything is sent. That is not a failure of
+   * the request, it is a failure to make one, and it used to end a task
+   * permanently: the worker reports any error inside a lease as `failed` and
+   * the control plane does not retry. A ten-task live run lost seven tasks
+   * that way, three of them with nothing to contend over.
+   *
+   * Only connection-level rejections are retried, and deliberately not
+   * timeouts. An aborted request may have been received and acted on, so
+   * repeating it could double-submit a result; a connection that was never
+   * established cannot have been. HTTP error statuses are answers, not
+   * failures, and are never retried either.
+   */
   private async request(
     path: string,
     init: {
@@ -95,6 +180,40 @@ export class WorkerClient {
       expectBinary?: boolean;
       timeoutMs?: number;
     } = {},
+  ): Promise<{ status: number; json?: unknown; bytes?: Buffer }> {
+    let lastError: unknown;
+    for (let attempt = 1; attempt <= this.connectionAttempts; attempt += 1) {
+      try {
+        return await this.attempt(path, init);
+      } catch (error) {
+        if (
+          attempt === this.connectionAttempts ||
+          !isTransportFailure(error)
+        ) {
+          throw error;
+        }
+        lastError = error;
+        // Backoff with jitter: every worker in a fleet loses its keep-alive
+        // sockets at the same moment when the server stalls, and retrying in
+        // lockstep would reproduce the stall that closed them.
+        const backoff = this.connectionBackoffMs * 2 ** (attempt - 1);
+        await new Promise((resolve) => {
+          const timer = setTimeout(resolve, backoff + Math.random() * backoff);
+          timer.unref?.();
+        });
+      }
+    }
+    throw lastError;
+  }
+
+  private async attempt(
+    path: string,
+    init: {
+      method?: string;
+      body?: unknown;
+      expectBinary?: boolean;
+      timeoutMs?: number;
+    },
   ): Promise<{ status: number; json?: unknown; bytes?: Buffer }> {
     const headers = new Headers({
       Authorization: `Bearer ${this.options.token}`,

@@ -658,6 +658,115 @@ test("an agent failure is reported, not swallowed", async (t) => {
   assert.equal(tasks[0]?.status, "failed");
 });
 
+test("a dropped connection is retried rather than surfaced", async () => {
+  // Two keep-alive sockets closed under us, then success. The caller should
+  // never learn it happened: this is a failure to make a request, not a
+  // failed request, and the difference used to cost a task permanently.
+  let calls = 0;
+  const client = new WorkerClient({
+    serverUrl: "https://control.example",
+    token: "token",
+    connectionBackoffMs: 1,
+    fetch: async () => {
+      calls += 1;
+      if (calls <= 2) {
+        throw Object.assign(new TypeError("fetch failed"), {
+          cause: Object.assign(new Error("other side closed"), {
+            code: "UND_ERR_SOCKET",
+          }),
+        });
+      }
+      return new Response(JSON.stringify({ id: "worker_1", name: "w", adapters: [], version: "1" }), {
+        status: 201,
+        headers: { "Content-Type": "application/json" },
+      });
+    },
+  });
+
+  const identity = await client.register({ name: "w", adapters: [], version: "1" });
+  assert.equal(identity.id, "worker_1");
+  assert.equal(calls, 3);
+});
+
+test("a timeout is never retried, because the server may have acted on it", async () => {
+  // The safety boundary of the retry. An aborted request may have been
+  // received and applied, so repeating it could double-submit a result. Only
+  // a connection that demonstrably carried nothing is safe to repeat.
+  let calls = 0;
+  const client = new WorkerClient({
+    serverUrl: "https://control.example",
+    token: "token",
+    connectionBackoffMs: 1,
+    fetch: async () => {
+      calls += 1;
+      throw Object.assign(new Error("This operation was aborted"), {
+        name: "AbortError",
+      });
+    },
+  });
+
+  await assert.rejects(
+    client.register({ name: "w", adapters: [], version: "1" }),
+    /aborted/u,
+  );
+  assert.equal(calls, 1);
+});
+
+test("an exhausted connection retry requeues the task instead of failing it", async (t) => {
+  const runtime = await startRuntime(t);
+  await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "survives an unreachable control plane",
+    agentId: "local",
+    validationCommands: [],
+  });
+
+  // The connection dies *after* the lease is granted, which is where a closed
+  // keep-alive socket actually landed in the live runs: a task already claimed
+  // by this worker, and an error that says nothing about it. Failing at lease
+  // time is already handled — no task has been claimed, and the daemon loop
+  // simply backs off.
+  let leased = false;
+  const client = new WorkerClient({
+    serverUrl: runtime.origin,
+    token: runtime.token,
+    connectionBackoffMs: 1,
+    fetch: async (input, init) => {
+      if (leased) {
+        throw Object.assign(new TypeError("fetch failed"), {
+          cause: Object.assign(new Error("other side closed"), {
+            code: "UND_ERR_SOCKET",
+          }),
+        });
+      }
+      const response = await fetch(input, init);
+      if (String(input).includes("/api/v1/workers/leases")) {
+        leased = true;
+      }
+      return response;
+    },
+  });
+  const worker = new Worker({
+    client,
+    project: runtime.project,
+    workspaceRoot: path.join(runtime.root, "w"),
+    name: "transport-worker",
+    version: "1.0.0",
+  });
+  await worker.register();
+
+  const result = await worker.runOnce();
+  assert.equal(result.transport, true);
+  assert.equal(result.deferred, true);
+  assert.equal(result.accepted, false);
+
+  // Still claimable, not failed: an unreachable control plane is a condition
+  // that clears, and the work itself was never judged. Before this, one
+  // dropped socket ended a task permanently.
+  const tasks = await runtime.store.listSubmittedTasks();
+  assert.notEqual(tasks[0]?.status, "failed");
+});
+
 test("stopping a worker hands its lease back immediately", async (t) => {
   const runtime = await startRuntime(t);
   const worker = makeWorker(runtime);
