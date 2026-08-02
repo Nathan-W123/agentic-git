@@ -6,6 +6,7 @@ import path from "node:path";
 import { ApiGateway, type ApiOperations } from "@coord/api-gateway";
 import { computeCoordinationMetrics } from "@coord/coordinator";
 import {
+  repoCreate,
   repoImportGitHub,
   runPendingTasks,
   taskSubmit,
@@ -55,8 +56,25 @@ async function main(): Promise<void> {
     argument("root") ?? process.env["COORD_PROJECT_ROOT"] ?? process.cwd(),
   );
   const project = await CoordinatorProject.open(root);
+  const controlPlaneLock = await acquireControlPlaneLock(project.directory);
   const store = project.openStore();
+  try {
+    await serve(project, store, controlPlaneLock);
+  } catch (error) {
+    try {
+      await store.close();
+    } finally {
+      await controlPlaneLock.release();
+    }
+    throw error;
+  }
+}
 
+async function serve(
+  project: CoordinatorProject,
+  store: CoordinationStore,
+  controlPlaneLock: ControlPlaneLock,
+): Promise<void> {
   // Crash recovery precedes serving: everything found now is genuinely
   // orphaned. This assumes the documented single-control-plane deployment.
   const recovery = await recoverCoordinationState(project, store);
@@ -78,6 +96,7 @@ async function main(): Promise<void> {
     console.warn(`Recovery warning: ${warning}`);
   }
 
+  const setupRequired = (await store.countUsers()) === 0;
   const generatedToken =
     process.env["COORD_BOOTSTRAP_TOKEN"] === undefined
       ? randomBytes(32).toString("base64url")
@@ -101,7 +120,6 @@ async function main(): Promise<void> {
         providerChat.connect({
           ...input,
           provider: input.provider as ProviderId,
-          kind: input.kind as "api-key" | "local-cli",
         }),
       disconnect: (input) =>
         providerChat.disconnect({
@@ -146,6 +164,13 @@ async function main(): Promise<void> {
         adapter: agent.adapter ?? "generic-cli",
         default: project.config.defaultAgent === id,
       }));
+    },
+    async createRepository(input) {
+      return await repoCreate(project, store, {
+        id: input.id,
+        projectId: input.projectId,
+        ...(input.branch === undefined ? {} : { branch: input.branch }),
+      });
     },
     async importGitHub(input) {
       return await repoImportGitHub(project, store, {
@@ -230,7 +255,7 @@ async function main(): Promise<void> {
     },
   };
 
-  const gateway = new ApiGateway({
+  const runningGateway = new ApiGateway({
     store,
     operations,
     bootstrapToken,
@@ -240,17 +265,22 @@ async function main(): Promise<void> {
   });
   const host = process.env["COORD_HOST"] ?? "127.0.0.1";
   const port = portNumber(argument("port") ?? process.env["COORD_PORT"]);
-  await new Promise<void>((resolve, reject) => {
-    gateway.server.once("error", reject);
-    gateway.server.listen(port, host, () => {
-      gateway.server.removeListener("error", reject);
-      resolve();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      runningGateway.server.once("error", reject);
+      runningGateway.server.listen(port, host, () => {
+        runningGateway.server.removeListener("error", reject);
+        resolve();
+      });
     });
-  });
+  } catch (error) {
+    await runningGateway.close();
+    throw error;
+  }
 
   console.log(`Coordinator control room: http://${host}:${port}`);
-  console.log(`Project: ${root}`);
-  if (generatedToken !== undefined) {
+  console.log(`Project: ${project.root}`);
+  if (setupRequired && generatedToken !== undefined) {
     console.log(`First-run bootstrap token: ${generatedToken}`);
   }
 
@@ -260,8 +290,15 @@ async function main(): Promise<void> {
       return;
     }
     closing = true;
-    await gateway.close();
-    await store.close();
+    try {
+      await runningGateway.close();
+    } finally {
+      try {
+        await store.close();
+      } finally {
+        await controlPlaneLock.release();
+      }
+    }
   };
   process.once("SIGINT", () => {
     void close().finally(() => process.exit(0));

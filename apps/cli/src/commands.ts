@@ -1,4 +1,5 @@
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import { CodexAdapter } from "@coord/adapter-codex";
@@ -32,10 +33,10 @@ import type { AgentConfig, CoordinatorProject } from "./project.js";
 
 /** Registered repositories are addressed by a short, filesystem-safe id. */
 function assertRepositoryId(id: string): string {
-  if (!/^[a-z0-9][a-z0-9._-]*$/iu.test(id)) {
+  if (id.length > 80 || !/^[a-z0-9][a-z0-9._-]*$/iu.test(id)) {
     throw new Error(
-      `Repository id must start alphanumeric and contain only letters, ` +
-        `digits, dot, dash, or underscore: ${id}`,
+      `Repository id must be at most 80 characters, start alphanumeric, and ` +
+        `contain only letters, digits, dot, dash, or underscore: ${id}`,
     );
   }
   return id;
@@ -55,6 +56,43 @@ export interface RepoAddOptions {
   branch?: string;
   projectId?: string;
   setDefault?: boolean;
+}
+
+export interface RepoCreateOptions {
+  id: string;
+  branch?: string;
+  projectId?: string;
+  setDefault?: boolean;
+}
+
+/**
+ * Creates a greenfield canonical repository with an empty initial commit.
+ *
+ * The temporary working repository exists only long enough for `repoAdd` to
+ * produce the canonical bare mirror. No host working tree is retained.
+ */
+export async function repoCreate(
+  project: CoordinatorProject,
+  store: CoordinationStore,
+  options: RepoCreateOptions,
+): Promise<StoredRepository> {
+  const id = assertRepositoryId(options.id);
+  const sourcePath = await mkdtemp(path.join(os.tmpdir(), "coord-greenfield-"));
+  try {
+    return await repoAdd(project, store, {
+      sourcePath,
+      id,
+      ...(options.branch === undefined ? {} : { branch: options.branch }),
+      ...(options.projectId === undefined
+        ? {}
+        : { projectId: options.projectId }),
+      ...(options.setDefault === undefined
+        ? {}
+        : { setDefault: options.setDefault }),
+    });
+  } finally {
+    await rm(sourcePath, { recursive: true, force: true });
+  }
 }
 
 /**

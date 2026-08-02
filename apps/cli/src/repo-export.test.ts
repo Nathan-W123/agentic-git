@@ -13,7 +13,7 @@ import {
 } from "@coord/repository-service";
 
 import { CoordinatorProject } from "./project.js";
-import { repoAdd } from "./commands.js";
+import { repoAdd, repoCreate } from "./commands.js";
 import { pushCredentials, repoPush } from "./repo-export.js";
 
 /**
@@ -152,10 +152,7 @@ test("pushing a repository with no recorded remote explains what to do", async (
 test("a greenfield project can be created, registered, and pushed", async () => {
   const harness = await createHarness();
   try {
-    // The whole point of greenfield support: start from an empty folder.
-    const fresh = path.join(harness.root, "new-idea");
-    const registered = await repoAdd(harness.project, harness.store, {
-      sourcePath: fresh,
+    const registered = await repoCreate(harness.project, harness.store, {
       id: "newidea",
     });
     assert.equal(registered.id, "newidea");

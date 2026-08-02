@@ -250,13 +250,19 @@ test("repository ids that could escape the project directory are refused", async
   const harness = await createHarness();
   const store = harness.project.openStore();
   try {
-    for (const id of ["../escape", "has space", "with/slash", ".hidden"]) {
+    for (const id of [
+      "../escape",
+      "has space",
+      "with/slash",
+      ".hidden",
+      "a".repeat(81),
+    ]) {
       await assert.rejects(
         repoAdd(harness.project, store, {
           sourcePath: harness.sourcePath,
           id,
         }),
-        /Repository id must start alphanumeric/u,
+        /Repository id must be at most 80 characters/u,
         `expected ${id} to be refused`,
       );
     }
