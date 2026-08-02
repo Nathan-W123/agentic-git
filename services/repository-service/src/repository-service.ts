@@ -352,8 +352,16 @@ export class RepositoryService {
     branch: string,
     credentials: RemoteRepositoryCredentials | undefined,
   ): Promise<string | undefined> {
+    const args = [
+      "ls-remote",
+      "--exit-code",
+      "--heads",
+      "--end-of-options",
+      remoteUrl,
+      branch,
+    ] as const;
     const result = await this.git.run(
-      ["ls-remote", "--exit-code", "--heads", "--end-of-options", remoteUrl, branch],
+      args,
       {
         env: remoteEnvironment(credentials),
         allowFailure: true,
@@ -361,12 +369,22 @@ export class RepositoryService {
         maxOutputBytes: 1024 * 1024,
       },
     );
-    if (result.exitCode !== 0) {
-      // exit 2 means the ref simply does not exist, which is not an error here.
+    if (result.exitCode === 2) {
+      // Git reserves exit 2 for a successful lookup with no matching ref.
       return undefined;
     }
+    if (result.exitCode !== 0) {
+      // Authentication, DNS, transport, and protocol failures are not proof
+      // that a branch is absent. Treating them that way can defeat the
+      // upstream-change check that makes export safe.
+      throw new GitCommandError(args, result);
+    }
     const line = result.stdout.split(/\r?\n/u).find((entry) => entry.trim().length > 0);
-    return line?.split(/\s+/u)[0];
+    const revision = line?.split(/\s+/u)[0];
+    if (revision === undefined || !/^[0-9a-f]{40,64}$/iu.test(revision)) {
+      throw new Error(`Remote returned an invalid tip for ${branch}`);
+    }
+    return revision;
   }
 
   /** The upstream revision recorded when this repository was imported. */
@@ -527,8 +545,15 @@ export class RepositoryService {
       );
     }
 
+    const sequence = Number.parseInt(sequenceResult.stdout.trim(), 10);
+    if (!Number.isSafeInteger(sequence) || sequence < 1) {
+      throw new Error(
+        `Could not determine history depth for canonical branch ${repository.branch}`,
+      );
+    }
+
     return {
-      sequence: Number.parseInt(sequenceResult.stdout.trim(), 10),
+      sequence,
       revision,
       branch: repository.branch,
       createdAt: createdAt ?? "",
@@ -715,14 +740,48 @@ export class RepositoryService {
       const reference = `refs/heads/${refName}`;
       const staging = await mkdtemp(path.join(os.tmpdir(), "coord-bundle-"));
       const bundlePath = path.join(staging, "revision.bundle");
+      let createdReference = false;
       try {
+        const existing = await this.git.run(
+          [
+            `--git-dir=${repository.path}`,
+            "show-ref",
+            "--verify",
+            "--quiet",
+            "--",
+            reference,
+          ],
+          { allowFailure: true },
+        );
+        if (existing.exitCode === 0) {
+          throw new Error(
+            `Bundle ref ${reference} already exists and will not be overwritten`,
+          );
+        }
+        if (existing.exitCode !== 1) {
+          throw new GitCommandError(
+            [
+              `--git-dir=${repository.path}`,
+              "show-ref",
+              "--verify",
+              "--quiet",
+              "--",
+              reference,
+            ],
+            existing,
+          );
+        }
         await this.git.run([
           `--git-dir=${repository.path}`,
           "update-ref",
           reference,
           "--end-of-options",
           revision,
+          // Empty old value means "create only". This closes the race between
+          // the existence check and update-ref without assuming hash length.
+          "",
         ]);
+        createdReference = true;
         await this.git.run([
           `--git-dir=${repository.path}`,
           "bundle",
@@ -733,10 +792,12 @@ export class RepositoryService {
         ]);
         return await readFile(bundlePath);
       } finally {
-        await this.git.run(
-          [`--git-dir=${repository.path}`, "update-ref", "-d", reference],
-          { allowFailure: true },
-        );
+        if (createdReference) {
+          await this.git.run(
+            [`--git-dir=${repository.path}`, "update-ref", "-d", reference],
+            { allowFailure: true },
+          );
+        }
         await rm(staging, { recursive: true, force: true });
       }
     });

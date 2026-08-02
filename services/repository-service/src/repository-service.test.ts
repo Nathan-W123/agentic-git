@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { GitClient, type GitRunOptions } from "./git-client.js";
+import {
+  GitClient,
+  GitCommandError,
+  type GitRunOptions,
+} from "./git-client.js";
 import type { ProcessOutput } from "./process-runner.js";
 import {
   RepositoryService,
@@ -110,6 +114,50 @@ class CapturingGitClient extends GitClient {
   }
 }
 
+class FailingRemoteGitClient extends GitClient {
+  public override async run(
+    args: readonly string[],
+    _options: GitRunOptions = {},
+  ): Promise<ProcessOutput> {
+    if (args[0] === "check-ref-format") {
+      return { exitCode: 0, stdout: "", stderr: "", durationMs: 1 };
+    }
+    if (args.includes("rev-parse")) {
+      return {
+        exitCode: 0,
+        stdout: `${"a".repeat(40)}\n`,
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    if (args[0] === "ls-remote") {
+      return {
+        exitCode: 128,
+        stdout: "",
+        stderr: "fatal: authentication failed",
+        durationMs: 1,
+      };
+    }
+    throw new Error(`Unexpected git invocation: ${args.join(" ")}`);
+  }
+}
+
+test("remote lookup failures are not misclassified as absent branches", async () => {
+  const repositories = new RepositoryService(new FailingRemoteGitClient());
+  await assert.rejects(
+    repositories.pushToRemote(
+      { id: "repo", path: "/canonical.git", branch: "main" },
+      {
+        remoteUrl: "https://example.com/repository.git",
+        revision: "a".repeat(40),
+        expectedUpstreamRevision: "a".repeat(40),
+      },
+    ),
+    (error: unknown) =>
+      error instanceof GitCommandError && error.result.exitCode === 128,
+  );
+});
+
 test("remote credentials never enter the clone URL or argument list", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-remote-test-"));
   const git = new CapturingGitClient();
@@ -204,6 +252,30 @@ test("revision metadata and concurrent bundle requests remain deterministic", as
     ]);
     assert.ok(first.byteLength > 0);
     assert.deepEqual(first, second);
+
+    const protectedRef = "refs/heads/coord-lease/protected";
+    const git = repositories.getGitClient();
+    await git.run([
+      `--git-dir=${repository.path}`,
+      "update-ref",
+      protectedRef,
+      canonical.revision,
+    ]);
+    await assert.rejects(
+      repositories.createBundle(
+        repository,
+        canonical.revision,
+        "coord-lease/protected",
+      ),
+      /already exists and will not be overwritten/u,
+    );
+    const stillProtected = await git.run([
+      `--git-dir=${repository.path}`,
+      "rev-parse",
+      "--verify",
+      protectedRef,
+    ]);
+    assert.equal(stillProtected.stdout.trim(), canonical.revision);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
