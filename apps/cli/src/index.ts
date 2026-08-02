@@ -21,9 +21,12 @@ import {
   runPendingTasks,
   taskCancel,
   taskRetry,
-  taskSubmit,
 } from "./commands.js";
-import { computeCoordinationMetrics } from "@coord/coordinator";
+import {
+  TaskIntakeService,
+  computeCoordinationMetrics,
+  parseDecompositionMode,
+} from "@coord/coordinator";
 
 import { formatCliError } from "./error-format.js";
 import { CoordinatorProject, PROJECT_DIRECTORY } from "./project.js";
@@ -92,6 +95,7 @@ Usage:
   coord repo push [--repo=<id>] [--branch=<target>] [--update-existing]
   coord repo list
   coord task submit --objective=<text> [--repo=<id>] [--agent=<id>]
+                    [--split=off|contended|always]
   coord task list [--repo=<id>] [--status=<status>]
   coord task retry <task-id>
   coord task cancel <task-id>
@@ -138,6 +142,14 @@ Options:
   --repeat=<n>   Run the benchmark n times and report each run. Scripted
                  scenarios are deterministic, so this only varies timing;
                  it is meaningful with --live.
+  --split=<mode> Whether intake may divide one objective into several narrower
+                 tasks before an agent plans it. "contended" (the default)
+                 divides only when other work is already competing for part of
+                 the estimated footprint and a division would free some of it;
+                 "always" divides whenever the footprint is safely separable;
+                 "off" queues every objective whole. Every mode refuses to
+                 divide work that reads as one indivisible change. See
+                 docs/architecture/task-decomposition.md.
 
 Scenarios:
 ${scenarios}
@@ -568,14 +580,49 @@ async function runTask(
           'Usage: coord task submit --objective="<what the agent should do>"',
         );
       }
+      const mode = parseDecompositionMode(flagValue(flags, "split"));
       await withProject(async (project, store) => {
         const repo = flagValue(flags, "repo");
         const agent = flagValue(flags, "agent");
-        const task = await taskSubmit(project, store, {
+        const repository = await resolveRepository(project, store, repo);
+        const [agentId] = project.requireAgent(agent);
+
+        const result = await new TaskIntakeService(undefined, undefined, {
+          mode,
+        }).submit(store, {
+          repository,
           objective,
-          ...(repo === undefined ? {} : { repositoryId: repo }),
-          ...(agent === undefined ? {} : { agentId: agent }),
+          agentId,
+          validationCommands: project.config.validationCommands,
         });
+
+        if (result.degraded !== undefined) {
+          console.log(`Note: ${result.degraded}\n`);
+        }
+        if (result.decision.split) {
+          console.log(
+            `Submitted ${result.tasks.length} tasks instead of one.\n` +
+              `  ${result.decision.explanation}\n`,
+          );
+          for (const [order, task] of result.tasks.entries()) {
+            const subtask = result.decision.subtasks[order];
+            console.log(
+              `${task.id}\n` +
+                `  scope      ${(subtask?.modules ?? []).join(", ")}\n` +
+                `  files      ${(subtask?.files ?? []).join(", ")}\n` +
+                `  contended  ${subtask?.contended === true ? "yes" : "no"}`,
+            );
+          }
+          console.log(
+            "\nRun `coord task list` to see them, or `coord run` to execute.",
+          );
+          return;
+        }
+
+        const [task] = result.tasks;
+        if (task === undefined) {
+          throw new Error("Intake produced no task");
+        }
         console.log(
           `Submitted ${task.id}\n` +
             `  repository ${task.repositoryId}\n` +

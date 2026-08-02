@@ -1,5 +1,16 @@
 # Coordination Architecture
 
+## Intake
+
+Everything below this section handles conflict once a task exists. Intake is
+the one stage that can decline to create it. Before a task is queued, its
+footprint is estimated from the objective text against the canonical index, and
+if that footprint spans several structurally independent modules — and other
+work is already competing for part of it — the objective enters the queue as
+several narrower tasks instead of one. The estimate is deterministic and weak
+by design, and every ambiguity resolves toward not splitting. See
+`docs/architecture/task-decomposition.md`.
+
 ## Planning
 
 Every adapter starts in planning mode against an explicit canonical revision.

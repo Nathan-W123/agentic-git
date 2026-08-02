@@ -75,6 +75,18 @@ observe, shared, intent, exclusive, and approval-required. The scheduler runs
 independent work in parallel, sequences structural dependencies, rejects
 cycles, and recursively cancels consumers whose required producer fails.
 
+One lever now acts before any of that. Intake can divide a submitted objective
+into several narrower, non-overlapping tasks *before* an agent plans it, so
+conflicts that would have been detected are instead never created. The
+footprint is estimated deterministically from the objective text against the
+canonical index, and the split is refused unless the estimate is anchored, the
+wording carries no atomicity signal, the candidate pieces are structurally
+uncoupled, and — in the default mode — the division actually frees some piece
+from work already in flight. It is prevention layered over detection, not a
+replacement for it, and it is verified statically only: whether it reduces real
+conflicts is an open question with a live experiment still to run. See
+docs/architecture/task-decomposition.md.
+
 Code intelligence uses the TypeScript compiler API for TypeScript/JavaScript
 and deterministic parsers for JSON, YAML, SQL, and Prisma. Indexing is bounded
 by file count and byte limits and cached by repository revision.

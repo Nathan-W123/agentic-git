@@ -623,6 +623,13 @@ export type AuditEventType =
   | "repository_created"
   | "repository_imported"
   | "task_submitted"
+  /**
+   * One submitted objective was queued as several narrower tasks. Written at
+   * intake, before any run exists, so it is the only record connecting the
+   * siblings to the objective they came from and to the reason they were
+   * separated.
+   */
+  | "task_decomposed"
   | "plan_received"
   | "plan_admitted"
   | "plan_revised"
