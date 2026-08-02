@@ -43,7 +43,7 @@ import type { RepositoryIndex } from "./index.js";
  * toward verbs: a noun is usually what a function is about, a verb is usually
  * how it phrases it.
  */
-const GENERIC_IDENTIFIER_TOKENS = new Set([
+export const GENERIC_IDENTIFIER_TOKENS = new Set([
   "add",
   "apply",
   "build",

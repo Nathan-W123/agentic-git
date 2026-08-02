@@ -12,7 +12,23 @@ import {
 } from "@coord/shared-types";
 import ts from "typescript";
 
-export { groundPlan, identifierTokens } from "./plan-grounding.js";
+export {
+  groundPlan,
+  identifierTokens,
+  GENERIC_IDENTIFIER_TOKENS,
+} from "./plan-grounding.js";
+export {
+  assessGroundedIntent,
+  groundIntent,
+  DEFAULT_GROUNDED_INTENT_OPTIONS,
+  DEFAULT_INTENT_GROUNDING_OPTIONS,
+  type GroundedIntentConflict,
+  type GroundedIntentOptions,
+  type IntentGrounding,
+  type IntentGroundingOptions,
+  type IntentRelation,
+  type IntentTarget,
+} from "./intent-grounding.js";
 
 export type SupportedLanguage =
   | "typescript"

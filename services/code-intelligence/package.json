@@ -17,6 +17,7 @@
     "test": "node --test dist/*.test.js"
   },
   "dependencies": {
+    "@coord/intent-analysis": "*",
     "@coord/repository-service": "*",
     "@coord/shared-types": "*",
     "typescript": "^5.9.0"
