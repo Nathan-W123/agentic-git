@@ -24,6 +24,7 @@ import {
   seedContextForTask,
   type PlanAdmissionInput,
 } from "@coord/coordinator";
+import { IntegrationService } from "@coord/integration-service";
 import { GitClient, RepositoryService } from "@coord/repository-service";
 import {
   deferredFilePaths,
@@ -36,6 +37,7 @@ import {
 import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
 
 import {
+  STALE_REASSESSMENT_BUDGET,
   acceptWorkResult,
   admitWorkPlan,
   leaseBundle,
@@ -3179,17 +3181,18 @@ async function collectEdit(
   return changeSet;
 }
 
-/**
- * One admitted task on a shared prose file, with canonical advanced under it
- * by an external edit to the same file — a human push, or a local
- * coordinator run the lease system never saw.
- */
-async function externalAdvanceOnGuide(harness: Harness) {
+/** One admitted task on the shared prose file, canonical not yet moved. */
+async function admitGuideTask(
+  harness: Harness,
+  overrides: Partial<AgentPlan> = {},
+  validationCommands: { executable: string; args: string[]; label: string }[] =
+    [],
+) {
   const taskB = await harness.store.submitTask({
     repositoryId: "repo_worker",
     objective: "correct the closing summary",
     agentId: "generic-cli",
-    validationCommands: [],
+    validationCommands,
   });
   const assignmentB = await leaseWork(harness.store, {
     workerId: harness.workerId,
@@ -3200,12 +3203,26 @@ async function externalAdvanceOnGuide(harness: Harness) {
     objective: assignmentB.task.objective,
     expectedFiles: ["docs/guide.md"],
     expectedSymbols: [],
+    ...overrides,
   });
   assert.equal(
     outcome.outcome === "admitted" ? outcome.admission.status : outcome,
     "approved",
   );
+  return { taskB, assignmentB };
+}
 
+/**
+ * Canonical advanced under an admitted task by an external edit to the same
+ * file — a human push, or a local coordinator run the lease system never saw.
+ */
+async function landExternalAdvance(
+  harness: Harness,
+  /** Which guide line the advance rewrites; a fresh one advances again. */
+  line = 1,
+  /** Which file it rewrites; another file makes the advance unrelated. */
+  file = "docs/guide.md",
+) {
   const repository = await harness.store.getRepository("repo_worker");
   assert.ok(repository);
   const canonicalRepo = {
@@ -3213,21 +3230,24 @@ async function externalAdvanceOnGuide(harness: Harness) {
     path: repository.path,
     branch: repository.branch,
   };
+  // Read from current canonical rather than the task's base, so a scenario can
+  // advance canonical more than once.
+  const from = await harness.repositories.getCanonicalVersion(canonicalRepo);
   const workspaces = new GitWorktreeWorkspaceManager(
     harness.repositories.getGitClient(),
   );
   const competing = await workspaces.create({
-    taskId: "external-edit",
-    rootPath: path.join(harness.root, "external"),
+    taskId: `external-edit-${String(line)}`,
+    rootPath: path.join(harness.root, "external", String(line)),
     repository: canonicalRepo,
-    baseVersion: assignmentB.canonicalVersion,
+    baseVersion: from,
   });
-  const target = path.join(competing.path, "docs", "guide.md");
+  const target = path.join(competing.path, ...file.split("/"));
   await writeFile(
     target,
     (await readFile(target, "utf8")).replace(
-      "Guide line 1.",
-      "Guide line 1, expanded externally.",
+      `Guide line ${String(line)}.`,
+      `Guide line ${String(line)}, expanded externally.`,
     ),
     "utf8",
   );
@@ -3237,15 +3257,17 @@ async function externalAdvanceOnGuide(harness: Harness) {
   );
   assert.ok(candidate);
   assert.equal(
-    await harness.repositories.promote(
-      canonicalRepo,
-      candidate,
-      assignmentB.canonicalVersion.revision,
-    ),
+    await harness.repositories.promote(canonicalRepo, candidate, from.revision),
     true,
   );
   await workspaces.destroy(competing);
-  return { taskB, assignmentB };
+}
+
+/** The two composed: the advance is already complete when the result lands. */
+async function externalAdvanceOnGuide(harness: Harness) {
+  const admitted = await admitGuideTask(harness);
+  await landExternalAdvance(harness);
+  return admitted;
 }
 
 test("a same-file loser with disjoint hunks is merged for free instead of replanned", async () => {
@@ -3324,6 +3346,335 @@ test("a same-file loser with overlapping hunks is requeued to replan, not failed
     // Losing the free bet costs what it always cost: a requeue to replan.
     assert.equal(acceptedB.accepted, false);
     assert.equal(acceptedB.requeued, true);
+    const taskAfter = (await harness.store.listSubmittedTasks()).find(
+      (entry) => entry.id === taskB.id,
+    );
+    assert.equal(taskAfter?.status, "submitted");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * An integration service that lets a competing advance land in the window
+ * between the caller's pre-integration canonical read and the integration's
+ * own — the race that makes a result stale rather than merely overtaken.
+ */
+function racingIntegrations(
+  harness: Harness,
+  /** How many attempts get beaten to canonical; later attempts run clean. */
+  raceFirst = 1,
+  /** Which file the competing advance rewrites. */
+  file = "docs/guide.md",
+) {
+  const real = new IntegrationService(harness.repositories);
+  const attempts: string[] = [];
+  const racing = {
+    integrate: async (input: Parameters<IntegrationService["integrate"]>[0]) => {
+      attempts.push(input.replayableOnto ?? "exact-base");
+      if (attempts.length <= raceFirst) {
+        // A distinct line per race, so each is a real further advance rather
+        // than a repeat of the same one.
+        await landExternalAdvance(harness, attempts.length, file);
+      }
+      return await real.integrate(input);
+    },
+  };
+  return {
+    service: racing as unknown as IntegrationService,
+    attempts,
+  };
+}
+
+test("a result that loses the integration race is assessed against the advance that beat it", async () => {
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+  });
+  try {
+    const { taskB, assignmentB } = await admitGuideTask(harness);
+    const changeSet = await collectEdit(
+      harness,
+      taskB.id,
+      assignmentB.canonicalVersion,
+      (content) =>
+        content.replace("Guide line 40.", "Guide line 40, corrected."),
+    );
+    const racing = racingIntegrations(harness);
+
+    const acceptedB = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignmentB.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: taskB.objective,
+          expectedFiles: ["docs/guide.md"],
+          expectedSymbols: [],
+        }),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrations: racing.service,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+
+    // The advance landed too late for the pre-integration check to see, so the
+    // first attempt came back stale. Asking the same question again against the
+    // now-completed advance finds only a textual overlap, and the free merge
+    // lands the disjoint hunks — no replan paid for losing a race.
+    assert.equal(acceptedB.accepted, true, acceptedB.reason);
+    assert.equal(acceptedB.integrationStatus, "integrated");
+    assert.equal(acceptedB.requeued, undefined);
+    const tasks = await harness.store.listSubmittedTasks();
+    assert.ok(tasks.every((entry) => entry.status === "integrated"));
+    // The first attempt went in on exact base and lost; the second was pinned
+    // to the advance that beat it.
+    assert.equal(racing.attempts.length, 2);
+    assert.equal(racing.attempts[0], "exact-base");
+    assert.notEqual(racing.attempts[1], "exact-base");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a result that loses the race to a semantically incompatible advance still replans", async () => {
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+  });
+  try {
+    // The advance rewrites this file, and this plan reasoned from it.
+    // Re-assessment must grade that semantic, exactly as the pre-integration
+    // check would have.
+    const dependencies = ["file:docs/guide.md"];
+    const { taskB, assignmentB } = await admitGuideTask(harness, {
+      dependencies,
+    });
+    const changeSet = await collectEdit(
+      harness,
+      taskB.id,
+      assignmentB.canonicalVersion,
+      (content) =>
+        content.replace("Guide line 40.", "Guide line 40, corrected."),
+    );
+    const racing = racingIntegrations(harness);
+
+    const acceptedB = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignmentB.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: taskB.objective,
+          expectedFiles: ["docs/guide.md"],
+          expectedSymbols: [],
+          dependencies,
+        }),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrations: racing.service,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+
+    // Widening *when* the question is asked must not change the answer: a
+    // semantic blocker requeues to a paid replan whether it was found before
+    // the race or after losing it.
+    assert.equal(acceptedB.accepted, false);
+    assert.equal(acceptedB.requeued, true);
+    const taskAfter = (await harness.store.listSubmittedTasks()).find(
+      (entry) => entry.id === taskB.id,
+    );
+    assert.equal(taskAfter?.status, "submitted");
+    // Graded once and refused; no second integration was spent on it.
+    assert.equal(racing.attempts.length, 1);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The expensive way to lose the race, and the common one: the advance lands
+ * while this result is validating, so the promote's compare-and-swap fails
+ * after the whole validation run. The integration reports stale from a
+ * different place than an overtaken base does, with validation already
+ * recorded, and the widened question has to reach both.
+ */
+function racingOnPromote(harness: Harness) {
+  let raced = false;
+  const repositories = new Proxy(harness.repositories, {
+    get(target, property, receiver) {
+      if (property === "promote") {
+        return async (
+          ...args: Parameters<RepositoryService["promote"]>
+        ): Promise<boolean> => {
+          if (!raced) {
+            raced = true;
+            await landExternalAdvance(harness);
+          }
+          return await target.promote(...args);
+        };
+      }
+      const value = Reflect.get(target, property, receiver) as unknown;
+      return typeof value === "function" ? value.bind(target) : value;
+    },
+  });
+  return new IntegrationService(repositories);
+}
+
+test("a result overtaken during its own validation is merged for free rather than replanned", async () => {
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+  });
+  try {
+    const { taskB, assignmentB } = await admitGuideTask(harness);
+    const changeSet = await collectEdit(
+      harness,
+      taskB.id,
+      assignmentB.canonicalVersion,
+      (content) =>
+        content.replace("Guide line 40.", "Guide line 40, corrected."),
+    );
+
+    const acceptedB = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignmentB.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: taskB.objective,
+          expectedFiles: ["docs/guide.md"],
+          expectedSymbols: [],
+        }),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrations: racingOnPromote(harness),
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+
+    // Losing at the promote is what happens whenever two tasks finish within a
+    // validation run of each other. Before, that cost a replan unconditionally;
+    // now it costs one more integration and the disjoint hunks land.
+    assert.equal(acceptedB.accepted, true, acceptedB.reason);
+    assert.equal(acceptedB.integrationStatus, "integrated");
+    assert.equal(acceptedB.requeued, undefined);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a race loser whose merged tree fails validation is requeued, never failed", async () => {
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+    // The advance lands here instead, so re-assessment finds no blocker of any
+    // kind — not even a textual one. Only the lost race can save this result
+    // from being failed outright.
+    "docs/other.md": GUIDE,
+  });
+  try {
+    // Validation the merged tree cannot pass, so the retry that the widened
+    // window newly makes possible ends in validation_failed.
+    const { taskB, assignmentB } = await admitGuideTask(harness, {}, [
+      {
+        executable: process.execPath,
+        args: ["-e", "process.exit(1)"],
+        label: "always fails",
+      },
+    ]);
+    const changeSet = await collectEdit(
+      harness,
+      taskB.id,
+      assignmentB.canonicalVersion,
+      (content) =>
+        content.replace("Guide line 40.", "Guide line 40, corrected."),
+    );
+
+    const acceptedB = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignmentB.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: taskB.objective,
+          expectedFiles: ["docs/guide.md"],
+          expectedSymbols: [],
+        }),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        // Lands the unrelated advance before the first attempt reads canonical,
+        // so that attempt is refused as stale without validating anything.
+        integrations: racingIntegrations(harness, 1, "docs/other.md").service,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+
+    // Before the widening this result was requeued without ever being
+    // validated. Now that it gets validated, a failure must not turn a task
+    // that would have been retried into a dead one.
+    assert.equal(acceptedB.accepted, false);
+    assert.equal(acceptedB.requeued, true);
+    const taskAfter = (await harness.store.listSubmittedTasks()).find(
+      (entry) => entry.id === taskB.id,
+    );
+    assert.equal(taskAfter?.status, "submitted");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a result that keeps losing races gives up on the budget instead of retrying forever", async () => {
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+  });
+  try {
+    const { taskB, assignmentB } = await admitGuideTask(harness);
+    const changeSet = await collectEdit(
+      harness,
+      taskB.id,
+      assignmentB.canonicalVersion,
+      (content) =>
+        content.replace("Guide line 40.", "Guide line 40, corrected."),
+    );
+    // Canonical moves again under every attempt, so no attempt can ever land.
+    const racing = racingIntegrations(harness, Number.MAX_SAFE_INTEGER);
+
+    const acceptedB = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignmentB.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: taskB.objective,
+          expectedFiles: ["docs/guide.md"],
+          expectedSymbols: [],
+        }),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrations: racing.service,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+
+    // A repository advancing faster than this result can integrate falls back
+    // to the replan this path always took, after a bounded number of tries.
+    assert.equal(acceptedB.accepted, false);
+    assert.equal(acceptedB.requeued, true);
+    assert.equal(racing.attempts.length, STALE_REASSESSMENT_BUDGET + 1);
     const taskAfter = (await harness.store.listSubmittedTasks()).find(
       (entry) => entry.id === taskB.id,
     );

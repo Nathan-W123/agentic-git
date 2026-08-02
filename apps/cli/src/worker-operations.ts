@@ -156,6 +156,19 @@ export interface WorkResultAcceptance {
   requeued?: boolean;
 }
 
+/**
+ * How many times a result that lost an integration race may be re-graded
+ * against the advance that beat it before it gives up and replans.
+ *
+ * One. A single re-assessment covers losing one race, which is what actually
+ * happens when two tasks finish together; a result that loses twice is in a
+ * repository advancing faster than it can integrate, and there the replan is
+ * both the cheaper answer and the more likely correct one. Each attempt costs
+ * a full validation run, so this trades a bounded, known cost against an
+ * unbounded agent replan — but only a bounded one.
+ */
+export const STALE_REASSESSMENT_BUDGET = 1;
+
 interface WorkResultServices {
   repositories?: RepositoryService;
   integrations?: IntegrationService;
@@ -2394,33 +2407,45 @@ export async function acceptWorkResult(
 
     const currentBeforeIntegration =
       await repositories.getCanonicalVersion(repository);
+    // The newest advance this result has been graded against. Every revision
+    // the result is allowed to land on has passed through `pinReplayOnto`.
+    let assessedAgainst = currentBeforeIntegration;
     let replayableOnto: string | undefined;
     let textualMergeAttempt = false;
-    if (currentBeforeIntegration.revision !== baseVersion.revision) {
-      const blockers = await replay(currentBeforeIntegration);
+    /**
+     * Grade one canonical advance and, if it clears, permit landing on it.
+     *
+     * The whole replay decision lives here so that it cannot drift between the
+     * two moments it is asked: once before integrating, and again if the
+     * integration lost a race to an advance that completed in between. Same
+     * function, same grading, same conservative default — a semantic blocker
+     * answers false and the caller pays for a replan.
+     */
+    const pinReplayOnto = async (
+      current: CanonicalVersion,
+      /** True when the advance beat this result to canonical rather than
+       * preceding it, which changes only what the audit trail says. */
+      afterLosingRace: boolean,
+    ): Promise<boolean> => {
+      const blockers = await replay(current);
       if (blockers.semantic.length > 0) {
-        return await requeueForCanonicalChange(
-          store,
-          repositories,
-          leaseAtStart,
-          baseVersion,
-          currentBeforeIntegration,
-          run.id,
-        );
+        return false;
       }
       // Pinned to this exact revision. If canonical moves once more before the
       // integration reads it, the permission no longer matches and the result
       // is refused as stale, exactly as it was before replay existed.
-      replayableOnto = currentBeforeIntegration.revision;
+      assessedAgainst = current;
+      replayableOnto = current.revision;
       textualMergeAttempt = blockers.textual.length > 0;
       await trace(store, run.id, "canonical_changed", task.id, {
         projectId: task.projectId,
         repositoryId: task.repositoryId,
         previousRevision: baseVersion.revision,
-        revision: currentBeforeIntegration.revision,
+        revision: current.revision,
         workerId: leaseAtStart.workerId,
         leaseId: leaseAtStart.id,
         replayed: true,
+        ...(afterLosingRace ? { afterLosingRace: true } : {}),
         ...(textualMergeAttempt
           ? { textualBlockers: blockers.textual }
           : {}),
@@ -2431,6 +2456,19 @@ export async function acceptWorkResult(
           : "Canonical advanced without touching anything this result depends " +
             "on, so the result was replayed rather than requeued",
       });
+      return true;
+    };
+    if (currentBeforeIntegration.revision !== baseVersion.revision) {
+      if (!(await pinReplayOnto(currentBeforeIntegration, false))) {
+        return await requeueForCanonicalChange(
+          store,
+          repositories,
+          leaseAtStart,
+          baseVersion,
+          currentBeforeIntegration,
+          run.id,
+        );
+      }
     }
     const settled = await store.finishWorkLease(
       input.leaseId,
@@ -2443,42 +2481,66 @@ export async function acceptWorkResult(
       throw new Error("Lease was lost before integration");
     }
 
-    await mkdir(
-      services.integrationRoot ??
-        path.resolve(".coordinator", "integration"),
-      { recursive: true },
-    );
+    const integrationRoot =
+      services.integrationRoot ?? path.resolve(".coordinator", "integration");
+    await mkdir(integrationRoot, { recursive: true });
     await store.saveTaskStatus(run.id, task.id, "validating");
-    const integration = await integrations.integrate({
-      repository,
-      integrationRoot:
-        services.integrationRoot ??
-        path.resolve(".coordinator", "integration"),
-      changeSet: promoted,
-      validationCommands: task.validationCommands,
-      commitMessage: `coord(${task.id}): ${task.objective}`,
-      requireExactBase: true,
-      ...(replayableOnto === undefined ? {} : { replayableOnto }),
-    });
-    await store.saveIntegration(run.id, integration);
-    await trace(store, run.id, "validation_completed", task.id, {
-      projectId: task.projectId,
-      status: integration.status,
-      commands: integration.validation.map((entry) => ({
-        label: entry.command.label,
-        exitCode: entry.exitCode,
-      })),
-    });
-
-    if (integration.status === "stale") {
-      return await requeueForCanonicalChange(
-        store,
-        repositories,
-        leaseAtStart,
-        baseVersion,
-        integration.canonicalVersion,
-        run.id,
-      );
+    // Staleness is the one integration outcome that is not a fact about this
+    // result: it says another task reached canonical first, which is exactly
+    // the advance the replay question exists to grade. Asked only before
+    // integrating, the question misses every result that loses that race — and
+    // near-simultaneous finishes are the normal case, not the rare one. So it
+    // is asked again, against the advance that beat us, now that the advance
+    // has completed and can be read.
+    //
+    // Nothing about the answer is relaxed to do this: it is the same
+    // `pinReplayOnto`, so a semantic blocker still requeues unconditionally,
+    // and the retry is still pinned to one exact revision. Only the moment the
+    // question may be asked has widened.
+    let integration: IntegrationResult;
+    let staleReassessments = 0;
+    /** Whether any attempt came back stale, i.e. this result lost a race. */
+    let lostRace = false;
+    for (;;) {
+      integration = await integrations.integrate({
+        repository,
+        integrationRoot,
+        changeSet: promoted,
+        validationCommands: task.validationCommands,
+        commitMessage: `coord(${task.id}): ${task.objective}`,
+        requireExactBase: true,
+        ...(replayableOnto === undefined ? {} : { replayableOnto }),
+      });
+      await store.saveIntegration(run.id, integration);
+      await trace(store, run.id, "validation_completed", task.id, {
+        projectId: task.projectId,
+        status: integration.status,
+        commands: integration.validation.map((entry) => ({
+          label: entry.command.label,
+          exitCode: entry.exitCode,
+        })),
+      });
+      if (integration.status !== "stale") {
+        break;
+      }
+      // Each re-assessment costs a second integration and validation run, so
+      // the budget is small. Exhausting it lands on the requeue this path took
+      // unconditionally before, which is the floor this can never fall below.
+      lostRace = true;
+      staleReassessments += 1;
+      if (
+        staleReassessments > STALE_REASSESSMENT_BUDGET ||
+        !(await pinReplayOnto(integration.canonicalVersion, true))
+      ) {
+        return await requeueForCanonicalChange(
+          store,
+          repositories,
+          leaseAtStart,
+          baseVersion,
+          integration.canonicalVersion,
+          run.id,
+        );
+      }
     }
     if (integration.status === "integrated") {
       await store.saveTaskStatus(
@@ -2506,7 +2568,7 @@ export async function acceptWorkResult(
         changeSet,
       );
     } else if (
-      textualMergeAttempt &&
+      (textualMergeAttempt || lostRace) &&
       ["conflict", "validation_failed"].includes(integration.status)
     ) {
       // The free merge was a bet, and it lost — overlapping hunks, or a
@@ -2514,12 +2576,21 @@ export async function acceptWorkResult(
       // costs what it always cost: the requeue-to-replan this path took
       // unconditionally before the bet existed. The task is not wrong, so
       // it is not failed.
+      //
+      // `lostRace` is here to keep that promise exact. A result that reached
+      // integration only by being re-graded after a stale attempt used to be
+      // requeued unconditionally, having never been validated at all; now
+      // that it does get validated, a failure must not turn a task that
+      // would have been retried into a dead one. Results assessed before
+      // integrating keep the narrower rule: with no textual overlap the
+      // advance is unrelated, so a validation failure is the agent's own and
+      // a replan would only rediscover it.
       return await requeueForCanonicalChange(
         store,
         repositories,
         leaseAtStart,
         baseVersion,
-        currentBeforeIntegration,
+        assessedAgainst,
         run.id,
       );
     } else {
