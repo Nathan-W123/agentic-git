@@ -97,9 +97,9 @@ export const DEFAULT_CONFIG: ProjectConfig = {
   version: CONFIG_VERSION,
   validationCommands: [
     {
-      executable: process.platform === "win32" ? "npm.cmd" : "npm",
-      args: ["test", "--silent"],
-      label: "repository tests",
+      executable: "git",
+      args: ["diff", "--check"],
+      label: "patch integrity",
     },
   ],
   agents: {},
