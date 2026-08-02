@@ -1109,7 +1109,11 @@ export class OverlayWorkspaceService {
           },
         });
       }
-      await this.store.finishRun(run.id, "completed", integration.canonicalVersion);
+      await this.store.finishRun(
+        run.id,
+        integration.status === "integrated" ? "completed" : "failed",
+        integration.canonicalVersion,
+      );
       runFinished = true;
       return {
         status: integration.status,

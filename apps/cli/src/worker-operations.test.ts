@@ -447,6 +447,7 @@ test("a valid remote result is recorded, validated, and promoted", async () => {
     const detail = await harness.store.getRun(accepted.runId);
     assert.equal(detail?.changeSets.length, 1);
     assert.equal(detail?.integrations[0]?.status, "integrated");
+    assert.equal(detail?.run.status, "completed");
     const duplicate = await acceptWorkResult(
       harness.store,
       {
@@ -3350,6 +3351,65 @@ test("a same-file loser with overlapping hunks is requeued to replan, not failed
       (entry) => entry.id === taskB.id,
     );
     assert.equal(taskAfter?.status, "submitted");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a result its own validation rejects finishes the run as failed", async () => {
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+  });
+  try {
+    // Nothing competes for canonical here, so there is no free merge to lose
+    // and no race to excuse the outcome: the only thing that can stop this
+    // result is its own validation, and that failure is the task's own.
+    const { taskB, assignmentB } = await admitGuideTask(harness, {}, [
+      {
+        executable: process.execPath,
+        args: ["-e", "process.exit(1)"],
+        label: "always fails",
+      },
+    ]);
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignmentB.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: taskB.objective,
+          expectedFiles: ["docs/guide.md"],
+          expectedSymbols: [],
+        }),
+        changeSet: await collectEdit(
+          harness,
+          taskB.id,
+          assignmentB.canonicalVersion,
+          (content) =>
+            content.replace("Guide line 40.", "Guide line 40, corrected."),
+        ),
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+
+    assert.equal(accepted.accepted, false);
+    assert.equal(accepted.integrationStatus, "validation_failed");
+    assert.equal(accepted.requeued, undefined);
+    // The run has to read as what it was. A "completed" here would contradict
+    // the failed task and the failed integration stored beside it, and a reader
+    // reconstructing the outcome from the run row alone would get it backwards.
+    const detail = await harness.store.getRun(accepted.runId ?? "");
+    assert.equal(detail?.integrations.at(-1)?.status, "validation_failed");
+    assert.equal(
+      detail?.tasks.find((entry) => entry.id === taskB.id)?.status,
+      "failed",
+    );
+    assert.equal(detail?.run.status, "failed");
+    assert.ok(detail?.run.finishedAt);
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }

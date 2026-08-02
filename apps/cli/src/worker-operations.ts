@@ -2639,7 +2639,11 @@ export async function acceptWorkResult(
       }),
       { runId: run.id },
     ).catch(() => undefined);
-    await store.finishRun(run.id, "completed", integration.canonicalVersion);
+    await store.finishRun(
+      run.id,
+      integration.status === "integrated" ? "completed" : "failed",
+      integration.canonicalVersion,
+    );
     runFinished = true;
     return {
       accepted: integration.status === "integrated",

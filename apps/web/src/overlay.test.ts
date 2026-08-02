@@ -327,6 +327,7 @@ test("submit pushes overlay edits through the pipeline into canonical", async ()
   const detail = await harness.store.getRun(result.runId!);
   assert.ok(detail);
   assert.equal(detail!.integrations.at(-1)?.status, "integrated");
+  assert.equal(detail!.run.status, "completed");
   const audit = (await harness.store.listAuditEvents({ limit: 1000 })).map(
     (record) => record.event.type,
   );
@@ -354,6 +355,16 @@ test("a stale overlay fails promotion instead of clobbering newer canonical", as
   await harness.service.writeOverlayFile(beta, "src/value.js", "beta late\n");
   const second = await harness.service.submit(beta, "beta edit");
   assert.notEqual(second.status, "integrated");
+
+  // The refusal reached integration and was recorded there — this is the
+  // promotion path, not the policy path that fails before integrating.
+  assert.ok(second.runId);
+  const failed = await harness.store.getRun(second.runId!);
+  assert.equal(failed?.integrations.at(-1)?.status, second.status);
+  // So the run must say so too. Reporting "completed" for a submit that never
+  // reached canonical is the one thing a reader cannot recover from.
+  assert.equal(failed?.run.status, "failed");
+  assert.ok(failed?.run.finishedAt);
 
   const canonicalPath = (await harness.store.getRepository(
     harness.repositoryId,
