@@ -75,6 +75,7 @@ export interface CreateWorkspaceInput {
 }
 
 export interface ChangeSetMetadata {
+  expectedFiles?: string[];
   symbolsChanged: string[];
   riskAssessment: RiskAssessment;
   agentExplanation: string;
@@ -153,6 +154,30 @@ function toPatchStatus(code: string): FilePatchStatus {
  */
 const MAX_TASK_SEGMENT = 24;
 const WORKSPACE_SUFFIX_LENGTH = 12;
+const MAX_CHANGESET_FILES = 2_000;
+const EPHEMERAL_DIRECTORY_NAMES = new Set([
+  ".gradle",
+  ".mypy_cache",
+  ".next",
+  ".nuxt",
+  ".output",
+  ".pnpm-store",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".svelte-kit",
+  ".tox",
+  ".turbo",
+  ".venv",
+  ".vite",
+  "__pycache__",
+  "build",
+  "coverage",
+  "dist",
+  "node_modules",
+  "out",
+  "target",
+  "venv",
+]);
 
 export function workspaceDirectoryName(
   taskId: TaskId,
@@ -184,6 +209,62 @@ function isErrorCode(error: unknown, code: string): boolean {
     "code" in error &&
     (error as NodeJS.ErrnoException).code === code
   );
+}
+
+export function parsePathListZ(output: string): string[] {
+  return output
+    .split("\0")
+    .filter((entry) => entry.length > 0)
+    .map(normalizeRepositoryPath);
+}
+
+export function isEphemeralWorkspacePath(
+  repositoryPath: string,
+  expectedFiles: ReadonlySet<string> = new Set(),
+): boolean {
+  if (
+    expectedFiles.has(repositoryPath) ||
+    [...expectedFiles].some((expected) =>
+      repositoryPath.startsWith(`${expected}/`),
+    )
+  ) {
+    return false;
+  }
+  const segments = repositoryPath.split("/");
+  return (
+    segments.some((segment) => EPHEMERAL_DIRECTORY_NAMES.has(segment)) ||
+    repositoryPath.endsWith(".tsbuildinfo") ||
+    repositoryPath.startsWith(".yarn/cache/") ||
+    repositoryPath.startsWith(".yarn/unplugged/") ||
+    repositoryPath.endsWith("/.yarn/install-state.gz") ||
+    repositoryPath.includes("/.yarn/cache/") ||
+    repositoryPath.includes("/.yarn/unplugged/") ||
+    repositoryPath === ".DS_Store" ||
+    repositoryPath.endsWith("/.DS_Store") ||
+    repositoryPath === "Thumbs.db" ||
+    repositoryPath.endsWith("/Thumbs.db")
+  );
+}
+
+function literalPathspec(repositoryPath: string): string {
+  return `:(literal)${repositoryPath}`;
+}
+
+function topLevelPaths(repositoryPaths: readonly string[]): string[] {
+  const selected: string[] = [];
+  for (const repositoryPath of [...repositoryPaths].sort(
+    (left, right) => left.length - right.length,
+  )) {
+    if (
+      !selected.some(
+        (parent) =>
+          repositoryPath === parent || repositoryPath.startsWith(`${parent}/`),
+      )
+    ) {
+      selected.push(repositoryPath);
+    }
+  }
+  return selected;
 }
 
 export class GitWorktreeWorkspaceManager implements WorkspaceManager {
@@ -232,6 +313,31 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
 
   public async destroy(workspace: TaskWorkspace): Promise<void> {
     assertWithinRoot(workspace.rootPath, workspace.path);
+    const untrackedDirectories = await this.git.run(
+      [
+        "-C",
+        workspace.path,
+        "ls-files",
+        "--others",
+        "--directory",
+        "-z",
+      ],
+      { allowFailure: true },
+    );
+    if (untrackedDirectories.exitCode === 0) {
+      const ephemeralDirectories = topLevelPaths(
+        parsePathListZ(untrackedDirectories.stdout).filter((repositoryPath) =>
+          isEphemeralWorkspacePath(repositoryPath),
+        ),
+      );
+      await Promise.allSettled(
+        ephemeralDirectories.map(async (repositoryPath) => {
+          const directoryPath = path.resolve(workspace.path, repositoryPath);
+          assertWithinRoot(workspace.path, directoryPath);
+          await rm(directoryPath, { recursive: true, force: true });
+        }),
+      );
+    }
     const removeArgs = [
       `--git-dir=${workspace.repository.path}`,
       "worktree",
@@ -285,14 +391,41 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
     workspace: TaskWorkspace,
     metadata: ChangeSetMetadata,
   ): Promise<ChangeSet> {
-    await this.git.run([
+    const untracked = await this.git.run([
       "-C",
       workspace.path,
-      "add",
-      "--intent-to-add",
-      "--",
-      ".",
+      "ls-files",
+      "--others",
+      "--exclude-standard",
+      "-z",
     ]);
+    const expectedFiles = new Set(
+      (metadata.expectedFiles ?? []).map(normalizeRepositoryPath),
+    );
+    const candidateUntrackedPaths = parsePathListZ(untracked.stdout).filter(
+      (repositoryPath) =>
+        !isEphemeralWorkspacePath(repositoryPath, expectedFiles),
+    );
+    if (candidateUntrackedPaths.length > MAX_CHANGESET_FILES) {
+      throw new Error(
+        `Changeset has ${candidateUntrackedPaths.length} untracked files; limit is ${MAX_CHANGESET_FILES}`,
+      );
+    }
+    if (candidateUntrackedPaths.length > 0) {
+      await this.git.run(
+        [
+          "-C",
+          workspace.path,
+          "add",
+          "--intent-to-add",
+          "--pathspec-from-file=-",
+          "--pathspec-file-nul",
+        ],
+        {
+          input: `${candidateUntrackedPaths.map(literalPathspec).join("\0")}\0`,
+        },
+      );
+    }
 
     const names = await this.git.run([
       "-C",
@@ -304,9 +437,15 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
       workspace.baseVersion.revision,
       "--",
     ]);
+    const changedEntries = parseNameStatusZ(names.stdout);
+    if (changedEntries.length > MAX_CHANGESET_FILES) {
+      throw new Error(
+        `Changeset has ${changedEntries.length} files; limit is ${MAX_CHANGESET_FILES}`,
+      );
+    }
 
     const patches: FilePatch[] = [];
-    for (const entry of parseNameStatusZ(names.stdout)) {
+    for (const entry of changedEntries) {
       const { code, path: changedPath } = entry;
       const patch = await this.git.run([
         "-C",
@@ -318,7 +457,7 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
         "--no-renames",
         workspace.baseVersion.revision,
         "--",
-        changedPath,
+        literalPathspec(changedPath),
       ]);
 
       patches.push({

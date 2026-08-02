@@ -585,6 +585,20 @@ export class RepositoryService {
     message: string,
   ): Promise<string | undefined> {
     await this.git.run(["-C", worktreePath, "add", "--all", "--"]);
+    return this.commitIndex(worktreePath, message);
+  }
+
+  /**
+   * Commits exactly the content already staged in the index.
+   *
+   * Integration uses this after validating that the staged tree still matches
+   * the admitted changeset. Re-staging here would accidentally promote
+   * untracked dependency or build output produced by validation commands.
+   */
+  public async commitIndex(
+    worktreePath: string,
+    message: string,
+  ): Promise<string | undefined> {
     const diffArgs = [
       "-C",
       worktreePath,

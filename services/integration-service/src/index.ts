@@ -13,7 +13,9 @@ import {
 } from "@coord/repository-service";
 import {
   GitWorktreeWorkspaceManager,
+  isEphemeralWorkspacePath,
   parseNameStatusZ,
+  parsePathListZ,
   type TaskWorkspace,
   type WorkspaceManager,
 } from "@coord/workspace-manager";
@@ -320,16 +322,11 @@ export class IntegrationService {
       }
     }
 
-    // Validation is evidence, not an additional editor. Stage the resulting
-    // workspace and prove that neither its tree nor HEAD changed before commit.
-    await this.repositories.getGitClient().run([
-      "-C",
-      integrationWorkspace.path,
-      "add",
-      "--all",
-      "--",
-    ]);
-    const [validatedTree, validatedHead] = await Promise.all([
+    // Validation is evidence, not an additional editor. Generated dependency,
+    // build, and coverage output may remain untracked, but source, index, and
+    // history must still exactly match the candidate.
+    const [validatedTree, validatedHead, workingChanges, untrackedFiles] =
+      await Promise.all([
       this.repositories.getGitClient().run([
         "-C",
         integrationWorkspace.path,
@@ -341,10 +338,32 @@ export class IntegrationService {
         "rev-parse",
         "HEAD",
       ]),
+      this.repositories.getGitClient().run([
+        "-C",
+        integrationWorkspace.path,
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        "--",
+      ]),
+      this.repositories.getGitClient().run([
+        "-C",
+        integrationWorkspace.path,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+      ]),
     ]);
+    const unexpectedUntracked = parsePathListZ(untrackedFiles.stdout).filter(
+      (repositoryPath) => !isEphemeralWorkspacePath(repositoryPath),
+    );
     if (
       validatedTree.stdout.trim() !== candidateTree ||
-      validatedHead.stdout.trim() !== previousVersion.revision
+      validatedHead.stdout.trim() !== previousVersion.revision ||
+      parsePathListZ(workingChanges.stdout).length > 0 ||
+      unexpectedUntracked.length > 0
     ) {
       return {
         taskId: input.changeSet.taskId,
@@ -358,7 +377,7 @@ export class IntegrationService {
       };
     }
 
-    const candidateRevision = await this.repositories.commitAll(
+    const candidateRevision = await this.repositories.commitIndex(
       integrationWorkspace.path,
       input.commitMessage,
     );
