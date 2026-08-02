@@ -1,0 +1,216 @@
+{
+  "shortDesktop": {
+    "viewport": [
+      1365,
+      768
+    ],
+    "orangeWarningPresent": false,
+    "rotorLoaded": true,
+    "outerTransform": "matrix(0.675997, -0.736904, 0.736904, 0.675997, 0, 0)",
+    "innerTransform": "matrix(-0.943991, 0.329972, -0.329972, -0.943991, 0, 0)",
+    "outerAnimation": "hud-rotor-clockwise, hud-rotor-lumen",
+    "innerAnimation": "hud-rotor-counter, hud-rotor-lumen",
+    "plateTransform": "none",
+    "plateAnimation": "hud-plate-energy",
+    "dockRect": {
+      "x": 28,
+      "y": 670,
+      "width": 1309,
+      "height": 71,
+      "top": 670,
+      "right": 1337,
+      "bottom": 741,
+      "left": 28
+    },
+    "dockButtons": [
+      {
+        "label": "EXPLORER",
+        "rect": {
+          "x": 59.15625,
+          "y": 670,
+          "width": 76,
+          "height": 71,
+          "top": 670,
+          "right": 135.15625,
+          "bottom": 741,
+          "left": 59.15625
+        },
+        "insideViewport": true
+      },
+      {
+        "label": "BOARD",
+        "rect": {
+          "x": 205.484375,
+          "y": 670,
+          "width": 76,
+          "height": 71,
+          "top": 670,
+          "right": 281.484375,
+          "bottom": 741,
+          "left": 205.484375
+        },
+        "insideViewport": true
+      },
+      {
+        "label": "EXECUTIONS",
+        "rect": {
+          "x": 351.828125,
+          "y": 670,
+          "width": 76,
+          "height": 71,
+          "top": 670,
+          "right": 427.828125,
+          "bottom": 741,
+          "left": 351.828125
+        },
+        "insideViewport": true
+      },
+      {
+        "label": "APPROVALS",
+        "rect": {
+          "x": 498.15625,
+          "y": 670,
+          "width": 76,
+          "height": 71,
+          "top": 670,
+          "right": 574.15625,
+          "bottom": 741,
+          "left": 498.15625
+        },
+        "insideViewport": true
+      },
+      {
+        "label": "REPOS",
+        "rect": {
+          "x": 644.484375,
+          "y": 670,
+          "width": 76,
+          "height": 71,
+          "top": 670,
+          "right": 720.484375,
+          "bottom": 741,
+          "left": 644.484375
+        },
+        "insideViewport": true
+      },
+      {
+        "label": "COORD",
+        "rect": {
+          "x": 790.828125,
+          "y": 670,
+          "width": 76,
+          "height": 71,
+          "top": 670,
+          "right": 866.828125,
+          "bottom": 741,
+          "left": 790.828125
+        },
+        "insideViewport": true
+      },
+      {
+        "label": "TEAM",
+        "rect": {
+          "x": 937.15625,
+          "y": 670,
+          "width": 76,
+          "height": 71,
+          "top": 670,
+          "right": 1013.15625,
+          "bottom": 741,
+          "left": 937.15625
+        },
+        "insideViewport": true
+      },
+      {
+        "label": "ADMIN",
+        "rect": {
+          "x": 1083.484375,
+          "y": 670,
+          "width": 76,
+          "height": 71,
+          "top": 670,
+          "right": 1159.484375,
+          "bottom": 741,
+          "left": 1083.484375
+        },
+        "insideViewport": true
+      },
+      {
+        "label": "SETTINGS",
+        "rect": {
+          "x": 1229.828125,
+          "y": 670,
+          "width": 76,
+          "height": 71,
+          "top": 670,
+          "right": 1305.828125,
+          "bottom": 741,
+          "left": 1229.828125
+        },
+        "insideViewport": true
+      }
+    ],
+    "horizontalOverflow": false
+  },
+  "motion": {
+    "outerRotated": true,
+    "innerRotated": true,
+    "plateStayedStationary": true
+  },
+  "terminalOpened": {
+    "visible": true,
+    "inputFocused": true,
+    "inputDisabled": false,
+    "inputReadOnly": false,
+    "intro": "RELAY COMMAND CONSOLE | live product telemetry\nType help for Relay commands. Workspace commands are isolated in the repository sandbox.\nSandbox offline. Product telemetry commands remain available.",
+    "rect": {
+      "x": 163.796875,
+      "y": 386,
+      "width": 1037.40625,
+      "height": 280,
+      "top": 386,
+      "right": 1201.203125,
+      "bottom": 666,
+      "left": 163.796875
+    },
+    "inputInsideViewport": true,
+    "clearsDock": true
+  },
+  "terminalCommands": {
+    "output": "RELAY COMMAND CONSOLE | live product telemetry\nType help for Relay commands. Workspace commands are isolated in the repository sandbox.\nSandbox offline. Product telemetry commands remain available.\nstatus\nProject: Local Project\nControl link: live\nSandbox: offline\nTasks: 7 | Executions: 19 | Pending approvals: 0\npwd\nSandbox runtime is offline, so repository shell commands cannot run.\nRelay commands still work. Type help to list them.",
+    "statusWorked": true,
+    "sandboxFailureExplained": true,
+    "inputFocused": true,
+    "inputDisabled": false,
+    "inputReadOnly": false
+  },
+  "hoverState": {
+    "visibleSatellites": 4,
+    "satelliteLabels": [
+      "Plan revisions: 1. Open coordination.",
+      "Scope requests: 0. Open coordination.",
+      "Failed runs: 6. Open runs.",
+      "Audit depth: 173. Open coordination."
+    ]
+  },
+  "reducedMotion": {
+    "rotorAnimation": "none",
+    "meterAnimation": "none",
+    "scoreAnimation": "none"
+  },
+  "mobile": {
+    "viewport": [
+      390,
+      844
+    ],
+    "horizontalOverflow": false,
+    "coreVisible": true,
+    "rotorLoaded": true,
+    "satellitesVisible": 4
+  },
+  "accessibility": {
+    "namelessButtons": []
+  },
+  "runtimeErrors": [],
+  "failedRequests": []
+}
