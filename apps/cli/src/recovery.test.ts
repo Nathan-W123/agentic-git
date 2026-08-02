@@ -4,7 +4,10 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { InMemoryCoordinationStore } from "@coord/persistence";
+import {
+  DEFAULT_ORGANIZATION_ID,
+  InMemoryCoordinationStore,
+} from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
 import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
 
@@ -53,6 +56,7 @@ test("recovery requeues stranded claims but leaves live remote leases alone", as
     });
     const worker = await store.registerWorker({
       userId: user.id,
+      organizationId: DEFAULT_ORGANIZATION_ID,
       name: "live-worker",
       adapters: ["generic-cli"],
       version: "1",

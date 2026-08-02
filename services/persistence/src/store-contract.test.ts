@@ -486,6 +486,106 @@ for (const backend of backends) {
     }
   });
 
+  /**
+   * The tenant filter has to hold in the query, not in the caller.
+   *
+   * Every backend answers `listWorkers` differently — an in-memory scan, a
+   * SQLite prepared statement, a Postgres parameterised query — so this is
+   * exactly the kind of rule that can hold in the default store and quietly
+   * fail in the one a real deployment runs. Asserting it here is what makes
+   * the gateway's authorization check meaningful: the check decides which
+   * organization may be named, and this decides that naming it actually
+   * bounds the rows.
+   */
+  test(`${backend.name}: workers list only within their organization`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const alpha = await store.createOrganization({
+        slug: "alpha",
+        name: "Alpha",
+      });
+      const beta = await store.createOrganization({
+        slug: "beta",
+        name: "Beta",
+      });
+      const alphaUser = await store.createUser({
+        email: "alpha@example.com",
+        displayName: "Alpha",
+        passwordDigest: "digest",
+      });
+      // One user in both organizations, so the filter cannot pass by
+      // accidentally keying on the owner instead of the tenant.
+      const betaUser = alphaUser;
+
+      const alphaWorker = await store.registerWorker({
+        userId: alphaUser.id,
+        organizationId: alpha.id,
+        name: "alpha-worker",
+        adapters: ["codex"],
+        version: "1",
+      });
+      const betaWorker = await store.registerWorker({
+        userId: betaUser.id,
+        organizationId: beta.id,
+        name: "beta-worker",
+        adapters: ["codex"],
+        version: "1",
+      });
+
+      assert.deepEqual(
+        (await store.listWorkers({ organizationId: alpha.id })).map(
+          (worker) => worker.id,
+        ),
+        [alphaWorker.id],
+      );
+      assert.deepEqual(
+        (await store.listWorkers({ organizationId: beta.id })).map(
+          (worker) => worker.id,
+        ),
+        [betaWorker.id],
+      );
+      assert.equal(
+        (await store.listWorkers({ organizationId: alpha.id }))[0]
+          ?.organizationId,
+        alpha.id,
+      );
+
+      // An organization with no workers gets an empty list, not everything.
+      const empty = await store.createOrganization({
+        slug: "gamma",
+        name: "Gamma",
+      });
+      assert.deepEqual(await store.listWorkers({ organizationId: empty.id }), []);
+
+      // An unknown organization must not be treated as "no filter".
+      assert.deepEqual(
+        await store.listWorkers({ organizationId: "org_does_not_exist" }),
+        [],
+      );
+
+      // The unfiltered call is the administrative one and still sees both, so
+      // the filter is doing the narrowing rather than the data being absent.
+      const all = (await store.listWorkers()).map((worker) => worker.id);
+      assert.equal(all.includes(alphaWorker.id), true);
+      assert.equal(all.includes(betaWorker.id), true);
+
+      // A worker cannot be registered into an organization that does not
+      // exist, which is what keeps the column from holding an unresolvable id.
+      await assert.rejects(
+        store.registerWorker({
+          userId: alphaUser.id,
+          organizationId: "org_does_not_exist",
+          name: "nowhere",
+          adapters: [],
+          version: "1",
+        }),
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a task leases to exactly one worker`, async () => {
     const { store, cleanup } = await backend.open();
     try {
@@ -496,12 +596,14 @@ for (const backend of backends) {
       });
       const first = await store.registerWorker({
         userId: user.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker-a",
         adapters: ["codex"],
         version: "1",
       });
       const second = await store.registerWorker({
         userId: user.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker-b",
         adapters: ["generic-cli"],
         version: "1",
@@ -551,6 +653,7 @@ for (const backend of backends) {
       });
       const worker = await store.registerWorker({
         userId: user.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker",
         adapters: [],
         version: "1",
@@ -610,6 +713,7 @@ for (const backend of backends) {
       });
       const worker = await store.registerWorker({
         userId: user.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker",
         adapters: [],
         version: "1",
@@ -672,6 +776,7 @@ for (const backend of backends) {
       });
       const worker = await store.registerWorker({
         userId: user.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker",
         adapters: [],
         version: "1",
@@ -1007,6 +1112,7 @@ for (const backend of backends) {
       });
       const worker = await store.registerWorker({
         userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker",
         adapters: ["codex"],
         version: "0.1.0",
@@ -1080,12 +1186,14 @@ for (const backend of backends) {
       });
       const firstWorker = await store.registerWorker({
         userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker-a",
         adapters: ["codex"],
         version: "0.1.0",
       });
       const secondWorker = await store.registerWorker({
         userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker-b",
         adapters: ["codex"],
         version: "0.1.0",
@@ -1182,12 +1290,14 @@ for (const backend of backends) {
       });
       const firstWorker = await store.registerWorker({
         userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker-a",
         adapters: ["codex"],
         version: "0.1.0",
       });
       const secondWorker = await store.registerWorker({
         userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker-b",
         adapters: ["codex"],
         version: "0.1.0",
@@ -1280,6 +1390,7 @@ for (const backend of backends) {
       });
       const worker = await store.registerWorker({
         userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker",
         adapters: ["codex"],
         version: "0.1.0",
@@ -1367,12 +1478,14 @@ for (const backend of backends) {
       });
       const firstWorker = await store.registerWorker({
         userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker-a",
         adapters: ["codex"],
         version: "0.1.0",
       });
       const secondWorker = await store.registerWorker({
         userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name: "worker-b",
         adapters: ["codex"],
         version: "0.1.0",
@@ -1530,6 +1643,7 @@ for (const backend of backends) {
       await assert.rejects(
         store.registerWorker({
           userId: "user_missing",
+          organizationId: DEFAULT_ORGANIZATION_ID,
           name: "worker",
           adapters: [],
           version: "1",

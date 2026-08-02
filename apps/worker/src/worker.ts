@@ -61,6 +61,12 @@ export interface WorkerOptions {
   client: WorkerClient;
   project: CoordinatorProject;
   workspaceRoot: string;
+  /**
+   * The organization this worker registers into, and the only one it can
+   * lease work from. Required rather than inferred: a worker's tenant is a
+   * deployment decision, not something to guess from the token's memberships.
+   */
+  organizationId: string;
   name?: string;
   version?: string;
   projectId?: string;
@@ -186,6 +192,7 @@ export class Worker {
       ),
     ];
     const identity = await this.options.client.register({
+      organizationId: this.options.organizationId,
       name: this.options.name ?? `worker-${process.pid}`,
       adapters,
       version: this.options.version ?? "0.0.0",

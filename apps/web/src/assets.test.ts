@@ -533,6 +533,23 @@ test("dispatch submits through the ordinary task endpoint, not a side channel", 
   assert.match(dispatch, /plan\.route === "local"[\s\S]*ensureRepositoryRun/u);
 });
 
+test("the fleet is fetched for the organization, not the signed-in user", async () => {
+  const source = await browserSource();
+  // Worker visibility is org-wide, so both fleet reads must name the
+  // organization. The gateway refuses an unscoped call outright; a client that
+  // dropped the parameter would render an empty Coordination view rather than
+  // fail loudly, so pin it here.
+  assert.match(
+    source,
+    /\/workers\?organizationId=\$\{encodeURIComponent\(state\.organizationId\)\}/u,
+  );
+  assert.match(source, /agents\/running\?organizationId=\$\{encodeURIComponent\(/u);
+  // The fleet spans colleagues now, so the table has to say whose worker each
+  // row is rather than implying they are all the viewer's.
+  assert.match(source, /function workerOwner/u);
+  assert.match(source, /<th>Owner<\/th>/u);
+});
+
 test("the HUD reports agents running from the control plane's own count", async () => {
   const source = await browserSource();
   // Counted from active leases server-side; the client must not invent a

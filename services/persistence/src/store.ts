@@ -127,7 +127,19 @@ export interface ApiTokenRecord {
 
 export interface WorkerRecord {
   id: string;
+  /** The person whose credential registered the worker, and who may drive it. */
   userId: UserId;
+  /**
+   * The tenant the worker belongs to, and the only unit visibility is granted
+   * against: a fleet is a property of a team, not of whoever happened to start
+   * the process.
+   *
+   * `undefined` only for rows registered before workers were org-scoped whose
+   * owner had no membership to backfill from. Such a worker matches no
+   * organization filter, so it stays invisible rather than leaking into an
+   * arbitrary tenant's fleet.
+   */
+  organizationId: string | undefined;
   name: string;
   /** Agent adapters this worker can drive, e.g. `codex`, `generic-cli`. */
   adapters: string[];
@@ -613,11 +625,19 @@ export interface CoordinationStore {
 
   registerWorker(input: {
     userId: UserId;
+    organizationId: string;
     name: string;
     adapters: string[];
     version: string;
   }): Promise<WorkerRecord>;
-  listWorkers(): Promise<WorkerRecord[]>;
+  /**
+   * Lists registered workers, newest heartbeat first.
+   *
+   * `organizationId` is the tenant boundary and is filtered in the query
+   * rather than by the caller: an unfiltered call returns every worker on the
+   * deployment, so anything serving a user must pass one.
+   */
+  listWorkers(filter?: { organizationId?: string }): Promise<WorkerRecord[]>;
   getWorker(id: string): Promise<WorkerRecord | undefined>;
   touchWorker(id: string, at: string): Promise<void>;
 

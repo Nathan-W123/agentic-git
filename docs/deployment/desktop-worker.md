@@ -55,11 +55,16 @@ Mint a token with the `run_task` scope from Settings → API tokens, then:
 ```bash
 COORD_SERVER=https://your-control-plane \
 COORD_TOKEN=coord_pat_… \
+COORD_ORGANIZATION=org_local \
 COORD_PROJECT_ROOT=/path/to/worker/project \
 COORD_PROJECT_ID=project_local \
 COORD_WORKER_NAME=nathan-desktop \
 node apps/worker/dist/index.js
 ```
+
+`COORD_ORGANIZATION` is the organization the worker joins. It is required and
+not inferred from the token: the whole organization can see this machine in the
+fleet listing, and it will only accept work from that organization's projects.
 
 `COORD_REPOSITORY` optionally pins the worker to one repository. A planned
 shutdown (Ctrl-C) hands the lease back so the task is picked up again

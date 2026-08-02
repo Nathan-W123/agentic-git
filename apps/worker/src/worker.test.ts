@@ -9,6 +9,7 @@ import type { CodexProcessRunner } from "@coord/adapter-codex";
 import { CoordinatorProject } from "@coord/cli/project";
 import { workerOperations } from "@coord/cli/worker-operations";
 import {
+  DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
   SqliteCoordinationStore,
 } from "@coord/persistence";
@@ -244,6 +245,7 @@ function makeWorker(runtime: Runtime): Worker {
   return new Worker({
     client: new WorkerClient({ serverUrl: runtime.origin, token: runtime.token }),
     project: runtime.project,
+    organizationId: DEFAULT_ORGANIZATION_ID,
     workspaceRoot: path.join(runtime.root, "w"),
     name: "test-worker",
     version: "1.0.0",
@@ -266,6 +268,7 @@ test("worker polling and admission budgets reject unsafe values", async (t) => {
       token: runtime.token,
     }),
     project: runtime.project,
+    organizationId: DEFAULT_ORGANIZATION_ID,
     workspaceRoot: path.join(runtime.root, "invalid-options"),
   };
   assert.throws(() => new Worker({ ...options, pollIntervalMs: 0 }), /positive/u);
@@ -403,6 +406,7 @@ test("a scope expansion another task holds is deferred, not refused", async (t) 
   });
   const rivalId = (
     await rival.register({
+      organizationId: DEFAULT_ORGANIZATION_ID,
       name: "rival",
       adapters: ["generic-cli"],
       version: "1.0.0",
@@ -475,6 +479,7 @@ test("a task past its token budget is stopped while it is still spending", async
   });
   const workerId = (
     await client.register({
+      organizationId: DEFAULT_ORGANIZATION_ID,
       name: "spender",
       adapters: ["generic-cli"],
       version: "1.0.0",
@@ -552,6 +557,7 @@ test("a worker whose plan is sequenced never runs its agent", async (t) => {
   });
   const rivalId = (
     await rival.register({
+      organizationId: DEFAULT_ORGANIZATION_ID,
       name: "rival",
       adapters: ["generic-cli"],
       version: "1.0.0",
@@ -593,6 +599,7 @@ test("a worker whose plan is sequenced never runs its agent", async (t) => {
       token: runtime.token,
     }),
     project: runtime.project,
+    organizationId: DEFAULT_ORGANIZATION_ID,
     workspaceRoot: path.join(runtime.root, "deferred"),
     planWaitBudgetMs: 0,
   });
@@ -683,7 +690,7 @@ test("a dropped connection is retried rather than surfaced", async () => {
     },
   });
 
-  const identity = await client.register({ name: "w", adapters: [], version: "1" });
+  const identity = await client.register({ organizationId: DEFAULT_ORGANIZATION_ID, name: "w", adapters: [], version: "1" });
   assert.equal(identity.id, "worker_1");
   assert.equal(calls, 3);
 });
@@ -706,7 +713,7 @@ test("a timeout is never retried, because the server may have acted on it", asyn
   });
 
   await assert.rejects(
-    client.register({ name: "w", adapters: [], version: "1" }),
+    client.register({ organizationId: DEFAULT_ORGANIZATION_ID, name: "w", adapters: [], version: "1" }),
     /aborted/u,
   );
   assert.equal(calls, 1);
@@ -749,6 +756,7 @@ test("an exhausted connection retry requeues the task instead of failing it", as
   const worker = new Worker({
     client,
     project: runtime.project,
+    organizationId: DEFAULT_ORGANIZATION_ID,
     workspaceRoot: path.join(runtime.root, "w"),
     name: "transport-worker",
     version: "1.0.0",
@@ -823,7 +831,7 @@ test("a worker without the run_task scope cannot register", async (t) => {
     token: "coord_pat_bogus.secret",
   });
   await assert.rejects(
-    client.register({ name: "rogue", adapters: [], version: "1" }),
+    client.register({ organizationId: DEFAULT_ORGANIZATION_ID, name: "rogue", adapters: [], version: "1" }),
     /401|invalid/iu,
   );
 });
@@ -914,6 +922,7 @@ test("a Codex worker uses the clone Git directory and configured model args", as
       token: runtime.token,
     }),
     project: runtime.project,
+    organizationId: DEFAULT_ORGANIZATION_ID,
     workspaceRoot: path.join(runtime.root, "codex-worker"),
     codexRunner: runner,
   });

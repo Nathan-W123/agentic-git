@@ -498,4 +498,21 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON token_usage(project_id, recorded_at)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 14,
+    name: "worker-organization-scope",
+    statements: [
+      `ALTER TABLE workers
+         ADD COLUMN organization_id TEXT REFERENCES organizations(id)`,
+      `UPDATE workers SET organization_id = (
+         SELECT m.organization_id FROM organization_memberships m
+         WHERE m.user_id = workers.user_id
+         ORDER BY m.created_at ASC, m.organization_id ASC
+         LIMIT 1
+       ) WHERE organization_id IS NULL`,
+      `CREATE INDEX workers_by_organization
+         ON workers(organization_id, last_seen_at DESC)`,
+    ],
+  },
 ];

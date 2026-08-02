@@ -686,6 +686,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
 
   public async registerWorker(input: {
     userId: string;
+    organizationId: string;
     name: string;
     adapters: string[];
     version: string;
@@ -693,10 +694,14 @@ export class PostgresCoordinationStore implements CoordinationStore {
     if ((await this.getUser(input.userId)) === undefined) {
       throw new Error(`Unknown user: ${input.userId}`);
     }
+    if ((await this.getOrganization(input.organizationId)) === undefined) {
+      throw new Error(`Unknown organization: ${input.organizationId}`);
+    }
     const now = new Date().toISOString();
     const worker: WorkerRecord = {
       id: createId("worker"),
       userId: input.userId,
+      organizationId: input.organizationId,
       name: input.name,
       adapters: [...input.adapters],
       version: input.version,
@@ -705,11 +710,13 @@ export class PostgresCoordinationStore implements CoordinationStore {
     };
     await this.query(
       `INSERT INTO workers
-         (id, user_id, name, adapters_json, version, registered_at, last_seen_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+         (id, user_id, organization_id, name, adapters_json, version,
+          registered_at, last_seen_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         worker.id,
         worker.userId,
+        worker.organizationId,
         worker.name,
         JSON.stringify(worker.adapters),
         worker.version,
@@ -720,10 +727,19 @@ export class PostgresCoordinationStore implements CoordinationStore {
     return worker;
   }
 
-  public async listWorkers(): Promise<WorkerRecord[]> {
-    const rows = await this.rows(
-      "SELECT * FROM workers ORDER BY last_seen_at DESC",
-    );
+  public async listWorkers(filter?: {
+    organizationId?: string;
+  }): Promise<WorkerRecord[]> {
+    // `= $1` rather than a caller-side filter, so a legacy row with a NULL
+    // organization never matches and cannot surface in a tenant's fleet.
+    const rows =
+      filter?.organizationId === undefined
+        ? await this.rows("SELECT * FROM workers ORDER BY last_seen_at DESC")
+        : await this.rows(
+            `SELECT * FROM workers WHERE organization_id = $1
+             ORDER BY last_seen_at DESC`,
+            [filter.organizationId],
+          );
     return rows.map((row) => this.toWorker(row));
   }
 
@@ -1055,6 +1071,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     return {
       id: text(row, "id"),
       userId: text(row, "user_id"),
+      organizationId: optionalText(row, "organization_id"),
       name: text(row, "name"),
       adapters: parseJson<string[]>(row, "adapters_json"),
       version: text(row, "version"),

@@ -544,6 +544,34 @@ export const MIGRATIONS: readonly Migration[] = [
          ON token_usage(project_id, recorded_at)`,
     ],
   },
+  {
+    // Workers belong to an organization, not to whoever started the process.
+    //
+    // A fleet is something a team operates, so seeing it has to be a property
+    // of membership; filtering a platform-wide list by `user_id` made every
+    // colleague's worker invisible and made the query's correctness depend on
+    // the caller remembering to filter at all.
+    //
+    // Nullable on purpose. Existing rows are backfilled from their owner's
+    // earliest membership, but a worker whose owner belongs to no organization
+    // has no defensible tenant to be assigned to, and inventing one would put
+    // it in a fleet nobody registered it with. NULL matches no organization
+    // filter, so those rows fail closed instead.
+    version: 14,
+    name: "worker-organization-scope",
+    statements: [
+      `ALTER TABLE workers
+         ADD COLUMN organization_id TEXT REFERENCES organizations(id)`,
+      `UPDATE workers SET organization_id = (
+         SELECT m.organization_id FROM organization_memberships m
+         WHERE m.user_id = workers.user_id
+         ORDER BY m.created_at ASC, m.organization_id ASC
+         LIMIT 1
+       ) WHERE organization_id IS NULL`,
+      `CREATE INDEX workers_by_organization
+         ON workers(organization_id, last_seen_at DESC)`,
+    ],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(

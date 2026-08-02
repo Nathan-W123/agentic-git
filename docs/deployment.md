@@ -123,6 +123,7 @@ Worker environment:
 | --- | --- | --- |
 | `COORD_SERVER` | Control-plane base URL. | required |
 | `COORD_TOKEN` | API token with `view` + `run_task` scopes. | required |
+| `COORD_ORGANIZATION` | Organization the worker joins, and the only one it leases from. | required |
 | `COORD_PROJECT_ROOT` | Directory with the worker's `.coordinator/config.json` (agents, sandbox). | working directory |
 | `COORD_WORKER_ROOT` | Where leased workspaces are materialized. | `.coordinator/worker` |
 | `COORD_WORKER_NAME` | Display name in the workers list. | hostname-derived |

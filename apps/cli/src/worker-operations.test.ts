@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
   InMemoryCoordinationStore,
   PostgresCoordinationStore,
@@ -102,6 +103,7 @@ async function createHarness(
     userId: user.id,
     name: "worker-a",
     adapters: ["generic-cli"],
+    organizationId: DEFAULT_ORGANIZATION_ID,
     version: "1.0.0",
   });
 
@@ -1149,6 +1151,7 @@ test("concurrent workers in one repository cannot corrupt canonical; a disjoint 
       userId: secondUser.id,
       name: "worker-b",
       adapters: ["generic-cli"],
+      organizationId: DEFAULT_ORGANIZATION_ID,
       version: "1.0.0",
     });
 
@@ -1514,6 +1517,7 @@ test("two workers targeting one file are separated at plan time, not after execu
       userId: secondUser.id,
       name: "worker-b",
       adapters: ["generic-cli"],
+      organizationId: DEFAULT_ORGANIZATION_ID,
       version: "1.0.0",
     });
 
@@ -1953,6 +1957,7 @@ async function leaseTheSplitTask(harness: Harness): Promise<WorkAssignment> {
     userId: user.id,
     name: `worker-split-${Math.random().toString(36).slice(2)}`,
     adapters: ["generic-cli"],
+    organizationId: DEFAULT_ORGANIZATION_ID,
     version: "1.0.0",
   });
   await harness.store.submitTask({

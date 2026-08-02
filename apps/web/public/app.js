@@ -430,8 +430,18 @@ async function loadContext({ quiet = false } = {}) {
         api(`/projects/${projectId}/agents`),
         api(`/projects/${projectId}`),
         apiOptional(`/projects/${projectId}/metrics`, { metrics: undefined }),
-        apiOptional(`/workers`, { workers: [] }),
-        apiOptional(`/agents/running`, { running: undefined }),
+        // The fleet is the organization's, not the project's: one set of
+        // workers serves every project the org runs.
+        apiOptional(
+          `/workers?organizationId=${encodeURIComponent(state.organizationId)}`,
+          { workers: [] },
+        ),
+        apiOptional(
+          `/agents/running?organizationId=${encodeURIComponent(
+            state.organizationId,
+          )}`,
+          { running: undefined },
+        ),
       ]);
       state.repositories = repositories.repositories;
       state.tasks = tasks.tasks;
@@ -2954,27 +2964,58 @@ function renderRepositories() {
 
 /* Coordination -------------------------------------------------------------- */
 
+/** Display name for whoever registered a worker, from the org's member list. */
+function workerOwner(worker) {
+  const member = state.members.find(
+    (candidate) => candidate.userId === worker.userId,
+  );
+  return member?.user?.displayName ?? member?.user?.email ?? "—";
+}
+
+/**
+ * The organization's whole fleet, not just the viewer's own workers.
+ *
+ * Owner is a column rather than a filter because the point of the wider view
+ * is knowing whose machine is holding a task — the answer to "why is this
+ * queued" is usually someone else's worker.
+ */
 function workerTable(workers) {
   if (workers.length === 0) {
-    return '<div class="empty-state"><div><h2>No workers registered</h2><p>A worker registers itself with a scoped API token. Until one does, tasks run on the control plane.</p></div></div>';
+    return '<div class="empty-state"><div><h2>No workers registered</h2><p>A worker registers itself against this organization with a scoped API token. Until one does, tasks run on the control plane.</p></div></div>';
   }
   return `
     <table class="data-table">
-      <thead><tr><th>Worker</th><th>Adapters</th><th>Version</th><th>Last seen</th></tr></thead>
+      <thead><tr><th>Worker</th><th>Owner</th><th>Adapters</th><th>Version</th><th>Leasing</th><th>Last seen</th></tr></thead>
       <tbody>
         ${workers
-          .map(
-            (worker) => `
+          .map((worker) => {
+            const leases = worker.activeLeases ?? [];
+            return `
           <tr>
             <td><strong>${escapeHtml(worker.name || shortId(worker.id))}</strong>
               <div class="muted">${escapeHtml(shortId(worker.id, 16))}</div></td>
+            <td>${escapeHtml(workerOwner(worker))}${
+              worker.own ? ' <span class="chip">you</span>' : ""
+            }</td>
             <td>${(worker.adapters ?? [])
               .map((adapter) => `<span class="chip">${escapeHtml(adapter)}</span>`)
               .join(" ")}</td>
             <td>${escapeHtml(worker.version ?? "—")}</td>
+            <td>${
+              leases.length === 0
+                ? '<span class="muted">idle</span>'
+                : leases
+                    .map(
+                      (lease) =>
+                        `<span class="chip">${escapeHtml(
+                          shortId(lease.taskId, 12),
+                        )}</span>`,
+                    )
+                    .join(" ")
+            }</td>
             <td>${escapeHtml(formatDate(worker.lastSeenAt))}</td>
-          </tr>`,
-          )
+          </tr>`;
+          })
           .join("")}
       </tbody>
     </table>`;

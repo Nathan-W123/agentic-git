@@ -487,15 +487,20 @@ export class InMemoryCoordinationStore implements CoordinationStore {
 
   public async registerWorker(input: {
     userId: string;
+    organizationId: string;
     name: string;
     adapters: string[];
     version: string;
   }): Promise<WorkerRecord> {
     this.requireUser(input.userId);
+    if (!this.organizations.has(input.organizationId)) {
+      throw new Error(`Unknown organization: ${input.organizationId}`);
+    }
     const now = new Date().toISOString();
     const worker: WorkerRecord = {
       id: createId("worker"),
       userId: input.userId,
+      organizationId: input.organizationId,
       name: input.name,
       adapters: [...input.adapters],
       version: input.version,
@@ -506,8 +511,15 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     return { ...worker, adapters: [...worker.adapters] };
   }
 
-  public async listWorkers(): Promise<WorkerRecord[]> {
+  public async listWorkers(filter?: {
+    organizationId?: string;
+  }): Promise<WorkerRecord[]> {
     return [...this.workers.values()]
+      .filter(
+        (worker) =>
+          filter?.organizationId === undefined ||
+          worker.organizationId === filter.organizationId,
+      )
       .sort((left, right) => right.lastSeenAt.localeCompare(left.lastSeenAt))
       .map((worker) => ({ ...worker, adapters: [...worker.adapters] }));
   }

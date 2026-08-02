@@ -25,6 +25,7 @@ async function main(): Promise<void> {
   const worker = new Worker({
     client: new WorkerClient({ serverUrl, token }),
     project,
+    organizationId: required("COORD_ORGANIZATION"),
     workspaceRoot:
       process.env["COORD_WORKER_ROOT"] ??
       path.join(project.directory, "worker"),

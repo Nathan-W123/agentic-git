@@ -15,6 +15,7 @@ import type {
   CoordinationStore,
   OrganizationRole,
   WorkLease,
+  WorkerRecord,
   StoredRepository,
   SubmittedTask,
   SubmittedTaskStatus,
@@ -867,11 +868,27 @@ export class ApiGateway {
     }
 
     // ---- Remote worker protocol -------------------------------------------
-    // Every endpoint requires the run_task scope, so a leaked read-only token
-    // cannot pull work or return changesets.
+    // Everything that pulls work or returns changesets requires the run_task
+    // scope, so a leaked read-only token cannot execute. The two fleet reads
+    // are deliberately not in that set: seeing the organization's workers is a
+    // `view`, and holding it to `run_task` would mean a reviewer could not see
+    // the machines running the work they review.
     if (path === `${API_PREFIX}/workers/register` && method === "POST") {
-      assertTokenScope(principal, "run_task");
       const body = objectBody(await this.readJson(request));
+      const organizationId =
+        stringField(body["organizationId"], "organizationId", { max: 120 }) ??
+        "";
+      // The tenant is decided here, once, and every later read of this worker
+      // is filtered by it. `authorizeOrganization` is what enforces it: it
+      // rejects a token bound elsewhere before consulting the caller's role,
+      // so a credential confined to one organization cannot enrol a worker
+      // into another even if its owner is a member of both.
+      await authorizeOrganization(
+        this.options.store,
+        principal,
+        organizationId,
+        "run_task",
+      );
       const adapters = body["adapters"];
       if (
         !Array.isArray(adapters) ||
@@ -885,6 +902,7 @@ export class ApiGateway {
       }
       const worker = await this.options.store.registerWorker({
         userId: principal.user.id,
+        organizationId,
         name: stringField(body["name"], "name", { max: 120 }) ?? "",
         adapters,
         version: stringField(body["version"], "version", { max: 40 }) ?? "0",
@@ -894,14 +912,16 @@ export class ApiGateway {
     }
 
     if (path === `${API_PREFIX}/agents/running` && method === "GET") {
-      // Platform-wide, not project-scoped: an active lease is one agent
-      // executing on some worker right now. Counted from leases rather than
-      // from worker registrations, because a registered worker is idle until
-      // it holds one.
-      const active = await this.options.store.listWorkLeases({
-        status: "active",
-      });
-      const workers = await this.options.store.listWorkers();
+      // Organization-wide, not project-scoped: an active lease is one agent
+      // executing on some worker right now, and a fleet spans the projects it
+      // serves. Counted from leases rather than from worker registrations,
+      // because a registered worker is idle until it holds one.
+      //
+      // The organization is required rather than defaulted. These are counts,
+      // but a platform-wide count still reports how busy other tenants are,
+      // which is not this caller's to know.
+      const { organizationId } = await this.authorizeFleet(principal, url);
+      const { workers, active } = await this.organizationFleet(organizationId);
       const byWorker = new Map<string, number>();
       for (const lease of active) {
         byWorker.set(lease.workerId, (byWorker.get(lease.workerId) ?? 0) + 1);
@@ -915,12 +935,33 @@ export class ApiGateway {
     }
 
     if (path === `${API_PREFIX}/workers` && method === "GET") {
-      assertTokenScope(principal, "run_task");
-      const workers = await this.options.store.listWorkers();
+      // The whole fleet the organization operates, not just the caller's own
+      // workers. A team cannot run shared infrastructure it cannot see, and
+      // the tenant boundary — not the registering user — is what makes that
+      // safe: `authorizeFleet` requires membership of the organization being
+      // asked about, and the store filters on the same id.
+      const { organizationId } = await this.authorizeFleet(principal, url);
+      const { workers, active } = await this.organizationFleet(organizationId);
+      const leasesByWorker = new Map<string, typeof active>();
+      for (const lease of active) {
+        const bucket = leasesByWorker.get(lease.workerId) ?? [];
+        bucket.push(lease);
+        leasesByWorker.set(lease.workerId, bucket);
+      }
       this.sendJson(response, 200, {
-        workers: principal.user.systemAdmin
-          ? workers
-          : workers.filter((worker) => worker.userId === principal.user.id),
+        workers: workers.map((worker) => ({
+          ...worker,
+          /** True for the caller's own workers, which only they may drive. */
+          own: worker.userId === principal.user.id,
+          activeLeases: (leasesByWorker.get(worker.id) ?? []).map((lease) => ({
+            id: lease.id,
+            taskId: lease.taskId,
+            repositoryId: lease.repositoryId,
+            projectId: lease.projectId,
+            issuedAt: lease.issuedAt,
+            expiresAt: lease.expiresAt,
+          })),
+        })),
       });
       return;
     }
@@ -935,12 +976,24 @@ export class ApiGateway {
       }
       const projectId =
         stringField(body["projectId"], "projectId", { max: 120 }) ?? "";
-      await authorizeProject(
+      const { project } = await authorizeProject(
         this.options.store,
         principal,
         projectId,
         "run_task",
       );
+      // Visibility widened to the organization; execution did not follow it
+      // across one. A user who belongs to two organizations could otherwise
+      // point a worker registered in one at work belonging to the other, and
+      // the resulting workspace, bundle, and changeset would carry another
+      // tenant's code on a machine that tenant never admitted to its fleet.
+      if (worker.organizationId !== project.organizationId) {
+        throw new HttpError(
+          403,
+          "worker_organization_mismatch",
+          "This worker is registered to a different organization",
+        );
+      }
 
       const nowIso = new Date().toISOString();
       // Reclaim anything a dead worker was holding before handing out new work.
@@ -3026,6 +3079,82 @@ export class ApiGateway {
       throw new AuthenticationError("Sign in is required");
     }
     return context.principal;
+  }
+
+  /**
+   * Resolves the organization whose fleet is being read, and proves the caller
+   * may read it.
+   *
+   * The id is taken from the request and authorized, never inferred from the
+   * caller's memberships. Inferring it would mean a request that named no
+   * tenant still got answered with one, and the endpoint would have no single
+   * value to filter the query by — which is exactly how a fleet listing ends
+   * up merging tenants. Requiring it makes the boundary one explicit
+   * `authorizeOrganization` call, which checks the token's organization
+   * binding first, then membership, then scope.
+   *
+   * `view` is the permission because this is a read: every role in the
+   * organization, down to `viewer`, can see the fleet it belongs to. Driving a
+   * worker is a separate, stricter check at the lease endpoints.
+   */
+  private async authorizeFleet(
+    principal: AuthenticatedPrincipal,
+    url: URL,
+  ): Promise<{ organizationId: string }> {
+    const organizationId = url.searchParams.get("organizationId")?.trim() ?? "";
+    if (organizationId.length === 0) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        "organizationId is required",
+      );
+    }
+    await authorizeOrganization(
+      this.options.store,
+      principal,
+      organizationId,
+      "view",
+    );
+    return { organizationId };
+  }
+
+  /**
+   * One organization's workers and the leases they are currently holding.
+   *
+   * Shared by the fleet listing and the running-agents count so the two cannot
+   * disagree about what belongs to a tenant — a count computed one way and a
+   * list computed another is how a boundary quietly develops a hole.
+   *
+   * Leases are filtered by their project as well as by their worker. Leasing
+   * already refuses a worker whose organization does not match the project's,
+   * so this is redundant for anything issued since; it is here for leases
+   * predating that rule, which would otherwise surface another tenant's task
+   * and repository ids. A lease with no project cannot be attributed to one
+   * and is dropped rather than assumed to be local.
+   *
+   * Callers must have authorized `organizationId` first — this method filters,
+   * it does not decide who may ask.
+   */
+  private async organizationFleet(organizationId: string): Promise<{
+    workers: WorkerRecord[];
+    active: WorkLease[];
+  }> {
+    const workers = await this.options.store.listWorkers({ organizationId });
+    const owned = new Set(workers.map((worker) => worker.id));
+    const visibleProjects = new Set(
+      (await this.options.store.listProjects(organizationId)).map(
+        (project) => project.id,
+      ),
+    );
+    const active = (
+      await this.options.store.listWorkLeases({ status: "active" })
+    ).filter(
+      (lease) =>
+        owned.has(lease.workerId) &&
+        lease.projectId !== undefined &&
+        visibleProjects.has(lease.projectId),
+    );
+    return { workers, active };
   }
 
   private async performOperation<T>(

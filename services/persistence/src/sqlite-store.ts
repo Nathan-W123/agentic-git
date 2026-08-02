@@ -624,6 +624,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
   public async registerWorker(input: {
     userId: string;
+    organizationId: string;
     name: string;
     adapters: string[];
     version: string;
@@ -631,10 +632,14 @@ export class SqliteCoordinationStore implements CoordinationStore {
     if ((await this.getUser(input.userId)) === undefined) {
       throw new Error(`Unknown user: ${input.userId}`);
     }
+    if ((await this.getOrganization(input.organizationId)) === undefined) {
+      throw new Error(`Unknown organization: ${input.organizationId}`);
+    }
     const now = new Date().toISOString();
     const worker: WorkerRecord = {
       id: createId("worker"),
       userId: input.userId,
+      organizationId: input.organizationId,
       name: input.name,
       adapters: [...input.adapters],
       version: input.version,
@@ -644,12 +649,14 @@ export class SqliteCoordinationStore implements CoordinationStore {
     this.db
       .prepare(
         `INSERT INTO workers
-           (id, user_id, name, adapters_json, version, registered_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+           (id, user_id, organization_id, name, adapters_json, version,
+            registered_at, last_seen_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         worker.id,
         worker.userId,
+        input.organizationId,
         worker.name,
         JSON.stringify(worker.adapters),
         worker.version,
@@ -659,10 +666,22 @@ export class SqliteCoordinationStore implements CoordinationStore {
     return worker;
   }
 
-  public async listWorkers(): Promise<WorkerRecord[]> {
-    const rows = this.db
-      .prepare("SELECT * FROM workers ORDER BY last_seen_at DESC")
-      .all() as Row[];
+  public async listWorkers(filter?: {
+    organizationId?: string;
+  }): Promise<WorkerRecord[]> {
+    // `= ?` rather than a caller-side filter, so a legacy row with a NULL
+    // organization never matches and cannot surface in a tenant's fleet.
+    const rows =
+      filter?.organizationId === undefined
+        ? (this.db
+            .prepare("SELECT * FROM workers ORDER BY last_seen_at DESC")
+            .all() as Row[])
+        : (this.db
+            .prepare(
+              `SELECT * FROM workers WHERE organization_id = ?
+               ORDER BY last_seen_at DESC`,
+            )
+            .all(filter.organizationId) as Row[]);
     return rows.map((row) => this.toWorker(row));
   }
 
@@ -1019,6 +1038,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     return {
       id: text(row, "id"),
       userId: text(row, "user_id"),
+      organizationId: optionalText(row, "organization_id"),
       name: text(row, "name"),
       adapters: parseJson<string[]>(row, "adapters_json"),
       version: text(row, "version"),

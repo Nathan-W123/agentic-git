@@ -987,7 +987,7 @@ test("a worker registers, leases exclusively, and heartbeats", async (t) => {
 
   const registered = await bearer(runtime.origin, "/api/v1/workers/register", token, {
     method: "POST",
-    body: { name: "worker-a", adapters: ["codex"], version: "1.0.0" },
+    body: { organizationId: DEFAULT_ORGANIZATION_ID, name: "worker-a", adapters: ["codex"], version: "1.0.0" },
   });
   assert.equal(registered.status, 201);
   const workerId = registered.data.id as string;
@@ -1050,7 +1050,7 @@ test("releasing a lease returns the task to the queue", async (t) => {
   const workerId = (
     await bearer(runtime.origin, "/api/v1/workers/register", token, {
       method: "POST",
-      body: { name: "w", adapters: [], version: "1" },
+      body: { organizationId: DEFAULT_ORGANIZATION_ID, name: "w", adapters: [], version: "1" },
     })
   ).data.id as string;
 
@@ -1106,7 +1106,7 @@ test("worker endpoints require the run_task scope", async (t) => {
 
   const denied = await bearer(runtime.origin, "/api/v1/workers/register", token, {
     method: "POST",
-    body: { name: "w", adapters: [], version: "1" },
+    body: { organizationId: DEFAULT_ORGANIZATION_ID, name: "w", adapters: [], version: "1" },
   });
   assert.equal(denied.status, 403);
   assert.equal(denied.data.error.code, "token_scope_missing");
@@ -1287,9 +1287,39 @@ test("a project-bound worker token cannot pull another tenant's queue", async (t
     token,
     {
       method: "POST",
-      body: { name: "tenant-worker", adapters: ["codex"], version: "1" },
+      body: {
+        organizationId: firstOrganization.id,
+        name: "tenant-worker",
+        adapters: ["codex"],
+        version: "1",
+      },
     },
   );
+  assert.equal(worker.status, 201);
+
+  // A colleague's worker in the same organization. Fleet visibility is
+  // org-wide, so this one must be visible to the developer even though they
+  // did not register it.
+  const colleague = await runtime.store.createUser({
+    email: "colleague@example.com",
+    displayName: "Colleague",
+    passwordDigest: "unused",
+  });
+  await runtime.store.saveMembership({
+    organizationId: firstOrganization.id,
+    userId: colleague.id,
+    role: "developer",
+  });
+  const colleagueWorker = await runtime.store.registerWorker({
+    userId: colleague.id,
+    organizationId: firstOrganization.id,
+    name: "colleague-worker",
+    adapters: ["codex"],
+    version: "1",
+  });
+
+  // A worker in a different organization. Widening visibility within a tenant
+  // must not widen it across one.
   const outsider = await runtime.store.createUser({
     email: "other-fleet@example.com",
     displayName: "Other Fleet",
@@ -1297,19 +1327,43 @@ test("a project-bound worker token cannot pull another tenant's queue", async (t
   });
   await runtime.store.registerWorker({
     userId: outsider.id,
+    organizationId: secondOrganization.id,
     name: "other-worker",
     adapters: ["codex"],
     version: "1",
   });
+
   const visibleWorkers = await bearer(
     runtime.origin,
-    "/api/v1/workers",
+    `/api/v1/workers?organizationId=${firstOrganization.id}`,
     token,
   );
+  assert.equal(visibleWorkers.status, 200);
   assert.deepEqual(
-    visibleWorkers.data.workers.map((entry: { id: string }) => entry.id),
-    [worker.data.id],
+    visibleWorkers.data.workers
+      .map((entry: { id: string }) => entry.id)
+      .sort(),
+    [worker.data.id, colleagueWorker.id].sort(),
   );
+  // The colleague's worker is visible but not drivable: `own` is what the UI
+  // uses to distinguish the two, and it must not be true here.
+  assert.equal(
+    visibleWorkers.data.workers.find(
+      (entry: { id: string }) => entry.id === colleagueWorker.id,
+    ).own,
+    false,
+  );
+
+  // Naming the other tenant is refused outright rather than answered with an
+  // empty list, and refused by the token binding before membership is even
+  // consulted.
+  const crossTenantFleet = await bearer(
+    runtime.origin,
+    `/api/v1/workers?organizationId=${secondOrganization.id}`,
+    token,
+  );
+  assert.equal(crossTenantFleet.status, 403);
+  assert.equal(crossTenantFleet.data.error.code, "token_organization_mismatch");
 
   await runtime.store.saveRepository({
     id: "repo_other_tenant",
@@ -1363,12 +1417,164 @@ test("a project-bound worker token cannot pull another tenant's queue", async (t
   );
 });
 
+/**
+ * The fleet boundary, proved on the membership path rather than the token one.
+ *
+ * The neighbouring test authenticates with a token bound to one organization,
+ * so it is refused by the credential's own binding before membership is ever
+ * consulted. That check is worth having but it is not the boundary: a cookie
+ * session carries no binding at all, so the only thing standing between a
+ * signed-in user and another tenant's fleet is the membership lookup. This
+ * test drives that path deliberately, and asserts the widening and the limit
+ * together — seeing a colleague's worker and being refused a stranger's are
+ * the same query differing only in which organization was named.
+ */
+test("org-wide worker visibility stops at the organization boundary", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const alpha = await runtime.store.createOrganization({
+    slug: "alpha",
+    name: "Alpha",
+  });
+  const beta = await runtime.store.createOrganization({
+    slug: "beta",
+    name: "Beta",
+  });
+
+  // Two members of Alpha, so "org-wide" is actually exercised: one registers a
+  // worker, the other must still see it.
+  const alphaUser = await runtime.store.createUser({
+    email: "alpha-dev@example.com",
+    displayName: "Alpha Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  const alphaColleague = await runtime.store.createUser({
+    email: "alpha-colleague@example.com",
+    displayName: "Alpha Colleague",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  const betaUser = await runtime.store.createUser({
+    email: "beta-dev@example.com",
+    displayName: "Beta Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  for (const [organizationId, userId] of [
+    [alpha.id, alphaUser.id],
+    [alpha.id, alphaColleague.id],
+    [beta.id, betaUser.id],
+  ] as const) {
+    await runtime.store.saveMembership({
+      organizationId,
+      userId,
+      role: "developer",
+    });
+  }
+
+  const alphaOwn = await runtime.store.registerWorker({
+    userId: alphaUser.id,
+    organizationId: alpha.id,
+    name: "alpha-own",
+    adapters: ["codex"],
+    version: "1",
+  });
+  const alphaOther = await runtime.store.registerWorker({
+    userId: alphaColleague.id,
+    organizationId: alpha.id,
+    name: "alpha-colleague",
+    adapters: ["codex"],
+    version: "1",
+  });
+  const betaWorker = await runtime.store.registerWorker({
+    userId: betaUser.id,
+    organizationId: beta.id,
+    name: "beta-secret",
+    adapters: ["codex"],
+    version: "1",
+  });
+
+  const client = new TestClient(runtime.origin);
+  assert.equal(
+    (
+      await client.request("/api/v1/auth/login", {
+        method: "POST",
+        body: { email: alphaUser.email, password: PASSWORD },
+      })
+    ).status,
+    200,
+  );
+
+  // The widening: a colleague's worker, which the old per-user filter hid.
+  const visible = await client.request(
+    `/api/v1/workers?organizationId=${alpha.id}`,
+  );
+  assert.equal(visible.status, 200);
+  const visibleIds = visible.data.workers
+    .map((entry: { id: string }) => entry.id)
+    .sort();
+  assert.deepEqual(visibleIds, [alphaOwn.id, alphaOther.id].sort());
+
+  // The limit: Beta's worker is absent from Alpha's fleet, and naming Beta is
+  // refused on membership — a plain `forbidden`, with no token binding
+  // involved. Both are asserted because an endpoint that leaked the row while
+  // refusing the request, or refused the request while leaking the row, would
+  // pass only one of them.
+  assert.equal(visibleIds.includes(betaWorker.id), false);
+  const refused = await client.request(
+    `/api/v1/workers?organizationId=${beta.id}`,
+  );
+  assert.equal(refused.status, 403);
+  assert.equal(refused.data.error.code, "forbidden");
+
+  // The counts endpoint reads the same fleet and must draw the same line;
+  // a total that spans tenants reports how busy Beta is.
+  const runningAlpha = await client.request(
+    `/api/v1/agents/running?organizationId=${alpha.id}`,
+  );
+  assert.equal(runningAlpha.status, 200);
+  assert.equal(runningAlpha.data.workers, 2);
+  assert.equal(
+    (await client.request(`/api/v1/agents/running?organizationId=${beta.id}`))
+      .status,
+    403,
+  );
+
+  // Naming no organization is refused rather than defaulted: an endpoint that
+  // guessed a tenant would answer a request that never identified one.
+  assert.equal((await client.request("/api/v1/workers")).status, 400);
+
+  // Beta's own member sees Beta's fleet and only it, so the boundary is a
+  // property of the organization asked about and not of this one user.
+  const betaClient = new TestClient(runtime.origin);
+  await betaClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: betaUser.email, password: PASSWORD },
+  });
+  const betaVisible = await betaClient.request(
+    `/api/v1/workers?organizationId=${beta.id}`,
+  );
+  assert.equal(betaVisible.status, 200);
+  assert.deepEqual(
+    betaVisible.data.workers.map((entry: { id: string }) => entry.id),
+    [betaWorker.id],
+  );
+  assert.equal(
+    (
+      await betaClient.request(
+        `/api/v1/workers?organizationId=${alpha.id}`,
+      )
+    ).status,
+    403,
+  );
+});
+
 test("a task past its runtime budget is failed at heartbeat", async (t) => {
   const { runtime, token } = await workerRuntime(t);
   const workerId = (
     await bearer(runtime.origin, "/api/v1/workers/register", token, {
       method: "POST",
-      body: { name: "budgeted", adapters: [], version: "1" },
+      body: { organizationId: DEFAULT_ORGANIZATION_ID, name: "budgeted", adapters: [], version: "1" },
     })
   ).data.id as string;
   await runtime.store.saveRepository({
@@ -1425,7 +1631,7 @@ test("a worker cannot touch another user's lease", async (t) => {
   const workerId = (
     await bearer(runtime.origin, "/api/v1/workers/register", token, {
       method: "POST",
-      body: { name: "w", adapters: [], version: "1" },
+      body: { organizationId: DEFAULT_ORGANIZATION_ID, name: "w", adapters: [], version: "1" },
     })
   ).data.id as string;
 

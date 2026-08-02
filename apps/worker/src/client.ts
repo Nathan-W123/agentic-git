@@ -317,6 +317,8 @@ export class WorkerClient {
   }
 
   public async register(input: {
+    /** The organization whose fleet this worker joins. */
+    organizationId: string;
     name: string;
     adapters: string[];
     version: string;

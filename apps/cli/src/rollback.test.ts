@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
   InMemoryCoordinationStore,
   type CoordinationStore,
@@ -254,6 +255,7 @@ test("a rollback is blocked by work already executing on the same files", async 
     });
     const worker = await harness.store.registerWorker({
       userId: user.id,
+      organizationId: DEFAULT_ORGANIZATION_ID,
       name: "worker-a",
       adapters: ["generic-cli"],
       version: "1.0.0",

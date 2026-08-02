@@ -186,12 +186,40 @@ visible. Only an advance that touched none of those is replayed.
 
 Permission is pinned to one revision rather than passed as a flag, so canonical
 moving once more between the check and the integration leaves them unequal and
-the result is refused as stale exactly as before. Everything that made remote
-results safe is untouched: the three-way apply, the comparison of applied
-against declared entries, and the compare-and-swap promotion all still run, and
-anything that cannot be ruled out still takes the requeue-to-replan path. The
-integration record carries `replayedFrom` so the history shows a result
-outlived its base rather than hiding it behind an ordinary promotion.
+the result is refused as stale. Everything that made remote results safe is
+untouched: the three-way apply, the comparison of applied against declared
+entries, and the compare-and-swap promotion all still run, and anything that
+cannot be ruled out still takes the requeue-to-replan path. The integration
+record carries `replayedFrom` so the history shows a result outlived its base
+rather than hiding it behind an ordinary promotion.
+
+Being refused as stale is not the end of the question, though, because staleness
+is the one integration outcome that is not a fact about this result: it says
+another task reached canonical first. Asked only before integrating, the replay
+question misses every result that loses that race — and the window is not
+narrow. The common way to lose it is the compare-and-swap at the end of
+promotion, which means losing *after* a full validation run, so any two tasks
+finishing within a validation run of each other put one of them here. That was
+an unconditional replan no matter how unrelated the two changes were.
+
+So a stale result is graded once more, against the advance that beat it, now
+that the advance has completed and can be read. This widens *when* the question
+may be asked and nothing else: it is the same assessment against the same base,
+so a semantic blocker still requeues unconditionally and only a purely textual
+overlap reaches the free merge, still pinned to one exact revision. The budget
+is one retry (`STALE_REASSESSMENT_BUDGET`), because each costs another
+validation run; exhausting it lands on the same requeue the path took before,
+which is the floor the mechanism can never fall below. Traces taken on this
+path carry `afterLosingRace` so the history distinguishes a result that was
+overtaken before it started from one that was overtaken while integrating.
+
+That floor is why a result which reached integration only by being re-graded is
+requeued, never failed, when the merged tree conflicts or fails validation. It
+used to be requeued without being validated at all; now that it does get
+validated, a failure must not turn a task that would have been retried into a
+dead one. Results assessed *before* integrating keep the narrower rule — with
+no textual overlap the advance is unrelated, so a validation failure is the
+agent's own and a replan would only rediscover it.
 
 Arbitration is serialized in the database, not in application code. The write
 that records an admission carries the set of already-admitted leases it was
@@ -242,8 +270,8 @@ first sweeps expired leases, so recovery needs no separate reaper process.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/v1/workers/register` | Announce a worker and its adapters |
-| `GET` | `/api/v1/workers` | Fleet visibility |
+| `POST` | `/api/v1/workers/register` | Announce a worker, its organization, and its adapters |
+| `GET` | `/api/v1/workers?organizationId=…` | Fleet visibility, organization-wide |
 | `POST` | `/api/v1/workers/leases` | Poll for work. `204` when idle |
 | `POST` | `/api/v1/workers/leases/{id}/heartbeat` | Extend. `409 lease_lost` if lapsed |
 | `GET` | `/api/v1/workers/leases/{id}/bundle` | Workspace contents as a Git bundle |
@@ -269,6 +297,37 @@ would be rejected again on the next attempt.
 `POST .../heartbeat` optionally takes `{ "tokenUsage": AgentTokenUsage[] }`,
 and `POST .../result` accepts the same field. See
 [Cost controls](#cost-controls).
+
+## Who can see a worker, and who can drive it
+
+A worker belongs to an organization, chosen at registration and fixed
+thereafter. `POST /workers/register` requires `organizationId` and authorizes
+it, so a token confined to one organization cannot enrol a machine into
+another.
+
+Visibility and control are deliberately different widths:
+
+- **Visibility is organization-wide.** `GET /workers?organizationId=…` returns
+  every worker the organization operates, with the active leases each is
+  holding, to any member with `view`. A fleet is shared infrastructure; a team
+  that cannot see which machine is holding a task cannot reason about its own
+  queue. The `own` flag on each row marks the caller's own workers.
+- **Control stays with the registering user.** The lease endpoints still
+  require `worker.userId` to be the caller. Seeing that a colleague's desktop
+  is busy is useful; being able to pull work onto it is not, and the worker
+  executes under its owner's credential.
+
+Leasing additionally requires the worker's organization to match the project's.
+Visibility widened within a tenant; execution did not widen across one. A user
+who belongs to two organizations could otherwise aim a worker registered in one
+at the other's queue, and the resulting workspace, bundle, and changeset would
+put that tenant's code on a machine it never admitted to its fleet. The
+mismatch answers `403 worker_organization_mismatch`.
+
+Naming no organization on the read endpoints is a `400`, not a default. An
+endpoint that inferred the tenant would answer a request that never identified
+one, and would have no single value to bound the query by — which is how a
+fleet listing ends up merging tenants.
 
 ## Human approval at admission time
 
@@ -417,6 +476,7 @@ environment:
 | --- | --- |
 | `COORD_SERVER` | Control plane URL |
 | `COORD_TOKEN` | Bearer token carrying `run_task` |
+| `COORD_ORGANIZATION` | Organization this worker registers into |
 | `COORD_PROJECT_ROOT` | Project supplying agent definitions |
 | `COORD_WORKER_NAME` | Reported to the fleet listing |
 | `COORD_REPOSITORY` | Restrict this worker to one repository |

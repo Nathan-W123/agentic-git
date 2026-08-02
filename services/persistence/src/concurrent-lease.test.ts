@@ -129,6 +129,7 @@ async function createHarness(taskCount: number): Promise<Harness> {
     addWorker: async (name) => {
       const worker = await store.registerWorker({
         userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
         name,
         adapters: ["codex"],
         version: "0.1.0",
