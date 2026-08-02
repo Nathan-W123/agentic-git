@@ -1,0 +1,102 @@
+{
+  "label": "replan-substitution-sighted",
+  "scenario": "live-checkout-trio",
+  "sample": 24,
+  "startedAt": "2026-07-31T16:07:58.863Z",
+  "elapsedMs": 297091,
+  "armOrder": [
+    "treatment",
+    "control"
+  ],
+  "taskId": "task_checkout_fee",
+  "objective": "During checkout, add a flat two pound handling charge to every order's total price",
+  "indexRevision": "445cf721ce89676d8a19cdc6c733cfd1e51376b7",
+  "firstPlan": {
+    "expectedFiles": [
+      "src/pricing/total.js",
+      "test/pricing.test.js"
+    ],
+    "expectedSymbols": [
+      "HANDLING_FEE",
+      "order total pricing test",
+      "orderTotal"
+    ],
+    "intent": "Add a fixed £2 handling fee to the final calculated total of every order while preserving existing subtotal, discount, and tax behavior.",
+    "grounding": {
+      "confidence": "grounded",
+      "missingFiles": [],
+      "unresolvedSymbols": [
+        "HANDLING_FEE",
+        "order total pricing test"
+      ],
+      "fileReferents": [],
+      "symbolReferents": [
+        {
+          "declared": "order total pricing test",
+          "resolved": "orderTotal",
+          "files": [
+            "src/pricing/total.js"
+          ]
+        }
+      ]
+    }
+  },
+  "arms": {
+    "treatment": {
+      "anyHallucination": true,
+      "repeated": [
+        "HANDLING_FEE"
+      ],
+      "fresh": [],
+      "adopted": [
+        "orderTotal"
+      ],
+      "adoptedAll": true,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "HANDLING_FEE",
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "HANDLING_FEE"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    "control": {
+      "anyHallucination": true,
+      "repeated": [
+        "HANDLING_FEE"
+      ],
+      "fresh": [],
+      "adopted": [
+        "orderTotal"
+      ],
+      "adoptedAll": true,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "HANDLING_FEE",
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "HANDLING_FEE"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  }
+}

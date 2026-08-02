@@ -1,0 +1,75 @@
+{
+  "label": "replan-substitution-sighted",
+  "scenario": "live-checkout-trio",
+  "sample": 21,
+  "startedAt": "2026-07-31T15:54:05.825Z",
+  "elapsedMs": 148747,
+  "armOrder": [
+    "control",
+    "treatment"
+  ],
+  "taskId": "task_checkout_fee",
+  "objective": "During checkout, add a flat two pound handling charge to every order's total price",
+  "indexRevision": "2ab86a8eb08a6a4f91614cd2a07db71599fe28a3",
+  "firstPlan": {
+    "expectedFiles": [
+      "src/pricing/total.js",
+      "test/pricing.test.js"
+    ],
+    "expectedSymbols": [
+      "orderTotal"
+    ],
+    "intent": "Add a fixed £2 handling charge to every calculated order total while preserving the existing subtotal, discount, and tax calculations.",
+    "grounding": {
+      "confidence": "verified",
+      "missingFiles": [],
+      "unresolvedSymbols": [],
+      "fileReferents": [],
+      "symbolReferents": []
+    }
+  },
+  "arms": {
+    "control": {
+      "anyHallucination": false,
+      "repeated": [],
+      "fresh": [],
+      "adopted": [],
+      "adoptedAll": false,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    "treatment": {
+      "anyHallucination": false,
+      "repeated": [],
+      "fresh": [],
+      "adopted": [],
+      "adoptedAll": false,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  }
+}

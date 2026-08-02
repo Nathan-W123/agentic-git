@@ -1,0 +1,88 @@
+{
+  "label": "replan-substitution-sighted",
+  "scenario": "live-checkout-trio",
+  "sample": 3,
+  "startedAt": "2026-07-31T14:43:01.830Z",
+  "elapsedMs": 379594,
+  "armOrder": [
+    "control",
+    "treatment"
+  ],
+  "taskId": "task_checkout_fee",
+  "objective": "During checkout, add a flat two pound handling charge to every order's total price",
+  "indexRevision": "2a546993859629c1be5fe956a65b6684e27ea467",
+  "firstPlan": {
+    "expectedFiles": [
+      "src/pricing/total.js",
+      "test/pricing.test.js"
+    ],
+    "expectedSymbols": [
+      "HANDLING_FEE",
+      "orderTotal"
+    ],
+    "intent": "Add a fixed £2 handling charge to every calculated order total while leaving subtotal, discount, and tax calculations unchanged.",
+    "grounding": {
+      "confidence": "grounded",
+      "missingFiles": [],
+      "unresolvedSymbols": [
+        "HANDLING_FEE"
+      ],
+      "fileReferents": [],
+      "symbolReferents": []
+    }
+  },
+  "arms": {
+    "control": {
+      "anyHallucination": true,
+      "repeated": [
+        "HANDLING_FEE"
+      ],
+      "fresh": [],
+      "adopted": [],
+      "adoptedAll": false,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "HANDLING_FEE",
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "HANDLING_FEE"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    "treatment": {
+      "anyHallucination": true,
+      "repeated": [
+        "HANDLING_FEE"
+      ],
+      "fresh": [],
+      "adopted": [],
+      "adoptedAll": false,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "HANDLING_FEE",
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "HANDLING_FEE"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  }
+}

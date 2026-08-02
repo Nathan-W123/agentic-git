@@ -1,0 +1,88 @@
+{
+  "label": "replan-substitution-sighted",
+  "scenario": "live-checkout-trio",
+  "sample": 14,
+  "startedAt": "2026-07-31T15:30:35.128Z",
+  "elapsedMs": 170067,
+  "armOrder": [
+    "treatment",
+    "control"
+  ],
+  "taskId": "task_checkout_fee",
+  "objective": "During checkout, add a flat two pound handling charge to every order's total price",
+  "indexRevision": "8e16fe94045d64c35c53719dabe37aba581dedec",
+  "firstPlan": {
+    "expectedFiles": [
+      "src/pricing/total.js",
+      "test/pricing.test.js"
+    ],
+    "expectedSymbols": [
+      "orderTotal",
+      "test(\"order total applies tax and handling charge\")"
+    ],
+    "intent": "Add a mandatory flat £2 handling charge to every calculated checkout order total while preserving existing subtotal, discount, and tax behavior.",
+    "grounding": {
+      "confidence": "grounded",
+      "missingFiles": [],
+      "unresolvedSymbols": [
+        "test(\"order total applies tax and handling charge\")"
+      ],
+      "fileReferents": [],
+      "symbolReferents": []
+    }
+  },
+  "arms": {
+    "treatment": {
+      "anyHallucination": true,
+      "repeated": [
+        "test(\"order total applies tax and handling charge\")"
+      ],
+      "fresh": [],
+      "adopted": [],
+      "adoptedAll": false,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal",
+        "test(\"order total applies tax and handling charge\")"
+      ],
+      "grounding": {
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "test(\"order total applies tax and handling charge\")"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    "control": {
+      "anyHallucination": true,
+      "repeated": [
+        "test(\"order total applies tax and handling charge\")"
+      ],
+      "fresh": [],
+      "adopted": [],
+      "adoptedAll": false,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal",
+        "test(\"order total applies tax and handling charge\")"
+      ],
+      "grounding": {
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "test(\"order total applies tax and handling charge\")"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  }
+}

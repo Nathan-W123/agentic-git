@@ -1,0 +1,88 @@
+{
+  "label": "replan-substitution-sighted",
+  "scenario": "live-checkout-trio",
+  "sample": 20,
+  "startedAt": "2026-07-31T15:50:18.505Z",
+  "elapsedMs": 226872,
+  "armOrder": [
+    "treatment",
+    "control"
+  ],
+  "taskId": "task_checkout_fee",
+  "objective": "During checkout, add a flat two pound handling charge to every order's total price",
+  "indexRevision": "a241f7af032391281991bf2df414f06199007a03",
+  "firstPlan": {
+    "expectedFiles": [
+      "src/pricing/total.js",
+      "test/pricing.test.js"
+    ],
+    "expectedSymbols": [
+      "HANDLING_CHARGE",
+      "orderTotal"
+    ],
+    "intent": "Enable a mandatory flat £2 handling charge in every calculated order total while preserving existing subtotal, discount, and tax behavior.",
+    "grounding": {
+      "confidence": "grounded",
+      "missingFiles": [],
+      "unresolvedSymbols": [
+        "HANDLING_CHARGE"
+      ],
+      "fileReferents": [],
+      "symbolReferents": []
+    }
+  },
+  "arms": {
+    "treatment": {
+      "anyHallucination": true,
+      "repeated": [
+        "HANDLING_CHARGE"
+      ],
+      "fresh": [],
+      "adopted": [],
+      "adoptedAll": false,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "HANDLING_CHARGE",
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "HANDLING_CHARGE"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    "control": {
+      "anyHallucination": true,
+      "repeated": [
+        "HANDLING_CHARGE"
+      ],
+      "fresh": [],
+      "adopted": [],
+      "adoptedAll": false,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "HANDLING_CHARGE",
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "grounded",
+        "missingFiles": [],
+        "unresolvedSymbols": [
+          "HANDLING_CHARGE"
+        ],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  }
+}

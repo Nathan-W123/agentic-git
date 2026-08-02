@@ -1,0 +1,90 @@
+{
+  "label": "replan-substitution-sighted",
+  "scenario": "live-checkout-trio",
+  "sample": 4,
+  "startedAt": "2026-07-31T14:49:38.172Z",
+  "elapsedMs": 612298,
+  "armOrder": [
+    "treatment",
+    "control"
+  ],
+  "taskId": "task_checkout_fee",
+  "objective": "During checkout, add a flat two pound handling charge to every order's total price",
+  "indexRevision": "c11856164193a79ccb219afc0ab3286fe9d5732d",
+  "firstPlan": {
+    "expectedFiles": [
+      "src/pricing/total.js",
+      "test/pricing.test.js"
+    ],
+    "expectedSymbols": [
+      "order total applies tax",
+      "orderTotal"
+    ],
+    "intent": "Enable a fixed £2 handling charge on every total returned by orderTotal while leaving subtotal, discount, and tax calculations unchanged.",
+    "grounding": {
+      "confidence": "grounded",
+      "missingFiles": [],
+      "unresolvedSymbols": [
+        "order total applies tax"
+      ],
+      "fileReferents": [],
+      "symbolReferents": [
+        {
+          "declared": "order total applies tax",
+          "resolved": "orderTotal",
+          "files": [
+            "src/pricing/total.js"
+          ]
+        }
+      ]
+    }
+  },
+  "arms": {
+    "treatment": {
+      "anyHallucination": false,
+      "repeated": [],
+      "fresh": [],
+      "adopted": [
+        "orderTotal"
+      ],
+      "adoptedAll": true,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    },
+    "control": {
+      "anyHallucination": false,
+      "repeated": [],
+      "fresh": [],
+      "adopted": [
+        "orderTotal"
+      ],
+      "adoptedAll": true,
+      "expectedFiles": [
+        "src/pricing/total.js",
+        "test/pricing.test.js"
+      ],
+      "expectedSymbols": [
+        "orderTotal"
+      ],
+      "grounding": {
+        "confidence": "verified",
+        "missingFiles": [],
+        "unresolvedSymbols": [],
+        "fileReferents": [],
+        "symbolReferents": []
+      }
+    }
+  }
+}

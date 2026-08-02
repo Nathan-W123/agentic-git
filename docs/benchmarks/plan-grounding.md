@@ -211,6 +211,15 @@ plans named something grounding could map to real code; those thirty are the
 comparison. Raw records in `data/grounding/*replan-substitution*`, tabulated by
 `scripts/summarize-replan-substitution.mjs`.
 
+The table below is the two blind collections — the `replan-substitution` and
+`replan-substitution-b2` labels — and nothing else. A later sighted collection
+sits in the same directory and is matched by the summarizer's filename filter,
+so running that script unfiltered now reports 67 samples and 32 scored pairs
+rather than the 40 and 30 recorded here. Those 27 sighted samples tested
+nothing — in 25 of them both arms received an identical prompt — and must not
+be pooled with these. See
+[`plan-grounding-sighted-rerun.md`](plan-grounding-sighted-rerun.md).
+
 | | Control | Treatment | Discordant pairs | McNemar exact |
 | --- | --- | --- | --- | --- |
 | Repeated a name it had already been corrected on | 19/30 (63%) | **5/30 (17%)** | 15 vs 1 | **p = 0.0005** |
