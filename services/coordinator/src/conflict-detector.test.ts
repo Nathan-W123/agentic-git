@@ -278,3 +278,82 @@ test("plans hallucinating different names for the same real code overlap once gr
   // The audit trail says these resources came from verification, not the agents.
   assert.match(fileEvidence?.explanation ?? "", /grounded/u);
 });
+
+/**
+ * Scoring a shared path on what each side reaches inside it.
+ *
+ * `file_overlap` sequenced two plans that named the same file regardless of
+ * what they did in it, which is the right answer only while a claim on a file
+ * cannot be narrower than the file. Given something that can say which lines
+ * each side reaches, a path both name but neither meets the other inside is
+ * not a collision.
+ */
+
+/** task_a occupies the head of the file, task_b the tail. */
+const OCCUPIES: Record<string, { startLine: number; endLine: number }[]> = {
+  task_a: [{ startLine: 1, endLine: 39 }],
+  task_b: [{ startLine: 40, endLine: 80 }],
+};
+
+test("a shared path neither side reaches into is not evidence", () => {
+  const detector = new ConflictDetector();
+  const assessment = detector.assess(
+    plan("task_a", ["src/pricing/total.js"]),
+    plan("task_b", ["src/pricing/total.js"]),
+    (entry) => OCCUPIES[entry.taskId],
+  );
+
+  assert.equal(assessment, undefined);
+});
+
+test("a shared path both sides reach into is evidence as before", () => {
+  const detector = new ConflictDetector();
+  const assessment = detector.assess(
+    plan("task_a", ["src/pricing/total.js"]),
+    plan("task_b", ["src/pricing/total.js"]),
+    (entry) =>
+      entry.taskId === "task_a"
+        ? [{ startLine: 1, endLine: 50 }]
+        : OCCUPIES.task_b,
+  );
+
+  assert.ok(assessment);
+  assert.deepEqual(
+    assessment.evidence.find((entry) => entry.kind === "file_overlap")
+      ?.resources,
+    ["src/pricing/total.js"],
+  );
+});
+
+test("a side that reaches the whole file collides with anything", () => {
+  // `undefined` is what a plan that simply named the path says, and it has to
+  // keep meaning all of it or the ordinary case would quietly stop colliding.
+  const detector = new ConflictDetector();
+  const assessment = detector.assess(
+    plan("task_a", ["src/pricing/total.js"]),
+    plan("task_b", ["src/pricing/total.js"]),
+    (entry) => (entry.taskId === "task_a" ? undefined : OCCUPIES.task_b),
+  );
+
+  assert.ok(assessment);
+  assert.equal(assessment.disposition, "concurrent");
+  assert.equal(
+    assessment.evidence.some((entry) => entry.kind === "file_overlap"),
+    true,
+  );
+});
+
+test("without an occupancy view every shared path is evidence", () => {
+  const detector = new ConflictDetector();
+  const assessment = detector.assess(
+    plan("task_a", ["src/pricing/total.js"]),
+    plan("task_b", ["src/pricing/total.js"]),
+  );
+
+  assert.ok(assessment);
+  assert.deepEqual(
+    assessment.evidence.find((entry) => entry.kind === "file_overlap")
+      ?.resources,
+    ["src/pricing/total.js"],
+  );
+});

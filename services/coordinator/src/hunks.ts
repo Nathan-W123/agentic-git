@@ -9,11 +9,9 @@
  * without re-reading the file.
  */
 
-export interface LineRange {
-  /** 1-based, inclusive. */
-  startLine: number;
-  endLine: number;
-}
+import { rangesOverlap, type LineRange } from "./ranges.js";
+
+export { rangesOverlap, type LineRange };
 
 /**
  * `@@ -oldStart,oldLines +newStart,newLines @@`, with the counts optional.
@@ -74,12 +72,6 @@ export function patchedLineRanges(patch: string): LineRange[] {
     }
   }
   return ranges;
-}
-
-export function rangesOverlap(first: LineRange, second: LineRange): boolean {
-  return (
-    first.startLine <= second.endLine && second.startLine <= first.endLine
-  );
 }
 
 /**

@@ -889,3 +889,305 @@ test("a grounded plan is partially admitted with only its misnamed piece withhel
     /via grounded referent/u,
   );
 });
+
+/**
+ * Withholding part of a file the candidate does *not* own.
+ *
+ * The finer withholding above only ever applied inside a file the plan was
+ * being granted anyway. A file another task held was lost whole, on its path
+ * alone, however little of it that task actually occupied. What changed is
+ * that a holder's claim can now be narrower than a path — so the contest can
+ * be over lines, and only the lines need be withheld.
+ */
+
+/** src/pricing/total.js at the base revision: two functions, well apart. */
+const TOTAL_RANGES: Record<
+  string,
+  { name: string; startLine: number; endLine: number }[]
+> = {
+  "src/pricing/total.js": [
+    { name: "orderTotal", startLine: 40, endLine: 80 },
+    { name: "formatTotal", startLine: 100, endLine: 140 },
+  ],
+};
+
+/**
+ * A holder that reaches into total.js without ever naming it: it declared
+ * `calcTotal`, which does not exist, and verification mapped that to
+ * `orderTotal`, which lives there. Its claim on the file is those lines and
+ * nothing else — which is the whole premise of granting the rest of it.
+ */
+function groundedHolder(): AgentPlan {
+  return {
+    ...plan("task_b", {
+      objective: "correct rounding when an order is totalled",
+      expectedFiles: ["src/audit/log.js"],
+      expectedSymbols: ["calcTotal"],
+    }),
+    grounding: {
+      confidence: "grounded",
+      revision: "a".repeat(40),
+      missingFiles: [],
+      unresolvedSymbols: ["calcTotal"],
+      fileReferents: [],
+      symbolReferents: [
+        {
+          declared: "calcTotal",
+          resolved: "orderTotal",
+          files: ["src/pricing/total.js"],
+        },
+      ],
+      notes: [],
+    },
+  };
+}
+
+/** The candidate wants the same file, for a part of it nobody is holding. */
+function sharedFileCandidate(): AgentPlan {
+  return plan("task_a", {
+    objective: "render a currency prefix when a price is displayed",
+    expectedFiles: ["src/pricing/total.js"],
+    expectedSymbols: ["formatTotal"],
+  });
+}
+
+/** The index every one of these reads the base revision through. */
+function placed(): Partial<PlanAdmissionInput> {
+  return { symbolRangesInFile: (file: string) => TOTAL_RANGES[file] ?? [] };
+}
+
+test("a contested file is granted apart from the lines its holder occupies", () => {
+  const admission = admit(
+    sharedFileCandidate(),
+    [groundedHolder()],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  // The file itself is granted — the thing that could not happen before, when
+  // a contested path was withheld whole.
+  assert.deepEqual(grantedResources(admission), [
+    "file:src/pricing/total.js",
+    "symbol:formatTotal",
+  ]);
+  assert.deepEqual(
+    admission.deferredResources?.map(
+      (resource) => `${resource.resourceType}:${resource.resourceId}`,
+    ),
+    ["symbol:orderTotal"],
+  );
+});
+
+test("the withheld part of a contested file is stated as lines", () => {
+  const admission = admit(
+    sharedFileCandidate(),
+    [groundedHolder()],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  // Enforcement divides the patch at exactly these lines, and the agent is
+  // told the same ones, so what it is asked for and what it is held to match.
+  assert.deepEqual(admission.deferredResources?.[0]?.locations, [
+    { file: "src/pricing/total.js", startLine: 40, endLine: 80 },
+  ]);
+  assert.ok(
+    admission.constraints.some((entry) =>
+      entry.includes("src/pricing/total.js lines 40-80"),
+    ),
+    `constraints did not name the lines: ${admission.constraints.join(" | ")}`,
+  );
+  assert.deepEqual(admission.deferredResources?.[0]?.heldBy, ["task_b"]);
+});
+
+test("the granted lease on a shared file excludes the holder's lines", () => {
+  const admission = admit(
+    sharedFileCandidate(),
+    [groundedHolder()],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  // The lease is the durable half of the promise: a later admission arbitrates
+  // against it, so it has to say what the decision said.
+  const lease = admission.ownershipGrants.find(
+    (entry) => entry.resourceType === "file",
+  );
+  assert.deepEqual(lease?.ranges, [
+    { startLine: 1, endLine: 39 },
+    { startLine: 81, endLine: Number.MAX_SAFE_INTEGER },
+  ]);
+});
+
+test("a holder that named the file still takes all of it", () => {
+  // Nothing here is narrower than a path. An agent told to edit a file edits
+  // it wherever it needs to, including lines no index placed, so reading a
+  // limit into that claim would hand the candidate lines the holder will use.
+  const admission = admit(
+    sharedFileCandidate(),
+    [
+      plan("task_b", {
+        expectedFiles: ["src/pricing/total.js"],
+        expectedSymbols: ["orderTotal"],
+      }),
+    ],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.deepEqual(admission.blockedBy, ["task_b"]);
+  assert.equal(admission.deferredResources, undefined);
+});
+
+test("a holder whose lines cannot be placed takes the file whole", () => {
+  // The index parses the file but has no range for `orderTotal`. Withholding
+  // "the lines it occupies" would then withhold nothing, and the rest of the
+  // file would be granted over the top of a task that is editing it.
+  const admission = admit(
+    sharedFileCandidate(),
+    [groundedHolder()],
+    new PlanAdmissionController(),
+    {
+      symbolRangesInFile: () => [
+        { name: "formatTotal", startLine: 100, endLine: 140 },
+      ],
+    },
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.equal(admission.deferredResources, undefined);
+});
+
+test("an unreadable file is contested whole, as it always was", () => {
+  const admission = admit(
+    sharedFileCandidate(),
+    [groundedHolder()],
+    new PlanAdmissionController(),
+    { symbolRangesInFile: () => undefined },
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.equal(admission.deferredResources, undefined);
+});
+
+test("two holders of different parts both keep their own lines", () => {
+  const second: AgentPlan = {
+    ...plan("task_c", {
+      objective: "rename the total formatter",
+      expectedFiles: ["src/report/summary.js"],
+      expectedSymbols: ["renderTotal"],
+    }),
+    grounding: {
+      confidence: "grounded",
+      revision: "a".repeat(40),
+      missingFiles: [],
+      unresolvedSymbols: ["renderTotal"],
+      fileReferents: [],
+      symbolReferents: [
+        {
+          declared: "renderTotal",
+          resolved: "formatTotal",
+          files: ["src/pricing/total.js"],
+        },
+      ],
+      notes: [],
+    },
+  };
+  const admission = admit(
+    plan("task_a", {
+      objective: "add a discount line to the pricing module",
+      expectedFiles: ["src/pricing/total.js"],
+      expectedSymbols: ["applyDiscount"],
+    }),
+    [groundedHolder(), second],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(
+    admission.deferredResources?.map((resource) => resource.resourceId).sort(),
+    ["formatTotal", "orderTotal"],
+  );
+  // What is left of the file is the gap between the two holders, plus the head
+  // and the tail.
+  const lease = admission.ownershipGrants.find(
+    (entry) => entry.resourceType === "file",
+  );
+  assert.deepEqual(lease?.ranges, [
+    { startLine: 1, endLine: 39 },
+    { startLine: 81, endLine: 99 },
+    { startLine: 141, endLine: Number.MAX_SAFE_INTEGER },
+  ]);
+});
+
+test("a file reached only through a misnamed path is still lost whole", () => {
+  // The candidate declared src/checkout.js, which does not exist. A division
+  // holds back hunks of a patch on a path, and no patch will ever carry that
+  // one, so there is nothing to enforce a partial grant against.
+  const candidate: AgentPlan = {
+    ...plan("task_a", {
+      objective: "render a currency prefix when a price is displayed",
+      expectedFiles: ["src/checkout.js"],
+      expectedSymbols: ["formatTotal"],
+    }),
+    grounding: {
+      confidence: "grounded",
+      revision: "a".repeat(40),
+      missingFiles: ["src/checkout.js"],
+      unresolvedSymbols: [],
+      fileReferents: [
+        { declared: "src/checkout.js", resolved: "src/pricing/total.js" },
+      ],
+      symbolReferents: [],
+      notes: [],
+    },
+  };
+  const admission = admit(
+    candidate,
+    [groundedHolder()],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.equal(admission.deferredResources, undefined);
+});
+
+test("a plan reaching only its own lines of a file runs beside the holder", () => {
+  // Neither side named the path and neither reaches the other's code, so there
+  // is no contest to resolve and nothing has to be withheld at all. On shared
+  // paths alone this pair was sequenced.
+  const admission = admit(
+    {
+      ...plan("task_a", {
+        objective: "render a currency prefix when a price is displayed",
+        expectedFiles: ["src/format/currency.js"],
+        expectedSymbols: ["showPrice"],
+      }),
+      grounding: {
+        confidence: "grounded",
+        revision: "a".repeat(40),
+        missingFiles: [],
+        unresolvedSymbols: ["showPrice"],
+        fileReferents: [],
+        symbolReferents: [
+          {
+            declared: "showPrice",
+            resolved: "formatTotal",
+            files: ["src/pricing/total.js"],
+          },
+        ],
+        notes: [],
+      },
+    },
+    [groundedHolder()],
+    new PlanAdmissionController(),
+    placed(),
+  );
+
+  assert.equal(admission.status, "approved");
+  assert.equal(admission.deferredResources, undefined);
+});

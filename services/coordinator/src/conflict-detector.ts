@@ -10,6 +10,8 @@ import {
   type ConflictEvidence,
 } from "@coord/shared-types";
 
+import { rangesIntersect, type LineRange } from "./ranges.js";
+
 export interface ConflictThresholds {
   concurrentMaximum: number;
   notifyMaximum: number;
@@ -108,6 +110,22 @@ function overlap(first: readonly string[], second: readonly string[]): string[] 
 }
 
 /**
+ * What a plan occupies inside one file, or `undefined` when it occupies all of
+ * it — which is what naming a file means, and what every plan meant before
+ * anything finer could be expressed.
+ *
+ * Supplying one of these is what lets arbitration ask whether two plans want
+ * the same *code* rather than merely the same path. It is deliberately a
+ * function of the plan rather than a field on it: the answer comes from the
+ * repository index at the base revision, which is not something a plan carries
+ * and not something the detector can reach on its own.
+ */
+export type FileOccupancy = (
+  plan: AgentPlan,
+  file: string,
+) => readonly LineRange[] | undefined;
+
+/**
  * Files two plans collide on, judged on each plan's grounded footprint.
  *
  * Arbitrating on the declared lists alone means arbitrating on whatever the
@@ -115,12 +133,32 @@ function overlap(first: readonly string[], second: readonly string[]): string[] 
  * different ways would pass as disjoint. The grounded view adds the real files
  * verification mapped those misnames to, so the collision is judged where it
  * would actually happen.
+ *
+ * Sharing a path is where the question starts, not where it ends. Given an
+ * {@link FileOccupancy} that can say which lines each side reaches, a path
+ * both plans name but neither meets the other inside is not a collision, and
+ * is dropped. Without one — or where either side reaches the whole file, which
+ * is the ordinary case of a plan that simply declared the path — the shared
+ * path is the answer, exactly as before.
  */
 export function overlappingFiles(
   first: AgentPlan,
   second: AgentPlan,
+  occupancy?: FileOccupancy,
 ): string[] {
-  return overlap(arbitrationFiles(first), arbitrationFiles(second));
+  const shared = overlap(arbitrationFiles(first), arbitrationFiles(second));
+  if (occupancy === undefined) {
+    return shared;
+  }
+  return shared.filter((file) => {
+    const left = occupancy(first, file);
+    const right = occupancy(second, file);
+    return (
+      left === undefined ||
+      right === undefined ||
+      rangesIntersect(left, right)
+    );
+  });
 }
 
 function resourceNames(plan: CompleteAgentPlan): Set<string> {
@@ -302,12 +340,13 @@ export class ConflictDetector {
   public assess(
     first: AgentPlan,
     second: AgentPlan,
+    occupancy?: FileOccupancy,
   ): ConflictAssessment | undefined {
     const taskIds: [string, string] = [first.taskId, second.taskId];
     const left = completeAgentPlan(first);
     const right = completeAgentPlan(second);
     const intent = analyzeIntent(left, right);
-    const fileOverlap = overlappingFiles(left, right);
+    const fileOverlap = overlappingFiles(left, right, occupancy);
     const symbolOverlap = overlap(
       arbitrationSymbols(left),
       arbitrationSymbols(right),
@@ -448,7 +487,10 @@ export class ConflictDetector {
     };
   }
 
-  public assessAll(plans: readonly AgentPlan[]): ConflictAssessment[] {
+  public assessAll(
+    plans: readonly AgentPlan[],
+    occupancy?: FileOccupancy,
+  ): ConflictAssessment[] {
     const assessments: ConflictAssessment[] = [];
     for (let left = 0; left < plans.length; left += 1) {
       for (let right = left + 1; right < plans.length; right += 1) {
@@ -457,7 +499,7 @@ export class ConflictDetector {
         if (first === undefined || second === undefined) {
           continue;
         }
-        const assessment = this.assess(first, second);
+        const assessment = this.assess(first, second, occupancy);
         if (assessment !== undefined) {
           assessments.push(assessment);
         }
@@ -469,8 +511,9 @@ export class ConflictDetector {
   public conflictsForScheduling(
     first: AgentPlan,
     second: AgentPlan,
+    occupancy?: FileOccupancy,
   ): boolean {
-    const assessment = this.assess(first, second);
+    const assessment = this.assess(first, second, occupancy);
     if (assessment === undefined) {
       return false;
     }

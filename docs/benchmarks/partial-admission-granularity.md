@@ -9,11 +9,14 @@ withholding is — how much work a task loses that nobody was actually contestin
 
 There are two separate withholding decisions, and they have different limits.
 
-**A contested file is withheld whole.** The plan declared `src/pricing/total.js`
-and an executing task holds it. The file is dropped from the reduced plan, the
-holder gets no lease on it, and a patch on that path is refused on its path
-alone. This is coarse by construction and [cannot currently be made
-finer](#what-is-still-withheld-whole-and-why).
+**A contested file is withheld whole — unless its holder occupies known
+lines.** The plan declared `src/pricing/total.js` and an executing task holds
+it. If that task named the file too, the file is dropped from the reduced plan,
+the holder gets no lease on it, and a patch on that path is refused on its path
+alone. If instead the holder reaches into the file only through code the index
+could place, [only those lines are
+withheld](#granting-the-rest-of-a-contested-file) and the rest of the file is
+granted.
 
 **A contested symbol inside a *granted* file is withheld by line range.** The
 plan declared `src/a.ts` and nobody else wants that file, but a symbol inside
@@ -115,50 +118,126 @@ a contested file survives; it does not say how often partial admission fires,
 which depends on the repository parallelism setting and on how much real
 contention a team generates.
 
-## What is still withheld whole, and why
+## Granting the rest of a contested file
 
-The obvious next step — withholding only the *lines* of a contested file that
-the other holder actually occupies, and granting the rest of that file — is not
-implemented, and cannot be made sound without two changes this one does not
-make. It is worth stating precisely, because the plan schema is not the
-obstacle people expect it to be.
+Withholding only the *lines* of a contested file that its holder occupies, and
+granting the rest, needed two changes, in this order. Both are now made.
 
-**It is not blocked by the plan schema.** The granularity needed does not come
-from the candidate's plan at all. It comes from the *holder's* declared symbols
-resolved to line ranges through the base-revision index — exactly the machinery
-`contestedSymbols` already uses. An agent would not have to declare hunks or
-line ranges for this to work, and no `AgentPlan` field is missing.
+**A file lease can be narrower than the file.** `ResourceLease` carries an
+optional set of line ranges, and two exclusive claims on one path collide only
+when those ranges meet. A claim that names no ranges still means the whole
+file, so a lease that could not say anything finer refuses exactly what it
+refused before. The narrowing happens *at issue time*, for every plan the
+admission can see rather than only for the candidate — the earlier obstacle
+was that a holder's lease could not be narrowed retroactively, and it does not
+have to be if it was never wide.
 
-**It is blocked by what a file lease means.** `DefaultOwnershipPolicy` leases a
-source file `exclusive`. When the contest is discovered, the holder already has
-that lease and its agent has already been told it owns the file. Granting a
-second task write access to other lines of the same file would be handing out
-access behind a live exclusive lease — the invariant the whole ownership model
-rests on. Narrowing the holder's lease retroactively is not available either:
-it was issued before this candidate existed.
+**`file_overlap` is scored on intersecting ranges, not on shared paths.**
+`ConflictDetector.assess` takes an optional view of what each plan occupies
+inside a file. A path both plans name but neither meets the other inside stops
+being evidence. Without that view — every caller that does not supply one —
+scoring is byte-for-byte what it was.
 
-**It is also blocked one layer earlier, in conflict scoring.** Even if leases
-were narrowed, `decide()` consults the `ConflictDetector` *before* ownership,
-and `file_overlap` evidence sequences two plans that name the same file
-regardless of what they do inside it. A plan reduced to "lines 40–80 of
-total.js" would still be refused by the detector on the path alone.
+With both in place the candidate's own claim can be narrowed too: its claim on
+the contested file becomes the whole file *minus* the holder's ranges, which is
+a claim the holder's lease does not intersect and the detector does not score.
+That is what turns "wait for total.js" into "take total.js except lines 40–80".
 
-So the two changes required, in order, are:
+### Which holders are narrow, and which are not
 
-1. `DefaultOwnershipPolicy` issues line-range leases instead of whole-file
-   leases wherever the index can locate a plan's symbols, falling back to the
-   file when it cannot — applied to *every* plan at admission, not just to the
-   candidate, so both sides of a contest are narrow.
-2. `ConflictDetector` scores `file_overlap` on intersecting line ranges rather
-   than on shared paths.
+The rule is deliberately reluctant, because a claim narrower than the truth
+hands another task lines this one will edit:
 
-Both are load-bearing changes to the numbers in
-[README.md](README.md) and [live-evidence.md](live-evidence.md), because
-`file_overlap` is what produces the sequencing those results measure. They are
-not a follow-up to this change; they are a separate experiment with its own
-before/after, and doing them as a side effect of hunk-level enforcement would
-have invalidated the recorded evidence without measuring what replaced it.
+- **A file the plan named is the plan's, all of it.** An agent told to edit a
+  file edits it wherever it needs to, including the lines between the symbols
+  an index can name and lines that did not exist when the index was built.
+  This is also why deriving a narrower claim from the plan's *symbols* would be
+  illusory: enrichment already makes a plan that names a file claim that file's
+  symbols, so the derived ranges would cover it anyway.
+- **A file a misnamed path grounds to is the same case.** The plan meant to
+  edit that whole file; it just called it something else.
+- **A file the plan reaches only because verification mapped a symbol onto code
+  living there** is the narrow case. The plan never said `total.js` — it said
+  `calculateTotal` — and the index knows exactly which lines that is.
 
-Until then, the honest statement of the granularity is: **a contested file is
-all-or-nothing; a contested symbol inside a granted file costs hunks, not
-files.**
+So the holder that can be narrowed is the one that reached the file through a
+grounded referent, which is precisely the shape the substitution benchmarks
+produce. If any symbol reaching in cannot be placed, or the file cannot be
+parsed, the whole file is the answer again and the file is withheld as before.
+
+The candidate side has one more requirement: it must have *declared* the path.
+What a division holds back are hunks of a patch on that path, and a path the
+plan only reached through a misname is not one any patch will carry.
+
+### How it is enforced
+
+The withholding is expressed as the holder's **symbols**, with their locations
+in the granted file — not as a partial file resource. That is not
+presentational. A withheld symbol carrying `locations` is exactly the shape
+`splitChangeSet` already divides a granted file's patch by, so a sub-file grant
+is enforced by the machinery above, which was already tested against real
+`git apply`, and the ranges are re-derived from the base index by name rather
+than trusted from a decision that travelled over the wire.
+
+### How often the narrow case exists
+
+The rule only bites on a holder that reached a file through a grounded symbol
+referent, so it is worth knowing whether real agents produce that shape at all
+rather than assuming it. Counted over the *tracked* records in
+`docs/benchmarks/data/grounding` — every plan-grounding record in each file,
+asking whether any `symbolReferents` entry names a file the plan neither
+declared nor reached through a `fileReferents` mapping. Only committed data is
+counted, so the figures are reproducible at this revision:
+
+| Corpus | Grounding records | Reaching an undeclared file |
+| --- | --- | --- |
+| `live-checkout-trio-replan-substitution-*` | 40 | **30 (75%)** |
+| `live-checkout-after-*` | 10 | 1 |
+| everything else | 44 | 0 |
+| all tracked | 94 | **31 (33%)** |
+
+The substitution runs are where it lives, and they are the same shape every
+time: a plan declaring `src/checkout.js`, which does not exist, whose symbol
+claims verification placed in `src/pricing/total.js`, which it never named.
+That is not a coincidence — those runs exist to produce misnaming, and
+misnaming is exactly what makes a plan's reach into a file narrower than the
+file.
+
+This counts the *holder* shape and nothing more. Whether one becomes a partial
+grant also needs a candidate that declared the same path, an index that places
+every symbol reaching in, and the two to be executing at once — none of which
+this measures.
+
+### What this did *not* change
+
+The recorded numbers in [README.md](README.md) and
+[live-evidence.md](live-evidence.md) stand. Every pair where at least one side
+declared the shared path scores and leases exactly as it did: the ranged path
+is reachable only when both sides' claims are bounded, and a plan that named a
+file is never bounded. No lease exists now that did not exist before except a
+ranged one on a file a plan reached only through grounding, and a ranged lease
+cannot refuse anything a whole-file lease would have let through.
+
+What does behave differently is a contest where the *holder* reached the file
+through a grounded referent — which is a case those runs contain. Those pairs
+now run concurrently, or partially, where they were sequenced. That is a change
+worth its own before/after measurement; it has not been measured here, and no
+figure above has been restated to claim otherwise.
+
+### Verification
+
+`scripts/verify-contested-file-division.mjs` carries one contest end to end
+against real machinery: it builds a repository, indexes it with the real
+`CodeIntelligenceService` so the withheld ranges are a parser's answer, runs a
+real `PlanAdmissionController` on a candidate declaring the contested file
+against a holder occupying one function in it, has an agent edit *both*
+functions, produces a real `git diff --binary --full-index`, splits it on the
+admission's own ranges, and applies the granted half with the flags
+`IntegrationService` uses. It then checks the thing the whole feature rests on:
+every line of the holder's function is byte-identical to base, the holder's
+edit did not sneak through, the candidate's own work did land, and the deferred
+half still applies on top to reproduce the undivided change.
+
+The honest statement of the granularity is now: **a contested file is
+all-or-nothing only when its holder claimed all of it; a contested symbol, and
+a holder that occupies known lines, cost hunks rather than files.**

@@ -1,4 +1,5 @@
 import {
+  arbitrationFiles,
   completeAgentPlan,
   planAdmissionApproved,
   planGroundingConfidence,
@@ -19,12 +20,23 @@ import {
 
 import type { NamedRange } from "./hunks.js";
 
-import { ConflictDetector, relatedObjectives } from "./conflict-detector.js";
+import {
+  ConflictDetector,
+  relatedObjectives,
+  type FileOccupancy,
+} from "./conflict-detector.js";
 import {
   OwnershipApprovalRequiredError,
   OwnershipConflictError,
   OwnershipService,
+  type PlanFileClaim,
 } from "./ownership-service.js";
+import {
+  WHOLE_FILE,
+  normalizeRanges,
+  subtractRanges,
+  type LineRange,
+} from "./ranges.js";
 
 /**
  * Arbitration of one plan against the work already running.
@@ -178,6 +190,112 @@ function declaredResources(plan: AgentPlan): PlanResourceRef[] {
   ];
 }
 
+/**
+ * The named spans a plan occupies inside one file, or `undefined` for all of
+ * it.
+ *
+ * This is the judgement the whole of sub-file arbitration rests on, and it is
+ * deliberately reluctant. `undefined` — the whole file — is returned wherever
+ * the plan's reach cannot be bounded by something the index actually placed,
+ * because a claim narrower than the truth hands another task lines this one
+ * will edit.
+ *
+ * Two cases are bounded, and they are the ones where the plan never asked for
+ * the file:
+ *
+ * - A file the plan **named** is the plan's, all of it. An agent told to edit
+ *   a file edits it wherever it needs to, including the lines between the
+ *   symbols an index can name, and including lines that did not exist when the
+ *   index was built. Narrowing here would be reading a limit into a claim that
+ *   never stated one — and after plan enrichment, where naming a file makes
+ *   the plan claim that file's symbols, it would not even be narrower.
+ * - A file a **misnamed file** declaration grounds to is the same case: the
+ *   plan meant to edit that whole file, it just called it something else.
+ *
+ * What is left is the file a plan reaches *only* because verification mapped a
+ * symbol it declared onto code living there. That plan never said the word
+ * `total.js`; what it said was `calculateTotal`, and the index knows exactly
+ * which lines that is. So the claim is those lines — provided every symbol
+ * reaching in can be placed. One that cannot leaves lines unaccounted for, and
+ * an unaccounted line is one this plan might edit while another task is being
+ * told it owns it, so the whole file is the answer again.
+ */
+function occupiedSpans(
+  plan: AgentPlan,
+  file: string,
+  locate: ((file: string) => readonly NamedRange[] | undefined) | undefined,
+): readonly NamedRange[] | undefined {
+  if (locate === undefined) {
+    return undefined;
+  }
+  if (uniqueRepositoryPaths(plan.expectedFiles).includes(file)) {
+    return undefined;
+  }
+  const grounding = plan.grounding;
+  if (grounding === undefined) {
+    return undefined;
+  }
+  if (grounding.fileReferents.some((entry) => entry.resolved === file)) {
+    return undefined;
+  }
+  const reaching = new Set(
+    grounding.symbolReferents
+      .filter((entry) => entry.files.includes(file))
+      .map((entry) => entry.resolved.toLowerCase()),
+  );
+  if (reaching.size === 0) {
+    return undefined;
+  }
+  const ranges = locate(file);
+  if (ranges === undefined) {
+    return undefined;
+  }
+  const found = ranges.filter((range) => reaching.has(range.name.toLowerCase()));
+  const placed = new Set(found.map((range) => range.name.toLowerCase()));
+  return placed.size < reaching.size ? undefined : found;
+}
+
+/** A contested file the candidate can still be granted the rest of. */
+interface PartiallyHeldFile {
+  file: string;
+  /** The lines its holders occupy, withheld from the candidate. */
+  ranges: LineRange[];
+  /**
+   * The same withholding stated as the holders' symbols.
+   *
+   * This is what reaches the admission, because it is the shape enforcement
+   * already understands: a withheld symbol with `locations` in a granted file
+   * is divided out of that file's patch at the hunk.
+   */
+  symbols: DeferredResource[];
+}
+
+/** One withheld resource per symbol a holder occupies in a shared file. */
+function withheldSymbolsFor(
+  file: string,
+  spans: readonly NamedRange[],
+  contest: DeferredResource,
+): DeferredResource[] {
+  const placed = new Map<string, DeferredResourceLocation[]>();
+  for (const span of spans) {
+    placed.set(span.name, [
+      ...(placed.get(span.name) ?? []),
+      { file, startLine: span.startLine, endLine: span.endLine },
+    ]);
+  }
+  return [...placed]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, locations]): DeferredResource => ({
+      resourceType: "symbol",
+      resourceId: name,
+      heldBy: contest.heldBy,
+      reason:
+        `held inside ${file} by ${contest.heldBy.join(", ")}, which is the ` +
+        `only part of that file being withheld: ${contest.reason}`,
+      locations,
+    }));
+}
+
 /** Intent evidence is advisory; only structural evidence controls scheduling. */
 export function structuralConflict(assessment: ConflictAssessment): boolean {
   return assessment.evidence.some(
@@ -257,7 +375,7 @@ export class PlanAdmissionController {
    * wait for all five is throughput thrown away for no safety gained.
    */
   public admit(input: PlanAdmissionInput): PlanAdmission {
-    const whole = this.decide(input.plan, input);
+    const whole = this.decide(input.plan, input, this.occupancy(input));
     if (planAdmissionApproved(whole) || input.partialAdmission === false) {
       return whole;
     }
@@ -280,10 +398,12 @@ export class PlanAdmissionController {
    * impact that no resource removal can undo — the original all-or-nothing
    * answer stands.
    *
-   * Files are withheld first, because a file can always be held to: the result
+   * Files are settled first, because a file can always be held to: the result
    * is a set of file patches, and a patch on a file that was not granted is
-   * refused on its path alone. Only when dropping the contested files is not
-   * enough — a symbol both plans still claim, typically — is the finer
+   * refused on its path alone. A contested file is not automatically a lost
+   * one, though — where its holders occupy lines the index can place, only
+   * those lines are withheld and the path is granted. Only when what is left
+   * still collides — a symbol both plans claim, typically — is the finer
    * withholding tried, and only where the index can say which lines that
    * symbol occupies in every file being granted. Where it cannot, the plan
    * waits, because an instruction the control plane cannot check is not one.
@@ -300,18 +420,33 @@ export class PlanAdmissionController {
     input: PlanAdmissionInput,
     whole: PlanAdmission,
   ): PlanAdmission | undefined {
-    const contested = this.contestedFiles(input);
+    const occupancy = this.occupancy(input);
+    const contested = this.contestedFiles(input, occupancy);
+    // A contested file is not automatically a file lost. Where every holder of
+    // it occupies known lines and the candidate really named the path, the
+    // contest is over those lines and not over the file, so what is withheld
+    // is the holder's own code and the rest of the file is granted.
+    const { whole: lost, partial: shared } = this.partitionContested(
+      input,
+      contested,
+    );
+    const narrowed = this.occupancy(
+      input,
+      new Map(shared.map((entry) => [entry.file, entry.ranges])),
+    );
     // No contested file is not the end of it: what collides may be finer than
     // a file, and often is — two plans naming one symbol in a file only one of
     // them declared is exactly what ownership exists to catch.
-    let deferred =
-      contested.length === 0
+    let deferred = [
+      ...(lost.length === 0
         ? []
         : [
-            ...contested,
-            ...this.derivedFrom(input, contested),
-            ...this.carriedSymbols(input, contested),
-          ];
+            ...lost,
+            ...this.derivedFrom(input, lost),
+            ...this.carriedSymbols(input, lost, occupancy),
+          ]),
+      ...shared.flatMap((entry) => entry.symbols),
+    ];
     let reduced =
       deferred.length === 0 ? input.plan : reducePlanScope(input.plan, deferred);
     // Nothing left to work on: the holder would burn an agent run to produce
@@ -319,13 +454,14 @@ export class PlanAdmissionController {
     if (reduced.expectedFiles.length === 0) {
       return undefined;
     }
-    let partial = deferred.length === 0 ? whole : this.decide(reduced, input);
+    let partial =
+      deferred.length === 0 ? whole : this.decide(reduced, input, narrowed);
 
     // Dropping the contested files was not enough, or there were none to drop.
     // Withholding a symbol is only offered when every file still being granted
     // can be read closely enough to tell whether a patch reached into it.
     if (!planAdmissionApproved(partial)) {
-      const symbols = this.contestedSymbols(input, reduced);
+      const symbols = this.contestedSymbols(input, reduced, narrowed);
       if (symbols.length === 0) {
         return undefined;
       }
@@ -334,7 +470,7 @@ export class PlanAdmissionController {
       if (reduced.expectedFiles.length === 0) {
         return undefined;
       }
-      partial = this.decide(reduced, input);
+      partial = this.decide(reduced, input, narrowed);
     }
     if (!planAdmissionApproved(partial) || deferred.length === 0) {
       return undefined;
@@ -361,6 +497,131 @@ export class PlanAdmissionController {
           )
           .join(", "),
     };
+  }
+
+  /**
+   * How every plan in this admission is read at sub-file granularity.
+   *
+   * One function serves both halves of arbitration deliberately. Conflict
+   * scoring and ownership have to agree about what a plan occupies, or a file
+   * cleared by one would be refused by the other and partial admission would
+   * offer something it could not deliver.
+   *
+   * `narrowed` is the candidate's side of a partial grant: the lines withheld
+   * from it in a file it is otherwise being given. Subtracting them is what
+   * turns "this plan wants total.js" into "this plan wants total.js except
+   * lines 40–80", which is the claim that no longer intersects the holder's.
+   * An empty remainder is left empty — nothing of the file survived, and the
+   * caller must not read that as an unrestricted claim.
+   */
+  private occupancy(
+    input: PlanAdmissionInput,
+    narrowed: ReadonlyMap<string, readonly LineRange[]> = new Map(),
+  ): FileOccupancy {
+    const locate = input.symbolRangesInFile;
+    const candidate = input.plan.taskId;
+    return (plan, file) => {
+      const spans = occupiedSpans(plan, file, locate);
+      const held = plan.taskId === candidate ? narrowed.get(file) : undefined;
+      if (held === undefined || held.length === 0) {
+        return spans === undefined ? undefined : normalizeRanges(spans);
+      }
+      return subtractRanges(spans ?? [WHOLE_FILE], held);
+    };
+  }
+
+  /**
+   * The file claims ownership should issue leases against, beyond the bare
+   * paths a plan declared.
+   *
+   * Two shapes come out of this. A file the plan reaches only through a
+   * grounded symbol referent gets a lease it would not otherwise have had, in
+   * ranged form — it can never refuse anything a whole-file lease would have
+   * let through, because there was no lease before. And a declared file whose
+   * claim has been narrowed by a partial grant gets its existing lease cut
+   * down to the lines actually being granted.
+   */
+  private fileClaims(
+    plan: AgentPlan,
+    occupancy: FileOccupancy,
+  ): PlanFileClaim[] {
+    const claims: PlanFileClaim[] = [];
+    for (const file of arbitrationFiles(plan)) {
+      const ranges = occupancy(plan, file);
+      if (ranges === undefined) {
+        continue;
+      }
+      claims.push({ file, ranges });
+    }
+    return claims;
+  }
+
+  /**
+   * Splits the contested files into the ones that must be lost whole and the
+   * ones that can be granted with the holder's lines cut out.
+   *
+   * Three things have to hold before a file can be shared, and each of them is
+   * about being able to *enforce* the split rather than merely announce it:
+   *
+   * - the candidate must have declared the path itself. What a division holds
+   *   back are hunks of a patch on that path, and a path the plan only reached
+   *   through a misname is not one any patch will carry;
+   * - every holder must be visible and occupy known lines. A holder whose
+   *   plan this admission cannot see, or who owns the whole file, leaves the
+   *   remainder undefined;
+   * - the holder's lines must belong to symbols the index can name, because
+   *   the enforcement pass re-derives them from the base index by name rather
+   *   than trusting a decision that travelled over the wire.
+   *
+   * The withholding is then expressed as those symbols, not as the file. That
+   * is not a presentational choice: a withheld symbol carrying `locations` is
+   * exactly the shape `splitChangeSet` already divides a granted file's patch
+   * by, so the sub-file grant is enforced by machinery that was already there
+   * and already tested against real `git apply`.
+   */
+  private partitionContested(
+    input: PlanAdmissionInput,
+    contested: readonly DeferredResource[],
+  ): { whole: DeferredResource[]; partial: PartiallyHeldFile[] } {
+    const locate = input.symbolRangesInFile;
+    const declared = new Set(uniqueRepositoryPaths(input.plan.expectedFiles));
+    const misnamed = new Set(
+      (input.plan.grounding?.fileReferents ?? []).map((entry) => entry.declared),
+    );
+    const lost: DeferredResource[] = [];
+    const shared: PartiallyHeldFile[] = [];
+
+    for (const entry of contested) {
+      const file = entry.resourceId;
+      if (!declared.has(file) || misnamed.has(file)) {
+        lost.push(entry);
+        continue;
+      }
+      const spans: NamedRange[] = [];
+      let bounded = entry.heldBy.length > 0;
+      for (const holder of entry.heldBy) {
+        const active = input.active.find((plan) => plan.taskId === holder);
+        const held =
+          active === undefined
+            ? undefined
+            : occupiedSpans(active.plan, file, locate);
+        if (held === undefined || held.length === 0) {
+          bounded = false;
+          break;
+        }
+        spans.push(...held);
+      }
+      if (!bounded || spans.length === 0) {
+        lost.push(entry);
+        continue;
+      }
+      shared.push({
+        file,
+        ranges: normalizeRanges(spans),
+        symbols: withheldSymbolsFor(file, spans, entry),
+      });
+    }
+    return { whole: lost, partial: shared };
   }
 
   /**
@@ -441,6 +702,7 @@ export class PlanAdmissionController {
   private carriedSymbols(
     input: PlanAdmissionInput,
     withheldFiles: readonly DeferredResource[],
+    occupancy: FileOccupancy,
   ): DeferredResource[] {
     const grounding = input.plan.grounding;
     const locate = input.symbolRangesInFile;
@@ -460,11 +722,16 @@ export class PlanAdmissionController {
         .flatMap((entry) => entry ?? [])
         .map((range) => range.name.toLowerCase()),
     );
-    const contested = this.contested(input, input.plan, {
-      resourceType: "symbol",
-      evidence: "symbol_overlap",
-      declared: input.plan.expectedSymbols,
-    });
+    const contested = this.contested(
+      input,
+      input.plan,
+      {
+        resourceType: "symbol",
+        evidence: "symbol_overlap",
+        declared: input.plan.expectedSymbols,
+      },
+      occupancy,
+    );
     return contested.filter((resource) => {
       const referents = grounding.symbolReferents.filter(
         (entry) => entry.declared === resource.resourceId,
@@ -480,12 +747,20 @@ export class PlanAdmissionController {
   }
 
   /** Declared files that executing work is holding, with who holds each. */
-  private contestedFiles(input: PlanAdmissionInput): DeferredResource[] {
-    return this.contested(input, input.plan, {
-      resourceType: "file",
-      evidence: "file_overlap",
-      declared: uniqueRepositoryPaths(input.plan.expectedFiles),
-    });
+  private contestedFiles(
+    input: PlanAdmissionInput,
+    occupancy: FileOccupancy,
+  ): DeferredResource[] {
+    return this.contested(
+      input,
+      input.plan,
+      {
+        resourceType: "file",
+        evidence: "file_overlap",
+        declared: uniqueRepositoryPaths(input.plan.expectedFiles),
+      },
+      occupancy,
+    );
   }
 
   /**
@@ -502,6 +777,7 @@ export class PlanAdmissionController {
   private contestedSymbols(
     input: PlanAdmissionInput,
     reduced: AgentPlan,
+    occupancy: FileOccupancy,
   ): DeferredResource[] {
     const locate = input.symbolRangesInFile;
     if (locate === undefined) {
@@ -511,11 +787,16 @@ export class PlanAdmissionController {
     if (ranges.some((entry) => entry === undefined)) {
       return [];
     }
-    const contested = this.contested(input, reduced, {
-      resourceType: "symbol",
-      evidence: "symbol_overlap",
-      declared: reduced.expectedSymbols,
-    });
+    const contested = this.contested(
+      input,
+      reduced,
+      {
+        resourceType: "symbol",
+        evidence: "symbol_overlap",
+        declared: reduced.expectedSymbols,
+      },
+      occupancy,
+    );
     const placed = new Map<string, DeferredResourceLocation[]>();
     reduced.expectedFiles.forEach((file, index) => {
       for (const range of ranges[index] ?? []) {
@@ -560,6 +841,7 @@ export class PlanAdmissionController {
       evidence: ConflictEvidence["kind"];
       declared: readonly string[];
     },
+    occupancy: FileOccupancy,
   ): DeferredResource[] {
     const taskId = candidate.taskId;
     const others = input.active.filter((entry) => entry.taskId !== taskId);
@@ -578,7 +860,11 @@ export class PlanAdmissionController {
     };
 
     for (const entry of others) {
-      const assessment = this.conflicts.assess(candidate, entry.plan);
+      const assessment = this.conflicts.assess(
+        candidate,
+        entry.plan,
+        occupancy,
+      );
       if (assessment === undefined || !structuralConflict(assessment)) {
         continue;
       }
@@ -595,9 +881,13 @@ export class PlanAdmissionController {
         }
       }
     }
-    for (const lease of this.seededOwnership(input, others).blockersFor(
-      candidate,
-    )) {
+    for (const lease of this.seededOwnership(
+      input,
+      others,
+      occupancy,
+    ).blockersFor(candidate, {
+      fileClaims: this.fileClaims(candidate, occupancy),
+    })) {
       if (lease.resourceType !== kind.resourceType) {
         continue;
       }
@@ -675,12 +965,18 @@ export class PlanAdmissionController {
   private seededOwnership(
     input: PlanAdmissionInput,
     others: readonly ActivePlan[],
+    occupancy: FileOccupancy,
   ): OwnershipService {
     const ownership = this.ownershipFor();
     for (const entry of others) {
       try {
         ownership.acquire(entry.plan, entry.agentId, input.baseVersion, {
           approvedResources: approvedSchemaResources(entry.plan),
+          // Every plan is leased at the same granularity, not just the
+          // candidate. A holder narrowed only on the way in is a holder whose
+          // lease still says the whole file, and the second half of this
+          // change would have nothing to read.
+          fileClaims: this.fileClaims(entry.plan, occupancy),
         });
       } catch {
         // See decide(): a collision between two already-admitted plans is not
@@ -690,7 +986,11 @@ export class PlanAdmissionController {
     return ownership;
   }
 
-  private decide(plan: AgentPlan, input: PlanAdmissionInput): PlanAdmission {
+  private decide(
+    plan: AgentPlan,
+    input: PlanAdmissionInput,
+    occupancy: FileOccupancy = () => undefined,
+  ): PlanAdmission {
     const taskId = plan.taskId;
     const retryAfterMs = input.retryAfterMs ?? DEFAULT_PLAN_RETRY_MS;
     const shared = {
@@ -760,7 +1060,7 @@ export class PlanAdmissionController {
     }
 
     const assessments = others
-      .map((entry) => this.conflicts.assess(plan, entry.plan))
+      .map((entry) => this.conflicts.assess(plan, entry.plan, occupancy))
       .filter((entry): entry is ConflictAssessment => entry !== undefined);
     const structural = assessments.filter(structuralConflict);
     const blocking = structural.filter(
@@ -857,12 +1157,13 @@ export class PlanAdmissionController {
     // while the other was invisible — a lapsed lease, say. Conflict assessment
     // above already covered the candidate against both, so seeding continues
     // rather than failing the admission on someone else's state.
-    const ownership = this.seededOwnership(input, others);
+    const ownership = this.seededOwnership(input, others, occupancy);
 
     let grants: ResourceLease[];
     try {
       grants = ownership.acquire(plan, input.agentId, input.baseVersion, {
         approvedResources: approvedSchemaResources(plan),
+        fileClaims: this.fileClaims(plan, occupancy),
       });
     } catch (error) {
       if (error instanceof OwnershipConflictError) {

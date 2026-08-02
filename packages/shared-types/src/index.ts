@@ -140,6 +140,18 @@ export type ResourceType =
   | "test"
   | "service";
 
+/**
+ * A span of lines in one file, measured at the revision it was taken from.
+ *
+ * Both ends are 1-based and inclusive. This is the only coordinate a diff and
+ * a repository index have in common, which is what makes it the unit an
+ * ownership claim can be both *stated* and *checked* in.
+ */
+export interface LineRange {
+  startLine: number;
+  endLine: number;
+}
+
 export interface ResourceLease {
   leaseId: LeaseId;
   resourceType: ResourceType;
@@ -149,6 +161,17 @@ export interface ResourceLease {
   mode: OwnershipMode;
   baseVersion: number;
   expiresAt: string;
+  /**
+   * The lines of the resource this lease covers, when the claim behind it is
+   * narrower than the whole resource.
+   *
+   * Absent means all of it, which is what every lease meant before line-range
+   * leases existed and what every lease still means for a file a plan named
+   * outright. It is present for a file a plan reaches only through code the
+   * index could place — there the plan's claim really is a set of spans, and
+   * two such claims that do not intersect are not a contest at all.
+   */
+  ranges?: LineRange[];
 }
 
 export type ConflictDisposition =
@@ -222,10 +245,8 @@ export type PlanAdmissionStatus =
  * common, which is what makes this the unit a withholding can be *checked* in
  * rather than merely stated. Both ends are 1-based and inclusive.
  */
-export interface DeferredResourceLocation {
+export interface DeferredResourceLocation extends LineRange {
   file: string;
-  startLine: number;
-  endLine: number;
 }
 
 /**

@@ -104,3 +104,128 @@ test("active work can renew ownership before a long execution expires", () => {
     OwnershipConflictError,
   );
 });
+
+/**
+ * A lease on part of a file.
+ *
+ * An exclusive lease has always meant the whole path, so a task occupying one
+ * function refused every other task the rest of the file. A claim that says
+ * which lines it means can be answered with the only question that matters —
+ * do these two claims meet — and a claim that says nothing still means all of
+ * them, so nothing that behaved one way before behaves differently now.
+ */
+
+test("two claims on different lines of one file are both granted", () => {
+  const service = new OwnershipService();
+  service.acquire(plan("task_a"), "agent_a", 1, {
+    fileClaims: [
+      { file: "src/shared.ts", ranges: [{ startLine: 40, endLine: 80 }] },
+    ],
+  });
+  const second = service.acquire(plan("task_b"), "agent_b", 1, {
+    fileClaims: [
+      { file: "src/shared.ts", ranges: [{ startLine: 100, endLine: 140 }] },
+    ],
+  });
+
+  assert.equal(second.length, 1);
+  assert.deepEqual(second[0]?.ranges, [{ startLine: 100, endLine: 140 }]);
+});
+
+test("claims that meet on one line still collide", () => {
+  const service = new OwnershipService();
+  service.acquire(plan("task_a"), "agent_a", 1, {
+    fileClaims: [
+      { file: "src/shared.ts", ranges: [{ startLine: 40, endLine: 80 }] },
+    ],
+  });
+
+  assert.throws(
+    () =>
+      service.acquire(plan("task_b"), "agent_b", 1, {
+        fileClaims: [
+          { file: "src/shared.ts", ranges: [{ startLine: 80, endLine: 120 }] },
+        ],
+      }),
+    OwnershipConflictError,
+  );
+});
+
+test("a claim that names no lines still means the whole file", () => {
+  // Both directions: the narrow lease does not let a whole-file claim past it,
+  // and a whole-file lease does not let a narrow claim past it either.
+  const held = new OwnershipService();
+  held.acquire(plan("task_a"), "agent_a", 1, {
+    fileClaims: [
+      { file: "src/shared.ts", ranges: [{ startLine: 40, endLine: 80 }] },
+    ],
+  });
+  assert.throws(
+    () => held.acquire(plan("task_b"), "agent_b", 1),
+    OwnershipConflictError,
+  );
+
+  const whole = new OwnershipService();
+  whole.acquire(plan("task_a"), "agent_a", 1);
+  assert.throws(
+    () =>
+      whole.acquire(plan("task_b"), "agent_b", 1, {
+        fileClaims: [
+          { file: "src/shared.ts", ranges: [{ startLine: 40, endLine: 80 }] },
+        ],
+      }),
+    OwnershipConflictError,
+  );
+});
+
+test("a claim can lease a file the plan never named", () => {
+  // This is how work that reaches code through a grounded referent takes a
+  // lease on the file that code really lives in — narrow, because that reach
+  // is exactly as wide as the symbols the index placed.
+  const service = new OwnershipService();
+  const leases = service.acquire(plan("task_a"), "agent_a", 1, {
+    fileClaims: [
+      { file: "src/pricing/total.js", ranges: [{ startLine: 4, endLine: 11 }] },
+    ],
+  });
+
+  assert.deepEqual(
+    leases.map((lease) => lease.resourceId).sort(),
+    ["src/pricing/total.js", "src/shared.ts"],
+  );
+  assert.equal(
+    service
+      .blockersFor(plan("task_b"), {
+        fileClaims: [
+          {
+            file: "src/pricing/total.js",
+            ranges: [{ startLine: 20, endLine: 24 }],
+          },
+        ],
+      })
+      .filter((lease) => lease.resourceId === "src/pricing/total.js").length,
+    0,
+  );
+});
+
+test("blockers are reported at the same granularity leases are issued", () => {
+  const service = new OwnershipService();
+  service.acquire(plan("task_a"), "agent_a", 1, {
+    fileClaims: [
+      { file: "src/shared.ts", ranges: [{ startLine: 40, endLine: 80 }] },
+    ],
+  });
+
+  assert.equal(
+    service.blockersFor(plan("task_b"), {
+      fileClaims: [
+        { file: "src/shared.ts", ranges: [{ startLine: 10, endLine: 20 }] },
+      ],
+    }).length,
+    0,
+  );
+  // And a plan asking for the whole file is still told who is in the way.
+  const blockers = service.blockersFor(plan("task_b"));
+  assert.equal(blockers.length, 1);
+  assert.deepEqual(blockers[0]?.ranges, [{ startLine: 40, endLine: 80 }]);
+});

@@ -7,6 +7,12 @@ import {
   type ResourceType,
 } from "@coord/shared-types";
 
+import {
+  normalizeRanges,
+  rangesIntersect,
+  type LineRange,
+} from "./ranges.js";
+
 export class OwnershipConflictError extends Error {
   public constructor(
     public readonly resourceId: string,
@@ -35,21 +41,77 @@ export interface PlannedResource {
   type: ResourceType;
   id: string;
   mode: OwnershipMode;
+  /**
+   * The lines of the resource this claim covers. Absent means all of it.
+   *
+   * Only ever set for a file, and only where the plan's reach into that file
+   * is genuinely a set of spans rather than the whole path — see
+   * {@link PlanFileClaim}.
+   */
+  ranges?: readonly LineRange[];
+}
+
+/**
+ * A plan's claim on one file, where the file alone does not describe it.
+ *
+ * Two things are said here that `expectedFiles` cannot say. A claim on a file
+ * the plan never named is how work that reaches code through a grounded
+ * referent takes a lease on the file that code really lives in. And `ranges`
+ * is how such a lease stays narrower than the file, so a second plan claiming
+ * different lines of it is not refused on the path alone.
+ *
+ * Deciding *which* files these cover, and how narrow each one may honestly be,
+ * is not the policy's call — it needs the repository index. The policy is
+ * handed the answer.
+ */
+export interface PlanFileClaim {
+  file: string;
+  /** Absent means the whole file, exactly as naming it would. */
+  ranges?: readonly LineRange[];
+}
+
+export interface PlanScopeContext {
+  fileClaims?: readonly PlanFileClaim[];
 }
 
 export interface OwnershipPolicy {
-  resourcesForPlan(plan: AgentPlan): PlannedResource[];
+  resourcesForPlan(
+    plan: AgentPlan,
+    context?: PlanScopeContext,
+  ): PlannedResource[];
+}
+
+/** Documentation and text files are edited alongside each other safely. */
+function fileMode(id: string): OwnershipMode {
+  return /\.(?:md|mdx|txt)$/iu.test(id) ? "shared" : "exclusive";
 }
 
 export class DefaultOwnershipPolicy implements OwnershipPolicy {
-  public resourcesForPlan(plan: AgentPlan): PlannedResource[] {
+  public resourcesForPlan(
+    plan: AgentPlan,
+    context: PlanScopeContext = {},
+  ): PlannedResource[] {
     const complete = completeAgentPlan(plan);
+    // A claim narrows the lease on a file the plan named, and adds one for a
+    // file it did not. Both are the same statement — "this is what the plan
+    // reaches in here" — so both come from the same list.
+    const claims = new Map(
+      (context.fileClaims ?? []).map((claim) => [claim.file, claim]),
+    );
+    const declared = new Set(complete.expectedFiles);
     const resources: PlannedResource[] = [
-      ...complete.expectedFiles.map((id): PlannedResource => ({
-        type: "file",
-        id,
-        mode: /\.(?:md|mdx|txt)$/iu.test(id) ? "shared" : "exclusive",
-      })),
+      ...[
+        ...complete.expectedFiles,
+        ...[...claims.keys()].filter((file) => !declared.has(file)).sort(),
+      ].map((id): PlannedResource => {
+        const ranges = claims.get(id)?.ranges;
+        return {
+          type: "file",
+          id,
+          mode: fileMode(id),
+          ...(ranges === undefined ? {} : { ranges }),
+        };
+      }),
       ...complete.expectedSymbols.map((id): PlannedResource => ({
         type: "symbol",
         id,
@@ -106,7 +168,30 @@ function compatible(first: OwnershipMode, second: OwnershipMode): boolean {
   return false;
 }
 
-export interface AcquireOwnershipOptions {
+/**
+ * Whether a live lease stands in the way of a new claim on the same resource.
+ *
+ * Mode is asked first and settles almost every case. What it cannot settle is
+ * two exclusive claims on one file that are not actually about the same code:
+ * an exclusive lease has always meant the whole path, so a plan holding forty
+ * lines of a file refused every other plan the other nine hundred. When both
+ * sides say which lines they mean, the honest answer is whether those lines
+ * meet — and a claim that does not say still means all of them, so nothing
+ * that behaved one way before behaves differently now.
+ */
+function blocks(existing: ResourceLease, claim: PlannedResource): boolean {
+  if (compatible(existing.mode, claim.mode)) {
+    return false;
+  }
+  const held = existing.ranges;
+  const wanted = claim.ranges;
+  if (held === undefined || wanted === undefined) {
+    return true;
+  }
+  return rangesIntersect(held, wanted);
+}
+
+export interface AcquireOwnershipOptions extends PlanScopeContext {
   /** Resource keys approved by a human, formatted as `type:id`. */
   approvedResources?: ReadonlySet<string>;
 }
@@ -135,7 +220,11 @@ export class OwnershipService {
     options: AcquireOwnershipOptions = {},
   ): ResourceLease[] {
     this.expireLeases();
-    const resources = this.policy.resourcesForPlan(plan);
+    const resources = this.policy.resourcesForPlan(plan, {
+      ...(options.fileClaims === undefined
+        ? {}
+        : { fileClaims: options.fileClaims }),
+    });
     const pending: PlannedResource[] = [];
 
     for (const resource of resources) {
@@ -151,9 +240,7 @@ export class OwnershipService {
         throw new OwnershipApprovalRequiredError(resource.type, resource.id);
       }
       const blocker = existing.find(
-        (lease) =>
-          lease.taskId !== plan.taskId &&
-          !compatible(lease.mode, resource.mode),
+        (lease) => lease.taskId !== plan.taskId && blocks(lease, resource),
       );
       if (blocker !== undefined) {
         throw new OwnershipConflictError(resource.id, blocker);
@@ -173,6 +260,9 @@ export class OwnershipService {
       mode: resource.mode,
       baseVersion,
       expiresAt,
+      ...(resource.ranges === undefined
+        ? {}
+        : { ranges: normalizeRanges(resource.ranges) }),
     }));
 
     for (const lease of acquired) {
@@ -224,15 +314,15 @@ export class OwnershipService {
     return renewed;
   }
 
-  public blockersFor(plan: AgentPlan): ResourceLease[] {
+  public blockersFor(
+    plan: AgentPlan,
+    context: PlanScopeContext = {},
+  ): ResourceLease[] {
     this.expireLeases();
     const blockers: ResourceLease[] = [];
-    for (const resource of this.policy.resourcesForPlan(plan)) {
+    for (const resource of this.policy.resourcesForPlan(plan, context)) {
       for (const lease of this.leases.get(this.key(resource.type, resource.id)) ?? []) {
-        if (
-          lease.taskId !== plan.taskId &&
-          !compatible(lease.mode, resource.mode)
-        ) {
+        if (lease.taskId !== plan.taskId && blocks(lease, resource)) {
           blockers.push(lease);
         }
       }
