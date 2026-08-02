@@ -133,6 +133,30 @@ test("only the task workspace is bind-mounted into the container", () => {
   assert.equal(flagValue(args, "--workdir"), "/workspace");
 });
 
+test("a workspace subdirectory is mapped to the container working directory", () => {
+  const manager = new DockerWorkspaceManager({ image: "coord/agent:1" });
+  const cwd = path.join(WORKSPACE_PATH, "packages", "api");
+  const args = manager.buildRunArgs({ ...AGENT_LAUNCH, cwd }, WORKSPACE);
+
+  assert.equal(flagValue(args, "--workdir"), "/workspace/packages/api");
+});
+
+test("container working directories cannot escape their workspace", () => {
+  const manager = new DockerWorkspaceManager({ image: "coord/agent:1" });
+  assert.throws(
+    () =>
+      manager.buildRunArgs(
+        { ...AGENT_LAUNCH, cwd: path.resolve(WORKSPACE_PATH, "..", "outside") },
+        WORKSPACE,
+      ),
+    /escapes the workspace/u,
+  );
+  assert.throws(
+    () => manager.buildRunArgs({ ...AGENT_LAUNCH, cwd: "/host/path" }),
+    /cannot be mapped without a workspace/u,
+  );
+});
+
 test("the worktree git pointer is masked inside the container", () => {
   const manager = new DockerWorkspaceManager({ image: "coord/agent:1" });
   const args = manager.buildRunArgs(AGENT_LAUNCH, WORKSPACE);

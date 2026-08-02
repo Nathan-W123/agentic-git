@@ -344,6 +344,28 @@ test("times out an agent that never answers", async () => {
   }
 });
 
+test("invalid process limits and NUL-bearing launches fail before spawning", async () => {
+  const fixture = await createFixture();
+  try {
+    assert.throws(
+      () => createAdapter(fixture, "ok", { requestTimeoutMs: 0 }),
+      /requestTimeoutMs must be a positive integer/u,
+    );
+    assert.throws(
+      () =>
+        new GenericCliAdapter({
+          agentId: TASK.agentId,
+          launch: { command: process.execPath, args: ["bad\0argument"] },
+          repository: fixture.repository,
+          workspaces: fixture.workspaces,
+        }),
+      /arguments must contain no NUL/u,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("collectChanges refuses a session that never completed", async () => {
   const fixture = await createFixture();
   try {

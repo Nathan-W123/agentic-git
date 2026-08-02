@@ -115,6 +115,49 @@ function toMountSource(workspacePath: string): string {
   return normalized;
 }
 
+function containerWorkingDirectory(
+  spec: SandboxLaunchSpec,
+  workspace: TaskWorkspace | undefined,
+  options: ResolvedOptions,
+): string {
+  if (workspace === undefined) {
+    if (spec.cwd !== undefined) {
+      throw new Error(
+        "A host working directory cannot be mapped without a workspace",
+      );
+    }
+    return options.tmpfs[0] ?? "/";
+  }
+  if (spec.cwd === undefined) {
+    return options.containerWorkspacePath;
+  }
+  if (spec.cwd.includes("\0")) {
+    throw new Error("Sandbox working directory must not contain NUL bytes");
+  }
+
+  const root = path.resolve(workspace.path);
+  const requested = path.isAbsolute(spec.cwd)
+    ? path.resolve(spec.cwd)
+    : path.resolve(root, spec.cwd);
+  const relative = path.relative(root, requested);
+  if (
+    relative === ".." ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  ) {
+    throw new Error(
+      `Sandbox working directory escapes the workspace: ${spec.cwd}`,
+    );
+  }
+  if (relative.length === 0) {
+    return options.containerWorkspacePath;
+  }
+  return path.posix.join(
+    options.containerWorkspacePath,
+    relative.replaceAll(path.sep, "/"),
+  );
+}
+
 function resolveExtraArgs(values: readonly string[]): string[] {
   const resolved: string[] = [];
   for (let index = 0; index < values.length; index += 2) {
@@ -243,10 +286,11 @@ export class DockerWorkspaceManager
     workspace?: TaskWorkspace,
   ): string[] {
     const options = this.options;
-    const workingDirectory =
-      workspace === undefined
-        ? options.tmpfs[0] ?? "/"
-        : options.containerWorkspacePath;
+    const workingDirectory = containerWorkingDirectory(
+      spec,
+      workspace,
+      options,
+    );
 
     return [
       "run",

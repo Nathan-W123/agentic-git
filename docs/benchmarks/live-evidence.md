@@ -144,12 +144,13 @@ have to spend, not the clock.
 ```powershell
 $env:COORD_AGENT_CMD = "<path to codex>"
 $env:COORD_AGENT_ADAPTER = "codex"
-$env:COORD_CODEX_SANDBOX = "danger-full-access"
 $env:COORD_AGENT_TASKS = "all"
 node apps/cli/dist/index.js benchmark --scenario=live-pricing --live --json
 ```
 
-`COORD_CODEX_SANDBOX` is required on Windows. Under `workspace-write` Codex
-reports a missing sandbox helper, degrades to read-only, and still exits 0 —
-the adapter detects that and raises `CodexWriteDeniedError` rather than
-recording an empty change set as success.
+`workspace-write` is the default. On native Windows the adapter explicitly
+selects Codex's preferred `elevated` backend while continuing to ignore other
+personal configuration. If scoped writes are still refused, the adapter raises
+`CodexWriteDeniedError` rather than recording an empty change set as success.
+`COORD_CODEX_SANDBOX=danger-full-access` is reserved for benchmark hosts that
+are already isolated by an external container or VM.

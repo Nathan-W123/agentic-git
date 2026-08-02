@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -32,6 +32,33 @@ test("a spawned child never sees NODE_TEST_CONTEXT", async () => {
   assert.equal(result.exitCode, 0);
   assert.equal(result.stdout, "undefined");
 });
+
+test(
+  "Windows batch shims run with argument boundaries preserved",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "coord batch test-"));
+    try {
+      const shim = path.join(root, "echo arguments.cmd");
+      await writeFile(
+        shim,
+        '@echo off\r\n<nul set /p "=%~1|%~2"\r\nexit /b 0\r\n',
+        "utf8",
+      );
+
+      const result = await runProcess(shim, ["alpha", "two words"]);
+
+      assert.equal(result.exitCode, 0, result.stderr);
+      assert.equal(result.stdout, "alpha|two words");
+      await assert.rejects(
+        runProcess(shim, ["safe&whoami", "ignored"]),
+        /cannot contain quotes.*shell control operators/u,
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 /**
  * The regression this guards: a nested `node --test` that inherits
@@ -80,6 +107,73 @@ test("a process that exceeds its deadline is terminated", async () => {
   assert.equal(result.timedOut, true);
   assert.match(result.stderr, /timed out/u);
 });
+
+test(
+  "a Windows batch timeout cannot be held open by a native child",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "coord-tree-kill-"));
+    try {
+      const shim = path.join(root, "launch-child.cmd");
+      const script = path.join(root, "child.mjs");
+      const pidFile = path.join(root, "child.pid");
+      await writeFile(
+        shim,
+        '@echo off\r\n"%~1" "%~2" "%~3"\r\n',
+        "utf8",
+      );
+      await writeFile(
+        script,
+        [
+          'import { writeFileSync } from "node:fs";',
+          "writeFileSync(process.argv[2], String(process.pid));",
+          // Never exits on its own. If the wrapper's descendant survived and
+          // kept the inherited stdio handles open, `close` would never fire
+          // and this test would hang rather than merely run slowly.
+          "setInterval(() => undefined, 1000);",
+        ].join("\n"),
+        "utf8",
+      );
+
+      const result = await runProcess(
+        shim,
+        [process.execPath, script, pidFile],
+        { timeoutMs: 500 },
+      );
+      const childPid = Number.parseInt(await readFile(pidFile, "utf8"), 10);
+
+      assert.equal(result.exitCode, 124);
+      assert.equal(result.timedOut, true);
+      // Deliberately not a tight wall-clock bound. Terminating the tree costs
+      // a synchronous taskkill.exe launch, which is roughly a second on some
+      // Windows hosts; that is teardown cost, not a missed deadline. The
+      // claim under test is that the call returns at all and leaves nothing
+      // behind, which the immortal child and the ESRCH check below establish.
+      assert.ok(
+        result.durationMs < 30_000,
+        `timeout took ${result.durationMs} ms`,
+      );
+      const deadline = Date.now() + 3_000;
+      while (Date.now() < deadline) {
+        try {
+          process.kill(childPid, 0);
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        } catch {
+          break;
+        }
+      }
+      assert.throws(
+        () => process.kill(childPid, 0),
+        (error: unknown) =>
+          error instanceof Error &&
+          "code" in error &&
+          (error as NodeJS.ErrnoException).code === "ESRCH",
+      );
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("captured output is bounded", async () => {
   const result = await runProcess(

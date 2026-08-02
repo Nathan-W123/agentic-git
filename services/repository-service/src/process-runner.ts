@@ -1,4 +1,6 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { existsSync } from "node:fs";
+import path from "node:path";
 
 export interface ProcessOutput {
   exitCode: number;
@@ -34,6 +36,95 @@ export interface ProcessOptions {
  * runs under a test runner.
  */
 const DENIED_CHILD_ENV = ["NODE_TEST_CONTEXT"];
+const WINDOWS_BATCH_FILE = /\.(?:bat|cmd)$/iu;
+const UNSAFE_WINDOWS_BATCH_TOKEN = /[\0\r\n"&|<>^%!]/u;
+
+interface ProcessInvocation {
+  executable: string;
+  args: string[];
+  windowsVerbatimArguments?: boolean;
+}
+
+/**
+ * Kills the wrapper and descendants together on Windows.
+ *
+ * Batch shims such as `claude.cmd` launch a native child. Killing only
+ * `cmd.exe` orphans that child, which keeps inherited stdout/stderr handles
+ * open and makes a timed-out coordinator wait indefinitely.
+ */
+function terminateProcessTree(child: ChildProcess): void {
+  if (process.platform === "win32" && child.pid !== undefined) {
+    const systemRoot =
+      process.env["SystemRoot"] ?? process.env["SYSTEMROOT"] ?? "C:\\Windows";
+    const result = spawnSync(
+      path.join(systemRoot, "System32", "taskkill.exe"),
+      ["/pid", String(child.pid), "/t", "/f"],
+      {
+        windowsHide: true,
+        stdio: "ignore",
+      },
+    );
+    if (result.error === undefined && result.status === 0) {
+      return;
+    }
+  }
+  child.kill("SIGKILL");
+}
+
+/**
+ * Windows cannot execute `.cmd` or `.bat` files directly. Launch them through
+ * `cmd.exe`, but reject expansion and control characters instead of enabling
+ * Node's argument-interpolating `shell` option.
+ */
+function processInvocation(
+  executable: string,
+  args: readonly string[],
+  cwd: string | undefined,
+  env: NodeJS.ProcessEnv,
+): ProcessInvocation {
+  if (process.platform !== "win32" || !WINDOWS_BATCH_FILE.test(executable)) {
+    return { executable, args: [...args] };
+  }
+
+  const hasPathSegment =
+    path.isAbsolute(executable) ||
+    executable.includes("\\") ||
+    executable.includes("/");
+  let resolvedExecutable = hasPathSegment
+    ? path.resolve(cwd ?? process.cwd(), executable)
+    : executable;
+  if (!hasPathSegment) {
+    const searchPath = Object.entries(env).find(
+      ([name]) => name.toUpperCase() === "PATH",
+    )?.[1];
+    for (const directory of searchPath?.split(path.delimiter) ?? []) {
+      const unquoted = directory.replace(/^"(.*)"$/u, "$1");
+      const candidate = path.resolve(unquoted, executable);
+      if (existsSync(candidate)) {
+        resolvedExecutable = candidate;
+        break;
+      }
+    }
+  }
+
+  const tokens = [resolvedExecutable, ...args];
+  for (const token of tokens) {
+    if (UNSAFE_WINDOWS_BATCH_TOKEN.test(token)) {
+      throw new Error(
+        "Windows batch commands cannot contain quotes, expansion characters, " +
+          "line breaks, or shell control operators",
+      );
+    }
+  }
+
+  const commandLine = `"${tokens.map((token) => `"${token}"`).join(" ")}"`;
+  return {
+    executable:
+      process.env["ComSpec"] ?? process.env["COMSPEC"] ?? "cmd.exe",
+    args: ["/d", "/s", "/v:off", "/c", commandLine],
+    windowsVerbatimArguments: true,
+  };
+}
 
 /** Strips harness variables that would change how a child interprets itself. */
 export function sanitizeChildEnv(
@@ -68,15 +159,25 @@ export async function runProcess(
   }
 
   const startedAt = performance.now();
+  const childEnv = sanitizeChildEnv(options.env ?? process.env);
+  const invocation = processInvocation(
+    executable,
+    args,
+    options.cwd,
+    childEnv,
+  );
 
   return await new Promise<ProcessOutput>((resolve, reject) => {
     let settled = false;
     let timedOut = false;
     let aborted = false;
-    const child = spawn(executable, [...args], {
+    let terminationRequested = false;
+    const child = spawn(invocation.executable, invocation.args, {
       cwd: options.cwd,
-      env: sanitizeChildEnv(options.env ?? process.env),
+      env: childEnv,
       shell: false,
+      windowsVerbatimArguments:
+        invocation.windowsVerbatimArguments ?? false,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -121,18 +222,32 @@ export async function runProcess(
     });
     child.stdin.on("error", () => undefined);
 
+    const terminate = () => {
+      if (terminationRequested) {
+        return;
+      }
+      terminationRequested = true;
+      terminateProcessTree(child);
+      // A descendant may have inherited these handles before a wrapper dies.
+      // Closing our ends prevents that orphan from holding `close` open after
+      // the deadline even when local policy denies process-tree termination.
+      child.stdin.destroy();
+      child.stdout.destroy();
+      child.stderr.destroy();
+    };
+
     const timeout =
       options.timeoutMs === undefined
         ? undefined
         : setTimeout(() => {
             timedOut = true;
-            child.kill("SIGKILL");
+            terminate();
           }, options.timeoutMs);
     timeout?.unref?.();
 
     const abort = () => {
       aborted = true;
-      child.kill("SIGKILL");
+      terminate();
     };
     options.signal?.addEventListener("abort", abort, { once: true });
     if (options.signal?.aborted === true) {

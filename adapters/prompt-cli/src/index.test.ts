@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -24,6 +24,7 @@ import {
   createClaudeAdapter,
   createGeminiAdapter,
   extractJsonObject,
+  resolveClaudeCommand,
   type PromptCliProcessRunner,
 } from "./index.js";
 
@@ -147,8 +148,18 @@ test("claude: plan-mode planning, skip-permissions execution, collected diff", a
   const calls: Array<{ args: readonly string[]; options: ProcessOptions }> = [];
   const runner: PromptCliProcessRunner = async (executable, args, options = {}) => {
     assert.equal(executable, "claude-test");
+    assert.ok(args.includes("--effort"));
+    assert.ok(args.includes("low"));
+    const schemaArgument = args[args.indexOf("--json-schema") + 1];
+    assert.equal(typeof schemaArgument, "string");
+    const schema = JSON.parse(schemaArgument ?? "{}") as {
+      required?: unknown;
+    };
+    assert.ok(Array.isArray(schema.required));
     calls.push({ args, options });
     if (args.includes("--permission-mode")) {
+      assert.ok(schema.required.includes("taskId"));
+      assert.ok(schema.required.includes("commands"));
       // Planning: instructions travel on stdin, never argv.
       assert.equal(args.includes(TASK.objective), false);
       assert.match(String(options.input), /coordination plan/u);
@@ -158,6 +169,8 @@ test("claude: plan-mode planning, skip-permissions execution, collected diff", a
       );
     }
     assert.ok(args.includes("--dangerously-skip-permissions"));
+    assert.ok(schema.required.includes("outcome"));
+    assert.ok(schema.required.includes("additionalFiles"));
     assert.ok(options.cwd !== undefined);
     await writeFile(
       path.join(String(options.cwd), "src", "value.js"),
@@ -174,6 +187,7 @@ test("claude: plan-mode planning, skip-permissions execution, collected diff", a
     planningRoot: fixture.planningRoot,
     command: "claude-test",
     args: ["--model", "claude-test-model"],
+    effort: "low",
     runner,
   });
 
@@ -203,6 +217,31 @@ test("claude: plan-mode planning, skip-permissions execution, collected diff", a
   assert.equal(changeSet.patches[0]?.path, "src/value.js");
   assert.deepEqual(changeSet.symbolsChanged, ["value"]);
 });
+
+test(
+  "Windows Claude npm shims resolve to the native executable",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "coord-claude-shim-"));
+    const nativeCommand = path.join(
+      root,
+      "node_modules",
+      "@anthropic-ai",
+      "claude-code",
+      "bin",
+      "claude.exe",
+    );
+    try {
+      await mkdir(path.dirname(nativeCommand), { recursive: true });
+      await writeFile(path.join(root, "claude.cmd"), "@echo off\n", "utf8");
+      await writeFile(nativeCommand, "", "utf8");
+
+      assert.equal(resolveClaudeCommand("claude.cmd", root), nativeCommand);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
 
 test("gemini: json envelope, --yolo execution, collected diff", async () => {
   const fixture = await createFixture();
@@ -343,5 +382,16 @@ test("configuration cannot smuggle arbitrary flags through args", async () => {
         args: ["--model", "a", "--extra", "b"],
       }),
     /only a single --model/u,
+  );
+  assert.throws(
+    () =>
+      createGeminiAdapter({
+        agentId: "gemini",
+        repository: fixture.repository,
+        workspaces: fixture.workspaces,
+        planningRoot: fixture.planningRoot,
+        effort: "low",
+      }),
+    /supported only by Claude/u,
   );
 });
