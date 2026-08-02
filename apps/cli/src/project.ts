@@ -28,6 +28,10 @@ export const CONFIG_VERSION = 1;
 
 interface AgentConfigBase {
   args?: string[];
+  /** Maximum time for one provider planning request. */
+  planningTimeoutMs?: number;
+  /** Maximum time for one provider edit request. */
+  executionTimeoutMs?: number;
   /**
    * Environment for the agent process.
    *
@@ -47,6 +51,8 @@ export interface CodexAgentConfig extends AgentConfigBase {
   adapter: "codex";
   /** Defaults to `codex` when omitted. */
   command?: string;
+  /** Native Windows sandbox backend. Defaults to the stronger `elevated` mode. */
+  windowsSandbox?: "elevated" | "unelevated";
 }
 
 /**
@@ -58,6 +64,8 @@ export interface PromptCliAgentConfig extends AgentConfigBase {
   adapter: "claude" | "gemini";
   /** Defaults to `claude` / `gemini` when omitted. */
   command?: string;
+  /** Claude reasoning effort. Gemini does not support this setting. */
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
 }
 
 export type AgentConfig =
@@ -99,6 +107,8 @@ export const DEFAULT_CONFIG: ProjectConfig = {
 
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]*$/iu;
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
+const MIN_AGENT_TIMEOUT_MS = 1_000;
+const MAX_AGENT_TIMEOUT_MS = 24 * 60 * 60 * 1_000;
 
 function fail(message: string): never {
   throw new Error(`Invalid ${PROJECT_DIRECTORY}/config.json: ${message}`);
@@ -110,6 +120,26 @@ function isErrorCode(error: unknown, code: string): boolean {
     "code" in error &&
     (error as NodeJS.ErrnoException).code === code
   );
+}
+
+function assertAgentTimeout(
+  name: string,
+  field: "planningTimeoutMs" | "executionTimeoutMs",
+  value: number | undefined,
+): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (
+    !Number.isSafeInteger(value) ||
+    value < MIN_AGENT_TIMEOUT_MS ||
+    value > MAX_AGENT_TIMEOUT_MS
+  ) {
+    fail(
+      `agent "${name}" needs "${field}" to be an integer between one second and one day`,
+    );
+  }
+  return value;
 }
 
 export function assertProjectIdentifier(value: unknown, where: string): string {
@@ -129,17 +159,24 @@ function assertValidationCommand(value: unknown, where: string): ValidationComma
   const command = value as Partial<ValidationCommand>;
   if (
     typeof command.executable !== "string" ||
-    command.executable.trim().length === 0
+    command.executable.trim().length === 0 ||
+    command.executable.includes("\0")
   ) {
     fail(`${where} needs a non-empty "executable"`);
   }
   if (
     !Array.isArray(command.args) ||
-    !command.args.every((entry) => typeof entry === "string")
+    !command.args.every(
+      (entry) => typeof entry === "string" && !entry.includes("\0"),
+    )
   ) {
     fail(`${where} needs "args" to be an array of strings`);
   }
-  if (typeof command.label !== "string" || command.label.trim().length === 0) {
+  if (
+    typeof command.label !== "string" ||
+    command.label.trim().length === 0 ||
+    command.label.includes("\0")
+  ) {
     fail(`${where} needs a non-empty "label"`);
   }
   return {
@@ -205,18 +242,62 @@ function assertAgent(name: string, value: unknown): AgentConfig {
   const common = {
     ...(agent.args === undefined ? {} : { args: [...agent.args] }),
     ...(agent.env === undefined ? {} : { env: { ...agent.env } }),
+    ...(assertAgentTimeout(
+      name,
+      "planningTimeoutMs",
+      agent.planningTimeoutMs,
+    ) === undefined
+      ? {}
+      : { planningTimeoutMs: agent.planningTimeoutMs }),
+    ...(assertAgentTimeout(
+      name,
+      "executionTimeoutMs",
+      agent.executionTimeoutMs,
+    ) === undefined
+      ? {}
+      : { executionTimeoutMs: agent.executionTimeoutMs }),
   };
   if (agent.adapter === "codex") {
+    const codexAgent = agent as Partial<CodexAgentConfig>;
+    if (
+      codexAgent.windowsSandbox !== undefined &&
+      codexAgent.windowsSandbox !== "elevated" &&
+      codexAgent.windowsSandbox !== "unelevated"
+    ) {
+      fail(
+        `agent "${name}" needs "windowsSandbox" to be "elevated" or "unelevated"`,
+      );
+    }
     return {
       adapter: "codex",
       ...(agent.command === undefined ? {} : { command: agent.command }),
+      ...(codexAgent.windowsSandbox === undefined
+        ? {}
+        : { windowsSandbox: codexAgent.windowsSandbox }),
       ...common,
     };
   }
   if (agent.adapter === "claude" || agent.adapter === "gemini") {
+    const promptAgent = agent as Partial<PromptCliAgentConfig>;
+    if (
+      promptAgent.effort !== undefined &&
+      !["low", "medium", "high", "xhigh", "max"].includes(
+        promptAgent.effort,
+      )
+    ) {
+      fail(
+        `agent "${name}" needs "effort" to be low, medium, high, xhigh, or max`,
+      );
+    }
+    if (agent.adapter === "gemini" && promptAgent.effort !== undefined) {
+      fail(`agent "${name}" cannot set Claude-only "effort"`);
+    }
     return {
       adapter: agent.adapter,
       ...(agent.command === undefined ? {} : { command: agent.command }),
+      ...(promptAgent.effort === undefined
+        ? {}
+        : { effort: promptAgent.effort }),
       ...common,
     };
   }

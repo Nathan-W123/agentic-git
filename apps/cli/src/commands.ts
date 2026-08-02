@@ -391,6 +391,15 @@ function createAdapter(
       planningRoot,
       ...(agent.command === undefined ? {} : { command: agent.command }),
       ...(agent.args === undefined ? {} : { args: agent.args }),
+      ...(agent.planningTimeoutMs === undefined
+        ? {}
+        : { planningTimeoutMs: agent.planningTimeoutMs }),
+      ...(agent.executionTimeoutMs === undefined
+        ? {}
+        : { executionTimeoutMs: agent.executionTimeoutMs }),
+      ...(agent.windowsSandbox === undefined
+        ? {}
+        : { windowsSandbox: agent.windowsSandbox }),
       ...(agent.env === undefined
         ? {}
         : { env: { ...process.env, ...agent.env } }),
@@ -413,6 +422,13 @@ function createAdapter(
       planningRoot,
       ...(agent.command === undefined ? {} : { command: agent.command }),
       ...(agent.args === undefined ? {} : { args: agent.args }),
+      ...(agent.planningTimeoutMs === undefined
+        ? {}
+        : { planningTimeoutMs: agent.planningTimeoutMs }),
+      ...(agent.executionTimeoutMs === undefined
+        ? {}
+        : { executionTimeoutMs: agent.executionTimeoutMs }),
+      ...(agent.effort === undefined ? {} : { effort: agent.effort }),
       ...(agent.env === undefined
         ? {}
         : { env: { ...process.env, ...agent.env } }),
@@ -437,6 +453,9 @@ function createAdapter(
     repository,
     workspaces,
     planningRoot,
+    ...(agent.executionTimeoutMs === undefined
+      ? {}
+      : { executionTimeoutMs: agent.executionTimeoutMs }),
     ...(sandbox === undefined ? {} : { sandbox }),
   });
 }

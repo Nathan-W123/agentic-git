@@ -47,6 +47,16 @@ test("configuration errors name the offending field", () => {
     /validationCommands\[0\] needs "args"/u,
   );
   assert.throws(
+    () =>
+      assertProjectConfig({
+        ...VALID,
+        validationCommands: [
+          { executable: "node", args: ["--test\0hidden"], label: "tests" },
+        ],
+      }),
+    /validationCommands\[0\] needs "args"/u,
+  );
+  assert.throws(
     () => assertProjectConfig({ ...VALID, agents: { bad: { args: [] } } }),
     /agent "bad" needs a non-empty "command"/u,
   );
@@ -89,10 +99,25 @@ test("identifiers and optional sandbox fields are validated", () => {
 test("a Codex agent can use the default executable", () => {
   const config = assertProjectConfig({
     ...VALID,
-    agents: { codex: { adapter: "codex" } },
+    agents: {
+      codex: { adapter: "codex", windowsSandbox: "unelevated" },
+    },
     defaultAgent: "codex",
   });
-  assert.deepEqual(config.agents.codex, { adapter: "codex" });
+  assert.deepEqual(config.agents.codex, {
+    adapter: "codex",
+    windowsSandbox: "unelevated",
+  });
+  assert.throws(
+    () =>
+      assertProjectConfig({
+        ...VALID,
+        agents: {
+          codex: { adapter: "codex", windowsSandbox: "disabled" } as never,
+        },
+      }),
+    /"windowsSandbox" to be "elevated" or "unelevated"/u,
+  );
 });
 
 test("Claude and Gemini agents default their executables; unknown adapters fail", () => {
@@ -116,6 +141,47 @@ test("Claude and Gemini agents default their executables; unknown adapters fail"
         agents: { mystery: { adapter: "copilot" } as never },
       }),
     /unsupported "adapter"/u,
+  );
+});
+
+test("agent planning and execution time limits are validated", () => {
+  const config = assertProjectConfig({
+    ...VALID,
+    agents: {
+      claude: {
+        adapter: "claude",
+        effort: "low",
+        planningTimeoutMs: 45_000,
+        executionTimeoutMs: 135_000,
+      },
+    },
+    defaultAgent: "claude",
+  });
+  assert.deepEqual(config.agents.claude, {
+    adapter: "claude",
+    effort: "low",
+    planningTimeoutMs: 45_000,
+    executionTimeoutMs: 135_000,
+  });
+  assert.throws(
+    () =>
+      assertProjectConfig({
+        ...VALID,
+        agents: {
+          claude: { adapter: "claude", executionTimeoutMs: 999 },
+        },
+      }),
+    /"executionTimeoutMs".*between one second and one day/su,
+  );
+  assert.throws(
+    () =>
+      assertProjectConfig({
+        ...VALID,
+        agents: {
+          gemini: { adapter: "gemini", effort: "low" },
+        },
+      }),
+    /cannot set Claude-only "effort"/u,
   );
 });
 
