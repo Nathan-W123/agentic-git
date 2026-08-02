@@ -974,7 +974,9 @@ export class OverlayWorkspaceService {
       const policy = approvalPolicyForProject(projectRecord?.policy);
       const reasons = [
         ...policy.planReasons(plan),
-        ...policy.changesetReasons(plan, changeSet),
+        ...policy.changesetReasons(plan, changeSet, {
+          planWasReviewed: true,
+        }),
       ];
       const decision: CoordinatorDecision = {
         decision: reasons.length === 0 ? "approved" : "approved_with_constraints",

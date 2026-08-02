@@ -334,7 +334,9 @@ export async function rollbackCanonical(
     const policy = approvalPolicyForProject(projectRecord?.policy);
     const reasons = [
       ...policy.planReasons(plan),
-      ...policy.changesetReasons(plan, changeSet),
+      ...policy.changesetReasons(plan, changeSet, {
+        planWasReviewed: true,
+      }),
     ];
     const decision: CoordinatorDecision = {
       decision: reasons.length === 0 ? "approved" : "approved_with_constraints",
@@ -471,7 +473,11 @@ export async function rollbackCanonical(
         },
       });
     }
-    await store.finishRun(run.id, "completed", integration.canonicalVersion);
+    await store.finishRun(
+      run.id,
+      integration.status === "integrated" ? "completed" : "failed",
+      integration.canonicalVersion,
+    );
     runFinished = true;
     return {
       status: integration.status,

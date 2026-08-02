@@ -85,8 +85,27 @@ interface PreparedTask extends PlannedTask {
   changeSet: ChangeSet;
 }
 
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+function errorMessage(
+  error: unknown,
+  seen: Set<unknown> = new Set(),
+): string {
+  if (typeof error === "object" && error !== null) {
+    if (seen.has(error)) {
+      return "[circular error]";
+    }
+    seen.add(error);
+  }
+
+  const summary = error instanceof Error ? error.message : String(error);
+  if (!(error instanceof AggregateError)) {
+    return summary;
+  }
+
+  const messages = [
+    summary,
+    ...Array.from(error.errors, (nested) => errorMessage(nested, seen)),
+  ].filter((message, index, all) => message.length > 0 && all.indexOf(message) === index);
+  return messages.join("; ");
 }
 
 function pairKey(taskIds: readonly [string, string]): string {
@@ -181,7 +200,12 @@ export class Coordinator {
         recorder,
         runAudit,
       );
-      await recorder?.finish("completed", result.canonicalVersion);
+      const runStatus = result.tasks.every(
+        (taskResult) => taskResult.status === "integrated",
+      )
+        ? "completed"
+        : "failed";
+      await recorder?.finish(runStatus, result.canonicalVersion);
       return result;
     } catch (error) {
       try {
@@ -992,6 +1016,7 @@ export class Coordinator {
       const reviewReasons = this.approvalPolicy.changesetReasons(
         entry.plan,
         changeSet,
+        { planWasReviewed: true },
       );
       if (reviewReasons.length > 0) {
         await recorder?.status(

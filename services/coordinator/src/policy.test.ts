@@ -89,6 +89,67 @@ test("a declarative policy replaces risk levels, paths, and review mode", () => 
   assert.equal(policy.timeoutMs, 5_000);
 });
 
+test("an unattended policy removes human pauses without weakening defaults", () => {
+  const sensitivePlan = planStub({
+    expectedFiles: ["package.json"],
+    expectedSchemas: ["Game"],
+    riskLevel: "critical",
+  });
+  const defaultPolicy = approvalPolicyForProject(undefined);
+  assert.notEqual(defaultPolicy.planReasons(sensitivePlan).length, 0);
+  assert.deepEqual(
+    defaultPolicy.changesetReasons(
+      sensitivePlan,
+      changeSetStub(["package.json"]),
+      { planWasReviewed: true },
+    ),
+    [],
+  );
+
+  const unattended = approvalPolicyForProject({
+    version: 1,
+    approvals: { enabled: false },
+  });
+  assert.deepEqual(unattended.planReasons(sensitivePlan), []);
+  assert.deepEqual(
+    unattended.changesetReasons(
+      sensitivePlan,
+      changeSetStub(["package.json"]),
+    ),
+    [],
+  );
+});
+
+test("schema review can be delegated to protected migration paths", () => {
+  const policy = approvalPolicyForProject({
+    version: 1,
+    approvals: {
+      requireSchemaReview: false,
+      riskLevels: ["critical"],
+      protectedPaths: ["database/migrations/**"],
+    },
+  });
+  assert.deepEqual(
+    policy.planReasons(
+      planStub({
+        expectedFiles: ["src/api-schema.ts"],
+        expectedSchemas: ["GameResponse"],
+        riskLevel: "medium",
+      }),
+    ),
+    [],
+  );
+  assert.notEqual(
+    policy.planReasons(
+      planStub({
+        expectedFiles: ["database/migrations/001-games.sql"],
+        expectedSchemas: ["games"],
+      }),
+    ).length,
+    0,
+  );
+});
+
 test("a corrupt stored policy throws instead of silently using defaults", () => {
   assert.throws(
     () => approvalPolicyForProject({ version: 7 }),
@@ -107,6 +168,22 @@ test("a corrupt stored policy throws instead of silently using defaults", () => 
       approvalPolicyForProject({
         version: 1,
         approvals: { surprise: true },
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      approvalPolicyForProject({
+        version: 1,
+        approvals: { enabled: "sometimes" },
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      approvalPolicyForProject({
+        version: 1,
+        approvals: { requireSchemaReview: "sometimes" },
       }),
     TypeError,
   );

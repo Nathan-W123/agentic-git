@@ -54,7 +54,7 @@ class TestAgent implements AgentAdapter {
     private readonly repository: CanonicalRepository,
     private readonly workspaces: WorkspaceManager,
     private readonly outputPath: string,
-    private readonly failPlanning = false,
+    private readonly planningFailure: boolean | Error = false,
     private readonly scopePath?: string,
   ) {}
 
@@ -82,8 +82,11 @@ class TestAgent implements AgentAdapter {
 
   public async requestPlan(sessionId: string): Promise<AgentPlan> {
     this.requireSession(sessionId);
-    if (this.failPlanning) {
+    if (this.planningFailure === true) {
       throw new Error("planned failure");
+    }
+    if (this.planningFailure !== false) {
+      throw this.planningFailure;
     }
     return structuredClone(this.plan);
   }
@@ -336,9 +339,11 @@ test("cancels every started session when planning fails", async () => {
 
   try {
     const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
     const coordinator = new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
+      store,
     });
     const healthy = new TestAgent(
       "agent_a",
@@ -353,7 +358,10 @@ test("cancels every started session when planning fails", async () => {
       fixture.repository,
       fixture.workspaces,
       "src/b.txt",
-      true,
+      new AggregateError(
+        [new Error("provider authentication failed"), new Error("cleanup denied")],
+        "planning and cleanup failed",
+      ),
     );
 
     await assert.rejects(
@@ -370,6 +378,13 @@ test("cancels every started session when planning fails", async () => {
     );
     assert.equal(healthy.cancelCount, 1);
     assert.equal(failing.cancelCount, 1);
+    const [run] = await store.listRuns(1);
+    assert.ok(run);
+    const detail = await store.getRun(run.id);
+    assert.match(
+      detail?.tasks.find((entry) => entry.id === "task_b")?.explanation ?? "",
+      /planning and cleanup failed; provider authentication failed; cleanup denied/u,
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -538,10 +553,11 @@ test("cancels execution promptly when a scope event cannot be persisted", async 
       false,
       "src/c.txt",
     );
+    const store = new FailingScopeStore();
     const result = await new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
-      store: new FailingScopeStore(),
+      store,
     }).run({
       repository: fixture.repository,
       workspaceRoot: path.join(root, "workspaces"),
@@ -553,6 +569,7 @@ test("cancels execution promptly when a scope event cannot be persisted", async 
     assert.match(result.tasks[0]?.explanation ?? "", /cancelled/u);
     assert.ok(agent.cancelCount >= 1);
     assert.equal(result.canonicalVersion.sequence, 1);
+    assert.equal((await store.listRuns())[0]?.status, "failed");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
