@@ -239,7 +239,10 @@ test("the estimate is capped and reports the cap", () => {
   const estimate = estimateScope(
     "Adjust invoice handling",
     repositoryIndex(files, ["services/billing/package.json"]),
-    { maxFiles: 5 },
+    // The ubiquity filter is off here on purpose: "invoice" naming all twelve
+    // files is precisely what that filter exists to reject, and this test is
+    // about the cap that applies once a token has been believed.
+    { maxFiles: 5, ubiquityRatio: 1 },
   );
   assert.equal(estimate.files.length, 5);
   assert.ok(estimate.notes.some((note) => note.includes("kept the 5 strongest")));

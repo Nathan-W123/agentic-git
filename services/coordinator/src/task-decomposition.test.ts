@@ -12,6 +12,7 @@ import {
   atomicSignals,
   couplePieces,
   decomposeTask,
+  manifestOnly,
   parseDecompositionMode,
   type ContendingWork,
   type DecompositionOptions,
@@ -53,36 +54,64 @@ function file(
  * Nothing here imports anything there: the fixture is the shape a split is
  * supposed to be legal on, and individual tests add the coupling that should
  * make it illegal.
+ *
+ * The dashboard carries a dozen files the objective never mentions, and that
+ * bulk is load-bearing rather than decorative. An earlier version of this
+ * fixture held five files total, so the four-file estimate was eighty per cent
+ * of the repository — a proportion the precision guard now refuses outright,
+ * and rightly, because a task touching most of a repository is not one anybody
+ * should be dividing. A fixture that only passes because it is tiny would be
+ * testing the policy against a repository shape it is meant to reject.
  */
 function workspaceIndex(edges: DependencyEdge[] = []): RepositoryIndex {
+  const unrelated = [
+    "chart",
+    "filter",
+    "header",
+    "layout",
+    "legend",
+    "palette",
+    "sidebar",
+    "sparkline",
+    "theme",
+    "toolbar",
+    "tooltip",
+  ].map((name) =>
+    file(`apps/dashboard/src/${name}.ts`, {
+      symbols: [`render${name[0]?.toUpperCase()}${name.slice(1)}`],
+    }),
+  );
+  const files = [
+    // `currencyCode` is here so the objective below is not balanced exactly on
+    // the token-coverage threshold: a billing service that has never heard of
+    // currency would make "give invoices a currency column" a half-unknown
+    // request, and the test would then be asserting the split policy while
+    // sitting one word away from a different verdict.
+    file("services/billing/src/invoice.ts", {
+      symbols: ["createInvoice", "InvoiceLine", "currencyCode"],
+    }),
+    file("services/billing/src/tax.ts", { symbols: ["invoiceTaxRate"] }),
+    file("services/notifications/src/receipt.ts", {
+      symbols: ["deliveryReceipt"],
+    }),
+    file("services/notifications/src/queue.ts", {
+      symbols: ["deliveryQueue"],
+    }),
+    file("apps/dashboard/src/screen.ts", { symbols: ["renderScreen"] }),
+    ...unrelated,
+  ];
   return {
     repositoryId: "example",
     revision: "b".repeat(40),
     generatedAt: "2026-01-01T00:00:00.000Z",
-    files: [
-      file("services/billing/src/invoice.ts", {
-        symbols: ["createInvoice", "InvoiceLine"],
-      }),
-      file("services/billing/src/tax.ts", { symbols: ["invoiceTaxRate"] }),
-      file("services/notifications/src/receipt.ts", {
-        symbols: ["deliveryReceipt"],
-      }),
-      file("services/notifications/src/queue.ts", {
-        symbols: ["deliveryQueue"],
-      }),
-      file("apps/dashboard/src/screen.ts", { symbols: ["renderScreen"] }),
-    ],
+    files,
     edges,
     paths: [
+      ...files.map((entry) => entry.path),
       "apps/dashboard/package.json",
-      "apps/dashboard/src/screen.ts",
       "services/billing/package.json",
-      "services/billing/src/invoice.ts",
-      "services/billing/src/tax.ts",
       "services/notifications/package.json",
-      "services/notifications/src/queue.ts",
-      "services/notifications/src/receipt.ts",
-    ],
+    ].sort(),
     truncated: false,
     skippedFiles: 0,
   };
@@ -248,6 +277,8 @@ test("a weak footprint is never split", () => {
     confidence: "weak",
     revision: "c".repeat(40),
     tokens: ["telemetry"],
+    unmatchedTokens: [],
+    repositoryFraction: 0.1,
     namedPaths: [],
     namedDirectories: [],
     files: [
@@ -270,6 +301,149 @@ test("a weak footprint is never split", () => {
     options: { mode: "always" },
   });
   assert.equal(decision.reason, "weak_scope");
+});
+
+/**
+ * The failure a replay against recorded runs actually found.
+ *
+ * A sixteen-file chess backend, and the objective "generate the frontend of
+ * the game chess". The frontend does not exist yet, so the only words the
+ * index can see are "chess" and "game" — which name most of that repository
+ * and localize nothing in it. The estimator matched them against the backend,
+ * called itself anchored, and the policy split a task whose real footprint
+ * was fourteen files in a `frontend/` tree that shared not one path with the
+ * estimate. Neither the atomicity nor the coupling veto could see it: the
+ * wording announces nothing indivisible and the wrongly-chosen files really
+ * are structurally independent of each other.
+ */
+function chessBackendIndex(): RepositoryIndex {
+  const files = [
+    file("src/chess/engine.ts", { symbols: ["ChessEngine", "applyChessMove"] }),
+    file("src/chess/types.ts", { symbols: ["ChessMove", "ChessPiece"] }),
+    // The service layer of a chess server names chess in its own types, which
+    // is exactly why the word cannot localize anything inside this repository.
+    file("src/games/game-service.ts", {
+      symbols: ["GameService", "ChessGameState"],
+    }),
+    file("src/games/game-store.ts", { symbols: ["GameStore", "ChessGameRow"] }),
+    file("src/routes/games.ts", { symbols: ["registerGameRoutes"] }),
+    file("src/websocket/game-events.ts", { symbols: ["GameEventSocket"] }),
+    file("tests/chess-engine.test.ts", { symbols: ["chessEngineSuite"] }),
+    file("tests/game-service.test.ts", { symbols: ["gameServiceSuite"] }),
+    file("tests/games-api.test.ts", { symbols: ["gamesApiSuite"] }),
+    file("src/server.ts", { symbols: ["startServer"] }),
+    file("src/config.ts", { symbols: ["loadSettings"] }),
+    file("src/logging.ts", { symbols: ["logLine"] }),
+    file("package.json", { language: "json" }),
+    file("package-lock.json", { language: "json" }),
+  ];
+  return {
+    repositoryId: "chess",
+    revision: "d".repeat(40),
+    generatedAt: "2026-01-01T00:00:00.000Z",
+    files,
+    edges: [],
+    paths: [...files.map((entry) => entry.path), "README.md"].sort(),
+    truncated: false,
+    skippedFiles: 0,
+  };
+}
+
+test("a domain word that names most of a small repository localizes nothing", () => {
+  const estimate = estimateScope(
+    "generate the frontend of the game chess",
+    chessBackendIndex(),
+  );
+  // "chess" and "game" each reach more files than the ubiquity limit allows,
+  // so nothing survives to be believed.
+  assert.equal(estimate.confidence, "none");
+  assert.deepEqual(estimate.tokens, []);
+  assert.ok(estimate.unmatchedTokens.includes("frontend"));
+  assert.ok(
+    estimate.notes.some((note) => note.includes("too common to localize")),
+  );
+});
+
+test("the replayed zero-overlap objective is now vetoed, not split", () => {
+  const decision = decide(
+    "generate the frontend of the game chess",
+    chessBackendIndex(),
+  );
+  assert.equal(decision.split, false);
+  assert.equal(decision.reason, "unknown_scope");
+});
+
+test("an estimate covering much of the repository is refused as a selection", () => {
+  // The ubiquity filter turned off, to prove the precision guard stands on its
+  // own rather than being shadowed by the filter that happens to fire first.
+  const index = chessBackendIndex();
+  const objective = "rework the game chess engine store routes and events";
+  const estimate = estimateScope(objective, index, { ubiquityRatio: 1 });
+  assert.equal(estimate.confidence, "anchored");
+  assert.ok(estimate.repositoryFraction > 0.35);
+
+  const decision = decomposeTask({
+    objective,
+    estimate,
+    index,
+    options: { mode: "always" },
+  });
+  assert.equal(decision.reason, "diffuse_estimate");
+  assert.equal(decision.split, false);
+  assert.ok(decision.explanation.includes("% of the indexed repository"));
+});
+
+test("words the repository has never seen are recorded but decide nothing", () => {
+  // Deliberately not a veto. A version of this policy vetoed on the share of
+  // content words the index could not find, and replay showed it firing on the
+  // best estimate in the corpus because that objective's unmatched words were
+  // "repair" and "synchronize" — stop-list gaps, not absent subjects. The
+  // signal is kept visible and left inert.
+  const index = workspaceIndex();
+  const objective = "add kubernetes helm terraform manifests for invoices";
+  const estimate = estimateScope(objective, index);
+  assert.ok(estimate.unmatchedTokens.length > estimate.tokens.length);
+  assert.ok(estimate.unmatchedTokens.includes("terraform"));
+
+  const decision = decomposeTask({
+    objective,
+    estimate,
+    index,
+    options: { mode: "always" },
+  });
+  assert.notEqual(decision.reason, "unknown_scope");
+  assert.ok(
+    decision.reason === "too_small" || decision.reason === "single_module",
+    `unexpected reason: ${decision.reason}`,
+  );
+});
+
+test("a piece of nothing but manifests is not a task of its own", () => {
+  assert.equal(manifestOnly(["package.json", "package-lock.json"]), true);
+  assert.equal(manifestOnly(["README.md", "docs/guide.md"]), true);
+  assert.equal(manifestOnly(["package.json", "src/app.ts"]), false);
+  assert.equal(manifestOnly([]), false);
+
+  // Billing and notifications are separable, but the objective also drags in
+  // the root lockfiles, which would become a third task holding nothing but
+  // bookkeeping.
+  const index = workspaceIndex();
+  index.files.push(
+    file("package.json", { language: "json" }),
+    file("package-lock.json", { language: "json" }),
+  );
+  index.paths.push("package.json", "package-lock.json");
+  const objective =
+    "Give invoices a currency column, give delivery receipts a timestamp, " +
+    "and record it all in package.json";
+  const decision = decomposeTask({
+    objective,
+    estimate: estimateScope(objective, index),
+    index,
+    options: { mode: "always" },
+  });
+  assert.equal(decision.reason, "manifest_only_piece");
+  assert.equal(decision.split, false);
 });
 
 test("a small footprint is not worth dividing", () => {

@@ -52,6 +52,7 @@ async function seedWorkspace(root: string): Promise<StoredRepository> {
     "services/billing/src/invoice.ts",
     [
       "export interface InvoiceLine { amount: number }",
+      "export const currencyCode = 'GBP';",
       "export function createInvoice(lines: InvoiceLine[]) {",
       "  return lines.length;",
       "}",
@@ -78,6 +79,26 @@ async function seedWorkspace(root: string): Promise<StoredRepository> {
     "apps/dashboard/src/screen.ts",
     "export function renderScreen() { return null; }\n",
   );
+  // Bulk the objective never mentions. Without it the four estimated files
+  // would be nearly half of a nine-file repository, which the precision guard
+  // refuses on principle — and rightly: a task touching half a repository is
+  // not one to divide. The fixture has to be a repository with somewhere else
+  // to be, or it tests the policy against a shape the policy rejects.
+  for (const name of [
+    "chart",
+    "filter",
+    "header",
+    "layout",
+    "legend",
+    "sidebar",
+    "theme",
+    "toolbar",
+  ]) {
+    await write(
+      `apps/dashboard/src/${name}.ts`,
+      `export function render${name[0]?.toUpperCase()}${name.slice(1)}() { return null; }\n`,
+    );
+  }
 
   await repositories.commitAll(source, "seed");
   const canonical = await repositories.importLocalRepository(

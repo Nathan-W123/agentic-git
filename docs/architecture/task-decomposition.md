@@ -72,6 +72,15 @@ the current canonical revision. No model call; nothing an audit cannot replay.
 3. **Ubiquity filter.** A fragment matching more than 15% of indexed files is
    discarded outright and the discard is recorded. An objective saying "test"
    is not evidence about *which* tests.
+
+   This filter was originally skipped for repositories with fewer than twenty
+   indexed files, on the reasoning that in a small repository every token is
+   proportionally ubiquitous and the ratio would punish words unfairly. Replay
+   showed that to be exactly backwards, and it was the direct cause of the
+   worst failure measured — see [Verification](#verification-status). Small
+   repositories are where a domain word is *most* ubiquitous. The floor is now
+   four files, which is only what the ratio genuinely cannot express: below
+   that there is no footprint worth dividing anyway.
 4. **Scoring.** Surviving fragments are matched against declared symbols,
    declared resources (APIs, schemas, config keys, services), directory
    segments, and file basenames, each with its own weight. Files above the
@@ -105,6 +114,8 @@ named reason.
 | `disabled` | The mode is `off`. |
 | `unknown_scope` | The estimate is `none` — splitting on ignorance is the worst case. |
 | `weak_scope` | The estimate is `weak` — too thin to divide work on. |
+| `diffuse_estimate` | The estimate names >35% of the indexed repository — a selection, not a localization. |
+| `manifest_only_piece` | A piece would hold nothing but manifests and prose. |
 | `too_small` | Fewer than 4 estimated files; not worth the cost. |
 | `single_module` | The footprint sits in one module; nothing independent to separate. |
 | `atomic_objective` | The wording announces an indivisible change. |
@@ -113,6 +124,31 @@ named reason.
 | `no_contention` | Nobody is competing for this footprint (default mode only). |
 | `no_relief` | Everything is contended, so no split can run free (default mode only). |
 | `split` | None of the above applies. |
+
+### Precision: the guard that was missing
+
+The atomicity and coupling vetoes both read the *shape* of what the estimate
+found. Neither can see whether it found the right thing, and a wrong estimate
+has a perfectly well-formed shape — which is how the failure in
+[Verification](#verification-status) got through all of them.
+
+`diffuse_estimate` is the direct guard, and it keys off the estimate's own
+measured precision proxy rather than off structure. `ScopeEstimate` reports
+`repositoryFraction`: the share of indexed files it names. Above 35% the
+objective's words are selecting the repository rather than a part of it, and
+dividing that divides noise along module lines that mean nothing.
+
+`ScopeEstimate` also reports `unmatchedTokens` — content fragments the index
+has never seen. That one is **diagnostic only, and deliberately decides
+nothing.** An earlier version of this policy vetoed when most of an objective's
+content words were unmatched. Replay killed it: it fired on the corpus's *best*
+estimate, a carefully written objective that named three real paths and scored
+the highest precision and recall of anything measured, because its unmatched
+words were "repair", "synchronize" and "normalize" — gaps in the stop list, not
+absent subjects. The measure was really counting how verbosely an objective was
+written, which penalizes exactly the objectives worth trusting, and the
+explanation it would have shown a human was false. The signal is kept visible
+and left inert.
 
 ### Atomicity: the wording veto
 
@@ -212,23 +248,93 @@ cannot be read, the objective is queued whole and the result carries a
 
 ## Verification status
 
-Static and unit verification only, as of 2026-08-01.
+Static, unit, and replay verification as of 2026-08-02. No live agent runs.
 
-Covered by `services/coordinator/src/*.test.ts` (39 tests):
+Covered by `services/coordinator/src/*.test.ts` (47 tests):
 
 - Estimation: named paths and directories, symbol and directory localization,
   plural stemming, the ubiquity filter (both directions), anchored vs weak vs
   none, truncated indexes, the file cap, module-root derivation and fallback.
 - Decision: every veto above, transitive coupling merges, coupling restricted
   to selected files, symbol-reference coupling, contention relief and its
-  absence, mode parsing.
+  absence, mode parsing. The replayed zero-overlap objective is a named
+  regression test, against a fixture reconstructed from the real repository's
+  shape, asserting both that the estimate collapses to `none` and that the
+  policy refuses it.
 - Intake: real git repository and real store — uncontended objective queued
   whole, contended objective queued as two independent tasks, the audit record
   and its chain, lease-sourced contention, `off`, unindexable repository,
   empty objective.
 
-**Not verified: whether this reduces real conflicts.** That claim needs a live
-multi-agent run and was deliberately not attempted here. What a future live
+### Replay against recorded runs — and what it caught
+
+Item 1 of the plan below has now been run: `scripts/replay-scope-estimates.mjs`
+re-runs `estimateScope` against a real index of the real repository at the
+exact canonical revision each recorded plan was made against, and scores it
+against what that plan declared and what its changeset touched. Splitting stays
+off throughout; the policy's verdict is computed but never acted on. Sixteen
+recorded plan revisions, `mode=always` so the vetoes reported are properties of
+the objective itself.
+
+**The first run failed the design.** All ten anchored objectives would have
+split, and not one atomicity or coupling veto fired. The worst case:
+
+> `generate the frontend of the game chess` — a sixteen-file chess *backend*.
+> The estimate named eleven backend files with `confidence: "anchored"`. The
+> task went on to create fourteen files in a new `frontend/` tree. **Overlap:
+> zero.** Precision 0.00, recall 0.00 — and it split.
+
+The diagnosis was not that the vetoes were tuned too loosely. It was that none
+of them was looking at the right thing:
+
+- **Atomicity** read the wording. "generate the frontend" announces nothing
+  indivisible, correctly.
+- **Coupling** read structure among the selected files. The wrongly-selected
+  backend files genuinely *are* independent of each other, so it correctly
+  found two separable pieces — of the wrong estimate.
+- **`confidence: "anchored"`** requires only that one selected file matched a
+  real symbol, directory or resource. "chess" and "game" *are* real names in
+  that repository. Anchored says the words matched real code; it never said
+  they matched the *right* real code.
+
+Underneath all three sat a plain defect: the ubiquity filter, the one mechanism
+that would have rejected "chess" and "game" as words naming most of that
+repository, was **disabled** — its floor of twenty indexed files exceeded the
+repository's sixteen. Nothing was discarded, so the two least informative words
+in the objective were the only two it was believed on.
+
+**After the fix**, on the same sixteen observations:
+
+| | before | after |
+| --- | --- | --- |
+| would split | **10** | **0** |
+| vetoed | 6 (`unknown_scope`) | 11 `unknown_scope`, 5 `manifest_only_piece` |
+| zero-overlap case | `anchored`, 11 files, **SPLIT** | `none`, 0 files, `unknown_scope` |
+| micro precision vs. touched | 0.267 | **0.421** |
+| micro precision vs. declared (pre-existing) | 0.221 | **0.484** |
+
+The two `Repair the … chess repository build` objectives — the best estimates
+in the corpus at precision 0.50 — are held back by `manifest_only_piece`,
+truthfully: their split would have handed one agent nothing but
+`frontend/package.json` and `frontend/tsconfig.json`.
+
+**Two costs, stated plainly.** Recall fell: micro recall against pre-existing
+declared files went 0.594 → 0.469, and observations with zero recall rose from
+5/13 to 8/13. Discarding ubiquitous words throws away true positives along with
+the false ones. Given that the estimate's only consumer is a decision whose
+safe default is *don't*, precision is the right side of that trade — but it is
+a trade, not a free win.
+
+And **this corpus contains no positive case.** Every objective in it is either
+whole-repository repair or greenfield creation; none *should* split, so zero
+splits is the correct outcome but proves only that the vetoes hold. It cannot
+show that a legitimate split still survives them. The unit suite does show that
+— a two-module split on a sixteen-file workspace passes every gate — but that
+fixture is synthetic. A corpus with genuinely separable multi-module work is
+the missing evidence.
+
+**Still not verified: whether this reduces real conflicts.** That claim needs a
+live multi-agent run and was deliberately not attempted. What a future live
 verification should measure, against the `off` mode as a control arm on the
 same scenarios:
 

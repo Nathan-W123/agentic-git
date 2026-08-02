@@ -81,10 +81,19 @@ conflicts that would have been detected are instead never created. The
 footprint is estimated deterministically from the objective text against the
 canonical index, and the split is refused unless the estimate is anchored, the
 wording carries no atomicity signal, the candidate pieces are structurally
-uncoupled, and — in the default mode — the division actually frees some piece
-from work already in flight. It is prevention layered over detection, not a
-replacement for it, and it is verified statically only: whether it reduces real
-conflicts is an open question with a live experiment still to run. See
+uncoupled, does not name a large fraction of the whole repository, and — in the
+default mode — the division actually frees some piece from work already in
+flight. It is prevention layered over detection, not a replacement for it.
+
+Replaying the estimator against recorded runs found the design's first real
+failure and corrected it: a domain word naming most of a small repository was
+believed, because the filter meant to reject such words was disabled below
+twenty indexed files — exactly the size where it matters most — and the
+resulting confident-but-wrong estimate passed every structural veto. Ten of ten
+anchored objectives would have split; after the fix, none do, and estimate
+precision roughly doubled at some cost in recall. Whether decomposition reduces
+real conflicts remains open: that needs a live experiment, and the replay corpus
+contains no objective that should have split. See
 docs/architecture/task-decomposition.md.
 
 Code intelligence uses the TypeScript compiler API for TypeScript/JavaScript

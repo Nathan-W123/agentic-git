@@ -55,7 +55,8 @@ const OBJECTIVE_STOP_WORDS = new Set([
   "down", "drop", "due", "during", "each", "either", "else", "enable",
   "ensure", "error", "even", "every", "everything", "exist", "existing",
   "expect", "fail", "file", "files", "first", "fix", "fixed", "for", "from",
-  "full", "function", "further", "get", "give", "go", "good", "handle",
+  "full", "function", "further", "generate", "generating", "get", "give",
+  "go", "good", "handle",
   "handler", "has", "have", "help", "helper", "here", "how", "however", "if",
   "implement", "improve", "in", "include", "index", "init", "instead", "into",
   "is", "issue", "it", "its", "just", "keep", "kind", "known", "last", "let",
@@ -121,8 +122,21 @@ export interface ScopeEstimationOptions {
    */
   ubiquityRatio?: number;
   /**
-   * Below this many indexed files the ubiquity filter is skipped: in a small
-   * repository every token is proportionally "ubiquitous". Default 20.
+   * Below this many indexed files the ubiquity filter is skipped. Default 4.
+   *
+   * This defaulted to 20, on the reasoning that in a small repository every
+   * token is proportionally ubiquitous and the ratio would punish words
+   * unfairly. Replaying the estimator against recorded runs showed that to be
+   * exactly backwards. A sixteen-file chess repository turned the filter
+   * *off*, so "chess" and "game" — which name most of that repository and
+   * localize nothing in it — were believed, and the resulting estimate had no
+   * overlap at all with what the task really touched. Small repositories are
+   * where a domain word is *most* ubiquitous, not least.
+   *
+   * The floor is now only what the ratio genuinely cannot express: with fewer
+   * than four indexed files there is no footprint worth dividing anyway. The
+   * `Math.max(3, …)` below already stops the ratio from punishing a token that
+   * matches only a handful of files.
    */
   ubiquityMinimumFiles?: number;
   /** Shortest objective fragment that may match anything. Default 3. */
@@ -159,6 +173,24 @@ export interface ScopeEstimate {
   revision: string;
   /** Objective fragments that survived stop-word and ubiquity filtering. */
   tokens: string[];
+  /**
+   * Content fragments of the objective that match nothing in the repository.
+   *
+   * The estimate is built only from {@link tokens}, so these are the part of
+   * the request it is structurally blind to. An objective whose distinguishing
+   * word appears here — "generate the *frontend*" against a repository with no
+   * frontend — has been localized by its remaining words onto a subject it was
+   * never about.
+   */
+  unmatchedTokens: string[];
+  /**
+   * Share of the repository's indexed files this estimate names, 0 to 1.
+   *
+   * The most direct proxy for precision available without knowing the truth.
+   * A footprint that is a large fraction of the repository has not localized
+   * anything: it has selected the repository and called it a task.
+   */
+  repositoryFraction: number;
   /** Real repository paths the objective named outright. */
   namedPaths: string[];
   /** Real repository directories the objective named outright. */
@@ -337,7 +369,7 @@ export function estimateScope(
   const maxFiles = options.maxFiles ?? 40;
   const minScore = options.minScore ?? 2;
   const ubiquityRatio = options.ubiquityRatio ?? 0.15;
-  const ubiquityMinimumFiles = options.ubiquityMinimumFiles ?? 20;
+  const ubiquityMinimumFiles = options.ubiquityMinimumFiles ?? 4;
   const minTokenLength = options.minTokenLength ?? 3;
 
   const notes: string[] = [];
@@ -453,6 +485,7 @@ export function estimateScope(
       : Number.POSITIVE_INFINITY;
 
   const tokens: string[] = [];
+  const unmatchedTokens: string[] = [];
   for (const token of [...rawTokens].sort()) {
     const reach = new Set<string>([
       ...(symbolExact.get(token) ?? []),
@@ -462,6 +495,11 @@ export function estimateScope(
       ...(basenameToken.get(token) ?? []),
     ]);
     if (reach.size === 0) {
+      // The repository has never heard of this word. Recorded rather than
+      // dropped: an objective built mostly out of words the index cannot see
+      // is describing something that is not there yet, and the estimate that
+      // survives is made of whatever *is* — which is not the same subject.
+      unmatchedTokens.push(token);
       continue;
     }
     if (reach.size > ubiquityLimit) {
@@ -601,10 +639,31 @@ export function estimateScope(
     );
   }
 
+  const repositoryFraction =
+    indexedPaths.length === 0 ? 0 : files.length / indexedPaths.length;
+  if (repositoryFraction >= 0.35) {
+    notes.push(
+      `this estimate names ${(repositoryFraction * 100).toFixed(0)}% of the ` +
+        "indexed repository, which is a selection rather than a localization",
+    );
+  }
+  if (unmatchedTokens.length > 0) {
+    // Stems, not the words as written: these are the fragments actually looked
+    // up, and saying so is more useful than pretty-printing something that was
+    // never searched for.
+    notes.push(
+      `no indexed name contains the fragment(s) ${unmatchedTokens
+        .map((token) => `"${token}"`)
+        .join(", ")}`,
+    );
+  }
+
   return {
     confidence,
     revision: index.revision,
     tokens,
+    unmatchedTokens,
+    repositoryFraction,
     namedPaths: [...new Set(namedPaths)].sort(),
     namedDirectories: [...new Set(namedDirectories)].sort(),
     files,

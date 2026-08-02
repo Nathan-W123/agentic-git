@@ -25,6 +25,19 @@ import type { ScopeEstimate } from "./scope-estimation.js";
  *
  *  1. The pre-agent estimate is anchored. Splitting on ignorance is the worst
  *     case, so an objective the repository cannot recognize is never split.
+ *  1a. The estimate localizes something. An estimate naming a third of the
+ *     indexed repository has found the repository rather than a footprint.
+ *     This gate exists because a replay against recorded runs found the case
+ *     that motivates it: a chess backend, the objective "generate the frontend
+ *     of the game chess", and an estimate that was confidently anchored to
+ *     eleven backend files while the task went on to create fourteen frontend
+ *     ones, sharing not a single path. Anchored says the words matched real
+ *     code; it does not say they matched the *right* real code, and nothing
+ *     else in this list could tell the difference — the atomicity and coupling
+ *     vetoes both read the shape of what was found, and a wrong estimate has a
+ *     perfectly well-formed shape.
+ *  1b. No piece is pure bookkeeping. A piece holding only manifests and prose
+ *     is the paperwork for work that lives somewhere else, not a task.
  *  2. The footprint is genuinely large — several files across several of the
  *     repository's own module roots.
  *  3. The objective carries no atomicity signal. Renames, refactors, moves,
@@ -85,6 +98,8 @@ export type DecompositionReason =
   | "disabled"
   | "unknown_scope"
   | "weak_scope"
+  | "diffuse_estimate"
+  | "manifest_only_piece"
   | "too_small"
   | "single_module"
   | "atomic_objective"
@@ -104,6 +119,32 @@ export interface DecompositionOptions {
   maxSubtasks?: number;
   /** Fewest estimated files a single piece may carry. Default 1. */
   minFilesPerSubtask?: number;
+  /**
+   * Largest share of the indexed repository an estimate may name and still be
+   * acted on. Default 0.35.
+   *
+   * This is the direct precision guard. An estimate covering a third of the
+   * repository has not found a footprint, it has found the repository, and
+   * dividing it divides noise along module lines that mean nothing.
+   */
+  maxRepositoryFraction?: number;
+}
+
+/**
+ * Files that are the connective tissue of a repository rather than work in
+ * their own right.
+ *
+ * A manifest changes because something else changed. A piece of a split
+ * containing nothing but these is not an independent task — it is the
+ * bookkeeping for a task that lives somewhere else, and handing it to its own
+ * agent produces a changeset that cannot be justified on its own terms.
+ */
+const MANIFEST_FILE =
+  /(?:^|\/)(?:package(?:-lock)?\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|tsconfig[^/]*\.json|jsconfig\.json|go\.(?:mod|sum)|cargo\.(?:toml|lock)|gemfile(?:\.lock)?|pyproject\.toml|poetry\.lock|requirements\.txt|composer\.(?:json|lock)|\.[^/]*rc(?:\.json|\.ya?ml)?|[^/]*\.(?:md|mdx|txt|lock))$/iu;
+
+/** Whether a piece is nothing but manifests and prose. */
+export function manifestOnly(files: readonly string[]): boolean {
+  return files.length > 0 && files.every((file) => MANIFEST_FILE.test(file));
 }
 
 /**
@@ -407,6 +448,7 @@ export function decomposeTask(
   const minSubtasks = options.minSubtasks ?? 2;
   const maxSubtasks = options.maxSubtasks ?? 4;
   const minFilesPerSubtask = options.minFilesPerSubtask ?? 1;
+  const maxRepositoryFraction = options.maxRepositoryFraction ?? 0.35;
   const contention = input.contention ?? [];
 
   if (mode === "off") {
@@ -428,6 +470,33 @@ export function decomposeTask(
         "declared resource — which is too thin to divide work on.",
     );
   }
+  // Estimate-quality gates run before the size gates, because "is this
+  // estimate worth acting on at all" has to be settled before "is what it
+  // found big enough to divide". A confident estimate of the wrong half of the
+  // repository is the failure mode that matters, and neither the atomicity nor
+  // the coupling veto can see it: both read the *shape* of what was found, and
+  // a wrong estimate can have a perfectly well-formed shape.
+  if (estimate.repositoryFraction > maxRepositoryFraction) {
+    return decision(
+      "diffuse_estimate",
+      `The estimate names ${(estimate.repositoryFraction * 100).toFixed(0)}% ` +
+        `of the indexed repository, above the ${(
+          maxRepositoryFraction * 100
+        ).toFixed(0)}% at which a footprint stops being a footprint. The ` +
+        "objective's words select this repository rather than a part of it.",
+    );
+  }
+  // There was briefly a third gate here, vetoing an objective when most of its
+  // content words matched nothing in the repository. It is gone deliberately.
+  // Replayed against recorded runs it fired on the corpus's *best* estimate —
+  // a carefully written objective that named three real paths and scored the
+  // highest precision and recall of anything measured — because its unmatched
+  // words were "repair", "synchronize", "normalize" and friends: generic verbs
+  // missing from the stop list, not evidence of an absent subject. The measure
+  // was really counting how verbosely the objective was written, which would
+  // have penalized precisely the objectives worth trusting, and its
+  // explanation to a human would have been false. `unmatchedTokens` survives
+  // as a diagnostic on the estimate; nothing decides on it.
   if (estimate.files.length < minFiles) {
     return decision(
       "too_small",
@@ -468,6 +537,18 @@ export function decomposeTask(
         thin.flatMap((piece) => piece.modules),
       )}) would carry fewer than ${minFilesPerSubtask} files, and dropping it ` +
         "would lose part of the objective.",
+    );
+  }
+  const manifestPieces = pieces.filter((piece) => manifestOnly(piece.files));
+  if (manifestPieces.length > 0) {
+    return decision(
+      "manifest_only_piece",
+      `One piece of this split (${describeModules(
+        manifestPieces.flatMap((piece) => piece.modules),
+      )}) would contain nothing but manifests and prose ` +
+        `(${manifestPieces.flatMap((piece) => piece.files).join(", ")}), ` +
+        "which is bookkeeping for work that lives elsewhere rather than a " +
+        "task of its own.",
     );
   }
   if (pieces.length < minSubtasks) {
