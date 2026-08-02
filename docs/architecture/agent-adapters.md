@@ -70,20 +70,22 @@ launches. If you need container isolation for a vendor CLI, wrap it as a
 generic-cli agent inside an image with credentials injected, and accept that
 protocol translation is on you.
 
-The refusal is not a missing feature waiting on adapter work. All three
-adapters funnel every invocation through one injectable process runner, so
-wrapping them in `DockerWorkspaceManager` would be a small change. What blocks
-it is the sandbox itself: it runs `--network none`, and a vendor CLI with no
-route to its provider's API cannot do anything at all — a DNS lookup for a
-vendor endpoint inside the sandbox fails with `EAI_AGAIN`, while the same
-lookup on a bridged network resolves. Widening the network would trade
+What blocked it was the sandbox itself: it runs `--network none`, and a vendor
+CLI with no route to its provider's API cannot do anything at all — a DNS
+lookup for a vendor endpoint inside the sandbox fails with `EAI_AGAIN`, while
+the same lookup on a bridged network resolves. Widening the network would trade
 deny-default egress for unrestricted egress, which is worse than what the
-vendor CLI's own sandbox already gives you. The real dependency is a per-task
-egress allowlist. Their credentials are the second obstacle: subscription
-logins live in the host home directory, which the container deliberately
-cannot see, so only an API-key deployment (injected through `env`, which
-becomes `--env` on the container) would be reachable even with egress.
-`docs/protocol/remote-workers.md` records the measurements.
+vendor CLI's own sandbox already gives you. Their credentials were the second
+obstacle: subscription logins live in the host home directory, which the
+container deliberately cannot see.
+
+Both now have mechanisms — a per-task egress allowlist and minimal-scope
+credential mounts — and the Codex double-sandboxing question is resolved. The
+refusal remains because the adapters themselves are not wired for it:
+`CodexAdapter` and the prompt-cli adapters accept no `WorkspaceSandbox`, and
+Codex's `--output-schema` file is written where the container cannot read it.
+See [vendor CLI sandboxing](vendor-cli-sandboxing.md); `docs/protocol/remote-workers.md`
+records the original measurements.
 
 ## Cost reporting
 

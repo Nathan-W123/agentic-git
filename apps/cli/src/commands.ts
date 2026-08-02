@@ -381,7 +381,12 @@ function createAdapter(
     if (sandbox !== undefined) {
       throw new Error(
         "Codex agents currently use the Codex CLI sandbox and cannot run " +
-          "inside the project's Docker sandbox",
+          "inside the project's Docker sandbox. The egress allowlist and " +
+          "scoped credential mounts this needed now exist " +
+          "(openVendorSandbox in @coord/workspace-manager); what remains is " +
+          "adapter wiring, including a mount for the --output-schema file the " +
+          "adapter writes to a host temp directory. See " +
+          "docs/architecture/vendor-cli-sandboxing.md",
       );
     }
     return new CodexAdapter({
@@ -410,7 +415,10 @@ function createAdapter(
     if (sandbox !== undefined) {
       throw new Error(
         `${agent.adapter} agents run the vendor CLI on the host with its own ` +
-          "login state and cannot run inside the project's Docker sandbox",
+          "login state and cannot run inside the project's Docker sandbox. " +
+          "The egress allowlist and scoped credential mounts this needed now " +
+          "exist (openVendorSandbox in @coord/workspace-manager); what remains " +
+          "is adapter wiring. See docs/architecture/vendor-cli-sandboxing.md",
       );
     }
     const create =

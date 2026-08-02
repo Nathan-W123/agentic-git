@@ -13,7 +13,11 @@ import {
   openCoordinationStore,
   type CoordinationStore,
 } from "@coord/persistence";
-import type { DockerSandboxOptions } from "@coord/workspace-manager";
+import {
+  assertAllowlistEntry,
+  type CredentialMountMode,
+  type DockerSandboxOptions,
+} from "@coord/workspace-manager";
 
 /**
  * A coordinator project: the `.coordinator` directory beside a working tree.
@@ -81,6 +85,29 @@ export interface SandboxConfig {
   image: string;
   network?: string;
   user?: string;
+  /**
+   * Hosts a sandboxed vendor CLI may reach, replacing `--network none` with an
+   * internal network behind an allowlisting proxy.
+   *
+   * Present is what makes a `codex`, `claude`, or `gemini` agent runnable
+   * inside the Docker sandbox at all: without it those adapters still refuse,
+   * because a vendor CLI with no route to its provider cannot do anything and
+   * an unrestricted network would be worse than the CLI's own sandbox.
+   *
+   * Omit to keep the deny-everything default. Cannot be combined with
+   * `network`, which expresses the opposite intent.
+   */
+  egressAllowlist?: string[];
+  /**
+   * How the vendor CLI's login state reaches the container.
+   *
+   * `ephemeral-copy` (the default) stages just the credential file into a
+   * task-scoped copy the CLI may rewrite when it refreshes its token, leaving
+   * the host's own file untouched. `read-only` binds the host file directly,
+   * which suits API-key deployments that never rewrite it. `none` mounts
+   * nothing, for agents authenticating purely through `env`.
+   */
+  credentials?: "ephemeral-copy" | "read-only" | "none";
 }
 
 export interface ProjectConfig {
@@ -338,11 +365,50 @@ function assertSandbox(value: unknown): SandboxConfig {
       fail(`"sandbox.${field}" must be a non-empty string`);
     }
   }
+  if (sandbox.egressAllowlist !== undefined) {
+    if (
+      !Array.isArray(sandbox.egressAllowlist) ||
+      sandbox.egressAllowlist.length === 0
+    ) {
+      fail(`"sandbox.egressAllowlist" must be a non-empty array of hostnames`);
+    }
+    for (const entry of sandbox.egressAllowlist) {
+      try {
+        assertAllowlistEntry(entry as string);
+      } catch (error) {
+        fail(
+          `"sandbox.egressAllowlist" is invalid: ` +
+            `${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (sandbox.network !== undefined) {
+      fail(
+        `"sandbox.network" cannot be combined with "sandbox.egressAllowlist": ` +
+          `the allowlist supplies its own internal network`,
+      );
+    }
+  }
+  if (
+    sandbox.credentials !== undefined &&
+    !["ephemeral-copy", "read-only", "none"].includes(sandbox.credentials)
+  ) {
+    fail(
+      `"sandbox.credentials" must be "ephemeral-copy", "read-only", or "none"`,
+    );
+  }
+
   return {
     mode: "docker",
     image: sandbox.image,
     ...(sandbox.network === undefined ? {} : { network: sandbox.network }),
     ...(sandbox.user === undefined ? {} : { user: sandbox.user }),
+    ...(sandbox.egressAllowlist === undefined
+      ? {}
+      : { egressAllowlist: [...sandbox.egressAllowlist] }),
+    ...(sandbox.credentials === undefined
+      ? {}
+      : { credentials: sandbox.credentials }),
   };
 }
 
@@ -530,6 +596,26 @@ export class CoordinatorProject {
       image: sandbox.image,
       ...(sandbox.network === undefined ? {} : { network: sandbox.network }),
       ...(sandbox.user === undefined ? {} : { user: sandbox.user }),
+    };
+  }
+
+  /**
+   * Egress and credential policy for a vendor CLI in the sandbox.
+   *
+   * Undefined means no allowlist was configured, which is what keeps the
+   * vendor adapters refusing to run containerized: the mechanism exists but
+   * has to be asked for, host by host.
+   */
+  public vendorSandboxPolicy():
+    | { allow: readonly string[]; credentials: CredentialMountMode | "none" }
+    | undefined {
+    const sandbox = this.config.sandbox;
+    if (sandbox?.egressAllowlist === undefined) {
+      return undefined;
+    }
+    return {
+      allow: sandbox.egressAllowlist,
+      credentials: sandbox.credentials ?? "ephemeral-copy",
     };
   }
 

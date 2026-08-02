@@ -8,6 +8,8 @@ import {
 } from "@coord/repository-service";
 import type { ChangeSet } from "@coord/shared-types";
 
+import type { EgressBinding } from "./egress-gateway.js";
+import type { CredentialMount } from "./vendor-credentials.js";
 import {
   GitWorktreeWorkspaceManager,
   type ChangeSetMetadata,
@@ -51,6 +53,22 @@ export interface DockerSandboxOptions {
    * Masks the worktree's `.git` pointer inside the container. Defaults to true.
    */
   maskGitMetadata?: boolean;
+  /**
+   * Per-task egress allowlist, from a started {@link EgressGateway}.
+   *
+   * Replaces `network` with the gateway's internal network — which has no
+   * route off the host — and points the container's proxy variables at the
+   * allowlisting sidecar. Setting both this and `network` is refused rather
+   * than silently resolved, since the two express opposite intents.
+   */
+  egress?: EgressBinding;
+  /**
+   * Individual credential files to bind into the container.
+   *
+   * Built by `resolveVendorCredentials`, which names one or two files per
+   * vendor rather than exposing a home directory.
+   */
+  credentialMounts?: readonly CredentialMount[];
 }
 
 export type ProcessRunner = (
@@ -75,6 +93,8 @@ interface ResolvedOptions {
   env: Readonly<Record<string, string>>;
   extraArgs: readonly string[];
   maskGitMetadata: boolean;
+  egress: EgressBinding | undefined;
+  credentialMounts: readonly CredentialMount[];
 }
 
 const ENVIRONMENT_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/u;
@@ -173,7 +193,56 @@ function resolveExtraArgs(values: readonly string[]): string[] {
   return resolved;
 }
 
+/**
+ * Environment a container needs to route through the egress proxy.
+ *
+ * Both cases of each variable are set because the convention is not
+ * standardised: Node's ecosystem generally reads the upper-case forms while
+ * curl and much of the Unix tooling read the lower-case ones, and a CLI that
+ * reads the case this omitted would bypass the proxy — reaching nothing,
+ * since the network itself is internal, but reaching it confusingly.
+ */
+function proxyEnvironment(egress: EgressBinding): Record<string, string> {
+  return {
+    HTTP_PROXY: egress.proxyUrl,
+    HTTPS_PROXY: egress.proxyUrl,
+    http_proxy: egress.proxyUrl,
+    https_proxy: egress.proxyUrl,
+    NO_PROXY: egress.noProxy,
+    no_proxy: egress.noProxy,
+  };
+}
+
+function resolveCredentialMounts(
+  mounts: readonly CredentialMount[],
+): readonly CredentialMount[] {
+  const seen = new Set<string>();
+  for (const mount of mounts) {
+    assertContainerPath(mount.containerPath, "credential mount target");
+    if (!path.isAbsolute(mount.hostPath)) {
+      throw new Error(
+        `Credential mount source must be absolute: ${mount.hostPath}`,
+      );
+    }
+    if (seen.has(mount.containerPath)) {
+      throw new Error(
+        `Two credential mounts target ${mount.containerPath}`,
+      );
+    }
+    seen.add(mount.containerPath);
+  }
+  return mounts;
+}
+
 function resolveOptions(options: DockerSandboxOptions): ResolvedOptions {
+  if (options.egress !== undefined && options.network !== undefined) {
+    throw new Error(
+      "A sandbox cannot set both `network` and `egress`: the egress gateway " +
+        "supplies its own internal network, and an explicit network would " +
+        "either duplicate it or silently widen it",
+    );
+  }
+
   const resolved: ResolvedOptions = {
     image: assertDockerToken(options.image, "image"),
     docker: options.docker ?? "docker",
@@ -181,7 +250,10 @@ function resolveOptions(options: DockerSandboxOptions): ResolvedOptions {
       options.containerWorkspacePath ?? "/workspace",
       "workspace mount point",
     ),
-    network: assertDockerToken(options.network ?? "none", "network"),
+    network: assertDockerToken(
+      options.egress?.network ?? options.network ?? "none",
+      "network",
+    ),
     memory: assertDockerToken(options.memory ?? "2g", "memory limit"),
     cpus: assertDockerToken(options.cpus ?? "2", "cpu limit"),
     pidsLimit: options.pidsLimit ?? 512,
@@ -193,9 +265,16 @@ function resolveOptions(options: DockerSandboxOptions): ResolvedOptions {
     dropCapabilities: options.dropCapabilities ?? true,
     noNewPrivileges: options.noNewPrivileges ?? true,
     tmpfs: options.tmpfs ?? ["/tmp"],
-    env: options.env ?? {},
+    // Proxy variables are merged under the caller's env, so an explicitly
+    // configured proxy still wins over the gateway's default.
+    env: {
+      ...(options.egress === undefined ? {} : proxyEnvironment(options.egress)),
+      ...(options.env ?? {}),
+    },
     extraArgs: resolveExtraArgs(options.extraArgs ?? []),
     maskGitMetadata: options.maskGitMetadata ?? true,
+    egress: options.egress,
+    credentialMounts: resolveCredentialMounts(options.credentialMounts ?? []),
   };
 
   if (!Number.isInteger(resolved.pidsLimit) || resolved.pidsLimit <= 0) {
@@ -324,6 +403,13 @@ export class DockerWorkspaceManager
                 ]
               : []),
           ]),
+      // Docker orders mounts by destination depth, so the tmpfs home is in
+      // place before a credential lands beneath it.
+      ...options.credentialMounts.flatMap((mount) => [
+        "--volume",
+        `${toMountSource(mount.hostPath)}:${mount.containerPath}` +
+          `${mount.readOnly ? ":ro" : ""}`,
+      ]),
       "--workdir",
       workingDirectory,
       ...Object.entries(options.env).flatMap(([name, value]) => [

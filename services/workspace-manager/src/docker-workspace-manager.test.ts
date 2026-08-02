@@ -408,3 +408,136 @@ test("an unreachable Docker daemon fails fast", async () => {
   await assert.rejects(manager.assertAvailable(), /Docker is not available/u);
   assert.deepEqual(calls[0]?.args, ["version", "--format", "{{.Server.Version}}"]);
 });
+
+const BINDING = {
+  network: "coord-egress-abc123",
+  proxyUrl: "http://egress-proxy:3128",
+  noProxy: "localhost,127.0.0.1,egress-proxy",
+};
+
+test("an egress binding replaces the network and sets the proxy variables", () => {
+  const manager = new DockerWorkspaceManager(
+    { image: "coord/agent:1", egress: BINDING },
+    new RecordingWorkspaceManager(),
+  );
+
+  const args = manager.buildRunArgs(AGENT_LAUNCH, WORKSPACE);
+
+  // The internal network, not `none` and not a bridged one.
+  assert.equal(flagValue(args, "--network"), BINDING.network);
+  const env = args.filter((_value, index) => args[index - 1] === "--env");
+  // Both cases are set: the upper-case forms are what the Node ecosystem
+  // reads, the lower-case ones are what curl and much of Unix reads.
+  for (const expected of [
+    `HTTPS_PROXY=${BINDING.proxyUrl}`,
+    `https_proxy=${BINDING.proxyUrl}`,
+    `HTTP_PROXY=${BINDING.proxyUrl}`,
+    `http_proxy=${BINDING.proxyUrl}`,
+    `NO_PROXY=${BINDING.noProxy}`,
+  ]) {
+    assert.ok(env.includes(expected), `missing ${expected}`);
+  }
+});
+
+test("configuring both a network and an egress gateway is refused", () => {
+  assert.throws(
+    () =>
+      new DockerWorkspaceManager(
+        { image: "coord/agent:1", network: "bridge", egress: BINDING },
+        new RecordingWorkspaceManager(),
+      ),
+    /cannot set both `network` and `egress`/u,
+  );
+});
+
+test("an explicit proxy variable wins over the gateway default", () => {
+  const manager = new DockerWorkspaceManager(
+    {
+      image: "coord/agent:1",
+      egress: BINDING,
+      env: { HTTPS_PROXY: "http://explicit:8080" },
+    },
+    new RecordingWorkspaceManager(),
+  );
+
+  const args = manager.buildRunArgs(AGENT_LAUNCH, WORKSPACE);
+  const env = args.filter((_value, index) => args[index - 1] === "--env");
+  assert.ok(env.includes("HTTPS_PROXY=http://explicit:8080"));
+  assert.ok(!env.includes(`HTTPS_PROXY=${BINDING.proxyUrl}`));
+});
+
+test("credential mounts are bound individually and marked read-only", () => {
+  const hostPath = isWindows ? "C:\\stage\\auth.json" : "/stage/auth.json";
+  const manager = new DockerWorkspaceManager(
+    {
+      image: "coord/agent:1",
+      credentialMounts: [
+        { hostPath, containerPath: "/home/agent/.codex/auth.json", readOnly: true },
+      ],
+      tmpfs: ["/tmp", "/home/agent"],
+    },
+    new RecordingWorkspaceManager(),
+  );
+
+  const args = manager.buildRunArgs(AGENT_LAUNCH, WORKSPACE);
+  const volumes = args.filter((_value, index) => args[index - 1] === "--volume");
+  const expected = isWindows ? "C:/stage/auth.json" : "/stage/auth.json";
+  assert.ok(
+    volumes.includes(`${expected}:/home/agent/.codex/auth.json:ro`),
+    `credential mount missing from ${JSON.stringify(volumes)}`,
+  );
+  // The home must be a writable mount or the credential has nothing to land on
+  // under a read-only root filesystem.
+  assert.ok(args.includes("/home/agent"));
+});
+
+test("a writable credential mount omits the read-only suffix", () => {
+  const hostPath = isWindows ? "C:\\stage\\auth.json" : "/stage/auth.json";
+  const manager = new DockerWorkspaceManager(
+    {
+      image: "coord/agent:1",
+      credentialMounts: [
+        { hostPath, containerPath: "/home/agent/.codex/auth.json", readOnly: false },
+      ],
+    },
+    new RecordingWorkspaceManager(),
+  );
+
+  const volumes = manager
+    .buildRunArgs(AGENT_LAUNCH, WORKSPACE)
+    .filter((_value, index, all) => all[index - 1] === "--volume");
+  const expected = isWindows ? "C:/stage/auth.json" : "/stage/auth.json";
+  assert.ok(volumes.includes(`${expected}:/home/agent/.codex/auth.json`));
+});
+
+test("credential mounts must be absolute and must not collide", () => {
+  const hostPath = isWindows ? "C:\\stage\\auth.json" : "/stage/auth.json";
+  assert.throws(
+    () =>
+      new DockerWorkspaceManager(
+        {
+          image: "coord/agent:1",
+          credentialMounts: [
+            { hostPath: "relative.json", containerPath: "/home/agent/a.json", readOnly: true },
+          ],
+        },
+        new RecordingWorkspaceManager(),
+      ),
+    /must be absolute/u,
+  );
+
+  assert.throws(
+    () =>
+      new DockerWorkspaceManager(
+        {
+          image: "coord/agent:1",
+          credentialMounts: [
+            { hostPath, containerPath: "/home/agent/a.json", readOnly: true },
+            { hostPath, containerPath: "/home/agent/a.json", readOnly: true },
+          ],
+        },
+        new RecordingWorkspaceManager(),
+      ),
+    /Two credential mounts target/u,
+  );
+});

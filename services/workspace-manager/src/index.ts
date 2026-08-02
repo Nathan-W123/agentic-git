@@ -1,4 +1,7 @@
 export * from "./docker-workspace-manager.js";
+export * from "./egress-gateway.js";
+export * from "./vendor-credentials.js";
+export * from "./vendor-sandbox.js";
 
 import { lstat, mkdir, rm } from "node:fs/promises";
 import path from "node:path";

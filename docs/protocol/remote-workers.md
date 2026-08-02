@@ -556,10 +556,17 @@ is not merely a packaging problem:
    no-new-privileges` that either fails or has to be disabled, at which point
    the container is the only sandbox and Codex's flag is decoration.
 
-Mechanically, the wiring is small — all three adapters funnel every invocation
-through one injectable process runner, and `DockerWorkspaceManager.wrapLaunch`
-produces exactly the command and arguments such a runner takes. The blocker is
-the egress allowlist, not the adapters.
+The egress allowlist and the scoped credential mounts both now exist, and the
+double-sandboxing question above is resolved: see
+[vendor CLI sandboxing](../architecture/vendor-cli-sandboxing.md) for the
+mechanism, the argument for disabling Codex's own sandbox inside a container,
+and the precondition that argument depends on.
+
+The adapters still refuse, because the wiring turned out to be less mechanical
+than this note assumed. `CodexAdapter` and the prompt-cli adapters do not accept
+a `WorkspaceSandbox` at all — only `GenericCliAdapter` does — and Codex writes
+its `--output-schema` file to a host temp directory the container cannot see,
+which needs a mount surface that does not exist yet.
 
 ### Where validation runs
 
@@ -582,8 +589,10 @@ weaker guarantee than running it under confinement here, not a stronger one.
 
 ## Not yet built
 
-- Per-task credentials and an egress allowlist. The allowlist is the
-  dependency for containerizing the vendor CLIs, above.
+- Adapter wiring for the containerized vendor CLIs. The per-task egress
+  allowlist and the scoped credential mounts they depended on are built; see
+  [vendor CLI sandboxing](../architecture/vendor-cli-sandboxing.md) for what
+  remains.
 - Validation executed by the worker itself, as opposed to under confinement on
   the control-plane host. See the limits above.
 - Cost accounting beyond tokens: no per-model pricing, invoicing, or billing
