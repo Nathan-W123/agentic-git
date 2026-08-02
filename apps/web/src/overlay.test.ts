@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  stat,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -162,6 +169,63 @@ test("an overlay is created from canonical, edited, and reported dirty", async (
   assert.deepEqual(reset.dirtyFiles, []);
   const after = await harness.service.readOverlayFile(scope, "src/value.js");
   assert.equal(unixLines(after.content), "export const value = 1;\n");
+});
+
+test("concurrent opens converge on one valid overlay", async () => {
+  const harness = await createHarness();
+  const scope = scopeFor(harness);
+  const [first, second] = await Promise.all([
+    harness.service.open(scope),
+    harness.service.open(scope),
+  ]);
+
+  assert.equal(first.exists, true);
+  assert.equal(second.exists, true);
+  assert.equal(first.baseRevision, second.baseRevision);
+  assert.equal(
+    unixLines(
+      (await harness.service.readOverlayFile(scope, "src/value.js")).content,
+    ),
+    "export const value = 1;\n",
+  );
+});
+
+test("overlay file APIs never follow symlinks outside the workspace", async () => {
+  const harness = await createHarness();
+  const scope = scopeFor(harness);
+  await harness.service.open(scope);
+
+  const outside = path.join(harness.root, "outside");
+  await mkdir(outside, { recursive: true });
+  await writeFile(path.join(outside, "secret.txt"), "host secret\n", "utf8");
+  const link = path.join(
+    harness.service.overlayDirectory(scope),
+    "outside-link",
+  );
+  await symlink(
+    outside,
+    link,
+    process.platform === "win32" ? "junction" : "dir",
+  );
+
+  await assert.rejects(
+    harness.service.readOverlayFile(scope, "outside-link/secret.txt"),
+    (error: unknown) =>
+      error instanceof OverlayError && error.code === "invalid_path",
+  );
+  await assert.rejects(
+    harness.service.writeOverlayFile(
+      scope,
+      "outside-link/secret.txt",
+      "overwritten\n",
+    ),
+    (error: unknown) =>
+      error instanceof OverlayError && error.code === "invalid_path",
+  );
+  assert.equal(
+    await readFile(path.join(outside, "secret.txt"), "utf8"),
+    "host secret\n",
+  );
 });
 
 test("two users get disjoint overlays and cannot address each other's", async () => {

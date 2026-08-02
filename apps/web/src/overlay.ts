@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 import {
   mkdir,
+  lstat,
   readFile,
   readdir,
+  rename,
   rm,
   stat,
   writeFile,
@@ -185,6 +187,33 @@ export function resolveOverlayPath(root: string, relative: string): string {
   return resolved;
 }
 
+async function assertNoOverlaySymlink(
+  root: string,
+  resolved: string,
+): Promise<void> {
+  const relation = path.relative(path.resolve(root), resolved);
+  let current = path.resolve(root);
+  for (const segment of relation.split(path.sep)) {
+    current = path.join(current, segment);
+    try {
+      const info = await lstat(current);
+      if (info.isSymbolicLink()) {
+        throw new OverlayError(
+          400,
+          "invalid_path",
+          "Symbolic links cannot be followed through the workspace API",
+        );
+      }
+    } catch (error) {
+      if (isErrorCode(error, "ENOENT")) {
+        // The first missing component means every remaining component is new.
+        return;
+      }
+      throw error;
+    }
+  }
+}
+
 function looksBinary(buffer: Buffer): boolean {
   const probe = buffer.subarray(0, 8_192);
   return probe.includes(0);
@@ -193,6 +222,7 @@ function looksBinary(buffer: Buffer): boolean {
 export class OverlayWorkspaceService {
   private readonly repositories: RepositoryService;
   private readonly worktrees: GitWorktreeWorkspaceManager;
+  private readonly overlayLocks = new Map<string, Promise<void>>();
   private dockerProbe:
     | { at: number; available: boolean; explanation: string }
     | undefined;
@@ -219,6 +249,29 @@ export class OverlayWorkspaceService {
       .digest("hex")
       .slice(0, 20);
     return path.join(this.overlaysRoot, digest);
+  }
+
+  private async withOverlayLock<T>(
+    scope: OverlayScope,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const key = this.overlayDirectory(scope);
+    const previous = this.overlayLocks.get(key) ?? Promise.resolve();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const current = previous.then(() => gate);
+    this.overlayLocks.set(key, current);
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+      if (this.overlayLocks.get(key) === current) {
+        this.overlayLocks.delete(key);
+      }
+    }
   }
 
   private metaPath(scope: OverlayScope): string {
@@ -251,14 +304,41 @@ export class OverlayWorkspaceService {
       }
       throw error;
     }
-    const meta = JSON.parse(raw) as OverlayMeta;
-    // The meta file is trusted (it is written by this service), but the
-    // ownership triple is still verified so a corrupted or hand-moved file
-    // cannot connect one user's session to another user's overlay.
+    let candidate: unknown;
+    try {
+      candidate = JSON.parse(raw);
+    } catch {
+      throw new OverlayError(
+        409,
+        "overlay_corrupt",
+        "The workspace record is invalid; discard and reopen it",
+      );
+    }
+    const value =
+      typeof candidate === "object" && candidate !== null
+        ? (candidate as Partial<OverlayMeta>)
+        : undefined;
+    const base =
+      typeof value?.baseVersion === "object" &&
+      value.baseVersion !== null
+        ? value.baseVersion
+        : undefined;
+    // Validate the full coordinate system, not only ownership. A hand-edited
+    // base revision or sequence could otherwise bypass stale-base protection.
     if (
-      meta.userId !== scope.userId ||
-      meta.projectId !== scope.projectId ||
-      meta.repositoryId !== scope.repositoryId
+      value?.version !== 1 ||
+      value.userId !== scope.userId ||
+      value.projectId !== scope.projectId ||
+      value.repositoryId !== scope.repositoryId ||
+      base === undefined ||
+      !Number.isSafeInteger(base.sequence) ||
+      base.sequence < 1 ||
+      typeof base.revision !== "string" ||
+      base.revision.length === 0 ||
+      typeof base.branch !== "string" ||
+      base.branch.length === 0 ||
+      typeof base.createdAt !== "string" ||
+      typeof value.createdAt !== "string"
     ) {
       throw new OverlayError(
         409,
@@ -266,7 +346,7 @@ export class OverlayWorkspaceService {
         "The workspace record does not match its owner; discard and reopen it",
       );
     }
-    return meta;
+    return value as OverlayMeta;
   }
 
   private async requireOverlay(
@@ -352,6 +432,13 @@ export class OverlayWorkspaceService {
   }
 
   public async status(scope: OverlayScope): Promise<OverlayStatus> {
+    return await this.withOverlayLock(
+      scope,
+      async () => await this.statusUnlocked(scope),
+    );
+  }
+
+  private async statusUnlocked(scope: OverlayScope): Promise<OverlayStatus> {
     const repository = await this.repository(scope);
     const canonical = await this.repositories.getCanonicalVersion(repository);
     const meta = await this.readMeta(scope);
@@ -406,10 +493,17 @@ export class OverlayWorkspaceService {
   }
 
   public async open(scope: OverlayScope): Promise<OverlayStatus> {
+    return await this.withOverlayLock(
+      scope,
+      async () => await this.openUnlocked(scope),
+    );
+  }
+
+  private async openUnlocked(scope: OverlayScope): Promise<OverlayStatus> {
     const repository = await this.repository(scope);
     const existing = await this.readMeta(scope);
     if (existing !== undefined) {
-      return await this.status(scope);
+      return await this.statusUnlocked(scope);
     }
     const canonical = await this.repositories.getCanonicalVersion(repository);
     await mkdir(this.overlaysRoot, { recursive: true });
@@ -423,6 +517,9 @@ export class OverlayWorkspaceService {
     );
     const directory = this.overlayDirectory(scope);
     const git = this.repositories.getGitClient();
+    const metadataPath = this.metaPath(scope);
+    const stagedMetadata = `${metadataPath}.${createId("tmp")}`;
+    let created = false;
     try {
       await git.run([
         `--git-dir=${repository.path}`,
@@ -432,41 +529,64 @@ export class OverlayWorkspaceService {
         directory,
         canonical.revision,
       ]);
+      created = true;
+      const meta: OverlayMeta = {
+        version: 1,
+        userId: scope.userId,
+        projectId: scope.projectId,
+        repositoryId: scope.repositoryId,
+        baseVersion: canonical,
+        createdAt: new Date().toISOString(),
+      };
+      await writeFile(
+        stagedMetadata,
+        `${JSON.stringify(meta, undefined, 2)}\n`,
+        "utf8",
+      );
+      await rename(stagedMetadata, metadataPath);
+      await this.store.appendAudit(undefined, {
+        type: "workspace_created",
+        data: {
+          projectId: scope.projectId,
+          repositoryId: scope.repositoryId,
+          actorId: scope.userId,
+          kind: "human-overlay",
+          baseRevision: canonical.revision,
+        },
+      });
+      return await this.statusUnlocked(scope);
     } catch (error) {
+      if (created) {
+        await git.run(
+          [
+            `--git-dir=${repository.path}`,
+            "worktree",
+            "remove",
+            "--force",
+            directory,
+          ],
+          { allowFailure: true },
+        );
+      }
+      await rm(stagedMetadata, { force: true });
+      await rm(metadataPath, { force: true });
+      await rm(directory, { recursive: true, force: true });
       await git.run(
         [`--git-dir=${repository.path}`, "worktree", "prune"],
         { allowFailure: true },
       );
-      await rm(directory, { recursive: true, force: true });
       throw error;
     }
-    const meta: OverlayMeta = {
-      version: 1,
-      userId: scope.userId,
-      projectId: scope.projectId,
-      repositoryId: scope.repositoryId,
-      baseVersion: canonical,
-      createdAt: new Date().toISOString(),
-    };
-    await writeFile(
-      this.metaPath(scope),
-      `${JSON.stringify(meta, undefined, 2)}\n`,
-      "utf8",
-    );
-    await this.store.appendAudit(undefined, {
-      type: "workspace_created",
-      data: {
-        projectId: scope.projectId,
-        repositoryId: scope.repositoryId,
-        actorId: scope.userId,
-        kind: "human-overlay",
-        baseRevision: canonical.revision,
-      },
-    });
-    return await this.status(scope);
   }
 
   public async discard(scope: OverlayScope): Promise<void> {
+    await this.withOverlayLock(
+      scope,
+      async () => await this.discardUnlocked(scope),
+    );
+  }
+
+  private async discardUnlocked(scope: OverlayScope): Promise<void> {
     const repository = await this.repository(scope);
     const directory = this.overlayDirectory(scope);
     const git = this.repositories.getGitClient();
@@ -489,11 +609,21 @@ export class OverlayWorkspaceService {
   }
 
   public async reset(scope: OverlayScope): Promise<OverlayStatus> {
-    await this.discard(scope);
-    return await this.open(scope);
+    return await this.withOverlayLock(scope, async () => {
+      await this.discardUnlocked(scope);
+      return await this.openUnlocked(scope);
+    });
   }
 
   public async listFiles(scope: OverlayScope): Promise<OverlayFileEntry[]> {
+    return await this.withOverlayLock(scope, async () => {
+      return await this.listFilesUnlocked(scope);
+    });
+  }
+
+  private async listFilesUnlocked(
+    scope: OverlayScope,
+  ): Promise<OverlayFileEntry[]> {
     const { directory } = await this.requireOverlay(scope);
     const entries: OverlayFileEntry[] = [];
     const walk = async (current: string): Promise<void> => {
@@ -528,8 +658,18 @@ export class OverlayWorkspaceService {
     scope: OverlayScope,
     relative: string,
   ): Promise<OverlayFileContent> {
+    return await this.withOverlayLock(scope, async () => {
+      return await this.readOverlayFileUnlocked(scope, relative);
+    });
+  }
+
+  private async readOverlayFileUnlocked(
+    scope: OverlayScope,
+    relative: string,
+  ): Promise<OverlayFileContent> {
     const { directory } = await this.requireOverlay(scope);
     const resolved = resolveOverlayPath(directory, relative);
+    await assertNoOverlaySymlink(directory, resolved);
     let buffer: Buffer;
     try {
       buffer = await readFile(resolved);
@@ -557,6 +697,16 @@ export class OverlayWorkspaceService {
     relative: string,
     content: string,
   ): Promise<void> {
+    await this.withOverlayLock(scope, async () => {
+      await this.writeOverlayFileUnlocked(scope, relative, content);
+    });
+  }
+
+  private async writeOverlayFileUnlocked(
+    scope: OverlayScope,
+    relative: string,
+    content: string,
+  ): Promise<void> {
     const { directory } = await this.requireOverlay(scope);
     const resolved = resolveOverlayPath(directory, relative);
     if (Buffer.byteLength(content, "utf8") > MAX_WRITE_BYTES) {
@@ -566,6 +716,7 @@ export class OverlayWorkspaceService {
         `Files larger than ${MAX_WRITE_BYTES} bytes cannot be saved through the dashboard`,
       );
     }
+    await assertNoOverlaySymlink(directory, resolved);
     await mkdir(path.dirname(resolved), { recursive: true });
     await writeFile(resolved, content, "utf8");
   }
@@ -584,7 +735,21 @@ export class OverlayWorkspaceService {
     scope: OverlayScope,
     command: string,
   ): Promise<OverlayExecResult> {
-    if (command.length === 0 || command.length > MAX_COMMAND_LENGTH) {
+    return await this.withOverlayLock(
+      scope,
+      async () => await this.execUnlocked(scope, command),
+    );
+  }
+
+  private async execUnlocked(
+    scope: OverlayScope,
+    command: string,
+  ): Promise<OverlayExecResult> {
+    if (
+      command.length === 0 ||
+      command.length > MAX_COMMAND_LENGTH ||
+      command.includes("\0")
+    ) {
       throw new OverlayError(400, "invalid_command", "Command length is invalid");
     }
     const options = this.project.sandboxOptions();
@@ -635,6 +800,16 @@ export class OverlayWorkspaceService {
    * rather than being force-merged; the user resets and reapplies.
    */
   public async submit(
+    scope: OverlayScope,
+    objective: string,
+  ): Promise<OverlaySubmitResult> {
+    return await this.withOverlayLock(
+      scope,
+      async () => await this.submitUnlocked(scope, objective),
+    );
+  }
+
+  private async submitUnlocked(
     scope: OverlayScope,
     objective: string,
   ): Promise<OverlaySubmitResult> {
@@ -912,7 +1087,8 @@ export class OverlayWorkspaceService {
         });
         // The overlay's edits are now canonical; rebase it onto the new
         // head so the next edit starts clean.
-        await this.reset(scope);
+        await this.discardUnlocked(scope);
+        await this.openUnlocked(scope);
       } else {
         await this.store.saveTaskStatus(
           run.id,
