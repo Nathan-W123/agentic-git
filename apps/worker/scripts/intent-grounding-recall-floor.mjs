@@ -120,7 +120,13 @@ await rm(root, { recursive: true, force: true });
 
 const byTarget = new Map();
 let grounded = 0;
-let declaredFileExists = 0;
+// Split by whether the plan declared a file that exists. The subgroup that
+// did not is the one structural evidence has nothing to arbitrate on, and it
+// is the whole reason to want this signal, so its rate is reported separately
+// rather than folded into the total.
+const withRealFile = { total: 0, grounded: 0, onTotalJs: 0 };
+const withoutRealFile = { total: 0, grounded: 0, onTotalJs: 0 };
+const TRUE_TARGET = "src/pricing/total.js";
 for (const entry of intents) {
   const grounding = groundIntent(entry.intent, index);
   const top = grounding.targets[0]?.file;
@@ -130,10 +136,15 @@ for (const entry of intents) {
   } else {
     byTarget.set("(none)", (byTarget.get("(none)") ?? 0) + 1);
   }
-  if (entry.declaredFiles.some((file) => index.paths.includes(file))) {
-    declaredFileExists += 1;
-  }
+  const real = entry.declaredFiles.some((file) => index.paths.includes(file));
+  const bucket = real ? withRealFile : withoutRealFile;
+  bucket.total += 1;
+  bucket.grounded += top === undefined ? 0 : 1;
+  bucket.onTotalJs += top === TRUE_TARGET ? 1 : 0;
 }
+const declaredFileExists = withRealFile.total;
+const share = (part, whole) =>
+  whole === 0 ? " n/a" : `${((part / whole) * 100).toFixed(0)}%`;
 
 /** Do two phrasings of the same work ground to a shared target? */
 let pairs = 0;
@@ -166,6 +177,17 @@ console.log(
   `same-work pairs agreeing ${agreeing} of ${pairs} ` +
     `(${((agreeing / pairs) * 100).toFixed(0)}%)`,
 );
+console.log(`\nby whether the plan declared a file that exists:`);
+for (const [name, bucket] of [
+  ["declared a real file", withRealFile],
+  ["declared none that exist", withoutRealFile],
+]) {
+  console.log(
+    `  ${name.padEnd(26)} n=${String(bucket.total).padStart(3)}  ` +
+      `grounded ${share(bucket.grounded, bucket.total).padStart(4)}  ` +
+      `on ${TRUE_TARGET} ${share(bucket.onTotalJs, bucket.total).padStart(4)}`,
+  );
+}
 console.log("\ntop target by intent:");
 for (const [file, count] of [...byTarget].sort((a, b) => b[1] - a[1])) {
   console.log(`  ${String(count).padStart(3)}  ${file}`);

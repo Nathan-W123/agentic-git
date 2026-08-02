@@ -179,6 +179,16 @@ is the wrong input for the question, not that the model was too small — and
 that a signal worth scheduling on would combine the grounded symbol graph with
 intent, rather than reading intent alone.
 
+That was tried: `docs/benchmarks/intent-grounding.md`. Grounding intent against
+the repository index does work — of the recorded intents whose declared file
+does not exist, 93% reach the file the agent meant but never named — but the
+signal built on it scores 70%
+precision at 58% recall on the same held-out half, and is also not wired in.
+The part of the conclusion above that survives is narrower than it was written:
+the problem is not finding the module, it is that "same file" and "linked by an
+import" are the only relations a file-level index offers, and neither of them
+is the relation the label turns on.
+
 ## Reproducing
 
 ```powershell

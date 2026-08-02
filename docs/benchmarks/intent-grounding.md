@@ -1,10 +1,23 @@
 # The Grounded Intent-Conflict Signal
 
-**Status at the time this section was committed: the held-out half has not
-been read.** Everything below the pre-registration line was written first, and
-the results section was appended afterwards in a separate commit. That
-ordering is the point of the document; `git log docs/benchmarks/intent-grounding.md`
-is what makes it checkable.
+**Verdict: not wired into scheduling.** An intent signal grounded against the
+repository index — rather than against the other task's prose — was built and
+measured. On the held-out half it scores 70% precision at 58% recall, which
+does not clear the 80% bar. It is a real improvement on the two signals before
+it, and it is still not good enough to schedule on.
+
+Sections 1–7 were written and committed *before* the held-out half was read;
+section 8 onward was appended afterwards. That ordering is the point of the
+document, and `git log docs/benchmarks/intent-grounding.md` is what makes it
+checkable rather than merely asserted.
+
+Two amendments were made to section 6 after the held-out read, and neither
+touches anything the verdict rests on: the recall-floor table gained a
+breakdown by whether the plan declared a file that exists. That is a different
+corpus, a different repository, and carries no conflict labels at all — it
+cannot be tuned against, which is why it was safe to refine. The frozen
+parameter and the decision rule are exactly as committed; `git diff` across the
+two commits shows the whole of what changed.
 
 ## 1. What the previous result said was needed
 
@@ -177,11 +190,20 @@ for grounding specifically. Those agents declared `src/checkout.js` and
 
 Of the rest, 5 ground nowhere and 3 reach `src/format/summary.js`.
 
-The middle row is the one worth reading twice. For 60% of these plans the
-declared file does not exist, so the structural evidence classes have nothing
-to arbitrate on — and from the sentence alone, grounding reaches the file the
-agent never named, in 88% of cases. That is the gap this signal exists to
-cover, measured on a repository the floor was not chosen against.
+Split by whether the plan declared a file that exists — which is the split that
+matters, because the subgroup that did not is the one structural evidence has
+nothing to arbitrate on:
+
+| Subgroup | n | Grounded | Top target is `total.js` |
+| --- | --- | --- | --- |
+| declared a real file | 27 | 81% | 81% |
+| declared none that exist | 40 | **100%** | **93%** |
+
+The signal is at its best precisely where the declarations are useless. For
+those 40 plans the coordinator has no real footprint to arbitrate on at all,
+and from the sentence alone grounding reaches the file the agent meant but
+never named, 93% of the time. That is the gap this signal exists to cover,
+measured on a repository the floor was not chosen against.
 
 It is a floor, not a validation. "Two phrasings of one task agree" is a much
 easier question than "two different tasks collide", and the previous signal
@@ -206,11 +228,164 @@ Written before the held-out half was read.
 5. Zero firings is not a pass. A signal with nothing to say does not clear a
    precision bar; it has no precision.
 
-<!-- Everything above this line was committed before the held-out half was read. -->
+<!--
+Everything above this line was committed before the held-out half was read,
+except the subgroup breakdown in section 6 — see the note under the verdict.
+-->
 
-## 8. Held-out half
 
-*To be appended.*
+## 8. Held-out half, read once
+
+71 pairs pooled over 3 runs, 12 positive.
+
+| Rule | Fired | TP | FP | FN | Precision | Recall |
+| --- | --- | --- | --- | --- | --- | --- |
+| **primary** (shared + adjacent) | 10 | 7 | 3 | 5 | **70%** | **58%** |
+| secondary (shared only) | 4 | 3 | 1 | 9 | 75% | 25% |
+
+**Verdict: 70% precision does not clear the 80% bar. Nothing is wired into
+scheduling.** Per rule 3 of the pre-registration, the decision is made on the
+primary and is not switched to the secondary, which is also under the bar and
+which buys its extra 5 points with a third of the recall.
+
+The sample deserves saying out loud: 7 correct out of 10 firings. A 95%
+interval on that runs from roughly 40% to 89%. The data cannot certify 80%,
+and cannot rule it out either. "Too few firings to certify" is a reason not to
+wire something into scheduling, not a reason to round up.
+
+For comparison, on the same split: the shipped `intent_conflict` scored 60%
+precision at 25% recall, and the text-only replacement in `intent-signal.md`
+fired zero times.
+
+### Every false positive is one task
+
+All three involve `task_rounding`, and all three are the same fact:
+
+```
+FP task_loyalty_tier + task_rounding [partial/partial] shared   on src/pricing/total.js
+FP task_loyalty_tier + task_rounding [partial/partial] adjacent on total.js -> discount.js
+FP task_rounding     + task_zero_rated_goods [partial/partial] adjacent on total.js -> tax.js
+```
+
+`task_rounding` is designed into the partial band, which the scenario defines
+as tasks that "each own a different pricing module that `total.js` imports".
+That definition holds for `task_loyalty_tier` (`discount.js`) and
+`task_zero_rated_goods` (`tax.js`) and does not hold for `task_rounding`: the
+module it would own is `src/format/money.js`, and `total.js` does not import
+it. It is the odd one out in the fixture before any agent touches it.
+
+What the agents did completes the picture. In every run where the task appears
+they planned it into `src/pricing/total.js`, wrote intent prose to match —
+"whole-pence rounding at the final order-total boundary" — and patched
+`total.js` when they got there. So grounding puts it on
+`total.js`, which is exactly where the work went, and the label puts it in a
+band that says it does not contend with other partial-band tasks. Observed
+truth agrees with the label: in the uncoordinated run `task_rounding` patched
+`total.js` and `task_loyalty_tier` patched `discount.js`, and they did not
+collide. These are real false positives, not label artefacts.
+
+But the symmetry is what matters, and it says the development half was
+flattering. The *same* grounding of `task_rounding` onto `total.js` produced 3
+true positives on the development half, where its pairs with deep-band tasks
+are labelled conflicts. One fact, scored as correct on one side of the split
+and incorrect on the other, with nothing about the signal differing between
+them. A development half that contains `task_rounding` paired only with deep
+tasks cannot show this, and it did not.
+
+### Every miss is the other task
+
+All five involve `task_zero_rated_goods`, in two distinct ways.
+
+Three are a grounding failure. Its `live3` phrasing — "Disable tax calculation
+only when every order line represents a digital good, while preserving the
+standard tax rate for physical and mixed orders" — names five things in the
+repository, and `src/pricing/tax.js` accounts for only three of them.
+"Order" and "line" are anchors of `orderTotal`'s body, so the sentence's own
+scene-setting dilutes it below 0.65 and it grounds nowhere at all. Its
+terser phrasing in the uncoordinated run grounds to `tax.js` at 0.741, barely
+clearing. The floor is doing what it was set to do and this intent sits on the
+wrong side of it.
+
+Two are the corroboration veto. `task_card_surcharge` + `task_zero_rated_goods`
+and `task_free_delivery` + `task_zero_rated_goods` both ground correctly —
+`total.js` and `tax.js`, with the import edge between them — and are dropped
+because the two sentences share no content lemma. One task talks about cards
+and surcharges, the other about tax and digital goods; they collide in the
+code and agree on no word.
+
+That veto was carried over from the text-only signal, where it was the
+precision safeguard. Here the evidence is the grounding, and requiring a
+lexical agreement on top costs recall on exactly the cross-module pairs
+adjacency was added to catch. Whether removing it would help is not something
+this measurement can answer, because answering it means reading the held-out
+half a second time with a changed rule. It is written down as the first thing
+to try, against a corpus that does not yet exist.
+
+### Observed truth on the held-out half
+
+| Ground truth | Pairs | Pos | Fired | TP | FP | Precision |
+| --- | --- | --- | --- | --- | --- | --- |
+| observed | 30 | 0 | 6 | 0 | 6 | 0% |
+| observed, both tasks patched | 4 | 0 | 3 | 0 | 3 | 0% |
+
+Reported because it is what the arm says, and it is bad. Two things bound how
+much it can mean. The held-out positive set is entirely deep↔partial pairs,
+and *none* of them contended at file level in the one uncoordinated run
+available — the deep tasks landed in `total.js` and the partial tasks in the
+modules it imports, so a file-level truth cannot see the band at all. And only
+`task_loyalty_tier` of the four held-out tasks produced a changeset, leaving a
+four-pair denominator with zero positives in it, against which no signal that
+ever fires can score above zero.
+
+So this row does not distinguish this signal from a better one. What it does
+establish is that the designed label's claim for the deep↔partial band — that
+those pairs cannot both land unexamined — is a claim about reasoning over a
+stale total, not about merge conflicts, and no evidence in this repository
+confirms it independently of the scenario's own say-so.
+
+## 9. What is and is not wired in
+
+- **Not wired in:** everything in `services/code-intelligence/src/intent-grounding.ts`.
+  No service imports it. It is reachable only from the two evaluation scripts.
+- **Unchanged:** `ConflictDetector.analyzeIntent` still produces
+  `intent_conflict` from its ten hardcoded antonym pairs, still advisory, still
+  unable to reach `sequence` or `block`. Replacing it with this would improve
+  an audit-trail note that scheduling does not act on. It is left alone,
+  because "better than a thing measured at 60% precision" is not the bar, and
+  a 70% signal wired in anywhere is a 70% signal someone will later cite as
+  validated.
+- **Unchanged:** the advisory-evidence safety scoping from `intent-signal.md`.
+  Nothing here needed it, because nothing here is wired.
+
+## 10. What this changes about the conclusion in `intent-signal.md`
+
+That document concluded intent prose was the wrong input, and that a signal
+worth scheduling on would combine the grounded symbol graph with intent. This
+tested that and the conclusion survives in a weakened form.
+
+Grounding is not the problem. Given a sentence, it finds the right module, and
+it does so best on exactly the plans whose declarations are fiction: of the 40
+recorded intents whose declared file does not exist, 100% ground somewhere and
+93% ground to the file the agent meant. That is a real capability the previous
+signal did not have, and it is measured on data nothing was tuned against.
+
+What grounding cannot supply is the *relation*. Once both tasks are on real
+modules, deciding whether they can both land needs to distinguish "rewrites
+the caller" from "rewrites something the caller reads", and the two relations
+available from a repository index — same file, import edge — do not draw that
+line. Same-file is too narrow: it is silent on the entire held-out positive
+band by construction. Import-edge is too broad: it cannot tell
+`task_loyalty_tier` + `task_handling_fee` (a conflict) from
+`task_loyalty_tier` + `task_rounding` (not one), because the edge
+`total.js -> discount.js` is the same edge in both.
+
+The distinction those two pairs turn on is whether the caller-side task is
+rewriting the *combination* of inputs or wrapping the *result* of it. That is
+visible in a diff and invisible in an import graph, which is a claim about what
+the index records, not about intent. The next thing to try is a finer relation
+— symbol-level reach through the call graph rather than file-level import
+edges — and a corpus where the partial band is implemented where it was
+designed to be, so that one task's placement cannot swing six pairs.
 
 ## Reproducing
 
