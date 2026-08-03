@@ -49,6 +49,58 @@
  * measuring further. It is held out too — nothing here is tuned on it.
  */
 
+/**
+ * The seed tree the recorded runs were executed against.
+ *
+ * Intent grounding scores a sentence against a repository index, so the tree
+ * is an input to the measurement exactly as much as the prose is. The recorded
+ * intents were written by agents looking at *this* tree; grounding them
+ * against a later one would be scoring sentences against a repository their
+ * authors never saw, and it would do so silently, because the evaluation
+ * scripts rebuild the index from `TEAM_QUEUE_SCENARIO.seed` on every run.
+ *
+ * This is a live hazard rather than a hypothetical. The scenario's partial
+ * band is documented as tasks that "each own a different pricing module that
+ * `total.js` imports", which is true of `discount.js` and `tax.js` and false
+ * of `src/format/money.js` — nothing imports it. That inconsistency is a real
+ * reason to want to change the seed, and changing it must invalidate these
+ * numbers rather than quietly improve them.
+ *
+ * So the fingerprint is pinned. Edit the seed and every recorded evaluation
+ * fails loudly until someone decides, in the open, what the old numbers now
+ * mean.
+ */
+export const REGISTERED_SEED_SHA256 =
+  "aa97bae419e9dd0b909c7cbdd8a545df43857d7a1715524dac78a5e1fd41d314";
+
+/** The fingerprint of a scenario seed, as {@link REGISTERED_SEED_SHA256}. */
+export function seedFingerprint(seed, createHash) {
+  const hash = createHash("sha256");
+  for (const [file, contents] of Object.entries(seed).sort((left, right) =>
+    left[0].localeCompare(right[0]),
+  )) {
+    hash.update(`path:${file}\nbytes:${contents.length}\n${contents}\n--\n`);
+  }
+  return hash.digest("hex");
+}
+
+/** Throws unless the seed is the one the recorded runs were executed against. */
+export function assertRegisteredSeed(seed, createHash) {
+  const actual = seedFingerprint(seed, createHash);
+  if (actual !== REGISTERED_SEED_SHA256) {
+    throw new Error(
+      "the team-queue seed has changed since these runs were recorded\n" +
+        `  registered ${REGISTERED_SEED_SHA256}\n` +
+        `  current    ${actual}\n` +
+        "The recorded intents were written against the registered tree. " +
+        "Grounding them\nagainst this one scores sentences against a " +
+        "repository their authors never saw.\nRecord fresh runs against the " +
+        "new seed, or evaluate at the old revision — do not\nre-score the old " +
+        "corpus and report the result as a correction.",
+    );
+  }
+}
+
 /** Agent ids whose tasks may be used for development. */
 export const DEVELOPMENT_AGENTS = new Set(["codex-a", "codex-b", "codex-c"]);
 

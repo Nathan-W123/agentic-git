@@ -76,6 +76,7 @@ import { RepositoryService, runProcess } from "@coord/repository-service";
 import { WorkerClient } from "../dist/client.js";
 import { Worker } from "../dist/worker.js";
 import { TEAM_QUEUE_SCENARIO } from "./team-queue-scenario.mjs";
+import { TEAM_QUEUE_WIRED_SCENARIO } from "./team-queue-wired-scenario.mjs";
 
 const run = promisify(execFile);
 
@@ -775,14 +776,41 @@ async function harvestPlans(store, byTaskId) {
   return plans;
 }
 
+/**
+ * Which seed to run against.
+ *
+ * `team-queue` is the recorded corpus and is frozen — the benchmark numbers in
+ * `docs/benchmarks/` are only reproducible while its seed is byte-identical,
+ * and `assertRegisteredSeed` enforces that. `team-queue-wired` is the same ten
+ * tasks over a corrected tree, in which all three partial-band modules are
+ * genuinely imported by the order total. New runs should prefer it; the
+ * default stays on the recorded scenario so that repeating a past experiment
+ * does not silently change what was being measured.
+ */
+const SCENARIOS = new Map([
+  ["team-queue", TEAM_QUEUE_SCENARIO],
+  ["team-queue-wired", TEAM_QUEUE_WIRED_SCENARIO],
+]);
+const scenarioName =
+  process.argv
+    .find((entry) => entry.startsWith("--scenario="))
+    ?.slice("--scenario=".length) ?? "team-queue";
+const baseScenario = SCENARIOS.get(scenarioName);
+if (baseScenario === undefined) {
+  throw new Error(
+    `--scenario must be one of ${[...SCENARIOS.keys()].join(", ")}, ` +
+      `got ${scenarioName}`,
+  );
+}
+
 async function once() {
-  const selected = TEAM_QUEUE_SCENARIO.tasks.filter((entry) =>
+  const selected = baseScenario.tasks.filter((entry) =>
     bands.includes(entry.band),
   );
   if (selected.length === 0) {
     throw new Error(`--bands selected no tasks: ${bands.join(",")}`);
   }
-  const scenario = { ...TEAM_QUEUE_SCENARIO, tasks: selected };
+  const scenario = { ...baseScenario, tasks: selected };
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-team-"));
   const startedAt = Date.now();
   let plane;

@@ -26,6 +26,7 @@
  * `--pairs=a+b,c+d` restricts output to named scenario task pairs.
  */
 
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rm, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -35,7 +36,11 @@ import {
   TEAM_QUEUE_SCENARIO,
   TEAM_QUEUE_TRUE_CONFLICTS,
 } from "./team-queue-scenario.mjs";
-import { splitOf } from "./intent-holdout.mjs";
+import { assertRegisteredSeed, splitOf } from "./intent-holdout.mjs";
+
+// Same guard as the evaluation: these inputs are only comparable with the
+// recorded numbers while the tree they are computed against is unchanged.
+assertRegisteredSeed(TEAM_QUEUE_SCENARIO.seed, createHash);
 
 /** The split a recorded `left|right [run]` bucket entry belongs to. */
 const splitOfPair = (entry) => {

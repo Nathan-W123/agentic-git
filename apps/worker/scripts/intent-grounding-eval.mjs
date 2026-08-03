@@ -28,6 +28,7 @@
  * tasks on the requested side of the split. `--json` writes the per-pair table.
  */
 
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { readFile } from "node:fs/promises";
@@ -39,11 +40,17 @@ import {
   TEAM_QUEUE_TRUE_CONFLICTS,
 } from "./team-queue-scenario.mjs";
 import {
+  assertRegisteredSeed,
   DEVELOPMENT_AGENTS,
   HELD_OUT_AGENTS,
   splitOf,
   TASK_AGENTS,
 } from "./intent-holdout.mjs";
+
+// The tree is an input to this measurement as much as the prose is, and the
+// index below is rebuilt from the live scenario on every run. If the seed has
+// been edited since these runs were recorded, stop.
+assertRegisteredSeed(TEAM_QUEUE_SCENARIO.seed, createHash);
 
 const REPO_ROOT = path.resolve(import.meta.dirname, "..", "..", "..");
 const fromDist = async (pkg, file) =>

@@ -14,6 +14,11 @@ remaining gap is one scenario task implemented outside the module its label
 bands it in, and closing it needs a corpus that does not exist and cannot be
 constructed from what is recorded (section 12).
 
+That fixture defect has been corrected for future runs — as a sibling
+scenario, leaving the recorded one byte-identical and pinned, because
+re-scoring the old corpus against a new tree would manufacture the result
+rather than measure it (section 13). No number in this document changes.
+
 Sections 1–7 were written and committed *before* the held-out half was read;
 section 8 onward was appended afterwards. That ordering is the point of the
 document, and `git log docs/benchmarks/intent-grounding.md` is what makes it
@@ -522,11 +527,85 @@ must come from somewhere else.
 
 What a usable corpus needs, concretely: three or more agent-written intents per
 run over a scenario with a genuine independent band, and — the part team-queue
-got wrong — every task implemented in the module its band assigns it, or the
-band assignment corrected to match where agents actually work. `task_rounding`
-alone swings six of the twelve held-out pairs. That requires live agent runs,
-which is the single blocker; everything else in this document was computed
-without any.
+got wrong — every partial-band task owning a module the caller actually reads.
+`task_rounding` alone accounts for all three held-out false positives, of eight
+errors in total; the other five are `task_zero_rated_goods` and are unrelated
+to banding. That requires live agent runs, which is the single blocker;
+everything else in this document was computed without any.
+
+## 13. The fixture defect, and what was done about it
+
+### It is a fixture defect, not a mislabelling
+
+The tempting correction is to re-band `task_rounding` as deep, which would turn
+all three false positives into true positives and report 100% precision. That
+number would be manufactured. `task_rounding` was identified *by inspecting
+which pairs the signal got wrong*, and relabelling those same pairs is the
+circularity the held-out method exists to prevent.
+
+The recorded data settles it independently. In the uncoordinated arm
+`task_rounding` patched `src/pricing/total.js` and `task_loyalty_tier` patched
+`src/pricing/discount.js`. They did not collide. The label calls that pair a
+non-conflict and observed behaviour agrees, so the label is right and the three
+false positives are real.
+
+What is wrong is one level down. The scenario documents its partial band as
+three tasks that "each own a different pricing module that `total.js`
+imports":
+
+| Task | Module | Imported by `total.js`? |
+| --- | --- | --- |
+| `task_loyalty_tier` | `src/pricing/discount.js` | yes |
+| `task_zero_rated_goods` | `src/pricing/tax.js` | yes |
+| `task_rounding` | `src/format/money.js` | **no — nothing imports it** |
+
+With no edge into the caller there is nothing in `money.js` for a rounding
+task to own, so every recorded agent implemented rounding inside `orderTotal`
+instead. Grounding then correctly followed them to `total.js`, and the pairs
+that followed were correctly labelled non-conflicts. Every part of the chain
+behaved properly except the tree.
+
+### The correction
+
+`apps/worker/scripts/team-queue-wired-scenario.mjs`, a sibling rather than an
+edit. `team-queue` stays byte-identical, because the numbers above are only
+reproducible while it does — `assertRegisteredSeed` in `intent-holdout.mjs`
+now pins its seed by SHA-256, and both evaluation scripts refuse to run
+against a changed one rather than silently re-scoring the old corpus against a
+new tree.
+
+`team-queue-wired` is the same ten tasks, ids, objectives and agent assignment
+— so the registered split applies to it unchanged — over a seed differing in
+three files. `src/format/money.js` gains a `roundMoney` helper that rounds to
+whole pounds at the base revision, which is the defect `task_rounding` exists
+to fix; `orderTotal` imports and applies it; and `test/money.test.js` covers
+it without pinning the number of decimal places, since changing that is the
+work. `team-queue-experiment.mjs` takes `--scenario=team-queue-wired`, with
+the recorded scenario still the default so that repeating a past experiment
+does not quietly change what it measures.
+
+`apps/worker/scripts/team-queue-wired-verify.mjs` checks the fixture before a
+live run is spent on it: the seeded tree passes its own `node --test`, and
+every partial-band module is both imported and called by the order total.
+
+```
+task_loyalty_tier        src/pricing/discount.js    imported, orderTotal -> discountRate
+task_zero_rated_goods    src/pricing/tax.js         imported, orderTotal -> taxFor
+task_rounding            src/format/money.js        imported, orderTotal -> roundMoney
+```
+
+### What this does and does not buy
+
+It produces **no new numbers**. The recorded intents were written by agents
+looking at the old tree; grounding them against the corrected one would score
+sentences against a repository their authors never saw, which is precisely
+what the seed pin now prevents. The held-out result stands at 70% precision
+and the ceiling at 75%.
+
+What it buys is that the next live run measures the scenario that was
+designed rather than the one that was built. Whether the signal clears 80% on
+a fixture whose bands hold is the open question, and it is now a question
+someone can answer by spending agent time rather than by relabelling.
 
 ## Reproducing
 
