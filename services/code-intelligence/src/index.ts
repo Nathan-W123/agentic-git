@@ -53,6 +53,26 @@ export interface SymbolRange {
   endLine: number;
 }
 
+/**
+ * One call site, attributed to the declared symbol whose body contains it.
+ *
+ * `referencedSymbols` records what a *file* mentions, which is enough to ask
+ * whether two files are connected and not enough to ask how. This says which
+ * function does the calling, so `orderTotal -> discountRate` is a fact the
+ * index can state rather than one a caller has to infer from "total.js
+ * mentions discountRate somewhere".
+ *
+ * Call expressions only. A symbol read as a value — `DELIVERY` inside
+ * `orderTotal` — is not recorded here, and a caller that needs value
+ * dependencies must not read an absent edge as "does not use it".
+ */
+export interface SymbolCall {
+  /** The declared symbol whose body contains the call. */
+  from: string;
+  /** The identifier being called. May be declared in another file, or nowhere. */
+  to: string;
+}
+
 export interface IndexedFile {
   path: string;
   language: SupportedLanguage;
@@ -65,6 +85,8 @@ export interface IndexedFile {
    * the two, before deciding anything enforcement depends on.
    */
   symbolRanges: SymbolRange[];
+  /** Call edges inside this file, attributed to the calling symbol. */
+  symbolCalls: SymbolCall[];
   imports: string[];
   dependencies: string[];
   referencedSymbols: string[];
@@ -205,6 +227,43 @@ function analyzeScript(
   const tests = new Set<string>();
   const services = new Set<string>();
   const ranges = new Map<string, SymbolRange>();
+  const calls = new Map<string, Set<string>>();
+
+  /**
+   * The declared symbols currently being descended through, innermost last.
+   *
+   * A call is attributed to the innermost one. Nothing is attributed at file
+   * scope: a call in a module's top-level body belongs to the module, and this
+   * index has no symbol standing for that.
+   */
+  const enclosing: string[] = [];
+
+  /** The symbol a node opens a body for, if it opens one. */
+  const opensScope = (node: ts.Node): string | undefined => {
+    const declared = namedDeclaration(node);
+    if (declared !== undefined) {
+      return declared;
+    }
+    if (
+      (ts.isMethodDeclaration(node) || ts.isPropertyDeclaration(node)) &&
+      ts.isIdentifier(node.name)
+    ) {
+      return node.name.text;
+    }
+    // `const handler = () => {...}` reads as a declaration of `handler` to
+    // anyone editing it, and the calls inside belong to it rather than to
+    // whatever encloses the assignment.
+    if (
+      ts.isVariableDeclaration(node) &&
+      ts.isIdentifier(node.name) &&
+      node.initializer !== undefined &&
+      (ts.isArrowFunction(node.initializer) ||
+        ts.isFunctionExpression(node.initializer))
+    ) {
+      return node.name.text;
+    }
+    return undefined;
+  };
 
   const record = (name: string, node: ts.Node): void => {
     const start = file.getLineAndCharacterOfPosition(node.getStart(file)).line;
@@ -221,6 +280,10 @@ function analyzeScript(
   };
 
   const visit = (node: ts.Node): void => {
+    const scope = opensScope(node);
+    if (scope !== undefined) {
+      enclosing.push(scope);
+    }
     const declaration = namedDeclaration(node);
     if (declaration !== undefined) {
       symbols.add(declaration);
@@ -272,6 +335,17 @@ function analyzeScript(
           dependencies.add(imported);
         }
       }
+      const caller = enclosing[enclosing.length - 1];
+      const callee = ts.isIdentifier(expression)
+        ? expression.text
+        : ts.isPropertyAccessExpression(expression)
+          ? expression.name.text
+          : undefined;
+      if (caller !== undefined && callee !== undefined && caller !== callee) {
+        const targets = calls.get(caller) ?? new Set<string>();
+        targets.add(callee);
+        calls.set(caller, targets);
+      }
       if (ts.isIdentifier(expression)) {
         referencedSymbols.add(expression.text);
         if (["describe", "it", "test"].includes(expression.text)) {
@@ -311,6 +385,9 @@ function analyzeScript(
     }
 
     ts.forEachChild(node, visit);
+    if (scope !== undefined) {
+      enclosing.pop();
+    }
   };
   visit(file);
 
@@ -323,6 +400,15 @@ function analyzeScript(
       (left, right) =>
         left.startLine - right.startLine || left.name.localeCompare(right.name),
     ),
+    symbolCalls: [...calls]
+      .flatMap(([from, targets]) =>
+        [...targets].sort().map((to) => ({ from, to })),
+      )
+      .sort(
+        (left, right) =>
+          left.from.localeCompare(right.from) ||
+          left.to.localeCompare(right.to),
+      ),
     imports: uniqueStrings([...imports]),
     dependencies: uniqueStrings([...dependencies]),
     referencedSymbols: uniqueStrings([...referencedSymbols]),
@@ -401,6 +487,7 @@ function analyzeDataFile(
     symbols: [],
     // Not parsed into an AST, so nothing can be located inside it.
     symbolRanges: [],
+    symbolCalls: [],
     imports: [],
     dependencies: [],
     referencedSymbols: [],

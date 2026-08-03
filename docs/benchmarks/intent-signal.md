@@ -183,7 +183,10 @@ That was tried: `docs/benchmarks/intent-grounding.md`. Grounding intent against
 the repository index does work — of the recorded intents whose declared file
 does not exist, 93% reach the file the agent meant but never named — but the
 signal built on it scores 70%
-precision at 58% recall on the same held-out half, and is also not wired in.
+precision at 58% recall on the same held-out half, and is also not wired in. A
+second round replaced file adjacency with function-call reachability and
+established a ceiling: no rule over that relation vocabulary exceeds 75%
+precision here, so the bar is unreachable on this corpus regardless of tuning.
 The part of the conclusion above that survives is narrower than it was written:
 the problem is not finding the module, it is that "same file" and "linked by an
 import" are the only relations a file-level index offers, and neither of them

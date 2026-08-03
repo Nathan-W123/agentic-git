@@ -1,10 +1,18 @@
 # The Grounded Intent-Conflict Signal
 
-**Verdict: not wired into scheduling.** An intent signal grounded against the
-repository index — rather than against the other task's prose — was built and
-measured. On the held-out half it scores 70% precision at 58% recall, which
-does not clear the 80% bar. It is a real improvement on the two signals before
-it, and it is still not good enough to schedule on.
+**Verdict: not wired into scheduling, and the line of work is closed.** An
+intent signal grounded against the repository index — rather than against the
+other task's prose — was built and measured. On the held-out half it scores
+70% precision at 58% recall, against an 80% bar.
+
+A second round then went finer, replacing file adjacency with function-call
+reachability through a call graph added to the index. That produced the result
+that settles it: the **oracle ceiling** over this relation vocabulary is 75%
+precision on the held-out half (section 11). No weights, thresholds or veto
+setting reach 80% — not even ones chosen with the answers in hand. The
+remaining gap is one scenario task implemented outside the module its label
+bands it in, and closing it needs a corpus that does not exist and cannot be
+constructed from what is recorded (section 12).
 
 Sections 1–7 were written and committed *before* the held-out half was read;
 section 8 onward was appended afterwards. That ordering is the point of the
@@ -387,6 +395,139 @@ the index records, not about intent. The next thing to try is a finer relation
 edges — and a corpus where the partial band is implemented where it was
 designed to be, so that one task's placement cannot swing six pairs.
 
+That was tried. Section 11.
+
+## 11. Symbol-level call reach, and the ceiling it runs into
+
+### What was built
+
+The index now records a call graph. `IndexedFile.symbolCalls` attributes every
+call expression to the declared symbol whose body contains it, so
+`src/pricing/total.js#orderTotal -> discountRate` is a fact the index states
+rather than one a reader infers from "total.js mentions discountRate
+somewhere". Grounded targets narrowed correspondingly: an `IntentTarget` now
+carries the symbols of its file that the intent's own vocabulary reaches, not
+just the file.
+
+On top of those, a new relation tier `calls` sits between `shared` and
+`adjacent`: it fires when a function one intent reaches calls a function the
+other reaches. It is strictly narrower than import adjacency — two files can be
+neighbours while the two functions in question have nothing to do with each
+other.
+
+### It changes nothing on the development half, and could not have
+
+40 pairs, 15 of 15, 100% precision and recall — identical to before, because
+the development half contains **no `calls` pair at all**:
+
+| Tier | Conflicts | Non-conflicts |
+| --- | --- | --- |
+| `shared` / corroborated | 15 | 0 |
+| `none` / corroborated | 0 | 11 |
+| `none` / bare | 0 | 14 |
+
+Every development positive is two tasks on `src/pricing/total.js`. The half
+that chose `targetFloor` has never contained a single cross-module conflict, so
+every parameter governing the cross-module relation — the call tier, the
+adjacency tier, the corroboration veto — was set blind, and still is. That is a
+sharper statement of the "development was flattering" finding in section 8, and
+it is a property of the split rather than of the signal.
+
+### The ceiling: no rule over these relations reaches the bar
+
+Rather than re-measure a changed rule on a held-out half already read once —
+which would be tuning on it — `apps/worker/scripts/intent-relation-inputs.mjs`
+computes the **oracle ceiling**: for each distinct structural input, an oracle
+that has already seen every label decides whether to fire, and decides
+correctly. No real rule can beat it. It is a bound computed *with* the labels,
+not an operating point, and its only use is the negative one.
+
+Bucketed by what a rule actually consumes — relation tier and whether the pair
+is lexically corroborated — on the held-out half:
+
+| Tier | Conflicts | Non-conflicts | Purity |
+| --- | --- | --- | --- |
+| `shared` / corroborated | 3 | 1 | 75% |
+| `calls` / corroborated | 4 | 2 | 67% |
+| `calls` / bare | 2 | 0 | 100% |
+| `none` / corroborated | 3 | 15 | 83% |
+| `none` / bare | 0 | 41 | 100% |
+
+| | TP | FP | FN | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| Oracle ceiling, held-out | 9 | 3 | 3 | **75%** | **75%** |
+| The shipped rule, held-out | 7 | 3 | 5 | 70% | 58% |
+
+**75% is the ceiling. The 80% bar is unreachable on this corpus by any rule
+over this relation vocabulary** — any weights, any thresholds, any veto
+setting, including settings chosen with the answers in hand. This is the
+result that closes the line of work rather than another failed attempt at it.
+
+Two tiers carry both labels and account for the whole shortfall:
+`shared`/corroborated holds `task_loyalty_tier` + `task_rounding`, and
+`calls`/corroborated holds `task_rounding` + `task_zero_rated_goods`. Both are
+`task_rounding`, for the reason section 8 set out: it grounds to `total.js`
+because that is where every agent put it, while the label bands it elsewhere.
+
+### The one thing the ceiling says is fixable
+
+`calls`/bare is 2 conflicts and 0 non-conflicts. Those are the two pairs the
+corroboration veto drops — `task_card_surcharge` and `task_free_delivery`
+against `task_zero_rated_goods`, which reach `orderTotal` and `taxFor`
+respectively, have the call edge between them, and share no content lemma.
+Removing the veto for the `calls` tier would take the signal from 70%/58% to
+the 75%/75% ceiling.
+
+**That change has not been made.** The evidence for it is entirely held-out:
+the development half has no `calls` pair to argue from, so making the change
+now would be fitting the rule to the data that judges it, and it would still
+land 5 points under the bar. It is recorded as indicated-but-unvalidated, and
+`DEFAULT_GROUNDED_INTENT_OPTIONS` is unchanged.
+
+### A caveat on a more optimistic number
+
+The same ceiling computed over the *full* structural input — both sides'
+grounded files, their reached symbols, and every edge between them — is 92%
+precision at 92% recall on held-out. That number should not be believed. Those
+inputs are fine enough that 36% of pairs have one that occurs exactly once, at
+a mean multiplicity of 1.76, so the oracle is substantially looking pairs up
+rather than generalising. It is a valid upper bound and almost no evidence.
+What it does establish is that the finer representation is not *information*
+-starved; whether the separation it finds would generalise is a question this
+corpus is too small to ask.
+
+## 12. Why there is no second held-out set
+
+`apps/worker/scripts/intent-corpus-audit.mjs` enumerates every recorded corpus
+against the three things a precision measurement needs: agent-written intent
+prose, at least three distinct tasks so that pairs exist, and both labels.
+
+| Corpus | Files | Tasks | Agent intents | Labels | Usable |
+| --- | --- | --- | --- | --- | --- |
+| `live-checkout` | 15 | 2 | 0 | all-positive by design | no |
+| `live-checkout-trio` | 75 | 3 | 67 | all-positive by design | no |
+| `live-pricing` | 1 | 0 | 0 | aggregate metrics only | no |
+| `team-queue` | 3 | 10 | 74 | pre-registered, 12 / 33 | **yes — and read** |
+
+The checkout scenarios fail on the third requirement for a reason that is not
+an accident: they were *built* uniformly contended, which was correct for
+measuring replan cost and makes them incapable of producing a false positive.
+`.coordinator/coordination.db` holds five distinct ad-hoc tasks — READMEs and a
+chess demo — with no conflict labels.
+
+So the answer to "construct a fresh held-out set" is that one cannot be
+constructed from what exists. Writing the intent prose myself would measure
+the author rather than the signal, and it is the prose, not the labels, that
+must come from somewhere else.
+
+What a usable corpus needs, concretely: three or more agent-written intents per
+run over a scenario with a genuine independent band, and — the part team-queue
+got wrong — every task implemented in the module its band assigns it, or the
+band assignment corrected to match where agents actually work. `task_rounding`
+alone swings six of the twelve held-out pairs. That requires live agent runs,
+which is the single blocker; everything else in this document was computed
+without any.
+
 ## Reproducing
 
 ```powershell
@@ -396,6 +537,14 @@ node apps/worker/scripts/intent-grounding-eval.mjs --split=development docs/benc
 
 ```powershell
 node apps/worker/scripts/intent-grounding-recall-floor.mjs
+```
+
+```powershell
+node apps/worker/scripts/intent-relation-inputs.mjs docs/benchmarks/data/team-queue/team-queue-co*live3*.json docs/benchmarks/data/team-queue/team-queue-*livelockfix*.json docs/benchmarks/data/team-queue/team-queue-unco*.json
+```
+
+```powershell
+node apps/worker/scripts/intent-corpus-audit.mjs
 ```
 
 `--groundings` prints what each intent grounded to, restricted to the tasks on

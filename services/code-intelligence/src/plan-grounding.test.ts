@@ -23,6 +23,7 @@ function indexedFile(
     bytes: 100,
     symbols,
     symbolRanges: [],
+    symbolCalls: [],
     imports: [],
     dependencies: [],
     referencedSymbols: [],

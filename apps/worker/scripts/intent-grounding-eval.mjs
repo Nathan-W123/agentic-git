@@ -271,6 +271,7 @@ for (const run of runs) {
         score: result.score,
         relation: result.relation,
         sharedTargets: result.sharedTargets,
+        callTargets: result.callTargets,
         adjacentTargets: result.adjacentTargets,
         corroboration: result.corroboration,
         opposition: result.opposition,
@@ -351,7 +352,7 @@ if (asJson) {
     console.log(
       `  ${row.truth ? "TP" : "FP"} ${row.left} + ${row.right} ` +
         `[${row.bands.join("/")}] ${row.relation} score=${row.score} ` +
-        `on ${[...row.sharedTargets, ...row.adjacentTargets].join(", ")} ` +
+        `on ${[...row.sharedTargets, ...row.callTargets, ...row.adjacentTargets].join(", ")} ` +
         `terms=${row.corroboration.join(",")}`,
     );
   }

@@ -97,6 +97,15 @@ export interface IntentTarget {
   score: number;
   /** The anchor words that put it here, for the audit trail. */
   anchors: string[];
+  /**
+   * Symbols declared in this file that the intent's own vocabulary reaches.
+   *
+   * A file is a coarse thing to claim two tasks collide on. This narrows the
+   * claim to the declarations the sentence actually names, which is what the
+   * call graph can then be asked about: not "these two files are connected"
+   * but "this function calls that one".
+   */
+  symbols: string[];
 }
 
 export interface IntentGrounding {
@@ -168,6 +177,8 @@ function fileAnchors(file: {
 interface AnchorIndex {
   /** Candidate file path to the words it answers to. */
   byFile: Map<string, Set<string>>;
+  /** Candidate file path to each declared symbol and the words it answers to. */
+  symbolsByFile: Map<string, Map<string, Set<string>>>;
   /** Inverse document frequency of each anchor word across the candidates. */
   weight: Map<string, number>;
 }
@@ -183,11 +194,17 @@ interface AnchorIndex {
  */
 function anchorIndex(index: RepositoryIndex): AnchorIndex {
   const byFile = new Map<string, Set<string>>();
+  const symbolsByFile = new Map<string, Map<string, Set<string>>>();
   for (const file of index.files) {
     if (TEST_PATH.test(file.path)) {
       continue;
     }
     byFile.set(file.path, fileAnchors(file));
+    const perSymbol = new Map<string, Set<string>>();
+    for (const symbol of file.symbols) {
+      perSymbol.set(symbol, new Set(anchorWords(symbol)));
+    }
+    symbolsByFile.set(file.path, perSymbol);
   }
   const documentFrequency = new Map<string, number>();
   for (const anchors of byFile.values()) {
@@ -200,7 +217,7 @@ function anchorIndex(index: RepositoryIndex): AnchorIndex {
   for (const [word, frequency] of documentFrequency) {
     weight.set(word, Math.log(total / frequency));
   }
-  return { byFile, weight };
+  return { byFile, symbolsByFile, weight };
 }
 
 function mass(words: Iterable<string>, weight: ReadonlyMap<string, number>): number {
@@ -235,7 +252,7 @@ export function groundIntent(
   index: RepositoryIndex,
   options: IntentGroundingOptions = DEFAULT_INTENT_GROUNDING_OPTIONS,
 ): IntentGrounding {
-  const { byFile, weight } = anchorIndex(index);
+  const { byFile, symbolsByFile, weight } = anchorIndex(index);
   const lemmas = intentTerms(text).strong;
   const vocabulary = new Set(
     [...lemmas].filter((lemma) => weight.has(lemma)),
@@ -251,7 +268,11 @@ export function groundIntent(
     }
     const score = mass(matched, weight) / asked;
     if (score >= options.targetFloor) {
-      targets.push({ file, score, anchors: matched.sort() });
+      const reached = matched.length === 0 ? [] : [...(symbolsByFile.get(file) ?? new Map())]
+        .filter(([, words]) => matched.some((word) => words.has(word)))
+        .map(([symbol]) => symbol)
+        .sort();
+      targets.push({ file, score, anchors: matched.sort(), symbols: reached });
     }
   }
   targets.sort(
@@ -293,14 +314,18 @@ export function groundIntent(
  * `shared` — both sentences point at the same file. Whatever they each meant
  * to do, they meant to do it to the same code.
  *
- * `adjacent` — one's target imports the other's. Weaker, and included for one
- * specific reason: the failure being fixed is a class of pair that *cannot*
- * share a file, where one task rewrites a caller and the other rewrites
- * something the caller reads. Identity alone is silent on every such pair by
- * construction, which is a guaranteed nil return on exactly the population the
- * previous negative result stumbled on.
+ * `calls` — a function one intent reaches calls a function the other reaches.
+ * This is the cross-module relation, and it is stated about declarations
+ * rather than files: `orderTotal -> discountRate` is a fact about two
+ * functions, where "total.js imports discount.js" is a fact about two
+ * neighbourhoods.
+ *
+ * `adjacent` — one's target imports the other's, with no call between the
+ * symbols either one names. Retained below `calls` as the weakest tier, for
+ * the case where the index parsed a file but the connection runs through
+ * something other than a call expression.
  */
-export type IntentRelation = "shared" | "adjacent";
+export type IntentRelation = "shared" | "calls" | "adjacent";
 
 export interface GroundedIntentConflict {
   fires: boolean;
@@ -309,6 +334,8 @@ export interface GroundedIntentConflict {
   relation?: IntentRelation;
   /** Files both intents ground to. */
   sharedTargets: string[];
+  /** Call edges between the symbols the two intents reach. */
+  callTargets: string[];
   /** Import edges between the two groundings, as `importer -> imported`. */
   adjacentTargets: string[];
   /** Lemmas both intents used, or that WordNet links as synonyms. */
@@ -321,6 +348,8 @@ export interface GroundedIntentConflict {
 export interface GroundedIntentOptions {
   /** Score for two intents grounded to the same file. */
   sharedWeight: number;
+  /** Score when a function one intent reaches calls a function the other reaches. */
+  callWeight: number;
   /** Score for two intents grounded to files one of which imports the other. */
   adjacentWeight: number;
   /** Added when WordNet records the two intents taking opposite directions. */
@@ -342,6 +371,7 @@ export interface GroundedIntentOptions {
  */
 export const DEFAULT_GROUNDED_INTENT_OPTIONS: GroundedIntentOptions = {
   sharedWeight: 0.8,
+  callWeight: 0.65,
   adjacentWeight: 0.55,
   oppositionBonus: 0.1,
   fireThreshold: 0.5,
@@ -411,6 +441,67 @@ function importEdges(
   return [...found].sort();
 }
 
+/** Which files declare each symbol name, for resolving a call to its target. */
+function declaringFiles(index: RepositoryIndex): Map<string, Set<string>> {
+  const declaring = new Map<string, Set<string>>();
+  for (const file of index.files) {
+    for (const symbol of file.symbols) {
+      const entry = declaring.get(symbol) ?? new Set<string>();
+      entry.add(file.path);
+      declaring.set(symbol, entry);
+    }
+  }
+  return declaring;
+}
+
+/** One side of a pair, as the set of `file#symbol` its grounding reaches. */
+function reachedSymbols(grounding: IntentGrounding): Set<string> {
+  const reached = new Set<string>();
+  for (const target of grounding.targets) {
+    for (const symbol of target.symbols) {
+      reached.add(`${target.file}#${symbol}`);
+    }
+  }
+  return reached;
+}
+
+/**
+ * Call edges between the symbols two intents reach, in either direction.
+ *
+ * Strictly narrower than {@link importEdges}: a file may import another
+ * without the two *functions* in question having anything to do with each
+ * other. `orderTotal -> discountRate` is a fact about two declarations, and
+ * two tasks connected only by their files being neighbours do not produce one.
+ *
+ * A call is resolved to the file declaring the callee's name. Where a name is
+ * declared in more than one file every declaration is admitted, because the
+ * index carries no binding information and guessing one would be a claim it
+ * cannot support.
+ */
+function callEdges(
+  index: RepositoryIndex,
+  left: ReadonlySet<string>,
+  right: ReadonlySet<string>,
+): string[] {
+  const declaring = declaringFiles(index);
+  const found = new Set<string>();
+  for (const file of index.files) {
+    for (const call of file.symbolCalls) {
+      const from = `${file.path}#${call.from}`;
+      for (const target of declaring.get(call.to) ?? []) {
+        const to = `${target}#${call.to}`;
+        if (
+          (left.has(from) && right.has(to)) ||
+          (right.has(from) && left.has(to))
+        ) {
+          found.add(`${from} -> ${to}`);
+        }
+      }
+    }
+  }
+  return [...found].sort();
+}
+
 /**
  * Whether two tasks' stated intents concern code that cannot be changed
  * independently, judged on where the repository says each one points.
@@ -442,8 +533,18 @@ export function assessGroundedIntent(
   const sharedTargets = [...leftFiles]
     .filter((file) => rightFiles.has(file))
     .sort();
+  const callTargets =
+    sharedTargets.length > 0
+      ? []
+      : callEdges(
+          index,
+          reachedSymbols(first.grounding),
+          reachedSymbols(second.grounding),
+        );
   const adjacentTargets =
-    sharedTargets.length > 0 ? [] : importEdges(index, leftFiles, rightFiles);
+    sharedTargets.length > 0 || callTargets.length > 0
+      ? []
+      : importEdges(index, leftFiles, rightFiles);
 
   let relation: IntentRelation | undefined;
   let score = 0;
@@ -451,6 +552,9 @@ export function assessGroundedIntent(
     if (sharedTargets.length > 0) {
       relation = "shared";
       score = options.sharedWeight;
+    } else if (callTargets.length > 0) {
+      relation = "calls";
+      score = options.callWeight;
     } else if (adjacentTargets.length > 0) {
       relation = "adjacent";
       score = options.adjacentWeight;
@@ -463,6 +567,8 @@ export function assessGroundedIntent(
   const parts: string[] = [];
   if (relation === "shared") {
     parts.push(`both intents ground to ${sharedTargets.join(", ")}`);
+  } else if (relation === "calls") {
+    parts.push(`grounded symbols are linked by ${callTargets.join(", ")}`);
   } else if (relation === "adjacent") {
     parts.push(`grounded targets are linked by ${adjacentTargets.join(", ")}`);
   } else if (leftFiles.size === 0 || rightFiles.size === 0) {
@@ -484,6 +590,7 @@ export function assessGroundedIntent(
     score,
     ...(relation === undefined ? {} : { relation }),
     sharedTargets,
+    callTargets,
     adjacentTargets,
     corroboration,
     ...(opposition === undefined ? {} : { opposition }),

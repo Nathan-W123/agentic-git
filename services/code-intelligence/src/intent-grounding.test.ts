@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { DependencyEdge, IndexedFile, RepositoryIndex } from "./index.js";
+import type {
+  DependencyEdge,
+  IndexedFile,
+  RepositoryIndex,
+  SymbolCall,
+} from "./index.js";
 import {
   assessGroundedIntent,
   groundIntent,
@@ -20,6 +25,7 @@ function indexedFile(
   filePath: string,
   symbols: string[],
   imports: string[] = [],
+  symbolCalls: SymbolCall[] = [],
 ): IndexedFile {
   return {
     path: filePath,
@@ -27,6 +33,7 @@ function indexedFile(
     bytes: 100,
     symbols,
     symbolRanges: [],
+    symbolCalls,
     imports,
     dependencies: imports,
     referencedSymbols: [],
@@ -44,6 +51,10 @@ function seedIndex(overrides: Partial<RepositoryIndex> = {}): RepositoryIndex {
       "src/pricing/total.js",
       ["DELIVERY", "orderTotal", "lines", "discounted", "withDelivery"],
       ["./discount.js", "./tax.js"],
+      [
+        { from: "orderTotal", to: "discountRate" },
+        { from: "orderTotal", to: "taxFor" },
+      ],
     ),
     indexedFile("src/pricing/discount.js", [
       "LOYAL_ORDERS",
@@ -54,6 +65,7 @@ function seedIndex(overrides: Partial<RepositoryIndex> = {}): RepositoryIndex {
     indexedFile("src/notify/webhook.js", ["deliver"]),
     indexedFile("src/audit/log.js", ["auditEntry", "isPrivileged"]),
     indexedFile("src/search/accounts.js", ["searchAccounts"]),
+    indexedFile("src/format/money.js", ["formatMoney"]),
     // A test file shadows its module's vocabulary and must never be a target.
     indexedFile("test/total.test.js", ["order"]),
   ];
@@ -145,7 +157,7 @@ test("two intents on the same module fire as a shared target", () => {
   assert.deepEqual(result.sharedTargets, ["src/pricing/total.js"]);
 });
 
-test("two intents on modules linked by an import fire as adjacent, and score lower", () => {
+test("a call between the symbols two intents reach fires as calls, and scores lower", () => {
   const index = seedIndex();
   const result = assessGroundedIntent(
     paired("Add a flat handling charge to every order total", index),
@@ -153,10 +165,36 @@ test("two intents on modules linked by an import fire as adjacent, and score low
     index,
   );
   assert.equal(result.fires, true);
-  assert.equal(result.relation, "adjacent");
+  assert.equal(result.relation, "calls");
   assert.ok(result.score < DEFAULT_GROUNDED_INTENT_OPTIONS.sharedWeight);
+  assert.deepEqual(result.callTargets, [
+    "src/pricing/total.js#orderTotal -> src/pricing/tax.js#taxFor",
+  ]);
+});
+
+test("an import without a call between the reached symbols is only adjacent", () => {
+  // `money.js` is imported by the total but nothing in `orderTotal` calls
+  // `formatMoney`, so the two files are neighbours and the two functions are
+  // not. That distinction is the whole reason the call graph was added.
+  const index = seedIndex({
+    edges: [
+      {
+        fromFile: "src/pricing/total.js",
+        toFile: "src/format/money.js",
+        resource: "src/format/money.js",
+        kind: "import",
+      },
+    ],
+  });
+  const result = assessGroundedIntent(
+    paired("Add a flat handling charge to every order total for a customer", index),
+    paired("Render money with a currency symbol for a customer", index),
+    index,
+  );
+  assert.deepEqual(result.callTargets, []);
+  assert.equal(result.relation, "adjacent");
   assert.deepEqual(result.adjacentTargets, [
-    "src/pricing/total.js -> src/pricing/tax.js",
+    "src/pricing/total.js -> src/format/money.js",
   ]);
 });
 
@@ -238,12 +276,22 @@ test("a raised fire threshold reduces the signal to shared targets only", () => 
     ...DEFAULT_GROUNDED_INTENT_OPTIONS,
     fireThreshold: DEFAULT_GROUNDED_INTENT_OPTIONS.sharedWeight,
   };
-  const adjacent = assessGroundedIntent(
+  const linked = assessGroundedIntent(
     paired("Add a flat handling charge to every order total", index),
     paired("Stop charging tax at the standard rate for digital goods", index),
     index,
     options,
   );
-  assert.equal(adjacent.relation, "adjacent");
-  assert.equal(adjacent.fires, false);
+  assert.equal(linked.relation, "calls");
+  assert.equal(linked.fires, false);
+});
+
+test("a grounded target narrows to the symbols the intent names", () => {
+  const index = seedIndex();
+  const grounding = groundIntent(
+    "Stop charging tax at the standard rate for digital goods",
+    index,
+  );
+  assert.equal(grounding.targets[0]?.file, "src/pricing/tax.js");
+  assert.deepEqual(grounding.targets[0]?.symbols, ["STANDARD_RATE", "taxFor"]);
 });
