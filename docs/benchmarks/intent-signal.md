@@ -1,5 +1,9 @@
 # The Intent-Level Conflict Signal
 
+> The successor to this signal is now live as advisory evidence, switched on
+> ahead of its validating run. See `intent-grounding-wired.md`; the shipped
+> `analyzeIntent` described below is what it replaced.
+
 **Verdict: not wired into scheduling.** A lemmatized, WordNet-corroborated,
 embedding-scored replacement for `intent_conflict` was built and measured. It
 fired zero times on the held-out half of the corpus, so its precision there is

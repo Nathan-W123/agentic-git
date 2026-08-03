@@ -225,11 +225,31 @@ export function relatedObjectives(first: AgentPlan, second: AgentPlan): boolean 
   return [...left].some((word) => word.length > 2 && right.has(word));
 }
 
-interface IntentResult {
+export interface IntentResult {
   probability: number;
   resources: string[];
   explanation: string;
 }
+
+/**
+ * A verdict on whether two plans' stated intents are after the same code.
+ *
+ * Injected rather than imported, for the same reason {@link FileOccupancy} is:
+ * answering it well needs the repository index at the base revision, which is
+ * not something a plan carries and not something this module can reach. When
+ * one is supplied it replaces {@link analyzeIntent} outright rather than
+ * adding to it — two intent signals scoring the same pair would double-count
+ * one fact.
+ *
+ * Whatever is supplied, its evidence is recorded as advisory and is excluded
+ * from the score the disposition is computed from. That is not a property of
+ * the implementation passed in; it is enforced here, in {@link
+ * ConflictDetector.assess}.
+ */
+export type IntentConflictAssessment = (
+  first: AgentPlan,
+  second: AgentPlan,
+) => IntentResult | undefined;
 
 function analyzeIntent(first: AgentPlan, second: AgentPlan): IntentResult | undefined {
   const left = words(first.intent ?? first.objective);
@@ -341,11 +361,18 @@ export class ConflictDetector {
     first: AgentPlan,
     second: AgentPlan,
     occupancy?: FileOccupancy,
+    intentAssessment?: IntentConflictAssessment,
   ): ConflictAssessment | undefined {
     const taskIds: [string, string] = [first.taskId, second.taskId];
     const left = completeAgentPlan(first);
     const right = completeAgentPlan(second);
-    const intent = analyzeIntent(left, right);
+    // A grounded assessor replaces the hardcoded-antonym reading rather than
+    // supplementing it: both answer the same question, and scoring both would
+    // count one fact twice.
+    const intent =
+      intentAssessment === undefined
+        ? analyzeIntent(left, right)
+        : intentAssessment(left, right);
     const fileOverlap = overlappingFiles(left, right, occupancy);
     const symbolOverlap = overlap(
       arbitrationSymbols(left),
@@ -490,6 +517,7 @@ export class ConflictDetector {
   public assessAll(
     plans: readonly AgentPlan[],
     occupancy?: FileOccupancy,
+    intentAssessment?: IntentConflictAssessment,
   ): ConflictAssessment[] {
     const assessments: ConflictAssessment[] = [];
     for (let left = 0; left < plans.length; left += 1) {
@@ -499,7 +527,12 @@ export class ConflictDetector {
         if (first === undefined || second === undefined) {
           continue;
         }
-        const assessment = this.assess(first, second, occupancy);
+        const assessment = this.assess(
+          first,
+          second,
+          occupancy,
+          intentAssessment,
+        );
         if (assessment !== undefined) {
           assessments.push(assessment);
         }

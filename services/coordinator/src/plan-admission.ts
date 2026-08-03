@@ -22,6 +22,7 @@ import type { NamedRange } from "./hunks.js";
 
 import {
   ConflictDetector,
+  type IntentConflictAssessment,
   relatedObjectives,
   type FileOccupancy,
 } from "./conflict-detector.js";
@@ -118,6 +119,19 @@ export interface PlanAdmissionInput {
    * option entirely — half an answer is not one.
    */
   symbolRangesInFile?: (file: string) => readonly NamedRange[] | undefined;
+  /**
+   * A grounded reading of whether two plans' intents concern the same code.
+   *
+   * Supplying this swaps the hardcoded-antonym intent check for one that
+   * resolves each intent sentence against the repository index. Its evidence
+   * is advisory either way and cannot reach `sequence` or `block`; what
+   * changes is the quality of the note a human is asked to look at.
+   *
+   * It is deliberately optional. The signal is wired in ahead of the live
+   * validation that would justify it — `docs/benchmarks/intent-grounding-wired.md`
+   * — so every path that arbitrates without it must keep working unchanged.
+   */
+  intentAssessment?: IntentConflictAssessment;
 }
 
 /**
@@ -1060,7 +1074,14 @@ export class PlanAdmissionController {
     }
 
     const assessments = others
-      .map((entry) => this.conflicts.assess(plan, entry.plan, occupancy))
+      .map((entry) =>
+        this.conflicts.assess(
+          plan,
+          entry.plan,
+          occupancy,
+          input.intentAssessment,
+        ),
+      )
       .filter((entry): entry is ConflictAssessment => entry !== undefined);
     const structural = assessments.filter(structuralConflict);
     const blocking = structural.filter(

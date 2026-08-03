@@ -36,7 +36,7 @@ LLM on the scheduling path.
 | `schema_impact` | Schema ownership or use overlaps |
 | `config_overlap` | Configuration keys overlap |
 | `test_overlap` | Test ownership or affected coverage overlaps |
-| `intent_conflict` | Objectives contain a known incompatible intent pair |
+| `intent_conflict` | Stated intents are judged to concern the same code |
 
 Structural evidence can notify, sequence, or block according to configurable
 weights and thresholds. Intent evidence is advisory: it is scored and recorded,
@@ -54,6 +54,21 @@ push the total across a threshold. Measured against the team-queue runs, the
 shipped intent signal fired on four pairs and was wrong on all four, so the
 only thing that behaviour bought was lost parallelism. See
 `docs/benchmarks/intent-signal.md`.
+
+How `intent_conflict` is produced depends on what the caller supplies.
+`ConflictDetector.assess` takes an optional `IntentConflictAssessment`; without
+one it falls back to comparing objectives against a hardcoded list of opposing
+verb pairs. The CLI supplies a grounded assessor that resolves each intent
+sentence against the repository index at the base revision, so two plans that
+describe the same module in different words are judged on where those words
+point rather than on whether the sentences resemble each other.
+
+That grounded assessor is **switched on ahead of the run that would validate
+it**, at a measured 70% precision against a bar of 80% it did not clear. It is
+survivable only because of the advisory scoping described above, and it is
+disabled by `COORD_DISABLE_INTENT_GROUNDING=1`. The reasoning, the numbers, and
+the outstanding validation are in `docs/benchmarks/intent-grounding-wired.md`.
+If the advisory guard is ever removed, that signal must be removed with it.
 
 ## Scheduling And Ownership
 

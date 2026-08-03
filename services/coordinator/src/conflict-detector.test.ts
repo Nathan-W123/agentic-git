@@ -171,6 +171,81 @@ test("advisory evidence cannot lift a disposition past notification", () => {
   );
 });
 
+/**
+ * The grounded intent signal is switched on in the CLI ahead of the live run
+ * that would validate it — see `docs/benchmarks/intent-grounding-wired.md`. It
+ * is right about 70% of the times it fires on the one corpus that can measure
+ * it, against a bar of 80% it did not clear. The only thing making that
+ * acceptable is that it cannot act on its own, so that property is pinned here
+ * against the injected assessor rather than only against the legacy reading.
+ */
+test("an injected intent assessor is advisory and cannot sequence or block", () => {
+  const detector = new ConflictDetector({
+    fileOverlapWeight: 20,
+    semanticConflictWeight: 100,
+    thresholds: {
+      concurrentMaximum: 20,
+      notifyMaximum: 45,
+      sequenceMaximum: 70,
+    },
+  });
+  const left = plan("left", ["src/shared.ts"]);
+  const right = plan("right", ["src/shared.ts"]);
+  // Maximum confidence, which would reach `block` on its own if it counted.
+  const assessment = detector.assess(left, right, undefined, () => ({
+    probability: 1,
+    resources: ["src/pricing/total.js"],
+    explanation: "both intents ground to src/pricing/total.js",
+  }));
+
+  assert.ok(assessment);
+  assert.equal(assessment.score, 100);
+  assert.equal(assessment.disposition, "concurrent_with_notification");
+  const intent = assessment.evidence.find(
+    (entry) => entry.kind === "intent_conflict",
+  );
+  assert.equal(intent?.advisory, true);
+  assert.equal(intent?.score, 100);
+  assert.deepEqual(intent?.resources, ["src/pricing/total.js"]);
+  assert.match(
+    assessment.explanation,
+    /Structural evidence controls scheduling \(20 of 100\)/u,
+  );
+});
+
+test("an injected intent assessor replaces the antonym reading rather than adding to it", () => {
+  const detector = new ConflictDetector({
+    fileOverlapWeight: 20,
+    semanticConflictWeight: 100,
+    thresholds: {
+      concurrentMaximum: 20,
+      notifyMaximum: 45,
+      sequenceMaximum: 70,
+    },
+  });
+  // Prose the legacy reading fires on: shared term plus an opposing verb pair.
+  const remove = {
+    ...plan("remove", ["src/shared.ts"]),
+    objective: "Remove password authentication",
+    intent: "Remove password authentication",
+  };
+  const add = {
+    ...plan("add", ["src/shared.ts"]),
+    objective: "Add password reset authentication",
+    intent: "Add password reset authentication",
+  };
+  // A grounded assessor that stays silent must silence the pair outright,
+  // rather than leaving the hardcoded list to speak for it.
+  const assessment = detector.assess(remove, add, undefined, () => undefined);
+
+  assert.ok(assessment);
+  assert.equal(
+    assessment.evidence.some((entry) => entry.kind === "intent_conflict"),
+    false,
+  );
+  assert.equal(assessment.disposition, "concurrent");
+});
+
 test("custom thresholds change scheduling disposition without changing evidence", () => {
   const detector = new ConflictDetector({
     fileOverlapWeight: 20,

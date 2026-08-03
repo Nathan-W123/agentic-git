@@ -1,6 +1,12 @@
 # The Grounded Intent-Conflict Signal
 
-**Verdict: not wired into scheduling, and the line of work is closed.** An
+> **Superseded in one respect.** This document's verdict was "not wired", and
+> that is no longer true: the signal was subsequently switched on as advisory
+> evidence, deliberately and *ahead of* the validating run, on the numbers
+> recorded here. See `intent-grounding-wired.md`. Every measurement below
+> stands unchanged — what changed is the decision taken on top of them.
+
+**Verdict of the measurement: does not clear the bar.** An
 intent signal grounded against the repository index — rather than against the
 other task's prose — was built and measured. On the held-out half it scores
 70% precision at 58% recall, against an 80% bar.
@@ -357,6 +363,9 @@ stale total, not about merge conflicts, and no evidence in this repository
 confirms it independently of the scenario's own say-so.
 
 ## 9. What is and is not wired in
+
+> Superseded — see the note at the top and `intent-grounding-wired.md`. This
+> section records the position at the time the measurement was taken.
 
 - **Not wired in:** everything in `services/code-intelligence/src/intent-grounding.ts`.
   No service imports it. It is reachable only from the two evaluation scripts.

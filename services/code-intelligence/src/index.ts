@@ -19,11 +19,13 @@ export {
 } from "./plan-grounding.js";
 export {
   assessGroundedIntent,
+  groundedIntentAssessor,
   groundIntent,
   DEFAULT_GROUNDED_INTENT_OPTIONS,
   DEFAULT_INTENT_GROUNDING_OPTIONS,
   type GroundedIntentConflict,
   type GroundedIntentOptions,
+  type IntentConflictVerdict,
   type IntentGrounding,
   type IntentGroundingOptions,
   type IntentRelation,

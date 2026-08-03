@@ -1,7 +1,11 @@
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 
-import { CodeIntelligenceService, groundPlan } from "@coord/code-intelligence";
+import {
+  CodeIntelligenceService,
+  groundedIntentAssessor,
+  groundPlan,
+} from "@coord/code-intelligence";
 import {
   DEFAULT_PLAN_RETRY_MS,
   OwnershipService,
@@ -1388,6 +1392,14 @@ export async function admitWorkPlan(
       // is the coordinate system a diff hunk's old side is measured in.
       symbolRangesInFile: (file) =>
         intelligence.symbolRangesInFile(index, file),
+      // The same index also grounds what each plan *says* it wants, which is
+      // the only reading available against a plan whose declarations verified
+      // as fiction. This evidence is advisory and cannot reach `sequence` or
+      // `block`; at most it asks a human to look. It is switched on ahead of
+      // the live validation that would justify it, and
+      // `COORD_DISABLE_INTENT_GROUNDING=1` turns it back off — see
+      // docs/benchmarks/intent-grounding-wired.md.
+      intentAssessment: groundedIntentAssessor(index),
       blockedAttempts,
     });
     // A gated plan already opened its run to hang the approval off. Carrying

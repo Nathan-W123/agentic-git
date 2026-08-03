@@ -9,6 +9,7 @@ import type {
 } from "./index.js";
 import {
   assessGroundedIntent,
+  groundedIntentAssessor,
   groundIntent,
   DEFAULT_GROUNDED_INTENT_OPTIONS,
 } from "./intent-grounding.js";
@@ -294,4 +295,48 @@ test("a grounded target narrows to the symbols the intent names", () => {
   );
   assert.equal(grounding.targets[0]?.file, "src/pricing/tax.js");
   assert.deepEqual(grounding.targets[0]?.symbols, ["STANDARD_RATE", "taxFor"]);
+});
+
+test("the assessor produces advisory-shaped evidence and caches groundings", () => {
+  const index = seedIndex();
+  const assess = groundedIntentAssessor(index);
+  const verdict = assess(
+    { objective: "Add a flat handling charge to every order total" },
+    { objective: "Add a card surcharge on top of the order total" },
+  );
+  assert.ok(verdict);
+  assert.equal(verdict.probability, DEFAULT_GROUNDED_INTENT_OPTIONS.sharedWeight);
+  assert.deepEqual(verdict.resources, ["src/pricing/total.js"]);
+  // The audit trail has to carry the caveat, not just the doc.
+  assert.match(verdict.explanation, /unvalidated/u);
+});
+
+test("the assessor prefers a plan's intent over its objective", () => {
+  const index = seedIndex();
+  const assess = groundedIntentAssessor(index);
+  const silent = assess(
+    {
+      objective: "Add a flat handling charge to every order total",
+      intent: "Rewrite the onboarding copy so it reads less formally",
+    },
+    { objective: "Add a card surcharge on top of the order total" },
+  );
+  assert.equal(silent, undefined);
+});
+
+test("the kill switch silences the assessor", () => {
+  const index = seedIndex();
+  const assess = groundedIntentAssessor(index);
+  process.env["COORD_DISABLE_INTENT_GROUNDING"] = "1";
+  try {
+    assert.equal(
+      assess(
+        { objective: "Add a flat handling charge to every order total" },
+        { objective: "Add a card surcharge on top of the order total" },
+      ),
+      undefined,
+    );
+  } finally {
+    delete process.env["COORD_DISABLE_INTENT_GROUNDING"];
+  }
 });

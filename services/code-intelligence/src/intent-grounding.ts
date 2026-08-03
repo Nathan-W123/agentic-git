@@ -192,6 +192,25 @@ interface AnchorIndex {
  * path and scores zero on its own arithmetic, and in a repository where "src"
  * *is* discriminating it would score accordingly.
  */
+/**
+ * Anchor sets are derived from the whole index and are the expensive part of
+ * grounding. Arbitration grounds every plan against every other, so rebuilding
+ * them per call would make the signal quadratic in the repository rather than
+ * in the queue. Keyed on the index object itself: a new index is a new object,
+ * so a re-indexed revision can never read a stale cache.
+ */
+const ANCHOR_CACHE = new WeakMap<RepositoryIndex, AnchorIndex>();
+
+function anchorIndexFor(index: RepositoryIndex): AnchorIndex {
+  const cached = ANCHOR_CACHE.get(index);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const built = anchorIndex(index);
+  ANCHOR_CACHE.set(index, built);
+  return built;
+}
+
 function anchorIndex(index: RepositoryIndex): AnchorIndex {
   const byFile = new Map<string, Set<string>>();
   const symbolsByFile = new Map<string, Map<string, Set<string>>>();
@@ -252,7 +271,7 @@ export function groundIntent(
   index: RepositoryIndex,
   options: IntentGroundingOptions = DEFAULT_INTENT_GROUNDING_OPTIONS,
 ): IntentGrounding {
-  const { byFile, symbolsByFile, weight } = anchorIndex(index);
+  const { byFile, symbolsByFile, weight } = anchorIndexFor(index);
   const lemmas = intentTerms(text).strong;
   const vocabulary = new Set(
     [...lemmas].filter((lemma) => weight.has(lemma)),
@@ -595,6 +614,98 @@ export function assessGroundedIntent(
     corroboration,
     ...(opposition === undefined ? {} : { opposition }),
     explanation: parts.join("; "),
+  };
+}
+
+/**
+ * One pair's verdict, in the shape arbitration records evidence in.
+ *
+ * Deliberately structural rather than an import from the coordinator: this
+ * package knows about repositories, not about scheduling, and inverting that
+ * dependency to share a type would be the wrong trade.
+ */
+export interface IntentConflictVerdict {
+  /** Confidence in [0, 1]. Arbitration scales its own weight by this. */
+  probability: number;
+  /** What the two plans were judged to share, for the audit trail. */
+  resources: string[];
+  explanation: string;
+}
+
+/**
+ * Kill switch, and the control arm for the run that has not happened yet.
+ *
+ * `COORD_DISABLE_INTENT_GROUNDING=1` returns arbitration to the state in which
+ * no grounded intent evidence is produced at all. This exists because the
+ * signal is wired in **ahead of** the validation that would justify it — see
+ * `docs/benchmarks/intent-grounding-wired.md` — and something switched on
+ * before it is proven needs a way back off that does not require a deploy.
+ */
+function groundingDisabled(): boolean {
+  return process.env["COORD_DISABLE_INTENT_GROUNDING"] === "1";
+}
+
+/**
+ * An intent-conflict assessor bound to one repository index.
+ *
+ * Arbitration compares every admitted plan against every active one, so the
+ * same intent sentence is grounded many times per decision. Groundings are
+ * cached per text for the life of the assessor, which makes the cost linear in
+ * distinct plans rather than quadratic in the queue.
+ *
+ * The verdict is **advisory and must stay advisory**. On the measurement in
+ * `docs/benchmarks/intent-grounding.md` this signal is right about 70% of the
+ * times it fires, against a bar of 80% that it did not clear, and the oracle
+ * ceiling for its whole class of rule on that corpus is 75%. Evidence that
+ * wrong three times in ten has no business sequencing anybody's work, and
+ * `ConflictDetector.assess` is what enforces that: advisory evidence is scored
+ * and recorded but excluded from the subtotal the disposition thresholds read.
+ * If that guard is ever removed, this signal must come out with it.
+ */
+export function groundedIntentAssessor(
+  index: RepositoryIndex,
+  groundingOptions: IntentGroundingOptions = DEFAULT_INTENT_GROUNDING_OPTIONS,
+  signalOptions: GroundedIntentOptions = DEFAULT_GROUNDED_INTENT_OPTIONS,
+): (first: { intent?: string; objective: string }, second: { intent?: string; objective: string }) => IntentConflictVerdict | undefined {
+  const cache = new Map<string, IntentGrounding>();
+  const groundingFor = (text: string): IntentGrounding => {
+    const cached = cache.get(text);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const grounding = groundIntent(text, index, groundingOptions);
+    cache.set(text, grounding);
+    return grounding;
+  };
+
+  return (first, second) => {
+    if (groundingDisabled()) {
+      return undefined;
+    }
+    const leftText = first.intent ?? first.objective;
+    const rightText = second.intent ?? second.objective;
+    if (leftText === undefined || rightText === undefined) {
+      return undefined;
+    }
+    const result = assessGroundedIntent(
+      { text: leftText, grounding: groundingFor(leftText) },
+      { text: rightText, grounding: groundingFor(rightText) },
+      index,
+      signalOptions,
+    );
+    if (!result.fires) {
+      return undefined;
+    }
+    const resources = [
+      ...result.sharedTargets,
+      ...result.callTargets,
+      ...result.adjacentTargets,
+    ];
+    return {
+      probability: result.score,
+      resources,
+      explanation: `${result.explanation} (grounded at ${index.revision}; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)`,
+    };
   };
 }
 
