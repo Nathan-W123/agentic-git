@@ -3,7 +3,10 @@ import test from "node:test";
 
 import type { AgentPlan } from "@coord/shared-types";
 
-import { ConflictDetector } from "./conflict-detector.js";
+import {
+  ConflictDetector,
+  DEFAULT_CONFLICT_OPTIONS,
+} from "./conflict-detector.js";
 
 function plan(taskId: string, expectedFiles: string[]): AgentPlan {
   return {
@@ -244,6 +247,119 @@ test("an injected intent assessor replaces the antonym reading rather than addin
     false,
   );
   assert.equal(assessment.disposition, "concurrent");
+});
+
+/**
+ * The independence finding: the coordinator resolved both intents to real
+ * modules and found nothing in the repository joining them. On the held-out
+ * half it is right 41 times in 43, which is better than the same signal's
+ * positive calls — but it is 43 pairs, so it is given the smallest power that
+ * is still worth something.
+ */
+test("a finding of independence never creates an assessment on its own", () => {
+  const detector = new ConflictDetector(DEFAULT_CONFLICT_OPTIONS);
+  // Two plans with nothing structural between them.
+  const left = plan("left", ["src/audit/log.js"]);
+  const right = plan("right", ["src/search/accounts.js"]);
+  const assessment = detector.assess(left, right, undefined, () => ({
+    probability: 0,
+    independent: true,
+    resources: ["src/audit/log.js", "src/search/accounts.js"],
+    explanation: "grounded targets are unrelated in the import graph",
+  }));
+
+  // Assessments are persisted as conflict records; a pair just judged
+  // unrelated must not appear among them.
+  assert.equal(assessment, undefined);
+});
+
+test("independence is recorded, unscored, when an assessment exists anyway", () => {
+  const detector = new ConflictDetector(DEFAULT_CONFLICT_OPTIONS);
+  const left = plan("left", ["src/shared.ts"]);
+  const right = plan("right", ["src/shared.ts"]);
+  const assessment = detector.assess(left, right, undefined, () => ({
+    probability: 0,
+    independent: true,
+    resources: ["src/audit/log.js"],
+    explanation: "grounded targets are unrelated in the import graph",
+  }));
+
+  assert.ok(assessment);
+  const found = assessment.evidence.find(
+    (entry) => entry.kind === "intent_independent",
+  );
+  assert.equal(found?.score, 0);
+  assert.equal(found?.advisory, true);
+  // The structural file overlap still decides everything.
+  assert.equal(assessment.score, 20);
+  assert.equal(assessment.disposition, "concurrent");
+  assert.equal(
+    assessment.evidence.some((entry) => entry.kind === "intent_conflict"),
+    false,
+  );
+});
+
+test("independence cannot clear a pair that structural evidence flagged", () => {
+  const detector = new ConflictDetector({
+    fileOverlapWeight: 60,
+    thresholds: {
+      concurrentMaximum: 20,
+      notifyMaximum: 45,
+      sequenceMaximum: 70,
+    },
+  });
+  const left = plan("left", ["src/shared.ts"]);
+  const right = plan("right", ["src/shared.ts"]);
+  const assessment = detector.assess(left, right, undefined, () => ({
+    probability: 0,
+    independent: true,
+    resources: ["src/audit/log.js"],
+    explanation: "grounded targets are unrelated in the import graph",
+  }));
+
+  assert.ok(assessment);
+  // 60 is past notifyMaximum: the pair sequences, and a claim about intent
+  // does not get to overrule two plans that name the same file.
+  assert.equal(assessment.disposition, "sequence");
+});
+
+test("independence withholds the notification bump other advisory evidence would add", () => {
+  const detector = new ConflictDetector({
+    fileOverlapWeight: 20,
+    semanticConflictWeight: 30,
+    thresholds: {
+      concurrentMaximum: 20,
+      notifyMaximum: 45,
+      sequenceMaximum: 70,
+    },
+  });
+  const left = plan("left", ["src/shared.ts"]);
+  const right = plan("right", ["src/shared.ts"]);
+
+  // Without a verdict, the legacy antonym reading fires and asks for a look.
+  const noisy = {
+    ...left,
+    objective: "Remove password authentication",
+    intent: "Remove password authentication",
+  };
+  const noisyRight = {
+    ...right,
+    objective: "Add password reset authentication",
+    intent: "Add password reset authentication",
+  };
+  assert.equal(
+    detector.assess(noisy, noisyRight)?.disposition,
+    "concurrent_with_notification",
+  );
+
+  // With a grounded verdict of independence, nobody is asked to look.
+  const cleared = detector.assess(noisy, noisyRight, undefined, () => ({
+    probability: 0,
+    independent: true,
+    resources: ["src/audit/log.js"],
+    explanation: "grounded targets are unrelated in the import graph",
+  }));
+  assert.equal(cleared?.disposition, "concurrent");
 });
 
 test("custom thresholds change scheduling disposition without changing evidence", () => {

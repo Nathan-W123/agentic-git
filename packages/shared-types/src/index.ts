@@ -189,7 +189,8 @@ export interface ConflictEvidence {
     | "schema_overlap"
     | "configuration_overlap"
     | "test_overlap"
-    | "intent_conflict";
+    | "intent_conflict"
+    | "intent_independent";
   resources: string[];
   taskIds: [TaskId, TaskId];
   score: number;

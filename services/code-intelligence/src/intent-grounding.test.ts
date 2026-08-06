@@ -340,3 +340,64 @@ test("the kill switch silences the assessor", () => {
     delete process.env["COORD_DISABLE_INTENT_GROUNDING"];
   }
 });
+
+test("both grounded with nothing between them is a positive finding, not silence", () => {
+  const index = seedIndex();
+  const result = assessGroundedIntent(
+    paired("Stop charging tax at the standard rate for digital goods", index),
+    paired("Record the originating IP address on every audit entry", index),
+    index,
+  );
+  assert.equal(result.fires, false);
+  assert.equal(result.independent, true);
+});
+
+test("an ungrounded side is not a finding of independence", () => {
+  // The difference that matters: "I checked and found nothing joining them"
+  // versus "I could not tell what one of these tasks was about".
+  const index = seedIndex();
+  const result = assessGroundedIntent(
+    paired("Stop charging tax at the standard rate for digital goods", index),
+    paired("Rewrite the onboarding copy so it reads less formally", index),
+    index,
+  );
+  assert.equal(result.fires, false);
+  assert.equal(result.independent, false);
+});
+
+test("a vetoed pair is not reported as independent", () => {
+  // Corroboration can stop a pair firing, but the repository still says the
+  // two modules are connected. Reporting that as independence would invert it.
+  const index = seedIndex();
+  const left = paired("Add a flat handling charge to every order total", index);
+  const right = paired(
+    "Stop charging tax at the standard rate for digital goods",
+    index,
+  );
+  const vetoed = assessGroundedIntent(left, right, index, {
+    ...DEFAULT_GROUNDED_INTENT_OPTIONS,
+    lexicon: undefined,
+    fireThreshold: 2,
+  });
+  assert.equal(vetoed.fires, false);
+  assert.equal(vetoed.independent, false);
+  assert.deepEqual(vetoed.callTargets, [
+    "src/pricing/total.js#orderTotal -> src/pricing/tax.js#taxFor",
+  ]);
+});
+
+test("the assessor reports independence with both sides' modules and no score", () => {
+  const index = seedIndex();
+  const assess = groundedIntentAssessor(index);
+  const verdict = assess(
+    { objective: "Stop charging tax at the standard rate for digital goods" },
+    { objective: "Record the originating IP address on every audit entry" },
+  );
+  assert.ok(verdict);
+  assert.equal(verdict.independent, true);
+  assert.equal(verdict.probability, 0);
+  assert.deepEqual(verdict.resources, [
+    "src/audit/log.js",
+    "src/pricing/tax.js",
+  ]);
+});

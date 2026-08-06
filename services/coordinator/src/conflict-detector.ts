@@ -229,6 +229,17 @@ export interface IntentResult {
   probability: number;
   resources: string[];
   explanation: string;
+  /**
+   * The verdict is that the two plans are *unrelated*, not that they collide.
+   *
+   * Recorded as `intent_independent` evidence rather than scored: it says a
+   * pair is safe to run concurrently, which is what a pair with no evidence
+   * does anyway. The value is in the audit trail being able to tell "the
+   * coordinator resolved both intents and found nothing joining the modules"
+   * apart from "the coordinator had no opinion", which are the same silence
+   * today and very different facts.
+   */
+  independent?: boolean;
 }
 
 /**
@@ -446,21 +457,55 @@ export class ConflictDetector {
         overlap(left.expectedTests, right.expectedTests).length *
           this.options.testOverlapWeight,
       ),
-      evidence(
-        "intent_conflict",
-        intent?.resources ?? [],
-        taskIds,
-        Math.round(
-          (intent?.probability ?? 0) * this.options.semanticConflictWeight,
-        ),
-        {
-          advisory: true,
-          ...(intent === undefined ? {} : { explanation: intent.explanation }),
-        },
-      ),
+      intent?.independent === true
+        ? undefined
+        : evidence(
+            "intent_conflict",
+            intent?.resources ?? [],
+            taskIds,
+            Math.round(
+              (intent?.probability ?? 0) * this.options.semanticConflictWeight,
+            ),
+            {
+              advisory: true,
+              ...(intent === undefined
+                ? {}
+                : { explanation: intent.explanation }),
+            },
+          ),
+      // A finding of independence, recorded at score zero.
+      //
+      // It cannot be routed through `evidence()`, which drops anything scoring
+      // zero — correctly, because a conflict worth nothing is not a conflict.
+      // This is the opposite claim and its whole point is to weigh nothing:
+      // scoring it would be inventing a reason to schedule, and the guarantee
+      // that matters is that it never changes what a pair was going to be
+      // allowed to do.
+      intent?.independent === true && intent.resources.length > 0
+        ? {
+            kind: "intent_independent" as const,
+            resources: intent.resources,
+            taskIds,
+            score: 0,
+            advisory: true,
+            explanation: intent.explanation,
+          }
+        : undefined,
     ].filter((entry): entry is ConflictEvidence => entry !== undefined);
 
-    if (items.length === 0) {
+    // A finding of independence never brings an assessment into existence.
+    //
+    // Assessments are persisted as conflict records and traced as
+    // `conflict_detected`. A pair the coordinator has just decided is
+    // *unrelated* must not appear there — it would swamp the table with
+    // non-conflicts and corrupt `conflictsDetected`, which benchmarks read. So
+    // the "no evidence, no record" invariant is unchanged: independence rides
+    // along in an assessment that exists for other reasons, and is silent
+    // otherwise. Silence is already the coordinator granting free concurrency.
+    const substantive = items.filter(
+      (entry) => entry.kind !== "intent_independent",
+    );
+    if (substantive.length === 0) {
       return undefined;
     }
     const score = Math.min(
@@ -488,11 +533,23 @@ export class ConflictDetector {
     const advisory = items.some(
       (entry) => entry.advisory === true && entry.score > 0,
     );
+    const independent = items.some(
+      (entry) => entry.kind === "intent_independent",
+    );
     let disposition = dispositionFor(schedulingScore, this.options.thresholds);
     // Advisory evidence can still ask a human to look, which costs nothing and
     // keeps the signal visible while its accuracy is being established. It can
     // never take the next step to sequence or block.
-    if (advisory && disposition === "concurrent") {
+    //
+    // A grounded finding of independence withholds even that: there is no
+    // point asking someone to check a pair the coordinator has just resolved
+    // to two unconnected modules. Note the asymmetry — this only ever *removes*
+    // a notification on a pair already scheduled as `concurrent`. It cannot
+    // touch a disposition structural evidence produced, because clearing a
+    // pair that real overlap flagged is exactly the kind of override the
+    // advisory split exists to prevent, and a 95%-accurate reading measured on
+    // 43 pairs is nowhere near strong enough to be given that power.
+    if (advisory && !independent && disposition === "concurrent") {
       disposition = "concurrent_with_notification";
     }
     const explanation = items

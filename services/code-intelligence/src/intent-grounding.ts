@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { intentTerms, lemmaOf, wordNet, type WordNet } from "@coord/intent-analysis";
+import { uniqueStrings } from "@coord/shared-types";
 
 import { GENERIC_IDENTIFIER_TOKENS, identifierTokens } from "./plan-grounding.js";
 import type { RepositoryIndex } from "./index.js";
@@ -348,6 +349,21 @@ export type IntentRelation = "shared" | "calls" | "adjacent";
 
 export interface GroundedIntentConflict {
   fires: boolean;
+  /**
+   * Both intents grounded, and the repository holds no connection between what
+   * they reached: not the same file, no call either way, no import either way.
+   *
+   * Distinct from `fires === false`, which also covers the case where the
+   * signal simply could not tell what one of the tasks was about. This is the
+   * positive finding — the coordinator looked the two modules up and found
+   * nothing joining them — and on the held-out half it is right 41 times in 43.
+   *
+   * It is a claim about the base revision only. Two independent modules can be
+   * made to depend on each other by the very changes being arbitrated, which
+   * is why this clears a pair to run concurrently and never does more than
+   * that.
+   */
+  independent: boolean;
   /** Confidence in [0, 1], reported so a caller can weigh it. */
   score: number;
   relation?: IntentRelation;
@@ -604,8 +620,17 @@ export function assessGroundedIntent(
     parts.push(`opposing terms (${opposition[0]}/${opposition[1]})`);
   }
 
+  const bothGrounded = leftFiles.size > 0 && rightFiles.size > 0;
   return {
     fires: score >= options.fireThreshold && score > 0,
+    // Read off the structure, not off `relation` — which is only assigned once
+    // corroboration has passed, so a vetoed pair would otherwise be reported
+    // as independent when the repository says the opposite.
+    independent:
+      bothGrounded &&
+      sharedTargets.length === 0 &&
+      callTargets.length === 0 &&
+      adjacentTargets.length === 0,
     score,
     ...(relation === undefined ? {} : { relation }),
     sharedTargets,
@@ -630,6 +655,12 @@ export interface IntentConflictVerdict {
   /** What the two plans were judged to share, for the audit trail. */
   resources: string[];
   explanation: string;
+  /**
+   * The verdict is that the two plans are *un*related, rather than that they
+   * collide. `probability` is then the confidence in independence, and
+   * arbitration must not score it as conflict evidence.
+   */
+  independent?: boolean;
 }
 
 /**
@@ -687,12 +718,32 @@ export function groundedIntentAssessor(
     if (leftText === undefined || rightText === undefined) {
       return undefined;
     }
+    const leftGrounding = groundingFor(leftText);
+    const rightGrounding = groundingFor(rightText);
     const result = assessGroundedIntent(
-      { text: leftText, grounding: groundingFor(leftText) },
-      { text: rightText, grounding: groundingFor(rightText) },
+      { text: leftText, grounding: leftGrounding },
+      { text: rightText, grounding: rightGrounding },
       index,
       signalOptions,
     );
+    const caveat =
+      `grounded at ${index.revision}; advisory — this signal is ` +
+      "unvalidated, see docs/benchmarks/intent-grounding-wired.md";
+    if (result.independent) {
+      // The one case where knowing that *nothing* connects two tasks is worth
+      // saying out loud. It carries no score: clearing a pair to run
+      // concurrently is what happens anyway, and the value is that the audit
+      // trail can distinguish "checked, found nothing" from "had no idea".
+      return {
+        probability: 0,
+        independent: true,
+        resources: uniqueStrings([
+          ...leftGrounding.targets.map((target) => target.file),
+          ...rightGrounding.targets.map((target) => target.file),
+        ]),
+        explanation: `${result.explanation} (${caveat})`,
+      };
+    }
     if (!result.fires) {
       return undefined;
     }
@@ -704,7 +755,7 @@ export function groundedIntentAssessor(
     return {
       probability: result.score,
       resources,
-      explanation: `${result.explanation} (grounded at ${index.revision}; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)`,
+      explanation: `${result.explanation} (${caveat})`,
     };
   };
 }

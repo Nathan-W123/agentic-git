@@ -76,6 +76,72 @@ fired four times and was wrong four times.
 **There is a kill switch.** `COORD_DISABLE_INTENT_GROUNDING=1` returns
 arbitration to producing no grounded intent evidence at all, without a deploy.
 
+## 3a. The independence finding
+
+The same grounding produces a second, opposite verdict that used to be thrown
+away: **both intents resolved to real modules, and the repository holds nothing
+joining them** — not the same file, no call either way, no import either way.
+
+This is not the same as the signal being quiet. Quiet covers two different
+situations, and only one of them is a judgment:
+
+| | Held-out pairs | Correct |
+| --- | --- | --- |
+| **No opinion** — at least one intent grounded to nothing | 18 | not a judgment |
+| **Independent** — both grounded, nothing connects them | **41** | **41 (100%)** |
+| Linked, but the shared-word veto suppressed the firing | 2 | — |
+
+41 for 41, with 11 for 11 on the development half as well: 52 findings, no
+false clears. A 95% Wilson interval on 41/41 has a lower bound near **91%**.
+
+Two cautions on that, because it is a better number than the signal's positive
+calls and could easily be over-read:
+
+- **41 pairs is still small**, and they are mostly easy — a webhook task
+  against an audit task really is obviously unrelated. The hard cases
+  concentrate in the pairs it declines or fires on, not here.
+- **It is a claim about the base revision only.** Two modules with nothing
+  between them today can be joined by the very changes being arbitrated. That
+  is precisely why the finding is given almost no power.
+
+### What it is allowed to do
+
+Almost nothing, deliberately:
+
+- It is recorded as `intent_independent` evidence at **score zero**, so it
+  contributes to neither the reported score nor the scheduling subtotal.
+- It **withholds the notification bump** that other advisory evidence would
+  otherwise add to a pair already scheduled as `concurrent`. There is no point
+  asking a human to check a pair the coordinator just resolved to two
+  unconnected modules.
+- It **cannot clear a pair that structural evidence flagged.** If two plans
+  name the same file, they are sequenced regardless. Clearing on structural
+  overlap is exactly the override the advisory split exists to prevent, and a
+  reading measured on 41 pairs is nowhere near strong enough for it.
+- It **never creates an assessment on its own.** Assessments are persisted as
+  conflict records and traced as `conflict_detected`; a pair just judged
+  unrelated must not land there, or it would swamp the table with
+  non-conflicts and corrupt the `conflictsDetected` metric benchmarks read. So
+  independence rides along in an assessment that exists for other reasons and
+  is silent otherwise.
+
+### Honest note on what changed
+
+On today's code this changes **no scheduling decision at all**. The only
+advisory producer is the intent signal itself, and "these conflict" and "these
+are independent" are mutually exclusive verdicts from it — so the bump it
+withholds is one that could not have been raised. A pair judged independent
+already ran freely, because a pair with no evidence produces no assessment.
+
+What actually changed is that the finding is now *expressible and recorded*:
+an admission audit trail can distinguish "the coordinator resolved both intents
+and found nothing joining the modules" from "the coordinator had no idea", which
+were the same silence before. The suppression rule is in place and tested so
+that it behaves correctly the moment a second advisory producer exists.
+
+Claiming this as a scheduling improvement would be overstating it. It is
+observability now, and a correct rule waiting for a case to apply to.
+
 ## 4. What is actually still owed
 
 A live run of `team-queue-wired` — the fixture correction in
