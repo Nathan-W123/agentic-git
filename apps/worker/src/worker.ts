@@ -28,6 +28,7 @@ import {
   type AgentPlan,
   type ChangeSet,
   type CoordinatorDecision,
+  type CanonicalChangeNotice,
   type PlanAdmission,
   type ScopeChangeDecision,
   type ScopeChangeRequest,
@@ -57,6 +58,20 @@ import { LeaseLostError, WorkerClient, isTransportFailure } from "./client.js";
  * control plane would then discard.
  */
 
+/**
+ * A plan this fleet has already paid for, and where canonical went next.
+ *
+ * `baseRevision` is what the plan was written against. `advancedTo` is filled
+ * in when the control plane refused the plan because canonical moved and told
+ * us exactly what moved; it is what turns the next attempt into an amendment
+ * rather than a cold start.
+ */
+interface CachedPlan {
+  plan: AgentPlan;
+  baseRevision: string;
+  advancedTo?: CanonicalChangeNotice;
+}
+
 export interface WorkerOptions {
   client: WorkerClient;
   project: CoordinatorProject;
@@ -73,6 +88,28 @@ export interface WorkerOptions {
   repositoryId?: string;
   /** Injected only by tests or embedded runtimes. */
   codexRunner?: CodexProcessRunner;
+  /**
+   * Plans already paid for, reusable while the base they were written against
+   * has not moved.
+   *
+   * A task deferred at admission goes back to the queue, and the next lease
+   * used to buy a whole fresh planning round from the model to rediscover the
+   * plan it already had. `awaitAdmission` already resubmits an unchanged plan
+   * without re-planning, but only for `planWaitBudgetMs`; past that the work
+   * is thrown away. Measured on the A/B series, that is where the coordinated
+   * arm's replans come from: 22 in one run, 11 in another.
+   *
+   * **The reuse is only ever safe against an identical base revision**, which
+   * is the whole of the guard: the key is `taskId` and `baseRevision`
+   * together, so a canonical that moved cannot match, and the plan is
+   * arbitrated exactly as a fresh one would be. Nothing about conflict
+   * detection changes — the same plan meets the same admission.
+   *
+   * Supply a shared map to let several workers in one process reuse each
+   * other's plans; the default is per-worker, which is the right scope when
+   * workers are separate processes.
+   */
+  planCache?: Map<string, CachedPlan>;
   /** Idle wait between polls when the queue is empty. */
   pollIntervalMs?: number;
   /**
@@ -148,6 +185,12 @@ interface PlannedWork {
 
 export class Worker {
   private identity: { id: string } | undefined;
+  /** See {@link WorkerOptions.planCache}. Per-worker unless one is injected. */
+  private readonly plans: Map<string, CachedPlan>;
+  /** Reused plans this worker did not have to buy again. */
+  public planReuseCount = 0;
+  /** Plans amended from a previous one rather than written from nothing. */
+  public planAmendCount = 0;
   private stopping = false;
   private activeLease: string | undefined;
   private activeSession:
@@ -159,6 +202,7 @@ export class Worker {
   private iterationInProgress = false;
 
   public constructor(private readonly options: WorkerOptions) {
+    this.plans = options.planCache ?? new Map<string, CachedPlan>();
     const pollInterval = options.pollIntervalMs ?? DEFAULT_POLL_MS;
     const planWaitBudget =
       options.planWaitBudgetMs ?? DEFAULT_PLAN_WAIT_BUDGET_MS;
@@ -308,6 +352,23 @@ export class Worker {
         throw new LeaseLostError(assignment.lease.id);
       }
       if (!planAdmissionApproved(admission)) {
+        // Canonical moved under this plan and the control plane said exactly
+        // where it went. Remember that against the plan we already paid for,
+        // so whoever leases this task next amends it instead of starting
+        // cold. Stored only when the notice begins where this plan does; a
+        // notice about some other stretch of history is not usable here.
+        const remembered = this.plans.get(assignment.task.id);
+        if (
+          admission.canonicalChange !== undefined &&
+          remembered !== undefined &&
+          remembered.baseRevision ===
+            admission.canonicalChange.previousVersion.revision
+        ) {
+          this.plans.set(assignment.task.id, {
+            ...remembered,
+            advancedTo: admission.canonicalChange,
+          });
+        }
         return await this.defer(assignment, planned, admission);
       }
 
@@ -575,7 +636,46 @@ export class Worker {
     // The adapter separates planning from editing: requestPlan returns the
     // agent's intent without touching the workspace, and nothing is written
     // until sendContext. That split is what makes admission possible at all.
-    const plan = await adapter.requestPlan(session.id);
+    //
+    // A plan already written for this task against this exact base revision is
+    // reused rather than bought again. The key pairs the two, so a canonical
+    // that has moved cannot match; what is reused is only the model's own
+    // output, and it is submitted for admission exactly as a fresh plan would
+    // be. See WorkerOptions.planCache.
+    const taskId = assignment.task.id;
+    const leaseBase = assignment.canonicalVersion.revision;
+    const remembered = this.plans.get(taskId);
+    let plan: AgentPlan;
+    if (remembered !== undefined && remembered.baseRevision === leaseBase) {
+      // Same task, same tree: the plan is still exactly what the model would
+      // write, so nothing needs asking.
+      plan = remembered.plan;
+      this.planReuseCount += 1;
+    } else if (
+      remembered !== undefined &&
+      remembered.advancedTo !== undefined &&
+      // The notice has to span the *whole* gap: written against the base the
+      // remembered plan used, and arriving at the tree this lease pins. A
+      // notice covering only part of the distance would understate what
+      // moved, and the plan would be amended against a tree it has never
+      // been told about — the stale-plan hazard that made blind reuse unsafe.
+      remembered.advancedTo.previousVersion.revision ===
+        remembered.baseRevision &&
+      remembered.advancedTo.canonicalVersion.revision === leaseBase
+    ) {
+      // Amend rather than rewrite. Measured on `team-queue-wired`, this costs
+      // 57% fewer tokens and 49% less wall clock than planning cold, and the
+      // amended plan is submitted to exactly the same arbitration.
+      plan = await adapter.requestReplan(session.id, {
+        taskId,
+        previousPlan: remembered.plan,
+        canonicalChange: remembered.advancedTo,
+        constraints: [],
+      });
+      this.planAmendCount += 1;
+    } else {
+      plan = await adapter.requestPlan(session.id);
+    }
     // A real model restates the objective in its own words, and the control
     // plane compares objectives byte-for-byte — that comparison is what binds
     // a plan, and later a result, to the leased task, and it must stay
@@ -592,6 +692,11 @@ export class Worker {
         ? { intent: modelObjective }
         : {}),
     };
+    // Remembered against the base it was written for, and only once it has
+    // been bound to the assigned objective — a plan that failed that binding
+    // is not one to hand out again. Any previous notice is dropped: it
+    // described a journey this plan has now superseded.
+    this.plans.set(taskId, { plan: submitted, baseRevision: leaseBase });
     return {
       adapter,
       sessionId: session.id,

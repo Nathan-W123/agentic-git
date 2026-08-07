@@ -1154,6 +1154,22 @@ export async function admitWorkPlan(
       baseVersion,
       current,
     );
+    // What moved, so the next attempt can amend this plan instead of writing
+    // a new one. Computed here rather than left to the worker because the
+    // control plane is the only side that can see both revisions: the worker
+    // holds a bundle of the old one only.
+    //
+    // A failure to describe the change is not a failure to requeue — the
+    // task is already back in the queue by this point, and a worker that
+    // receives no notice simply plans cold, which is the behaviour this
+    // replaces.
+    const advance = await canonicalAdvance(
+      repositories,
+      intelligence,
+      repository,
+      baseVersion,
+      current,
+    ).catch(() => undefined);
     return {
       outcome: "admitted",
       admission: {
@@ -1169,6 +1185,23 @@ export async function admitWorkPlan(
           "Canonical advanced before this plan was submitted; the task was " +
           "requeued to replan",
         requeue: true,
+        ...(advance === undefined
+          ? {}
+          : {
+              canonicalChange: {
+                previousVersion: baseVersion,
+                canonicalVersion: current,
+                changedFiles: [...advance.changedFiles],
+                changedSymbols: [...advance.changedSymbols],
+                changedApis: [...advance.changedApis],
+                changedSchemas: [...advance.changedSchemas],
+                changedConfigKeys: [...advance.changedConfigKeys],
+                changedTests: [...advance.changedTests],
+                changedServices: [...advance.changedServices],
+                reason:
+                  "canonical advanced while this plan was being written",
+              },
+            }),
         decidedAt: new Date().toISOString(),
       },
     };
@@ -2744,6 +2777,36 @@ export function workerOperations(
     admitWorkPlan: async (input: WorkPlanInput) => {
       const lease = await store.getWorkLease(input.leaseId);
       const key = lease?.repositoryId ?? input.leaseId;
+      // Build the repository index *before* queueing behind the other
+      // admissions for this repository.
+      //
+      // Admission is serialised per repository because it is a read-decide-
+      // write against the executing set, and that serialisation is the
+      // safety property — it is not touched here. But indexing is read-only
+      // work against one fixed revision, and it was sitting inside the
+      // critical section, so every waiting submission paid for the one in
+      // front of it to finish indexing before its own decision could start.
+      //
+      // The index is cached on `(repository path, revision)`, so warming it
+      // here means the call inside `admitWorkPlan` is a cache hit against the
+      // identical key. A revision that moves produces a different key and a
+      // fresh build, exactly as before: this cannot serve a stale index, and
+      // a failure to warm is ignored because the real build is still there.
+      if (lease !== undefined) {
+        const stored = await store.getRepository(lease.repositoryId);
+        if (stored !== undefined) {
+          await intelligence
+            .index(
+              {
+                id: stored.id,
+                path: stored.path,
+                branch: stored.branch,
+              },
+              lease.baseRevision,
+            )
+            .catch(() => undefined);
+        }
+      }
       const run = async () => await admitWorkPlan(store, input, planServices);
       // Chained on settlement, not on success: one failed admission must not
       // wedge every later submission in the repository.

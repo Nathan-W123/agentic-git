@@ -1262,10 +1262,38 @@ export class PromptCliAdapter implements AgentAdapter {
     record: PromptCliSession,
     request: ReplanRequest,
   ): string {
+    // Why this is written as an amendment rather than a fresh planning task:
+    // the whole reason to replan incrementally is that the coordinator has
+    // *already* enumerated what moved, exhaustively — files, symbols, APIs,
+    // schemas, config keys, tests and services. An agent that re-explores the
+    // tree anyway pays a cold planning round to rediscover a diff it was
+    // handed, which is the entire saving gone. So the instruction is not
+    // "inspect only what changed" (which still invites a look around) but
+    // "the change list is complete, start from the previous plan".
+    const change = request.canonicalChange;
+    const touched = [
+      ...change.changedFiles,
+      ...change.changedSymbols,
+      ...change.changedApis,
+      ...change.changedSchemas,
+      ...change.changedConfigKeys,
+      ...change.changedTests,
+      ...change.changedServices,
+    ];
     return [
-      "Replan the approved task against the new canonical repository state in the current directory.",
+      "Amend an existing plan. This is not a fresh planning task.",
       "Do not edit files.",
-      "Use the previous plan and canonical change first; inspect only what changed.",
+      "The canonical change below is a COMPLETE and AUTHORITATIVE record of",
+      "everything that moved since the previous plan was written. Trust it.",
+      "Do NOT re-read the repository to rediscover it, and do NOT re-derive",
+      "the previous plan's reasoning.",
+      touched.length === 0
+        ? "Nothing relevant changed: return the previous plan unaltered."
+        : "Open a file only if it appears in the change list below AND the " +
+          "previous plan already claimed it. Read nothing else.",
+      "Most amendments need no file reads at all — the previous plan plus the",
+      "change list is usually enough. Returning the previous plan unchanged is",
+      "a correct answer when nothing it claimed was affected.",
       `Planning deadline: ${this.planningTimeoutMs} ms.`,
       `Task id: ${record.input.task.id}`,
       `Objective: ${record.input.task.objective}`,

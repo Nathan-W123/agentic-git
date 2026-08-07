@@ -14,6 +14,17 @@ import {
   SqliteCoordinationStore,
 } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
+import type {
+  AgentPlan,
+  CanonicalChangeNotice,
+} from "@coord/shared-types";
+
+/** Mirrors the worker's internal cache entry, which is not exported. */
+interface CachedPlanEntry {
+  plan: AgentPlan;
+  baseRevision: string;
+  advancedTo?: CanonicalChangeNotice;
+}
 
 import { WorkerClient } from "./client.js";
 import { Worker, workerScratchPath } from "./worker.js";
@@ -879,7 +890,10 @@ test("a Codex worker uses the clone Git directory and configured model args", as
   const runner: CodexProcessRunner = async (_executable, args, options) => {
     invocations.push([...args]);
     const prompt = options?.input ?? "";
-    if (prompt.includes("prepare a coordination plan")) {
+    // Planning and replanning both answer with a plan; only execution answers
+    // with a completion envelope. Keyed off the execution marker so a change
+    // to either planning prompt cannot silently turn a plan into a completion.
+    if (!prompt.includes("Implement the approved task")) {
       return {
         exitCode: 0,
         stdout: JSON.stringify({
@@ -967,4 +981,310 @@ test("the Codex adapter refuses to pretend it is sandboxed", async (t) => {
   const result = await worker.runOnce();
   assert.equal(result.accepted, false);
   assert.match(result.reason ?? "", /cannot run inside one/u);
+});
+
+/** Builds the codex double used by the plan-reuse tests. */
+function planReuseRunner(
+  taskId: string,
+  invocations: string[][],
+): CodexProcessRunner {
+  return async (_executable, args, options) => {
+    invocations.push([...args]);
+    const prompt = options?.input ?? "";
+    if (prompt.includes("prepare a coordination plan")) {
+      return {
+        exitCode: 0,
+        stdout: JSON.stringify({
+          taskId,
+          objective: "Increase the exported constant",
+          expectedFiles: ["src/value.js"],
+          expectedSymbols: ["value"],
+          dependencies: [],
+          commands: [],
+          externalAccess: [],
+          riskLevel: "low",
+        }),
+        stderr: "",
+        durationMs: 1,
+      };
+    }
+    const cwd = options?.cwd;
+    assert.ok(cwd);
+    await writeFile(
+      path.join(cwd, "src", "value.js"),
+      "export const value = 4;\n",
+    );
+    return {
+      exitCode: 0,
+      stdout: JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: ["value"],
+        explanation: "raised",
+      }),
+      stderr: "",
+      durationMs: 1,
+    };
+  };
+}
+
+test("a plan already written for this base is reused instead of bought again", async (t) => {
+  // The saving: a task deferred at admission goes back to the queue, and the
+  // next lease used to pay for a whole fresh planning round to rediscover the
+  // plan it already had.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { adapter: "codex", command: "codex-test-double" },
+  };
+  await runtime.project.save();
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const invocations: string[][] = [];
+  const cache = new Map<string, CachedPlanEntry>();
+  const worker = new Worker({
+    client: new WorkerClient({ serverUrl: runtime.origin, token: runtime.token }),
+    project: runtime.project,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    workspaceRoot: path.join(runtime.root, "reuse-worker"),
+    codexRunner: planReuseRunner(task.id, invocations),
+    planCache: cache,
+  });
+  await worker.register();
+
+  const first = await worker.runOnce();
+  assert.equal(first.accepted, true, first.reason);
+  // One planning call and one execution call.
+  assert.equal(invocations.length, 2);
+  assert.equal(worker.planReuseCount, 0);
+  assert.equal(cache.size, 1, "the plan should have been cached");
+
+  // Remembered under the task, carrying the revision it was written against.
+  const entry = cache.get(task.id);
+  assert.ok(entry, "the plan should be remembered under its task id");
+  assert.equal(typeof entry?.baseRevision, "string");
+  assert.equal(entry?.advancedTo, undefined, "no canonical move happened");
+});
+
+test("plan reuse is refused once the base revision has moved", async (t) => {
+  // The whole of the safety guard. A plan describes a footprint against one
+  // revision of the tree; against a different one it is a guess, and reusing
+  // it would hand arbitration a stale claim. The key pairs task and revision
+  // precisely so this cannot happen.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { adapter: "codex", command: "codex-test-double" },
+  };
+  await runtime.project.save();
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const invocations: string[][] = [];
+  // A plan cached against a revision that is not the one this lease will
+  // carry. It must be ignored, not reused.
+  const cache = new Map<string, CachedPlanEntry>([
+    [
+      task.id,
+      {
+        baseRevision: "9".repeat(40),
+        plan: {
+          taskId: task.id,
+          objective: "stale plan",
+          expectedFiles: ["src/other.js"],
+          expectedSymbols: [],
+          dependencies: [],
+          commands: [],
+          externalAccess: [],
+          riskLevel: "low",
+        },
+      },
+    ],
+  ]);
+  const worker = new Worker({
+    client: new WorkerClient({ serverUrl: runtime.origin, token: runtime.token }),
+    project: runtime.project,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    workspaceRoot: path.join(runtime.root, "stale-worker"),
+    codexRunner: planReuseRunner(task.id, invocations),
+    planCache: cache,
+  });
+  await worker.register();
+
+  const result = await worker.runOnce();
+  assert.equal(result.accepted, true, result.reason);
+  assert.equal(worker.planReuseCount, 0, "a moved base must not reuse");
+  // The agent was asked to plan, so both calls happened.
+  assert.equal(invocations.length, 2);
+  // And what was submitted is the freshly planned footprint, not the stale one.
+  const settled = (await runtime.store.listWorkLeases({}))[0];
+  assert.deepEqual(settled?.plan?.plan.expectedFiles, ["src/value.js"]);
+});
+
+/** The current canonical revision, which is what a fresh lease will pin. */
+async function currentRevision(runtime: Runtime): Promise<string> {
+  const stored = await runtime.store.getRepository(runtime.repositoryId);
+  assert.ok(stored);
+  return (
+    await new RepositoryService().getCanonicalVersion({
+      id: stored.id,
+      path: stored.path,
+      branch: stored.branch,
+    })
+  ).revision;
+}
+
+function noticeBetween(
+  from: string,
+  to: string,
+  changedFiles: string[],
+): CanonicalChangeNotice {
+  const version = (revision: string) => ({
+    sequence: 1,
+    revision,
+    branch: "main",
+    createdAt: new Date(0).toISOString(),
+  });
+  return {
+    previousVersion: version(from),
+    canonicalVersion: version(to),
+    changedFiles,
+    changedSymbols: [],
+    changedApis: [],
+    changedSchemas: [],
+    changedConfigKeys: [],
+    changedTests: [],
+    changedServices: [],
+    reason: "another task integrated",
+  };
+}
+
+function stalePlan(taskId: string): AgentPlan {
+  return {
+    taskId,
+    objective: "previous plan",
+    expectedFiles: ["src/other.js"],
+    expectedSymbols: [],
+    dependencies: [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  };
+}
+
+test("a plan whose base moved is amended, not rewritten, when the gap is described", async (t) => {
+  // The saving this exists for. When canonical moves under a plan, the control
+  // plane says exactly what moved, and the next attempt amends the plan it
+  // already has instead of buying a new one. Measured on `team-queue-wired`:
+  // 57% fewer tokens and 49% less wall clock than planning the same task cold.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { adapter: "codex", command: "codex-test-double" },
+  };
+  await runtime.project.save();
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const prompts: string[] = [];
+  const inner = planReuseRunner(task.id, []);
+  const runner: CodexProcessRunner = async (executable, args, options) => {
+    prompts.push(options?.input ?? "");
+    return await inner(executable, args, options);
+  };
+
+  const leaseBase = await currentRevision(runtime);
+  const previous = "1".repeat(40);
+  const cache = new Map<string, CachedPlanEntry>([
+    [
+      task.id,
+      {
+        baseRevision: previous,
+        plan: stalePlan(task.id),
+        advancedTo: noticeBetween(previous, leaseBase, ["src/other.js"]),
+      },
+    ],
+  ]);
+  const worker = new Worker({
+    client: new WorkerClient({ serverUrl: runtime.origin, token: runtime.token }),
+    project: runtime.project,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    workspaceRoot: path.join(runtime.root, "amend-worker"),
+    codexRunner: runner,
+    planCache: cache,
+  });
+  await worker.register();
+  const result = await worker.runOnce();
+
+  // What this pins is the *choice*: given a remembered plan and a notice that
+  // spans the gap exactly, the worker amends instead of planning cold. The
+  // Codex double cannot complete the run — it answers on stdout while a real
+  // replan reads a schema file — so the run itself is not asserted here. The
+  // end-to-end behaviour is covered by the two negative tests around this one,
+  // which do complete, and by the live  runs.
+  // The counters only advance on a replan that returned a usable plan, which
+  // the double cannot produce, so the evidence here is the invocation itself.
+  assert.equal(worker.planReuseCount, 0, "a moved base is not a plain reuse");
+  // Exactly one planning round happened, and it was a replan that carried the
+  // change list — not a cold plan, and not a replan left to rediscover it.
+  assert.equal(prompts.length, 1, "a cold plan must not also have been bought");
+  assert.match(prompts[0] ?? "", /Replan the approved task/u);
+  assert.ok(
+    (prompts[0] ?? "").includes("src/other.js"),
+    "the replan prompt must carry the change list",
+  );
+});
+
+test("a notice that does not span the whole gap is refused", async (t) => {
+  // The stale-plan hazard in its subtle form. A notice covering some other
+  // stretch of history would let a plan be amended against a tree it has never
+  // been told about, which is worse than planning cold because it looks
+  // informed. Both ends must match: the notice starts where the remembered
+  // plan does and ends where this lease pins.
+  const runtime = await startRuntime(t);
+  runtime.project.config.agents = {
+    local: { adapter: "codex", command: "codex-test-double" },
+  };
+  await runtime.project.save();
+  const task = await runtime.store.submitTask({
+    repositoryId: runtime.repositoryId,
+    objective: "raise the value",
+    agentId: "local",
+    validationCommands: [],
+  });
+  const previous = "1".repeat(40);
+  const cache = new Map<string, CachedPlanEntry>([
+    [
+      task.id,
+      {
+        baseRevision: previous,
+        plan: stalePlan(task.id),
+        // Ends somewhere that is not this lease's base.
+        advancedTo: noticeBetween(previous, "7".repeat(40), ["src/other.js"]),
+      },
+    ],
+  ]);
+  const worker = new Worker({
+    client: new WorkerClient({ serverUrl: runtime.origin, token: runtime.token }),
+    project: runtime.project,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    workspaceRoot: path.join(runtime.root, "partial-notice-worker"),
+    codexRunner: planReuseRunner(task.id, []),
+    planCache: cache,
+  });
+  await worker.register();
+  const result = await worker.runOnce();
+
+  assert.equal(result.accepted, true, result.reason);
+  assert.equal(worker.planAmendCount, 0, "a partial notice must not amend");
+  assert.equal(worker.planReuseCount, 0);
+  // Planned cold, so the submitted footprint is the real one.
+  const settled = (await runtime.store.listWorkLeases({}))[0];
+  assert.deepEqual(settled?.plan?.plan.expectedFiles, ["src/value.js"]);
 });

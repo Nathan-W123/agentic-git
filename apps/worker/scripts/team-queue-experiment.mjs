@@ -454,6 +454,10 @@ async function outstanding(store) {
 async function driveWorkers(plane, root, count, deadline) {
   const iterations = [];
   const workers = [];
+  // One cache across the fleet: these five workers share a process, and a task
+  // deferred by one is routinely re-leased by another. Keyed on task and base
+  // revision, so a moved canonical never matches.
+  const planCache = new Map();
   for (let index = 0; index < count; index += 1) {
     const worker = new Worker({
       client: new WorkerClient({
@@ -480,6 +484,7 @@ async function driveWorkers(plane, root, count, deadline) {
       // minute instead of holding it for the default eight hours, which is
       // long enough to strand a run that has no reviewer behind it.
       planApprovalWaitMs: 60_000,
+      planCache,
       // Only the Codex adapter takes an injected runner. A `claude` run needs
       // none: the prompt-cli adapter reads the usage block out of the same
       // envelope it already parses and reports it through the protocol, so its
@@ -556,6 +561,10 @@ async function driveWorkers(plane, root, count, deadline) {
 
   await Promise.all(workers.map(async (worker, index) => await loop(worker, index)));
   await Promise.all(workers.map(async (worker) => await worker.stop()));
+  iterations.planReuseCount = workers.reduce(
+    (sum, worker) => sum + worker.planReuseCount,
+    0,
+  );
   return iterations;
 }
 
@@ -636,16 +645,56 @@ async function survival(finalTreePath, patches, byTaskId) {
 async function behaviouralSurvival(mergePath, plane, root) {
   const results = [];
   for (const entry of plane.submitted) {
-    const canonical = plane.canonicals.get(entry.scenarioTaskId);
-    if (canonical === undefined) {
-      continue;
+    // Where this task's own version of its tests lives differs by arm. The
+    // uncoordinated arm gave every task its own canonical, so the task's work
+    // is that repository's HEAD. The coordinated arm has one shared canonical
+    // and the task's work is the commit the coordinator promoted for it,
+    // found by the `coord(<id>)` subject its integration writes.
+    //
+    // Getting this wrong is silent rather than loud: an unresolved lookup
+    // simply judges nothing, which is how the first coordinated run of the A/B
+    // series reported `0/0` instead of a rate.
+    const own = plane.canonicals.get(entry.scenarioTaskId);
+    let source;
+    let revision;
+    if (own !== undefined) {
+      source = own.path;
+      revision = (await git(own.path, "rev-parse", "HEAD")).trim();
+      if (revision === plane.seedRevision) {
+        continue;
+      }
+    } else {
+      const commit = (
+        await git(
+          mergePath,
+          "log",
+          "--format=%H",
+          `--grep=coord(${entry.taskId})`,
+          "--fixed-strings",
+        ).catch(() => "")
+      )
+        .split("\n")
+        .filter(Boolean)[0];
+      if (commit === undefined) {
+        results.push({
+          scenarioTaskId: entry.scenarioTaskId,
+          judged: false,
+          reason: "no promoted commit for this task in the final tree",
+        });
+        continue;
+      }
+      source = mergePath;
+      revision = commit;
     }
-    const head = (await git(canonical.path, "rev-parse", "HEAD")).trim();
-    if (head === plane.seedRevision) {
-      continue;
-    }
+
     const changed = (
-      await git(canonical.path, "diff", "--name-only", plane.seedRevision, head)
+      await git(
+        source,
+        "show",
+        "--name-only",
+        "--format=",
+        revision,
+      ).catch(() => "")
     )
       .split("\n")
       .map((line) => line.trim())
@@ -660,9 +709,10 @@ async function behaviouralSurvival(mergePath, plane, root) {
       continue;
     }
     const probe = path.join(root, `probe-${entry.scenarioTaskId}`);
+    await rm(probe, { recursive: true, force: true }).catch(() => undefined);
     await run("git", ["clone", "--quiet", mergePath, probe]);
     for (const file of testFiles) {
-      const contents = await git(canonical.path, "show", `${head}:${file}`).catch(
+      const contents = await git(source, "show", `${revision}:${file}`).catch(
         () => undefined,
       );
       if (contents === undefined) {
@@ -1077,6 +1127,8 @@ function summarize(iterations, records, tasks) {
     resultTimeRequeues: replanEvents.filter((entry) => entry.runId !== undefined)
       .length,
     replansTotal: replanEvents.length,
+    /** Planning rounds avoided by reusing a plan whose base had not moved. */
+    plansReused: iterations.planReuseCount ?? 0,
 
     integrationsPromoted: events("canonical_promoted").length,
     validationRuns: events("validation_completed").length,
@@ -1413,6 +1465,7 @@ console.log(
   `[${arm}] integrated=${String(m.tasksIntegrated)}/${String(m.tasksTotal)} ` +
     `conflicts=${String(m.conflictsDetected)} ` +
     `replans=${String(m.planTimeRequeues)}p/${String(m.resultTimeRequeues)}r ` +
+    `plansReused=${String(m.plansReused)} ` +
     `tokens=${String(m.reportedTokensTotal || m.tokensTotal || m.observedTokensTotal || "n/a")} ` +
     `transportFails=${String(m.transportFailures)}(requeued ${String(m.transportRequeues)}) ` +
     `elapsed=${String(Math.round(record.elapsedMs / 1000))}s ` +
