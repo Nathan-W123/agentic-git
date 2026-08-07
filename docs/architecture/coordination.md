@@ -156,9 +156,21 @@ up to 8. Unattended, that is a deadlock rather than a review — the first live
 waiting for an approval nobody was there to give.
 
 **What an unconfigured deployment now does without asking:** applies schema
-changes, edits protected paths, acts on `critical`-risk plans, and **rolls
-canonical back**. A rollback is high risk by construction and used to be gated
-by the default alone.
+changes, edits protected paths, and acts on `critical`-risk plans.
+
+**One thing is deliberately excluded: rolling canonical back still asks.**
+`requireRollbackReview` defaults to true and is *not* governed by `enabled`.
+Everything else here reviews work arriving through the pipeline, and that is
+what became opt-in. A rollback is the opposite operation — it discards changes
+that were already reviewed, validated and accepted, it is issued by an operator
+rather than produced by an agent, and nothing downstream re-checks it. Before
+approvals became opt-in it was gated only as a side effect of the rollback plan
+being marked `riskLevel: "high"`; letting that lapse would have turned a change
+about agent throughput into the quiet removal of the only confirmation on a
+destructive action.
+
+A deployment that wants no prompt anywhere sets `requireRollbackReview: false`
+and gets exactly that. It has to say so.
 
 **Turning review back on is one field**, per project:
 
@@ -171,5 +183,5 @@ review, the protected-path list, the risk levels, the 24-hour timeout. Nothing
 was removed from the approval machinery; only the answer to "what happens when
 nobody has said" changed. Narrower configurations still work: a project can
 enable approvals and then set `riskLevels`, `protectedPaths`,
-`requireSchemaReview`, `requireChangesetReview`, `requireRemotePlanReview`, and
-`approvalTimeoutMs` to taste.
+`requireSchemaReview`, `requireChangesetReview`, `requireRemotePlanReview`,
+`requireRollbackReview`, and `approvalTimeoutMs` to taste.

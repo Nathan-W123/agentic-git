@@ -47,6 +47,28 @@ export interface ApprovalPolicyOptions {
   pathPatterns?: readonly string[];
   approvalTimeoutMs?: number;
   requireRemotePlanReview?: boolean;
+  /**
+   * Whether rolling canonical backwards asks a human first. **Defaults to
+   * true, and is deliberately not governed by {@link enabled}.**
+   *
+   * Everything else here reviews work on its way *in*, and that review is now
+   * opt-in because an unattended pipeline that stops for nobody is the point.
+   * A rollback is the opposite operation: it discards changes that were
+   * already reviewed, validated and accepted, and it is issued by an operator
+   * rather than produced by an agent. Nothing downstream re-checks it — the
+   * discarded work is simply gone.
+   *
+   * Before approvals became opt-in this was gated only as a side effect: the
+   * rollback plan is built with `riskLevel: "high"`, and the old default
+   * happened to review high-risk plans. Letting that lapse silently would have
+   * turned a default change about agent throughput into the removal of the
+   * one confirmation on a destructive action, which is not what switching the
+   * pipeline to unattended was for.
+   *
+   * A deployment that genuinely wants no prompt anywhere sets
+   * `requireRollbackReview: false` and gets exactly that. It has to say so.
+   */
+  requireRollbackReview?: boolean;
 }
 
 const DEFAULT_PATH_PATTERNS = [
@@ -98,6 +120,8 @@ export class ApprovalPolicy {
    * decision to stop for them at admission time is a project's to make.
    */
   public readonly requireRemotePlanReview: boolean;
+  /** See {@link ApprovalPolicyOptions.requireRollbackReview}. */
+  public readonly requireRollbackReview: boolean;
 
   public constructor(options: ApprovalPolicyOptions = {}) {
     // Unattended by default. See ApprovalPolicyOptions.enabled for why this
@@ -114,6 +138,9 @@ export class ApprovalPolicy {
     this.requireSchemaReview = options.requireSchemaReview ?? true;
     this.requireChangesetReview = options.requireChangesetReview ?? false;
     this.requireRemotePlanReview = options.requireRemotePlanReview ?? false;
+    // Not `this.enabled && ...`: a destructive, operator-issued action keeps
+    // its confirmation even where the agent pipeline runs unattended.
+    this.requireRollbackReview = options.requireRollbackReview ?? true;
   }
 
   /**
@@ -133,6 +160,21 @@ export class ApprovalPolicy {
       return [];
     }
     return this.reasons(plan, plan.expectedFiles);
+  }
+
+  /**
+   * Why rolling canonical back needs a person, or nothing.
+   *
+   * Separate from {@link planReasons} because a rollback is not a plan the
+   * coordinator arbitrated: it is an operator discarding accepted work, and
+   * the reason to pause is the discarding rather than anything about the
+   * diff. Reported alongside whatever `planReasons` says, so a project that
+   * also runs attended review sees both.
+   */
+  public rollbackReasons(): string[] {
+    return this.requireRollbackReview
+      ? ["Rolling canonical back discards work that was already accepted"]
+      : [];
   }
 
   public changesetReasons(

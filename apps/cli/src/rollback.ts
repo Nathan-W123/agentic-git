@@ -333,6 +333,11 @@ export async function rollbackCanonical(
         : await store.getProject(input.projectId);
     const policy = approvalPolicyForProject(projectRecord?.policy);
     const reasons = [
+      // A rollback keeps its confirmation even where the pipeline runs
+      // unattended: it discards work that was already reviewed, validated and
+      // accepted, and nothing downstream re-checks it. See
+      // ApprovalPolicyOptions.requireRollbackReview.
+      ...policy.rollbackReasons(),
       ...policy.planReasons(plan),
       ...policy.changesetReasons(plan, changeSet, {
         planWasReviewed: true,

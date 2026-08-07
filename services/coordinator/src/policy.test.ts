@@ -187,6 +187,32 @@ test("schema review can be delegated to protected migration paths", () => {
   );
 });
 
+test("a rollback still asks a human on a project that configured nothing", () => {
+  // The safety consequence of making approvals opt-in, and the carve-out that
+  // answers it. Everything else reviews work arriving through the pipeline and
+  // is now off by default; a rollback discards work that was already accepted,
+  // is issued by an operator rather than an agent, and nothing downstream
+  // re-checks it. Before approvals became opt-in it was gated only as a side
+  // effect of the rollback plan being marked high risk.
+  const unconfigured = approvalPolicyForProject(undefined);
+  assert.deepEqual(unconfigured.planReasons(planStub({ riskLevel: "high" })), []);
+  assert.notEqual(unconfigured.rollbackReasons().length, 0);
+
+  // Explicitly unattended is still not permission to discard accepted work.
+  const unattended = approvalPolicyForProject({
+    version: 1,
+    approvals: { enabled: false },
+  });
+  assert.notEqual(unattended.rollbackReasons().length, 0);
+
+  // A deployment that wants no prompt anywhere has to say so.
+  const silent = approvalPolicyForProject({
+    version: 1,
+    approvals: { requireRollbackReview: false },
+  });
+  assert.deepEqual(silent.rollbackReasons(), []);
+});
+
 test("a corrupt stored policy throws instead of silently using defaults", () => {
   assert.throws(
     () => approvalPolicyForProject({ version: 7 }),
@@ -221,6 +247,14 @@ test("a corrupt stored policy throws instead of silently using defaults", () => 
       approvalPolicyForProject({
         version: 1,
         approvals: { requireSchemaReview: "sometimes" },
+      }),
+    TypeError,
+  );
+  assert.throws(
+    () =>
+      approvalPolicyForProject({
+        version: 1,
+        approvals: { requireRollbackReview: "sometimes" },
       }),
     TypeError,
   );

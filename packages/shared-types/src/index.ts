@@ -1329,6 +1329,12 @@ export interface ProjectApprovalPolicyConfig {
    * worker holding a repository slot while a person is asked. Default: false.
    */
   requireRemotePlanReview?: boolean;
+  /**
+   * Whether rolling canonical back asks a human. Defaults to true and is not
+   * governed by `enabled`: it guards a destructive operator action rather than
+   * work arriving through the pipeline.
+   */
+  requireRollbackReview?: boolean;
   /** Risk levels that require human review. Default: high and critical. */
   riskLevels?: RiskLevel[];
   /** Glob patterns whose files require human review when touched. */
@@ -1421,6 +1427,7 @@ export function assertProjectPolicy(
       key !== "requireSchemaReview" &&
       key !== "requireChangesetReview" &&
       key !== "requireRemotePlanReview" &&
+      key !== "requireRollbackReview" &&
       key !== "riskLevels" &&
       key !== "protectedPaths" &&
       key !== "approvalTimeoutMs"
@@ -1453,6 +1460,12 @@ export function assertProjectPolicy(
     typeof approvals.requireRemotePlanReview !== "boolean"
   ) {
     throw new TypeError("requireRemotePlanReview must be a boolean");
+  }
+  if (
+    approvals.requireRollbackReview !== undefined &&
+    typeof approvals.requireRollbackReview !== "boolean"
+  ) {
+    throw new TypeError("requireRollbackReview must be a boolean");
   }
   if (approvals.riskLevels !== undefined) {
     if (

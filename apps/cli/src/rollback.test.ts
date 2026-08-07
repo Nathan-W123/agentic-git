@@ -99,19 +99,6 @@ async function createHarness(): Promise<Harness> {
   await workspaces.destroy(workspace);
   const second = (await repositories.getCanonicalVersion(canonical)).revision;
 
-  // A rollback is high risk by construction, and this suite is about what the
-  // gate does once it engages. Since 2026-08-06 an unconfigured project runs
-  // unattended, so the review these tests drive is asked for explicitly rather
-  // than inherited from the default.
-  //
-  // Worth stating where someone will read it: under the new default, a real
-  // deployment that has configured nothing will roll canonical back *without*
-  // asking anyone. That is the intended product behaviour, and a deployment
-  // that wants a human on rollbacks sets `approvals: {enabled: true}`.
-  await store.updateProject(DEFAULT_PROJECT_ID, {
-    policy: { version: 1, approvals: { enabled: true } },
-  });
-
   return {
     root,
     store,
@@ -178,8 +165,9 @@ test("a rollback restores the earlier tree by moving canonical forward", async (
       },
       { repositories: harness.repositories },
     );
-    // A rollback is high risk by construction, and this project asks for the
-    // gate (see createHarness).
+    // A rollback discards accepted work, so it asks a human even on a project
+    // with no policy at all — `requireRollbackReview` defaults to true and is
+    // deliberately not governed by the (now opt-in) `enabled` switch.
     await approveWhenAsked(harness.store);
     const result = await pending;
 

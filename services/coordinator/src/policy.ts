@@ -33,6 +33,9 @@ export function approvalPolicyForProject(
     ...(approvals.requireRemotePlanReview === undefined
       ? {}
       : { requireRemotePlanReview: approvals.requireRemotePlanReview }),
+    ...(approvals.requireRollbackReview === undefined
+      ? {}
+      : { requireRollbackReview: approvals.requireRollbackReview }),
     ...(approvals.riskLevels === undefined
       ? {}
       : { riskLevels: approvals.riskLevels }),
