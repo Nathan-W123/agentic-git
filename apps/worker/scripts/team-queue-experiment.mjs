@@ -67,6 +67,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { parseCodexTokens } from "@coord/adapter-codex";
+import { parseClaudeUsage } from "@coord/adapter-prompt-cli";
 import { assertProjectPolicy } from "@coord/shared-types";
 import { ApiGateway } from "@coord/api-gateway";
 import { CoordinatorProject } from "@coord/cli/project";
@@ -112,6 +113,29 @@ const repairPenaltySeconds = Number(flag("repair-penalty-seconds", "300"));
  * broke a livelock needs the contended core and something uncontended beside
  * it, and nothing else.
  */
+/**
+ * How the uncoordinated arm settles a merge it cannot apply cleanly.
+ *
+ * `agent` pays a real model to resolve the conflict, in the merge tree, with
+ * the conflict markers `git apply --3way` left behind, and clocks what that
+ * costs. `last-writer-wins` is the original behaviour: discard the merge and
+ * overwrite the file with the later task's whole version, then charge
+ * `--repair-penalty-seconds` for the human who would have had to do it
+ * properly.
+ *
+ * The original is kept because every recorded number was produced by it, but
+ * it is not a resolution and should not be read as one. It *destroys* the
+ * earlier task's change — which is precisely why those runs report tasks
+ * losing work — and the penalty standing in for the repair is an invented
+ * figure with no measurement behind it. A comparison of coordinated against
+ * uncoordinated wall clock is only honest if the uncoordinated side actually
+ * pays for the tree it owes, so new runs should use `agent`.
+ */
+const conflictResolution = flag("resolve-conflicts", "agent");
+if (!["agent", "last-writer-wins"].includes(conflictResolution)) {
+  throw new Error("--resolve-conflicts must be agent or last-writer-wins");
+}
+
 const bands = flag("bands", "deep,partial,independent")
   .split(",")
   .map((entry) => entry.trim())
@@ -593,6 +617,182 @@ async function survival(finalTreePath, patches, byTaskId) {
 }
 
 /**
+ * Whether each task's *behaviour* survived, judged by its own tests.
+ *
+ * The line-based check below asks whether a task's added lines are still
+ * present verbatim. That is the right question when the loser of a merge is
+ * simply overwritten, and the wrong one as soon as anybody genuinely resolves
+ * a conflict: a real resolution rewrites the lines it combines, so a tree that
+ * correctly implements both changes scores as having lost both. Measured on
+ * the first agent-resolved run, all three tasks read as partially lost while
+ * `node --test` passed on the merged tree.
+ *
+ * So the task's own tests are run against the merged tree instead. A task
+ * whose tests pass there had its behaviour preserved however the lines were
+ * rearranged; a task whose tests fail lost something real. The tests come from
+ * that task's own canonical, not the merged tree, because a merge can drop a
+ * test as easily as it can drop the code it covers.
+ */
+async function behaviouralSurvival(mergePath, plane, root) {
+  const results = [];
+  for (const entry of plane.submitted) {
+    const canonical = plane.canonicals.get(entry.scenarioTaskId);
+    if (canonical === undefined) {
+      continue;
+    }
+    const head = (await git(canonical.path, "rev-parse", "HEAD")).trim();
+    if (head === plane.seedRevision) {
+      continue;
+    }
+    const changed = (
+      await git(canonical.path, "diff", "--name-only", plane.seedRevision, head)
+    )
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    const testFiles = changed.filter((file) => /(^|\/)test\//u.test(file));
+    if (testFiles.length === 0) {
+      results.push({
+        scenarioTaskId: entry.scenarioTaskId,
+        judged: false,
+        reason: "task changed no test file, so its behaviour cannot be judged",
+      });
+      continue;
+    }
+    const probe = path.join(root, `probe-${entry.scenarioTaskId}`);
+    await run("git", ["clone", "--quiet", mergePath, probe]);
+    for (const file of testFiles) {
+      const contents = await git(canonical.path, "show", `${head}:${file}`).catch(
+        () => undefined,
+      );
+      if (contents === undefined) {
+        continue;
+      }
+      const target = path.join(probe, file);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, contents, "utf8");
+    }
+    let passed = false;
+    let output = "";
+    try {
+      const { stdout } = await run("node", ["--test", ...testFiles], {
+        cwd: probe,
+        maxBuffer: 16 * 1024 * 1024,
+      });
+      passed = true;
+      output = stdout.slice(-1500);
+    } catch (error) {
+      output = `${error.stdout ?? ""}${error.stderr ?? ""}`.slice(-1500);
+    }
+    await rm(probe, { recursive: true, force: true }).catch(() => undefined);
+    results.push({
+      scenarioTaskId: entry.scenarioTaskId,
+      judged: true,
+      testFiles,
+      passed,
+      ...(passed ? {} : { output }),
+    });
+  }
+  return results;
+}
+
+/**
+ * Every conflict-resolution pass the uncoordinated arm had to pay for.
+ *
+ * This is the cost the arm used to get for free. `git apply --3way` leaves
+ * conflict markers behind when it refuses; a real team then sits down and
+ * works out which half of each side to keep. Nothing in this harness did that
+ * — it overwrote the file with the later task's version and charged a made-up
+ * penalty — so the uncoordinated wall clock measured coding and nothing else.
+ * Here the resolution is actually performed, by the same model doing the
+ * coding, and what it costs is measured rather than assumed.
+ */
+const conflictResolutions = [];
+
+/**
+ * Resolves the conflict markers in a merge tree, with an agent, and clocks it.
+ *
+ * Run in the merge tree itself rather than a workspace: the thing being
+ * resolved is a tree, the tests that decide whether it worked are in it, and
+ * the agent needs to be able to run them. It is told not to discard either
+ * side, because discarding is exactly what the old behaviour did and what the
+ * lost-work metric counts.
+ */
+async function resolveConflictsWithAgent(mergePath, files, taskId) {
+  const command = process.env["COORD_AGENT_CMD"]?.trim() ?? "";
+  if (command.length === 0) {
+    throw new Error("COORD_AGENT_CMD must name the agent executable");
+  }
+  const rawArgs = process.env["COORD_AGENT_ARGS"]?.trim() ?? "";
+  const effort = process.env["COORD_AGENT_EFFORT"]?.trim() ?? "";
+  const prompt = [
+    "A three-way merge left conflict markers in this repository.",
+    "",
+    "Conflicted files:",
+    ...files.map((file) => "- " + file),
+    "",
+    "Resolve every conflict so the working tree is coherent and node --test",
+    "passes.",
+    "",
+    "Both sides are changes somebody made deliberately. Keep the intent of",
+    "both: do not delete one side's change to make the markers go away, and",
+    "do not weaken or delete a test to make it pass. Where two changes",
+    "affect the same calculation, combine them so both apply.",
+    "",
+    "Leave no conflict markers behind. Reply with a one-line summary.",
+  ].join("\n");
+
+  const startedAt = Date.now();
+  const output = await runProcess(
+    command,
+    [
+      "-p",
+      "--output-format",
+      "json",
+      "--dangerously-skip-permissions",
+      ...(rawArgs.length === 0 ? [] : JSON.parse(rawArgs)),
+      ...(effort.length === 0 ? [] : ["--effort", effort]),
+    ],
+    {
+      cwd: mergePath,
+      input: prompt,
+      timeoutMs: 30 * 60 * 1000,
+      maxOutputBytes: 32 * 1024 * 1024,
+    },
+  );
+  const elapsedMs = Date.now() - startedAt;
+  const usage = parseClaudeUsage(output.stdout) ?? undefined;
+  const record = {
+    taskId,
+    files: [...files],
+    elapsedMs,
+    exitCode: output.exitCode,
+    ...(usage === undefined
+      ? {}
+      : {
+          tokens: usage.totalTokens,
+          ...(usage.costUsd === undefined ? {} : { costUsd: usage.costUsd }),
+        }),
+  };
+  conflictResolutions.push(record);
+  return record;
+}
+
+/** Files still carrying conflict markers, which means the resolution failed. */
+async function filesWithMarkers(mergePath, files) {
+  const remaining = [];
+  for (const file of files) {
+    const contents = await readFile(path.join(mergePath, file), "utf8").catch(
+      () => "",
+    );
+    if (/^<{7} |^={7}$|^>{7} /mu.test(contents)) {
+      remaining.push(file);
+    }
+  }
+  return remaining;
+}
+
+/**
  * The debt the uncoordinated arm owes: ten diffs against one base, one tree.
  *
  * Applied in the order the tasks finished, three-way, with the later task
@@ -654,17 +854,48 @@ async function mergeUncoordinated(plane, root, order) {
           .filter((line) => line.startsWith("+++ b/"))
           .map((line) => line.slice(6));
       }
-      await git(mergePath, "checkout", "--", ".").catch(() => undefined);
-      for (const file of conflicted) {
-        const contents = await git(canonical.path, "show", `${head}:${file}`).catch(
-          () => undefined,
+      if (conflictResolution === "agent") {
+        // Leave the markers `git apply --3way` wrote and pay an agent to
+        // settle them, which is what the arm actually owes. Only if that
+        // fails do we fall back to destroying a side, and the fallback is
+        // recorded rather than silently substituted.
+        const resolved = await resolveConflictsWithAgent(
+          mergePath,
+          conflicted,
+          taskId,
         );
-        if (contents === undefined) {
-          continue;
+        const stillConflicted = await filesWithMarkers(mergePath, conflicted);
+        resolved.unresolvedFiles = stillConflicted;
+        resolved.succeeded = stillConflicted.length === 0;
+        if (!resolved.succeeded) {
+          await git(mergePath, "checkout", "--", ".").catch(() => undefined);
+          for (const file of conflicted) {
+            const contents = await git(
+              canonical.path,
+              "show",
+              `${head}:${file}`,
+            ).catch(() => undefined);
+            if (contents === undefined) {
+              continue;
+            }
+            const target = path.join(mergePath, file);
+            await mkdir(path.dirname(target), { recursive: true });
+            await writeFile(target, contents, "utf8");
+          }
         }
-        const target = path.join(mergePath, file);
-        await mkdir(path.dirname(target), { recursive: true });
-        await writeFile(target, contents, "utf8");
+      } else {
+        await git(mergePath, "checkout", "--", ".").catch(() => undefined);
+        for (const file of conflicted) {
+          const contents = await git(canonical.path, "show", `${head}:${file}`).catch(
+            () => undefined,
+          );
+          if (contents === undefined) {
+            continue;
+          }
+          const target = path.join(mergePath, file);
+          await mkdir(path.dirname(target), { recursive: true });
+          await writeFile(target, contents, "utf8");
+        }
       }
       conflictedFiles += conflicted.length;
     }
@@ -697,7 +928,26 @@ async function mergeUncoordinated(plane, root, order) {
     merges,
     patches,
     conflictedFiles,
-    repairPenaltyMs: conflictedFiles * repairPenaltySeconds * 1000,
+    // With a real resolution pass the repair is measured, so the invented
+    // penalty is not also charged. `last-writer-wins` keeps the penalty
+    // because nothing was actually repaired there.
+    repairPenaltyMs:
+      conflictResolution === "agent"
+        ? conflictResolutions.reduce((sum, entry) => sum + entry.elapsedMs, 0)
+        : conflictedFiles * repairPenaltySeconds * 1000,
+    resolutionMode: conflictResolution,
+    conflictResolutions,
+    resolutionElapsedMs: conflictResolutions.reduce(
+      (sum, entry) => sum + entry.elapsedMs,
+      0,
+    ),
+    resolutionTokens: conflictResolutions.reduce(
+      (sum, entry) => sum + (entry.tokens ?? 0),
+      0,
+    ),
+    resolutionsFailed: conflictResolutions.filter(
+      (entry) => entry.succeeded === false,
+    ).length,
     validation,
   };
 }
@@ -962,6 +1212,49 @@ async function once() {
       .filter((id) => id !== undefined)
       .filter((id, index, all) => all.indexOf(id) === index);
 
+    /**
+     * Work that did not survive, as a rate rather than an aside.
+     *
+     * This is the measure that decides whether the rest matters: wall clock
+     * and tokens compare two ways of getting to a tree, and a tree missing a
+     * task's change is not the same tree. It was previously computed ad hoc
+     * by whoever read the artefact, which is how "about two tasks a run" ended
+     * up being passed around as folklore instead of a number.
+     */
+    const lostWorkMetrics = (survival, behavioural = []) => {
+      const judged = behavioural.filter((entry) => entry.judged);
+      const failed = judged.filter((entry) => !entry.passed);
+      const wholly = survival.filter((entry) => entry.whollyOverwritten);
+      const partially = survival.filter((entry) => entry.partiallyOverwritten);
+      const total = survival.length;
+      return {
+        tasksWithChangesets: total,
+        tasksWhollyOverwritten: wholly.length,
+        tasksPartiallyOverwritten: partially.length,
+        tasksLosingWork: wholly.length + partially.length,
+        lostTaskRate:
+          total === 0 ? 0 : (wholly.length + partially.length) / total,
+        tasksLosingWorkIds: [...wholly, ...partially]
+          .map((entry) => entry.scenarioTaskId)
+          .filter((id) => id !== undefined)
+          .sort(),
+        /**
+         * The headline number, and the one to quote.
+         *
+         * Verbatim line survival above is a proxy that stops being valid the
+         * moment a conflict is genuinely resolved rather than overwritten —
+         * a correct merge rewrites the lines it combines. This asks the
+         * question directly: does the merged tree still do what this task's
+         * own tests say it should?
+         */
+        behaviouralJudged: judged.length,
+        behaviouralLost: failed.length,
+        behaviouralLostRate:
+          judged.length === 0 ? undefined : failed.length / judged.length,
+        behaviouralLostIds: failed.map((entry) => entry.scenarioTaskId).sort(),
+      };
+    };
+
     let outcome;
     if (arm === "uncoordinated") {
       const merged = await mergeUncoordinated(plane, root, completionOrder);
@@ -991,9 +1284,23 @@ async function once() {
         conflictedFiles: merged.conflictedFiles,
         repairPenaltyMs: merged.repairPenaltyMs,
         repairPenaltySeconds,
+        resolutionMode: merged.resolutionMode,
+        conflictResolutions: merged.conflictResolutions,
+        resolutionElapsedMs: merged.resolutionElapsedMs,
+        resolutionTokens: merged.resolutionTokens,
+        resolutionsFailed: merged.resolutionsFailed,
         validation: merged.validation,
         survival: await survival(merged.mergePath, merged.patches, plane.byTaskId),
       };
+      outcome.behaviouralSurvival = await behaviouralSurvival(
+        merged.mergePath,
+        plane,
+        root,
+      );
+      outcome.lostWork = lostWorkMetrics(
+        outcome.survival,
+        outcome.behaviouralSurvival,
+      );
     } else {
       const settled = await coordinatedOutcome(plane, root);
       outcome = {
@@ -1001,6 +1308,15 @@ async function once() {
         validation: settled.validation,
         survival: await survival(settled.finalPath, settled.patches, plane.byTaskId),
       };
+      outcome.behaviouralSurvival = await behaviouralSurvival(
+        settled.finalPath,
+        plane,
+        root,
+      );
+      outcome.lostWork = lostWorkMetrics(
+        outcome.survival,
+        outcome.behaviouralSurvival,
+      );
     }
 
     return {
@@ -1092,9 +1408,7 @@ const file = path.join(
 );
 await writeFile(file, `${JSON.stringify(record, undefined, 2)}\n`, "utf8");
 const m = record.metrics;
-const lost = record.outcome.survival.filter(
-  (entry) => entry.whollyOverwritten || entry.partiallyOverwritten,
-).length;
+const lw = record.outcome.lostWork;
 console.log(
   `[${arm}] integrated=${String(m.tasksIntegrated)}/${String(m.tasksTotal)} ` +
     `conflicts=${String(m.conflictsDetected)} ` +
@@ -1104,6 +1418,10 @@ console.log(
     `elapsed=${String(Math.round(record.elapsedMs / 1000))}s ` +
     `wall=${String(Math.round(record.wallClockMs / 1000))}s ` +
     `mergeConflicts=${String(record.outcome.conflictedFiles ?? 0)} ` +
-    `tasksLosingWork=${String(lost)} ` +
+    `lostTasks=${String(lw.behaviouralLost ?? "?")}/${String(lw.behaviouralJudged ?? 0)}` +
+    `(${lw.behaviouralLostRate === undefined ? "n/a" : `${(lw.behaviouralLostRate * 100).toFixed(0)}%`}) ` +
+    `linesLost=${String(lw.tasksLosingWork)}/${String(lw.tasksWithChangesets)} ` +
+    `resolveTime=${String(Math.round((record.outcome.resolutionElapsedMs ?? 0) / 1000))}s ` +
+    `resolveTokens=${String(record.outcome.resolutionTokens ?? 0)} ` +
     `finalTests=${record.outcome.validation.passed ? "pass" : "FAIL"} -> ${file}`,
 );
