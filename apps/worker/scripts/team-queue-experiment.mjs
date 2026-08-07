@@ -67,6 +67,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { parseCodexTokens } from "@coord/adapter-codex";
+import { assertProjectPolicy } from "@coord/shared-types";
 import { ApiGateway } from "@coord/api-gateway";
 import { CoordinatorProject } from "@coord/cli/project";
 import { workerOperations } from "@coord/cli/worker-operations";
@@ -175,6 +176,13 @@ const git = async (repo, ...args) =>
  * end against a scripted agent before any of it is pointed at a real model,
  * because a plumbing bug found after an hour of live tokens is an expensive
  * way to learn about a typo.
+ *
+ * `COORD_AGENT_EFFORT` is the prompt-cli reasoning setting. It is a first-class
+ * field on a `claude` agent rather than something smuggled through
+ * `COORD_AGENT_ARGS`, because the prompt-cli adapter accepts only `--model`
+ * pairs in `args` — deliberately, so that project configuration cannot weaken
+ * the invocation mode it enforces — and would reject `--effort` there. The
+ * model itself does go through `args`, as `["--model", "opus"]`.
  */
 function liveAgent() {
   const command = process.env["COORD_AGENT_CMD"]?.trim() ?? "";
@@ -186,10 +194,15 @@ function liveAgent() {
     process.env["COORD_CODEX_WINDOWS_SANDBOX"]?.trim() ?? "unelevated";
   const executionSandbox = process.env["COORD_CODEX_SANDBOX"]?.trim();
   const rawArgs = process.env["COORD_AGENT_ARGS"]?.trim() ?? "";
+  const effort = process.env["COORD_AGENT_EFFORT"]?.trim() ?? "";
+  if (effort.length > 0 && adapter !== "claude") {
+    throw new Error("COORD_AGENT_EFFORT applies only to a claude agent");
+  }
   return {
     adapter,
     command,
     ...(rawArgs.length === 0 ? {} : { args: JSON.parse(rawArgs) }),
+    ...(effort.length === 0 ? {} : { effort }),
     ...(adapter === "codex" ? { windowsSandbox } : {}),
     ...(executionSandbox === undefined ? {} : { executionSandbox }),
   };
@@ -320,6 +333,49 @@ async function bootControlPlane(root, scenario) {
   assert.equal(issued.status, 201);
   const token = (await issued.json()).token;
 
+  // Bootstrap creates the owner's organization, and a worker's tenant is now a
+  // required registration field rather than something the control plane infers
+  // from the token. Read back rather than assumed: the id is minted during
+  // bootstrap and nothing else here knows it.
+  const [organization] = await store.listOrganizations();
+  if (organization === undefined) {
+    throw new Error("bootstrap created no organization to register workers in");
+  }
+
+  // Leasing is project-scoped now: a worker asks for work in one project, and
+  // the queue it reads is `listSubmittedTasks({projectId})`. So the tasks and
+  // the workers have to agree on a project, and there has to be a real one —
+  // `authorizeProject` resolves it before any work is handed out. One project
+  // holds every task in both arms, because the arm is expressed in how many
+  // canonical repositories exist, and splitting the project as well would
+  // change a second variable.
+  const projectRecord = await store.createProject({
+    organizationId: organization.id,
+    slug: "team-queue",
+    name: "team-queue experiment",
+  });
+  // Approvals off, because there is nobody to give one.
+  //
+  // The policy defaults gate any plan declaring a schema change and then wait
+  // up to 24 hours for a human, while the worker holds the lease for up to 8.
+  // In an unattended benchmark that is not a review, it is a deadlock: the
+  // first wired pilot gated eight of ten plans and burned its whole budget
+  // waiting. Nothing is being measured about approvals here, and the recorded
+  // corpus never tripped this gate at all — its plans did not declare schemas
+  // — so disabling it makes the arms comparable rather than diverging from
+  // them. Plans are recorded before the gate either way, so the intent corpus
+  // this run exists to produce is unaffected.
+  //
+  // `version: 1` is not decoration: `assertProjectPolicy` rejects a policy
+  // without it, the rejection surfaces as a 500 on every lease, and the worker
+  // loop treats that as a transport error and retries silently. Omitting it
+  // cost a full twenty-minute run that produced 3,895 failed iterations and
+  // not one plan. Validated here, at boot, so a malformed policy is a startup
+  // error rather than a budget spent on nothing.
+  const policy = { version: 1, approvals: { enabled: false } };
+  assertProjectPolicy(policy);
+  await store.updateProject(projectRecord.id, { policy });
+
   // The store mints its own task ids, so nothing downstream can key off the
   // scenario's. Every later lookup — which repository a task owns, which band
   // it was designed into, which commit is its contribution — goes through this
@@ -329,6 +385,7 @@ async function bootControlPlane(root, scenario) {
     const canonical = canonicals.get(shared ? "shared" : entry.task.id);
     const record = await store.submitTask({
       repositoryId: canonical.id,
+      projectId: projectRecord.id,
       objective: entry.task.objective,
       agentId: entry.task.agentId,
       validationCommands: entry.task.validationCommands,
@@ -351,6 +408,8 @@ async function bootControlPlane(root, scenario) {
     gateway,
     origin,
     token,
+    organizationId: organization.id,
+    projectId: projectRecord.id,
     repositories,
     sourcePath,
     seedRevision,
@@ -384,15 +443,25 @@ async function driveWorkers(plane, root, count, deadline) {
         requestTimeoutMs: 10 * 60 * 1000,
       }),
       project: plane.project,
+      organizationId: plane.organizationId,
+      projectId: plane.projectId,
       workspaceRoot: path.join(root, `w${String(index)}`),
       name: `team-queue-worker-${String(index)}`,
       version: "1.0.0",
       // Halved chatter against a control plane that is sharing a process with
       // the workers it is serving.
       pollIntervalMs: 3_000,
-      ...(process.env["COORD_AGENT_ADAPTER"]?.trim() === "generic-cli"
-        ? {}
-        : { codexRunner: countingCodexRunner }),
+      // Belt and braces against the deadlock the project policy above removes.
+      // If anything still gates a plan, the worker gives the lease back in a
+      // minute instead of holding it for the default eight hours, which is
+      // long enough to strand a run that has no reviewer behind it.
+      planApprovalWaitMs: 60_000,
+      // Only the Codex adapter takes an injected runner, and only its output
+      // carries a token line to parse. A `claude` or `generic-cli` run reports
+      // no tokens at all rather than reporting a wrong number.
+      ...((process.env["COORD_AGENT_ADAPTER"]?.trim() ?? "codex") === "codex"
+        ? { codexRunner: countingCodexRunner }
+        : {}),
     });
     await worker.register();
     workers.push(worker);
@@ -421,10 +490,43 @@ async function driveWorkers(plane, root, count, deadline) {
         elapsedMs: Date.now() - startedAt,
         ...result,
       });
+      abortIfHopeless();
       if (!result.worked || result.deferred === true) {
         await sleep(1_500);
       }
     }
+  };
+
+  /**
+   * Stops a run that is failing every iteration instead of letting it spend
+   * its whole budget doing so.
+   *
+   * The worker loop is deliberately forgiving — a failed iteration is recorded
+   * and retried, because transient control-plane trouble should not kill a
+   * run. The cost of that forgiveness is that a *permanent* fault is
+   * indistinguishable from a slow start: a malformed project policy made every
+   * lease return 500, and the loop turned that into 3,895 identical failures
+   * over twenty minutes with nothing to show. If nothing has succeeded after
+   * this many consecutive failures, something is wrong with the setup rather
+   * than with one request, and stopping now leaves the reason on the record
+   * while it is still cheap to read.
+   */
+  const abortIfHopeless = () => {
+    const MIN_ATTEMPTS = 40;
+    if (iterations.length < MIN_ATTEMPTS) {
+      return;
+    }
+    if (iterations.some((entry) => entry.worked === true)) {
+      return;
+    }
+    const reasons = new Set(
+      iterations.map((entry) => String(entry.reason ?? "").slice(0, 200)),
+    );
+    throw new Error(
+      `${String(iterations.length)} iterations, none of which worked. ` +
+        `This is a setup fault, not a flaky request. Distinct reasons: ` +
+        [...reasons].map((reason) => JSON.stringify(reason)).join(", "),
+    );
   };
 
   await Promise.all(workers.map(async (worker, index) => await loop(worker, index)));
@@ -893,6 +995,11 @@ async function once() {
         COORD_REPOSITORY_PARALLELISM:
           process.env["COORD_REPOSITORY_PARALLELISM"] ?? "default",
         COORD_AGENT_ADAPTER: process.env["COORD_AGENT_ADAPTER"] ?? "codex",
+        // Which model actually wrote these plans. The recorded corpus is
+        // Codex; anything else is a deviation and has to be legible in the
+        // artefact rather than only in whoever ran it.
+        COORD_AGENT_ARGS: process.env["COORD_AGENT_ARGS"] ?? "",
+        COORD_AGENT_EFFORT: process.env["COORD_AGENT_EFFORT"] ?? "",
       },
       startedAt: new Date(startedAt).toISOString(),
       elapsedMs,
@@ -907,6 +1014,27 @@ async function once() {
       metrics,
       outcome,
       plans,
+      /**
+       * Every conflict assessment the coordinator actually recorded, with its
+       * evidence list intact.
+       *
+       * `metrics.conflictsDetected` counts these, which is enough to compare
+       * arms and not enough to answer the question the wired run exists to
+       * ask: whether the grounded intent signal produced evidence in a real
+       * arbitration, and whether it stayed advisory when it did. That is a
+       * claim about the `kind` and `advisory` fields of individual evidence
+       * entries, so the entries are kept rather than counted.
+       */
+      assessments: records
+        .filter((entry) => entry.event.type === "conflict_detected")
+        .map((entry) => ({
+          taskId: entry.event.taskId,
+          taskIds: entry.event.data.taskIds,
+          score: entry.event.data.score,
+          disposition: entry.event.data.disposition,
+          stage: entry.event.data.stage,
+          evidence: entry.event.data.evidence,
+        })),
       tasks: tasks.map((task) => ({
         id: task.id,
         scenarioTaskId: plane.byTaskId.get(task.id)?.scenarioTaskId,

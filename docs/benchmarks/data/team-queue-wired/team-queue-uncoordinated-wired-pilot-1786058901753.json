@@ -1,0 +1,1046 @@
+{
+  "arm": "uncoordinated",
+  "label": "wired-pilot",
+  "scenario": "team-queue-wired",
+  "bands": [
+    "deep",
+    "partial",
+    "independent"
+  ],
+  "workers": 5,
+  "env": {
+    "COORD_REPOSITORY_PARALLELISM": "default",
+    "COORD_AGENT_ADAPTER": "claude",
+    "COORD_AGENT_ARGS": "[\"--model\",\"opus\"]",
+    "COORD_AGENT_EFFORT": "high"
+  },
+  "startedAt": "2026-08-06T22:52:15.216Z",
+  "elapsedMs": 2162780,
+  "wallClockMs": 2462780,
+  "budgetExhausted": true,
+  "completionOrder": [
+    "task_cb706724-37d4-4acb-ad5f-f3831727d62a",
+    "task_39272963-d6e9-47d1-9ff9-110c7ac051b5",
+    "task_064bb469-6e2f-4f16-83d8-76764f6c824a",
+    "task_79e7e809-e756-45d5-9f11-27a8953ce5b4",
+    "task_3f63eac8-c56e-4c3b-b2c4-0fee85bfdda7"
+  ],
+  "metrics": {
+    "transportFailures": 8,
+    "transportRequeues": 8,
+    "tasksIntegrated": 5,
+    "tasksFailed": 0,
+    "tasksOutstanding": 5,
+    "tasksTotal": 10,
+    "leaseIterations": 13,
+    "acceptedIterations": 5,
+    "deferredIterations": 8,
+    "conflictsDetected": 0,
+    "partialAdmissions": 0,
+    "planTimeRequeues": 0,
+    "resultTimeRequeues": 0,
+    "replansTotal": 0,
+    "integrationsPromoted": 5,
+    "validationRuns": 5,
+    "validationFailures": 0,
+    "observedTokensTotal": 0,
+    "observedTokensByPhase": {
+      "planning": 0,
+      "execution": 0
+    },
+    "codexInvocations": 0,
+    "codexInvocationsWithoutTokenLine": 0,
+    "controlPlaneTokensTotal": 0
+  },
+  "outcome": {
+    "kind": "uncoordinated",
+    "patchFiles": [
+      {
+        "taskId": "task_cb706724-37d4-4acb-ad5f-f3831727d62a",
+        "scenarioTaskId": "task_loyalty_tier",
+        "files": [
+          "src/pricing/discount.js",
+          "test/discount.test.js"
+        ]
+      },
+      {
+        "taskId": "task_39272963-d6e9-47d1-9ff9-110c7ac051b5",
+        "scenarioTaskId": "task_free_delivery",
+        "files": [
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ]
+      },
+      {
+        "taskId": "task_064bb469-6e2f-4f16-83d8-76764f6c824a",
+        "scenarioTaskId": "task_handling_fee",
+        "files": [
+          "README.md",
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ]
+      },
+      {
+        "taskId": "task_79e7e809-e756-45d5-9f11-27a8953ce5b4",
+        "scenarioTaskId": "task_rounding",
+        "files": [
+          "src/format/money.js",
+          "test/money.test.js"
+        ]
+      },
+      {
+        "taskId": "task_3f63eac8-c56e-4c3b-b2c4-0fee85bfdda7",
+        "scenarioTaskId": "task_webhook_retry",
+        "files": [
+          "src/notify/webhook.js",
+          "test/webhook.test.js"
+        ]
+      }
+    ],
+    "merges": [
+      {
+        "taskId": "task_cb706724-37d4-4acb-ad5f-f3831727d62a",
+        "status": "clean",
+        "conflictedFiles": []
+      },
+      {
+        "taskId": "task_39272963-d6e9-47d1-9ff9-110c7ac051b5",
+        "status": "clean",
+        "conflictedFiles": []
+      },
+      {
+        "taskId": "task_064bb469-6e2f-4f16-83d8-76764f6c824a",
+        "status": "conflicted",
+        "conflictedFiles": [
+          "src/pricing/total.js"
+        ]
+      },
+      {
+        "taskId": "task_79e7e809-e756-45d5-9f11-27a8953ce5b4",
+        "status": "clean",
+        "conflictedFiles": []
+      },
+      {
+        "taskId": "task_3f63eac8-c56e-4c3b-b2c4-0fee85bfdda7",
+        "status": "clean",
+        "conflictedFiles": []
+      }
+    ],
+    "conflictedFiles": 1,
+    "repairPenaltyMs": 300000,
+    "repairPenaltySeconds": 300,
+    "validation": {
+      "passed": false,
+      "output": " twenty five orders (0.1439ms)\n✔ notifications use the account channel (0.546ms)\n✔ exports keep id, name and status columns (0.7029ms)\n✔ money renders with a currency symbol (0.637ms)\n✔ rounding leaves a positive amount positive and never grows it much (0.1415ms)\n✔ rounding keeps whole pence (0.0826ms)\n✔ money renders to whole pence, never long decimals (0.0747ms)\n✔ search matches on name and rejects empty queries (1.1482ms)\n✔ tax is charged on a standard order (0.5432ms)\n✔ an order total is a positive number (1.2926ms)\n✔ every order carries the flat handling charge (0.1262ms)\n✔ a bigger basket costs more than a smaller one (0.1066ms)\n✖ an order over a hundred pounds is not charged for delivery (0.7141ms)\n✖ an order of exactly a hundred pounds is not charged for delivery (0.193ms)\n✖ an order under a hundred pounds is charged three pounds delivery (0.1468ms)\n✔ webhook delivery reports the endpoint it used (0.6208ms)\n✔ webhook delivery does not retry after a successful attempt (0.1123ms)\n✔ webhook delivery retries until the transport succeeds (0.0941ms)\n✔ webhook delivery retries after a thrown transport error (0.733ms)\n✔ webhook delivery gives up after three failed attempts (0.139ms)\n✔ webhook delivery gives up after three thrown transport errors (0.1077ms)\nℹ tests 23\nℹ suites 0\nℹ pass 20\nℹ fail 3\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 616.515\n\n✖ failing tests:\n\ntest at test\\total.test.js:32:1\n✖ an order over a hundred pounds is not charged for delivery (0.7141ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  186 !== 180\n  \n      at TestContext.<anonymous> (file:///C:/Users/nward/AppData/Local/Temp/coord-team-rffeVn/merge/test/total.test.js:34:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1325:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)\n      at Test.postRun (node:internal/test_runner/test:1465:19)\n      at Test.run (node:internal/test_runner/test:1390:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 186,\n    expected: 180,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at test\\total.test.js:37:1\n✖ an order of exactly a hundred pounds is not charged for delivery (0.193ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  126 !== 120\n  \n      at TestContext.<anonymous> (file:///C:/Users/nward/AppData/Local/Temp/coord-team-rffeVn/merge/test/total.test.js:39:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1325:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)\n      at Test.postRun (node:internal/test_runner/test:1465:19)\n      at Test.run (node:internal/test_runner/test:1390:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 126,\n    expected: 120,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at test\\total.test.js:42:1\n✖ an order under a hundred pounds is charged three pounds delivery (0.1468ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  124.8 !== 122\n  \n      at TestContext.<anonymous> (file:///C:/Users/nward/AppData/Local/Temp/coord-team-rffeVn/merge/test/total.test.js:44:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1325:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)\n      at Test.postRun (node:internal/test_runner/test:1465:19)\n      at Test.run (node:internal/test_runner/test:1390:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 124.8,\n    expected: 122,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n"
+    },
+    "survival": [
+      {
+        "taskId": "task_cb706724-37d4-4acb-ad5f-f3831727d62a",
+        "scenarioTaskId": "task_loyalty_tier",
+        "band": "partial",
+        "addedLines": 6,
+        "survivingLines": 6,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_39272963-d6e9-47d1-9ff9-110c7ac051b5",
+        "scenarioTaskId": "task_free_delivery",
+        "band": "deep",
+        "addedLines": 14,
+        "survivingLines": 9,
+        "survivalRatio": 0.6428571428571429,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": true
+      },
+      {
+        "taskId": "task_064bb469-6e2f-4f16-83d8-76764f6c824a",
+        "scenarioTaskId": "task_handling_fee",
+        "band": "deep",
+        "addedLines": 13,
+        "survivingLines": 13,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_79e7e809-e756-45d5-9f11-27a8953ce5b4",
+        "scenarioTaskId": "task_rounding",
+        "band": "partial",
+        "addedLines": 8,
+        "survivingLines": 8,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_3f63eac8-c56e-4c3b-b2c4-0fee85bfdda7",
+        "scenarioTaskId": "task_webhook_retry",
+        "band": "independent",
+        "addedLines": 33,
+        "survivingLines": 33,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      }
+    ]
+  },
+  "plans": [
+    {
+      "runId": "run_2b347884-32e9-4a0a-9fdd-4adff9ad5ef2",
+      "taskId": "task_426a7d84-8e72-4365-8359-5c197dc4e108",
+      "scenarioTaskId": "task_audit_ip",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T23:13:03.140Z",
+      "plan": {
+        "taskId": "task_426a7d84-8e72-4365-8359-5c197dc4e108",
+        "objective": "Record the originating IP address on every audit entry",
+        "expectedFiles": [
+          "src/audit/log.js",
+          "test/audit.test.js"
+        ],
+        "expectedSymbols": [
+          "auditEntry",
+          "isPrivileged"
+        ],
+        "expectedApis": [
+          "auditEntry(actor, action, subject, ip)"
+        ],
+        "expectedSchemas": [
+          "audit entry object: { actor, action, subject, ip }"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/audit.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add an originating-IP field to the audit entry record: extend auditEntry in src/audit/log.js with an ip parameter that is always emitted on the returned entry (with a defined fallback when the caller supplies none), and extend test/audit.test.js to assert the ip is recorded. No behavior is removed or disabled; isPrivileged and all non-audit modules are untouched."
+      }
+    },
+    {
+      "runId": "run_055e80c6-085d-4532-9e86-896d2c0fd158",
+      "taskId": "task_d8e3f21a-d274-40eb-b0f9-bbe8ecf60cba",
+      "scenarioTaskId": "task_card_surcharge",
+      "band": "deep",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T23:12:23.647Z",
+      "plan": {
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "dependencies": [],
+        "expectedApis": [
+          "orderTotal(order)",
+          "surchargeFor(amount, order)"
+        ],
+        "expectedConfigKeys": [],
+        "expectedFiles": [
+          "src/pricing/surcharge.js",
+          "src/pricing/total.js",
+          "test/surcharge.test.js",
+          "test/total.test.js"
+        ],
+        "expectedSchemas": [
+          "order.payment (payment method descriptor read by pricing; card orders identified by a method value of \"card\")"
+        ],
+        "expectedServices": [],
+        "expectedSymbols": [
+          "CARD_SURCHARGE_RATE",
+          "discountRate",
+          "orderTotal",
+          "roundMoney",
+          "surchargeFor",
+          "taxFor"
+        ],
+        "expectedTests": [
+          "test/surcharge.test.js",
+          "test/total.test.js"
+        ],
+        "externalAccess": [],
+        "intent": "Add a new pricing behavior: a five percent card-payment surcharge applied on top of the otherwise-payable order amount (line items less discount, plus delivery, plus tax), leaving non-card orders unchanged.",
+        "objective": "Orders paid by card should cost an extra five percent on top of what the customer would otherwise pay",
+        "riskLevel": "medium",
+        "taskId": "task_d8e3f21a-d274-40eb-b0f9-bbe8ecf60cba"
+      }
+    },
+    {
+      "runId": "run_8d398044-b403-47c2-b849-640821634380",
+      "taskId": "task_28ac91e5-915f-43f2-8d3d-c980f3cc7fcd",
+      "scenarioTaskId": "task_zero_rated_goods",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T23:11:15.812Z",
+      "plan": {
+        "taskId": "task_28ac91e5-915f-43f2-8d3d-c980f3cc7fcd",
+        "objective": "Orders that contain only digital goods should not be charged tax",
+        "expectedFiles": [
+          "src/pricing/tax.js",
+          "test/tax.test.js"
+        ],
+        "expectedSymbols": [
+          "STANDARD_RATE",
+          "isDigitalOnly",
+          "taxFor"
+        ],
+        "expectedApis": [
+          "taxFor(amount, order)"
+        ],
+        "expectedSchemas": [
+          "order.lines[].digital (boolean, optional, defaults to false/absent meaning physical)"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/tax.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add a tax exemption in src/pricing/tax.js: taxFor returns 0 when every line of the order is a digital good (order.lines[].digital), while all other orders keep the existing standard-rate tax; src/pricing/total.js already forwards the order to taxFor so it needs no change, and new coverage is added only in test/tax.test.js per the README's one-test-file-per-module rule."
+      }
+    },
+    {
+      "runId": "run_79bdaa24-6742-4d9e-849a-ac15e2561546",
+      "taskId": "task_63ccee63-6652-416d-9292-a7c1691f7095",
+      "scenarioTaskId": "task_search_email",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T22:57:53.895Z",
+      "plan": {
+        "taskId": "task_63ccee63-6652-416d-9292-a7c1691f7095",
+        "objective": "Make account search match on email address as well as name",
+        "expectedFiles": [
+          "src/search/accounts.js",
+          "test/search.test.js"
+        ],
+        "expectedSymbols": [
+          "searchAccounts"
+        ],
+        "expectedApis": [
+          "searchAccounts(accounts, query)"
+        ],
+        "expectedSchemas": [
+          "account object shape: { name: string, email?: string }"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/search.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add email-address matching to the existing case-insensitive substring account search: searchAccounts in src/search/accounts.js will return an account when the trimmed, lowercased query is a substring of either account.name or account.email (email treated as optional/missing-safe), while preserving the current empty-query-returns-empty behavior and input order; test/search.test.js gains coverage for email-only matches and accounts without an email field. No other module, API surface, or configuration changes."
+      }
+    },
+    {
+      "runId": "run_7dc572f8-6bd5-4b22-bcca-eb0ab57d7e93",
+      "taskId": "task_93a3bef7-7a61-4366-a745-6d6c97f73cad",
+      "scenarioTaskId": "task_export_created_at",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T22:57:28.378Z",
+      "plan": {
+        "taskId": "task_93a3bef7-7a61-4366-a745-6d6c97f73cad",
+        "objective": "Add a created-at column to the CSV export",
+        "expectedFiles": [
+          "src/export/csv.js",
+          "test/export.test.js"
+        ],
+        "expectedSymbols": [
+          "COLUMNS",
+          "exportColumns",
+          "toCsv"
+        ],
+        "expectedApis": [
+          "exportColumns()",
+          "toCsv(rows)"
+        ],
+        "expectedSchemas": [
+          "CSV export row shape: id, name, status, createdAt",
+          "CSV header row: id,name,status,createdAt"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/export.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add a new trailing \"createdAt\" column to the CSV export column list so exported rows include their creation timestamp; append-only, no existing columns removed, reordered, or disabled."
+      }
+    },
+    {
+      "runId": "run_df99e865-e060-4d1d-b727-b2ff73e69413",
+      "taskId": "task_3f63eac8-c56e-4c3b-b2c4-0fee85bfdda7",
+      "scenarioTaskId": "task_webhook_retry",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T22:56:33.739Z",
+      "plan": {
+        "taskId": "task_3f63eac8-c56e-4c3b-b2c4-0fee85bfdda7",
+        "objective": "Retry webhook delivery up to three times when the transport reports a failure",
+        "expectedFiles": [
+          "src/notify/webhook.js",
+          "test/webhook.test.js"
+        ],
+        "expectedSymbols": [
+          "MAX_ATTEMPTS",
+          "deliver"
+        ],
+        "expectedApis": [
+          "deliver(subscriber, event, transport) -> { url, delivered }"
+        ],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/webhook.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add bounded retry behavior to webhook delivery: deliver() calls the synchronous transport up to three total attempts, retrying when the transport reports failure (response.ok not strictly true, or a thrown error), returning on first success and reporting delivered:false after the third failed attempt. Return shape { url, delivered } and the synchronous signature are preserved; no removal or disabling of existing behavior, no new dependencies, config, or network access."
+      }
+    },
+    {
+      "runId": "run_f50661dc-e4e0-4962-922e-90d4ed2d94f1",
+      "taskId": "task_79e7e809-e756-45d5-9f11-27a8953ce5b4",
+      "scenarioTaskId": "task_rounding",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T22:56:12.510Z",
+      "plan": {
+        "taskId": "task_79e7e809-e756-45d5-9f11-27a8953ce5b4",
+        "objective": "Round every amount a customer is shown to whole pence so totals never display long decimals",
+        "expectedFiles": [
+          "src/format/money.js",
+          "test/money.test.js"
+        ],
+        "expectedSymbols": [
+          "PLACES",
+          "formatMoney",
+          "orderTotal",
+          "roundMoney"
+        ],
+        "expectedApis": [],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/money.test.js",
+          "test/total.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Modify existing rounding behavior: change the customer-facing precision constant PLACES in src/format/money.js from 0 (whole pounds) to 2 (whole pence), so roundMoney and its callers (formatMoney, orderTotal) quantize to pence instead of pounds. Not adding, removing, or gating a feature — no new module, export, or flag; the single existing rounding seam is corrected in place. Add a test in test/money.test.js pinning two-decimal-place rounding (the current test deliberately leaves precision unasserted). No change to src/pricing/total.js, which already delegates rounding to src/format/money.js, and no change to the four non-pricing feature areas (notify, audit, export, search), which render no amounts."
+      }
+    },
+    {
+      "runId": "run_f7a23ec6-acf4-4bd0-a3ff-b086582eeb3d",
+      "taskId": "task_426a7d84-8e72-4365-8359-5c197dc4e108",
+      "scenarioTaskId": "task_audit_ip",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T22:55:46.905Z",
+      "plan": {
+        "taskId": "task_426a7d84-8e72-4365-8359-5c197dc4e108",
+        "objective": "Record the originating IP address on every audit entry",
+        "expectedFiles": [
+          "src/audit/log.js",
+          "test/audit.test.js"
+        ],
+        "expectedSymbols": [
+          "auditEntry",
+          "isPrivileged"
+        ],
+        "expectedApis": [
+          "auditEntry(actor, action, subject, ip)"
+        ],
+        "expectedSchemas": [
+          "audit entry object: { actor, action, subject, ip }"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/audit.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add an originating-IP field to the audit entry record: extend auditEntry in src/audit/log.js with an ip parameter that is included on the returned entry object, and extend test/audit.test.js to assert the ip is recorded. No other module is touched; isPrivileged behavior is unchanged."
+      }
+    },
+    {
+      "runId": "run_3d2690b9-a961-4df0-b73e-53d855169983",
+      "taskId": "task_d8e3f21a-d274-40eb-b0f9-bbe8ecf60cba",
+      "scenarioTaskId": "task_card_surcharge",
+      "band": "deep",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T22:55:01.411Z",
+      "plan": {
+        "taskId": "task_d8e3f21a-d274-40eb-b0f9-bbe8ecf60cba",
+        "objective": "Orders paid by card should cost an extra five percent on top of what the customer would otherwise pay",
+        "expectedFiles": [
+          "README.md",
+          "src/pricing/surcharge.js",
+          "src/pricing/total.js",
+          "test/surcharge.test.js",
+          "test/total.test.js"
+        ],
+        "expectedSymbols": [
+          "CARD_SURCHARGE_RATE",
+          "discountRate",
+          "order.payment",
+          "order.payment.method",
+          "orderTotal",
+          "roundMoney",
+          "surchargeRate",
+          "taxFor"
+        ],
+        "expectedApis": [
+          "orderTotal(order)",
+          "surchargeRate(payment)"
+        ],
+        "expectedSchemas": [
+          "order object shape gains an optional payment/payment-method field consumed by orderTotal; existing lines[] and customer fields unchanged"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/discount.test.js",
+          "test/money.test.js",
+          "test/surcharge.test.js",
+          "test/tax.test.js",
+          "test/total.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "medium",
+        "intent": "Add a new pricing behavior: a 5% card-payment surcharge applied in src/pricing/total.js to the full amount the customer would otherwise pay (line items after discount, plus delivery, plus tax), via a new src/pricing/surcharge.js module mirroring the existing discount.js/tax.js pattern, with orders paid by any other method left unchanged and the result still rounded through roundMoney; no existing behavior is removed or disabled."
+      }
+    },
+    {
+      "runId": "run_b1e94bc7-83c4-406a-b3be-0be4b1224814",
+      "taskId": "task_064bb469-6e2f-4f16-83d8-76764f6c824a",
+      "scenarioTaskId": "task_handling_fee",
+      "band": "deep",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T22:54:37.603Z",
+      "plan": {
+        "taskId": "task_064bb469-6e2f-4f16-83d8-76764f6c824a",
+        "objective": "Add a flat two pound handling charge to every order's total",
+        "expectedFiles": [
+          "README.md",
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ],
+        "expectedSymbols": [
+          "DELIVERY",
+          "HANDLING",
+          "discountRate",
+          "orderTotal",
+          "roundMoney",
+          "taxFor"
+        ],
+        "expectedApis": [
+          "orderTotal(order)"
+        ],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/total.test.js"
+        ],
+        "expectedServices": [
+          "accounts-service pricing module (src/pricing)"
+        ],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Adding behavior: introduce a new flat £2 handling charge constant in src/pricing/total.js and include it in every order total alongside the existing £3 delivery charge (added to the discounted line subtotal before tax is applied, so handling is taxed like delivery), with a new test in test/total.test.js asserting the fixed charge raises the total by the expected amount; no existing charge, discount, tax, or rounding behavior is removed or disabled."
+      }
+    },
+    {
+      "runId": "run_50bccb8a-8f46-407a-b2d6-92ac5d007dad",
+      "taskId": "task_28ac91e5-915f-43f2-8d3d-c980f3cc7fcd",
+      "scenarioTaskId": "task_zero_rated_goods",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T22:54:36.487Z",
+      "plan": {
+        "taskId": "task_28ac91e5-915f-43f2-8d3d-c980f3cc7fcd",
+        "objective": "Orders that contain only digital goods should not be charged tax",
+        "expectedFiles": [
+          "src/pricing/tax.js",
+          "test/tax.test.js"
+        ],
+        "expectedSymbols": [
+          "STANDARD_RATE",
+          "isDigitalOnly",
+          "orderTotal",
+          "taxFor"
+        ],
+        "expectedApis": [
+          "taxFor(amount, order)"
+        ],
+        "expectedSchemas": [
+          "order.lines[].digital (optional boolean marking a line as a digital good; absent/false means physical)"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/tax.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "medium",
+        "intent": "Add a conditional tax exemption inside taxFor: return 0 when the order has at least one line and every line is marked digital; otherwise keep charging the existing STANDARD_RATE. This uses the currently-ignored `order` parameter (today voided via `void order`), requires no change to orderTotal in src/pricing/total.js since it already forwards the order, and confines new test coverage to test/tax.test.js per the README's one-module-one-test-file rule. Nothing is removed and no existing taxed behavior is disabled."
+      }
+    },
+    {
+      "runId": "run_09219e7a-53df-417b-9dc8-fe3e57c5ba47",
+      "taskId": "task_39272963-d6e9-47d1-9ff9-110c7ac051b5",
+      "scenarioTaskId": "task_free_delivery",
+      "band": "deep",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T22:54:17.403Z",
+      "plan": {
+        "taskId": "task_39272963-d6e9-47d1-9ff9-110c7ac051b5",
+        "objective": "Orders of one hundred pounds or more should not be charged for delivery, and every other order should be charged three pounds",
+        "expectedFiles": [
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ],
+        "expectedSymbols": [
+          "DELIVERY",
+          "FREE_DELIVERY_THRESHOLD",
+          "deliveryFor",
+          "orderTotal"
+        ],
+        "expectedApis": [
+          "orderTotal(order)"
+        ],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/total.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [
+          "src/format/money.js",
+          "src/pricing/discount.js",
+          "src/pricing/tax.js"
+        ],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add a conditional free-delivery rule inside orderTotal in src/pricing/total.js: replace the unconditional flat 3-pound delivery charge with one that is waived (0) when the discounted order value is at least 100 and remains 3 otherwise, introducing a threshold constant alongside the existing DELIVERY constant; extend test/total.test.js with cases covering above-threshold (free), exactly-at-threshold (free, inclusive boundary), and below-threshold (charged) orders. No API signature, schema, config, or service changes; delivery charging behavior is disabled only for qualifying orders and preserved for all others."
+      }
+    },
+    {
+      "runId": "run_b215024d-54de-4a15-8d7d-f3d5b4d6cabf",
+      "taskId": "task_cb706724-37d4-4acb-ad5f-f3831727d62a",
+      "scenarioTaskId": "task_loyalty_tier",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-06T22:54:15.705Z",
+      "plan": {
+        "taskId": "task_cb706724-37d4-4acb-ad5f-f3831727d62a",
+        "objective": "Customers who have placed more than twenty five orders should get fifteen percent off instead of ten",
+        "expectedFiles": [
+          "src/pricing/discount.js",
+          "test/discount.test.js"
+        ],
+        "expectedSymbols": [
+          "LOYAL_ORDERS",
+          "LOYAL_RATE",
+          "discountRate"
+        ],
+        "expectedApis": [
+          "discountRate(customer)"
+        ],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/discount.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Modify existing loyalty discount behavior in src/pricing/discount.js by changing the eligibility threshold constant LOYAL_ORDERS from 10 to 25 and the rate constant LOYAL_RATE from 0.1 to 0.15, so only customers with more than 25 orders qualify and they receive 15% off; no discount code paths are added, removed, enabled, or disabled, and orderTotal in src/pricing/total.js consumes the new values unchanged. Optionally tighten test/discount.test.js (the discount module's own test file, per README's one-test-file-per-module rule) to assert the 25-order boundary and the exact 0.15 rate; no other module or test is touched."
+      }
+    }
+  ],
+  "tasks": [
+    {
+      "id": "task_064bb469-6e2f-4f16-83d8-76764f6c824a",
+      "scenarioTaskId": "task_handling_fee",
+      "status": "integrated",
+      "agentId": "codex-a",
+      "band": "deep",
+      "objective": "Add a flat two pound handling charge to every order's total"
+    },
+    {
+      "id": "task_39272963-d6e9-47d1-9ff9-110c7ac051b5",
+      "scenarioTaskId": "task_free_delivery",
+      "status": "integrated",
+      "agentId": "codex-b",
+      "band": "deep",
+      "objective": "Orders of one hundred pounds or more should not be charged for delivery, and every other order should be charged three pounds"
+    },
+    {
+      "id": "task_d8e3f21a-d274-40eb-b0f9-bbe8ecf60cba",
+      "scenarioTaskId": "task_card_surcharge",
+      "status": "submitted",
+      "agentId": "codex-c",
+      "band": "deep",
+      "objective": "Orders paid by card should cost an extra five percent on top of what the customer would otherwise pay"
+    },
+    {
+      "id": "task_cb706724-37d4-4acb-ad5f-f3831727d62a",
+      "scenarioTaskId": "task_loyalty_tier",
+      "status": "integrated",
+      "agentId": "codex-d",
+      "band": "partial",
+      "objective": "Customers who have placed more than twenty five orders should get fifteen percent off instead of ten"
+    },
+    {
+      "id": "task_28ac91e5-915f-43f2-8d3d-c980f3cc7fcd",
+      "scenarioTaskId": "task_zero_rated_goods",
+      "status": "submitted",
+      "agentId": "codex-e",
+      "band": "partial",
+      "objective": "Orders that contain only digital goods should not be charged tax"
+    },
+    {
+      "id": "task_79e7e809-e756-45d5-9f11-27a8953ce5b4",
+      "scenarioTaskId": "task_rounding",
+      "status": "integrated",
+      "agentId": "codex-a",
+      "band": "partial",
+      "objective": "Round every amount a customer is shown to whole pence so totals never display long decimals"
+    },
+    {
+      "id": "task_3f63eac8-c56e-4c3b-b2c4-0fee85bfdda7",
+      "scenarioTaskId": "task_webhook_retry",
+      "status": "integrated",
+      "agentId": "codex-b",
+      "band": "independent",
+      "objective": "Retry webhook delivery up to three times when the transport reports a failure"
+    },
+    {
+      "id": "task_426a7d84-8e72-4365-8359-5c197dc4e108",
+      "scenarioTaskId": "task_audit_ip",
+      "status": "submitted",
+      "agentId": "codex-c",
+      "band": "independent",
+      "objective": "Record the originating IP address on every audit entry"
+    },
+    {
+      "id": "task_93a3bef7-7a61-4366-a745-6d6c97f73cad",
+      "scenarioTaskId": "task_export_created_at",
+      "status": "submitted",
+      "agentId": "codex-d",
+      "band": "independent",
+      "objective": "Add a created-at column to the CSV export"
+    },
+    {
+      "id": "task_63ccee63-6652-416d-9292-a7c1691f7095",
+      "scenarioTaskId": "task_search_email",
+      "status": "submitted",
+      "agentId": "codex-e",
+      "band": "independent",
+      "objective": "Make account search match on email address as well as name"
+    }
+  ],
+  "iterations": [
+    {
+      "worker": 2,
+      "taskId": "task_cb706724-37d4-4acb-ad5f-f3831727d62a",
+      "startedAt": "2026-08-06T22:52:31.353Z",
+      "finishedAt": "2026-08-06T22:54:25.343Z",
+      "elapsedMs": 113990,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_39272963-d6e9-47d1-9ff9-110c7ac051b5",
+      "startedAt": "2026-08-06T22:52:31.352Z",
+      "finishedAt": "2026-08-06T22:54:27.441Z",
+      "elapsedMs": 116089,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_064bb469-6e2f-4f16-83d8-76764f6c824a",
+      "startedAt": "2026-08-06T22:52:31.354Z",
+      "finishedAt": "2026-08-06T22:54:38.969Z",
+      "elapsedMs": 127615,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "taskId": "task_79e7e809-e756-45d5-9f11-27a8953ce5b4",
+      "startedAt": "2026-08-06T22:54:25.343Z",
+      "finishedAt": "2026-08-06T22:56:14.691Z",
+      "elapsedMs": 109348,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_3f63eac8-c56e-4c3b-b2c4-0fee85bfdda7",
+      "startedAt": "2026-08-06T22:54:27.441Z",
+      "finishedAt": "2026-08-06T22:56:35.959Z",
+      "elapsedMs": 128518,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_28ac91e5-915f-43f2-8d3d-c980f3cc7fcd",
+      "startedAt": "2026-08-06T22:52:31.354Z",
+      "finishedAt": "2026-08-06T23:09:51.127Z",
+      "elapsedMs": 1039773,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "transport": true,
+      "tokens": 0,
+      "reason": "control plane unreachable, task requeued: fetch failed"
+    },
+    {
+      "worker": 1,
+      "taskId": "task_d8e3f21a-d274-40eb-b0f9-bbe8ecf60cba",
+      "startedAt": "2026-08-06T22:52:31.353Z",
+      "finishedAt": "2026-08-06T23:10:15.902Z",
+      "elapsedMs": 1064549,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "transport": true,
+      "tokens": 0,
+      "reason": "control plane unreachable, task requeued: fetch failed"
+    },
+    {
+      "worker": 3,
+      "taskId": "task_426a7d84-8e72-4365-8359-5c197dc4e108",
+      "startedAt": "2026-08-06T22:54:38.969Z",
+      "finishedAt": "2026-08-06T23:11:00.360Z",
+      "elapsedMs": 981391,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "transport": true,
+      "tokens": 0,
+      "reason": "control plane unreachable, task requeued: fetch failed"
+    },
+    {
+      "worker": 2,
+      "taskId": "task_93a3bef7-7a61-4366-a745-6d6c97f73cad",
+      "startedAt": "2026-08-06T22:56:14.692Z",
+      "finishedAt": "2026-08-06T23:12:44.195Z",
+      "elapsedMs": 989503,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "transport": true,
+      "tokens": 0,
+      "reason": "control plane unreachable, task requeued: fetch failed"
+    },
+    {
+      "worker": 0,
+      "taskId": "task_63ccee63-6652-416d-9292-a7c1691f7095",
+      "startedAt": "2026-08-06T22:56:35.960Z",
+      "finishedAt": "2026-08-06T23:13:09.973Z",
+      "elapsedMs": 994013,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "transport": true,
+      "tokens": 0,
+      "reason": "control plane unreachable, task requeued: fetch failed"
+    },
+    {
+      "worker": 4,
+      "taskId": "task_28ac91e5-915f-43f2-8d3d-c980f3cc7fcd",
+      "startedAt": "2026-08-06T23:09:52.629Z",
+      "finishedAt": "2026-08-06T23:26:31.292Z",
+      "elapsedMs": 998663,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "transport": true,
+      "tokens": 0,
+      "reason": "control plane unreachable, task requeued: fetch failed"
+    },
+    {
+      "worker": 1,
+      "taskId": "task_d8e3f21a-d274-40eb-b0f9-bbe8ecf60cba",
+      "startedAt": "2026-08-06T23:10:17.417Z",
+      "finishedAt": "2026-08-06T23:27:36.552Z",
+      "elapsedMs": 1039135,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "transport": true,
+      "tokens": 0,
+      "reason": "control plane unreachable, task requeued: fetch failed"
+    },
+    {
+      "worker": 3,
+      "taskId": "task_426a7d84-8e72-4365-8359-5c197dc4e108",
+      "startedAt": "2026-08-06T23:11:01.876Z",
+      "finishedAt": "2026-08-06T23:28:16.482Z",
+      "elapsedMs": 1034606,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "transport": true,
+      "tokens": 0,
+      "reason": "control plane unreachable, task requeued: fetch failed"
+    }
+  ]
+}

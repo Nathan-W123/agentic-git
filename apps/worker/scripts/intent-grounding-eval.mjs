@@ -39,6 +39,7 @@ import {
   TEAM_QUEUE_SCENARIO,
   TEAM_QUEUE_TRUE_CONFLICTS,
 } from "./team-queue-scenario.mjs";
+import { TEAM_QUEUE_WIRED_SCENARIO } from "./team-queue-wired-scenario.mjs";
 import {
   assertRegisteredSeed,
   DEVELOPMENT_AGENTS,
@@ -100,6 +101,51 @@ const overrides = Object.fromEntries(
 );
 if (!["development", "held-out"].includes(wantedSplit)) {
   throw new Error(`--split must be development or held-out, got ${wantedSplit}`);
+}
+
+/**
+ * Which tree the intents are grounded against.
+ *
+ * Grounding scores a sentence against a repository index, so the tree is an
+ * input to this measurement as much as the prose is — and a run of
+ * `team-queue-wired` was written by agents looking at the *corrected* tree.
+ * Grounding those sentences against the recorded seed would silently score
+ * them against a repository their authors never saw, which is exactly the
+ * hazard `intent-holdout.mjs` pins the fingerprint to prevent. So the scenario
+ * is named explicitly and defaults to the recorded one, mirroring
+ * `team-queue-experiment.mjs`.
+ *
+ * `assertRegisteredSeed` above still guards the *base*: `team-queue-wired` is
+ * defined as a diff against it, so a drifting base invalidates both.
+ */
+const SCENARIOS = new Map([
+  ["team-queue", TEAM_QUEUE_SCENARIO],
+  ["team-queue-wired", TEAM_QUEUE_WIRED_SCENARIO],
+]);
+const scenarioName =
+  args.find((entry) => entry.startsWith("--scenario="))?.slice("--scenario=".length) ??
+  "team-queue";
+const scenario = SCENARIOS.get(scenarioName);
+if (scenario === undefined) {
+  throw new Error(
+    `--scenario must be one of ${[...SCENARIOS.keys()].join(", ")}, got ${scenarioName}`,
+  );
+}
+
+/**
+ * Refuses to score a run against a tree it was not executed on.
+ *
+ * Every run record carries the scenario it ran, and mixing two of them into
+ * one pooled number would be a category error that nothing downstream could
+ * detect.
+ */
+function assertScenarioMatches(run) {
+  if (run.scenario !== undefined && run.scenario !== scenarioName) {
+    throw new Error(
+      `${run.file} recorded scenario "${run.scenario}", but this evaluation ` +
+        `is grounding against "${scenarioName}". Pass --scenario=${run.scenario}.`,
+    );
+  }
 }
 if (files.length === 0) {
   throw new Error("pass one or more team-queue run JSON files");
@@ -169,17 +215,17 @@ function observedConflicts(run) {
 /**
  * A repository index over the scenario's seed.
  *
- * Built from `TEAM_QUEUE_SCENARIO.seed` rather than from a recorded artefact
- * so that the index this is grounded against is provably the tree the agents
- * were given — the same bytes the experiment writes into every canonical
- * repository before any task starts.
+ * Built from the selected scenario's own seed rather than from a recorded
+ * artefact so that the index this is grounded against is provably the tree the
+ * agents were given — the same bytes the experiment writes into every
+ * canonical repository before any task starts.
  */
 async function seedIndex() {
   const root = await mkdtemp(path.join(tmpdir(), "intent-grounding-"));
   const sourcePath = path.join(root, "src-repo");
   const repositories = new RepositoryService();
   await repositories.initializeWorkingRepository(sourcePath);
-  for (const [file, contents] of Object.entries(TEAM_QUEUE_SCENARIO.seed)) {
+  for (const [file, contents] of Object.entries(scenario.seed)) {
     const target = path.join(sourcePath, file);
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, contents, "utf8");
@@ -201,10 +247,12 @@ const index = await seedIndex();
 
 const runs = [];
 for (const file of files) {
-  runs.push({
+  const run = {
     file: path.basename(file),
     ...JSON.parse(await readFile(file, "utf8")),
-  });
+  };
+  assertScenarioMatches(run);
+  runs.push(run);
 }
 
 function matrix(rows, fires) {

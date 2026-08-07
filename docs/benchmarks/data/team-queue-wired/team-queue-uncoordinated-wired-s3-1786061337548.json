@@ -1,0 +1,1526 @@
+{
+  "arm": "uncoordinated",
+  "label": "wired-s3",
+  "scenario": "team-queue-wired",
+  "bands": [
+    "deep",
+    "partial",
+    "independent"
+  ],
+  "workers": 5,
+  "env": {
+    "COORD_REPOSITORY_PARALLELISM": "default",
+    "COORD_AGENT_ADAPTER": "claude",
+    "COORD_AGENT_ARGS": "[\"--model\",\"opus\"]",
+    "COORD_AGENT_EFFORT": "high"
+  },
+  "startedAt": "2026-08-07T00:04:50.017Z",
+  "elapsedMs": 241165,
+  "wallClockMs": 1441165,
+  "budgetExhausted": false,
+  "completionOrder": [
+    "task_3619fc8c-6b8e-4b4d-a8ee-3072e688be1f",
+    "task_758d99ce-6ae6-4dab-be6a-b6ceeda7ca11",
+    "task_0239f7a4-a563-4c68-937f-961d9651e7bd",
+    "task_6cc25482-eb78-44c7-b33c-d2dc02e0c173",
+    "task_e103535c-9922-4b0b-a4ba-17d10a317707",
+    "task_e247cd55-4373-4450-b76f-f60c2f5af036",
+    "task_79ce12b4-f252-47d4-835c-1b9df2b23cd2",
+    "task_51998bd6-8cd5-4600-a24d-9a7d8a0a5dbb",
+    "task_c6e5b62f-c302-4cab-ab79-0e0476e1f300",
+    "task_6787b43c-c63f-4c12-b0c8-dff79501554f"
+  ],
+  "metrics": {
+    "transportFailures": 0,
+    "transportRequeues": 0,
+    "tasksIntegrated": 10,
+    "tasksFailed": 0,
+    "tasksOutstanding": 0,
+    "tasksTotal": 10,
+    "leaseIterations": 10,
+    "acceptedIterations": 10,
+    "deferredIterations": 0,
+    "conflictsDetected": 0,
+    "partialAdmissions": 0,
+    "planTimeRequeues": 0,
+    "resultTimeRequeues": 0,
+    "replansTotal": 0,
+    "integrationsPromoted": 10,
+    "validationRuns": 10,
+    "validationFailures": 0,
+    "observedTokensTotal": 0,
+    "observedTokensByPhase": {
+      "planning": 0,
+      "execution": 0
+    },
+    "codexInvocations": 0,
+    "codexInvocationsWithoutTokenLine": 0,
+    "controlPlaneTokensTotal": 0
+  },
+  "outcome": {
+    "kind": "uncoordinated",
+    "patchFiles": [
+      {
+        "taskId": "task_3619fc8c-6b8e-4b4d-a8ee-3072e688be1f",
+        "scenarioTaskId": "task_loyalty_tier",
+        "files": [
+          "src/pricing/discount.js",
+          "test/discount.test.js"
+        ]
+      },
+      {
+        "taskId": "task_758d99ce-6ae6-4dab-be6a-b6ceeda7ca11",
+        "scenarioTaskId": "task_zero_rated_goods",
+        "files": [
+          "src/pricing/tax.js",
+          "test/tax.test.js"
+        ]
+      },
+      {
+        "taskId": "task_0239f7a4-a563-4c68-937f-961d9651e7bd",
+        "scenarioTaskId": "task_handling_fee",
+        "files": [
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ]
+      },
+      {
+        "taskId": "task_6cc25482-eb78-44c7-b33c-d2dc02e0c173",
+        "scenarioTaskId": "task_free_delivery",
+        "files": [
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ]
+      },
+      {
+        "taskId": "task_e103535c-9922-4b0b-a4ba-17d10a317707",
+        "scenarioTaskId": "task_card_surcharge",
+        "files": [
+          "src/pricing/payment.js",
+          "src/pricing/total.js",
+          "test/payment.test.js",
+          "test/total.test.js"
+        ]
+      },
+      {
+        "taskId": "task_e247cd55-4373-4450-b76f-f60c2f5af036",
+        "scenarioTaskId": "task_audit_ip",
+        "files": [
+          "src/audit/log.js",
+          "test/audit.test.js"
+        ]
+      },
+      {
+        "taskId": "task_79ce12b4-f252-47d4-835c-1b9df2b23cd2",
+        "scenarioTaskId": "task_webhook_retry",
+        "files": [
+          "src/notify/webhook.js",
+          "test/webhook.test.js"
+        ]
+      },
+      {
+        "taskId": "task_51998bd6-8cd5-4600-a24d-9a7d8a0a5dbb",
+        "scenarioTaskId": "task_export_created_at",
+        "files": [
+          "src/export/csv.js",
+          "test/export.test.js"
+        ]
+      },
+      {
+        "taskId": "task_c6e5b62f-c302-4cab-ab79-0e0476e1f300",
+        "scenarioTaskId": "task_search_email",
+        "files": [
+          "src/search/accounts.js",
+          "test/search.test.js"
+        ]
+      },
+      {
+        "taskId": "task_6787b43c-c63f-4c12-b0c8-dff79501554f",
+        "scenarioTaskId": "task_rounding",
+        "files": [
+          "src/format/money.js",
+          "test/money.test.js"
+        ]
+      }
+    ],
+    "merges": [
+      {
+        "taskId": "task_3619fc8c-6b8e-4b4d-a8ee-3072e688be1f",
+        "status": "clean",
+        "conflictedFiles": []
+      },
+      {
+        "taskId": "task_758d99ce-6ae6-4dab-be6a-b6ceeda7ca11",
+        "status": "clean",
+        "conflictedFiles": []
+      },
+      {
+        "taskId": "task_0239f7a4-a563-4c68-937f-961d9651e7bd",
+        "status": "clean",
+        "conflictedFiles": []
+      },
+      {
+        "taskId": "task_6cc25482-eb78-44c7-b33c-d2dc02e0c173",
+        "status": "conflicted",
+        "conflictedFiles": [
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ]
+      },
+      {
+        "taskId": "task_e103535c-9922-4b0b-a4ba-17d10a317707",
+        "status": "conflicted",
+        "conflictedFiles": [
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ]
+      },
+      {
+        "taskId": "task_e247cd55-4373-4450-b76f-f60c2f5af036",
+        "status": "clean",
+        "conflictedFiles": []
+      },
+      {
+        "taskId": "task_79ce12b4-f252-47d4-835c-1b9df2b23cd2",
+        "status": "clean",
+        "conflictedFiles": []
+      },
+      {
+        "taskId": "task_51998bd6-8cd5-4600-a24d-9a7d8a0a5dbb",
+        "status": "clean",
+        "conflictedFiles": []
+      },
+      {
+        "taskId": "task_c6e5b62f-c302-4cab-ab79-0e0476e1f300",
+        "status": "clean",
+        "conflictedFiles": []
+      },
+      {
+        "taskId": "task_6787b43c-c63f-4c12-b0c8-dff79501554f",
+        "status": "clean",
+        "conflictedFiles": []
+      }
+    ],
+    "conflictedFiles": 4,
+    "repairPenaltyMs": 1200000,
+    "repairPenaltySeconds": 300,
+    "validation": {
+      "passed": true,
+      "output": "✔ audit records the actor and marks privileged actions (0.561ms)\n✔ audit records the originating IP address on every entry (0.597ms)\n✔ loyal customers are discounted and new ones are not (0.5915ms)\n✔ customers with more than 25 orders get fifteen percent off (0.1203ms)\n✔ notifications use the account channel (0.5471ms)\n✔ exports keep id, name and status columns (0.7629ms)\n✔ exports add a createdAt column after status (1.2025ms)\n✔ rows without createdAt export an empty cell (0.107ms)\n✔ money renders with a currency symbol (0.8083ms)\n✔ rounding keeps whole pence (0.2037ms)\n✔ formatting renders whole pence (0.134ms)\n✔ paying by card adds five percent (0.5886ms)\n✔ paying another way adds nothing (0.1578ms)\n✔ an order with no payment method adds nothing (0.0914ms)\n✔ search matches on name and rejects empty queries (1.3697ms)\n✔ search matches on email address (0.2486ms)\n✔ tax is charged on a standard order (0.8053ms)\n✔ no tax when every line is a digital good (0.1326ms)\n✔ tax is charged when an order mixes digital and physical goods (0.089ms)\n✔ an order with no lines is still taxed (0.0853ms)\n✔ an order total is a positive number (0.7502ms)\n✔ a bigger basket costs more than a smaller one (0.1294ms)\n✔ paying by card costs more than paying another way (0.109ms)\n✔ webhook delivery reports the endpoint it used (0.6111ms)\n✔ webhook delivery succeeds on the first attempt without retrying (0.1317ms)\n✔ webhook delivery retries after a transport failure and stops on success (0.1032ms)\n✔ webhook delivery gives up after the maximum number of attempts (0.61ms)\nℹ tests 27\nℹ suites 0\nℹ pass 27\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 743.6159\n"
+    },
+    "survival": [
+      {
+        "taskId": "task_3619fc8c-6b8e-4b4d-a8ee-3072e688be1f",
+        "scenarioTaskId": "task_loyalty_tier",
+        "band": "partial",
+        "addedLines": 9,
+        "survivingLines": 9,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_758d99ce-6ae6-4dab-be6a-b6ceeda7ca11",
+        "scenarioTaskId": "task_zero_rated_goods",
+        "band": "partial",
+        "addedLines": 22,
+        "survivingLines": 22,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_0239f7a4-a563-4c68-937f-961d9651e7bd",
+        "scenarioTaskId": "task_handling_fee",
+        "band": "deep",
+        "addedLines": 11,
+        "survivingLines": 0,
+        "survivalRatio": 0,
+        "whollyOverwritten": true,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_6cc25482-eb78-44c7-b33c-d2dc02e0c173",
+        "scenarioTaskId": "task_free_delivery",
+        "band": "deep",
+        "addedLines": 17,
+        "survivingLines": 0,
+        "survivalRatio": 0,
+        "whollyOverwritten": true,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_e103535c-9922-4b0b-a4ba-17d10a317707",
+        "scenarioTaskId": "task_card_surcharge",
+        "band": "deep",
+        "addedLines": 28,
+        "survivingLines": 28,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_e247cd55-4373-4450-b76f-f60c2f5af036",
+        "scenarioTaskId": "task_audit_ip",
+        "band": "independent",
+        "addedLines": 13,
+        "survivingLines": 13,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_79ce12b4-f252-47d4-835c-1b9df2b23cd2",
+        "scenarioTaskId": "task_webhook_retry",
+        "band": "independent",
+        "addedLines": 33,
+        "survivingLines": 33,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_51998bd6-8cd5-4600-a24d-9a7d8a0a5dbb",
+        "scenarioTaskId": "task_export_created_at",
+        "band": "independent",
+        "addedLines": 9,
+        "survivingLines": 9,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_c6e5b62f-c302-4cab-ab79-0e0476e1f300",
+        "scenarioTaskId": "task_search_email",
+        "band": "independent",
+        "addedLines": 13,
+        "survivingLines": 13,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_6787b43c-c63f-4c12-b0c8-dff79501554f",
+        "scenarioTaskId": "task_rounding",
+        "band": "partial",
+        "addedLines": 10,
+        "survivingLines": 10,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      }
+    ]
+  },
+  "plans": [
+    {
+      "runId": "run_6317f43e-f1bb-4a70-9656-b4e3e3b18fc8",
+      "taskId": "task_6787b43c-c63f-4c12-b0c8-dff79501554f",
+      "scenarioTaskId": "task_rounding",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T00:08:47.221Z",
+      "plan": {
+        "taskId": "task_6787b43c-c63f-4c12-b0c8-dff79501554f",
+        "objective": "Round every amount a customer is shown to whole pence so totals never display long decimals",
+        "expectedFiles": [
+          "src/format/money.js",
+          "test/money.test.js"
+        ],
+        "expectedSymbols": [
+          "PLACES",
+          "formatMoney",
+          "roundMoney"
+        ],
+        "expectedApis": [],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/money.test.js"
+        ],
+        "expectedServices": [
+          "accounts-service"
+        ],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Modify existing rounding behavior: change the PLACES precision constant in src/format/money.js from 0 (whole pounds) to 2 (whole pence) so roundMoney/formatMoney — and orderTotal, their only external caller — round customer-facing amounts to pence; update test/money.test.js to pin the now-settled precision. No code is added or removed elsewhere, and no feature is enabled or disabled."
+      }
+    },
+    {
+      "runId": "run_94f794bb-5395-4061-9096-9b608bd8aac4",
+      "taskId": "task_c6e5b62f-c302-4cab-ab79-0e0476e1f300",
+      "scenarioTaskId": "task_search_email",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T00:08:28.740Z",
+      "plan": {
+        "taskId": "task_c6e5b62f-c302-4cab-ab79-0e0476e1f300",
+        "objective": "Make account search match on email address as well as name",
+        "expectedFiles": [
+          "src/search/accounts.js",
+          "test/search.test.js"
+        ],
+        "expectedSymbols": [
+          "searchAccounts"
+        ],
+        "expectedApis": [
+          "searchAccounts(accounts, query)"
+        ],
+        "expectedSchemas": [
+          "account object: { name: string, email?: string }"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/search.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add email-address matching to the existing case-insensitive substring account search: searchAccounts in src/search/accounts.js currently filters only on account.name, and will be widened to also match account.email (guarding accounts with a missing email), while preserving the existing empty/whitespace-query behavior that returns []. Test coverage in test/search.test.js is extended with an email-match case; no other module, its tests, or any config/schema/service changes."
+      }
+    },
+    {
+      "runId": "run_eb787c67-3754-45b2-bb18-8df2eff17e33",
+      "taskId": "task_51998bd6-8cd5-4600-a24d-9a7d8a0a5dbb",
+      "scenarioTaskId": "task_export_created_at",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T00:08:26.759Z",
+      "plan": {
+        "taskId": "task_51998bd6-8cd5-4600-a24d-9a7d8a0a5dbb",
+        "objective": "Add a created-at column to the CSV export",
+        "expectedFiles": [
+          "src/export/csv.js",
+          "test/export.test.js"
+        ],
+        "expectedSymbols": [
+          "COLUMNS",
+          "exportColumns",
+          "toCsv"
+        ],
+        "expectedApis": [
+          "exportColumns()",
+          "toCsv(rows)"
+        ],
+        "expectedSchemas": [
+          "CSV export column set: id,name,status,createdAt",
+          "CSV export row object shape (adds createdAt key read from each row)"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/export.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Adding behavior: append a new createdAt column to the CSV export's COLUMNS list in src/export/csv.js so exportColumns() and toCsv() emit a fourth created-at field after status, with test/export.test.js extended to cover the new column. No existing columns, ordering, or other modules change; the export module has no other in-repo consumers."
+      }
+    },
+    {
+      "runId": "run_42c1ff3c-2463-42a7-a6d8-b1b560f2e18a",
+      "taskId": "task_79ce12b4-f252-47d4-835c-1b9df2b23cd2",
+      "scenarioTaskId": "task_webhook_retry",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T00:08:09.368Z",
+      "plan": {
+        "taskId": "task_79ce12b4-f252-47d4-835c-1b9df2b23cd2",
+        "objective": "Retry webhook delivery up to three times when the transport reports a failure",
+        "expectedFiles": [
+          "src/notify/webhook.js",
+          "test/webhook.test.js"
+        ],
+        "expectedSymbols": [
+          "MAX_DELIVERY_ATTEMPTS",
+          "deliver"
+        ],
+        "expectedApis": [
+          "deliver(subscriber, event, transport)"
+        ],
+        "expectedSchemas": [
+          "webhook delivery result object { url, delivered } extended with an attempts count"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/webhook.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add retry behavior to webhook delivery: src/notify/webhook.js currently calls the transport exactly once and reports delivered from a single response; change deliver to re-invoke the transport when it reports failure (response.ok !== true), for at most three total attempts, stopping early on the first success, and report the attempt count alongside the existing url/delivered fields. Signature and success-path result stay backward compatible; new coverage is added only in test/webhook.test.js per the README's one-test-file-per-module rule, and no other module, config key, or service is touched."
+      }
+    },
+    {
+      "runId": "run_9c0adef1-671b-4967-a550-5dbe8df72f3c",
+      "taskId": "task_e247cd55-4373-4450-b76f-f60c2f5af036",
+      "scenarioTaskId": "task_audit_ip",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T00:08:05.553Z",
+      "plan": {
+        "taskId": "task_e247cd55-4373-4450-b76f-f60c2f5af036",
+        "objective": "Record the originating IP address on every audit entry",
+        "expectedFiles": [
+          "src/audit/log.js",
+          "test/audit.test.js"
+        ],
+        "expectedSymbols": [
+          "auditEntry",
+          "isPrivileged"
+        ],
+        "expectedApis": [
+          "auditEntry(actor, action, subject, ip)"
+        ],
+        "expectedSchemas": [
+          "audit entry object: { actor, action, subject, ip }"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/audit.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add an originating IP address field to audit entries by extending auditEntry in src/audit/log.js with an ip parameter that is included on every returned entry object, and cover it in test/audit.test.js; no existing behavior is removed or disabled and no other module is touched."
+      }
+    },
+    {
+      "runId": "run_e0e99760-b00c-41d6-97fa-39d37382739e",
+      "taskId": "task_e103535c-9922-4b0b-a4ba-17d10a317707",
+      "scenarioTaskId": "task_card_surcharge",
+      "band": "deep",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T00:07:14.437Z",
+      "plan": {
+        "taskId": "task_e103535c-9922-4b0b-a4ba-17d10a317707",
+        "objective": "Orders paid by card should cost an extra five percent on top of what the customer would otherwise pay",
+        "expectedFiles": [
+          "src/pricing/payment.js",
+          "src/pricing/total.js",
+          "test/payment.test.js",
+          "test/total.test.js"
+        ],
+        "expectedSymbols": [
+          "CARD_SURCHARGE_RATE",
+          "cardSurchargeFor",
+          "discountRate",
+          "orderTotal",
+          "roundMoney",
+          "taxFor"
+        ],
+        "expectedApis": [
+          "cardSurchargeFor(amount, order)",
+          "orderTotal(order)"
+        ],
+        "expectedSchemas": [
+          "order.payment (new optional field on the order object consumed by orderTotal; card payment indicated by a value such as \"card\")"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/payment.test.js",
+          "test/total.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add a new card-payment surcharge: introduce src/pricing/payment.js exposing a 5% surcharge derived from the order's payment method, and apply it in orderTotal after lines, discount, delivery and tax so card orders cost 5% more than the otherwise-payable amount; non-card orders are unchanged (surcharge rate 0). No existing behavior is removed or disabled; discount, delivery, tax and rounding logic stay as-is, with rounding still performed once by roundMoney in src/format/money.js. Per README, the new module gets its own test file (test/payment.test.js) and test/total.test.js gains a card-vs-non-card case."
+      }
+    },
+    {
+      "runId": "run_45594004-4171-48ee-8e83-56d7ae682c6f",
+      "taskId": "task_6cc25482-eb78-44c7-b33c-d2dc02e0c173",
+      "scenarioTaskId": "task_free_delivery",
+      "band": "deep",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T00:07:07.265Z",
+      "plan": {
+        "taskId": "task_6cc25482-eb78-44c7-b33c-d2dc02e0c173",
+        "objective": "Orders of one hundred pounds or more should not be charged for delivery, and every other order should be charged three pounds",
+        "expectedFiles": [
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ],
+        "expectedSymbols": [
+          "DELIVERY",
+          "FREE_DELIVERY_FROM",
+          "discountRate",
+          "orderTotal",
+          "roundMoney",
+          "taxFor"
+        ],
+        "expectedApis": [
+          "orderTotal(order)"
+        ],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/total.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add a conditional free-delivery rule to orderTotal: waive the existing flat 3 delivery charge when the discounted line subtotal reaches an inclusive 100 threshold, keeping the 3 charge below it; no behaviour is removed or disabled elsewhere, and discount/tax/rounding ordering is unchanged."
+      }
+    },
+    {
+      "runId": "run_3c8738ae-33e5-4020-9912-04b2d84d9f05",
+      "taskId": "task_0239f7a4-a563-4c68-937f-961d9651e7bd",
+      "scenarioTaskId": "task_handling_fee",
+      "band": "deep",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T00:06:47.960Z",
+      "plan": {
+        "taskId": "task_0239f7a4-a563-4c68-937f-961d9651e7bd",
+        "objective": "Add a flat two pound handling charge to every order's total",
+        "expectedFiles": [
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ],
+        "expectedSymbols": [
+          "DELIVERY",
+          "HANDLING",
+          "orderTotal"
+        ],
+        "expectedApis": [
+          "orderTotal(order) -> number"
+        ],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/total.test.js"
+        ],
+        "expectedServices": [
+          "accounts-service"
+        ],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add behavior: introduce a new module-level HANDLING constant of 2 in src/pricing/total.js and include it unconditionally in every orderTotal calculation, added alongside the existing DELIVERY charge before tax is applied (so tax is charged on the handling fee, matching how delivery is treated), with the result still rounded via roundMoney. No existing charge is removed or disabled; only the pricing total module and its own test file are touched, preserving the repository's rule that a change to one module does not require editing another module's tests."
+      }
+    },
+    {
+      "runId": "run_a5aef47d-6bdd-4c58-9084-d38db222c479",
+      "taskId": "task_758d99ce-6ae6-4dab-be6a-b6ceeda7ca11",
+      "scenarioTaskId": "task_zero_rated_goods",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T00:06:35.411Z",
+      "plan": {
+        "taskId": "task_758d99ce-6ae6-4dab-be6a-b6ceeda7ca11",
+        "objective": "Orders that contain only digital goods should not be charged tax",
+        "expectedFiles": [
+          "src/pricing/tax.js",
+          "test/tax.test.js"
+        ],
+        "expectedSymbols": [
+          "STANDARD_RATE",
+          "isDigitalOnly",
+          "orderTotal",
+          "taxFor"
+        ],
+        "expectedApis": [
+          "taxFor(amount, order)"
+        ],
+        "expectedSchemas": [
+          "order.lines[].digital (boolean line-item flag marking a digital good)"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/tax.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add a tax exemption: taxFor currently ignores its `order` argument and always applies STANDARD_RATE (0.2); change it to return 0 when the order has at least one line and every line is a digital good (line.digital truthy), leaving mixed and physical-only orders taxed exactly as today. Adds behavior in src/pricing/tax.js only — src/pricing/total.js already delegates to taxFor and needs no change; new coverage goes in test/tax.test.js to respect the README rule that a module change must not touch another module's tests."
+      }
+    },
+    {
+      "runId": "run_d491bd12-35bf-4ba2-ab6b-d661b9cf4192",
+      "taskId": "task_3619fc8c-6b8e-4b4d-a8ee-3072e688be1f",
+      "scenarioTaskId": "task_loyalty_tier",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T00:06:31.252Z",
+      "plan": {
+        "taskId": "task_3619fc8c-6b8e-4b4d-a8ee-3072e688be1f",
+        "objective": "Customers who have placed more than twenty five orders should get fifteen percent off instead of ten",
+        "expectedFiles": [
+          "src/pricing/discount.js",
+          "test/discount.test.js"
+        ],
+        "expectedSymbols": [
+          "LOYAL_ORDERS",
+          "LOYAL_RATE",
+          "VERY_LOYAL_ORDERS",
+          "VERY_LOYAL_RATE",
+          "discountRate"
+        ],
+        "expectedApis": [
+          "discountRate(customer)"
+        ],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/discount.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Enable a new 15% discount tier for customers with more than 25 orders, replacing the 10% rate they previously received; existing >10-order 10% tier and 0% default are preserved."
+      }
+    }
+  ],
+  "assessments": [],
+  "tasks": [
+    {
+      "id": "task_0239f7a4-a563-4c68-937f-961d9651e7bd",
+      "scenarioTaskId": "task_handling_fee",
+      "status": "integrated",
+      "agentId": "codex-a",
+      "band": "deep",
+      "objective": "Add a flat two pound handling charge to every order's total"
+    },
+    {
+      "id": "task_6cc25482-eb78-44c7-b33c-d2dc02e0c173",
+      "scenarioTaskId": "task_free_delivery",
+      "status": "integrated",
+      "agentId": "codex-b",
+      "band": "deep",
+      "objective": "Orders of one hundred pounds or more should not be charged for delivery, and every other order should be charged three pounds"
+    },
+    {
+      "id": "task_e103535c-9922-4b0b-a4ba-17d10a317707",
+      "scenarioTaskId": "task_card_surcharge",
+      "status": "integrated",
+      "agentId": "codex-c",
+      "band": "deep",
+      "objective": "Orders paid by card should cost an extra five percent on top of what the customer would otherwise pay"
+    },
+    {
+      "id": "task_3619fc8c-6b8e-4b4d-a8ee-3072e688be1f",
+      "scenarioTaskId": "task_loyalty_tier",
+      "status": "integrated",
+      "agentId": "codex-d",
+      "band": "partial",
+      "objective": "Customers who have placed more than twenty five orders should get fifteen percent off instead of ten"
+    },
+    {
+      "id": "task_758d99ce-6ae6-4dab-be6a-b6ceeda7ca11",
+      "scenarioTaskId": "task_zero_rated_goods",
+      "status": "integrated",
+      "agentId": "codex-e",
+      "band": "partial",
+      "objective": "Orders that contain only digital goods should not be charged tax"
+    },
+    {
+      "id": "task_6787b43c-c63f-4c12-b0c8-dff79501554f",
+      "scenarioTaskId": "task_rounding",
+      "status": "integrated",
+      "agentId": "codex-a",
+      "band": "partial",
+      "objective": "Round every amount a customer is shown to whole pence so totals never display long decimals"
+    },
+    {
+      "id": "task_79ce12b4-f252-47d4-835c-1b9df2b23cd2",
+      "scenarioTaskId": "task_webhook_retry",
+      "status": "integrated",
+      "agentId": "codex-b",
+      "band": "independent",
+      "objective": "Retry webhook delivery up to three times when the transport reports a failure"
+    },
+    {
+      "id": "task_e247cd55-4373-4450-b76f-f60c2f5af036",
+      "scenarioTaskId": "task_audit_ip",
+      "status": "integrated",
+      "agentId": "codex-c",
+      "band": "independent",
+      "objective": "Record the originating IP address on every audit entry"
+    },
+    {
+      "id": "task_51998bd6-8cd5-4600-a24d-9a7d8a0a5dbb",
+      "scenarioTaskId": "task_export_created_at",
+      "status": "integrated",
+      "agentId": "codex-d",
+      "band": "independent",
+      "objective": "Add a created-at column to the CSV export"
+    },
+    {
+      "id": "task_c6e5b62f-c302-4cab-ab79-0e0476e1f300",
+      "scenarioTaskId": "task_search_email",
+      "status": "integrated",
+      "agentId": "codex-e",
+      "band": "independent",
+      "objective": "Make account search match on email address as well as name"
+    }
+  ],
+  "iterations": [
+    {
+      "worker": 2,
+      "taskId": "task_3619fc8c-6b8e-4b4d-a8ee-3072e688be1f",
+      "startedAt": "2026-08-07T00:04:56.394Z",
+      "finishedAt": "2026-08-07T00:06:34.308Z",
+      "elapsedMs": 97914,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_758d99ce-6ae6-4dab-be6a-b6ceeda7ca11",
+      "startedAt": "2026-08-07T00:04:56.393Z",
+      "finishedAt": "2026-08-07T00:06:39.882Z",
+      "elapsedMs": 103489,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_0239f7a4-a563-4c68-937f-961d9651e7bd",
+      "startedAt": "2026-08-07T00:04:56.394Z",
+      "finishedAt": "2026-08-07T00:06:51.879Z",
+      "elapsedMs": 115485,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "taskId": "task_6cc25482-eb78-44c7-b33c-d2dc02e0c173",
+      "startedAt": "2026-08-07T00:04:56.394Z",
+      "finishedAt": "2026-08-07T00:07:09.834Z",
+      "elapsedMs": 133440,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_e103535c-9922-4b0b-a4ba-17d10a317707",
+      "startedAt": "2026-08-07T00:04:56.395Z",
+      "finishedAt": "2026-08-07T00:07:17.951Z",
+      "elapsedMs": 141556,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_e247cd55-4373-4450-b76f-f60c2f5af036",
+      "startedAt": "2026-08-07T00:06:51.879Z",
+      "finishedAt": "2026-08-07T00:08:10.121Z",
+      "elapsedMs": 78242,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:10.121Z",
+      "finishedAt": "2026-08-07T00:08:10.134Z",
+      "elapsedMs": 13,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:11.819Z",
+      "finishedAt": "2026-08-07T00:08:11.828Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:13.334Z",
+      "finishedAt": "2026-08-07T00:08:13.373Z",
+      "elapsedMs": 39,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_79ce12b4-f252-47d4-835c-1b9df2b23cd2",
+      "startedAt": "2026-08-07T00:06:39.882Z",
+      "finishedAt": "2026-08-07T00:08:13.762Z",
+      "elapsedMs": 93880,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:13.762Z",
+      "finishedAt": "2026-08-07T00:08:13.781Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:14.894Z",
+      "finishedAt": "2026-08-07T00:08:14.931Z",
+      "elapsedMs": 37,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:15.283Z",
+      "finishedAt": "2026-08-07T00:08:15.299Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:16.439Z",
+      "finishedAt": "2026-08-07T00:08:16.452Z",
+      "elapsedMs": 13,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:16.812Z",
+      "finishedAt": "2026-08-07T00:08:16.829Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:17.965Z",
+      "finishedAt": "2026-08-07T00:08:17.982Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:18.336Z",
+      "finishedAt": "2026-08-07T00:08:18.357Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:19.494Z",
+      "finishedAt": "2026-08-07T00:08:19.509Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:19.866Z",
+      "finishedAt": "2026-08-07T00:08:19.884Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:21.010Z",
+      "finishedAt": "2026-08-07T00:08:21.028Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:21.386Z",
+      "finishedAt": "2026-08-07T00:08:21.404Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:22.537Z",
+      "finishedAt": "2026-08-07T00:08:22.543Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:22.907Z",
+      "finishedAt": "2026-08-07T00:08:22.927Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:24.052Z",
+      "finishedAt": "2026-08-07T00:08:24.070Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:24.430Z",
+      "finishedAt": "2026-08-07T00:08:24.449Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:25.609Z",
+      "finishedAt": "2026-08-07T00:08:25.626Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:25.951Z",
+      "finishedAt": "2026-08-07T00:08:25.970Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:27.131Z",
+      "finishedAt": "2026-08-07T00:08:27.150Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:27.478Z",
+      "finishedAt": "2026-08-07T00:08:27.490Z",
+      "elapsedMs": 12,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:28.652Z",
+      "finishedAt": "2026-08-07T00:08:28.668Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:28.991Z",
+      "finishedAt": "2026-08-07T00:08:29.001Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:30.182Z",
+      "finishedAt": "2026-08-07T00:08:30.191Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:30.606Z",
+      "finishedAt": "2026-08-07T00:08:30.609Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:32.280Z",
+      "finishedAt": "2026-08-07T00:08:32.415Z",
+      "elapsedMs": 135,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:32.280Z",
+      "finishedAt": "2026-08-07T00:08:32.416Z",
+      "elapsedMs": 136,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:34.066Z",
+      "finishedAt": "2026-08-07T00:08:34.175Z",
+      "elapsedMs": 109,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:34.067Z",
+      "finishedAt": "2026-08-07T00:08:34.175Z",
+      "elapsedMs": 108,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "taskId": "task_51998bd6-8cd5-4600-a24d-9a7d8a0a5dbb",
+      "startedAt": "2026-08-07T00:07:09.835Z",
+      "finishedAt": "2026-08-07T00:08:35.198Z",
+      "elapsedMs": 85363,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T00:08:35.198Z",
+      "finishedAt": "2026-08-07T00:08:35.213Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:35.684Z",
+      "finishedAt": "2026-08-07T00:08:35.702Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:35.684Z",
+      "finishedAt": "2026-08-07T00:08:35.702Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_c6e5b62f-c302-4cab-ab79-0e0476e1f300",
+      "startedAt": "2026-08-07T00:07:17.952Z",
+      "finishedAt": "2026-08-07T00:08:35.913Z",
+      "elapsedMs": 77961,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T00:08:35.913Z",
+      "finishedAt": "2026-08-07T00:08:35.923Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T00:08:36.720Z",
+      "finishedAt": "2026-08-07T00:08:36.740Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:37.204Z",
+      "finishedAt": "2026-08-07T00:08:37.213Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:37.208Z",
+      "finishedAt": "2026-08-07T00:08:37.216Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T00:08:37.439Z",
+      "finishedAt": "2026-08-07T00:08:37.456Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T00:08:38.250Z",
+      "finishedAt": "2026-08-07T00:08:38.267Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:38.716Z",
+      "finishedAt": "2026-08-07T00:08:38.724Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:38.717Z",
+      "finishedAt": "2026-08-07T00:08:38.724Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T00:08:38.966Z",
+      "finishedAt": "2026-08-07T00:08:38.982Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T00:08:39.780Z",
+      "finishedAt": "2026-08-07T00:08:39.804Z",
+      "elapsedMs": 24,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:40.231Z",
+      "finishedAt": "2026-08-07T00:08:40.235Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:40.233Z",
+      "finishedAt": "2026-08-07T00:08:40.238Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T00:08:40.495Z",
+      "finishedAt": "2026-08-07T00:08:40.512Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T00:08:41.306Z",
+      "finishedAt": "2026-08-07T00:08:41.328Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:41.741Z",
+      "finishedAt": "2026-08-07T00:08:41.760Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:41.742Z",
+      "finishedAt": "2026-08-07T00:08:41.760Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T00:08:42.023Z",
+      "finishedAt": "2026-08-07T00:08:42.039Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T00:08:42.834Z",
+      "finishedAt": "2026-08-07T00:08:42.862Z",
+      "elapsedMs": 28,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:43.273Z",
+      "finishedAt": "2026-08-07T00:08:43.290Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:43.278Z",
+      "finishedAt": "2026-08-07T00:08:43.291Z",
+      "elapsedMs": 13,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T00:08:43.554Z",
+      "finishedAt": "2026-08-07T00:08:43.572Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T00:08:44.363Z",
+      "finishedAt": "2026-08-07T00:08:44.380Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:44.799Z",
+      "finishedAt": "2026-08-07T00:08:44.803Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:44.800Z",
+      "finishedAt": "2026-08-07T00:08:44.805Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T00:08:45.083Z",
+      "finishedAt": "2026-08-07T00:08:45.102Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T00:08:45.895Z",
+      "finishedAt": "2026-08-07T00:08:45.913Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:46.317Z",
+      "finishedAt": "2026-08-07T00:08:46.337Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:46.318Z",
+      "finishedAt": "2026-08-07T00:08:46.337Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T00:08:46.615Z",
+      "finishedAt": "2026-08-07T00:08:46.631Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T00:08:47.422Z",
+      "finishedAt": "2026-08-07T00:08:47.430Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:47.840Z",
+      "finishedAt": "2026-08-07T00:08:47.843Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:47.841Z",
+      "finishedAt": "2026-08-07T00:08:47.845Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T00:08:48.137Z",
+      "finishedAt": "2026-08-07T00:08:48.157Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T00:08:48.939Z",
+      "finishedAt": "2026-08-07T00:08:48.952Z",
+      "elapsedMs": 13,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T00:08:49.350Z",
+      "finishedAt": "2026-08-07T00:08:49.354Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T00:08:49.351Z",
+      "finishedAt": "2026-08-07T00:08:49.357Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T00:08:49.664Z",
+      "finishedAt": "2026-08-07T00:08:49.677Z",
+      "elapsedMs": 13,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "taskId": "task_6787b43c-c63f-4c12-b0c8-dff79501554f",
+      "startedAt": "2026-08-07T00:06:34.308Z",
+      "finishedAt": "2026-08-07T00:08:50.439Z",
+      "elapsedMs": 136131,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    }
+  ]
+}
