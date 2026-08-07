@@ -1,6 +1,7 @@
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 
 export interface ProcessOutput {
   exitCode: number;
@@ -23,6 +24,26 @@ export interface ProcessOptions {
   maxOutputBytes?: number;
   /** Terminates the child when the operation is cancelled. */
   signal?: AbortSignal;
+  /**
+   * Called with decoded stdout text as it arrives, rather than at exit.
+   *
+   * The buffered {@link ProcessOutput} is the record of what a run produced;
+   * this is for deciding something *during* it. A caller watching an agent CLI
+   * for context pressure cannot wait for `close`, because by then the run it
+   * would have intervened in is over.
+   *
+   * Observers see every byte the child wrote, including bytes `maxOutputBytes`
+   * declines to retain: a monitor that went blind at the retention cap would
+   * fail exactly on the long runs it exists to watch. Chunk boundaries carry no
+   * meaning — a multi-byte character or a line may be split across two calls,
+   * so an observer that needs whole lines must reassemble them itself.
+   *
+   * Throwing from an observer is contained and ignored. Watching a process must
+   * never be able to kill it.
+   */
+  onStdout?: (chunk: string) => void;
+  /** Stderr counterpart to {@link onStdout}, with identical semantics. */
+  onStderr?: (chunk: string) => void;
 }
 
 /**
@@ -210,12 +231,37 @@ export async function runProcess(
       };
     };
 
+    // Decoders are per-stream and stateful: a UTF-8 character split across two
+    // reads must not reach an observer as two replacement characters.
+    const stdoutDecoder = new StringDecoder("utf8");
+    const stderrDecoder = new StringDecoder("utf8");
+    const observe = (
+      observer: ((chunk: string) => void) | undefined,
+      decoder: StringDecoder,
+      chunk: Buffer,
+    ): void => {
+      if (observer === undefined) {
+        return;
+      }
+      const text = decoder.write(chunk);
+      if (text.length === 0) {
+        return;
+      }
+      try {
+        observer(text);
+      } catch {
+        // Watching a process must never be able to kill it.
+      }
+    };
+
     child.stdout.on("data", (chunk: Buffer) => {
+      observe(options.onStdout, stdoutDecoder, chunk);
       const captured = capture(stdout, chunk, stdoutBytes);
       stdoutBytes = captured.bytes;
       stdoutTruncated ||= captured.truncated;
     });
     child.stderr.on("data", (chunk: Buffer) => {
+      observe(options.onStderr, stderrDecoder, chunk);
       const captured = capture(stderr, chunk, stderrBytes);
       stderrBytes = captured.bytes;
       stderrTruncated ||= captured.truncated;

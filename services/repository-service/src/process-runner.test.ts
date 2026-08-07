@@ -214,3 +214,109 @@ test("invalid resource limits fail before spawning", async () => {
     RangeError,
   );
 });
+
+test("stdout is observable while the child is still running", async () => {
+  // The point of the callback: a decision that must be made during a run
+  // cannot wait for the buffered result.
+  const seen: string[] = [];
+  let settled = false;
+  let firstArrivedWhileRunning: boolean | undefined;
+
+  const running = runProcess(
+    process.execPath,
+    [
+      "-e",
+      "process.stdout.write('first');" +
+        "setTimeout(() => process.stdout.write('second'), 150);" +
+        "setTimeout(() => process.exit(0), 300);",
+    ],
+    {
+      onStdout: (chunk) => {
+        firstArrivedWhileRunning ??= !settled;
+        seen.push(chunk);
+      },
+    },
+  );
+  void running.then(() => {
+    settled = true;
+  });
+  const result = await running;
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(firstArrivedWhileRunning, true);
+  // Two deliveries 150 ms apart, so the first was seen well before exit
+  // rather than flushed alongside it.
+  assert.ok(seen.length >= 2, `expected separate deliveries, got ${seen.length}`);
+  assert.equal(seen.join(""), "firstsecond");
+  // The buffered transcript is unchanged by observation.
+  assert.equal(result.stdout, "firstsecond");
+});
+
+test("stderr has its own observer", async () => {
+  const out: string[] = [];
+  const err: string[] = [];
+  await runProcess(
+    process.execPath,
+    ["-e", "process.stdout.write('o');process.stderr.write('e')"],
+    { onStdout: (chunk) => out.push(chunk), onStderr: (chunk) => err.push(chunk) },
+  );
+  assert.equal(out.join(""), "o");
+  assert.equal(err.join(""), "e");
+});
+
+test("a multi-byte character split across reads is not corrupted", async () => {
+  // Writing a byte at a time forces the split that a naive per-chunk toString
+  // would turn into replacement characters.
+  const observed: string[] = [];
+  const result = await runProcess(
+    process.execPath,
+    [
+      "-e",
+      "const b=Buffer.from('héllo→世界','utf8');" +
+        "let i=0;" +
+        "const t=setInterval(()=>{" +
+        "if(i>=b.length){clearInterval(t);process.exit(0);}" +
+        "process.stdout.write(b.subarray(i,i+1));i+=1;},1);",
+    ],
+    { onStdout: (chunk) => observed.push(chunk) },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(observed.join(""), "héllo→世界");
+  assert.ok(!observed.join("").includes("\uFFFD"));
+});
+
+test("an observer that throws cannot kill the run", async () => {
+  // Watching a process must never be able to fail it.
+  const result = await runProcess(
+    process.execPath,
+    ["-e", "process.stdout.write('still fine')"],
+    {
+      onStdout: () => {
+        throw new Error("observer exploded");
+      },
+    },
+  );
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdout, "still fine");
+});
+
+test("observers see output the retention cap declines to keep", async () => {
+  // A monitor that went blind at the cap would fail on exactly the long runs
+  // it exists to watch.
+  let observedBytes = 0;
+  const result = await runProcess(
+    process.execPath,
+    ["-e", "process.stdout.write('x'.repeat(5000))"],
+    {
+      maxOutputBytes: 100,
+      onStdout: (chunk) => {
+        observedBytes += chunk.length;
+      },
+    },
+  );
+
+  assert.equal(observedBytes, 5000);
+  assert.equal(result.stdoutTruncated, true);
+  assert.ok(result.stdout.length < 5000);
+});
