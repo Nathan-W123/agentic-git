@@ -470,6 +470,12 @@ test("a valid remote result is recorded, validated, and promoted", async () => {
 test("a protected remote result waits for durable human approval", async () => {
   const harness = await createHarness();
   try {
+    // The gate is asked for explicitly: since 2026-08-06 a project that has
+    // configured nothing runs unattended, so inheriting the default would
+    // mean this test silently stopped exercising the thing it names.
+    await harness.store.updateProject(DEFAULT_PROJECT_ID, {
+      policy: { version: 1, approvals: { enabled: true } },
+    });
     const taskId = await submit(harness);
     const assignment = await leaseAndAdmit(harness, { riskLevel: "high" });
     const stored = await harness.store.getRepository("repo_worker");
@@ -541,7 +547,7 @@ test("a gated remote plan waits for a reviewer before any agent runs", async () 
     await harness.store.updateProject(DEFAULT_PROJECT_ID, {
       policy: {
         version: 1,
-        approvals: { requireRemotePlanReview: true, riskLevels: ["high"] },
+        approvals: { enabled: true, requireRemotePlanReview: true, riskLevels: ["high"] },
       },
     });
 
@@ -604,7 +610,7 @@ test("a rejected remote plan fails its lease instead of executing", async () => 
     await harness.store.updateProject(DEFAULT_PROJECT_ID, {
       policy: {
         version: 1,
-        approvals: { requireRemotePlanReview: true, riskLevels: ["high"] },
+        approvals: { enabled: true, requireRemotePlanReview: true, riskLevels: ["high"] },
       },
     });
 
@@ -648,7 +654,7 @@ test("a project policy forces review of an otherwise benign changeset", async ()
     // Declarative policy on the default project: every changeset needs a
     // human, even a low-risk one touching nothing protected.
     await harness.store.updateProject(DEFAULT_PROJECT_ID, {
-      policy: { version: 1, approvals: { requireChangesetReview: true } },
+      policy: { version: 1, approvals: { enabled: true, requireChangesetReview: true } },
     });
 
     const taskId = await submit(harness);

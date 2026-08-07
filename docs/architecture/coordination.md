@@ -139,3 +139,37 @@ Accepted work never writes canonical directly:
 
 A stale compare-and-swap or failed command leaves canonical unchanged. Cleanup
 errors are recorded without rewriting an already-known integration outcome.
+
+### Approvals are off by default
+
+Step 2 consults the project's approval policy, and **a project that has not
+configured one stops for nobody.** As of 2026-08-06 the platform runs
+unattended by default: plans proceed on the coordinator's own evidence, and no
+human is asked.
+
+That is a reversal. The previous default gated any plan declaring a schema
+change, touching a protected path (`database/migrations/**`, `secrets/**`,
+`.github/workflows/**`, `package.json`, …), or rated `high`/`critical`, and
+then waited up to 24 hours for a decision while the worker held its lease for
+up to 8. Unattended, that is a deadlock rather than a review — the first live
+`team-queue-wired` benchmark gated 8 of 10 plans and spent its whole budget
+waiting for an approval nobody was there to give.
+
+**What an unconfigured deployment now does without asking:** applies schema
+changes, edits protected paths, acts on `critical`-risk plans, and **rolls
+canonical back**. A rollback is high risk by construction and used to be gated
+by the default alone.
+
+**Turning review back on is one field**, per project:
+
+```json
+{ "version": 1, "approvals": { "enabled": true } }
+```
+
+Everything else is unchanged and only consulted once that switch is on — schema
+review, the protected-path list, the risk levels, the 24-hour timeout. Nothing
+was removed from the approval machinery; only the answer to "what happens when
+nobody has said" changed. Narrower configurations still work: a project can
+enable approvals and then set `riskLevels`, `protectedPaths`,
+`requireSchemaReview`, `requireChangesetReview`, `requireRemotePlanReview`, and
+`approvalTimeoutMs` to taste.

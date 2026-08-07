@@ -12,6 +12,34 @@ import {
 } from "@coord/persistence";
 
 export interface ApprovalPolicyOptions {
+  /**
+   * Whether this project stops for a human at all. **Defaults to false.**
+   *
+   * The platform runs unattended by default: a project that has configured
+   * nothing gates nothing, and every plan proceeds on the coordinator's own
+   * evidence. That is a deliberate product decision taken on 2026-08-06, and
+   * it reverses the previous default.
+   *
+   * The previous default gated any plan declaring a schema change, touching a
+   * protected path, or rated high risk, and then waited up to 24 hours for a
+   * decision while the worker held its lease for up to 8. With nobody
+   * watching, that is not review — it is a deadlock, and it behaved like one:
+   * the first live `team-queue-wired` run gated 8 of 10 plans and spent its
+   * entire budget waiting for an approval that could never arrive.
+   *
+   * **Turning it back on is one field.** A team that wants human review sets
+   * `approvals: {enabled: true}` in its project policy, and gets the whole
+   * previous behaviour — schema review, protected paths, risk levels, the 24
+   * hour timeout — because every one of those defaults is unchanged and only
+   * consulted once this switch is on. Nothing about the approval machinery was
+   * removed; a deployment that wants a gate still has exactly the gate it had.
+   *
+   * **What this costs, stated plainly:** an unconfigured deployment will now
+   * apply schema changes, edit `database/migrations/**`, `secrets/**` and
+   * `.github/workflows/**`, and act on plans rated `critical`, without asking
+   * anyone. Anywhere that is not acceptable must set `enabled: true`, and
+   * should do so before this ships rather than after.
+   */
   enabled?: boolean;
   requireSchemaReview?: boolean;
   requireChangesetReview?: boolean;
@@ -72,7 +100,9 @@ export class ApprovalPolicy {
   public readonly requireRemotePlanReview: boolean;
 
   public constructor(options: ApprovalPolicyOptions = {}) {
-    this.enabled = options.enabled ?? true;
+    // Unattended by default. See ApprovalPolicyOptions.enabled for why this
+    // reversed, and for the single field that restores the old behaviour.
+    this.enabled = options.enabled ?? false;
     this.riskLevels = new Set(options.riskLevels ?? ["high", "critical"]);
     this.pathPatterns = (options.pathPatterns ?? DEFAULT_PATH_PATTERNS).map(
       (pattern) => ({ pattern, regex: globRegex(pattern) }),

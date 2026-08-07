@@ -32,6 +32,7 @@ import {
   type WorkspaceManager,
 } from "@coord/workspace-manager";
 
+import { ApprovalPolicy } from "./approval-service.js";
 import { Coordinator } from "./coordinator.js";
 
 interface TestSession {
@@ -398,6 +399,12 @@ test("cancels dependency descendants when their producer cannot integrate", asyn
     const coordinator = new Coordinator({
       repositories: fixture.repositories,
       workspaces: fixture.workspaces,
+      // What stops the producer here is the approval gate on a high-risk
+      // plan, with nobody to give one. That used to be the default; since
+      // 2026-08-06 an unconfigured project runs unattended, so the gate this
+      // test depends on is asked for explicitly. The subject under test is
+      // dependency cancellation, not the default.
+      approvalPolicy: new ApprovalPolicy({ enabled: true }),
     });
     const producer = new TestAgent(
       "agent_a",

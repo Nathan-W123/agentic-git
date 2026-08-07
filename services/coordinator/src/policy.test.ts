@@ -40,24 +40,54 @@ function changeSetStub(paths: string[]): ChangeSet {
   };
 }
 
-test("no stored policy means the built-in defaults", () => {
+test("no stored policy means nobody is asked", () => {
+  // The default reversed on 2026-08-06: an unconfigured project runs
+  // unattended. Nothing about *what* would be risky changed — only whether
+  // anyone is stopped for it — so the sensitive cases below are the same ones
+  // that used to gate, asserted to pass straight through now.
   const policy = approvalPolicyForProject(undefined);
   assert.deepEqual(policy.planReasons(planStub()), []);
-  assert.notEqual(
-    policy.planReasons(planStub({ riskLevel: "high" })).length,
-    0,
+  assert.deepEqual(policy.planReasons(planStub({ riskLevel: "critical" })), []);
+  assert.deepEqual(
+    policy.planReasons(planStub({ expectedFiles: ["package.json"] })),
+    [],
   );
-  // package.json is a default protected pattern.
+  assert.deepEqual(
+    policy.planReasons(planStub({ expectedSchemas: ["Game"] })),
+    [],
+  );
+});
+
+test("one field restores every gate the old default had", () => {
+  // The guarantee behind reversing the default: a team that wants review sets
+  // `enabled: true` and gets the whole previous behaviour, because none of the
+  // sub-defaults moved. If any of these stops holding, the default flip has
+  // quietly become a feature removal.
+  const policy = approvalPolicyForProject({
+    version: 1,
+    approvals: { enabled: true },
+  });
+  assert.deepEqual(policy.planReasons(planStub()), []);
+  assert.notEqual(policy.planReasons(planStub({ riskLevel: "high" })).length, 0);
+  // package.json is still a default protected pattern.
   assert.notEqual(
     policy.planReasons(planStub({ expectedFiles: ["package.json"] })).length,
     0,
   );
+  // Schema review is still on by default *within* an enabled policy.
+  assert.notEqual(
+    policy.planReasons(planStub({ expectedSchemas: ["Game"] })).length,
+    0,
+  );
+  // And the timeout a reviewer gets is unchanged.
+  assert.equal(policy.timeoutMs, 24 * 60 * 60 * 1000);
 });
 
 test("a declarative policy replaces risk levels, paths, and review mode", () => {
   const policy = approvalPolicyForProject({
     version: 1,
     approvals: {
+      enabled: true,
       riskLevels: ["low", "medium", "high", "critical"],
       protectedPaths: ["generated/**"],
       requireChangesetReview: true,
@@ -70,7 +100,7 @@ test("a declarative policy replaces risk levels, paths, and review mode", () => 
   // Custom protected paths replace the defaults entirely.
   const calm = approvalPolicyForProject({
     version: 1,
-    approvals: { riskLevels: [], protectedPaths: ["generated/**"] },
+    approvals: { enabled: true, riskLevels: [], protectedPaths: ["generated/**"] },
   });
   assert.deepEqual(
     calm.planReasons(planStub({ expectedFiles: ["package.json"] })),
@@ -95,10 +125,14 @@ test("an unattended policy removes human pauses without weakening defaults", () 
     expectedSchemas: ["Game"],
     riskLevel: "critical",
   });
-  const defaultPolicy = approvalPolicyForProject(undefined);
-  assert.notEqual(defaultPolicy.planReasons(sensitivePlan).length, 0);
+  // Explicitly enabled, because that is now the configuration that gates.
+  const reviewing = approvalPolicyForProject({
+    version: 1,
+    approvals: { enabled: true },
+  });
+  assert.notEqual(reviewing.planReasons(sensitivePlan).length, 0);
   assert.deepEqual(
-    defaultPolicy.changesetReasons(
+    reviewing.changesetReasons(
       sensitivePlan,
       changeSetStub(["package.json"]),
       { planWasReviewed: true },
@@ -106,24 +140,27 @@ test("an unattended policy removes human pauses without weakening defaults", () 
     [],
   );
 
-  const unattended = approvalPolicyForProject({
-    version: 1,
-    approvals: { enabled: false },
-  });
-  assert.deepEqual(unattended.planReasons(sensitivePlan), []);
-  assert.deepEqual(
-    unattended.changesetReasons(
-      sensitivePlan,
-      changeSetStub(["package.json"]),
-    ),
-    [],
-  );
+  // Both spellings of unattended: explicitly off, and simply unconfigured.
+  for (const unattended of [
+    approvalPolicyForProject({ version: 1, approvals: { enabled: false } }),
+    approvalPolicyForProject(undefined),
+  ]) {
+    assert.deepEqual(unattended.planReasons(sensitivePlan), []);
+    assert.deepEqual(
+      unattended.changesetReasons(
+        sensitivePlan,
+        changeSetStub(["package.json"]),
+      ),
+      [],
+    );
+  }
 });
 
 test("schema review can be delegated to protected migration paths", () => {
   const policy = approvalPolicyForProject({
     version: 1,
     approvals: {
+      enabled: true,
       requireSchemaReview: false,
       riskLevels: ["critical"],
       protectedPaths: ["database/migrations/**"],
