@@ -1041,11 +1041,15 @@ export class PromptCliAdapter implements AgentAdapter {
     );
     const plan = extractJsonObject(this.profile.unwrap(stdout), "the plan");
     assertAgentPlan(plan);
-    if (plan.taskId !== record.input.task.id) {
-      throw new Error(
-        `${this.profile.name} planned ${plan.taskId} but was started for ${record.input.task.id}`,
-      );
-    }
+    // The model's copy of the task id carries no information: this adapter
+    // started the session and knows which task it is for. A transcription slip
+    // in a 36-character UUID used to throw away a whole agent run -- measured
+    // once in the A/B series, where a replan returned `...-496f-496f-...` for
+    // `...-ef4f-496f-...` and the task failed outright. So the id is *set*
+    // rather than checked, which makes the binding stronger than trusting the
+    // model to echo it: the same treatment the worker already gives `objective`,
+    // and for the same reason.
+    plan.taskId = record.input.task.id;
     return plan;
   }
 

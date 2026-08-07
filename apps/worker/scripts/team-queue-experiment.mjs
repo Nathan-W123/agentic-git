@@ -565,6 +565,10 @@ async function driveWorkers(plane, root, count, deadline) {
     (sum, worker) => sum + worker.planReuseCount,
     0,
   );
+  iterations.planAmendCount = workers.reduce(
+    (sum, worker) => sum + worker.planAmendCount,
+    0,
+  );
   return iterations;
 }
 
@@ -1129,6 +1133,8 @@ function summarize(iterations, records, tasks) {
     replansTotal: replanEvents.length,
     /** Planning rounds avoided by reusing a plan whose base had not moved. */
     plansReused: iterations.planReuseCount ?? 0,
+    /** Planning rounds amended from a previous plan rather than bought whole. */
+    plansAmended: iterations.planAmendCount ?? 0,
 
     integrationsPromoted: events("canonical_promoted").length,
     validationRuns: events("validation_completed").length,
@@ -1465,7 +1471,7 @@ console.log(
   `[${arm}] integrated=${String(m.tasksIntegrated)}/${String(m.tasksTotal)} ` +
     `conflicts=${String(m.conflictsDetected)} ` +
     `replans=${String(m.planTimeRequeues)}p/${String(m.resultTimeRequeues)}r ` +
-    `plansReused=${String(m.plansReused)} ` +
+    `plansReused=${String(m.plansReused)} amended=${String(m.plansAmended)} ` +
     `tokens=${String(m.reportedTokensTotal || m.tokensTotal || m.observedTokensTotal || "n/a")} ` +
     `transportFails=${String(m.transportFailures)}(requeued ${String(m.transportRequeues)}) ` +
     `elapsed=${String(Math.round(record.elapsedMs / 1000))}s ` +
