@@ -3917,3 +3917,99 @@ test("hunks clear of a withheld symbol land while only the trespass waits", asyn
     await rm(harness.root, { recursive: true, force: true });
   }
 });
+
+test("a plan survives canonical moving somewhere it does not claim", async () => {
+  // The coordinated arm's largest cost. Any movement of canonical used to
+  // discard a plan, however unrelated — five workers racing nine integrations
+  // produced 16 to 26 replans a run at roughly 145k tokens each. A finished
+  // result is never sent back for an advance like this, and an unexecuted plan
+  // is worth less than a finished result.
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+  });
+  try {
+    await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+
+    // Canonical moves in a file this plan never mentions.
+    await landExternalAdvance(harness, 1, "docs/guide.md");
+
+    const outcome = await admit(harness, assignment, {
+      expectedFiles: ["src/value.js"],
+    });
+    assert.equal(outcome.outcome, "admitted");
+    const admission =
+      outcome.outcome === "admitted" ? outcome.admission : undefined;
+    assert.equal(admission?.requeue, undefined, admission?.explanation);
+    assert.equal(admission?.status, "approved");
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a plan is still sent back when canonical moved under what it claims", async () => {
+  // The other half, and the reason the check is on `assessReplay` rather than
+  // on nothing: an advance that touches what the plan claims genuinely
+  // invalidates it, and admitting it would let a task edit a file it has not
+  // seen the current state of.
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+  });
+  try {
+    await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+
+    await landExternalAdvance(harness, 1, "docs/guide.md");
+
+    const outcome = await admit(harness, assignment, {
+      // This time the plan claims the very file that moved.
+      expectedFiles: ["docs/guide.md"],
+    });
+    assert.equal(outcome.outcome, "admitted");
+    const admission =
+      outcome.outcome === "admitted" ? outcome.admission : undefined;
+    assert.equal(admission?.requeue, true, admission?.explanation);
+    assert.match(admission?.explanation ?? "", /Canonical advanced/u);
+    // And it says what moved, so the next attempt can amend rather than start
+    // cold.
+    assert.ok(admission?.canonicalChange, "the change notice should be sent");
+    assert.deepEqual(admission?.canonicalChange?.changedFiles, [
+      "docs/guide.md",
+    ]);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("the strict rebase switch restores the unconditional requeue", async () => {
+  // The rollback, in the same shape as the other COORD_* switches: an operator
+  // who decides the looser rule is wrong turns it off without a deploy.
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+  });
+  const previous = process.env["COORD_STRICT_PLAN_REBASE"];
+  process.env["COORD_STRICT_PLAN_REBASE"] = "1";
+  try {
+    await submit(harness);
+    const assignment = await lease(harness);
+    assert.ok(assignment);
+    await landExternalAdvance(harness, 1, "docs/guide.md");
+
+    const outcome = await admit(harness, assignment, {
+      expectedFiles: ["src/value.js"],
+    });
+    assert.equal(outcome.outcome, "admitted");
+    const admission =
+      outcome.outcome === "admitted" ? outcome.admission : undefined;
+    assert.equal(admission?.requeue, true, "strict mode requeues regardless");
+  } finally {
+    if (previous === undefined) {
+      delete process.env["COORD_STRICT_PLAN_REBASE"];
+    } else {
+      process.env["COORD_STRICT_PLAN_REBASE"] = previous;
+    }
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});

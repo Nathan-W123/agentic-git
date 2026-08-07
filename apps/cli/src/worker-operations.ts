@@ -1146,7 +1146,67 @@ export async function admitWorkPlan(
 
   // Canonical moving under a plan is the cheapest possible moment to notice:
   // the worker has planned but not edited, so requeueing costs one plan.
-  if (current.revision !== baseVersion.revision) {
+  //
+  // But *any* movement used to requeue, which is stricter than this codebase
+  // treats finished work. `assessReplay` already separates an advance that
+  // invalidates what a task knows from overlap a three-way apply absorbs, and
+  // a finished *result* is only sent back for the former. An unexecuted plan
+  // is worth less than a finished result, so refusing it on evidence that
+  // would not refuse a result is backwards.
+  //
+  // Measured on the A/B series, this is where the coordinated arm spends: 16
+  // to 26 replans a run at roughly 145k tokens each, with five workers racing
+  // nine integrations, and the two tasks that failed outright show "Canonical
+  // advanced before this plan was submitted" two and three times in a row.
+  // Most of those advances never touched the plan discarded for them.
+  //
+  // `COORD_STRICT_PLAN_REBASE=1` restores the unconditional requeue.
+  let advanceIsUnrelated = false;
+  if (
+    current.revision !== baseVersion.revision &&
+    process.env["COORD_STRICT_PLAN_REBASE"] !== "1"
+  ) {
+    const advance = await canonicalAdvance(
+      repositories,
+      intelligence,
+      repository,
+      baseVersion,
+      current,
+    ).catch(() => undefined);
+    if (advance !== undefined) {
+      // Nothing has executed, so the empty patch list is the honest input
+      // rather than a placeholder: the only question here is whether the
+      // advance disturbs what this plan claims or depends on.
+      const assessment = assessReplay(
+        submitted,
+        {
+          id: "",
+          taskId: task.id,
+          baseVersion: baseVersion.sequence,
+          baseRevision: baseVersion.revision,
+          patches: [],
+          commandsRun: [],
+          tests: [],
+          dependenciesChanged: [],
+          symbolsChanged: [],
+          riskAssessment: { level: "low", reasons: [] },
+          agentExplanation: "",
+          createdAt: new Date().toISOString(),
+        },
+        advance,
+      );
+      // Deliberately stricter than the result path, which tolerates `textual`
+      // overlap because a three-way apply absorbs it. That reasoning holds for
+      // a changeset already written against the old tree; for a plan about to
+      // be *written*, letting an agent edit a file whose current contents it
+      // has never seen is a different bet, and not one worth taking to save a
+      // planning round. So the requeue is skipped only when the advance
+      // touches nothing this plan claims or depends on at all.
+      advanceIsUnrelated =
+        assessment.semantic.length === 0 && assessment.textual.length === 0;
+    }
+  }
+  if (current.revision !== baseVersion.revision && !advanceIsUnrelated) {
     await requeueForCanonicalChange(
       store,
       repositories,
