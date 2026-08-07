@@ -456,9 +456,10 @@ async function driveWorkers(plane, root, count, deadline) {
       // minute instead of holding it for the default eight hours, which is
       // long enough to strand a run that has no reviewer behind it.
       planApprovalWaitMs: 60_000,
-      // Only the Codex adapter takes an injected runner, and only its output
-      // carries a token line to parse. A `claude` or `generic-cli` run reports
-      // no tokens at all rather than reporting a wrong number.
+      // Only the Codex adapter takes an injected runner. A `claude` run needs
+      // none: the prompt-cli adapter reads the usage block out of the same
+      // envelope it already parses and reports it through the protocol, so its
+      // tokens arrive by the ordinary path as `agent_usage_reported`.
       ...((process.env["COORD_AGENT_ADAPTER"]?.trim() ?? "codex") === "codex"
         ? { codexRunner: countingCodexRunner }
         : {}),
@@ -928,6 +929,23 @@ async function once() {
     const tasks = await plane.store.listSubmittedTasks();
     const records = await plane.store.listAuditEvents();
     const metrics = summarize(iterations, records, tasks);
+    // What the vendor CLIs actually reported, read from where the control
+    // plane stores it. `agent_usage_reported` is not an audit event — usage
+    // goes to `recordTokenUsage`, one row per lease and phase carrying a
+    // running total — so the old `controlPlaneTokensTotal` read a table that
+    // was never written and reported every run as free.
+    const usageRows = await plane.store.listTokenUsage({});
+    metrics.reportedTokensTotal = usageRows.reduce(
+      (sum, row) => sum + Number(row.totalTokens ?? 0),
+      0,
+    );
+    metrics.reportedTokensByPhase = {};
+    for (const row of usageRows) {
+      metrics.reportedTokensByPhase[row.phase] =
+        (metrics.reportedTokensByPhase[row.phase] ?? 0) +
+        Number(row.totalTokens ?? 0);
+    }
+    metrics.reportedTokenRows = usageRows.length;
     const plans = await harvestPlans(plane.store, plane.byTaskId);
 
     // Completion order is the order the control plane promoted each task's
@@ -1081,7 +1099,7 @@ console.log(
   `[${arm}] integrated=${String(m.tasksIntegrated)}/${String(m.tasksTotal)} ` +
     `conflicts=${String(m.conflictsDetected)} ` +
     `replans=${String(m.planTimeRequeues)}p/${String(m.resultTimeRequeues)}r ` +
-    `tokens=${String(m.tokensTotal ?? m.observedTokensTotal ?? "n/a")} ` +
+    `tokens=${String(m.reportedTokensTotal || m.tokensTotal || m.observedTokensTotal || "n/a")} ` +
     `transportFails=${String(m.transportFailures)}(requeued ${String(m.transportRequeues)}) ` +
     `elapsed=${String(Math.round(record.elapsedMs / 1000))}s ` +
     `wall=${String(Math.round(record.wallClockMs / 1000))}s ` +

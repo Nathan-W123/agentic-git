@@ -360,29 +360,141 @@ transport failures on all but the pilot. Three of ten uncoordinated runs ended
 with a failing merged tree, which is a finding about last-writer-wins merging
 rather than a fault.
 
+## 5a. What was fixed afterwards (2026-08-06, same day)
+
+Four of the five things this run exposed were repaired; the fifth was measured
+and deliberately not shipped.
+
+### Fix A — rank-weighted relations. **Shipped.**
+
+`GroundedIntentOptions.rankWeighting`, defaulting to 1. Each target is given a
+rank within its own grounding — its score over the best score that grounding
+produced — and a relation is multiplied by the weakest rank it rests on.
+Measured on the nine-run held-out corpus, designed labels:
+
+| | Fired | TP | FP | Precision | Recall |
+| --- | --- | --- | --- | --- | --- |
+| Before | 22 | 21 | 1 | 95% | 39% |
+| **After** | 21 | 21 | **0** | **100%** | **39%** |
+
+It removed exactly the recurring false positive and cost **nothing** in
+recall, which is what the design predicted: every true positive in this corpus
+fires from a rank-1.0 target on both sides. Three tests pin it, including one
+asserting the multiplier can only ever lower a score — the property that stops
+it inventing a firing.
+
+### Fix B — the recall/denominator problem. **Measured, rejected, not shipped.**
+
+Two candidates were implemented and tried.
+
+**Restricting the score to the intent's rarest words** made recall *worse* at
+every setting (35% -> 19% at a 4-word budget). The hypothesis was that
+dropping common words would stop them diluting the denominator; in fact they
+carry matched mass too, so the ratio falls. The knob was removed rather than
+left switched off.
+
+**Lowering `targetFloor`** looked excellent on the development half and failed
+on held-out:
+
+| Configuration | Development | Held-out |
+| --- | --- | --- |
+| floor 0.65 (shipped) | 100% / 35% | **100% / 39%** |
+| floor 0.45 | 100% / 67% | **72% / 93%** |
+| floor 0.45 + Fix A | 100% / 67% | **74% / 89%** |
+
+A floor tuned to 0.45 on the development half generalises to 74% precision —
+below the 80% bar and below the 70% the original corpus gave. `targetFloor`
+stays at 0.65.
+
+**This is the safeguard earning its keep.** Had both fixes been bundled and
+reported as one number, the combined 74%/89% would have looked like a
+reasonable trade instead of what it is: Fix A's perfect precision destroyed by
+Fix B. Recall stays a known weakness with no accepted fix.
+
+### The observed-contention split. **Fixed, and it changes the headline.**
+
+Two changes. The evaluator no longer prints `0%` for precision against a truth
+set with no positives — that case now reads `n/m`, because every firing is a
+false positive there by construction and a perfect signal scores the same as a
+broken one. And a second split is registered, `band-stratified`, chosen by a
+mechanical rule (hold out the alphabetically last agent owning a task in each
+band) that puts every band on both sides. The original split could not: the
+deep band is owned entirely by `codex-a/b/c`, which *is* the development half.
+
+With observed contention finally measurable on held-out data:
+
+| Ground truth, held-out, band-stratified | Positives | Precision | Recall |
+| --- | --- | --- | --- |
+| Designed (pre-registered labels) | 63 | **100%** | 33% |
+| **Observed (what actually collided)** | 16 | **38%** | 50% |
+
+**The signal is right about the labels and wrong about reality most of the
+time.** The designed labels call deep-against-partial pairs conflicts; in ten
+live runs those pairs never collided, and the only collisions were
+deep-against-deep. The signal follows the labels, so it fires where the labels
+say and reality does not. That gap is a statement about the fixture's design,
+not about the code — but until it is resolved, **38% is the more honest figure
+for "will these two actually collide", and it is far below any bar.**
+
+One caveat on it: the frozen thresholds were tuned on the original development
+half, which included `codex-c`, so this split's held-out side contains prose
+seen during tuning. It is clean for the next tuning cycle, not retroactively.
+
+### Token reporting. **Fixed.**
+
+The prompt-cli adapter now reads the `usage` block out of the same JSON
+envelope it already parses, records it per phase, and reports it through
+`reportedTokenUsage` exactly as the Codex adapter does. Cache traffic counts
+toward the total — it is billed, and it dominates: a trivial probe showed
+49,080 cached tokens against 77 uncached.
+
+The harness was reading the wrong source as well: usage is written by
+`recordTokenUsage` into the token-usage table, not emitted as an
+`agent_usage_reported` audit event, so the old counter summed a table nothing
+writes. A verification run that previously reported `tokens=0` now reports
+**1,040,108 tokens for four tasks** — about 260,000 per task, split 446k
+planning / 594k execution.
+
+Every figure in section 4 was gathered before this fix, so **the eleven runs
+above remain unmeasured for cost**. Future runs will not be.
+
+### The failing merged trees. **Confirmed correct, no fix.**
+
+Three uncoordinated runs ended with a failing merged tree. That is the
+uncoordinated arm working, not a defect:
+
+- Per-task validation failures across all ten uncoordinated runs: **zero**.
+  Every task's own tree passed its own tests before merging.
+- Failures appear only in the merged tree, only in files that had merge
+  conflicts (`src/pricing/total.js`, `test/total.test.js`), and are arithmetic
+  mismatches — one task's pricing change surviving next to another task's test
+  expectations.
+- The coordinated arm had **0 merge conflicts and passed**, because it
+  sequenced the contended work instead of merging it blind.
+
+That contrast is the experiment's point. Nothing to fix.
+
 ## 6. What is still owed
 
-- **A trustworthy observed-contention number.** Blocked on split composition
-  (section 4.3), not on compute. Requires scoring the development split
-  explicitly, or a corpus where `codex-d`/`codex-e` tasks collide.
-- **Fix A — rank-weighted relation scoring.** *Proposed, not implemented.*
-  Scale a relation by `min(leftRank, rightRank)` where
-  `rank = target.score / topTargetScore`, so evidence inherits the confidence
-  of the weakest grounding that produced it. On the observed failure this takes
-  `loyalty_tier + rounding` from 0.65 to 0.43 — below the 0.5 fire threshold —
-  while every current true positive fires from rank-1.0 targets on both sides
-  and is untouched. It can only ever *lower* scores, so it cannot manufacture
-  new false positives; the risk is new false negatives, on an axis that is
-  already weak.
-- **The recall half is deliberately not bundled with it.** Fixing the
-  denominator means re-deriving the frozen `targetFloor`, whose justification
-  is documented against specific development-half cases. Doing both at once
-  makes it impossible to attribute whichever number moves.
-- **Neither may be tuned on the held-out split of these runs.** That corpus is
-  currently clean holdout and is the only trustworthy measurement available.
-  Choose thresholds on `codex-a/b/c`, then measure **once** against held-out.
-  Tuning the rank rule against the held-out false positive would destroy the
-  only property that makes any of this worth reading.
+- **The gap between designed labels and observed contention.** Now measurable
+  and large: 100% against the labels, 38% against what collided (section 5a).
+  The labels call deep-against-partial pairs conflicts and reality does not.
+  Either the labels are wrong for this fixture, or the fixture still does not
+  implement its own band design. That question is now the most important open
+  one here, and it is about the corpus rather than the signal.
+- **Recall, still, with no accepted fix.** 39% held-out. The cause is
+  understood — verbose intents dilute their own denominator — and the obvious
+  remedy overfits (section 5a). A fix has to generalise off the development
+  half, which the floor change did not.
+- **A fresh corpus before the next tuning round.** The held-out half of these
+  runs has now been read four times, once per configuration measured. Those
+  readings were reported rather than selected on — the floor was chosen on
+  development and Fix B was rejected *because* held-out disagreed — but the
+  half is no longer pristine, and the next threshold change deserves data that
+  has never been scored.
+- **The `band-stratified` split is clean only going forward.** Its held-out
+  side contains `codex-c`, whose prose was seen when the current thresholds
+  were tuned. Use it for the next cycle, not to re-certify today's numbers.
 
 ## 7. What would justify taking it back out
 
@@ -394,17 +506,31 @@ rather than a fault.
 
 ## 8. Honest summary
 
-The run this document called for has happened. On the corrected fixture the
-signal fires correctly about nine times in ten, up from seven, with an interval
-[63%, 100%] that neither certifies the 80% bar nor rules it out. Recall fell to
-39%, for a reason that is understood and probably an artefact of the model
-swap. The single recurring false positive has a diagnosed root cause and a
-bounded fix, which is proposed and not implemented.
+The run this document called for has happened, and the fixes it justified have
+landed. Against the pre-registered labels the signal now fires correctly 21
+times out of 21 on held-out data, because the one recurring false positive had
+a real cause — a relation resting on a weak secondary grounding — and that is
+fixed and tested.
+
+Two things stop that being a success story.
+
+**Against what actually collided, it is right 38% of the time.** The labels and
+reality disagree in this fixture: the labels call deep-against-partial pairs
+conflicts, and in ten live runs those pairs never collided. Scoring 100% on the
+labels and 38% on reality is not a signal that works, it is a signal that
+agrees with a corpus that may itself be wrong. Resolving that is now the most
+important open question, and it is a question about the fixture.
+
+**Recall is 39% and the obvious fix overfits.** Lowering the grounding floor
+doubled recall on the development half and dropped precision to 74% on
+held-out. It was measured and rejected rather than shipped, which is the split
+doing its job.
 
 Measured against what it costs: every collision that actually happened in these
 runs was caught by structural file overlap without help, and the guard that
 keeps intent evidence advisory held in a live coordinated arbitration — nine
-findings, all advisory, none scheduling anything.
+findings, all advisory, none scheduling anything. So the practical cost of all
+of this remains a human occasionally glancing at a pair of tasks.
 
 It is better than it was, it is measured now rather than assumed, and it is
 still not a validated feature. It should stay advisory.

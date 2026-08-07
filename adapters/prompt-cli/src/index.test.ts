@@ -26,6 +26,7 @@ import {
   extractJsonObject,
   resolveClaudeCommand,
   type PromptCliProcessRunner,
+  parseClaudeUsage,
 } from "./index.js";
 
 const TASK: TaskDefinition = {
@@ -394,4 +395,43 @@ test("configuration cannot smuggle arbitrary flags through args", async () => {
       }),
     /supported only by Claude/u,
   );
+});
+
+test("claude usage is read from the envelope the adapter already parses", () => {
+  // A real envelope, trimmed. Cache traffic dominates a coding session and is
+  // billed, so a total that dropped it would understate cost by two orders of
+  // magnitude here: 4 + 73 uncached against 24,566 + 24,514 cached.
+  const envelope = JSON.stringify({
+    is_error: false,
+    result: '{"answer":"ok"}',
+    total_cost_usd: 0.260363,
+    usage: {
+      input_tokens: 4,
+      output_tokens: 73,
+      cache_creation_input_tokens: 24566,
+      cache_read_input_tokens: 24514,
+    },
+  });
+  const usage = parseClaudeUsage(envelope);
+  assert.equal(usage?.inputTokens, 4);
+  assert.equal(usage?.outputTokens, 73);
+  assert.equal(usage?.cacheCreationTokens, 24566);
+  assert.equal(usage?.cacheReadTokens, 24514);
+  assert.equal(usage?.totalTokens, 4 + 73 + 24566 + 24514);
+  assert.equal(usage?.costUsd, 0.260363);
+});
+
+test("an envelope without usage reports nothing rather than zero", () => {
+  // "not reported" and "cost nothing" are different claims, and a total built
+  // from the second is quietly wrong.
+  assert.equal(parseClaudeUsage('{"is_error":false,"result":"hi"}'), undefined);
+  assert.equal(parseClaudeUsage("not json at all"), undefined);
+  assert.equal(parseClaudeUsage(""), undefined);
+});
+
+test("the claude profile carries a usage reader and gemini does not", () => {
+  // Gemini's envelope has no usage block, so claiming to read one would
+  // manufacture zeros for every Gemini run.
+  assert.equal(typeof CLAUDE_PROFILE.usage, "function");
+  assert.equal(GEMINI_PROFILE.usage, undefined);
 });

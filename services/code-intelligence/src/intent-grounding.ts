@@ -391,6 +391,33 @@ export interface GroundedIntentOptions {
   oppositionBonus: number;
   /** Score at or above which the signal is reported as firing. */
   fireThreshold: number;
+  /**
+   * How much a relation is discounted for resting on a weak grounding.
+   *
+   * A grounding produces several targets and they are not equally believed:
+   * `task_loyalty_tier` reaches `src/pricing/discount.js` at 1.000 and
+   * `src/pricing/total.js` at 0.667, the second only because the sentence
+   * mentions the caller it must not break. Relation formation used to flatten
+   * those, so a call edge found through the 0.667 target counted exactly as
+   * much as one found through the 1.000 target — which is the whole of the
+   * recurring `loyalty_tier + rounding` false positive, in this corpus and in
+   * the recorded one before it.
+   *
+   * Each target is given a rank within its own grounding — its score over the
+   * best score that grounding produced — and a relation is multiplied by the
+   * *weakest* rank it rests on. Evidence inherits the confidence of its
+   * weakest link, which is a statement about derived evidence rather than
+   * about rounding.
+   *
+   * 1 applies it fully. 0 restores the previous flattened behaviour, which is
+   * how the before/after in `docs/benchmarks/intent-grounding-wired.md` is
+   * measured. Values between interpolate.
+   *
+   * Note this can only ever *lower* a score, so it cannot invent a firing.
+   * Its cost is paid entirely in recall, on pairs whose only evidence runs
+   * through a secondary target.
+   */
+  rankWeighting: number;
   lexicon?: WordNet | undefined;
 }
 
@@ -410,6 +437,7 @@ export const DEFAULT_GROUNDED_INTENT_OPTIONS: GroundedIntentOptions = {
   adjacentWeight: 0.55,
   oppositionBonus: 0.1,
   fireThreshold: 0.5,
+  rankWeighting: 1,
 };
 
 function sharedVocabulary(
@@ -457,23 +485,46 @@ function opposedPair(
 }
 
 /** Import edges between two sets of files, in either direction. */
+/**
+ * One relation, with the file each side of the pair contributed to it.
+ *
+ * The files are carried rather than only the printable label because a
+ * relation is discounted by the rank of the groundings that produced it, and
+ * that cannot be recovered from `"a.js -> b.js"` once the direction has been
+ * flattened into a string.
+ */
+interface RelationEdge {
+  label: string;
+  leftFile: string;
+  rightFile: string;
+}
+
 function importEdges(
   index: RepositoryIndex,
   left: ReadonlySet<string>,
   right: ReadonlySet<string>,
-): string[] {
-  const found = new Set<string>();
+): RelationEdge[] {
+  const found = new Map<string, RelationEdge>();
   for (const edge of index.edges) {
     if (edge.kind !== "import" || edge.toFile === undefined) {
       continue;
     }
-    const forward = left.has(edge.fromFile) && right.has(edge.toFile);
-    const backward = right.has(edge.fromFile) && left.has(edge.toFile);
-    if (forward || backward) {
-      found.add(`${edge.fromFile} -> ${edge.toFile}`);
+    const label = `${edge.fromFile} -> ${edge.toFile}`;
+    if (left.has(edge.fromFile) && right.has(edge.toFile)) {
+      found.set(label, {
+        label,
+        leftFile: edge.fromFile,
+        rightFile: edge.toFile,
+      });
+    } else if (right.has(edge.fromFile) && left.has(edge.toFile)) {
+      found.set(label, {
+        label,
+        leftFile: edge.toFile,
+        rightFile: edge.fromFile,
+      });
     }
   }
-  return [...found].sort();
+  return [...found.values()].sort((a, b) => a.label.localeCompare(b.label));
 }
 
 /** Which files declare each symbol name, for resolving a call to its target. */
@@ -517,24 +568,75 @@ function callEdges(
   index: RepositoryIndex,
   left: ReadonlySet<string>,
   right: ReadonlySet<string>,
-): string[] {
+): RelationEdge[] {
   const declaring = declaringFiles(index);
-  const found = new Set<string>();
+  const found = new Map<string, RelationEdge>();
   for (const file of index.files) {
     for (const call of file.symbolCalls) {
       const from = `${file.path}#${call.from}`;
       for (const target of declaring.get(call.to) ?? []) {
         const to = `${target}#${call.to}`;
-        if (
-          (left.has(from) && right.has(to)) ||
-          (right.has(from) && left.has(to))
-        ) {
-          found.add(`${from} -> ${to}`);
+        const label = `${from} -> ${to}`;
+        if (left.has(from) && right.has(to)) {
+          found.set(label, {
+            label,
+            leftFile: file.path,
+            rightFile: target,
+          });
+        } else if (right.has(from) && left.has(to)) {
+          found.set(label, {
+            label,
+            leftFile: target,
+            rightFile: file.path,
+          });
         }
       }
     }
   }
-  return [...found].sort();
+  return [...found.values()].sort((a, b) => a.label.localeCompare(b.label));
+}
+
+/**
+ * Each target's believedness relative to the best target its own grounding
+ * produced. The strongest target is always 1.
+ */
+function ranksByFile(grounding: IntentGrounding): Map<string, number> {
+  const best = grounding.targets[0]?.score ?? 0;
+  const ranks = new Map<string, number>();
+  for (const target of grounding.targets) {
+    ranks.set(target.file, best > 0 ? target.score / best : 0);
+  }
+  return ranks;
+}
+
+/**
+ * How much of a relation's nominal weight survives the groundings behind it.
+ *
+ * A relation rests on one file from each side, so it is worth the weaker of
+ * the two ranks; where several edges support the same relation the strongest
+ * one is taken, because the claim is that *some* believed connection exists
+ * rather than that all of them are believed. `rankWeighting` interpolates
+ * between this and the previous flattened behaviour so both can be measured.
+ */
+function relationStrength(
+  edges: readonly RelationEdge[],
+  leftRanks: ReadonlyMap<string, number>,
+  rightRanks: ReadonlyMap<string, number>,
+  rankWeighting: number,
+): number {
+  if (edges.length === 0) {
+    return 0;
+  }
+  let strongest = 0;
+  for (const edge of edges) {
+    const weakestLink = Math.min(
+      leftRanks.get(edge.leftFile) ?? 0,
+      rightRanks.get(edge.rightFile) ?? 0,
+    );
+    strongest = Math.max(strongest, weakestLink);
+  }
+  const clamped = Math.min(1, Math.max(0, rankWeighting));
+  return 1 - clamped + clamped * strongest;
 }
 
 /**
@@ -565,10 +667,21 @@ export function assessGroundedIntent(
 
   const leftFiles = new Set(first.grounding.targets.map((entry) => entry.file));
   const rightFiles = new Set(second.grounding.targets.map((entry) => entry.file));
-  const sharedTargets = [...leftFiles]
+  const leftRanks = ranksByFile(first.grounding);
+  const rightRanks = ranksByFile(second.grounding);
+  const rankWeighting = options.rankWeighting;
+  const sharedFiles = [...leftFiles]
     .filter((file) => rightFiles.has(file))
     .sort();
-  const callTargets =
+  // A shared target is its own relation edge: both sides contributed the same
+  // file, so the weakest link is the weaker of the two sides' belief in it.
+  const sharedEdges: RelationEdge[] = sharedFiles.map((file) => ({
+    label: file,
+    leftFile: file,
+    rightFile: file,
+  }));
+  const sharedTargets = sharedFiles;
+  const callEdgesFound =
     sharedTargets.length > 0
       ? []
       : callEdges(
@@ -576,23 +689,35 @@ export function assessGroundedIntent(
           reachedSymbols(first.grounding),
           reachedSymbols(second.grounding),
         );
-  const adjacentTargets =
-    sharedTargets.length > 0 || callTargets.length > 0
+  const adjacentEdgesFound =
+    sharedTargets.length > 0 || callEdgesFound.length > 0
       ? []
       : importEdges(index, leftFiles, rightFiles);
+  const callTargets = callEdgesFound.map((edge) => edge.label);
+  const adjacentTargets = adjacentEdgesFound.map((edge) => edge.label);
 
   let relation: IntentRelation | undefined;
   let score = 0;
   if (corroboration.length > 0) {
+    let edges: readonly RelationEdge[] = [];
     if (sharedTargets.length > 0) {
       relation = "shared";
       score = options.sharedWeight;
+      edges = sharedEdges;
     } else if (callTargets.length > 0) {
       relation = "calls";
       score = options.callWeight;
+      edges = callEdgesFound;
     } else if (adjacentTargets.length > 0) {
       relation = "adjacent";
       score = options.adjacentWeight;
+      edges = adjacentEdgesFound;
+    }
+    if (score > 0) {
+      // Applied before the opposition bonus: the bonus is evidence about the
+      // two sentences, not about the grounding, so discounting it for a weak
+      // grounding would be charging the same weakness twice.
+      score *= relationStrength(edges, leftRanks, rightRanks, rankWeighting);
     }
     if (score > 0 && opposition !== undefined) {
       score = Math.min(1, score + options.oppositionBonus);

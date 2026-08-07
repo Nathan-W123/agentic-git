@@ -135,3 +135,80 @@ export function splitOf(leftTaskId, rightTaskId) {
     HELD_OUT_AGENTS.has(TASK_AGENTS[rightTaskId]);
   return held ? "held-out" : "development";
 }
+
+/**
+ * A second split, registered 2026-08-06, because the first one cannot measure
+ * observed contention at all.
+ *
+ * ## The defect in the original split
+ *
+ * The original rule holds out `codex-d` and `codex-e`. The deep band —
+ * `task_handling_fee`, `task_free_delivery`, `task_card_surcharge` — is owned
+ * by `codex-a`, `codex-b` and `codex-c`, which is *exactly* the development
+ * half. Every collision that actually happens in this scenario is deep against
+ * deep, because all three deep tasks edit `src/pricing/total.js`. A held-out
+ * pair needs `codex-d` or `codex-e`, so the held-out half contains **no**
+ * observed-contending pair, and precision against observed truth is 0% there
+ * whatever the signal does. Ten live runs of `team-queue-wired` confirmed it:
+ * `pos=0` on all 270 held-out pairs.
+ *
+ * The original rule was written to satisfy "no single agent owns a whole
+ * band". It does. That turns out to be the weaker of the two properties a
+ * group split needs — the one that matters is that **every band is
+ * represented on both sides**, and grouping by agent alone does not give it.
+ *
+ * ## The rule
+ *
+ * For each band, hold out the alphabetically last agent owning a task in it:
+ *
+ * - deep (`codex-a`, `codex-b`, `codex-c`) -> `codex-c`
+ * - partial (`codex-a`, `codex-d`, `codex-e`) -> `codex-e`
+ * - independent (`codex-b`, `codex-c`, `codex-d`, `codex-e`) -> `codex-e`
+ *
+ * giving held-out `codex-c`, `codex-e` and development `codex-a`, `codex-b`,
+ * `codex-d`. The rule is mechanical and stated before it was scored, which is
+ * the property that makes it a split rather than a choice. It is *not* chosen
+ * because it makes any number better.
+ *
+ * The result keeps the same 30/15 pair shape as the original, and puts
+ * positives of both kinds on both sides: 4 designed positives held out and 2
+ * in development, 2 observed-contending pairs held out and 1 in development.
+ *
+ * ## What it is not yet good for
+ *
+ * **The frozen thresholds were tuned on the original development half, which
+ * included `codex-c`.** So this split's held-out half contains prose that was
+ * seen during tuning, and measuring *today's* parameters against it is
+ * contaminated for every `codex-c` pair. This split is clean for the next
+ * tuning cycle, not retroactively. Any number computed on it now must say so.
+ */
+export const BAND_STRATIFIED_HELD_OUT_AGENTS = new Set(["codex-c", "codex-e"]);
+
+export const BAND_STRATIFIED_DEVELOPMENT_AGENTS = new Set([
+  "codex-a",
+  "codex-b",
+  "codex-d",
+]);
+
+export function bandStratifiedSplitOf(leftTaskId, rightTaskId) {
+  const held =
+    BAND_STRATIFIED_HELD_OUT_AGENTS.has(TASK_AGENTS[leftTaskId]) ||
+    BAND_STRATIFIED_HELD_OUT_AGENTS.has(TASK_AGENTS[rightTaskId]);
+  return held ? "held-out" : "development";
+}
+
+/** The two registered splits, by the name `--split-rule` selects them with. */
+export const SPLIT_RULES = {
+  registered: {
+    splitOf,
+    development: DEVELOPMENT_AGENTS,
+    heldOut: HELD_OUT_AGENTS,
+    measuresObservedContention: false,
+  },
+  "band-stratified": {
+    splitOf: bandStratifiedSplitOf,
+    development: BAND_STRATIFIED_DEVELOPMENT_AGENTS,
+    heldOut: BAND_STRATIFIED_HELD_OUT_AGENTS,
+    measuresObservedContention: true,
+  },
+};

@@ -42,9 +42,7 @@ import {
 import { TEAM_QUEUE_WIRED_SCENARIO } from "./team-queue-wired-scenario.mjs";
 import {
   assertRegisteredSeed,
-  DEVELOPMENT_AGENTS,
-  HELD_OUT_AGENTS,
-  splitOf,
+  SPLIT_RULES,
   TASK_AGENTS,
 } from "./intent-holdout.mjs";
 
@@ -154,9 +152,31 @@ if (files.length === 0) {
 const groundingOptions = { ...DEFAULT_INTENT_GROUNDING_OPTIONS, ...overrides };
 const signalOptions = { ...DEFAULT_GROUNDED_INTENT_OPTIONS, ...overrides };
 
+/**
+ * Which registered split to read the corpus through.
+ *
+ * `registered` is the original agent split and stays the default so repeating
+ * a past evaluation does not silently change what was measured.
+ * `band-stratified` is the 2026-08-06 registration, and is the only one whose
+ * held-out half can contain an observed-contending pair at all — see
+ * `intent-holdout.mjs` for why the first one cannot.
+ */
+const splitRuleName =
+  args.find((entry) => entry.startsWith("--split-rule="))?.slice(
+    "--split-rule=".length,
+  ) ?? "registered";
+const splitRule = SPLIT_RULES[splitRuleName];
+if (splitRule === undefined) {
+  throw new Error(
+    `--split-rule must be one of ${Object.keys(SPLIT_RULES).join(", ")}, ` +
+      `got ${splitRuleName}`,
+  );
+}
+const splitOf = splitRule.splitOf;
+
 /** The agents whose intent prose this invocation is allowed to look at. */
 const visibleAgents =
-  wantedSplit === "development" ? DEVELOPMENT_AGENTS : HELD_OUT_AGENTS;
+  wantedSplit === "development" ? splitRule.development : splitRule.heldOut;
 
 const pairKey = (a, b) => [a, b].sort().join("|");
 
@@ -273,11 +293,25 @@ function matrix(rows, fires) {
   };
 }
 
+/**
+ * Precision against a truth set with no positives in it is arithmetically 0%
+ * and says nothing about the signal: every firing is a false positive by
+ * construction, so a perfect signal and a broken one score the same. Printing
+ * `0%` there invites exactly the misreading it produced once already, so the
+ * degenerate case is named instead of scored.
+ */
+const precisionOf = (m) =>
+  m.precision === undefined
+    ? " n/a"
+    : m.positives === 0
+      ? " n/m"
+      : `${(m.precision * 100).toFixed(0)}%`.padStart(4);
+
 const format = (m) =>
   `pairs=${String(m.pairs).padStart(3)} pos=${String(m.positives).padStart(2)} ` +
   `fired=${String(m.fired).padStart(2)} TP=${String(m.truePositives).padStart(2)} ` +
   `FP=${String(m.falsePositives).padStart(2)} FN=${String(m.falseNegatives).padStart(2)} ` +
-  `precision=${m.precision === undefined ? " n/a" : `${(m.precision * 100).toFixed(0)}%`.padStart(4)} ` +
+  `precision=${precisionOf(m)} ` +
   `recall=${m.recall === undefined ? " n/a" : `${(m.recall * 100).toFixed(0)}%`.padStart(4)}`;
 
 const pooled = { designed: [], observed: [], "observed (both patched)": [] };
@@ -400,7 +434,14 @@ if (asJson) {
     );
   }
   console.log(
-    `\noptions: ${JSON.stringify({ ...groundingOptions, ...signalOptions })}`,
+    `\nsplit rule: ${splitRuleName}` +
+      (splitRule.measuresObservedContention
+        ? ""
+        : "  (its held-out half holds no observed-contending pair; " +
+          "observed precision there reads n/m by construction)"),
+  );
+  console.log(
+    `options: ${JSON.stringify({ ...groundingOptions, ...signalOptions })}`,
   );
   console.log("\nfirings:");
   for (const row of pooled.designed.filter((r) => r.fires)) {

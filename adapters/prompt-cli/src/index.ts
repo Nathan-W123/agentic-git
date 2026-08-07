@@ -6,6 +6,7 @@ import {
   type AgentCapabilities,
   type AgentEvent,
   type AgentSession,
+  type AgentTokenUsage,
   type CoordinatorContext,
   type StartTaskInput,
 } from "@coord/agent-protocol";
@@ -92,6 +93,90 @@ export interface PromptCliProfile {
    * the envelope itself reports failure.
    */
   unwrap(stdout: string): string;
+  /**
+   * What the invocation cost, if the CLI said.
+   *
+   * Undefined where the envelope carries no usage at all: "not reported" and
+   * "cost nothing" are different claims, and a total built from the second is
+   * quietly wrong. Every `team-queue-wired` run reported `tokens=0` for
+   * exactly this reason — nothing here read the figure the CLI was already
+   * printing.
+   */
+  usage?(stdout: string): PromptCliUsage | undefined;
+}
+
+/**
+ * One invocation's cost, as the vendor CLI reported it.
+ *
+ * `totalTokens` counts everything the request was billed for, cache included:
+ * a cached read is cheaper than a fresh one but it is not free, and a total
+ * that omitted it would understate a long session badly — in practice cache
+ * traffic dominates. The split is kept alongside so a reader can recover the
+ * uncached figure.
+ */
+export interface PromptCliUsage {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheCreationTokens: number;
+  /** What the CLI said it cost, where it says so. */
+  costUsd?: number;
+}
+
+function numberField(source: Record<string, unknown>, name: string): number {
+  const value = source[name];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+/**
+ * Reads the `usage` block Claude Code prints in its result envelope.
+ *
+ * The envelope is the same JSON `unwrap` already parses, so this adds no
+ * second invocation and no second parse contract — if the shape ever changes,
+ * both fail together rather than one silently reporting zero.
+ */
+export function parseClaudeUsage(stdout: string): PromptCliUsage | undefined {
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(stdout.trim()) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (typeof envelope !== "object" || envelope === null) {
+    return undefined;
+  }
+  const usage = (envelope as { usage?: unknown }).usage;
+  if (typeof usage !== "object" || usage === null) {
+    return undefined;
+  }
+  const record = usage as Record<string, unknown>;
+  const inputTokens = numberField(record, "input_tokens");
+  const outputTokens = numberField(record, "output_tokens");
+  const cacheReadTokens = numberField(record, "cache_read_input_tokens");
+  const cacheCreationTokens = numberField(
+    record,
+    "cache_creation_input_tokens",
+  );
+  const cost = (envelope as { total_cost_usd?: unknown }).total_cost_usd;
+  return {
+    totalTokens:
+      inputTokens + outputTokens + cacheReadTokens + cacheCreationTokens,
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheCreationTokens,
+    ...(typeof cost === "number" && Number.isFinite(cost)
+      ? { costUsd: cost }
+      : {}),
+  };
+}
+
+/** What one prompt-cli invocation cost, and which half of the task it bought. */
+export interface PromptCliTokenUsage extends PromptCliUsage {
+  phase: "planning" | "execution";
+  durationMs: number;
+  at: string;
 }
 
 export const PROMPT_CLI_EFFORTS = [
@@ -155,6 +240,7 @@ export const CLAUDE_PROFILE: PromptCliProfile = {
     }
     return record.result;
   },
+  usage: parseClaudeUsage,
 };
 
 /**
@@ -256,6 +342,7 @@ interface PromptCliSession {
   eventHandlers: Set<(event: AgentEvent) => void>;
   controller: AbortController | undefined;
   active: Promise<ProcessOutput> | undefined;
+  tokenUsage: PromptCliTokenUsage[];
   scopeDecisions: ScopeChangeDecision[];
   pendingScope: Map<
     string,
@@ -656,6 +743,7 @@ export class PromptCliAdapter implements AgentAdapter {
       eventHandlers: new Set(),
       controller: undefined,
       active: undefined,
+      tokenUsage: [],
       scopeDecisions: [],
       pendingScope: new Map(),
       cancelled: false,
@@ -774,6 +862,7 @@ export class PromptCliAdapter implements AgentAdapter {
         ),
         this.executionPrompt(record, context),
         this.executionTimeoutMs,
+        "execution",
       );
       const execution = extractJsonObject(
         this.profile.unwrap(stdout),
@@ -948,6 +1037,7 @@ export class PromptCliAdapter implements AgentAdapter {
       ),
       prompt,
       this.planningTimeoutMs,
+      "planning",
     );
     const plan = extractJsonObject(this.profile.unwrap(stdout), "the plan");
     assertAgentPlan(plan);
@@ -965,6 +1055,7 @@ export class PromptCliAdapter implements AgentAdapter {
     args: readonly string[],
     prompt: string,
     timeoutMs: number,
+    phase: "planning" | "execution",
   ): Promise<string> {
     if (record.active !== undefined) {
       throw new Error(
@@ -1008,7 +1099,81 @@ export class PromptCliAdapter implements AgentAdapter {
         `${this.profile.name} output exceeded the configured limit`,
       );
     }
+    // Recorded only where the CLI actually reported a figure. A profile with
+    // no `usage` reader, or an envelope without a usage block, contributes
+    // nothing rather than contributing a zero.
+    const usage = this.profile.usage?.(output.stdout);
+    if (usage !== undefined) {
+      record.tokenUsage.push({
+        ...usage,
+        phase,
+        durationMs: output.durationMs,
+        at: new Date().toISOString(),
+      });
+    }
     return output.stdout;
+  }
+
+  /** Every invocation this adapter made, for cost accounting and benchmarks. */
+  public allTokenUsage(): (PromptCliTokenUsage & {
+    sessionId: string;
+    taskId: string;
+  })[] {
+    return [...this.sessions.values()].flatMap((record) =>
+      record.tokenUsage.map((entry) => ({
+        ...entry,
+        sessionId: record.session.id,
+        taskId: record.input.task.id,
+      })),
+    );
+  }
+
+  /** Total tokens across every session this adapter drove. */
+  public totalTokens(): number {
+    return this.allTokenUsage().reduce(
+      (sum, entry) => sum + entry.totalTokens,
+      0,
+    );
+  }
+
+  /** What the vendor said this adapter's work cost, where it said so. */
+  public totalCostUsd(): number {
+    return this.allTokenUsage().reduce(
+      (sum, entry) => sum + (entry.costUsd ?? 0),
+      0,
+    );
+  }
+
+  /**
+   * The protocol-shaped view of {@link allTokenUsage}, for the control plane.
+   *
+   * Summed per phase, matching what `CodexAdapter` reports, so a run mixing
+   * adapters produces one comparable number rather than two shapes.
+   */
+  public reportedTokenUsage(sessionId: string): AgentTokenUsage[] {
+    const totals = new Map<
+      AgentTokenUsage["phase"],
+      { totalTokens: number; inputTokens: number; outputTokens: number }
+    >();
+    for (const entry of this.requireSession(sessionId).tokenUsage) {
+      const current = totals.get(entry.phase) ?? {
+        totalTokens: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+      };
+      totals.set(entry.phase, {
+        totalTokens: current.totalTokens + entry.totalTokens,
+        // Cache traffic is input the request was billed for, so it belongs on
+        // the input side rather than nowhere.
+        inputTokens:
+          current.inputTokens +
+          entry.inputTokens +
+          entry.cacheReadTokens +
+          entry.cacheCreationTokens,
+        outputTokens: current.outputTokens + entry.outputTokens,
+      });
+    }
+    return [...totals].map(([phase, sums]) => ({ phase, ...sums }));
   }
 
   private createScopeWaiter(

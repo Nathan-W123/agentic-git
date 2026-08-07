@@ -401,3 +401,123 @@ test("the assessor reports independence with both sides' modules and no score", 
     "src/pricing/tax.js",
   ]);
 });
+
+test("a relation resting on a weak secondary target is discounted", () => {
+  // The recurring false positive, in the recorded corpus and in the live
+  // `team-queue-wired` runs alike: one intent reaches its own module strongly
+  // and the caller weakly, because it mentions the total it must not disturb.
+  // A call edge found through that weak reach used to count exactly as much as
+  // one found through the intent's strongest target.
+  //
+  // The groundings are built here rather than derived from prose so the ranks
+  // under test are the ones stated, not whatever a sentence happens to yield.
+  const index = seedIndex({
+    files: [
+      indexedFile(
+        "src/pricing/total.js",
+        ["DELIVERY", "orderTotal"],
+        ["../format/money.js"],
+        [{ from: "orderTotal", to: "roundMoney" }],
+      ),
+      indexedFile("src/pricing/discount.js", ["LOYAL_RATE", "discountRate"]),
+      indexedFile("src/format/money.js", ["PLACES", "roundMoney"]),
+    ],
+  });
+  const grounded = (
+    text: string,
+    targets: { file: string; score: number; symbols: string[] }[],
+  ) => ({
+    text,
+    grounding: {
+      revision: index.revision,
+      targets: targets.map((target) => ({ ...target, anchors: [] })),
+      vocabulary: [],
+      confidence: "grounded" as const,
+      notes: [],
+    },
+  });
+
+  // Its own module at full strength; the caller reached only in passing.
+  const loyalty = grounded(
+    "Raise the loyalty discount rate for a customer with more orders",
+    [
+      { file: "src/pricing/discount.js", score: 1, symbols: ["discountRate"] },
+      { file: "src/pricing/total.js", score: 0.667, symbols: ["orderTotal"] },
+    ],
+  );
+  const rounding = grounded(
+    "Round every amount a customer is shown to whole pence",
+    [{ file: "src/format/money.js", score: 1, symbols: ["roundMoney"] }],
+  );
+
+  const flattened = assessGroundedIntent(loyalty, rounding, index, {
+    ...DEFAULT_GROUNDED_INTENT_OPTIONS,
+    rankWeighting: 0,
+  });
+  const weighted = assessGroundedIntent(loyalty, rounding, index);
+
+  assert.equal(flattened.relation, "calls");
+  assert.equal(flattened.fires, true, "the flattened reading is the bug");
+  // 0.65 * min(0.667, 1) = 0.4335, below the 0.5 fire threshold.
+  assert.ok(
+    weighted.score < flattened.score,
+    `weighted ${String(weighted.score)} should be below ${String(flattened.score)}`,
+  );
+  assert.equal(weighted.fires, false, "the weak link must stop it firing");
+});
+
+test("rank weighting leaves a relation between two strongest targets alone", () => {
+  // The other half of the guarantee: the fix must cost nothing on pairs whose
+  // evidence runs through each intent's own best target, which is where every
+  // true positive in the live corpus came from.
+  const index = seedIndex();
+  const left = paired("Add a flat handling charge to every order total", index);
+  const right = paired(
+    "Stop charging tax at the standard rate for digital goods",
+    index,
+  );
+  assert.equal(left.grounding.targets[0]?.file, "src/pricing/total.js");
+  assert.equal(right.grounding.targets[0]?.file, "src/pricing/tax.js");
+
+  const weighted = assessGroundedIntent(left, right, index);
+  const flattened = assessGroundedIntent(left, right, index, {
+    ...DEFAULT_GROUNDED_INTENT_OPTIONS,
+    rankWeighting: 0,
+  });
+  assert.equal(weighted.score, flattened.score);
+  assert.equal(weighted.fires, true);
+});
+
+test("rank weighting can only lower a score, never raise one", () => {
+  // Why the fix cannot introduce a false positive: it is a multiplier in
+  // [0, 1] on a relation's weight. Anything it changes, it changes downward.
+  const index = seedIndex();
+  const pairs: [string, string][] = [
+    [
+      "Add a flat handling charge to every order total",
+      "Add a card surcharge on top of the order total",
+    ],
+    [
+      "Raise the loyalty discount rate for customers with more orders, " +
+        "leaving the order total otherwise unchanged",
+      "Round every amount a customer is shown to whole pence",
+    ],
+    [
+      "Stop charging tax at the standard rate for digital goods",
+      "Add a flat handling charge to every order total",
+    ],
+  ];
+  for (const [leftText, rightText] of pairs) {
+    const left = paired(leftText, index);
+    const right = paired(rightText, index);
+    const weighted = assessGroundedIntent(left, right, index);
+    const flattened = assessGroundedIntent(left, right, index, {
+      ...DEFAULT_GROUNDED_INTENT_OPTIONS,
+      rankWeighting: 0,
+    });
+    assert.ok(
+      weighted.score <= flattened.score,
+      `${leftText} / ${rightText}: ${String(weighted.score)} > ${String(flattened.score)}`,
+    );
+  }
+});
