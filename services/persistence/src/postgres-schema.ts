@@ -521,4 +521,27 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
     name: "user-appearance",
     statements: [`ALTER TABLE users ADD COLUMN appearance TEXT`],
   },
+  {
+    // Mirrors the SQLite migration of the same version. Postgres has no
+    // COLLATE NOCASE, so the email is stored lowercased by the store instead.
+    version: 16,
+    name: "organization-invitations",
+    statements: [
+      `CREATE TABLE invitations (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        email TEXT NOT NULL,
+        role TEXT NOT NULL,
+        secret_hash TEXT NOT NULL,
+        invited_by TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        accepted_at TEXT,
+        accepted_by TEXT REFERENCES users(id),
+        revoked_at TEXT
+      )`,
+      `CREATE INDEX invitations_by_organization
+         ON invitations(organization_id, created_at DESC)`,
+    ],
+  },
 ];

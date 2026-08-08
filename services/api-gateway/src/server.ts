@@ -1,5 +1,6 @@
 import {
   createHash,
+  randomBytes,
   randomUUID,
   timingSafeEqual,
 } from "node:crypto";
@@ -31,7 +32,9 @@ import {
   AuthService,
   AuthenticationError,
   hashPassword,
+  hashSecret,
   parseBearer,
+  secretMatches,
   type AuthenticatedPrincipal,
 } from "./auth.js";
 import {
@@ -51,6 +54,9 @@ const API_PREFIX = "/api/v1";
 const MAX_JSON_BYTES = 1024 * 1024;
 /** How long a worker holds a task before it must heartbeat again. */
 const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
+/** A week: long enough to be useful, short enough to be a poor thing to leak. */
+const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 const ROLES: readonly OrganizationRole[] = [
   "owner",
   "admin",
@@ -457,6 +463,39 @@ function matchPath(pathname: string, pattern: RegExp): string[] | undefined {
   }
 }
 
+/** An invitation without its secret, which is never stored recoverably. */
+function publicInvitation(invitation: {
+  id: string;
+  organizationId: string;
+  email: string;
+  role: OrganizationRole;
+  invitedBy: string;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | undefined;
+  acceptedBy: string | undefined;
+  revokedAt: string | undefined;
+}) {
+  const status =
+    invitation.revokedAt !== undefined
+      ? "revoked"
+      : invitation.acceptedAt !== undefined
+        ? "accepted"
+        : Date.parse(invitation.expiresAt) < Date.now()
+          ? "expired"
+          : "pending";
+  return {
+    id: invitation.id,
+    organizationId: invitation.organizationId,
+    email: invitation.email,
+    role: invitation.role,
+    invitedBy: invitation.invitedBy,
+    createdAt: invitation.createdAt,
+    expiresAt: invitation.expiresAt,
+    status,
+  };
+}
+
 function publicUser(user: {
   id: string;
   email: string;
@@ -718,13 +757,24 @@ export class ApiGateway {
         response.writeHead(204).end();
         return;
       }
+      // Looking at an invitation, and accepting one, must work before the
+      // recipient has an account — that is the entire point of an invitation.
+      // Both carry their own secret, so neither is unauthenticated in the
+      // sense that matters.
+      const invitationPath = /^\/api\/v1\/invitations\/[^/]+(\/accept)?$/u.test(
+        url.pathname,
+      );
       const isPublic =
-        request.method === "GET" && url.pathname === `${API_PREFIX}/health` ||
-        request.method === "POST" &&
+        (request.method === "GET" && url.pathname === `${API_PREFIX}/health`) ||
+        (request.method === "GET" && invitationPath) ||
+        (request.method === "POST" &&
           [
             `${API_PREFIX}/auth/login`,
             `${API_PREFIX}/auth/bootstrap`,
-          ].includes(url.pathname);
+          ].includes(url.pathname)) ||
+        (request.method === "POST" &&
+          url.pathname.endsWith("/accept") &&
+          invitationPath);
       if (!isPublic) {
         const bearer = parseBearer(
           typeof request.headers.authorization === "string"
@@ -863,6 +913,137 @@ export class ApiGateway {
       return;
     }
 
+    // ---- Accepting an invitation ------------------------------------------
+    // Reachable without a session: the recipient may have no account yet. The
+    // link's own secret is the credential, so this is not an open endpoint.
+    // Two patterns rather than one with an optional group: matchPath decodes
+    // every group, so an absent group comes back as the string "undefined"
+    // rather than as undefined.
+    const inviteReadMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/invitations/([^/]+)$`, "u"),
+    );
+    const inviteAcceptMatch =
+      inviteReadMatch === undefined
+        ? matchPath(
+            path,
+            new RegExp(`^${API_PREFIX}/invitations/([^/]+)/accept$`, "u"),
+          )
+        : undefined;
+    const inviteTokenMatch = inviteReadMatch ?? inviteAcceptMatch;
+    if (inviteTokenMatch !== undefined) {
+      const token = inviteTokenMatch[0] ?? "";
+      const action = inviteAcceptMatch === undefined ? undefined : "accept";
+      const separator = token.indexOf(".");
+      const invitation =
+        separator < 1
+          ? undefined
+          : await this.options.store.getInvitation(token.slice(0, separator));
+      const secret = separator < 1 ? "" : token.slice(separator + 1);
+      // One answer for every way a link can be wrong, so a probe cannot tell
+      // "no such invitation" from "wrong secret".
+      if (
+        invitation === undefined ||
+        !secretMatches(secret, invitation.secretHash)
+      ) {
+        throw new HttpError(404, "not_found", "This invitation is not valid");
+      }
+      const organization = await this.options.store.getOrganization(
+        invitation.organizationId,
+      );
+      const state = publicInvitation(invitation).status;
+
+      if (method === "GET" && action === undefined) {
+        this.sendJson(response, 200, {
+          invitation: {
+            email: invitation.email,
+            role: invitation.role,
+            status: state,
+            organizationName: organization?.name ?? "this organization",
+            expiresAt: invitation.expiresAt,
+          },
+        });
+        return;
+      }
+
+      if (method === "POST" && action === "accept") {
+        if (state !== "pending") {
+          throw new HttpError(
+            409,
+            `invitation_${state}`,
+            `This invitation has already been ${state}`,
+          );
+        }
+        const body = objectBody(await this.readJson(request));
+        let user = await this.options.store.getUserByEmail(invitation.email);
+        if (user === undefined) {
+          user = await this.options.store.createUser({
+            email: invitation.email,
+            displayName:
+              stringField(body["displayName"], "displayName", { max: 120 }) ??
+              "",
+            passwordDigest: await hashPassword(
+              stringField(body["password"], "password", { max: 256 }) ?? "",
+            ),
+          });
+        } else {
+          // The account already exists, so the invitation is not proof of who
+          // is holding the link. Signing in is.
+          const signedIn = await this.auth
+            .authenticate(request.headers.cookie)
+            .catch(() => undefined);
+          if (signedIn?.user.id !== user.id) {
+            throw new HttpError(
+              409,
+              "account_exists",
+              "An account already uses that address. Sign in as " +
+                `${invitation.email} and open this link again.`,
+            );
+          }
+        }
+        const claimed = await this.options.store.acceptInvitation(
+          invitation.id,
+          user.id,
+          new Date().toISOString(),
+        );
+        if (!claimed) {
+          throw new HttpError(
+            409,
+            "invitation_used",
+            "This invitation has already been used",
+          );
+        }
+        await this.options.store.saveMembership({
+          organizationId: invitation.organizationId,
+          userId: user.id,
+          role: invitation.role,
+        });
+        await this.options.store.appendAudit(undefined, {
+          type: "membership_changed",
+          data: {
+            organizationId: invitation.organizationId,
+            userId: user.id,
+            role: invitation.role,
+            action: "accepted_invitation",
+            actorId: user.id,
+          },
+        });
+        const issued = await this.auth.issueSession(
+          user,
+          this.remoteAddress(request),
+          request.headers["user-agent"] ?? "",
+        );
+        response.setHeader("Set-Cookie", issued.cookies);
+        this.sendJson(response, 200, {
+          user: issued.principal.user,
+          memberships: issued.principal.memberships,
+          csrfToken: issued.csrfToken,
+        });
+        return;
+      }
+      throw new HttpError(405, "method_not_allowed", "Unsupported method");
+    }
+
     const principal = this.requirePrincipal(context);
     if (method === "POST" && path === `${API_PREFIX}/auth/logout`) {
       // A bearer token has no session to end; revoking it is a separate,
@@ -914,6 +1095,7 @@ export class ApiGateway {
       this.sendJson(response, 200, { user: publicUser(updated) });
       return;
     }
+
 
     // ---- Remote worker protocol -------------------------------------------
     // Everything that pulls work or returns changesets requires the run_task
@@ -1588,6 +1770,125 @@ export class ApiGateway {
         this.sendJson(response, 200, { organization });
         return;
       }
+    }
+
+
+    // ---- Invitations ------------------------------------------------------
+    // Membership already required an account, and creating an account required
+    // a system administrator, so an organization owner had no way to bring in
+    // a colleague. An invitation closes that loop: it names an email and a
+    // role, and creates the account at the moment it is accepted.
+    const invitationsMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/organizations/([^/]+)/invitations$`, "u"),
+    );
+    if (invitationsMatch !== undefined) {
+      const organizationId = invitationsMatch[0] ?? "";
+      const authorized = await authorizeOrganization(
+        this.options.store,
+        principal,
+        organizationId,
+        "manage_members",
+      );
+      if (method === "GET") {
+        this.sendJson(response, 200, {
+          invitations: (
+            await this.options.store.listInvitations(organizationId)
+          ).map(publicInvitation),
+        });
+        return;
+      }
+      if (method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const email = emailField(body["email"]) ?? "";
+        const role = stringField(body["role"], "role", { max: 20 }) as
+          | OrganizationRole
+          | undefined;
+        if (role === undefined || !ROLES.includes(role)) {
+          throw new HttpError(400, "invalid_role", "Role is invalid");
+        }
+        // The same ceiling as adding a member directly: an invitation must not
+        // be a way to hand out a role you could not assign yourself.
+        if (!canAssignRole(authorized.role, role)) {
+          throw new HttpError(403, "forbidden", "You cannot assign that role");
+        }
+        const existing = await this.options.store.getUserByEmail(email);
+        if (existing !== undefined) {
+          const memberships = await this.options.store.listMemberships(
+            organizationId,
+          );
+          if (memberships.some((entry) => entry.userId === existing.id)) {
+            throw new HttpError(
+              409,
+              "already_a_member",
+              "That person is already in this organization",
+            );
+          }
+        }
+        const id = `inv_${randomBytes(9).toString("base64url")}`;
+        const secret = randomBytes(32).toString("base64url");
+        const now = new Date();
+        const invitation = {
+          id,
+          organizationId,
+          email,
+          role,
+          secretHash: hashSecret(secret),
+          invitedBy: principal.user.id,
+          createdAt: now.toISOString(),
+          expiresAt: new Date(
+            now.getTime() + INVITATION_TTL_MS,
+          ).toISOString(),
+          acceptedAt: undefined,
+          acceptedBy: undefined,
+          revokedAt: undefined,
+        };
+        await this.options.store.createInvitation(invitation);
+        await this.options.store.appendAudit(undefined, {
+          type: "membership_changed",
+          data: {
+            organizationId,
+            email,
+            role,
+            action: "invited",
+            actorId: principal.user.id,
+          },
+        });
+        // The only time the secret exists in a response. It is not stored in
+        // recoverable form, so a lost link is reissued rather than looked up.
+        this.sendJson(response, 201, {
+          invitation: publicInvitation(invitation),
+          token: `${id}.${secret}`,
+        });
+        return;
+      }
+    }
+
+    const invitationMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/organizations/([^/]+)/invitations/([^/]+)$`,
+        "u",
+      ),
+    );
+    if (invitationMatch !== undefined && method === "DELETE") {
+      const [organizationId = "", invitationId = ""] = invitationMatch;
+      await authorizeOrganization(
+        this.options.store,
+        principal,
+        organizationId,
+        "manage_members",
+      );
+      const found = await this.options.store.getInvitation(invitationId);
+      if (found === undefined || found.organizationId !== organizationId) {
+        throw new HttpError(404, "not_found", "Invitation was not found");
+      }
+      await this.options.store.revokeInvitation(
+        invitationId,
+        new Date().toISOString(),
+      );
+      this.sendJson(response, 200, { revoked: true });
+      return;
     }
 
     const membersMatch = matchPath(

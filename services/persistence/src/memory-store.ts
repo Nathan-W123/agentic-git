@@ -71,6 +71,7 @@ import type {
   RecordTokenUsageInput,
   TokenUsageFilter,
   TokenUsageRecord,
+  InvitationRecord,
   UserAccount,
   UserAppearance,
 } from "./store.js";
@@ -787,6 +788,54 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       )
       .sort((left, right) => left.recordedAt.localeCompare(right.recordedAt))
       .map((record) => ({ ...record }));
+  }
+
+
+  /* ------------------------------------------------------- invitations ---- */
+
+  private readonly invitations = new Map<string, InvitationRecord>();
+
+  public async createInvitation(invitation: InvitationRecord): Promise<void> {
+    this.invitations.set(invitation.id, { ...invitation });
+  }
+
+  public async getInvitation(id: string): Promise<InvitationRecord | undefined> {
+    const found = this.invitations.get(id);
+    return found === undefined ? undefined : { ...found };
+  }
+
+  public async listInvitations(
+    organizationId: string,
+  ): Promise<InvitationRecord[]> {
+    return [...this.invitations.values()]
+      .filter((entry) => entry.organizationId === organizationId)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .map((entry) => ({ ...entry }));
+  }
+
+  public async acceptInvitation(
+    id: string,
+    userId: string,
+    at: string,
+  ): Promise<boolean> {
+    const found = this.invitations.get(id);
+    if (
+      found === undefined ||
+      found.acceptedAt !== undefined ||
+      found.revokedAt !== undefined
+    ) {
+      return false;
+    }
+    found.acceptedAt = at;
+    found.acceptedBy = userId;
+    return true;
+  }
+
+  public async revokeInvitation(id: string, at: string): Promise<void> {
+    const found = this.invitations.get(id);
+    if (found !== undefined && found.revokedAt === undefined) {
+      found.revokedAt = at;
+    }
   }
 
   public async createApiToken(token: ApiTokenRecord): Promise<void> {

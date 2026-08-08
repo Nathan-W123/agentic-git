@@ -73,6 +73,28 @@ export interface Organization {
  * as their own, so colleagues can tell at a glance whose agent is holding a
  * file. Both are `#rrggbb` or absent.
  */
+/**
+ * A pending invitation into an organization.
+ *
+ * The secret is never stored — only its hash — so a leaked database yields no
+ * usable invitation links. `email` is what the invitation is *for*; accepting
+ * it with a different signed-in account is refused, or the link would be a
+ * transferable membership grant.
+ */
+export interface InvitationRecord {
+  id: string;
+  organizationId: string;
+  email: string;
+  role: OrganizationRole;
+  secretHash: string;
+  invitedBy: UserId;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | undefined;
+  acceptedBy: UserId | undefined;
+  revokedAt: string | undefined;
+}
+
 export interface UserAppearance {
   accent?: string;
   agentColor?: string;
@@ -712,6 +734,14 @@ export interface CoordinationStore {
    */
   recordTokenUsage(input: RecordTokenUsageInput): Promise<TokenUsageRecord>;
   listTokenUsage(filter?: TokenUsageFilter): Promise<TokenUsageRecord[]>;
+
+  createInvitation(invitation: InvitationRecord): Promise<void>;
+  getInvitation(id: string): Promise<InvitationRecord | undefined>;
+  /** Newest first. Accepted and revoked ones are kept so the record stands. */
+  listInvitations(organizationId: string): Promise<InvitationRecord[]>;
+  /** Marks it used. Returns false when it was already used or revoked. */
+  acceptInvitation(id: string, userId: UserId, at: string): Promise<boolean>;
+  revokeInvitation(id: string, at: string): Promise<void>;
 
   createApiToken(token: ApiTokenRecord): Promise<void>;
   getApiToken(id: string): Promise<ApiTokenRecord | undefined>;

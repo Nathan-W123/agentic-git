@@ -44,6 +44,9 @@ import {
   closePopover,
   showMenu,
   showPopover,
+  badge,
+  relativeTime,
+  showModal,
   toast,
 } from "./ui.js";
 import { ensureAgentOptions, scrollThread, sendChat } from "./chat.js";
@@ -80,7 +83,17 @@ import {
   readOne,
   renderNotifications,
 } from "./screen-notifications.js";
-import { applyProviderSetting, saveAppearance } from "./data.js";
+import {
+  INVITE_ROLES,
+  acceptInvitation,
+  applyProviderSetting,
+  createInvitation,
+  invitationLink,
+  loadInvitations,
+  readInvitation,
+  revokeInvitation,
+  saveAppearance,
+} from "./data.js";
 
 /* ---------------------------------------------------------- formatting ---- */
 
@@ -193,6 +206,68 @@ function minutesValue(milliseconds) {
 /* --------------------------------------------------------------- auth ---- */
 
 let authMode = "login";
+
+/**
+ * The screen somebody lands on when they open an invite link.
+ *
+ * Rendered on the auth shell because the recipient usually has no account
+ * yet — that is what an invitation is for — so it has to work before there is
+ * anything to sign in to.
+ */
+function renderInvite() {
+  const invite = state.invite;
+  if (invite === undefined) {
+    return `<main class="auth-shell"><div class="auth-box">
+      <div class="auth-mascot">${brandMark(54)}
+        <div><h1>Checking your invitation…</h1></div></div>
+    </div></main>`;
+  }
+  if (invite.error !== undefined || invite.status !== "pending") {
+    const reason =
+      invite.error ??
+      {
+        accepted: "This invitation has already been used.",
+        revoked: "This invitation was revoked.",
+        expired: "This invitation has expired.",
+      }[invite.status] ??
+      "This invitation is no longer valid.";
+    return `<main class="auth-shell"><div class="auth-box">
+      <div class="auth-mascot">${brandMark(54)}
+        <div><h1>That link will not work</h1><p>${esc(reason)}</p></div></div>
+      <p class="auth-foot">Ask whoever invited you to send a new one.</p>
+    </div></main>`;
+  }
+  return `<main class="auth-shell">
+    <div class="auth-box">
+      <div class="auth-mascot">${brandMark(54)}
+        <div>
+          <h1>Join ${esc(invite.organizationName)}</h1>
+          <p>You have been invited as a ${esc(invite.role)}. Choose a password
+            and you are in.</p>
+        </div>
+      </div>
+      <form class="auth-card" data-act="invite-accept">
+        <label class="field">
+          <span>Email address</span>
+          <input class="input" value="${esc(invite.email)}" disabled>
+        </label>
+        <label class="field">
+          <span>Your name</span>
+          <input class="input" name="displayName" autocomplete="name" required>
+        </label>
+        <label class="field">
+          <span>Choose a password</span>
+          <input class="input" name="password" type="password" minlength="12"
+            autocomplete="new-password" required placeholder="••••••••••••">
+        </label>
+        <button class="btn btn-primary btn-wide" type="submit">
+          Accept and join
+        </button>
+        <p class="form-msg" id="auth-msg" role="alert"></p>
+      </form>
+    </div>
+  </main>`;
+}
 
 function renderAuth() {
   const setupRequired = state.health?.setupRequired === true;
@@ -376,6 +451,9 @@ function sidebar() {
         </span>
         <span class="pc-star">${icon("star")}</span>
       </div>
+      <button class="nav-item" data-act="invite" style="margin-bottom:4px">
+        ${icon("users")}<span>Invite someone</span>
+      </button>
       <div class="sys-line">
         <span class="dot ${state.health === undefined ? "grey" : "green"}"></span>
         ${state.health === undefined ? "Control plane unreachable" : "All systems operational"}
@@ -415,6 +493,8 @@ function settingsScreen() {
     </div>
 
     <div class="settings-grid">
+      ${invitationsCard()}
+
       ${appearanceCard()}
 
       <section class="card">
@@ -632,6 +712,123 @@ async function saveAppearanceChoice(patch) {
   } catch (error) {
     toast(error.message, "error");
   }
+}
+
+/* -------------------------------------------------------- invitations ---- */
+
+/**
+ * Inviting somebody onto the project.
+ *
+ * Worth being plain about what this grants: access is held at the
+ * organization level, not per repository, so an invitation admits someone to
+ * every repository this project has rather than to the one they were invited
+ * from. Saying so in the dialog is the difference between a considered choice
+ * and a surprise.
+ */
+async function inviteSomebody(rerender) {
+  const repository = currentRepository();
+  const values = await showModal({
+    title: "Invite someone to collaborate",
+    subtitle:
+      `They will be able to reach every repository in ${
+        state.project?.name ?? "this project"
+      }${repository === undefined ? "" : `, including ${repository.id}`}.`,
+    confirm: "Create invite link",
+    body: `<label class="field">
+        <span>Email address</span>
+        <input class="input" name="email" type="email" required
+          placeholder="colleague@company.com">
+      </label>
+      <label class="field">
+        <span>Role</span>
+        <select class="input" name="role">
+          ${INVITE_ROLES.map(
+            (role) => `<option value="${esc(role.value)}">${esc(role.label)} — ${esc(
+              role.detail,
+            )}</option>`,
+          ).join("")}
+        </select>
+      </label>`,
+  });
+  if (values === undefined || !values.email?.trim()) {
+    return;
+  }
+  try {
+    const created = await createInvitation(values.email.trim(), values.role);
+    rerender();
+    await showInviteLink(created.token, values.email.trim());
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * The link, shown once.
+ *
+ * The secret is not stored recoverably, so this dialog is the only chance to
+ * copy it — which the copy has to say, or somebody will close it and assume
+ * they can find it again later.
+ */
+async function showInviteLink(token, email) {
+  const link = invitationLink(token);
+  await showModal({
+    title: "Send this link",
+    subtitle: `${email} can use it once, within seven days. It is not stored,
+      so this is the only time it can be copied.`,
+    confirm: "Copy link",
+    cancel: "Done",
+    body: `<div class="invite-link"><code>${esc(link)}</code></div>`,
+  }).then((choice) => {
+    if (choice !== undefined) {
+      void navigator.clipboard
+        ?.writeText(link)
+        .then(() => toast("Invite link copied", "ok"))
+        .catch(() => toast("Could not copy — select the link instead", "error"));
+    }
+  });
+}
+
+/** Pending and spent invitations, for the Settings screen. */
+function invitationsCard() {
+  const rows = state.invitations ?? [];
+  return `<section class="card">
+    <div class="panel-head">
+      <div><h3>People</h3><p>Invitations into ${esc(
+        state.project?.name ?? "this project",
+      )}</p></div>
+      <span class="spacer"></span>
+      <button class="btn btn-sm btn-primary" data-act="invite">
+        ${icon("users")} Invite
+      </button>
+    </div>
+    ${
+      rows.length === 0
+        ? `<div class="set-row"><span class="sr-body"><div class="sr-sub">
+            No invitations yet. Anyone you invite joins with the role you pick
+            and can reach every repository in this project.</div></span></div>`
+        : rows
+            .map(
+              (invite) => `<div class="set-row">
+                <span class="sr-body">
+                  <div class="sr-title">${esc(invite.email)}</div>
+                  <div class="sr-sub">${esc(invite.role)} · invited ${esc(
+                    relativeTime(invite.createdAt),
+                  )}</div>
+                </span>
+                <span class="sr-ctl">
+                  ${badge(invite.status)}
+                  ${
+                    invite.status === "pending"
+                      ? `<button class="btn btn-sm" data-act="invite-revoke"
+                          data-value="${esc(invite.id)}">Revoke</button>`
+                      : ""
+                  }
+                </span>
+              </div>`,
+            )
+            .join("")
+    }
+  </section>`;
 }
 
 async function savePolicy(form) {
@@ -916,6 +1113,7 @@ document.addEventListener("click", (event) => {
     case "repo-menu":
       showMenu(node, [
         { act: "open-repo", value, label: "Open", iconName: "arrowRight" },
+        { act: "invite", label: "Invite someone…", iconName: "users" },
         {
           act: "star",
           value,
@@ -1114,6 +1312,20 @@ document.addEventListener("click", (event) => {
       readOne(value, render);
       return;
 
+    /* People */
+    case "invite":
+      closePopover();
+      void inviteSomebody(render);
+      return;
+    case "invite-revoke":
+      void revokeInvitation(value)
+        .then(() => {
+          toast("Invitation revoked", "ok");
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
+
     /* Settings */
     case "set-accent":
       void saveAppearanceChoice({ accent: value });
@@ -1163,6 +1375,28 @@ document.addEventListener("submit", (event) => {
     case "policy-save":
       void savePolicy(form);
       return;
+    case "invite-accept": {
+      const data = new FormData(form);
+      void acceptInvitation(
+        state.inviteToken,
+        String(data.get("displayName") ?? ""),
+        String(data.get("password") ?? ""),
+      )
+        .then(async () => {
+          state.invite = undefined;
+          state.inviteToken = undefined;
+          window.location.hash = "#repositories";
+          await boot();
+          toast("Welcome aboard", "ok");
+        })
+        .catch((error) => {
+          const message = $("#auth-msg");
+          if (message !== null) {
+            message.textContent = error.message;
+          }
+        });
+      return;
+    }
     case "chat-submit": {
       const input = $("[data-act='chat-input']", form);
       const agent = currentAgent();
@@ -1296,6 +1530,7 @@ async function refresh({ quiet = false } = {}) {
   }
   try {
     await loadContext();
+    await loadInvitations();
     invalidateCode();
     render();
   } catch (error) {
@@ -1314,7 +1549,42 @@ async function refresh({ quiet = false } = {}) {
   }
 }
 
+/**
+ * An invite link, if this is one.
+ *
+ * Checked before anything else: somebody arriving with a link has a specific
+ * intention, and dropping them on a sign-in form for an account they do not
+ * have yet would strand them.
+ */
+async function handleInviteLink() {
+  const match = /^#invite\/(.+)$/u.exec(window.location.hash);
+  if (match === null) {
+    return false;
+  }
+  state.inviteToken = match[1];
+  state.invite = undefined;
+  showInvite();
+  try {
+    const response = await readInvitation(state.inviteToken);
+    state.invite = response.invitation;
+  } catch (error) {
+    state.invite = { error: error.message, status: "invalid" };
+  }
+  showInvite();
+  return true;
+}
+
+function showInvite() {
+  closeSocket();
+  $("#app-root").hidden = true;
+  $("#auth-root").hidden = false;
+  $("#auth-root").innerHTML = renderInvite();
+}
+
 async function boot() {
+  if (await handleInviteLink()) {
+    return;
+  }
   await loadHealth();
   if (state.health?.setupRequired === true && state.principal === undefined) {
     authMode = "bootstrap";
@@ -1334,6 +1604,11 @@ async function boot() {
   render();
 
   void loadProviders().then(() => render());
+  void loadInvitations().then(() => {
+    if (state.route === "settings") {
+      render();
+    }
+  });
 
   connectSocket(() => {
     // The stream tells us something changed; the store stays the source of

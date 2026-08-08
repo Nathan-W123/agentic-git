@@ -79,6 +79,7 @@ import type {
   TokenUsageFilter,
   TokenUsageRecord,
   SubmittedTaskStatus,
+  InvitationRecord,
   UserAccount,
   UserAppearance,
   LeaseTaskInput,
@@ -1205,6 +1206,84 @@ export class PostgresCoordinationStore implements CoordinationStore {
       )
     ).rows as Row[];
     return rows.map((row) => this.toTokenUsage(row));
+  }
+
+
+  /* ------------------------------------------------------- invitations ---- */
+
+  public async createInvitation(invitation: InvitationRecord): Promise<void> {
+    await this.query(
+      `INSERT INTO invitations
+         (id, organization_id, email, role, secret_hash, invited_by,
+          created_at, expires_at, accepted_at, accepted_by, revoked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, NULL)`,
+      [
+        invitation.id,
+        invitation.organizationId,
+        // Lowercased here because this schema has no case-insensitive collation
+        // on the column, and an invitation must match the address regardless of
+        // how the recipient types it.
+        invitation.email.toLowerCase(),
+        invitation.role,
+        invitation.secretHash,
+        invitation.invitedBy,
+        invitation.createdAt,
+        invitation.expiresAt,
+      ],
+    );
+  }
+
+  public async getInvitation(id: string): Promise<InvitationRecord | undefined> {
+    const row = await this.row("SELECT * FROM invitations WHERE id = $1", [id]);
+    return row === undefined ? undefined : this.toInvitation(row);
+  }
+
+  public async listInvitations(
+    organizationId: string,
+  ): Promise<InvitationRecord[]> {
+    const rows = await this.rows(
+      `SELECT * FROM invitations WHERE organization_id = $1
+       ORDER BY created_at DESC`,
+      [organizationId],
+    );
+    return rows.map((row) => this.toInvitation(row));
+  }
+
+  public async acceptInvitation(
+    id: string,
+    userId: string,
+    at: string,
+  ): Promise<boolean> {
+    const rows = await this.rows(
+      `UPDATE invitations SET accepted_at = $1, accepted_by = $2
+       WHERE id = $3 AND accepted_at IS NULL AND revoked_at IS NULL
+       RETURNING id`,
+      [at, userId, id],
+    );
+    return rows.length === 1;
+  }
+
+  public async revokeInvitation(id: string, at: string): Promise<void> {
+    await this.query(
+      "UPDATE invitations SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL",
+      [at, id],
+    );
+  }
+
+  private toInvitation(row: Row): InvitationRecord {
+    return {
+      id: text(row, "id"),
+      organizationId: text(row, "organization_id"),
+      email: text(row, "email"),
+      role: text(row, "role") as InvitationRecord["role"],
+      secretHash: text(row, "secret_hash"),
+      invitedBy: text(row, "invited_by"),
+      createdAt: text(row, "created_at"),
+      expiresAt: text(row, "expires_at"),
+      acceptedAt: optionalText(row, "accepted_at"),
+      acceptedBy: optionalText(row, "accepted_by"),
+      revokedAt: optionalText(row, "revoked_at"),
+    };
   }
 
   public async createApiToken(token: ApiTokenRecord): Promise<void> {

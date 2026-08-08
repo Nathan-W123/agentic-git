@@ -1757,3 +1757,148 @@ test("an agent colour must be a plain hex triple", async (t) => {
     assert.equal(rejected.status, 400, `${value} should be refused`);
   }
 });
+
+test("an invitation brings in somebody who has no account yet", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "newcomer@example.com", role: "developer" } },
+  );
+  assert.equal(invited.status, 201);
+  const token = invited.data.token as string;
+  assert.match(token, /^inv_[\w-]+\.[\w-]+$/u);
+  // The secret is returned exactly once and is not stored recoverably.
+  assert.equal(invited.data.invitation.status, "pending");
+  assert.equal("secretHash" in invited.data.invitation, false);
+
+  // The recipient can read the invitation before having any account at all.
+  const anonymous = new TestClient(runtime.origin);
+  const preview = await anonymous.request(`/api/v1/invitations/${token}`);
+  assert.equal(preview.status, 200);
+  assert.equal(preview.data.invitation.email, "newcomer@example.com");
+  assert.equal(preview.data.invitation.role, "developer");
+
+  const accepted = await anonymous.request(`/api/v1/invitations/${token}/accept`, {
+    method: "POST",
+    body: { displayName: "Newcomer", password: PASSWORD },
+  });
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.data.user.email, "newcomer@example.com");
+  assert.equal(accepted.data.memberships[0].role, "developer");
+
+  // And they are signed in, so accepting lands them inside rather than at a
+  // login screen with a fresh password they just chose.
+  const me = await anonymous.request("/api/v1/auth/me");
+  assert.equal(me.status, 200);
+  assert.equal(me.data.user.email, "newcomer@example.com");
+});
+
+test("an invitation works once and stops working when revoked", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const first = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "once@example.com", role: "viewer" } },
+  );
+  const token = first.data.token as string;
+  const joiner = new TestClient(runtime.origin);
+  assert.equal(
+    (
+      await joiner.request(`/api/v1/invitations/${token}/accept`, {
+        method: "POST",
+        body: { displayName: "Once", password: PASSWORD },
+      })
+    ).status,
+    200,
+  );
+  // A used link is spent, not a standing grant.
+  const replay = new TestClient(runtime.origin);
+  assert.equal(
+    (
+      await replay.request(`/api/v1/invitations/${token}/accept`, {
+        method: "POST",
+        body: { displayName: "Impostor", password: PASSWORD },
+      })
+    ).status,
+    409,
+  );
+
+  const second = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "revoked@example.com", role: "viewer" } },
+  );
+  await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations/${second.data.invitation.id}`,
+    { method: "DELETE" },
+  );
+  const late = new TestClient(runtime.origin);
+  assert.equal(
+    (
+      await late.request(`/api/v1/invitations/${second.data.token}/accept`, {
+        method: "POST",
+        body: { displayName: "Late", password: PASSWORD },
+      })
+    ).status,
+    409,
+  );
+});
+
+test("a wrong or forged invitation link is indistinguishable from a missing one", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const made = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "probe@example.com", role: "viewer" } },
+  );
+  const id = made.data.invitation.id as string;
+  const anonymous = new TestClient(runtime.origin);
+  // A real id with the wrong secret must answer exactly as a made-up id does,
+  // or the endpoint confirms which invitations exist.
+  for (const token of [`${id}.wrong-secret`, "inv_nope.whatever", "garbage"]) {
+    assert.equal(
+      (await anonymous.request(`/api/v1/invitations/${token}`)).status,
+      404,
+      token,
+    );
+  }
+});
+
+test("an invitation cannot hand out a role its sender could not assign", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  // Bring in a developer, who may not manage members at all.
+  const invite = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "dev@example.com", role: "developer" } },
+  );
+  const developer = new TestClient(runtime.origin);
+  await developer.request(`/api/v1/invitations/${invite.data.token}/accept`, {
+    method: "POST",
+    body: { displayName: "Dev", password: PASSWORD },
+  });
+  const refused = await developer.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "escalate@example.com", role: "owner" } },
+  );
+  assert.equal(refused.status, 403);
+});
+
+test("inviting somebody who is already a member says so", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const setup = await bootstrap(owner);
+  const again = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: setup.user.email, role: "developer" } },
+  );
+  assert.equal(again.status, 409);
+  assert.equal(again.data.error.code, "already_a_member");
+});

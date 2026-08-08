@@ -80,6 +80,7 @@ import type {
   TokenUsageFilter,
   TokenUsageRecord,
   SubmittedTaskStatus,
+  InvitationRecord,
   UserAccount,
   UserAppearance,
   LeaseTaskInput,
@@ -1161,6 +1162,88 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(`SELECT * FROM token_usage${where} ORDER BY recorded_at ASC`)
       .all(...values) as Row[];
     return rows.map((row) => this.toTokenUsage(row));
+  }
+
+
+  /* ------------------------------------------------------- invitations ---- */
+
+  public async createInvitation(invitation: InvitationRecord): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO invitations
+           (id, organization_id, email, role, secret_hash, invited_by,
+            created_at, expires_at, accepted_at, accepted_by, revoked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+      )
+      .run(
+        invitation.id,
+        invitation.organizationId,
+        invitation.email,
+        invitation.role,
+        invitation.secretHash,
+        invitation.invitedBy,
+        invitation.createdAt,
+        invitation.expiresAt,
+      );
+  }
+
+  public async getInvitation(id: string): Promise<InvitationRecord | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM invitations WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row === undefined ? undefined : this.toInvitation(row);
+  }
+
+  public async listInvitations(
+    organizationId: string,
+  ): Promise<InvitationRecord[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM invitations WHERE organization_id = ?
+         ORDER BY created_at DESC`,
+      )
+      .all(organizationId) as Row[];
+    return rows.map((row) => this.toInvitation(row));
+  }
+
+  public async acceptInvitation(
+    id: string,
+    userId: string,
+    at: string,
+  ): Promise<boolean> {
+    // Conditional on still being unused: two people racing the same link must
+    // not both come away believing they were admitted.
+    const result = this.db
+      .prepare(
+        `UPDATE invitations SET accepted_at = ?, accepted_by = ?
+         WHERE id = ? AND accepted_at IS NULL AND revoked_at IS NULL`,
+      )
+      .run(at, userId, id);
+    return Number(result.changes) === 1;
+  }
+
+  public async revokeInvitation(id: string, at: string): Promise<void> {
+    this.db
+      .prepare(
+        "UPDATE invitations SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+      )
+      .run(at, id);
+  }
+
+  private toInvitation(row: Row): InvitationRecord {
+    return {
+      id: text(row, "id"),
+      organizationId: text(row, "organization_id"),
+      email: text(row, "email"),
+      role: text(row, "role") as InvitationRecord["role"],
+      secretHash: text(row, "secret_hash"),
+      invitedBy: text(row, "invited_by"),
+      createdAt: text(row, "created_at"),
+      expiresAt: text(row, "expires_at"),
+      acceptedAt: optionalText(row, "accepted_at"),
+      acceptedBy: optionalText(row, "accepted_by"),
+      revokedAt: optionalText(row, "revoked_at"),
+    };
   }
 
   public async createApiToken(token: ApiTokenRecord): Promise<void> {

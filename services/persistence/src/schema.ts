@@ -585,6 +585,38 @@ export const MIGRATIONS: readonly Migration[] = [
     name: "user-appearance",
     statements: [`ALTER TABLE users ADD COLUMN appearance TEXT`],
   },
+  {
+    // Bringing somebody new onto a team.
+    //
+    // Adding a member requires an account that already exists, and creating an
+    // account requires a system administrator — so an organization owner had
+    // no way at all to bring in a colleague. An invitation is the missing
+    // half: it names an email and a role, carries a secret the recipient
+    // presents once, and creates the account at the moment it is accepted.
+    //
+    // The secret is stored hashed, exactly like an API token, because a
+    // readable invitations table would otherwise be a list of working keys to
+    // every organization.
+    version: 16,
+    name: "organization-invitations",
+    statements: [
+      `CREATE TABLE invitations (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        email TEXT NOT NULL COLLATE NOCASE,
+        role TEXT NOT NULL,
+        secret_hash TEXT NOT NULL,
+        invited_by TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        accepted_at TEXT,
+        accepted_by TEXT REFERENCES users(id),
+        revoked_at TEXT
+      )`,
+      `CREATE INDEX invitations_by_organization
+         ON invitations(organization_id, created_at DESC)`,
+    ],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(

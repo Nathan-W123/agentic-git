@@ -74,6 +74,8 @@ export const state = {
     JSON.parse(window.localStorage.getItem("ag.favourites") ?? "[]"),
   ),
 
+  invitations: [],
+
   /* Filters */
   repoQuery: "",
   repoSort: "recent",
@@ -338,6 +340,68 @@ export function closeSocket() {
 
 export function socketLive() {
   return state.socket?.readyState === WebSocket.OPEN;
+}
+
+/* -------------------------------------------------------- invitations ---- */
+
+/**
+ * Roles an invitation can carry.
+ *
+ * The server refuses a role above the inviter's own, so this list is what the
+ * form offers rather than what it guarantees.
+ */
+export const INVITE_ROLES = [
+  { value: "developer", label: "Developer", detail: "Submit and run work" },
+  { value: "reviewer", label: "Reviewer", detail: "Approve changes" },
+  { value: "viewer", label: "Viewer", detail: "Read-only" },
+  { value: "admin", label: "Admin", detail: "Manage people and settings" },
+];
+
+export async function loadInvitations() {
+  if (!state.organizationId) {
+    state.invitations = [];
+    return state.invitations;
+  }
+  const response = await apiOptional(
+    `/organizations/${encodeURIComponent(state.organizationId)}/invitations`,
+    { invitations: [] },
+  );
+  state.invitations = response.invitations ?? [];
+  return state.invitations;
+}
+
+export async function createInvitation(email, role) {
+  const response = await api(
+    `/organizations/${encodeURIComponent(state.organizationId)}/invitations`,
+    { method: "POST", body: { email, role } },
+  );
+  await loadInvitations();
+  return response;
+}
+
+export async function revokeInvitation(invitationId) {
+  await api(
+    `/organizations/${encodeURIComponent(state.organizationId)}/invitations/` +
+      encodeURIComponent(invitationId),
+    { method: "DELETE" },
+  );
+  await loadInvitations();
+}
+
+/** The link a recipient opens. Built here so one place decides its shape. */
+export function invitationLink(token) {
+  return `${window.location.origin}/#invite/${token}`;
+}
+
+export async function readInvitation(token) {
+  return await api(`/invitations/${encodeURIComponent(token)}`);
+}
+
+export async function acceptInvitation(token, displayName, password) {
+  return await api(`/invitations/${encodeURIComponent(token)}/accept`, {
+    method: "POST",
+    body: { displayName, password },
+  });
 }
 
 /* --------------------------------------------------------- appearance ---- */
