@@ -1,5 +1,5 @@
 /**
- * Lattic — control room entry point.
+ * Lattice — control room entry point.
  *
  * The shell, the router, and the one delegated event listener live here;
  * every screen is a module that returns markup. Rendering is whole-screen and
@@ -204,7 +204,7 @@ function renderAuth() {
       <div class="auth-mascot">
         ${brandMark(54)}
         <div>
-          <h1>${bootstrap ? "Set up your control room" : "Sign in to Lattic"}</h1>
+          <h1>${bootstrap ? "Set up your control room" : "Sign in to Lattice"}</h1>
           <p>${
             bootstrap
               ? "Create the first owner for this control plane."
@@ -333,7 +333,7 @@ function sidebar() {
   return `<aside class="sidebar">
     <a class="brand" href="#repositories">
       ${brandMark(34)}
-      <span class="brand-text"><b>Lattic</b><span>Coordinator</span></span>
+      <span class="brand-text"><b>Lattice</b><span>Coordinator</span></span>
     </a>
 
     ${
@@ -600,7 +600,7 @@ function appearanceCard() {
 
   return `<section class="card">
     <div class="panel-head"><div><h3>Appearance</h3>
-      <p>How Lattic looks to you, and how your agents look to everyone</p></div></div>
+      <p>How Lattice looks to you, and how your agents look to everyone</p></div></div>
 
     <div class="set-row">
       <span class="sr-body">

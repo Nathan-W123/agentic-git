@@ -653,14 +653,24 @@ test("a colour that reaches a style attribute is validated first", async () => {
   assert.match(ui.slice(start, ui.indexOf("\n}", start)), /safeColor\(/u);
 });
 
-test("the product is named Lattic throughout the browser surface", async () => {
-  assert.match(await browserSource(), /<b>Lattic<\/b>/u);
-  assert.match(await publicFile("index.html"), /<title>Lattic<\/title>/u);
-  for (const file of ["app.js", "index.html", "manifest.webmanifest"]) {
+test("the product is named Lattice throughout the browser surface", async () => {
+  assert.match(await browserSource(), /<b>Lattice<\/b>/u);
+  assert.match(await publicFile("index.html"), /<title>Lattice<\/title>/u);
+  for (const file of [
+    "app.js",
+    "ui.js",
+    "styles.css",
+    "index.html",
+    "manifest.webmanifest",
+  ]) {
+    const source = await publicFile(file);
+    assert.equal(/Agentic/u.test(source), false, `${file} still says Agentic`);
+    // The earlier spelling was one letter short, which is exactly the kind of
+    // rename a search-and-replace leaves half-finished.
     assert.equal(
-      /Agentic/u.test(await publicFile(file)),
+      /Lattic(?!e)/u.test(source),
       false,
-      `${file} still says Agentic`,
+      `${file} still has the old spelling`,
     );
   }
 });

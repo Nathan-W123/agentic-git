@@ -173,7 +173,7 @@ export function icon(name, extra = "") {
 /**
  * The product mark: a small character rather than a geometric logo.
  *
- * Lattic's whole subject is agents working alongside people, so the mark is
+ * Lattice's whole subject is agents working alongside people, so the mark is
  * one of the same doodles the agents are drawn with — the lattice it sits in
  * is the coordination, and the face is what is being coordinated.
  */
