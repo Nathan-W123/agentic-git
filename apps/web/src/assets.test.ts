@@ -470,7 +470,11 @@ test("every character is a well-formed 16x16 pixel grid", async () => {
     assert.equal(rows.length, 16, `${name} should have 16 rows`);
     for (const [index, row] of rows.entries()) {
       assert.equal(row.length, 16, `${name} row ${index} is not 16 wide`);
-      assert.match(row, /^[.#+-]{16}$/u, `${name} row ${index} has a stray glyph`);
+      assert.match(
+        row,
+        /^[.#+\-^*~!]{16}$/u,
+        `${name} row ${index} has a stray glyph`,
+      );
     }
   }
 });
@@ -492,7 +496,75 @@ test("a character is one colour at three opacities, so any tint works", async ()
   const block = /const SPRITES = \{([\s\S]*?)\n\};/u.exec(source)?.[1] ?? "";
   assert.equal(/#[0-9a-f]{3,8}\b/iu.test(block), false, "sprites carry no colour");
   assert.match(source, /fill="currentColor"/u);
-  assert.match(source, /const TONES = \{ "\+": 1, "#": 0\.85, "-": 0\.5 \}/u);
+  const alphas = [...source.matchAll(/alpha: (0?\.\d+|1)/gu)].map((m) => m[1]);
+  assert.deepEqual(new Set(alphas), new Set(["1", "0.85", "0.5"]));
+});
+
+test("motion is declared by the drawing, not bolted on beside it", async () => {
+  const source = await publicFile("ui.js");
+  // The antenna pixels are the ones that bob. Keeping that in the pixel map
+  // means a character's movement cannot drift out of step with its shape.
+  const sprites = spriteTable(source);
+  const moving = new Map([
+    ["^", "bob"],
+    ["*", "twinkle"],
+    ["~", "sway"],
+    ["!", "glow"],
+  ]);
+  const used = new Set(
+    [...sprites.values()].flatMap((rows) =>
+      [...rows.join("")].filter((glyph) => moving.has(glyph)),
+    ),
+  );
+  assert.deepEqual(used, new Set(moving.keys()), "every motion glyph is in use");
+  for (const part of moving.values()) {
+    assert.match(source, new RegExp(`part: "${part}"`, "u"));
+  }
+});
+
+test("a blink is a lid over the eye, because the eye is a hole", async () => {
+  const source = await publicFile("ui.js");
+  // There is nothing in an eye socket to animate — the pixels are absent — so
+  // a lid in the body colour is flashed over it instead.
+  assert.match(source, /const EYELIDS = \{/u);
+  const block = /const EYELIDS = \{([\s\S]*?)\n\};/u.exec(source)?.[1] ?? "";
+  assert.equal(
+    /cursor:/u.test(block),
+    false,
+    "Cursor's eyes are drawn, so they flicker rather than blink",
+  );
+  const sprites = spriteTable(source);
+  for (const name of [...sprites.keys()].filter((key) => key !== "cursor")) {
+    assert.match(block, new RegExp(`${name}:`, "u"), `${name} needs a lid`);
+  }
+});
+
+test("motion is restrained, reducible, and off when an agent is not there", async () => {
+  const css = await publicFile("styles.css");
+  // Only transform and opacity, so none of this can touch layout.
+  const keyframes = [...css.matchAll(/@keyframes sp-[\w-]+ \{([\s\S]*?)\n\}/gu)]
+    .map((match) => match[1] ?? "")
+    .join("");
+  assert.notEqual(keyframes.length, 0);
+  for (const property of [...keyframes.matchAll(/^\s{4}([a-z-]+):/gmu)].map(
+    (match) => match[1],
+  )) {
+    assert.equal(
+      ["transform", "opacity"].includes(property ?? ""),
+      true,
+      `${property} is animated; only transform and opacity are compositor-safe`,
+    );
+  }
+  // Every translation is sub-pixel at the size these actually render.
+  for (const distance of [...keyframes.matchAll(/translate[XY]\((-?[\d.]+)px\)/gu)]) {
+    assert.equal(Math.abs(Number(distance[1])) <= 0.5, true, "movement stays slight");
+  }
+  // Stillness is a status signal: a disconnected agent does not fidget.
+  assert.match(
+    css,
+    /\.agent-face\[data-presence="offline"\] svg,\s*\.agent-face\[data-presence="offline"\] svg \* \{\s*animation: none;/u,
+  );
+  assert.match(css, /@media \(prefers-reduced-motion: reduce\)/u);
 });
 
 test("every agent kind resolves to its own character", async () => {

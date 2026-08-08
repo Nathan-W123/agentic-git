@@ -3099,6 +3099,143 @@ svg {
   background: #fff;
 }
 
+/* ---------------------------------------------------- character motion ---- */
+
+/*
+ * Slight on purpose.
+ *
+ * Every movement is sub-pixel at the size these actually render, and each
+ * character keeps its own tempo so a list of agents breathes rather than
+ * ticking in unison. Motion is also a status signal, not decoration: a
+ * disconnected agent holds perfectly still, which is why the rules are gated
+ * on presence rather than applied to every sprite on the page.
+ *
+ * Only transform and opacity are animated, so none of this touches layout.
+ */
+
+@keyframes sp-bob {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-0.4px);
+  }
+}
+
+@keyframes sp-twinkle {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  45% {
+    opacity: 0.2;
+  }
+}
+
+@keyframes sp-sway {
+  0%,
+  100% {
+    transform: translateX(0);
+  }
+  25% {
+    transform: translateX(-0.3px);
+  }
+  75% {
+    transform: translateX(0.3px);
+  }
+}
+
+@keyframes sp-glow {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  40% {
+    opacity: 0.35;
+  }
+  60% {
+    opacity: 1;
+  }
+}
+
+/* Shut for a few frames of a long cycle, which is what a blink is. */
+@keyframes sp-blink {
+  0%,
+  92%,
+  100% {
+    opacity: 0;
+  }
+  94%,
+  97% {
+    opacity: 1;
+  }
+}
+
+@keyframes sp-breathe {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-0.25px);
+  }
+}
+
+.agent-face svg .sp-bob {
+  animation: sp-bob 3.2s ease-in-out infinite;
+}
+
+.agent-face svg .sp-twinkle {
+  animation: sp-twinkle 2.4s ease-in-out infinite;
+}
+
+.agent-face svg .sp-sway {
+  animation: sp-sway 4.4s ease-in-out infinite;
+}
+
+.agent-face svg .sp-glow {
+  animation: sp-glow 3.6s ease-in-out infinite;
+}
+
+.agent-face svg .sp-blink {
+  opacity: 0;
+  animation: sp-blink 7s linear infinite;
+}
+
+/* The whole character lifts a quarter-pixel while it is actually working. */
+.agent-face[data-presence="online"] svg {
+  animation: sp-breathe 2.8s ease-in-out infinite;
+}
+
+/* Each character on its own clock, so a row of them never pulses together. */
+.agent-face[data-kind="cursor"] svg .sp-blink,
+.agent-face[data-kind="cursor"] svg .sp-glow {
+  animation-duration: 5.2s;
+}
+
+.agent-face[data-kind="codex"] svg * {
+  animation-delay: -1.1s;
+}
+
+.agent-face[data-kind="gemini"] svg * {
+  animation-delay: -2.3s;
+}
+
+.agent-face[data-kind="grok"] svg * {
+  animation-delay: -0.7s;
+}
+
+.agent-face[data-kind="deepseek"] svg * {
+  animation-delay: -1.8s;
+}
+
+/* An agent that is not connected is not moving. */
+.agent-face[data-presence="offline"] svg,
+.agent-face[data-presence="offline"] svg * {
+  animation: none;
+}
+
 /* -------------------------------------------------------- colour picker ---- */
 
 .swatches {
@@ -3161,6 +3298,35 @@ svg {
 .doodle-chip .doodle svg {
   width: 100%;
   height: 100%;
+}
+
+.doodle-chip .doodle .sp-bob {
+  animation: sp-bob 3.2s ease-in-out infinite;
+}
+
+.doodle-chip .doodle .sp-twinkle {
+  animation: sp-twinkle 2.4s ease-in-out infinite;
+}
+
+.doodle-chip .doodle .sp-sway {
+  animation: sp-sway 4.4s ease-in-out infinite;
+}
+
+.doodle-chip .doodle .sp-glow {
+  animation: sp-glow 3.6s ease-in-out infinite;
+}
+
+.doodle-chip .doodle .sp-blink {
+  opacity: 0;
+  animation: sp-blink 7s linear infinite;
+}
+
+.doodle-chip:nth-child(2n) .doodle * {
+  animation-delay: -1.4s;
+}
+
+.doodle-chip:nth-child(3n) .doodle * {
+  animation-delay: -2.6s;
 }
 
 /* ------------------------------------------------------------- toasts ---- */

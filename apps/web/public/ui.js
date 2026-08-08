@@ -309,9 +309,9 @@ export function agentLabelOf(id) {
  */
 const SPRITES = {
   claude: [
-    "......#..#......",
-    ".......##.......",
-    ".......##.......",
+    "......^..^......",
+    ".......^^.......",
+    ".......^^.......",
     "....++++++++....",
     "...##########...",
     "..############..",
@@ -322,18 +322,18 @@ const SPRITES = {
     "...##########...",
     "....--------....",
     "..############..",
-    ".##.########.##.",
+    ".~~.########.~~.",
     "..############..",
     "....##....##....",
   ],
   cursor: [
-    ".......++.......",
-    ".......##.......",
-    ".......##.......",
+    ".......^^.......",
+    ".......^^.......",
+    ".......^^.......",
     "..++++++++++++..",
     "..#..........#..",
-    "..#..##..##..#..",
-    "..#..##..##..#..",
+    "..#..!!..!!..#..",
+    "..#..!!..!!..#..",
     "..#..........#..",
     "..############..",
     "....--------....",
@@ -345,9 +345,9 @@ const SPRITES = {
     "...##......##...",
   ],
   codex: [
-    ".......++.......",
-    ".......##.......",
-    ".......##.......",
+    ".......^^.......",
+    ".......^^.......",
+    ".......^^.......",
     "..############..",
     "..############..",
     "..############..",
@@ -358,14 +358,14 @@ const SPRITES = {
     "..############..",
     "....--------....",
     "..############..",
-    "#.##..####..##.#",
-    "#.##..####..##.#",
+    "~.##..####..##.~",
+    "~.##..####..##.~",
     "...##......##...",
   ],
   gemini: [
     ".......##.......",
     ".......##.......",
-    "..+...####...+..",
+    "..*...####...*..",
     "......####......",
     ".....######.....",
     "....########....",
@@ -375,15 +375,15 @@ const SPRITES = {
     "..####....####..",
     "....########....",
     ".....######.....",
-    "..+...####...+..",
+    "..*...####...*..",
     "......####......",
     ".......##.......",
     ".......##.......",
   ],
   grok: [
-    ".......+........",
-    ".......#........",
-    ".......#........",
+    ".......^........",
+    ".......^........",
+    ".......^........",
     "....########....",
     "...##########...",
     "..############..",
@@ -393,15 +393,15 @@ const SPRITES = {
     "..############..",
     "...##########...",
     "....--------....",
-    "..######..####..",
-    "..#####..#####..",
-    "..####..######..",
+    "..#######!!###..",
+    "..#####!!#####..",
+    "..###!!#######..",
     "...##......##...",
   ],
   deepseek: [
-    "......+...++....",
-    "......#....+....",
-    "......#.........",
+    "......^...**....",
+    "......^....*....",
+    "......^.........",
     "....++++++++....",
     "..############..",
     ".##############.",
@@ -411,15 +411,15 @@ const SPRITES = {
     "..####....####..",
     ".##############.",
     "..############..",
-    "..#..#.##.#..#..",
-    "..#..#.##.#..#..",
-    "..#..#....#..#..",
-    ".....#....#.....",
+    "..~..~.~~.~..~..",
+    "..~..~.~~.~..~..",
+    "..~..~....~..~..",
+    ".....~....~.....",
   ],
   generic: [
     "................",
-    ".......##.......",
-    ".......##.......",
+    ".......^^.......",
+    ".......^^.......",
     "...++++++++++...",
     "..############..",
     "..############..",
@@ -436,39 +436,88 @@ const SPRITES = {
   ],
 };
 
-const TONES = { "+": 1, "#": 0.85, "-": 0.5 };
+/**
+ * What each glyph paints, and whether it moves.
+ *
+ * Motion is declared in the drawing rather than bolted on afterwards: the
+ * antenna pixels are the ones that bob, so a character's movement can never
+ * drift out of step with its shape.
+ */
+const PIXELS = {
+  "+": { alpha: 1 },
+  "#": { alpha: 0.85 },
+  "-": { alpha: 0.5 },
+  "^": { alpha: 0.85, part: "bob" },
+  "*": { alpha: 1, part: "twinkle" },
+  "~": { alpha: 0.85, part: "sway" },
+  "!": { alpha: 1, part: "glow" },
+};
 
 /**
- * Turns a pixel map into rects, merging horizontal runs of one tone.
+ * Where each character's eyes are, so a lid can be drawn over them.
+ *
+ * Eyes are holes in the sprite, not marks on it, which means a blink cannot be
+ * animated directly — there is nothing there to move. A lid in the body colour
+ * flashed over the hole closes the eye instead. Cursor is absent on purpose:
+ * its eyes are lit rectangles, so they flicker rather than blink.
+ */
+const EYELIDS = {
+  claude: [5, 6, 6, 1],
+  codex: [5, 6, 6, 2],
+  gemini: [5, 6, 6, 2],
+  grok: [4, 6, 8, 3],
+  deepseek: [3, 7, 10, 1],
+  generic: [5, 6, 6, 1],
+};
+
+/**
+ * Turns a pixel map into rects, merging horizontal runs of one glyph.
  *
  * A naive rect-per-pixel sprite is 150-odd nodes and these render at every row
- * of every list; run-merging cuts that by roughly four without changing a
- * pixel.
+ * of every list, so merging cuts that by roughly four without changing a
+ * pixel. Moving parts are grouped, so one animation drives a whole limb
+ * instead of each of its pixels separately.
  */
 function spriteSvg(name) {
   const rows = SPRITES[name] ?? SPRITES.generic;
-  const rects = [];
+  const still = [];
+  const parts = new Map();
   rows.forEach((row, y) => {
     let x = 0;
     while (x < row.length) {
-      const tone = row[x];
-      if (TONES[tone] === undefined) {
+      const glyph = row[x];
+      const pixel = PIXELS[glyph];
+      if (pixel === undefined) {
         x += 1;
         continue;
       }
       let width = 1;
-      while (row[x + width] === tone) {
+      while (row[x + width] === glyph) {
         width += 1;
       }
-      rects.push(
+      const rect =
         `<rect x="${x}" y="${y}" width="${width}" height="1" fill="currentColor"` +
-          (TONES[tone] === 1 ? "" : ` fill-opacity="${TONES[tone]}"`) +
-          "/>",
-      );
+        (pixel.alpha === 1 ? "" : ` fill-opacity="${pixel.alpha}"`) +
+        "/>";
+      if (pixel.part === undefined) {
+        still.push(rect);
+      } else {
+        parts.set(pixel.part, (parts.get(pixel.part) ?? "") + rect);
+      }
       x += width;
     }
   });
-  return rects.join("");
+
+  const moving = [...parts]
+    .map(([part, body]) => `<g class="sp-${part}">${body}</g>`)
+    .join("");
+  const lid = EYELIDS[name];
+  const blink =
+    lid === undefined
+      ? ""
+      : `<rect class="sp-blink" x="${lid[0]}" y="${lid[1]}" width="${lid[2]}"` +
+        ` height="${lid[3]}" fill="currentColor" fill-opacity="0.85"/>`;
+  return still.join("") + moving + blink;
 }
 
 /** Rendered once per character; the markup never changes, only its colour. */
@@ -508,9 +557,12 @@ export function agentFace(agent, size = 34) {
   const kind = agentKindOf(agent?.provider ?? agent?.id);
   const presence = agent?.presence ?? "offline";
   const color = safeColor(agent?.color) ?? "var(--accent)";
-  return `<span class="agent-face sz-${size}" style="color:${color}" title="${esc(
-    agent?.name ?? AGENTS[kind].label,
-  )}">${agentDoodle(kind)}<i class="presence presence-${presence}"></i></span>`;
+  // The kind and presence are on the element so the stylesheet can give each
+  // character its own tempo and hold a disconnected one perfectly still.
+  return `<span class="agent-face sz-${size}" data-kind="${kind}"
+    data-presence="${presence}" style="color:${color}" title="${esc(
+      agent?.name ?? AGENTS[kind].label,
+    )}">${agentDoodle(kind)}<i class="presence presence-${presence}"></i></span>`;
 }
 
 /**
