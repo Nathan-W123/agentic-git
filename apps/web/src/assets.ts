@@ -5,15 +5,25 @@ import { fileURLToPath } from "node:url";
 
 import type { StaticAsset } from "@coord/api-gateway";
 
+/**
+ * The dashboard is served as plain ES modules — there is no bundler — so each
+ * screen module is listed here individually. The list is an allowlist, not a
+ * directory listing: a file that is not named is not served.
+ */
 const PUBLIC_FILES = [
   ["index.html", "text/html; charset=utf-8"],
   ["styles.css", "text/css; charset=utf-8"],
-  ["jarvis.css", "text/css; charset=utf-8"],
   ["app.js", "text/javascript; charset=utf-8"],
-  ["editor.js", "text/javascript; charset=utf-8"],
+  ["ui.js", "text/javascript; charset=utf-8"],
+  ["data.js", "text/javascript; charset=utf-8"],
+  ["chat.js", "text/javascript; charset=utf-8"],
+  ["code-view.js", "text/javascript; charset=utf-8"],
+  ["screen-repos.js", "text/javascript; charset=utf-8"],
+  ["screen-code.js", "text/javascript; charset=utf-8"],
+  ["screen-agents.js", "text/javascript; charset=utf-8"],
+  ["screen-coordinator.js", "text/javascript; charset=utf-8"],
+  ["screen-notifications.js", "text/javascript; charset=utf-8"],
   ["mark.svg", "image/svg+xml"],
-  ["hud-interface-bg.png", "image/png"],
-  ["hud-reactor-rotor.png", "image/png"],
   ["manifest.webmanifest", "application/manifest+json"],
 ] as const;
 
