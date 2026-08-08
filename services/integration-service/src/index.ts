@@ -3,15 +3,19 @@ import {
   type CanonicalVersion,
   type ChangeSet,
   type CommandResult,
+  type FilePatch,
   type FilePatchStatus,
   type IntegrationResult,
   type ValidationCommand,
 } from "@coord/shared-types";
 import {
+  emitPatch,
+  parseUnifiedPatch,
   RepositoryService,
   type CanonicalRepository,
   type CommitIdentity,
   type CommitTrailer,
+  type ParsedHunk,
 } from "@coord/repository-service";
 import {
   GitWorktreeWorkspaceManager,
@@ -58,6 +62,17 @@ export interface IntegrateChangeSetInput {
    * unequal, and the result is refused as stale exactly as before.
    */
   replayableOnto?: string;
+  /**
+   * Keep the parts of a conflicting changeset that still apply.
+   *
+   * Off by default, and deliberately so: salvage promotes a subset of what
+   * the agent produced and hands the remainder back in
+   * {@link IntegrationResult.salvagedDeferred}. A caller that ignored that
+   * would silently lose the difference, which is worse than the whole
+   * changeset being refused. Only callers that requeue the remainder may ask
+   * for it.
+   */
+  salvageConflicts?: boolean;
 }
 
 export interface IntegrationServiceOptions {
@@ -67,6 +82,16 @@ export interface IntegrationServiceOptions {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** What survived a salvage pass, and what is being handed back. */
+interface SalvageOutcome {
+  /** Patches to apply, some of them a file's clean hunks rather than a file. */
+  granted: FilePatch[];
+  /** Patches that genuinely collided. The caller requeues these. */
+  deferred: FilePatch[];
+  /** Files that landed only in part. */
+  divided: string[];
 }
 
 function patchStatus(code: string): FilePatchStatus {
@@ -218,6 +243,119 @@ export class IntegrationService {
     };
   }
 
+  /**
+   * Returns the workspace to the revision it was built at.
+   *
+   * A failed three-way apply leaves conflict markers, unmerged index stages,
+   * and any file it managed to create before giving up. Every trial below has
+   * to start from the same pristine tree or its answer means nothing, and
+   * `clean` is safe here specifically because nothing has run yet — validation
+   * comes later, so there is no build output to lose.
+   */
+  private async resetWorkspace(
+    workspacePath: string,
+    revision: string,
+  ): Promise<void> {
+    const git = this.repositories.getGitClient();
+    await git.run([
+      "-C",
+      workspacePath,
+      "reset",
+      "--hard",
+      "--quiet",
+      "--end-of-options",
+      revision,
+    ]);
+    await git.run(["-C", workspacePath, "clean", "-fdq"]);
+  }
+
+  /** Whether a patch applies to a pristine workspace. Leaves it pristine. */
+  private async appliesCleanly(
+    workspacePath: string,
+    revision: string,
+    patchText: string,
+  ): Promise<boolean> {
+    const result = await this.repositories.getGitClient().run(
+      [
+        "-C",
+        workspacePath,
+        "apply",
+        "--index",
+        "--3way",
+        "--whitespace=nowarn",
+        "-",
+      ],
+      { allowFailure: true, input: patchText },
+    );
+    // `--check` cannot be used for this: combined with `--3way` git applies
+    // the patch anyway and reports success, so the only honest trial is to
+    // apply it for real and undo it.
+    await this.resetWorkspace(workspacePath, revision);
+    return result.exitCode === 0;
+  }
+
+  /**
+   * Sorts a conflicting changeset into what still applies and what does not.
+   *
+   * Whole files are tried first, because most changesets touch several files
+   * and only one of them is contested — keeping the other nine is most of the
+   * value for one trial each. A file that fails is then tried a hunk at a
+   * time, so a single bad hunk costs its own lines rather than the file's.
+   *
+   * Hunks are re-emitted from one parse rather than concatenated: a hunk's
+   * new-side line numbers depend on which of its siblings survived, and
+   * pasting single-hunk patches together would produce a patch that applies
+   * in the wrong place.
+   */
+  private async salvage(
+    workspacePath: string,
+    revision: string,
+    patches: readonly FilePatch[],
+  ): Promise<SalvageOutcome> {
+    const granted: FilePatch[] = [];
+    const deferred: FilePatch[] = [];
+    const divided: string[] = [];
+
+    await this.resetWorkspace(workspacePath, revision);
+
+    for (const filePatch of patches) {
+      if (
+        await this.appliesCleanly(workspacePath, revision, filePatch.patch)
+      ) {
+        granted.push(filePatch);
+        continue;
+      }
+
+      const parsed = parseUnifiedPatch(filePatch.patch);
+      if (parsed === undefined || parsed.hunks.length < 2) {
+        // Indivisible, or a single hunk that already failed on its own.
+        deferred.push(filePatch);
+        continue;
+      }
+
+      const keep: ParsedHunk[] = [];
+      const hold: ParsedHunk[] = [];
+      for (const hunk of parsed.hunks) {
+        const single = emitPatch(parsed, [hunk]);
+        if (await this.appliesCleanly(workspacePath, revision, single)) {
+          keep.push(hunk);
+        } else {
+          hold.push(hunk);
+        }
+      }
+      if (keep.length === 0) {
+        deferred.push(filePatch);
+        continue;
+      }
+
+      granted.push({ ...filePatch, patch: emitPatch(parsed, keep) });
+      deferred.push({ ...filePatch, patch: emitPatch(parsed, hold) });
+      divided.push(filePatch.path);
+    }
+
+    return { granted, deferred, divided };
+  }
+
   private async integrateInWorkspace(
     input: IntegrateChangeSetInput,
     previousVersion: CanonicalVersion,
@@ -226,6 +364,11 @@ export class IntegrationService {
     replaying: boolean,
   ): Promise<IntegrationResult> {
     const validation: CommandResult[] = [];
+    // What integration is actually promoting. These start as everything the
+    // changeset declared and narrow only if a conflict is salvaged, in which
+    // case the tree must match what survived rather than what was submitted.
+    let effectiveEntries = declaredEntries;
+    let salvage: SalvageOutcome | undefined;
     const combinedPatch = input.changeSet.patches
       .map((filePatch) => filePatch.patch)
       .join("");
@@ -295,7 +438,7 @@ export class IntegrationService {
         };
       }
 
-      return {
+      const refused: IntegrationResult = {
         taskId: input.changeSet.taskId,
         changeSetId: input.changeSet.id,
         status: "conflict",
@@ -306,6 +449,51 @@ export class IntegrationService {
           `The changeset conflicts with current canonical in ` +
           `${conflictedPaths.join(", ")}: ${detail}`,
       };
+      if (input.salvageConflicts !== true) {
+        return refused;
+      }
+
+      // A conflict in one file used to discard every clean file beside it and
+      // buy a replan to rediscover work that was already done. Sort out what
+      // still applies and promote that; the caller requeues the rest.
+      salvage = await this.salvage(
+        integrationWorkspace.path,
+        previousVersion.revision,
+        input.changeSet.patches,
+      );
+      if (salvage.granted.length === 0) {
+        return refused;
+      }
+
+      const salvagedPatch = salvage.granted
+        .map((filePatch) => filePatch.patch)
+        .join("");
+      const reapplied = await this.repositories.getGitClient().run(
+        [
+          "-C",
+          integrationWorkspace.path,
+          "apply",
+          "--index",
+          "--3way",
+          "--whitespace=nowarn",
+          "-",
+        ],
+        { allowFailure: true, input: salvagedPatch },
+      );
+      if (reapplied.exitCode !== 0) {
+        // Each piece applied on its own, so a failure here means they
+        // interact. Nothing is lost by falling back to the original answer,
+        // and guessing further would be guessing.
+        await this.resetWorkspace(
+          integrationWorkspace.path,
+          previousVersion.revision,
+        );
+        return refused;
+      }
+      effectiveEntries = salvage.granted.map((filePatch) => ({
+        path: normalizeRepositoryPath(filePatch.path),
+        status: filePatch.status,
+      }));
     }
 
     const appliedNames = await this.repositories.getGitClient().run([
@@ -322,7 +510,7 @@ export class IntegrationService {
     const appliedEntries = parseNameStatusZ(appliedNames.stdout)
       .map((entry) => ({ path: entry.path, status: patchStatus(entry.code) }))
       .sort((left, right) => left.path.localeCompare(right.path));
-    const expectedEntries = [...declaredEntries].sort((left, right) =>
+    const expectedEntries = [...effectiveEntries].sort((left, right) =>
       left.path.localeCompare(right.path),
     );
     if (
@@ -460,6 +648,24 @@ export class IntegrationService {
       ...(replaying
         ? [{ key: "Replayed-From", value: input.changeSet.baseRevision }]
         : []),
+      // A reader comparing this commit against the task would otherwise find
+      // it short, with nothing to say why.
+      ...(salvage === undefined
+        ? []
+        : [
+            {
+              key: "Salvaged-From-Conflict",
+              value:
+                `${salvage.granted.length} of ` +
+                `${input.changeSet.patches.length} file(s) applied; ` +
+                `conflicted: ${salvage.deferred
+                  .map((filePatch) => filePatch.path)
+                  .join(" ")}` +
+                (salvage.divided.length === 0
+                  ? ""
+                  : `; split at the hunk: ${salvage.divided.join(" ")}`),
+            },
+          ]),
       {
         key: "Validation",
         value:
@@ -526,7 +732,19 @@ export class IntegrationService {
       canonicalVersion,
       validation,
       candidateRevision,
-      explanation: `Promoted ${candidateRevision.slice(0, 12)} atomically`,
+      ...(salvage === undefined
+        ? {}
+        : {
+            salvagedDeferred: salvage.deferred,
+            salvagedDividedFiles: salvage.divided,
+          }),
+      explanation:
+        `Promoted ${candidateRevision.slice(0, 12)} atomically` +
+        (salvage === undefined
+          ? ""
+          : `; salvaged ${salvage.granted.length} of ` +
+            `${input.changeSet.patches.length} file(s) from a conflict, ` +
+            `${salvage.deferred.length} requeued`),
     };
   }
 }

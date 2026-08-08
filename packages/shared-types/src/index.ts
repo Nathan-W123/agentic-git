@@ -626,6 +626,19 @@ export interface IntegrationResult {
    * an ordinary promotion.
    */
   replayedFrom?: string;
+  /**
+   * Work that conflicted and was held back so the rest could land.
+   *
+   * Present only when the caller asked for salvage. A conflict used to
+   * discard the whole changeset — every clean hunk with it — and buy a replan
+   * to rediscover work that had already been done. These are the patches that
+   * genuinely collided; the caller must requeue them, which is why salvage is
+   * something a caller opts into rather than something integration does on
+   * its own.
+   */
+  salvagedDeferred?: FilePatch[];
+  /** Files that landed in part, having been split at the conflicting hunks. */
+  salvagedDividedFiles?: string[];
   explanation: string;
 }
 

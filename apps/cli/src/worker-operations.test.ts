@@ -3367,6 +3367,117 @@ test("a same-file loser with overlapping hunks is requeued to replan, not failed
   }
 });
 
+/**
+ * A conflict in one file used to discard every clean file beside it, and buy
+ * a replan to rediscover work already done. Integration now keeps what
+ * applies — but only because the caller accounts for the rest: the half that
+ * conflicted becomes a task of its own, or it is silently lost, which would
+ * be worse than the refusal this replaces.
+ */
+test("a conflict keeps the clean files and queues the contested one", async () => {
+  const harness = await createHarness(new InMemoryCoordinationStore(), {
+    "docs/guide.md": GUIDE,
+    "docs/notes.md": "Notes line 1.\n",
+  });
+  try {
+    const admitted = await admitGuideTask(harness, {
+      expectedFiles: ["docs/guide.md", "docs/notes.md"],
+    });
+    await landExternalAdvance(harness);
+    const { taskB, assignmentB } = admitted;
+
+    // One contested file and one nobody else touched, in a single changeset.
+    const repository = await harness.store.getRepository("repo_worker");
+    assert.ok(repository);
+    const canonicalRepo = {
+      id: repository.id,
+      path: repository.path,
+      branch: repository.branch,
+    };
+    const workspaces = new GitWorktreeWorkspaceManager(
+      harness.repositories.getGitClient(),
+    );
+    const workspace = await workspaces.create({
+      taskId: taskB.id,
+      rootPath: path.join(harness.root, "salvage-workspaces"),
+      repository: canonicalRepo,
+      baseVersion: assignmentB.canonicalVersion,
+    });
+    const guidePath = path.join(workspace.path, "docs", "guide.md");
+    await writeFile(
+      guidePath,
+      (await readFile(guidePath, "utf8")).replace(
+        "Guide line 1.",
+        "Guide line 1, redone.",
+      ),
+      "utf8",
+    );
+    await writeFile(
+      path.join(workspace.path, "docs", "notes.md"),
+      "Notes line 1, improved.\n",
+      "utf8",
+    );
+    const changeSet = await workspaces.collectChangeSet(workspace, {
+      symbolsChanged: [],
+      riskAssessment: { level: "low", reasons: [] },
+      agentExplanation: "edited both",
+    });
+    await workspaces.destroy(workspace);
+
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignmentB.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskB.id, {
+          objective: taskB.objective,
+          expectedFiles: ["docs/guide.md", "docs/notes.md"],
+          expectedSymbols: [],
+        }),
+        changeSet,
+      },
+      {
+        repositories: harness.repositories,
+        integrationRoot: path.join(harness.root, "integration"),
+      },
+    );
+
+    assert.equal(accepted.accepted, true, accepted.reason);
+    assert.equal(accepted.integrationStatus, "integrated");
+
+    // The uncontested file landed rather than being thrown away with the
+    // contested one.
+    const head = await harness.repositories.getCanonicalVersion(canonicalRepo);
+    assert.equal(
+      await harness.repositories.readFile(
+        canonicalRepo,
+        head.revision,
+        "docs/notes.md",
+      ),
+      "Notes line 1, improved.\n",
+    );
+    // The contested file kept the winner's content.
+    assert.match(
+      await harness.repositories.readFile(
+        canonicalRepo,
+        head.revision,
+        "docs/guide.md",
+      ),
+      /Guide line 1, expanded externally/u,
+    );
+
+    // And the remainder is somebody's job now, naming the file that collided.
+    const followUps = (await harness.store.listSubmittedTasks()).filter(
+      (entry) => entry.id !== taskB.id,
+    );
+    assert.equal(followUps.length, 1, "the conflicted half was not requeued");
+    assert.match(followUps[0]?.objective ?? "", /docs\/guide\.md/u);
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
 test("a result its own validation rejects finishes the run as failed", async () => {
   const harness = await createHarness(new InMemoryCoordinationStore(), {
     "docs/guide.md": GUIDE,

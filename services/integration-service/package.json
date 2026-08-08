@@ -14,7 +14,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/integration-service.test.js dist/apply-classification.test.js dist/provenance.test.js"
+    "test": "node --test dist/integration-service.test.js dist/apply-classification.test.js dist/provenance.test.js dist/salvage.test.js"
   },
   "dependencies": {
     "@coord/repository-service": "*",
@@ -22,4 +22,3 @@
     "@coord/workspace-manager": "*"
   }
 }
-

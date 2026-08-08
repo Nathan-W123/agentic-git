@@ -56,6 +56,7 @@ import {
   type AgentPlan,
   type CanonicalVersion,
   type ChangeSet,
+  type FilePatch,
   type CoordinatorDecision,
   type DeferredResource,
   type IntegrationResult,
@@ -731,6 +732,71 @@ async function queueDeferredScope(
         "against is being rewritten by whoever holds the deferred resource",
     });
   }
+  return followUp.id;
+}
+
+/**
+ * Turns the half of a conflicting changeset that could not land into a task.
+ *
+ * A conflict used to end the whole result: every clean file and clean hunk
+ * beside the contested one was discarded, and a replan bought back work that
+ * had already been done. Integration now promotes what still applies, which
+ * leaves precisely this remainder to account for.
+ *
+ * It reuses the deferred-scope marker on purpose. That marker is what stops a
+ * follow-up from splitting again, and the termination argument is the same
+ * here: one division per task, or a task could shed a file per round forever,
+ * each round costing an agent run.
+ *
+ * The contested patches are recorded but never replayed. They were written
+ * against a version of the file that has since moved — that is what made them
+ * conflict — so they are context for whoever picks the follow-up up, not a
+ * diff to re-apply.
+ */
+async function queueSalvagedConflict(
+  store: CoordinationStore,
+  runId: string,
+  task: SubmittedTask,
+  deferred: readonly FilePatch[],
+  reported: ChangeSet,
+): Promise<string | undefined> {
+  if (deferred.length === 0) {
+    return undefined;
+  }
+  const paths = [...new Set(deferred.map((patch) => patch.path))].sort();
+  const followUp = await store.submitTask({
+    repositoryId: task.repositoryId,
+    ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
+    objective: deferredScopeObjective(task.objective, [], paths),
+    agentId: task.agentId,
+    validationCommands: task.validationCommands,
+    ...(task.submittedBy === undefined ? {} : { submittedBy: task.submittedBy }),
+  });
+  await trace(store, runId, "task_submitted", followUp.id, {
+    projectId: task.projectId,
+    repositoryId: task.repositoryId,
+    objective: followUp.objective,
+    deferredFrom: task.id,
+    conflictedPaths: paths,
+  });
+
+  const record = withheldPatchRecord([...deferred]);
+  await trace(store, runId, "changeset_withheld", followUp.id, {
+    projectId: task.projectId,
+    repositoryId: task.repositoryId,
+    deferredFrom: task.id,
+    reportedChangeSetId: reported.id,
+    baseRevision: reported.baseRevision,
+    baseVersion: reported.baseVersion,
+    patches: record.patches,
+    truncated: record.truncated,
+    bytes: record.bytes,
+    explanation:
+      "Patches that conflicted with canonical while the rest of the same " +
+      "changeset was promoted. Kept as context for the follow-up task; " +
+      "never replayed, because the base they were written against is " +
+      "exactly what moved underneath them",
+  });
   return followUp.id;
 }
 
@@ -2649,6 +2715,9 @@ export async function acceptWorkResult(
                 },
               ]),
         ],
+        // One division per task, for the same reason partial admission has
+        // that rule: without it a task could shed a file per round forever.
+        salvageConflicts: !isDeferredScopeFollowUp(task.objective),
         requireExactBase: true,
         ...(replayableOnto === undefined ? {} : { replayableOnto }),
       });
@@ -2706,6 +2775,15 @@ export async function acceptWorkResult(
         task,
         admitted.admission,
         split,
+        changeSet,
+      );
+      // Same rule for the half a conflict held back: only once the rest is
+      // durably in canonical is the remainder worth asking anyone for.
+      followUp ??= await queueSalvagedConflict(
+        store,
+        run.id,
+        task,
+        integration.salvagedDeferred ?? [],
         changeSet,
       );
     } else if (
