@@ -208,6 +208,16 @@ export class IntegrationService {
     const combinedPatch = input.changeSet.patches
       .map((filePatch) => filePatch.patch)
       .join("");
+    // `--whitespace=nowarn` rather than `error-all`. Erroring on whitespace
+    // rejected work that had nothing wrong with it: git counts a trailing
+    // space as an error, so a Markdown hard line break — two trailing spaces,
+    // the documented way to write one — failed the apply outright. That
+    // arrived here as a conflict, and a conflict costs a full replan.
+    //
+    // Integration is not the place to hold an opinion about whitespace
+    // anyway. The bytes reaching this point were already validated on the
+    // worker, and a project that wants a whitespace rule has a validation
+    // command to put it in, where the failure names the real reason.
     const applyResult = await this.repositories.getGitClient().run(
       [
         "-C",
@@ -215,7 +225,7 @@ export class IntegrationService {
         "apply",
         "--index",
         "--3way",
-        "--whitespace=error-all",
+        "--whitespace=nowarn",
         "-",
       ],
       {
@@ -225,6 +235,45 @@ export class IntegrationService {
     );
 
     if (applyResult.exitCode !== 0) {
+      // Not every failed apply is a conflict, and the difference decides what
+      // happens next: a conflict is genuine contention worth replanning
+      // against, while a patch that cannot be applied at all is a defect in
+      // the changeset that replanning will reproduce.
+      //
+      // The question is asked of the index rather than of the error text.
+      // A three-way apply that truly conflicts leaves unmerged stages behind;
+      // one that failed for any other reason leaves none. That is structural,
+      // so it does not drift when git rewords a message.
+      const unmerged = await this.repositories.getGitClient().run(
+        [
+          "-C",
+          integrationWorkspace.path,
+          "diff",
+          "--name-only",
+          "--diff-filter=U",
+          "-z",
+        ],
+        { allowFailure: true },
+      );
+      const conflictedPaths =
+        unmerged.exitCode === 0 ? parsePathListZ(unmerged.stdout) : [];
+      const detail =
+        applyResult.stderr.trim() || applyResult.stdout.trim() || "no detail";
+
+      if (conflictedPaths.length === 0) {
+        return {
+          taskId: input.changeSet.taskId,
+          changeSetId: input.changeSet.id,
+          status: "policy_failed",
+          previousVersion,
+          canonicalVersion: previousVersion,
+          validation,
+          explanation:
+            "The changeset could not be applied, and not because it " +
+            `conflicts: ${detail}`,
+        };
+      }
+
       return {
         taskId: input.changeSet.taskId,
         changeSetId: input.changeSet.id,
@@ -233,8 +282,8 @@ export class IntegrationService {
         canonicalVersion: previousVersion,
         validation,
         explanation:
-          applyResult.stderr.trim() ||
-          "The changeset could not be replayed on the latest canonical revision",
+          `The changeset conflicts with current canonical in ` +
+          `${conflictedPaths.join(", ")}: ${detail}`,
       };
     }
 
