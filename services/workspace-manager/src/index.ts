@@ -271,6 +271,117 @@ function topLevelPaths(repositoryPaths: readonly string[]): string[] {
   return selected;
 }
 
+/**
+ * Serialises worktree bookkeeping per canonical mirror.
+ *
+ * `git worktree add`, `remove` and `prune` all begin by enumerating every
+ * worktree the mirror has registered and reading each one's `commondir`. None
+ * of them takes a lock over that, so two running at once can have one reading
+ * an administrative directory the other is in the middle of deleting:
+ *
+ *     fatal: failed to read .../worktrees/<other>/commondir: No such file or directory
+ *
+ * Removing a directory is not atomic — `commondir` disappears before the entry
+ * containing it does — so the window is real, and on a loaded machine with
+ * several integrations finishing together it is wide enough to hit. It was
+ * observed exactly once, in a full-suite run with the CPU saturated, and could
+ * not be provoked in isolation afterwards; that is the signature of a
+ * timing window, not of it being absent.
+ *
+ * The map is module-level rather than per instance deliberately. The
+ * integration service, the benchmark driver and crash recovery each construct
+ * their own manager against the same mirror, so an instance field would
+ * serialise nothing that actually collides.
+ *
+ * Only the git calls are held — never the filesystem deletion, which is the
+ * slow part and touches nothing shared.
+ */
+interface MirrorLock {
+  /** Resolves when the current exclusive holder, if any, is done. */
+  exclusive: Promise<void>;
+  /** In-flight shared holders, which an exclusive request waits behind. */
+  shared: Set<Promise<void>>;
+}
+
+const worktreeLocks = new Map<string, MirrorLock>();
+
+/** Windows paths differ in case without differing in identity. */
+function lockKey(repositoryPath: string): string {
+  const resolved = path.resolve(repositoryPath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function mirrorLock(repositoryPath: string): MirrorLock {
+  const key = lockKey(repositoryPath);
+  const existing = worktreeLocks.get(key);
+  if (existing !== undefined) {
+    return existing;
+  }
+  const created: MirrorLock = {
+    exclusive: Promise.resolve(),
+    shared: new Set(),
+  };
+  worktreeLocks.set(key, created);
+  return created;
+}
+
+/**
+ * Exclusive access, for the operations that *delete* — `remove` and `prune`.
+ *
+ * These are the only ones that can pull an administrative directory out from
+ * under a concurrent reader, so they are the only ones that need to exclude
+ * everybody.
+ */
+async function withWorktreeWrite<T>(
+  repositoryPath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const lock = mirrorLock(repositoryPath);
+  const previous = lock.exclusive;
+  let release: () => void = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  lock.exclusive = previous.then(() => gate);
+  await previous;
+  // Readers admitted before this point still hold their enumeration open.
+  await Promise.allSettled([...lock.shared]);
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
+}
+
+/**
+ * Shared access, for `add`.
+ *
+ * Adding enumerates the registered worktrees like everything else, so it must
+ * not run while a delete is in progress — but two adds create two *different*
+ * directories and remove nothing, so they cannot hurt each other. Letting
+ * them overlap matters: a wave starts by materialising every task's workspace
+ * at once, and serialising that would turn the widest part of the pipeline
+ * into a queue for no safety gained.
+ */
+async function withWorktreeRead<T>(
+  repositoryPath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const lock = mirrorLock(repositoryPath);
+  await lock.exclusive;
+  let release: () => void = () => {};
+  const entry = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  lock.shared.add(entry);
+  try {
+    return await operation();
+  } finally {
+    release();
+    lock.shared.delete(entry);
+  }
+}
+
 export class GitWorktreeWorkspaceManager implements WorkspaceManager {
   public constructor(private readonly git = new GitClient()) {}
 
@@ -286,19 +397,23 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
     assertWithinRoot(rootPath, workspacePath);
 
     try {
-      await this.git.run([
-        `--git-dir=${input.repository.path}`,
-        "worktree",
-        "add",
-        "--detach",
-        workspacePath,
-        input.baseVersion.revision,
-      ]);
+      await withWorktreeRead(input.repository.path, async () => {
+        await this.git.run([
+          `--git-dir=${input.repository.path}`,
+          "worktree",
+          "add",
+          "--detach",
+          workspacePath,
+          input.baseVersion.revision,
+        ]);
+      });
     } catch (error) {
-      await this.git.run(
-        [`--git-dir=${input.repository.path}`, "worktree", "prune"],
-        { allowFailure: true },
-      );
+      await withWorktreeWrite(input.repository.path, async () => {
+        await this.git.run(
+          [`--git-dir=${input.repository.path}`, "worktree", "prune"],
+          { allowFailure: true },
+        );
+      });
       await rm(workspacePath, { recursive: true, force: true });
       throw error;
     }
@@ -349,15 +464,33 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
       "--force",
       workspace.path,
     ] as const;
-    const removal = await this.git.run(removeArgs, { allowFailure: true });
     const pruneArgs = [
       `--git-dir=${workspace.repository.path}`,
       "worktree",
       "prune",
     ] as const;
-    const prune = await this.git.run(
-      pruneArgs,
-      { allowFailure: true },
+    // One critical section for both: a prune between another teardown's
+    // remove and its prune is exactly the interleaving that breaks.
+    //
+    // Pruning is skipped when the removal succeeded. `worktree remove` takes
+    // its own registration with it, so there is nothing of this workspace's
+    // left to prune, and running it anyway made every teardown pay to rescan
+    // every worktree the mirror has — under an exclusive lock, so the cost
+    // was quadratic in the width of the wave rather than merely wasted.
+    // Registrations orphaned some other way are swept at startup by crash
+    // recovery, which is where that belongs.
+    const { removal, prune } = await withWorktreeWrite(
+      workspace.repository.path,
+      async () => {
+        const removed = await this.git.run(removeArgs, { allowFailure: true });
+        return {
+          removal: removed,
+          prune:
+            removed.exitCode === 0
+              ? undefined
+              : await this.git.run(pruneArgs, { allowFailure: true }),
+        };
+      },
     );
     if (removal.exitCode !== 0) {
       try {
@@ -369,7 +502,7 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
         }
       }
     }
-    if (prune.exitCode !== 0) {
+    if (prune !== undefined && prune.exitCode !== 0) {
       throw new GitCommandError(pruneArgs, prune);
     }
   }
