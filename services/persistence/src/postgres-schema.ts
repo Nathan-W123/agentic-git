@@ -515,4 +515,71 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON workers(organization_id, last_seen_at DESC)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 15,
+    name: "user-appearance",
+    statements: [`ALTER TABLE users ADD COLUMN appearance TEXT`],
+  },
+  {
+    // Mirrors the SQLite migration of the same version. Postgres has no
+    // COLLATE NOCASE, so the email is stored lowercased by the store instead.
+    version: 16,
+    name: "organization-invitations",
+    statements: [
+      `CREATE TABLE invitations (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        email TEXT NOT NULL,
+        role TEXT NOT NULL,
+        secret_hash TEXT NOT NULL,
+        invited_by TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        accepted_at TEXT,
+        accepted_by TEXT REFERENCES users(id),
+        revoked_at TEXT
+      )`,
+      `CREATE INDEX invitations_by_organization
+         ON invitations(organization_id, created_at DESC)`,
+    ],
+  },
+{
+  // Mirrors the SQLite migration of the same version.
+    // Access to one repository rather than to everything an organization owns.
+    //
+    // Membership was organization-wide, so sharing a single repository meant
+    // handing over every repository the team had. A grant is the narrower
+    // thing: it names a person, a repository, and the role they hold there.
+    //
+    // Organization roles still confer blanket access. Scoping owners down to
+    // explicit grants would let them lock themselves out of repositories they
+    // created, and an administrator who cannot see their own team's work is a
+    // worse failure than one who can see too much.
+    version: 17,
+    name: "repository-grants",
+    statements: [
+      `CREATE TABLE repository_grants (
+        repository_id TEXT NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        role TEXT NOT NULL,
+        granted_by TEXT REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, user_id)
+      )`,
+      `CREATE INDEX repository_grants_by_user ON repository_grants(user_id)`,
+    ],
+  },
+{
+    // Mirrors the SQLite migration of the same version.
+    // Narrowing an invitation to a single repository.
+    //
+    // A separate migration rather than an edit to the one that created the
+    // table: migration 16 has already run wherever this branch has been
+    // started, and an applied migration is never re-applied, so changing it
+    // would leave those databases without the column and every insert failing.
+    version: 18,
+    name: "repository-scoped-invitations",
+    statements: [`ALTER TABLE invitations ADD COLUMN repository_id TEXT`],
+  },
 ];

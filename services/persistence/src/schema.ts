@@ -572,8 +572,88 @@ export const MIGRATIONS: readonly Migration[] = [
          ON workers(organization_id, last_seen_at DESC)`,
     ],
   },
+  {
+    // How a person's agents are drawn, stored on the user rather than in the
+    // browser.
+    //
+    // The colour is an identity signal, not a local preference: the point of
+    // choosing one is that colleagues can tell whose agents are whose on the
+    // coordinator's shared views. A value only the chooser could see would
+    // answer no question anyone has. Nullable, because "never chose" is a real
+    // state and the interface derives a stable default from the user id.
+    version: 15,
+    name: "user-appearance",
+    statements: [`ALTER TABLE users ADD COLUMN appearance TEXT`],
+  },
+  {
+    // Bringing somebody new onto a team.
+    //
+    // Adding a member requires an account that already exists, and creating an
+    // account requires a system administrator — so an organization owner had
+    // no way at all to bring in a colleague. An invitation is the missing
+    // half: it names an email and a role, carries a secret the recipient
+    // presents once, and creates the account at the moment it is accepted.
+    //
+    // The secret is stored hashed, exactly like an API token, because a
+    // readable invitations table would otherwise be a list of working keys to
+    // every organization.
+    version: 16,
+    name: "organization-invitations",
+    statements: [
+      `CREATE TABLE invitations (
+        id TEXT PRIMARY KEY,
+        organization_id TEXT NOT NULL REFERENCES organizations(id),
+        email TEXT NOT NULL COLLATE NOCASE,
+        role TEXT NOT NULL,
+        secret_hash TEXT NOT NULL,
+        invited_by TEXT NOT NULL REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        accepted_at TEXT,
+        accepted_by TEXT REFERENCES users(id),
+        revoked_at TEXT
+      )`,
+      `CREATE INDEX invitations_by_organization
+         ON invitations(organization_id, created_at DESC)`,
+    ],
+  },
+{
+    // Access to one repository rather than to everything an organization owns.
+    //
+    // Membership was organization-wide, so sharing a single repository meant
+    // handing over every repository the team had. A grant is the narrower
+    // thing: it names a person, a repository, and the role they hold there.
+    //
+    // Organization roles still confer blanket access. Scoping owners down to
+    // explicit grants would let them lock themselves out of repositories they
+    // created, and an administrator who cannot see their own team's work is a
+    // worse failure than one who can see too much.
+    version: 17,
+    name: "repository-grants",
+    statements: [
+      `CREATE TABLE repository_grants (
+        repository_id TEXT NOT NULL,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        role TEXT NOT NULL,
+        granted_by TEXT REFERENCES users(id),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, user_id)
+      )`,
+      `CREATE INDEX repository_grants_by_user ON repository_grants(user_id)`,
+    ],
+  },
+{
+    // Narrowing an invitation to a single repository.
+    //
+    // A separate migration rather than an edit to the one that created the
+    // table: migration 16 has already run wherever this branch has been
+    // started, and an applied migration is never re-applied, so changing it
+    // would leave those databases without the column and every insert failing.
+    version: 18,
+    name: "repository-scoped-invitations",
+    statements: [`ALTER TABLE invitations ADD COLUMN repository_id TEXT`],
+  },
 ];
-
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),
   0,

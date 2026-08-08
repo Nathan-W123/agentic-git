@@ -1,10 +1,10 @@
 {
-  "name": "Relay Control Room",
-  "short_name": "Relay",
+  "name": "Lattice",
+  "short_name": "Lattice",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#f3eddf",
-  "theme_color": "#e85d2a",
+  "background_color": "#0a0b0f",
+  "theme_color": "#8b5cf6",
   "icons": [
     {
       "src": "/mark.svg",

@@ -2161,4 +2161,143 @@ for (const backend of backends) {
       await cleanup();
     }
   });
+  test(`${backend.name}: an invitation is single use and cannot be raced`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const inviter = await store.createUser({
+        email: "owner@example.com",
+        displayName: "Owner",
+        passwordDigest: "digest",
+      });
+      const joiner = await store.createUser({
+        email: "joiner@example.com",
+        displayName: "Joiner",
+        passwordDigest: "digest",
+      });
+      const other = await store.createUser({
+        email: "other@example.com",
+        displayName: "Other",
+        passwordDigest: "digest",
+      });
+      await store.createInvitation({
+        id: "inv_1",
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        repositoryId: undefined,
+        email: "joiner@example.com",
+        role: "developer",
+        secretHash: "hash",
+        invitedBy: inviter.id,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2026-01-08T00:00:00.000Z",
+        acceptedAt: undefined,
+        acceptedBy: undefined,
+        revokedAt: undefined,
+      });
+
+      const first = await store.acceptInvitation(
+        "inv_1",
+        joiner.id,
+        "2026-01-02T00:00:00.000Z",
+      );
+      // A link that admitted one person must not admit a second: two people
+      // opening the same invitation cannot both come away believing they were
+      // let in.
+      const second = await store.acceptInvitation(
+        "inv_1",
+        other.id,
+        "2026-01-02T00:00:01.000Z",
+      );
+      assert.equal(first, true);
+      assert.equal(second, false);
+
+      const stored = await store.getInvitation("inv_1");
+      assert.equal(stored?.acceptedBy, joiner.id);
+      // The record survives being used, so who joined and when stays auditable.
+      const listed = await store.listInvitations(DEFAULT_ORGANIZATION_ID);
+      assert.equal(listed.length, 1);
+      assert.equal(listed[0]?.email, "joiner@example.com");
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a revoked invitation stops working`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const inviter = await store.createUser({
+        email: "owner2@example.com",
+        displayName: "Owner",
+        passwordDigest: "digest",
+      });
+      const joiner = await store.createUser({
+        email: "late@example.com",
+        displayName: "Late",
+        passwordDigest: "digest",
+      });
+      await store.createInvitation({
+        id: "inv_2",
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        repositoryId: REPOSITORY.id,
+        email: "late@example.com",
+        role: "viewer",
+        secretHash: "hash",
+        invitedBy: inviter.id,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2026-01-08T00:00:00.000Z",
+        acceptedAt: undefined,
+        acceptedBy: undefined,
+        revokedAt: undefined,
+      });
+      await store.revokeInvitation("inv_2", "2026-01-03T00:00:00.000Z");
+      assert.equal(
+        await store.acceptInvitation("inv_2", joiner.id, "2026-01-04T00:00:00.000Z"),
+        false,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a grant reaches one repository and no others`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "granted@example.com",
+        displayName: "Granted",
+        passwordDigest: "digest",
+      });
+      await store.saveRepositoryGrant({
+        repositoryId: "repo_shared",
+        userId: user.id,
+        role: "developer",
+        grantedBy: undefined,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      const mine = await store.listGrantsForUser(user.id);
+      assert.equal(mine.length, 1);
+      assert.equal(mine[0]?.repositoryId, "repo_shared");
+      // Nothing about this grant says anything about any other repository.
+      assert.deepEqual(await store.listRepositoryGrants("repo_private"), []);
+
+      // Re-granting changes the role rather than duplicating the person.
+      await store.saveRepositoryGrant({
+        repositoryId: "repo_shared",
+        userId: user.id,
+        role: "reviewer",
+        grantedBy: undefined,
+        createdAt: "2026-01-02T00:00:00.000Z",
+      });
+      const after = await store.listRepositoryGrants("repo_shared");
+      assert.equal(after.length, 1);
+      assert.equal(after[0]?.role, "reviewer");
+
+      await store.removeRepositoryGrant("repo_shared", user.id);
+      assert.deepEqual(await store.listGrantsForUser(user.id), []);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
 }

@@ -65,6 +65,58 @@ export interface Organization {
   createdAt: string;
 }
 
+/**
+ * How one person's agents are drawn.
+ *
+ * `accent` is a personal interface preference. `agentColor` is not: it is the
+ * colour every one of this user's agents is drawn in, on shared views as well
+ * as their own, so colleagues can tell at a glance whose agent is holding a
+ * file. Both are `#rrggbb` or absent.
+ */
+/**
+ * One person's access to one repository.
+ *
+ * Additive to organization membership rather than a replacement for it: an
+ * organization role still reaches every repository, and a grant is how
+ * somebody with no such role reaches one.
+ */
+export interface RepositoryGrant {
+  repositoryId: string;
+  userId: UserId;
+  role: OrganizationRole;
+  grantedBy: UserId | undefined;
+  createdAt: string;
+}
+
+/**
+ * A pending invitation into an organization.
+ *
+ * The secret is never stored — only its hash — so a leaked database yields no
+ * usable invitation links. `email` is what the invitation is *for*; accepting
+ * it with a different signed-in account is refused, or the link would be a
+ * transferable membership grant.
+ */
+export interface InvitationRecord {
+  id: string;
+  organizationId: string;
+  /** When set, accepting grants this repository rather than the organization. */
+  repositoryId: string | undefined;
+  email: string;
+  role: OrganizationRole;
+  secretHash: string;
+  invitedBy: UserId;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | undefined;
+  acceptedBy: UserId | undefined;
+  revokedAt: string | undefined;
+}
+
+export interface UserAppearance {
+  accent?: string;
+  agentColor?: string;
+}
+
 export interface UserAccount {
   id: UserId;
   email: string;
@@ -73,6 +125,7 @@ export interface UserAccount {
   systemAdmin: boolean;
   disabled: boolean;
   createdAt: string;
+  appearance?: UserAppearance;
 }
 
 export interface OrganizationMembership {
@@ -575,6 +628,7 @@ export interface CoordinationStore {
       passwordDigest?: string;
       disabled?: boolean;
       systemAdmin?: boolean;
+      appearance?: UserAppearance;
     },
   ): Promise<UserAccount>;
   getUser(id: UserId): Promise<UserAccount | undefined>;
@@ -697,6 +751,20 @@ export interface CoordinationStore {
    */
   recordTokenUsage(input: RecordTokenUsageInput): Promise<TokenUsageRecord>;
   listTokenUsage(filter?: TokenUsageFilter): Promise<TokenUsageRecord[]>;
+
+  saveRepositoryGrant(grant: RepositoryGrant): Promise<void>;
+  removeRepositoryGrant(repositoryId: string, userId: UserId): Promise<void>;
+  listRepositoryGrants(repositoryId: string): Promise<RepositoryGrant[]>;
+  /** Every repository this user has been granted, across all of them. */
+  listGrantsForUser(userId: UserId): Promise<RepositoryGrant[]>;
+
+  createInvitation(invitation: InvitationRecord): Promise<void>;
+  getInvitation(id: string): Promise<InvitationRecord | undefined>;
+  /** Newest first. Accepted and revoked ones are kept so the record stands. */
+  listInvitations(organizationId: string): Promise<InvitationRecord[]>;
+  /** Marks it used. Returns false when it was already used or revoked. */
+  acceptInvitation(id: string, userId: UserId, at: string): Promise<boolean>;
+  revokeInvitation(id: string, at: string): Promise<void>;
 
   createApiToken(token: ApiTokenRecord): Promise<void>;
   getApiToken(id: string): Promise<ApiTokenRecord | undefined>;

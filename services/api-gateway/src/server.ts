@@ -1,5 +1,6 @@
 import {
   createHash,
+  randomBytes,
   randomUUID,
   timingSafeEqual,
 } from "node:crypto";
@@ -13,7 +14,9 @@ import type { Duplex } from "node:stream";
 
 import type {
   CoordinationStore,
+  Organization,
   OrganizationRole,
+  ProjectRecord,
   WorkLease,
   WorkerRecord,
   StoredRepository,
@@ -31,12 +34,15 @@ import {
   AuthService,
   AuthenticationError,
   hashPassword,
+  hashSecret,
   parseBearer,
+  secretMatches,
   type AuthenticatedPrincipal,
 } from "./auth.js";
 import {
   authorizeOrganization,
   authorizeProject,
+  authorizeRepository,
   canAssignRole,
   ALL_PERMISSIONS,
   assertTokenScope,
@@ -51,6 +57,9 @@ const API_PREFIX = "/api/v1";
 const MAX_JSON_BYTES = 1024 * 1024;
 /** How long a worker holds a task before it must heartbeat again. */
 const WORK_LEASE_TTL_MS = 5 * 60 * 1000;
+/** A week: long enough to be useful, short enough to be a poor thing to leak. */
+const INVITATION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
 const ROLES: readonly OrganizationRole[] = [
   "owner",
   "admin",
@@ -334,6 +343,25 @@ class HttpError extends Error {
   }
 }
 
+/**
+ * A colour, accepted only as `#rrggbb`.
+ *
+ * The value is written into a `style` attribute by the dashboard, so anything
+ * looser than an exact hex triple is an injection point: `red;background:url()`
+ * is a perfectly good CSS colour prefix. Validating at the edge means the
+ * browser never has to sanitise it.
+ */
+function hexColorField(value: unknown, field: string): string {
+  if (typeof value !== "string" || !/^#[0-9a-f]{6}$/iu.test(value.trim())) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `${field} must be a #rrggbb colour`,
+    );
+  }
+  return value.trim().toLowerCase();
+}
+
 function stringField(
   value: unknown,
   field: string,
@@ -438,6 +466,60 @@ function matchPath(pathname: string, pattern: RegExp): string[] | undefined {
   }
 }
 
+/**
+ * Drops rows for repositories the caller cannot reach.
+ *
+ * Per-repository access is only real if the lists respect it. Tasks, runs and
+ * approvals all carry the repository they belong to, so one helper narrows
+ * them; `undefined` means an organization role, which reaches everything.
+ */
+function narrowToRepositories<T extends { repositoryId?: string }>(
+  rows: readonly T[],
+  repositories: ReadonlySet<string> | undefined,
+): T[] {
+  if (repositories === undefined) {
+    return [...rows];
+  }
+  return rows.filter(
+    (row) => row.repositoryId !== undefined && repositories.has(row.repositoryId),
+  );
+}
+
+/** An invitation without its secret, which is never stored recoverably. */
+function publicInvitation(invitation: {
+  id: string;
+  organizationId: string;
+  repositoryId?: string | undefined;
+  email: string;
+  role: OrganizationRole;
+  invitedBy: string;
+  createdAt: string;
+  expiresAt: string;
+  acceptedAt: string | undefined;
+  acceptedBy: string | undefined;
+  revokedAt: string | undefined;
+}) {
+  const status =
+    invitation.revokedAt !== undefined
+      ? "revoked"
+      : invitation.acceptedAt !== undefined
+        ? "accepted"
+        : Date.parse(invitation.expiresAt) < Date.now()
+          ? "expired"
+          : "pending";
+  return {
+    id: invitation.id,
+    organizationId: invitation.organizationId,
+    repositoryId: invitation.repositoryId,
+    email: invitation.email,
+    role: invitation.role,
+    invitedBy: invitation.invitedBy,
+    createdAt: invitation.createdAt,
+    expiresAt: invitation.expiresAt,
+    status,
+  };
+}
+
 function publicUser(user: {
   id: string;
   email: string;
@@ -445,6 +527,7 @@ function publicUser(user: {
   systemAdmin: boolean;
   disabled: boolean;
   createdAt: string;
+  appearance?: { accent?: string; agentColor?: string };
 }): Omit<typeof user, "passwordDigest"> {
   return {
     id: user.id,
@@ -453,6 +536,9 @@ function publicUser(user: {
     systemAdmin: user.systemAdmin,
     disabled: user.disabled,
     createdAt: user.createdAt,
+    // Deliberately public within the organization: an agent colour only
+    // identifies its owner if the people working alongside them can read it.
+    ...(user.appearance === undefined ? {} : { appearance: user.appearance }),
   };
 }
 
@@ -695,13 +781,24 @@ export class ApiGateway {
         response.writeHead(204).end();
         return;
       }
+      // Looking at an invitation, and accepting one, must work before the
+      // recipient has an account — that is the entire point of an invitation.
+      // Both carry their own secret, so neither is unauthenticated in the
+      // sense that matters.
+      const invitationPath = /^\/api\/v1\/invitations\/[^/]+(\/accept)?$/u.test(
+        url.pathname,
+      );
       const isPublic =
-        request.method === "GET" && url.pathname === `${API_PREFIX}/health` ||
-        request.method === "POST" &&
+        (request.method === "GET" && url.pathname === `${API_PREFIX}/health`) ||
+        (request.method === "GET" && invitationPath) ||
+        (request.method === "POST" &&
           [
             `${API_PREFIX}/auth/login`,
             `${API_PREFIX}/auth/bootstrap`,
-          ].includes(url.pathname);
+          ].includes(url.pathname)) ||
+        (request.method === "POST" &&
+          url.pathname.endsWith("/accept") &&
+          invitationPath);
       if (!isPublic) {
         const bearer = parseBearer(
           typeof request.headers.authorization === "string"
@@ -840,6 +937,157 @@ export class ApiGateway {
       return;
     }
 
+    // ---- Accepting an invitation ------------------------------------------
+    // Reachable without a session: the recipient may have no account yet. The
+    // link's own secret is the credential, so this is not an open endpoint.
+    // Two patterns rather than one with an optional group: matchPath decodes
+    // every group, so an absent group comes back as the string "undefined"
+    // rather than as undefined.
+    const inviteReadMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/invitations/([^/]+)$`, "u"),
+    );
+    const inviteAcceptMatch =
+      inviteReadMatch === undefined
+        ? matchPath(
+            path,
+            new RegExp(`^${API_PREFIX}/invitations/([^/]+)/accept$`, "u"),
+          )
+        : undefined;
+    const inviteTokenMatch = inviteReadMatch ?? inviteAcceptMatch;
+    if (inviteTokenMatch !== undefined) {
+      const token = inviteTokenMatch[0] ?? "";
+      const action = inviteAcceptMatch === undefined ? undefined : "accept";
+      const separator = token.indexOf(".");
+      const invitation =
+        separator < 1
+          ? undefined
+          : await this.options.store.getInvitation(token.slice(0, separator));
+      const secret = separator < 1 ? "" : token.slice(separator + 1);
+      // One answer for every way a link can be wrong, so a probe cannot tell
+      // "no such invitation" from "wrong secret".
+      if (
+        invitation === undefined ||
+        !secretMatches(secret, invitation.secretHash)
+      ) {
+        throw new HttpError(404, "not_found", "This invitation is not valid");
+      }
+      const organization = await this.options.store.getOrganization(
+        invitation.organizationId,
+      );
+      const state = publicInvitation(invitation).status;
+
+      if (method === "GET" && action === undefined) {
+        this.sendJson(response, 200, {
+          invitation: {
+            email: invitation.email,
+            role: invitation.role,
+            status: state,
+            organizationName: organization?.name ?? "this organization",
+            ...(invitation.repositoryId === undefined
+              ? {}
+              : { repositoryId: invitation.repositoryId }),
+            expiresAt: invitation.expiresAt,
+          },
+        });
+        return;
+      }
+
+      if (method === "POST" && action === "accept") {
+        if (state !== "pending") {
+          throw new HttpError(
+            409,
+            `invitation_${state}`,
+            `This invitation has already been ${state}`,
+          );
+        }
+        const body = objectBody(await this.readJson(request));
+        let user = await this.options.store.getUserByEmail(invitation.email);
+        if (user === undefined) {
+          user = await this.options.store.createUser({
+            email: invitation.email,
+            displayName:
+              stringField(body["displayName"], "displayName", { max: 120 }) ??
+              "",
+            passwordDigest: await hashPassword(
+              stringField(body["password"], "password", { max: 256 }) ?? "",
+            ),
+          });
+        } else {
+          // The account already exists, so the invitation is not proof of who
+          // is holding the link. Signing in is.
+          const signedIn = await this.auth
+            .authenticate(request.headers.cookie)
+            .catch(() => undefined);
+          if (signedIn?.user.id !== user.id) {
+            throw new HttpError(
+              409,
+              "account_exists",
+              "An account already uses that address. Sign in as " +
+                `${invitation.email} and open this link again.`,
+            );
+          }
+        }
+        const claimed = await this.options.store.acceptInvitation(
+          invitation.id,
+          user.id,
+          new Date().toISOString(),
+        );
+        if (!claimed) {
+          throw new HttpError(
+            409,
+            "invitation_used",
+            "This invitation has already been used",
+          );
+        }
+        // A repository-scoped invitation grants that repository and nothing
+        // else — deliberately no organization membership, because any
+        // organization role reaches every repository and would undo the point
+        // of scoping the invitation in the first place.
+        if (invitation.repositoryId === undefined) {
+          await this.options.store.saveMembership({
+            organizationId: invitation.organizationId,
+            userId: user.id,
+            role: invitation.role,
+          });
+        } else {
+          await this.options.store.saveRepositoryGrant({
+            repositoryId: invitation.repositoryId,
+            userId: user.id,
+            role: invitation.role,
+            grantedBy: invitation.invitedBy,
+            createdAt: new Date().toISOString(),
+          });
+        }
+        await this.options.store.appendAudit(undefined, {
+          type: "membership_changed",
+          data: {
+            organizationId: invitation.organizationId,
+            ...(invitation.repositoryId === undefined
+              ? {}
+              : { repositoryId: invitation.repositoryId }),
+            userId: user.id,
+            role: invitation.role,
+            action: "accepted_invitation",
+            actorId: user.id,
+          },
+        });
+        const issued = await this.auth.issueSession(
+          user,
+          this.remoteAddress(request),
+          request.headers["user-agent"] ?? "",
+        );
+        response.setHeader("Set-Cookie", issued.cookies);
+        this.sendJson(response, 200, {
+          user: issued.principal.user,
+          memberships: issued.principal.memberships,
+          csrfToken: issued.csrfToken,
+        });
+        return;
+      }
+      throw new HttpError(405, "method_not_allowed", "Unsupported method");
+    }
+
     const principal = this.requirePrincipal(context);
     if (method === "POST" && path === `${API_PREFIX}/auth/logout`) {
       // A bearer token has no session to end; revoking it is a separate,
@@ -866,6 +1114,32 @@ export class ApiGateway {
       this.sendJson(response, 200, principal);
       return;
     }
+
+    // A person's own interface colours. Scoped to the authenticated principal
+    // with no user id in the path, so there is no request shape that edits
+    // somebody else's appearance.
+    if (method === "PATCH" && path === `${API_PREFIX}/auth/me/appearance`) {
+      const body = objectBody(await this.readJson(request));
+      // A PATCH names only what it changes. The stored value is one object, so
+      // an unnamed field has to be carried over: sending just `agentColor`
+      // must not silently clear the accent the user picked a moment earlier.
+      const current = await this.options.store.getUser(principal.user.id);
+      const appearance = {
+        ...current?.appearance,
+        ...(body["accent"] === undefined
+          ? {}
+          : { accent: hexColorField(body["accent"], "accent") }),
+        ...(body["agentColor"] === undefined
+          ? {}
+          : { agentColor: hexColorField(body["agentColor"], "agentColor") }),
+      };
+      const updated = await this.options.store.updateUser(principal.user.id, {
+        appearance,
+      });
+      this.sendJson(response, 200, { user: publicUser(updated) });
+      return;
+    }
+
 
     // ---- Remote worker protocol -------------------------------------------
     // Everything that pulls work or returns changesets requires the run_task
@@ -1442,9 +1716,7 @@ export class ApiGateway {
 
     if (method === "GET" && path === `${API_PREFIX}/organizations`) {
       this.sendJson(response, 200, {
-        organizations: await this.options.store.listOrganizations(
-          principal.user.systemAdmin ? undefined : principal.user.id,
-        ),
+        organizations: await this.reachableOrganizations(principal),
       });
       return;
     }
@@ -1540,6 +1812,145 @@ export class ApiGateway {
         this.sendJson(response, 200, { organization });
         return;
       }
+    }
+
+
+    // ---- Invitations ------------------------------------------------------
+    // Membership already required an account, and creating an account required
+    // a system administrator, so an organization owner had no way to bring in
+    // a colleague. An invitation closes that loop: it names an email and a
+    // role, and creates the account at the moment it is accepted.
+    const invitationsMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/organizations/([^/]+)/invitations$`, "u"),
+    );
+    if (invitationsMatch !== undefined) {
+      const organizationId = invitationsMatch[0] ?? "";
+      const authorized = await authorizeOrganization(
+        this.options.store,
+        principal,
+        organizationId,
+        "manage_members",
+      );
+      if (method === "GET") {
+        this.sendJson(response, 200, {
+          invitations: (
+            await this.options.store.listInvitations(organizationId)
+          ).map(publicInvitation),
+        });
+        return;
+      }
+      if (method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const email = emailField(body["email"]) ?? "";
+        const role = stringField(body["role"], "role", { max: 20 }) as
+          | OrganizationRole
+          | undefined;
+        if (role === undefined || !ROLES.includes(role)) {
+          throw new HttpError(400, "invalid_role", "Role is invalid");
+        }
+        // The same ceiling as adding a member directly: an invitation must not
+        // be a way to hand out a role you could not assign yourself.
+        if (!canAssignRole(authorized.role, role)) {
+          throw new HttpError(403, "forbidden", "You cannot assign that role");
+        }
+        // An invitation may name one repository, which is what it then
+        // grants; without one it admits the person to the whole organization.
+        const repositoryId = stringField(
+          body["repositoryId"],
+          "repositoryId",
+          { max: 128, optional: true },
+        );
+        if (repositoryId !== undefined) {
+          const owned = await this.options.store.listProjectRepositories(
+            stringField(body["projectId"], "projectId", { max: 128 }) ?? "",
+          );
+          if (!owned.some((entry) => entry.id === repositoryId)) {
+            throw new HttpError(
+              404,
+              "not_found",
+              "Repository was not found in that project",
+            );
+          }
+        }
+        const existing = await this.options.store.getUserByEmail(email);
+        if (existing !== undefined && repositoryId === undefined) {
+          const memberships = await this.options.store.listMemberships(
+            organizationId,
+          );
+          if (memberships.some((entry) => entry.userId === existing.id)) {
+            throw new HttpError(
+              409,
+              "already_a_member",
+              "That person is already in this organization",
+            );
+          }
+        }
+        const id = `inv_${randomBytes(9).toString("base64url")}`;
+        const secret = randomBytes(32).toString("base64url");
+        const now = new Date();
+        const invitation = {
+          id,
+          organizationId,
+          repositoryId,
+          email,
+          role,
+          secretHash: hashSecret(secret),
+          invitedBy: principal.user.id,
+          createdAt: now.toISOString(),
+          expiresAt: new Date(
+            now.getTime() + INVITATION_TTL_MS,
+          ).toISOString(),
+          acceptedAt: undefined,
+          acceptedBy: undefined,
+          revokedAt: undefined,
+        };
+        await this.options.store.createInvitation(invitation);
+        await this.options.store.appendAudit(undefined, {
+          type: "membership_changed",
+          data: {
+            organizationId,
+            email,
+            role,
+            action: "invited",
+            actorId: principal.user.id,
+          },
+        });
+        // The only time the secret exists in a response. It is not stored in
+        // recoverable form, so a lost link is reissued rather than looked up.
+        this.sendJson(response, 201, {
+          invitation: publicInvitation(invitation),
+          token: `${id}.${secret}`,
+        });
+        return;
+      }
+    }
+
+    const invitationMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/organizations/([^/]+)/invitations/([^/]+)$`,
+        "u",
+      ),
+    );
+    if (invitationMatch !== undefined && method === "DELETE") {
+      const [organizationId = "", invitationId = ""] = invitationMatch;
+      await authorizeOrganization(
+        this.options.store,
+        principal,
+        organizationId,
+        "manage_members",
+      );
+      const found = await this.options.store.getInvitation(invitationId);
+      if (found === undefined || found.organizationId !== organizationId) {
+        throw new HttpError(404, "not_found", "Invitation was not found");
+      }
+      await this.options.store.revokeInvitation(
+        invitationId,
+        new Date().toISOString(),
+      );
+      this.sendJson(response, 200, { revoked: true });
+      return;
     }
 
     const membersMatch = matchPath(
@@ -1715,16 +2126,50 @@ export class ApiGateway {
     );
     if (projectsMatch !== undefined) {
       const organizationId = projectsMatch[0] ?? "";
-      await authorizeOrganization(
-        this.options.store,
-        principal,
-        organizationId,
-        method === "GET" ? "view" : "manage_project",
-      );
+      // Reading the project list is the one place a grant alone has to be
+      // enough: somebody invited to a single repository has no organization
+      // role, and without this they sign in successfully and can see nothing.
+      // Everything beyond reading still requires a real organization role.
+      let hasOrganizationRole = true;
       if (method === "GET") {
-        this.sendJson(response, 200, {
-          projects: await this.options.store.listProjects(organizationId),
-        });
+        try {
+          await authorizeOrganization(
+            this.options.store,
+            principal,
+            organizationId,
+            "view",
+          );
+        } catch (error) {
+          hasOrganizationRole = false;
+          const grants = await this.options.store.listGrantsForUser(
+            principal.user.id,
+          );
+          if (grants.length === 0) {
+            throw error;
+          }
+        }
+      } else {
+        await authorizeOrganization(
+          this.options.store,
+          principal,
+          organizationId,
+          "manage_project",
+        );
+      }
+      if (method === "GET") {
+        const projects = await this.reachableProjects(
+          principal,
+          organizationId,
+          hasOrganizationRole,
+        );
+        if (!hasOrganizationRole && projects.length === 0) {
+          throw new AuthenticationError(
+            "You do not have permission to perform this action",
+            403,
+            "forbidden",
+          );
+        }
+        this.sendJson(response, 200, { projects });
         return;
       }
       if (method === "POST") {
@@ -1873,15 +2318,22 @@ export class ApiGateway {
     );
     if (repositoriesMatch !== undefined && method === "GET") {
       const projectId = repositoriesMatch[0] ?? "";
-      await authorizeProject(
+      const { repositories } = await authorizeProject(
         this.options.store,
         principal,
         projectId,
         "view",
       );
+      const all = await this.options.store.listProjectRepositories(projectId);
       this.sendJson(response, 200, {
+        // Somebody holding a grant sees the repositories they were granted and
+        // no others: this list is how the interface learns what exists, so
+        // returning everything here would defeat the grant regardless of what
+        // the per-repository routes enforce.
         repositories:
-          await this.options.store.listProjectRepositories(projectId),
+          repositories === undefined
+            ? all
+            : all.filter((entry) => repositories.has(entry.id)),
       });
       return;
     }
@@ -1983,7 +2435,7 @@ export class ApiGateway {
     );
     if (tasksMatch !== undefined) {
       const projectId = tasksMatch[0] ?? "";
-      await authorizeProject(
+      const authorized = await authorizeProject(
         this.options.store,
         principal,
         projectId,
@@ -2002,11 +2454,12 @@ export class ApiGateway {
             `Task status must be one of ${TASK_STATUSES.join(", ")}`,
           );
         }
+        const tasks = await this.options.store.listSubmittedTasks({
+          projectId,
+          ...(status === undefined ? {} : { status }),
+        });
         this.sendJson(response, 200, {
-          tasks: await this.options.store.listSubmittedTasks({
-            projectId,
-            ...(status === undefined ? {} : { status }),
-          }),
+          tasks: narrowToRepositories(tasks, authorized.repositories),
         });
         return;
       }
@@ -2018,7 +2471,12 @@ export class ApiGateway {
           !(await this.options.store.projectHasRepository(
             projectId,
             repositoryId,
-          ))
+          )) ||
+          // Reaching the project is not permission to put work into a
+          // repository inside it. Same answer either way, so a probe cannot
+          // tell "not linked" from "not yours".
+          (authorized.repositories !== undefined &&
+            !authorized.repositories.has(repositoryId))
         ) {
           throw new HttpError(
             404,
@@ -2111,10 +2569,11 @@ export class ApiGateway {
     );
     if (runMatch !== undefined && method === "POST") {
       const [projectId = "", repositoryId = ""] = runMatch;
-      await authorizeProject(
+      await authorizeRepository(
         this.options.store,
         principal,
         projectId,
+        repositoryId,
         "run_task",
       );
       if (
@@ -2273,7 +2732,13 @@ export class ApiGateway {
     );
     if (versionsMatch !== undefined && method === "GET") {
       const [projectId = "", repositoryId = ""] = versionsMatch;
-      await authorizeProject(this.options.store, principal, projectId, "view");
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
       if (
         !(await this.options.store.projectHasRepository(projectId, repositoryId))
       ) {
@@ -2309,10 +2774,11 @@ export class ApiGateway {
       // Reverting canonical wholesale is a project-management act, not
       // ordinary task work, so it needs more than the run_task a developer
       // carries.
-      await authorizeProject(
+      await authorizeRepository(
         this.options.store,
         principal,
         projectId,
+        repositoryId,
         "manage_project",
       );
       if (
@@ -2397,10 +2863,11 @@ export class ApiGateway {
           "This deployment does not support overlay workspaces",
         );
       }
-      await authorizeProject(
+      await authorizeRepository(
         this.options.store,
         principal,
         projectId,
+        repositoryId,
         action === "exec" ? "run_task" : "submit_task",
       );
       const scope = {
@@ -2735,7 +3202,7 @@ export class ApiGateway {
     );
     if (runsMatch !== undefined && method === "GET") {
       const projectId = runsMatch[0] ?? "";
-      await authorizeProject(
+      const authorized = await authorizeProject(
         this.options.store,
         principal,
         projectId,
@@ -2746,7 +3213,10 @@ export class ApiGateway {
         Math.max(1, Number.parseInt(url.searchParams.get("limit") ?? "100", 10)),
       );
       this.sendJson(response, 200, {
-        runs: (await this.options.store.listRuns(limit * 5))
+        runs: narrowToRepositories(
+          await this.options.store.listRuns(limit * 5),
+          authorized.repositories,
+        )
           .filter((run) => run.projectId === projectId)
           .slice(0, limit),
       });
@@ -2779,7 +3249,7 @@ export class ApiGateway {
     );
     if (approvalsMatch !== undefined && method === "GET") {
       const projectId = approvalsMatch[0] ?? "";
-      await authorizeProject(
+      const authorized = await authorizeProject(
         this.options.store,
         principal,
         projectId,
@@ -2798,10 +3268,13 @@ export class ApiGateway {
         );
       }
       this.sendJson(response, 200, {
-        approvals: await this.options.store.listApprovals({
-          projectId,
-          ...(status === undefined ? {} : { status }),
-        }),
+        approvals: narrowToRepositories(
+          await this.options.store.listApprovals({
+            projectId,
+            ...(status === undefined ? {} : { status }),
+          }),
+          authorized.repositories,
+        ),
       });
       return;
     }
@@ -3072,6 +3545,80 @@ export class ApiGateway {
     }
 
     throw new HttpError(404, "not_found", "Route was not found");
+  }
+
+  /**
+   * Organizations the caller can reach at all.
+   *
+   * Membership is no longer the only route in: somebody invited to a single
+   * repository holds a grant and no organization role, and listing only their
+   * memberships would leave them signed in and staring at nothing. The
+   * organizations behind their grants are added so the interface can find the
+   * project the repository lives in.
+   */
+  private async reachableOrganizations(
+    principal: AuthenticatedPrincipal,
+  ): Promise<Organization[]> {
+    const byMembership = await this.options.store.listOrganizations(
+      principal.user.systemAdmin ? undefined : principal.user.id,
+    );
+    if (principal.user.systemAdmin) {
+      return byMembership;
+    }
+    const grants = await this.options.store.listGrantsForUser(
+      principal.user.id,
+    );
+    if (grants.length === 0) {
+      return byMembership;
+    }
+    const granted = new Set(grants.map((grant) => grant.repositoryId));
+    const seen = new Set(byMembership.map((entry) => entry.id));
+    const found = [...byMembership];
+    for (const organization of await this.options.store.listOrganizations()) {
+      if (seen.has(organization.id)) {
+        continue;
+      }
+      for (const project of await this.options.store.listProjects(
+        organization.id,
+      )) {
+        const repositories = await this.options.store.listProjectRepositories(
+          project.id,
+        );
+        if (repositories.some((entry) => granted.has(entry.id))) {
+          found.push(organization);
+          seen.add(organization.id);
+          break;
+        }
+      }
+    }
+    return found;
+  }
+
+  /** Projects the caller can reach, by membership or by a repository grant. */
+  private async reachableProjects(
+    principal: AuthenticatedPrincipal,
+    organizationId: string,
+    hasOrganizationRole: boolean,
+  ): Promise<ProjectRecord[]> {
+    const projects = await this.options.store.listProjects(organizationId);
+    if (hasOrganizationRole || principal.user.systemAdmin) {
+      return projects;
+    }
+    const granted = new Set(
+      (await this.options.store.listGrantsForUser(principal.user.id)).map(
+        (grant) => grant.repositoryId,
+      ),
+    );
+    const reachable: ProjectRecord[] = [];
+    for (const project of projects) {
+      const repositories = await this.options.store.listProjectRepositories(
+        project.id,
+      );
+      if (repositories.some((entry) => granted.has(entry.id))) {
+        reachable.push(project);
+      }
+    }
+    return reachable;
   }
 
   private requirePrincipal(context: RequestContext): AuthenticatedPrincipal {

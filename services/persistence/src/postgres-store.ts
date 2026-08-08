@@ -79,7 +79,10 @@ import type {
   TokenUsageFilter,
   TokenUsageRecord,
   SubmittedTaskStatus,
+  InvitationRecord,
+  RepositoryGrant,
   UserAccount,
+  UserAppearance,
   LeaseTaskInput,
   LeasedWork,
   SaveWorkLeasePlanInput,
@@ -437,24 +440,35 @@ export class PostgresCoordinationStore implements CoordinationStore {
       passwordDigest?: string;
       disabled?: boolean;
       systemAdmin?: boolean;
+      appearance?: UserAppearance;
     },
   ): Promise<UserAccount> {
     const existing = await this.getUser(id);
     if (existing === undefined) {
       throw new Error(`Unknown user: ${id}`);
     }
+    const appearance = input.appearance ?? existing.appearance;
     const user: UserAccount = {
       ...existing,
       displayName: input.displayName?.trim() ?? existing.displayName,
       passwordDigest: input.passwordDigest ?? existing.passwordDigest,
       disabled: input.disabled ?? existing.disabled,
       systemAdmin: input.systemAdmin ?? existing.systemAdmin,
+      ...(appearance === undefined ? {} : { appearance }),
     };
     await this.query(
       `UPDATE users
-       SET display_name = $1, password_digest = $2, disabled = $3, system_admin = $4
-       WHERE id = $5`,
-      [user.displayName, user.passwordDigest, user.disabled, user.systemAdmin, id],
+       SET display_name = $1, password_digest = $2, disabled = $3,
+           system_admin = $4, appearance = $5
+       WHERE id = $6`,
+      [
+        user.displayName,
+        user.passwordDigest,
+        user.disabled,
+        user.systemAdmin,
+        appearance === undefined ? null : JSON.stringify(appearance),
+        id,
+      ],
     );
     return user;
   }
@@ -1193,6 +1207,145 @@ export class PostgresCoordinationStore implements CoordinationStore {
       )
     ).rows as Row[];
     return rows.map((row) => this.toTokenUsage(row));
+  }
+
+
+  /* ------------------------------------------------------- invitations ---- */
+
+
+  /* -------------------------------------------------- repository grants ---- */
+
+  public async saveRepositoryGrant(grant: RepositoryGrant): Promise<void> {
+    await this.query(
+      `INSERT INTO repository_grants
+         (repository_id, user_id, role, granted_by, created_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (repository_id, user_id)
+       DO UPDATE SET role = EXCLUDED.role`,
+      [
+        grant.repositoryId,
+        grant.userId,
+        grant.role,
+        grant.grantedBy ?? null,
+        grant.createdAt,
+      ],
+    );
+  }
+
+  public async removeRepositoryGrant(
+    repositoryId: string,
+    userId: string,
+  ): Promise<void> {
+    await this.query(
+      "DELETE FROM repository_grants WHERE repository_id = $1 AND user_id = $2",
+      [repositoryId, userId],
+    );
+  }
+
+  public async listRepositoryGrants(
+    repositoryId: string,
+  ): Promise<RepositoryGrant[]> {
+    const rows = await this.rows(
+      "SELECT * FROM repository_grants WHERE repository_id = $1 ORDER BY created_at",
+      [repositoryId],
+    );
+    return rows.map((row) => this.toGrant(row));
+  }
+
+  public async listGrantsForUser(userId: string): Promise<RepositoryGrant[]> {
+    const rows = await this.rows(
+      "SELECT * FROM repository_grants WHERE user_id = $1",
+      [userId],
+    );
+    return rows.map((row) => this.toGrant(row));
+  }
+
+  private toGrant(row: Row): RepositoryGrant {
+    return {
+      repositoryId: text(row, "repository_id"),
+      userId: text(row, "user_id"),
+      role: text(row, "role") as RepositoryGrant["role"],
+      grantedBy: optionalText(row, "granted_by"),
+      createdAt: text(row, "created_at"),
+    };
+  }
+
+  public async createInvitation(invitation: InvitationRecord): Promise<void> {
+    await this.query(
+      `INSERT INTO invitations
+         (id, organization_id, repository_id, email, role, secret_hash,
+          invited_by, created_at, expires_at, accepted_at, accepted_by,
+          revoked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL, NULL)`,
+      [
+        invitation.id,
+        invitation.organizationId,
+        invitation.repositoryId ?? null,
+        // Lowercased here because this schema has no case-insensitive collation
+        // on the column, and an invitation must match the address regardless of
+        // how the recipient types it.
+        invitation.email.toLowerCase(),
+        invitation.role,
+        invitation.secretHash,
+        invitation.invitedBy,
+        invitation.createdAt,
+        invitation.expiresAt,
+      ],
+    );
+  }
+
+  public async getInvitation(id: string): Promise<InvitationRecord | undefined> {
+    const row = await this.row("SELECT * FROM invitations WHERE id = $1", [id]);
+    return row === undefined ? undefined : this.toInvitation(row);
+  }
+
+  public async listInvitations(
+    organizationId: string,
+  ): Promise<InvitationRecord[]> {
+    const rows = await this.rows(
+      `SELECT * FROM invitations WHERE organization_id = $1
+       ORDER BY created_at DESC`,
+      [organizationId],
+    );
+    return rows.map((row) => this.toInvitation(row));
+  }
+
+  public async acceptInvitation(
+    id: string,
+    userId: string,
+    at: string,
+  ): Promise<boolean> {
+    const rows = await this.rows(
+      `UPDATE invitations SET accepted_at = $1, accepted_by = $2
+       WHERE id = $3 AND accepted_at IS NULL AND revoked_at IS NULL
+       RETURNING id`,
+      [at, userId, id],
+    );
+    return rows.length === 1;
+  }
+
+  public async revokeInvitation(id: string, at: string): Promise<void> {
+    await this.query(
+      "UPDATE invitations SET revoked_at = $1 WHERE id = $2 AND revoked_at IS NULL",
+      [at, id],
+    );
+  }
+
+  private toInvitation(row: Row): InvitationRecord {
+    return {
+      id: text(row, "id"),
+      organizationId: text(row, "organization_id"),
+      repositoryId: optionalText(row, "repository_id"),
+      email: text(row, "email"),
+      role: text(row, "role") as InvitationRecord["role"],
+      secretHash: text(row, "secret_hash"),
+      invitedBy: text(row, "invited_by"),
+      createdAt: text(row, "created_at"),
+      expiresAt: text(row, "expires_at"),
+      acceptedAt: optionalText(row, "accepted_at"),
+      acceptedBy: optionalText(row, "accepted_by"),
+      revokedAt: optionalText(row, "revoked_at"),
+    };
   }
 
   public async createApiToken(token: ApiTokenRecord): Promise<void> {
@@ -2654,6 +2807,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
   }
 
   private toUser(row: Row): UserAccount {
+    const appearance = row["appearance"];
     return {
       id: text(row, "id"),
       email: text(row, "email"),
@@ -2662,6 +2816,11 @@ export class PostgresCoordinationStore implements CoordinationStore {
       systemAdmin: flag(row, "system_admin"),
       disabled: flag(row, "disabled"),
       createdAt: text(row, "created_at"),
+      // A row written before the column existed, or by a client that never
+      // chose, reads as absent rather than as an empty preference.
+      ...(typeof appearance === "string" && appearance.length > 0
+        ? { appearance: JSON.parse(appearance) as UserAppearance }
+        : {}),
     };
   }
 

@@ -56,6 +56,8 @@ export interface PublicUser {
   email: string;
   displayName: string;
   systemAdmin: boolean;
+  /** Interface colours; the agent colour identifies this user to colleagues. */
+  appearance?: { accent?: string; agentColor?: string };
 }
 
 /**
@@ -107,6 +109,21 @@ function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("base64url");
 }
 
+/**
+ * Hashes a bearer-style secret for storage.
+ *
+ * Shared with invitations so an invitation link is stored exactly the way a
+ * session or API token is — the database never holds anything that could be
+ * presented back as a credential.
+ */
+export function hashSecret(value: string): string {
+  return digest(value);
+}
+
+export function secretMatches(value: string, expectedHash: string): boolean {
+  return equalDigest(value, expectedHash);
+}
+
 function equalDigest(value: string, expected: string): boolean {
   const actualBuffer = Buffer.from(digest(value));
   const expectedBuffer = Buffer.from(expected);
@@ -122,6 +139,10 @@ function publicUser(user: UserAccount): PublicUser {
     email: user.email,
     displayName: user.displayName,
     systemAdmin: user.systemAdmin,
+    // The principal is rebuilt from the store on every request, so a colour
+    // changed in one tab is live in the next request rather than at next
+    // sign-in.
+    ...(user.appearance === undefined ? {} : { appearance: user.appearance }),
   };
 }
 

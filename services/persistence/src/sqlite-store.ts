@@ -80,7 +80,10 @@ import type {
   TokenUsageFilter,
   TokenUsageRecord,
   SubmittedTaskStatus,
+  InvitationRecord,
+  RepositoryGrant,
   UserAccount,
+  UserAppearance,
   LeaseTaskInput,
   LeasedWork,
   SaveWorkLeasePlanInput,
@@ -348,23 +351,27 @@ export class SqliteCoordinationStore implements CoordinationStore {
       passwordDigest?: string;
       disabled?: boolean;
       systemAdmin?: boolean;
+      appearance?: UserAppearance;
     },
   ): Promise<UserAccount> {
     const existing = await this.getUser(id);
     if (existing === undefined) {
       throw new Error(`Unknown user: ${id}`);
     }
+    const appearance = input.appearance ?? existing.appearance;
     const user: UserAccount = {
       ...existing,
       displayName: input.displayName?.trim() ?? existing.displayName,
       passwordDigest: input.passwordDigest ?? existing.passwordDigest,
       disabled: input.disabled ?? existing.disabled,
       systemAdmin: input.systemAdmin ?? existing.systemAdmin,
+      ...(appearance === undefined ? {} : { appearance }),
     };
     this.db
       .prepare(
         `UPDATE users
-         SET display_name = ?, password_digest = ?, disabled = ?, system_admin = ?
+         SET display_name = ?, password_digest = ?, disabled = ?, system_admin = ?,
+             appearance = ?
          WHERE id = ?`,
       )
       .run(
@@ -372,6 +379,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         user.passwordDigest,
         user.disabled ? 1 : 0,
         user.systemAdmin ? 1 : 0,
+        appearance === undefined ? null : JSON.stringify(appearance),
         id,
       );
     return user;
@@ -1155,6 +1163,151 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(`SELECT * FROM token_usage${where} ORDER BY recorded_at ASC`)
       .all(...values) as Row[];
     return rows.map((row) => this.toTokenUsage(row));
+  }
+
+
+  /* ------------------------------------------------------- invitations ---- */
+
+
+  /* -------------------------------------------------- repository grants ---- */
+
+  public async saveRepositoryGrant(grant: RepositoryGrant): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO repository_grants
+           (repository_id, user_id, role, granted_by, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(repository_id, user_id)
+         DO UPDATE SET role = excluded.role`,
+      )
+      .run(
+        grant.repositoryId,
+        grant.userId,
+        grant.role,
+        grant.grantedBy ?? null,
+        grant.createdAt,
+      );
+  }
+
+  public async removeRepositoryGrant(
+    repositoryId: string,
+    userId: string,
+  ): Promise<void> {
+    this.db
+      .prepare(
+        "DELETE FROM repository_grants WHERE repository_id = ? AND user_id = ?",
+      )
+      .run(repositoryId, userId);
+  }
+
+  public async listRepositoryGrants(
+    repositoryId: string,
+  ): Promise<RepositoryGrant[]> {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM repository_grants WHERE repository_id = ? ORDER BY created_at",
+      )
+      .all(repositoryId) as Row[];
+    return rows.map((row) => this.toGrant(row));
+  }
+
+  public async listGrantsForUser(userId: string): Promise<RepositoryGrant[]> {
+    const rows = this.db
+      .prepare("SELECT * FROM repository_grants WHERE user_id = ?")
+      .all(userId) as Row[];
+    return rows.map((row) => this.toGrant(row));
+  }
+
+  private toGrant(row: Row): RepositoryGrant {
+    return {
+      repositoryId: text(row, "repository_id"),
+      userId: text(row, "user_id"),
+      role: text(row, "role") as RepositoryGrant["role"],
+      grantedBy: optionalText(row, "granted_by"),
+      createdAt: text(row, "created_at"),
+    };
+  }
+
+  public async createInvitation(invitation: InvitationRecord): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO invitations
+           (id, organization_id, repository_id, email, role, secret_hash,
+            invited_by, created_at, expires_at, accepted_at, accepted_by,
+            revoked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+      )
+      .run(
+        invitation.id,
+        invitation.organizationId,
+        invitation.repositoryId ?? null,
+        invitation.email,
+        invitation.role,
+        invitation.secretHash,
+        invitation.invitedBy,
+        invitation.createdAt,
+        invitation.expiresAt,
+      );
+  }
+
+  public async getInvitation(id: string): Promise<InvitationRecord | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM invitations WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row === undefined ? undefined : this.toInvitation(row);
+  }
+
+  public async listInvitations(
+    organizationId: string,
+  ): Promise<InvitationRecord[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM invitations WHERE organization_id = ?
+         ORDER BY created_at DESC`,
+      )
+      .all(organizationId) as Row[];
+    return rows.map((row) => this.toInvitation(row));
+  }
+
+  public async acceptInvitation(
+    id: string,
+    userId: string,
+    at: string,
+  ): Promise<boolean> {
+    // Conditional on still being unused: two people racing the same link must
+    // not both come away believing they were admitted.
+    const result = this.db
+      .prepare(
+        `UPDATE invitations SET accepted_at = ?, accepted_by = ?
+         WHERE id = ? AND accepted_at IS NULL AND revoked_at IS NULL`,
+      )
+      .run(at, userId, id);
+    return Number(result.changes) === 1;
+  }
+
+  public async revokeInvitation(id: string, at: string): Promise<void> {
+    this.db
+      .prepare(
+        "UPDATE invitations SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+      )
+      .run(at, id);
+  }
+
+  private toInvitation(row: Row): InvitationRecord {
+    return {
+      id: text(row, "id"),
+      organizationId: text(row, "organization_id"),
+      repositoryId: optionalText(row, "repository_id"),
+      email: text(row, "email"),
+      role: text(row, "role") as InvitationRecord["role"],
+      secretHash: text(row, "secret_hash"),
+      invitedBy: text(row, "invited_by"),
+      createdAt: text(row, "created_at"),
+      expiresAt: text(row, "expires_at"),
+      acceptedAt: optionalText(row, "accepted_at"),
+      acceptedBy: optionalText(row, "accepted_by"),
+      revokedAt: optionalText(row, "revoked_at"),
+    };
   }
 
   public async createApiToken(token: ApiTokenRecord): Promise<void> {
@@ -2684,6 +2837,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
   }
 
   private toUser(row: Row): UserAccount {
+    const appearance = row["appearance"];
     return {
       id: text(row, "id"),
       email: text(row, "email"),
@@ -2692,6 +2846,11 @@ export class SqliteCoordinationStore implements CoordinationStore {
       systemAdmin: integer(row, "system_admin") === 1,
       disabled: integer(row, "disabled") === 1,
       createdAt: text(row, "created_at"),
+      // A row written before the column existed, or by a client that never
+      // chose, reads as absent rather than as an empty preference.
+      ...(typeof appearance === "string" && appearance.length > 0
+        ? { appearance: JSON.parse(appearance) as UserAppearance }
+        : {}),
     };
   }
 

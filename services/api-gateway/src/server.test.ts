@@ -1684,3 +1684,440 @@ test("a worker cannot touch another user's lease", async (t) => {
     assert.equal(response.status, 404, action);
   }
 });
+
+test("a member's agent colour is readable by the colleagues it identifies", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const setup = await bootstrap(owner);
+
+  const chosen = await owner.request("/api/v1/auth/me/appearance", {
+    method: "PATCH",
+    body: { accent: "#4F8EF7", agentColor: "#E05F9E" },
+  });
+  assert.equal(chosen.status, 200);
+  // Normalised on the way in, so two spellings of one colour compare equal.
+  assert.equal(chosen.data.user.appearance.agentColor, "#e05f9e");
+  assert.equal(chosen.data.user.appearance.accent, "#4f8ef7");
+
+  const me = await owner.request("/api/v1/auth/me");
+  assert.equal(me.data.user.appearance.agentColor, "#e05f9e");
+
+  // The point of the colour is that other people can read it: a teammate
+  // listing the organization's members has to see it, or "pink doodles are
+  // Nathan's agents" is not a thing anyone can learn.
+  const members = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/members`,
+  );
+  assert.equal(members.status, 200);
+  const listed = members.data.members.find(
+    (member: any) => member.userId === setup.user.id,
+  );
+  assert.equal(listed.user.appearance.agentColor, "#e05f9e");
+});
+
+test("changing one colour leaves the other one alone", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  await client.request("/api/v1/auth/me/appearance", {
+    method: "PATCH",
+    body: { accent: "#2fae7f" },
+  });
+  // A PATCH names only what it changes; the accent picked a moment ago must
+  // survive a later choice of agent colour.
+  const second = await client.request("/api/v1/auth/me/appearance", {
+    method: "PATCH",
+    body: { agentColor: "#e05f9e" },
+  });
+  assert.equal(second.status, 200);
+  assert.deepEqual(second.data.user.appearance, {
+    accent: "#2fae7f",
+    agentColor: "#e05f9e",
+  });
+});
+
+test("an agent colour must be a plain hex triple", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  // The value is written into a style attribute, so a CSS colour that happens
+  // to carry a second declaration must not survive the edge.
+  for (const value of [
+    "red;background:url(https://x)",
+    "rgb(1,2,3)",
+    "#fff",
+    "javascript:alert(1)",
+  ]) {
+    const rejected = await client.request("/api/v1/auth/me/appearance", {
+      method: "PATCH",
+      body: { agentColor: value },
+    });
+    assert.equal(rejected.status, 400, `${value} should be refused`);
+  }
+});
+
+test("an invitation brings in somebody who has no account yet", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "newcomer@example.com", role: "developer" } },
+  );
+  assert.equal(invited.status, 201);
+  const token = invited.data.token as string;
+  assert.match(token, /^inv_[\w-]+\.[\w-]+$/u);
+  // The secret is returned exactly once and is not stored recoverably.
+  assert.equal(invited.data.invitation.status, "pending");
+  assert.equal("secretHash" in invited.data.invitation, false);
+
+  // The recipient can read the invitation before having any account at all.
+  const anonymous = new TestClient(runtime.origin);
+  const preview = await anonymous.request(`/api/v1/invitations/${token}`);
+  assert.equal(preview.status, 200);
+  assert.equal(preview.data.invitation.email, "newcomer@example.com");
+  assert.equal(preview.data.invitation.role, "developer");
+
+  const accepted = await anonymous.request(`/api/v1/invitations/${token}/accept`, {
+    method: "POST",
+    body: { displayName: "Newcomer", password: PASSWORD },
+  });
+  assert.equal(accepted.status, 200);
+  assert.equal(accepted.data.user.email, "newcomer@example.com");
+  assert.equal(accepted.data.memberships[0].role, "developer");
+
+  // And they are signed in, so accepting lands them inside rather than at a
+  // login screen with a fresh password they just chose.
+  const me = await anonymous.request("/api/v1/auth/me");
+  assert.equal(me.status, 200);
+  assert.equal(me.data.user.email, "newcomer@example.com");
+});
+
+test("an invitation works once and stops working when revoked", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const first = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "once@example.com", role: "viewer" } },
+  );
+  const token = first.data.token as string;
+  const joiner = new TestClient(runtime.origin);
+  assert.equal(
+    (
+      await joiner.request(`/api/v1/invitations/${token}/accept`, {
+        method: "POST",
+        body: { displayName: "Once", password: PASSWORD },
+      })
+    ).status,
+    200,
+  );
+  // A used link is spent, not a standing grant.
+  const replay = new TestClient(runtime.origin);
+  assert.equal(
+    (
+      await replay.request(`/api/v1/invitations/${token}/accept`, {
+        method: "POST",
+        body: { displayName: "Impostor", password: PASSWORD },
+      })
+    ).status,
+    409,
+  );
+
+  const second = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "revoked@example.com", role: "viewer" } },
+  );
+  await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations/${second.data.invitation.id}`,
+    { method: "DELETE" },
+  );
+  const late = new TestClient(runtime.origin);
+  assert.equal(
+    (
+      await late.request(`/api/v1/invitations/${second.data.token}/accept`, {
+        method: "POST",
+        body: { displayName: "Late", password: PASSWORD },
+      })
+    ).status,
+    409,
+  );
+});
+
+test("a wrong or forged invitation link is indistinguishable from a missing one", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const made = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "probe@example.com", role: "viewer" } },
+  );
+  const id = made.data.invitation.id as string;
+  const anonymous = new TestClient(runtime.origin);
+  // A real id with the wrong secret must answer exactly as a made-up id does,
+  // or the endpoint confirms which invitations exist.
+  for (const token of [`${id}.wrong-secret`, "inv_nope.whatever", "garbage"]) {
+    assert.equal(
+      (await anonymous.request(`/api/v1/invitations/${token}`)).status,
+      404,
+      token,
+    );
+  }
+});
+
+test("an invitation cannot hand out a role its sender could not assign", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  // Bring in a developer, who may not manage members at all.
+  const invite = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "dev@example.com", role: "developer" } },
+  );
+  const developer = new TestClient(runtime.origin);
+  await developer.request(`/api/v1/invitations/${invite.data.token}/accept`, {
+    method: "POST",
+    body: { displayName: "Dev", password: PASSWORD },
+  });
+  const refused = await developer.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "escalate@example.com", role: "owner" } },
+  );
+  assert.equal(refused.status, 403);
+});
+
+test("inviting somebody who is already a member says so", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const setup = await bootstrap(owner);
+  const again = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: setup.user.email, role: "developer" } },
+  );
+  assert.equal(again.status, 409);
+  assert.equal(again.data.error.code, "already_a_member");
+});
+
+/** Invites somebody to one repository and returns a client signed in as them. */
+async function joinRepository(
+  runtime: TestRuntime,
+  owner: TestClient,
+  email: string,
+  repositoryId: string,
+  role = "developer",
+): Promise<TestClient> {
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    {
+      method: "POST",
+      body: { email, role, repositoryId, projectId: DEFAULT_PROJECT_ID },
+    },
+  );
+  assert.equal(invited.status, 201, JSON.stringify(invited.data));
+  const client = new TestClient(runtime.origin);
+  const accepted = await client.request(
+    `/api/v1/invitations/${invited.data.token}/accept`,
+    { method: "POST", body: { displayName: "Guest", password: PASSWORD } },
+  );
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  return client;
+}
+
+test("a repository invitation grants that repository and no other", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  for (const id of ["shared", "private"]) {
+    assert.equal(
+      (
+        await owner.request(
+          `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+          { method: "POST", body: { id, branch: "main" } },
+        )
+      ).status,
+      201,
+    );
+  }
+
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "guest@example.com",
+    "shared",
+  );
+
+  // The list is how the interface learns what exists, so it must not mention
+  // the repository they were not given.
+  const listed = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+  );
+  assert.equal(listed.status, 200);
+  assert.deepEqual(
+    listed.data.repositories.map((entry: { id: string }) => entry.id),
+    ["shared"],
+  );
+
+  // And the routes enforce it independently of the list, answering exactly as
+  // they would for a repository that does not exist.
+  const refused = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/private/versions`,
+  );
+  assert.equal(refused.status, 404);
+  const submitted = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`,
+    {
+      method: "POST",
+      body: { repositoryId: "private", objective: "Sneak a change in" },
+    },
+  );
+  assert.equal(submitted.status, 404);
+
+  // The one they were given genuinely works.
+  const allowed = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`,
+    {
+      method: "POST",
+      body: { repositoryId: "shared", objective: "Do the work I was asked to" },
+    },
+  );
+  assert.equal(allowed.status, 201, JSON.stringify(allowed.data));
+});
+
+test("a guest's task list shows only their own repository's work", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  for (const id of ["shared", "private"]) {
+    await owner.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`, {
+      method: "POST",
+      body: { id, branch: "main" },
+    });
+    await owner.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`, {
+      method: "POST",
+      body: { repositoryId: id, objective: `work on ${id}` },
+    });
+  }
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "reader@example.com",
+    "shared",
+  );
+  const tasks = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`,
+  );
+  assert.equal(tasks.status, 200);
+  // Objectives are free text and often say more than a repository name does,
+  // so a leak here would be a real disclosure rather than a cosmetic one.
+  assert.deepEqual(
+    tasks.data.tasks.map((task: { repositoryId: string }) => task.repositoryId),
+    ["shared"],
+  );
+
+  const owned = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`,
+  );
+  // The owner still sees everything: scoping an organization role down to
+  // explicit grants would let owners lock themselves out of their own work.
+  assert.equal(owned.data.tasks.length, 2);
+});
+
+test("an organization invitation still reaches every repository", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  for (const id of ["alpha", "beta"]) {
+    await owner.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`, {
+      method: "POST",
+      body: { id, branch: "main" },
+    });
+  }
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "staff@example.com", role: "developer" } },
+  );
+  const member = new TestClient(runtime.origin);
+  await member.request(`/api/v1/invitations/${invited.data.token}/accept`, {
+    method: "POST",
+    body: { displayName: "Staff", password: PASSWORD },
+  });
+  const listed = await member.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+  );
+  assert.deepEqual(
+    listed.data.repositories.map((entry: { id: string }) => entry.id).sort(),
+    ["alpha", "beta"],
+  );
+});
+
+test("a repository guest can find the project their repository is in", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await owner.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`, {
+    method: "POST",
+    body: { id: "shared", branch: "main" },
+  });
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "finder@example.com",
+    "shared",
+  );
+
+  // A grant carries no organization membership, so listing organizations and
+  // projects by membership alone would sign this person in successfully and
+  // then show them nothing at all.
+  const organizations = await guest.request("/api/v1/organizations");
+  assert.equal(organizations.status, 200);
+  assert.deepEqual(
+    organizations.data.organizations.map((entry: { id: string }) => entry.id),
+    [DEFAULT_ORGANIZATION_ID],
+  );
+  const projects = await guest.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/projects`,
+  );
+  assert.equal(projects.status, 200);
+  assert.deepEqual(
+    projects.data.projects.map((entry: { id: string }) => entry.id),
+    [DEFAULT_PROJECT_ID],
+  );
+});
+
+test("a stranger with no grant and no membership still sees nothing", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  // Reached through the admin path so this account has neither a membership
+  // nor a grant — the case the projects fallback must not accidentally admit.
+  await owner.request("/api/v1/admin/users", {
+    method: "POST",
+    body: {
+      email: "stranger@example.com",
+      displayName: "Stranger",
+      password: PASSWORD,
+    },
+  });
+  const stranger = new TestClient(runtime.origin);
+  await stranger.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "stranger@example.com", password: PASSWORD },
+  });
+  assert.deepEqual(
+    (await stranger.request("/api/v1/organizations")).data.organizations,
+    [],
+  );
+  assert.equal(
+    (
+      await stranger.request(
+        `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/projects`,
+      )
+    ).status,
+    403,
+  );
+});
