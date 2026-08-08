@@ -898,19 +898,18 @@ svg {
   color: var(--text-3);
 }
 
-/* Agent face: a small restrained mascot, tinted per provider. */
+/* The agent character. Free-standing: a pixel sprite inside a circular chrome
+   ring would fight the grid it is drawn on. */
 .agent-face {
   position: relative;
   display: grid;
   place-items: center;
-  border-radius: 50%;
-  border: 1.5px solid currentColor;
   flex: none;
 }
 
 .agent-face svg {
-  width: 68%;
-  height: 68%;
+  width: 100%;
+  height: 100%;
 }
 
 .agent-face.sz-28 {
@@ -930,8 +929,8 @@ svg {
 
 .agent-face .presence {
   position: absolute;
-  right: -1px;
-  bottom: -1px;
+  right: -2px;
+  bottom: 0;
   width: 9px;
   height: 9px;
   border-radius: 50%;
@@ -3153,17 +3152,15 @@ svg {
 }
 
 .doodle-chip .doodle {
-  width: 38px;
-  height: 38px;
+  width: 44px;
+  height: 44px;
   display: grid;
   place-items: center;
-  border-radius: 50%;
-  border: 1.5px solid currentColor;
 }
 
 .doodle-chip .doodle svg {
-  width: 68%;
-  height: 68%;
+  width: 100%;
+  height: 100%;
 }
 
 /* ------------------------------------------------------------- toasts ---- */

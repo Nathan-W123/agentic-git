@@ -446,23 +446,53 @@ test("the diff shown is the patch the coordinator recorded", async () => {
 
 /* ------------------------------------------------------ agent identity ---- */
 
-test("there is one doodle per agent kind and they are all distinct", async () => {
+function spriteTable(source: string): Map<string, string[]> {
+  const block = /const SPRITES = \{([\s\S]*?)\n\};/u.exec(source)?.[1] ?? "";
+  const table = new Map<string, string[]>();
+  for (const entry of block.matchAll(/(\w+): \[([\s\S]*?)\n  \]/gu)) {
+    table.set(
+      entry[1] ?? "",
+      [...(entry[2] ?? "").matchAll(/"([^"]*)"/gu)].map((row) => row[1] ?? ""),
+    );
+  }
+  return table;
+}
+
+test("every character is a well-formed 16x16 pixel grid", async () => {
+  const sprites = spriteTable(await publicFile("ui.js"));
+  assert.deepEqual(
+    [...sprites.keys()],
+    ["claude", "cursor", "codex", "gemini", "grok", "deepseek", "generic"],
+  );
+  for (const [name, rows] of sprites) {
+    // A ragged row shifts every pixel after it, which reads as a corrupt
+    // sprite rather than as an obvious mistake.
+    assert.equal(rows.length, 16, `${name} should have 16 rows`);
+    for (const [index, row] of rows.entries()) {
+      assert.equal(row.length, 16, `${name} row ${index} is not 16 wide`);
+      assert.match(row, /^[.#+-]{16}$/u, `${name} row ${index} has a stray glyph`);
+    }
+  }
+});
+
+test("no two characters are the same drawing", async () => {
+  const sprites = spriteTable(await publicFile("ui.js"));
+  const drawings = [...sprites.values()].map((rows) => rows.join("\n"));
+  assert.equal(
+    new Set(drawings).size,
+    drawings.length,
+    "each agent should look like itself",
+  );
+});
+
+test("a character is one colour at three opacities, so any tint works", async () => {
   const source = await publicFile("ui.js");
-  const block = /const DOODLES = \{([\s\S]*?)\n\};/u.exec(source)?.[1] ?? "";
-  const kinds = [...block.matchAll(/^\s{2}([a-z]+):/gmu)].map((m) => m[1]);
-  assert.deepEqual(kinds, [
-    "claude",
-    "codex",
-    "gemini",
-    "grok",
-    "deepseek",
-    "generic",
-  ]);
-  // Six characters that all render the same path would defeat the point of
-  // having six.
-  const bodies = [...block.matchAll(/`([\s\S]*?)`/gu)].map((m) => m[1]);
-  assert.equal(bodies.length, 6);
-  assert.equal(new Set(bodies).size, 6, "each doodle should be its own drawing");
+  // Hard-coded per-character colours would survive re-tinting as stubborn
+  // patches, which is exactly what the owner colour must not have to fight.
+  const block = /const SPRITES = \{([\s\S]*?)\n\};/u.exec(source)?.[1] ?? "";
+  assert.equal(/#[0-9a-f]{3,8}\b/iu.test(block), false, "sprites carry no colour");
+  assert.match(source, /fill="currentColor"/u);
+  assert.match(source, /const TONES = \{ "\+": 1, "#": 0\.85, "-": 0\.5 \}/u);
 });
 
 test("every agent kind resolves to its own character", async () => {
@@ -474,19 +504,16 @@ test("every agent kind resolves to its own character", async () => {
   // path from key to drawing, not just that the table has six entries.
   const agents = /export const AGENTS = \{([\s\S]*?)\n\};/u.exec(source)?.[1] ?? "";
   const pairs = [...agents.matchAll(/(\w+): \{ label: "[^"]+", doodle: "(\w+)" \}/gu)];
-  assert.equal(pairs.length, 6, "there should be six agent kinds");
+  assert.equal(pairs.length, 7, "six named agents plus a fallback");
 
-  const block = /const DOODLES = \{([\s\S]*?)\n\};/u.exec(source)?.[1] ?? "";
-  const drawings = new Map(
-    [...block.matchAll(/^\s{2}(\w+): `([\s\S]*?)`,$/gmu)].map((m) => [m[1], m[2]]),
-  );
+  const drawings = spriteTable(source);
   const resolved = new Set();
   for (const [key, doodle] of pairs.map((m) => [m[1], m[2]])) {
-    const drawing = drawings.get(doodle);
-    assert.notEqual(drawing, undefined, `${key} resolves to a missing doodle`);
-    resolved.add(drawing);
+    const drawing = drawings.get(doodle ?? "");
+    assert.notEqual(drawing, undefined, `${key} resolves to a missing sprite`);
+    resolved.add((drawing ?? []).join("\n"));
   }
-  assert.equal(resolved.size, 6, "each agent kind should look different");
+  assert.equal(resolved.size, 7, "each agent kind should look different");
 
   // And the accessor must go through that mapping rather than index directly.
   const start = source.indexOf("export function agentDoodle");

@@ -624,7 +624,7 @@ function appearanceCard() {
     <div style="padding:0 17px 16px">
       <div class="swatches">${swatches("set-agent-color", agentColor)}</div>
       <div class="doodle-preview" style="color:${esc(agentColor)}">
-        ${["anthropic", "openai", "google", "xai", "deepseek", "generic"]
+        ${["anthropic", "cursor", "openai", "google", "xai", "deepseek"]
           .map(
             (kind) => `<span class="doodle-chip">
               <span class="doodle">${agentDoodle(kind)}</span>

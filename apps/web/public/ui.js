@@ -257,6 +257,7 @@ export function avatarStack(names, max = 4, size = 26) {
  */
 export const AGENTS = {
   anthropic: { label: "Claude", doodle: "claude" },
+  cursor: { label: "Cursor", doodle: "cursor" },
   openai: { label: "Codex", doodle: "codex" },
   google: { label: "Gemini", doodle: "gemini" },
   xai: { label: "Grok", doodle: "grok" },
@@ -267,6 +268,7 @@ export const AGENTS = {
 /** Aliases, so a task's free-form agent id still finds the right face. */
 const AGENT_ALIASES = {
   claude: "anthropic",
+  cursor: "cursor",
   codex: "openai",
   gpt: "openai",
   gemini: "google",
@@ -292,37 +294,185 @@ export function agentLabelOf(id) {
 }
 
 /**
- * Six characters, drawn on one 24×24 grid so they read as a family.
+ * The agent characters, as 16x16 pixel sprites.
  *
- * Each is a face plus one distinguishing feature, monochrome in
- * `currentColor` so the owner's colour is the only thing tinting them.
+ * Written as pixel maps rather than as paths because that is what they are:
+ * the grid is the drawing, and editing a face means editing a character in a
+ * string rather than nudging bezier handles.
+ *
+ * Three tones, all of them the *same* colour at different opacities, which is
+ * what lets one sprite be re-tinted to any owner colour without going muddy.
+ * Features are cut out to transparency rather than painted dark, so a face
+ * reads correctly on whatever surface it sits on.
+ *
+ *   `+` highlight   `#` base   `-` shadow   `.` transparent
  */
-const DOODLES = {
-  // Claude: friendly, wide smile, small antenna tuft.
-  claude: `<circle cx="9" cy="10.4" r="1.5" fill="currentColor"/>
-    <circle cx="15" cy="10.4" r="1.5" fill="currentColor"/>
-    <path d="M8.8 14.4c1.9 1.9 4.5 1.9 6.4 0" stroke-width="1.7"/>
-    <path d="M12 4.6v2.2" stroke-width="1.6"/><circle cx="12" cy="3.7" r="1.1" fill="currentColor"/>`,
-  // Codex: angle-bracket eyes, straight mouth — the literal one.
-  codex: `<path d="m9.6 8.9-2.3 2 2.3 2M14.4 8.9l2.3 2-2.3 2" stroke-width="1.7"/>
-    <path d="M9.2 15.2h5.6" stroke-width="1.7"/>`,
-  // Gemini: twin sparks above a small smile.
-  gemini: `<path d="M8.4 5.2c.3 1.7 1.5 2.9 3.2 3.2-1.7.3-2.9 1.5-3.2 3.2-.3-1.7-1.5-2.9-3.2-3.2 1.7-.3 2.9-1.5 3.2-3.2z" fill="currentColor" stroke="none"/>
-    <path d="M16.4 7.8c.2 1.2 1 2 2.2 2.2-1.2.2-2 1-2.2 2.2-.2-1.2-1-2-2.2-2.2 1.2-.2 2-1 2.2-2.2z" fill="currentColor" stroke="none"/>
-    <path d="M8.9 15.4c1.8 1.6 4.4 1.6 6.2 0" stroke-width="1.7"/>`,
-  // Grok: one raised brow and an off-centre smirk.
-  grok: `<path d="M6.9 8.2 10.4 7" stroke-width="1.6"/>
-    <circle cx="9" cy="10.6" r="1.5" fill="currentColor"/>
-    <circle cx="15" cy="10.6" r="1.5" fill="currentColor"/>
-    <path d="M9.2 15c1.6 1.2 3.6 1.4 5.4.2" stroke-width="1.7"/>`,
-  // DeepSeek: a diving mask — eyes behind a single visor.
-  deepseek: `<path d="M6.4 9.2h11.2a1 1 0 0 1 1 1.2l-.5 2.2a1.4 1.4 0 0 1-1.4 1.1h-2.2a1.4 1.4 0 0 1-1.3-.9L12 11.8l-1.2 1c-.2.6-.7.9-1.3.9H7.3a1.4 1.4 0 0 1-1.4-1.1l-.5-2.2a1 1 0 0 1 1-1.2z" stroke-width="1.5"/>
-    <path d="M9.6 17.2c1.5 1 3.3 1 4.8 0" stroke-width="1.6"/>`,
-  // Anything unrecognised: the plainest face in the set.
-  generic: `<circle cx="9.2" cy="10.6" r="1.4" fill="currentColor"/>
-    <circle cx="14.8" cy="10.6" r="1.4" fill="currentColor"/>
-    <path d="M9.4 14.8h5.2" stroke-width="1.7"/>`,
+const SPRITES = {
+  claude: [
+    "......#..#......",
+    ".......##.......",
+    ".......##.......",
+    "....++++++++....",
+    "...##########...",
+    "..############..",
+    "#####..##..#####",
+    "################",
+    "..############..",
+    "..####....####..",
+    "...##########...",
+    "....--------....",
+    "..############..",
+    ".##.########.##.",
+    "..############..",
+    "....##....##....",
+  ],
+  cursor: [
+    ".......++.......",
+    ".......##.......",
+    ".......##.......",
+    "..++++++++++++..",
+    "..#..........#..",
+    "..#..##..##..#..",
+    "..#..##..##..#..",
+    "..#..........#..",
+    "..############..",
+    "....--------....",
+    ".#..########..#.",
+    ".#.##########.#.",
+    ".#.###....###.#.",
+    "...##########...",
+    "...##------##...",
+    "...##......##...",
+  ],
+  codex: [
+    ".......++.......",
+    ".......##.......",
+    ".......##.......",
+    "..############..",
+    "..############..",
+    "..############..",
+    "#####..##..#####",
+    "#####..##..#####",
+    "..############..",
+    "..###......###..",
+    "..############..",
+    "....--------....",
+    "..############..",
+    "#.##..####..##.#",
+    "#.##..####..##.#",
+    "...##......##...",
+  ],
+  gemini: [
+    ".......##.......",
+    ".......##.......",
+    "..+...####...+..",
+    "......####......",
+    ".....######.....",
+    "....########....",
+    "..###..##..###..",
+    "#####..##..#####",
+    "################",
+    "..####....####..",
+    "....########....",
+    ".....######.....",
+    "..+...####...+..",
+    "......####......",
+    ".......##.......",
+    ".......##.......",
+  ],
+  grok: [
+    ".......+........",
+    ".......#........",
+    ".......#........",
+    "....########....",
+    "...##########...",
+    "..############..",
+    "..##.######.##..",
+    "..###.####.###..",
+    "..##.######.##..",
+    "..############..",
+    "...##########...",
+    "....--------....",
+    "..######..####..",
+    "..#####..#####..",
+    "..####..######..",
+    "...##......##...",
+  ],
+  deepseek: [
+    "......+...++....",
+    "......#....+....",
+    "......#.........",
+    "....++++++++....",
+    "..############..",
+    ".##############.",
+    "################",
+    "###..######..###",
+    "################",
+    "..####....####..",
+    ".##############.",
+    "..############..",
+    "..#..#.##.#..#..",
+    "..#..#.##.#..#..",
+    "..#..#....#..#..",
+    ".....#....#.....",
+  ],
+  generic: [
+    "................",
+    ".......##.......",
+    ".......##.......",
+    "...++++++++++...",
+    "..############..",
+    "..############..",
+    "#####..##..#####",
+    "################",
+    "..############..",
+    "..###......###..",
+    "...##########...",
+    "....--------....",
+    "..############..",
+    ".##.########.##.",
+    "..############..",
+    "....##....##....",
+  ],
 };
+
+const TONES = { "+": 1, "#": 0.85, "-": 0.5 };
+
+/**
+ * Turns a pixel map into rects, merging horizontal runs of one tone.
+ *
+ * A naive rect-per-pixel sprite is 150-odd nodes and these render at every row
+ * of every list; run-merging cuts that by roughly four without changing a
+ * pixel.
+ */
+function spriteSvg(name) {
+  const rows = SPRITES[name] ?? SPRITES.generic;
+  const rects = [];
+  rows.forEach((row, y) => {
+    let x = 0;
+    while (x < row.length) {
+      const tone = row[x];
+      if (TONES[tone] === undefined) {
+        x += 1;
+        continue;
+      }
+      let width = 1;
+      while (row[x + width] === tone) {
+        width += 1;
+      }
+      rects.push(
+        `<rect x="${x}" y="${y}" width="${width}" height="1" fill="currentColor"` +
+          (TONES[tone] === 1 ? "" : ` fill-opacity="${TONES[tone]}"`) +
+          "/>",
+      );
+      x += width;
+    }
+  });
+  return rects.join("");
+}
+
+/** Rendered once per character; the markup never changes, only its colour. */
+const SPRITE_CACHE = new Map();
 
 export function providerOf(id) {
   const kind = agentKindOf(id);
@@ -339,10 +489,13 @@ export function providerOf(id) {
  */
 export function agentDoodle(kind) {
   const name = AGENTS[agentKindOf(kind)].doodle;
-  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
-    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${
-      DOODLES[name] ?? DOODLES.generic
-    }</svg>`;
+  if (!SPRITE_CACHE.has(name)) {
+    SPRITE_CACHE.set(name, spriteSvg(name));
+  }
+  // crispEdges keeps the pixels square at every size; without it the browser
+  // smooths the grid away and the sprite reads as a blurry blob.
+  return `<svg viewBox="0 0 16 16" shape-rendering="crispEdges"
+    aria-hidden="true">${SPRITE_CACHE.get(name)}</svg>`;
 }
 
 /**
