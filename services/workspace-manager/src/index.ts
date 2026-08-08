@@ -1,5 +1,6 @@
 export * from "./docker-workspace-manager.js";
 export * from "./egress-gateway.js";
+export * from "./user-credentials.js";
 export * from "./vendor-credentials.js";
 export * from "./vendor-sandbox.js";
 

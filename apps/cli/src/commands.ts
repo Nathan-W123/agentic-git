@@ -19,12 +19,17 @@ import { DEFAULT_PROJECT_ID } from "@coord/persistence";
 import {
   normalizeGitHubRepository,
   RepositoryService,
+  sanitizeChildEnv,
   type CanonicalRepository,
 } from "@coord/repository-service";
 import type { TaskDefinition } from "@coord/shared-types";
 import {
   DockerWorkspaceManager,
   GitWorktreeWorkspaceManager,
+  openCredentialHome,
+  type CredentialHome,
+  type UserCredentialStore,
+  type VendorCliKind,
   type WorkspaceManager,
   type WorkspaceSandbox,
 } from "@coord/workspace-manager";
@@ -41,6 +46,16 @@ function assertRepositoryId(id: string): string {
   }
   return id;
 }
+
+/**
+ * Which adapters authenticate through a vendor CLI login, and so can be
+ * pointed at a specific user's account.
+ */
+const VENDOR_ADAPTERS: Partial<Record<string, VendorCliKind>> = {
+  claude: "claude",
+  codex: "codex",
+  gemini: "gemini",
+};
 
 function toCanonical(repository: StoredRepository): CanonicalRepository {
   return {
@@ -376,7 +391,21 @@ function createAdapter(
   workspaces: WorkspaceManager,
   sandbox: WorkspaceSandbox | undefined,
   planningRoot: string,
+  /**
+   * Replaces the inherited process environment for this one task, so the
+   * vendor CLI authenticates as the task's submitter rather than as whoever
+   * the host machine is logged in as. Undefined keeps the previous
+   * behaviour of running under the host's own CLI login.
+   */
+  baseEnv: NodeJS.ProcessEnv = process.env,
 ): AgentAdapter {
+  // The agent's own env block still wins: it is deployment configuration,
+  // whereas the credential environment is per task.
+  const launchEnv =
+    agent.env === undefined && baseEnv === process.env
+      ? undefined
+      : { ...baseEnv, ...(agent.env ?? {}) };
+
   if (agent.adapter === "codex") {
     if (sandbox !== undefined) {
       throw new Error(
@@ -405,9 +434,7 @@ function createAdapter(
       ...(agent.windowsSandbox === undefined
         ? {}
         : { windowsSandbox: agent.windowsSandbox }),
-      ...(agent.env === undefined
-        ? {}
-        : { env: { ...process.env, ...agent.env } }),
+      ...(launchEnv === undefined ? {} : { env: launchEnv }),
     });
   }
 
@@ -437,9 +464,7 @@ function createAdapter(
         ? {}
         : { executionTimeoutMs: agent.executionTimeoutMs }),
       ...(agent.effort === undefined ? {} : { effort: agent.effort }),
-      ...(agent.env === undefined
-        ? {}
-        : { env: { ...process.env, ...agent.env } }),
+      ...(launchEnv === undefined ? {} : { env: launchEnv }),
     });
   }
 
@@ -455,8 +480,8 @@ function createAdapter(
       args: [...(agent.args ?? [])],
       env:
         sandbox === undefined
-          ? { ...process.env, ...(agent.env ?? {}) }
-          : { ...process.env },
+          ? { ...baseEnv, ...(agent.env ?? {}) }
+          : { ...baseEnv },
     },
     repository,
     workspaces,
@@ -471,6 +496,76 @@ function createAdapter(
 export interface RunOptions {
   repositoryId?: string;
   projectId?: string;
+  /**
+   * Per-user vendor credentials. When supplied, a task whose submitter has
+   * connected their own provider account runs under that account instead of
+   * the host machine's CLI login.
+   *
+   * Absent — the trusted single-operator CLI, and any deployment where nobody
+   * has connected an account — everything keeps running under the host login,
+   * which is the previous behaviour.
+   */
+  credentials?: UserCredentialStore;
+  /**
+   * What to do when a task's submitter has no usable credential. `host-login`
+   * falls back to the machine's own CLI login; `refuse` fails the task.
+   *
+   * A multi-tenant deployment wants `refuse`: silently charging the host
+   * owner for someone else's task is the exact confusion this feature exists
+   * to remove. The default stays `host-login` so existing single-operator
+   * projects are unaffected.
+   */
+  credentialPolicy?: "host-login" | "refuse";
+}
+
+/**
+ * Opens the credential environment a task should run under, or undefined to
+ * fall back to the host's own CLI login.
+ *
+ * Only the vendor-CLI adapters authenticate this way. A `generic-cli` agent
+ * runs an arbitrary executable whose credentials are the deployment's
+ * business, so nothing is injected for it.
+ */
+export async function openSubmitterCredentialHome(
+  agent: AgentConfig,
+  task: SubmittedTask,
+  options: RunOptions,
+): Promise<CredentialHome | undefined> {
+  // An omitted adapter means generic-cli, which authenticates however its
+  // executable does and gets nothing injected.
+  const vendor = VENDOR_ADAPTERS[agent.adapter ?? "generic-cli"];
+  if (options.credentials === undefined || vendor === undefined) {
+    return undefined;
+  }
+
+  const refuse = (reason: string): never => {
+    throw new Error(
+      `Task ${task.id} cannot run: ${reason}. This project requires each ` +
+        `task to run under its submitter's own ${vendor} account; connect ` +
+        `one in the dashboard, or set the credential policy back to ` +
+        `host-login to spend the host owner's account instead.`,
+    );
+  };
+
+  if (task.submittedBy === undefined) {
+    // A task with no submitter predates per-user credentials or came from the
+    // local CLI. There is no user to charge, so only the host login is left.
+    return options.credentialPolicy === "refuse"
+      ? refuse("it records no submitter")
+      : undefined;
+  }
+
+  const credential = await options.credentials.get(task.submittedBy, vendor);
+  if (credential === undefined) {
+    return options.credentialPolicy === "refuse"
+      ? refuse(`its submitter has connected no ${vendor} account`)
+      : undefined;
+  }
+  return await openCredentialHome({
+    vendor,
+    credential,
+    baseEnv: sanitizeChildEnv(process.env),
+  });
 }
 
 export interface RunSummary {
@@ -520,6 +615,10 @@ export async function runPendingTasks(
     };
   }
 
+  // Staged outside the try so the finally can always reach them: each home
+  // holds a copy of one user's credential and whatever the CLI refreshed into
+  // it, and must not outlive the run whichever way the run ends.
+  const credentialHomes: CredentialHome[] = [];
   try {
     const repositories = new RepositoryService();
     const worktrees = new GitWorktreeWorkspaceManager(
@@ -535,7 +634,8 @@ export async function runPendingTasks(
     await mkdir(project.workspaceRoot, { recursive: true });
     await mkdir(project.integrationRoot, { recursive: true });
 
-    const tasks = claimed.map((task) => {
+    const tasks: Array<{ task: TaskDefinition; adapter: AgentAdapter }> = [];
+    for (const task of claimed) {
       const definition: TaskDefinition = {
         id: task.id,
         objective: task.objective,
@@ -554,7 +654,11 @@ export async function runPendingTasks(
               },
               worktrees,
             );
-      return {
+      const home = await openSubmitterCredentialHome(agent, task, options);
+      if (home !== undefined) {
+        credentialHomes.push(home);
+      }
+      tasks.push({
         task: definition,
         adapter: createAdapter(
           agent,
@@ -563,9 +667,10 @@ export async function runPendingTasks(
           workspaces,
           agentSandbox,
           project.planningRoot,
+          home?.env ?? process.env,
         ),
-      };
-    });
+      });
+    }
 
     // The project's stored declarative policy governs approvals for this
     // run; without one the coordinator keeps its built-in defaults.
@@ -633,5 +738,9 @@ export async function runPendingTasks(
       );
     }
     throw error;
+  } finally {
+    // Best effort by design: a directory left behind is worth reporting, but
+    // not worth masking the run's own outcome with.
+    await Promise.allSettled(credentialHomes.map((home) => home.close()));
   }
 }

@@ -58,6 +58,8 @@ the web UI.
 | `COORD_BOOTSTRAP_TOKEN` | First-run setup token, minimum 24 characters. Generated and printed on boot if unset — set it explicitly in real deployments. | generated |
 | `COORD_SECURE_COOKIES` | `true` to mark session cookies Secure. Required when serving over HTTPS; leave `false` for plain-HTTP trials. | `false` |
 | `COORD_ALLOWED_ORIGINS` | Comma-separated browser origins allowed CORS access, for a UI hosted on a different origin. | none |
+| `COORD_CREDENTIAL_KEY` | Encrypts users' stored provider credentials. 32 bytes as base64 or hex; anything else is stretched with scrypt. Generated once beside the credential file if unset, which ties the credentials to that directory — set it explicitly in real deployments. | generated |
+| `COORD_CREDENTIAL_POLICY` | What a task does when its submitter has connected no provider account: `host-login` falls back to the machine's own CLI login, `refuse` fails the task. **Set `refuse` on any deployment serving more than one person** — otherwise one person's tasks quietly spend the host owner's subscription. See [per-user provider accounts](architecture/per-user-credentials.md). | `host-login` |
 | `COORD_REPOSITORY_PARALLELISM` | How many remote workers may hold leases in one repository at once. Concurrent workers are separated at plan time: each submits its plan before editing and a colliding plan is sequenced rather than executed. Correctness does not depend on this setting — every result still integrates from its exact leased base or is requeued to replan — so raising it trades a little planning overhead for throughput. | `4` |
 
 The same variables work without Docker: build with `npm ci && npm run build`,

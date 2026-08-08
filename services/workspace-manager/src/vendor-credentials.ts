@@ -34,6 +34,17 @@ import path from "node:path";
  * given: a task that can call the vendor's API can also read the token it is
  * calling with. Scoping the mount bounds which secrets are exposed, not what
  * the agent may do with the one it needs.
+ *
+ * ### These are the *host's* credentials
+ *
+ * Everything here reads the host home directory, so a sandboxed CLI staged
+ * this way authenticates as the host owner. That is correct for a
+ * single-operator deployment and wrong for a multi-user one, where a task
+ * should run under the account of whoever submitted it — see
+ * `./user-credentials.ts` and `docs/architecture/per-user-credentials.md`.
+ * Nothing is broken today because the adapters refuse to combine a vendor CLI
+ * with the Docker sandbox at all; whoever wires that up must take the
+ * submitter's credential rather than the host's files.
  */
 export type VendorCliKind = "codex" | "claude" | "gemini";
 

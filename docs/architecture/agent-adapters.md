@@ -46,6 +46,11 @@ blocked by local policy; both modes retain scoped filesystem boundaries.
    **not** log in through the dashboard, and the platform never sees or
    stores these credentials; API keys can alternatively be supplied per agent
    via the `env` block.
+
+   That machine login funds *every* user's tasks. A deployment serving more
+   than one person should instead have each user connect their own provider
+   account in the dashboard, so their tasks run on their own subscription —
+   see [per-user provider accounts](per-user-credentials.md).
 2. **Declare the agent** in `.coordinator/config.json` as above and restart
    the control plane (or worker).
 3. **In the dashboard**: submit a task, pick the agent from the dropdown, and
