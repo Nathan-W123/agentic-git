@@ -343,7 +343,12 @@ export class IntegrationService {
           hold.push(hunk);
         }
       }
-      if (keep.length === 0) {
+      if (keep.length === 0 || hold.length === 0) {
+        // Nothing survived, or everything did while the file as a whole still
+        // failed — which means the hunks interact rather than collide with
+        // canonical. Dividing there would emit a deferred patch carrying no
+        // hunks and claim a split that did not happen, so the file is handed
+        // back whole and the combined re-apply is left to decide.
         deferred.push(filePatch);
         continue;
       }
