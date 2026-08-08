@@ -10,6 +10,8 @@ import {
 import {
   RepositoryService,
   type CanonicalRepository,
+  type CommitIdentity,
+  type CommitTrailer,
 } from "@coord/repository-service";
 import {
   GitWorktreeWorkspaceManager,
@@ -26,6 +28,23 @@ export interface IntegrateChangeSetInput {
   changeSet: ChangeSet;
   validationCommands: ValidationCommand[];
   commitMessage: string;
+  /**
+   * Who wrote the change, recorded as the commit's author.
+   *
+   * Without this every canonical commit is authored by the coordinator, and
+   * `git blame` on a repository full of agent-written code can say only that
+   * a machine did it. The coordinator stays the committer either way.
+   */
+  author?: CommitIdentity;
+  /**
+   * Extra provenance for the commit's trailer block, for facts integration
+   * cannot know on its own — which agent and model ran, who approved it,
+   * whether the changeset was admitted only in part.
+   *
+   * Integration adds what it does know (task, changeset, base revision,
+   * validation, replay) without being told.
+   */
+  trailers?: readonly CommitTrailer[];
   /** Reject instead of replaying when canonical no longer matches the worker base. */
   requireExactBase?: boolean;
   /**
@@ -152,6 +171,7 @@ export class IntegrationService {
         previousVersion,
         integrationWorkspace,
         declaredEntries,
+        replaying,
       );
       if (replaying && result.status === "integrated") {
         result = {
@@ -203,6 +223,7 @@ export class IntegrationService {
     previousVersion: CanonicalVersion,
     integrationWorkspace: TaskWorkspace,
     declaredEntries: Array<{ path: string; status: FilePatchStatus }>,
+    replaying: boolean,
   ): Promise<IntegrationResult> {
     const validation: CommandResult[] = [];
     const combinedPatch = input.changeSet.patches
@@ -426,9 +447,39 @@ export class IntegrationService {
       };
     }
 
+    // Everything a reader of the repository alone would otherwise have to ask
+    // the coordinator's database for. The parent commit is already git's
+    // record of what this was integrated onto; `Base-Revision` is the
+    // different question of what the agent actually wrote against, and on a
+    // replay the two disagree — which is what `Replayed-From` marks.
+    const trailers: CommitTrailer[] = [
+      { key: "Task-Id", value: input.changeSet.taskId },
+      { key: "Change-Set-Id", value: input.changeSet.id },
+      ...(input.trailers ?? []),
+      { key: "Base-Revision", value: input.changeSet.baseRevision },
+      ...(replaying
+        ? [{ key: "Replayed-From", value: input.changeSet.baseRevision }]
+        : []),
+      {
+        key: "Validation",
+        value:
+          validation.length === 0
+            ? "none"
+            : validation
+                .map(
+                  (entry) => `${entry.command.label}(exit ${entry.exitCode})`,
+                )
+                .join(", "),
+      },
+    ];
+
     const candidateRevision = await this.repositories.commitIndex(
       integrationWorkspace.path,
       input.commitMessage,
+      {
+        ...(input.author === undefined ? {} : { author: input.author }),
+        trailers,
+      },
     );
     if (candidateRevision === undefined) {
       return {

@@ -38,6 +38,86 @@ export interface CommitIdentity {
   email: string;
 }
 
+/** One `Key: value` line in a commit's trailer block. */
+export interface CommitTrailer {
+  key: string;
+  value: string;
+}
+
+export interface CommitOptions {
+  /**
+   * Who wrote the change.
+   *
+   * The coordinator stays the *committer* — it is what ran `git commit`, and
+   * claiming otherwise would be false — while the author records whoever
+   * actually produced the work. Git keeps the two apart for exactly this
+   * case, and `git log --format=%an` and `git blame` both read the author.
+   */
+  author?: CommitIdentity;
+  /**
+   * Provenance to record in the commit message's trailer block.
+   *
+   * A canonical commit is the one artifact that outlives the coordinator's
+   * database. Everything a reader needs to reconstruct why it exists — the
+   * task, the changeset, the base it was written against, what validated it,
+   * who approved it — belongs here rather than only in a table that a clone
+   * of the repository does not come with.
+   */
+  trailers?: readonly CommitTrailer[];
+}
+
+const TRAILER_KEY = /^[A-Za-z][A-Za-z0-9-]*$/u;
+
+/**
+ * Renders a trailer block git will parse back out.
+ *
+ * Values are flattened to one line: a trailer's value ends at the newline, so
+ * an objective containing one would silently truncate the trailer and leave
+ * the remainder sitting in the message as prose. Empty values are dropped
+ * rather than written as a key with nothing after it.
+ */
+export function formatTrailers(trailers: readonly CommitTrailer[]): string {
+  const lines: string[] = [];
+  for (const trailer of trailers) {
+    if (!TRAILER_KEY.test(trailer.key)) {
+      throw new Error(`Invalid commit trailer key: ${trailer.key}`);
+    }
+    const value = trailer.value.replaceAll(/\s+/gu, " ").trim();
+    if (value.length === 0) {
+      continue;
+    }
+    lines.push(`${trailer.key}: ${value}`);
+  }
+  return lines.join("\n");
+}
+
+/**
+ * The commit author for work an agent produced.
+ *
+ * The address is under `.invalid`, which RFC 2606 reserves precisely so that
+ * a made-up address cannot collide with a real one or look deliverable. It
+ * exists to make `git log --author` and `git shortlog` work across agents,
+ * not to be written to.
+ */
+export function agentCommitIdentity(agentId: string): CommitIdentity {
+  const name = agentId.replaceAll(/[\r\n<>]/gu, " ").trim();
+  const local = agentId.replaceAll(/[^A-Za-z0-9._-]/gu, "-").slice(0, 64);
+  return {
+    name: name.length === 0 ? "agent" : name,
+    email: `${local.length === 0 ? "agent" : local}@agents.invalid`,
+  };
+}
+
+function assertIdentity(identity: CommitIdentity): void {
+  for (const field of [identity.name, identity.email]) {
+    if (field.length === 0 || /[\r\n<>]/u.test(field)) {
+      throw new Error(
+        "Commit identity fields must be non-empty and free of line breaks and angle brackets",
+      );
+    }
+  }
+}
+
 export interface RemoteRepositoryCredentials {
   /** GitHub accepts `x-access-token`; other Git hosts may require a username. */
   username?: string;
@@ -638,9 +718,10 @@ export class RepositoryService {
   public async commitAll(
     worktreePath: string,
     message: string,
+    options: CommitOptions = {},
   ): Promise<string | undefined> {
     await this.git.run(["-C", worktreePath, "add", "--all", "--"]);
-    return this.commitIndex(worktreePath, message);
+    return this.commitIndex(worktreePath, message, options);
   }
 
   /**
@@ -653,6 +734,7 @@ export class RepositoryService {
   public async commitIndex(
     worktreePath: string,
     message: string,
+    options: CommitOptions = {},
   ): Promise<string | undefined> {
     const diffArgs = [
       "-C",
@@ -674,6 +756,17 @@ export class RepositoryService {
       throw new GitCommandError(diffArgs, diff);
     }
 
+    assertIdentity(this.identity);
+    const author = options.author;
+    if (author !== undefined) {
+      assertIdentity(author);
+    }
+    const trailerBlock = formatTrailers(options.trailers ?? []);
+    const fullMessage =
+      trailerBlock.length === 0
+        ? message
+        : `${message.trimEnd()}\n\n${trailerBlock}\n`;
+
     const emptyHooks = await mkdtemp(
       path.join(os.tmpdir(), "coord-disabled-hooks-"),
     );
@@ -690,8 +783,12 @@ export class RepositoryService {
         "commit",
         "--no-gpg-sign",
         "--no-verify",
+        // The coordinator committed it; the author is whoever wrote it.
+        ...(author === undefined
+          ? []
+          : [`--author=${author.name} <${author.email}>`]),
         "-m",
-        message,
+        fullMessage,
       ]);
     } finally {
       await rm(emptyHooks, { recursive: true, force: true });

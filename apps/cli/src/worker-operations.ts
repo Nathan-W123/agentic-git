@@ -35,6 +35,7 @@ import type {
   WorkLease,
 } from "@coord/persistence";
 import {
+  agentCommitIdentity,
   LEASE_REF_PREFIX,
   RepositoryService,
   type CanonicalRepository,
@@ -2451,6 +2452,7 @@ export async function acceptWorkResult(
         ? undefined
         : await store.getProject(task.projectId);
     const approvalPolicy = approvalPolicyForProject(project?.policy);
+    let approvedBy: string | undefined;
     const reviewReasons = approvalPolicy.changesetReasons(plan, promoted);
     const decision: CoordinatorDecision = {
       decision:
@@ -2478,6 +2480,9 @@ export async function acceptWorkResult(
         "awaiting_approval",
         reviewReasons.join("; "),
       );
+      // Captured for the commit's trailer block: who let this into canonical
+      // is part of why the commit exists, and the approval record lives in a
+      // database the repository does not travel with.
       const review = await new StoreApprovalController(
         store,
         approvalPolicy.timeoutMs,
@@ -2502,6 +2507,7 @@ export async function acceptWorkResult(
           });
         },
       });
+      approvedBy = review.request.decidedBy;
       await trace(store, run.id, "approval_decided", task.id, {
         projectId: task.projectId,
         approvalId: review.request.id,
@@ -2621,6 +2627,28 @@ export async function acceptWorkResult(
         changeSet: promoted,
         validationCommands: task.validationCommands,
         commitMessage: `coord(${task.id}): ${task.objective}`,
+        author: agentCommitIdentity(task.agentId),
+        trailers: [
+          { key: "Agent", value: task.agentId },
+          ...(approvedBy === undefined
+            ? []
+            : [{ key: "Approved-By", value: approvedBy }]),
+          // A partial admission means canonical is receiving only part of
+          // what the agent wrote, with the rest requeued. A reader comparing
+          // this commit against the task would otherwise find it short.
+          ...(split.deferred.length === 0
+            ? []
+            : [
+                {
+                  key: "Partial-Admission",
+                  value: `${split.granted.patches.length} of ${
+                    split.granted.patches.length + split.deferred.length
+                  } file(s) granted; deferred: ${split.deferred
+                    .map((patch) => patch.path)
+                    .join(" ")}`,
+                },
+              ]),
+        ],
         requireExactBase: true,
         ...(replayableOnto === undefined ? {} : { replayableOnto }),
       });

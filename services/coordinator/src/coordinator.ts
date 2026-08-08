@@ -11,6 +11,7 @@ import {
 import { IntegrationService } from "@coord/integration-service";
 import type { CoordinationStore } from "@coord/persistence";
 import {
+  agentCommitIdentity,
   RepositoryService,
   type CanonicalRepository,
 } from "@coord/repository-service";
@@ -1298,6 +1299,8 @@ export class Coordinator {
         changeSet: result.changeSet,
         validationCommands: result.task.validationCommands,
         commitMessage: `coord(${result.task.id}): ${result.task.objective}`,
+        author: agentCommitIdentity(result.task.agentId),
+        trailers: [{ key: "Agent", value: result.task.agentId }],
       });
       await recorder?.integration(integration);
       await this.trace(

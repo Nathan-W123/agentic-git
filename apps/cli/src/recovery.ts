@@ -3,7 +3,10 @@ import path from "node:path";
 
 import { IntegrationService } from "@coord/integration-service";
 import type { CoordinationStore, RunDetail } from "@coord/persistence";
-import { RepositoryService } from "@coord/repository-service";
+import {
+  agentCommitIdentity,
+  RepositoryService,
+} from "@coord/repository-service";
 import type { ChangeSet } from "@coord/shared-types";
 import {
   DockerWorkspaceManager,
@@ -200,6 +203,14 @@ async function resumeStrandedResults(
           changeSet,
           validationCommands: task.validationCommands,
           commitMessage: `coord(${task.id}): ${task.objective}`,
+          author: agentCommitIdentity(task.agentId),
+          trailers: [
+            { key: "Agent", value: task.agentId },
+            // The agent's work, promoted by a later process than the one that
+            // collected it. Worth saying, since the commit's timestamp will
+            // sit well after the run it belongs to.
+            { key: "Resumed-By", value: "crash-recovery" },
+          ],
         });
         await store.saveIntegration(run.id, integration);
         if (integration.status !== "integrated") {

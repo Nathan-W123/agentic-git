@@ -355,6 +355,7 @@ export async function rollbackCanonical(
       blockedBy: [],
       explanation: `Reverting canonical to ${target.revision}`,
     };
+    let approvedBy: string | undefined;
     if (reasons.length > 0) {
       await store.saveTaskStatus(
         run.id,
@@ -392,6 +393,7 @@ export async function rollbackCanonical(
           });
         },
       });
+      approvedBy = review.request.decidedBy;
       await store.appendAudit(run.id, {
         type: "approval_decided",
         taskId,
@@ -419,6 +421,20 @@ export async function rollbackCanonical(
       changeSet,
       validationCommands: project.config.validationCommands,
       commitMessage: `coord(rollback): ${objective}`,
+      // A rollback is a person's decision, not an agent's, so the person is
+      // the author. `Approved-By` is only set when the policy actually
+      // demanded a review, so its absence is meaningful rather than missing.
+      author: {
+        name: input.actorId,
+        email: `${input.actorId.replaceAll(/[^A-Za-z0-9._-]/gu, "-")}@users.invalid`,
+      },
+      trailers: [
+        { key: "Rollback-To", value: target.revision },
+        { key: "Requested-By", value: input.actorId },
+        ...(approvedBy === undefined
+          ? []
+          : [{ key: "Approved-By", value: approvedBy }]),
+      ],
       // Same compare-and-swap discipline as any other change: if canonical
       // moved while the rollback was being reviewed, it is stale, not forced.
       requireExactBase: true,
