@@ -560,13 +560,28 @@ export class Worker {
 
     const workspacePath = path.join(scratch, "workspace");
     const git = new GitClient();
+    // `clone --branch` cannot name a ref outside `refs/heads/`, and the lease
+    // ref deliberately lives under `refs/coord/leases/` so an in-flight lease
+    // is not a branch of the canonical repository. Fetching the ref by its
+    // full name and checking out detached reaches the same state and is
+    // tidier about it: the workspace ends up carrying no refs at all, where a
+    // clone left the lease ref and a remote-tracking copy of it behind.
+    await git.run(["init", "--end-of-options", workspacePath]);
     await git.run([
-      "clone",
-      "--branch",
-      assignment.bundleRef,
+      "-C",
+      workspacePath,
+      "fetch",
+      "--no-tags",
       "--end-of-options",
       bundlePath,
+      assignment.bundleRef,
+    ]);
+    await git.run([
+      "-C",
       workspacePath,
+      "checkout",
+      "--detach",
+      "FETCH_HEAD",
     ]);
 
     const workspace: TaskWorkspace = {

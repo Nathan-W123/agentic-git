@@ -242,18 +242,25 @@ test("revision metadata and concurrent bundle requests remain deterministic", as
       repositories.createBundle(
         repository,
         canonical.revision,
-        "coord-lease/same",
+        "refs/coord/leases/same",
       ),
       repositories.createBundle(
         repository,
         canonical.revision,
-        "coord-lease/same",
+        "refs/coord/leases/same",
       ),
     ]);
     assert.ok(first.byteLength > 0);
     assert.deepEqual(first, second);
 
-    const protectedRef = "refs/heads/coord-lease/protected";
+    // A lease ref belongs outside the branch namespace, so a bare name is
+    // refused rather than quietly reinterpreted as `refs/heads/<name>`.
+    await assert.rejects(
+      repositories.createBundle(repository, canonical.revision, "coord/leases/bare"),
+      /fully qualified/u,
+    );
+
+    const protectedRef = "refs/coord/leases/protected";
     const git = repositories.getGitClient();
     await git.run([
       `--git-dir=${repository.path}`,
@@ -265,7 +272,7 @@ test("revision metadata and concurrent bundle requests remain deterministic", as
       repositories.createBundle(
         repository,
         canonical.revision,
-        "coord-lease/protected",
+        "refs/coord/leases/protected",
       ),
       /already exists and will not be overwritten/u,
     );

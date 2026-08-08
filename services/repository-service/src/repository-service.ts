@@ -58,6 +58,15 @@ export interface RemoteImportOptions {
  */
 export const IMPORT_REF_PREFIX = "refs/coord/imported/";
 
+/**
+ * Where a lease's bundle ref lives.
+ *
+ * Deliberately outside `refs/heads/`: a lease is scaffolding for one remote
+ * execution, not a branch anybody should see when listing the repository's
+ * branches or cloning the mirror.
+ */
+export const LEASE_REF_PREFIX = "refs/coord/leases/";
+
 export class UpstreamChangedError extends Error {
   public constructor(
     public readonly branch: string,
@@ -256,6 +265,7 @@ export class RepositoryService {
     const stagedRepository = path.join(stagingRoot, "repository.git");
     try {
       await this.git.run(["clone", "--bare", sourcePath, stagedRepository]);
+      await this.enableReflog(stagedRepository);
       await this.git.run([
         `--git-dir=${stagedRepository}`,
         "show-ref",
@@ -315,6 +325,7 @@ export class RepositoryService {
           maxOutputBytes: 1024 * 1024,
         },
       );
+      await this.enableReflog(stagedRepository);
       const branch =
         options.branch ??
         (await this.discoverDefaultBranch(stagedRepository));
@@ -509,6 +520,25 @@ export class RepositoryService {
     }
     await this.git.run(["check-ref-format", `refs/heads/${branch}`]);
     this.validatedBranches.add(branch);
+  }
+
+  /**
+   * Validates a fully qualified ref, for refs that are deliberately not
+   * branches.
+   *
+   * {@link assertBranchName} prefixes `refs/heads/`, which is exactly what a
+   * ref living outside the branch namespace must not get. Cached on the same
+   * reasoning: `check-ref-format` reads no repository state.
+   */
+  public async assertRefName(reference: string): Promise<void> {
+    if (!reference.startsWith("refs/")) {
+      throw new Error(`Ref must be fully qualified: ${reference}`);
+    }
+    if (this.validatedBranches.has(reference)) {
+      return;
+    }
+    await this.git.run(["check-ref-format", reference]);
+    this.validatedBranches.add(reference);
   }
 
   public async getCanonicalVersion(
@@ -719,9 +749,16 @@ export class RepositoryService {
    *
    * This is how a remote worker materialises a workspace without the control
    * plane running a Git server: the bundle is a single self-contained file the
-   * worker can clone from directly. It advertises only the lease ref and
+   * worker fetches from directly. It advertises only the lease ref and
    * excludes newer canonical refs, but necessarily includes the ancestors
    * reachable from that commit so Git can materialize the snapshot.
+   *
+   * `refName` is fully qualified and lives under `refs/coord/leases/`, outside
+   * the branch namespace. A lease is scaffolding, not a branch: putting these
+   * in `refs/heads/` made every in-flight lease show up as a branch of the
+   * canonical repository, and left one behind on any crash between creating
+   * the ref and deleting it — which then pinned its objects against `gc` and
+   * blocked that lease from ever being bundled again.
    *
    * The bundle is written to a file rather than captured from stdout because
    * it is binary, and the process runner decodes output as UTF-8.
@@ -731,13 +768,13 @@ export class RepositoryService {
     revision: string,
     refName: string,
   ): Promise<Buffer> {
-    await this.assertBranchName(refName);
+    await this.assertRefName(refName);
     const key = `${repository.path}\0${refName}`;
     return await this.withBundleLock(key, async () => {
       // Git refuses to bundle a bare commit: a bundle carries refs, not commits.
-      // A short-lived branch names the revision so an arbitrary commit can be
+      // A short-lived ref names the revision so an arbitrary commit can be
       // packaged after canonical advances beyond the lease.
-      const reference = `refs/heads/${refName}`;
+      const reference = refName;
       const staging = await mkdtemp(path.join(os.tmpdir(), "coord-bundle-"));
       const bundlePath = path.join(staging, "revision.bundle");
       let createdReference = false;
@@ -801,6 +838,49 @@ export class RepositoryService {
         await rm(staging, { recursive: true, force: true });
       }
     });
+  }
+
+  /**
+   * Every lease ref currently present in a canonical mirror.
+   *
+   * `createBundle` deletes its ref in a `finally`, which covers a thrown
+   * error but not a killed process. Crash recovery uses this to find the refs
+   * that outlived the run that made them: each one pins its objects against
+   * `gc` and blocks that lease from being bundled again.
+   */
+  public async listLeaseRefs(
+    repository: CanonicalRepository,
+  ): Promise<string[]> {
+    const result = await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "for-each-ref",
+        "--format=%(refname)",
+        `${LEASE_REF_PREFIX}**`,
+      ],
+      { allowFailure: true },
+    );
+    if (result.exitCode !== 0) {
+      return [];
+    }
+    return result.stdout
+      .split(/\r?\n/u)
+      .map((line) => line.trim())
+      .filter((line) => line.startsWith(LEASE_REF_PREFIX));
+  }
+
+  /** Removes one lease ref. Absent is success, since the goal is absence. */
+  public async deleteLeaseRef(
+    repository: CanonicalRepository,
+    reference: string,
+  ): Promise<void> {
+    if (!reference.startsWith(LEASE_REF_PREFIX)) {
+      throw new Error(`Not a lease ref: ${reference}`);
+    }
+    await this.git.run(
+      [`--git-dir=${repository.path}`, "update-ref", "-d", reference],
+      { allowFailure: true },
+    );
   }
 
   private async withBundleLock<T>(
@@ -938,6 +1018,43 @@ export class RepositoryService {
 
   public getGitClient(): GitClient {
     return this.git;
+  }
+
+  /**
+   * Turns on the reflog for a canonical mirror.
+   *
+   * Git defaults `core.logAllRefUpdates` to true only for non-bare
+   * repositories, and every canonical mirror is bare — so promotions, the
+   * compare-and-swap that rejected one, and rollbacks all moved
+   * `refs/heads/<branch>` leaving no trace in the repository itself. The
+   * coordinator's own audit trail recorded them, which is worth exactly as
+   * much as a record that cannot be checked against anything.
+   *
+   * With this set, `git reflog refs/heads/<branch>` in the mirror is an
+   * independent account of every move of canonical, written by git rather
+   * than by us.
+   */
+  /**
+   * Turns the reflog on for a mirror that already exists.
+   *
+   * Imports do this for themselves, but a deployment that imported before
+   * reflogs were enabled would otherwise never get one. Startup recovery
+   * calls this so existing mirrors are brought up to the same footing rather
+   * than being silently worse off than new ones. Setting a config value that
+   * is already set is a no-op, so it is safe to run every boot.
+   */
+  public async ensureReflog(repository: CanonicalRepository): Promise<void> {
+    await this.enableReflog(repository.path);
+  }
+
+  private async enableReflog(repositoryPath: string): Promise<void> {
+    await this.git.run([
+      `--git-dir=${repositoryPath}`,
+      "config",
+      "--local",
+      "core.logAllRefUpdates",
+      "true",
+    ]);
   }
 
   private async discoverDefaultBranch(repositoryPath: string): Promise<string> {

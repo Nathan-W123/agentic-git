@@ -306,13 +306,18 @@ test("a worker reconstructs the workspace from the bundle alone", async () => {
 
     const git = new GitClient();
     const workspace = path.join(remote, "workspace");
+    // Exactly what the worker does. The lease ref is not a branch, so it is
+    // fetched by its full name and checked out detached rather than cloned.
+    await git.run(["init", workspace]);
     await git.run([
-      "clone",
-      "--branch",
-      assignment?.bundleRef ?? "",
-      bundlePath,
+      "-C",
       workspace,
+      "fetch",
+      "--no-tags",
+      bundlePath,
+      assignment?.bundleRef ?? "",
     ]);
+    await git.run(["-C", workspace, "checkout", "--detach", "FETCH_HEAD"]);
 
     // Line endings are not part of the contract: a worker on Windows checks
     // out with autocrlf, and git converts back when it diffs, so a CRLF

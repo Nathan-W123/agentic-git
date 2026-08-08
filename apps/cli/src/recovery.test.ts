@@ -325,3 +325,111 @@ test("recovery clears orphaned worktrees and prunes their registrations", async 
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+/**
+ * `createBundle` deletes its lease ref in a `finally`, which a killed process
+ * never reaches. A survivor is not harmless: it holds every object it reaches
+ * against `gc`, and bundling refuses to overwrite an existing ref, so that
+ * lease can never be served again.
+ */
+test("recovery sweeps lease refs no active lease owns", async () => {
+  const fixture = await createFixture();
+  try {
+    const git = fixture.repositories.getGitClient();
+    const orphaned = "refs/coord/leases/lease_dead";
+    await git.run([
+      `--git-dir=${fixture.canonical.path}`,
+      "update-ref",
+      orphaned,
+      fixture.version.revision,
+    ]);
+
+    const report = await recoverCoordinationState(
+      fixture.project,
+      fixture.store,
+      fixture.repositories,
+    );
+
+    assert.deepEqual(report.removedLeaseRefs, [orphaned]);
+    assert.deepEqual(report.warnings, []);
+    const remaining = await git.run(
+      [
+        `--git-dir=${fixture.canonical.path}`,
+        "show-ref",
+        "--verify",
+        "--quiet",
+        "--",
+        orphaned,
+      ],
+      { allowFailure: true },
+    );
+    assert.notEqual(remaining.exitCode, 0);
+
+    // The canonical branch is not a lease ref and must be untouched.
+    const canonicalStill = await fixture.repositories.getCanonicalVersion(
+      fixture.canonical,
+    );
+    assert.equal(canonicalStill.revision, fixture.version.revision);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Canonical mirrors are bare, and git only defaults `core.logAllRefUpdates`
+ * to true for non-bare repositories — so every promotion moved the branch
+ * leaving no trace git itself had written.
+ */
+test("an imported mirror keeps a reflog of its canonical branch", async () => {
+  const fixture = await createFixture();
+  try {
+    const git = fixture.repositories.getGitClient();
+    const setting = await git.run([
+      `--git-dir=${fixture.canonical.path}`,
+      "config",
+      "--get",
+      "core.logAllRefUpdates",
+    ]);
+    assert.equal(setting.stdout.trim(), "true");
+
+    // A real promotion, so the branch genuinely moves: git writes no reflog
+    // entry for an update that changes nothing.
+    const workspaces = new GitWorktreeWorkspaceManager(git);
+    const workspace = await workspaces.create({
+      taskId: "task_reflog",
+      rootPath: fixture.project.workspaceRoot,
+      repository: fixture.canonical,
+      baseVersion: fixture.version,
+    });
+    await writeFile(
+      path.join(workspace.path, "value.js"),
+      "export const v = 2;\n",
+    );
+    const candidate = await fixture.repositories.commitAll(
+      workspace.path,
+      "advance canonical",
+    );
+    assert.ok(candidate !== undefined);
+    assert.equal(
+      await fixture.repositories.promote(
+        fixture.canonical,
+        candidate,
+        fixture.version.revision,
+      ),
+      true,
+    );
+    await workspaces.destroy(workspace);
+
+    // The move is now recorded by git itself, independently of the
+    // coordinator's own audit trail.
+    const reflog = await git.run([
+      `--git-dir=${fixture.canonical.path}`,
+      "reflog",
+      "show",
+      `refs/heads/${fixture.canonical.branch}`,
+    ]);
+    assert.match(reflog.stdout, new RegExp(candidate.slice(0, 7), "u"));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});

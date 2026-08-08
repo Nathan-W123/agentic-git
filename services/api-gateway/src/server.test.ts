@@ -186,7 +186,7 @@ async function startRuntime(
           createdAt: "2026-01-01T00:00:00.000Z",
         },
         bundleUrl: `/api/v1/workers/leases/${leased.lease.id}/bundle`,
-        bundleRef: `coord-lease/${leased.lease.id}`,
+        bundleRef: `refs/coord/leases/${leased.lease.id}`,
         heartbeatIntervalMs: 60_000,
         protocolVersion: 2,
         planUrl: `/api/v1/workers/leases/${leased.lease.id}/plan`,

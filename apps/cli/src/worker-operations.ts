@@ -35,6 +35,7 @@ import type {
   WorkLease,
 } from "@coord/persistence";
 import {
+  LEASE_REF_PREFIX,
   RepositoryService,
   type CanonicalRepository,
 } from "@coord/repository-service";
@@ -215,9 +216,16 @@ async function canonicalAdvance(
   };
 }
 
-/** Derived from the lease so concurrent bundle requests cannot collide. */
+/**
+ * Derived from the lease so concurrent bundle requests cannot collide.
+ *
+ * Fully qualified and outside `refs/heads/`: a lease is scaffolding for one
+ * remote execution, and these used to appear as branches of the canonical
+ * repository for as long as the lease lived — longer, if the process died
+ * before deleting one.
+ */
 export function bundleRefFor(leaseId: string): string {
-  return `coord-lease/${leaseId.replaceAll(/[^A-Za-z0-9_-]/gu, "")}`;
+  return `${LEASE_REF_PREFIX}${leaseId.replaceAll(/[^A-Za-z0-9_-]/gu, "")}`;
 }
 
 function canonical(repository: {

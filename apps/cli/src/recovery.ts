@@ -12,6 +12,7 @@ import {
 } from "@coord/workspace-manager";
 
 import type { CoordinatorProject } from "./project.js";
+import { bundleRefFor } from "./worker-operations.js";
 
 /**
  * Crash recovery for the control plane.
@@ -64,6 +65,15 @@ export interface RecoveryReport {
   removedDirectories: string[];
   /** Canonical mirrors whose stale worktree registrations were pruned. */
   prunedRepositories: string[];
+  /**
+   * Lease refs deleted because no active lease owned them.
+   *
+   * `createBundle` removes its ref in a `finally`, which a killed process
+   * never reaches. Each survivor pins its objects against `gc` and makes that
+   * lease impossible to bundle again, since bundling refuses to overwrite an
+   * existing ref.
+   */
+  removedLeaseRefs: string[];
   /** Non-fatal problems, e.g. a directory that could not be deleted. */
   warnings: string[];
 }
@@ -255,6 +265,7 @@ export async function recoverCoordinationState(
     expiredLeases: [],
     removedDirectories: [],
     prunedRepositories: [],
+    removedLeaseRefs: [],
     warnings: [],
   };
   const now = new Date().toISOString();
@@ -283,6 +294,40 @@ export async function recoverCoordinationState(
     } catch (error) {
       report.warnings.push(
         `Could not prune worktrees of ${repository.id}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  // Lease refs are the other thing a killed process leaves in a mirror.
+  // Expiry above has already settled which leases are still live, so a ref
+  // with no active lease behind it is debris — and debris that costs
+  // something, since it holds its objects against `gc` and makes its own
+  // lease unbundlable for as long as it survives.
+  //
+  // Live leases are read once rather than per repository: a remote worker
+  // still holding one is mid-execution and its ref must stay.
+  const liveLeaseRefs = new Set(
+    (await store.listWorkLeases({ status: "active" })).map((lease) =>
+      bundleRefFor(lease.id),
+    ),
+  );
+  for (const repository of await store.listRepositories()) {
+    try {
+      // Mirrors imported before reflogs were turned on would otherwise stay
+      // without one forever. Setting a value already set costs nothing.
+      await repositories.ensureReflog(repository);
+      for (const reference of await repositories.listLeaseRefs(repository)) {
+        if (liveLeaseRefs.has(reference)) {
+          continue;
+        }
+        await repositories.deleteLeaseRef(repository, reference);
+        report.removedLeaseRefs.push(reference);
+      }
+    } catch (error) {
+      report.warnings.push(
+        `Could not sweep lease refs of ${repository.id}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
