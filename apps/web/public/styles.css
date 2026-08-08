@@ -3830,3 +3830,37 @@ dialog.modal::backdrop {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Marks a field somebody can skip, so the form does not look like it is all
+   required when only two of the four are. */
+.field-optional {
+  color: var(--text-3);
+  font-weight: 400;
+  text-transform: none;
+}
+
+/* Guidance inside a modal: where to get a credential, and what happens to it
+   once pasted. Quiet, because it is read once and then never again. */
+.modal-hint {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 12.5px;
+  line-height: 1.5;
+}
+
+.modal-hint code {
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 12px;
+}
+
+/* A pasted credential file is long and unwrapped; monospace makes a JSON blob
+   legible enough to see whether the right thing landed. */
+.cred-paste {
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 12px;
+  resize: vertical;
+  min-height: 76px;
+}

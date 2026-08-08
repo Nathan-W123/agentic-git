@@ -273,6 +273,34 @@ async function bootstrap(client: TestClient): Promise<any> {
   return response.data;
 }
 
+/**
+ * A repository to invite somebody to, since every invitation names one.
+ *
+ * Invitations are deliberately repository-scoped: there is no way to ask for
+ * the whole organization, so a test that wants to invite anybody has to say
+ * where to.
+ */
+async function invitableRepository(
+  client: TestClient,
+  id = "shared-repo",
+): Promise<string> {
+  const created = await client.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+    { method: "POST", body: { id, branch: "main" } },
+  );
+  assert.equal(created.status, 201);
+  return id;
+}
+
+/** The body every invitation needs: who, what role, and which repository. */
+function inviteBody(
+  email: string,
+  role: string,
+  repositoryId: string,
+): Record<string, unknown> {
+  return { email, role, repositoryId, projectId: DEFAULT_PROJECT_ID };
+}
+
 test("bootstrap, sessions, CSRF, static fallback, and logout work over HTTP", async (t) => {
   const runtime = await startRuntime(t);
   const client = new TestClient(runtime.origin);
@@ -1762,10 +1790,11 @@ test("an invitation brings in somebody who has no account yet", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   await bootstrap(owner);
+  const repo = await invitableRepository(owner);
 
   const invited = await owner.request(
     `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
-    { method: "POST", body: { email: "newcomer@example.com", role: "developer" } },
+    { method: "POST", body: inviteBody("newcomer@example.com", "developer", repo) },
   );
   assert.equal(invited.status, 201);
   const token = invited.data.token as string;
@@ -1787,7 +1816,18 @@ test("an invitation brings in somebody who has no account yet", async (t) => {
   });
   assert.equal(accepted.status, 200);
   assert.equal(accepted.data.user.email, "newcomer@example.com");
-  assert.equal(accepted.data.memberships[0].role, "developer");
+  // No organization membership: an invitation grants its one repository and
+  // nothing else, and any organization role would reach every repository.
+  assert.deepEqual(accepted.data.memberships, []);
+  // The grant they did get is the repository they were invited to.
+  const reachable = await anonymous.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+  );
+  assert.equal(reachable.status, 200);
+  assert.deepEqual(
+    reachable.data.repositories.map((entry: { id: string }) => entry.id),
+    [repo],
+  );
 
   // And they are signed in, so accepting lands them inside rather than at a
   // login screen with a fresh password they just chose.
@@ -1800,10 +1840,11 @@ test("an invitation works once and stops working when revoked", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   await bootstrap(owner);
+  const repo = await invitableRepository(owner);
 
   const first = await owner.request(
     `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
-    { method: "POST", body: { email: "once@example.com", role: "viewer" } },
+    { method: "POST", body: inviteBody("once@example.com", "viewer", repo) },
   );
   const token = first.data.token as string;
   const joiner = new TestClient(runtime.origin);
@@ -1830,7 +1871,7 @@ test("an invitation works once and stops working when revoked", async (t) => {
 
   const second = await owner.request(
     `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
-    { method: "POST", body: { email: "revoked@example.com", role: "viewer" } },
+    { method: "POST", body: inviteBody("revoked@example.com", "viewer", repo) },
   );
   await owner.request(
     `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations/${second.data.invitation.id}`,
@@ -1852,9 +1893,10 @@ test("a wrong or forged invitation link is indistinguishable from a missing one"
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   await bootstrap(owner);
+  const repo = await invitableRepository(owner);
   const made = await owner.request(
     `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
-    { method: "POST", body: { email: "probe@example.com", role: "viewer" } },
+    { method: "POST", body: inviteBody("probe@example.com", "viewer", repo) },
   );
   const id = made.data.invitation.id as string;
   const anonymous = new TestClient(runtime.origin);
@@ -1873,11 +1915,12 @@ test("an invitation cannot hand out a role its sender could not assign", async (
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   await bootstrap(owner);
+  const repo = await invitableRepository(owner);
 
   // Bring in a developer, who may not manage members at all.
   const invite = await owner.request(
     `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
-    { method: "POST", body: { email: "dev@example.com", role: "developer" } },
+    { method: "POST", body: inviteBody("dev@example.com", "developer", repo) },
   );
   const developer = new TestClient(runtime.origin);
   await developer.request(`/api/v1/invitations/${invite.data.token}/accept`, {
@@ -1886,21 +1929,39 @@ test("an invitation cannot hand out a role its sender could not assign", async (
   });
   const refused = await developer.request(
     `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
-    { method: "POST", body: { email: "escalate@example.com", role: "owner" } },
+    { method: "POST", body: inviteBody("escalate@example.com", "owner", repo) },
   );
   assert.equal(refused.status, 403);
 });
 
-test("inviting somebody who is already a member says so", async (t) => {
+test("an existing member can still be invited to a repository", async (t) => {
+  // The organization-wide invitation refused this with `already_a_member`,
+  // and it was right to: a second one added nothing. A repository grant is a
+  // different offer — being in the organization does not mean being able to
+  // reach a particular repository — so it is worth making to someone who is
+  // already here.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const setup = await bootstrap(owner);
+  const repo = await invitableRepository(owner);
   const again = await owner.request(
     `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
-    { method: "POST", body: { email: setup.user.email, role: "developer" } },
+    { method: "POST", body: inviteBody(setup.user.email, "developer", repo) },
   );
-  assert.equal(again.status, 409);
-  assert.equal(again.data.error.code, "already_a_member");
+  assert.equal(again.status, 201, JSON.stringify(again.data));
+});
+
+test("an invitation must name a repository", async (t) => {
+  // The whole point of the change: there is no way to ask for the whole
+  // organization. Omitting the repository is a bad request, not a wider grant.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const refused = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "everywhere@example.com", role: "developer" } },
+  );
+  assert.equal(refused.status, 400, JSON.stringify(refused.data));
 });
 
 /** Invites somebody to one repository and returns a client signed in as them. */
@@ -2027,7 +2088,11 @@ test("a guest's task list shows only their own repository's work", async (t) => 
   assert.equal(owned.data.tasks.length, 2);
 });
 
-test("an organization invitation still reaches every repository", async (t) => {
+test("an invitation reaches its own repository and no other", async (t) => {
+  // This replaces a test asserting that an invitation reached *every*
+  // repository the organization held. That was the upstream behaviour when an
+  // invitation could omit its repository; it cannot any more, and the
+  // guarantee is now the opposite one.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   await bootstrap(owner);
@@ -2039,8 +2104,9 @@ test("an organization invitation still reaches every repository", async (t) => {
   }
   const invited = await owner.request(
     `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
-    { method: "POST", body: { email: "staff@example.com", role: "developer" } },
+    { method: "POST", body: inviteBody("staff@example.com", "developer", "alpha") },
   );
+  assert.equal(invited.status, 201, JSON.stringify(invited.data));
   const member = new TestClient(runtime.origin);
   await member.request(`/api/v1/invitations/${invited.data.token}/accept`, {
     method: "POST",
@@ -2051,7 +2117,7 @@ test("an organization invitation still reaches every repository", async (t) => {
   );
   assert.deepEqual(
     listed.data.repositories.map((entry: { id: string }) => entry.id).sort(),
-    ["alpha", "beta"],
+    ["alpha"],
   );
 });
 
@@ -2120,4 +2186,82 @@ test("a stranger with no grant and no membership still sees nothing", async (t) 
     ).status,
     403,
   );
+});
+
+test("anybody can create an account, and it comes with somewhere to work", async (t) => {
+  // Open registration: no invitation, no bootstrap token. What the new user
+  // gets is their *own* organization and project, because an organization
+  // role reaches every repository that organization holds — attaching them to
+  // an existing one would hand a stranger everybody else's code.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "owners-repo");
+
+  const newcomer = new TestClient(runtime.origin);
+  const created = await newcomer.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "stranger@example.com",
+      displayName: "Stranger",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  assert.equal(created.data.user.email, "stranger@example.com");
+  // Signed in already: registering lands them inside, not back at a form.
+  const me = await newcomer.request("/api/v1/auth/me");
+  assert.equal(me.status, 200);
+  assert.equal(me.data.user.email, "stranger@example.com");
+
+  // Their own organization, owned by them, and not the bootstrap one.
+  assert.equal(created.data.memberships.length, 1);
+  assert.equal(created.data.memberships[0].role, "owner");
+  assert.notEqual(created.data.memberships[0].organizationId, DEFAULT_ORGANIZATION_ID);
+
+  // A project to put repositories in, which is the first thing they came for.
+  const organizationId = created.data.memberships[0].organizationId;
+  const projects = await newcomer.request(
+    `/api/v1/organizations/${organizationId}/projects`,
+  );
+  assert.equal(projects.status, 200);
+  assert.equal(projects.data.projects.length, 1);
+
+  // And none of the bootstrap owner's work is visible to them.
+  const theirs = await newcomer.request(
+    `/api/v1/projects/${projects.data.projects[0].id}/repositories`,
+  );
+  assert.equal(theirs.status, 200);
+  assert.deepEqual(theirs.data.repositories, []);
+  const notTheirs = await newcomer.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+  );
+  assert.equal(notTheirs.status === 200, false, "another team's project must not be readable");
+});
+
+test("registration can be closed off", async (t) => {
+  // Some deployments want invitations to be the only way in; this is the
+  // switch, and it works without a redeploy.
+  const previous = process.env["COORD_DISABLE_REGISTRATION"];
+  process.env["COORD_DISABLE_REGISTRATION"] = "1";
+  try {
+    const runtime = await startRuntime(t);
+    const client = new TestClient(runtime.origin);
+    const refused = await client.request("/api/v1/auth/register", {
+      method: "POST",
+      body: {
+        email: "nope@example.com",
+        displayName: "Nope",
+        password: PASSWORD,
+      },
+    });
+    assert.equal(refused.status, 403);
+    assert.equal(refused.data.error.code, "registration_closed");
+  } finally {
+    if (previous === undefined) {
+      delete process.env["COORD_DISABLE_REGISTRATION"];
+    } else {
+      process.env["COORD_DISABLE_REGISTRATION"] = previous;
+    }
+  }
 });

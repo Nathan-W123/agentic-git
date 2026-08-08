@@ -364,6 +364,65 @@ export class AuthService {
     return user;
   }
 
+  /**
+   * Creates an account for somebody nobody invited.
+   *
+   * Registration hands the new user their *own* organization and a project
+   * inside it, rather than attaching them to whichever organization happens
+   * to exist. Attaching them would be much worse than it sounds: an
+   * organization role reaches every repository the organization holds, so one
+   * sign-up form would hand a stranger everybody else's code. Their own
+   * organization means the account is real and empty, which is what somebody
+   * arriving to start a repository actually wants.
+   *
+   * They are not a system administrator. That is reserved for the bootstrap
+   * owner, who set the control plane up; a self-registered user administers
+   * their own organization and nothing beyond it.
+   *
+   * The email uniqueness check belongs to the store, which enforces it under
+   * whatever concurrency the deployment has. A duplicate surfaces as the
+   * store's own conflict rather than being pre-checked here, because a check
+   * followed by an insert is a race.
+   */
+  public async register(input: {
+    email: string;
+    displayName: string;
+    password: string;
+    organizationName?: string;
+  }): Promise<UserAccount> {
+    const user = await this.store.createUser({
+      email: input.email,
+      displayName: input.displayName,
+      passwordDigest: await hashPassword(input.password),
+      systemAdmin: false,
+    });
+    // Slugs have to be unique across the deployment, and a display name is
+    // neither unique nor URL-safe, so the user's own id is the only thing to
+    // hand that is guaranteed both.
+    const slug = `team-${user.id.replace(/^user_/u, "").slice(0, 12)}`;
+    const organization = await this.store.createOrganization({
+      slug,
+      name:
+        input.organizationName !== undefined && input.organizationName !== ""
+          ? input.organizationName
+          : `${input.displayName}'s team`,
+    });
+    await this.store.saveMembership({
+      organizationId: organization.id,
+      userId: user.id,
+      role: "owner",
+    });
+    // A repository has to live in a project, so a brand new account with no
+    // project could not do the first thing it came to do.
+    await this.store.createProject({
+      organizationId: organization.id,
+      slug: "default",
+      name: "My Project",
+      description: "Repositories you create live here.",
+    });
+    return user;
+  }
+
   public async login(input: {
     email: string;
     password: string;

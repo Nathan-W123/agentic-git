@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { existsSync, type Dirent } from "node:fs";
-import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -11,6 +12,20 @@ import {
   sanitizeChildEnv,
   type ProcessOutput,
 } from "@coord/repository-service";
+import {
+  supportedCredentialKinds,
+  UserCredentialError,
+  UserCredentialStore,
+  assertSessionFile,
+  credentialHint,
+  SESSION_FILE_SHARES_REFRESH_TOKEN,
+  withCredentialHome,
+  type CredentialHome,
+  type UserCredential,
+  type UserCredentialKind,
+  type UserCredentialSummary,
+  type VendorCliKind,
+} from "@coord/workspace-manager";
 
 /**
  * Direct provider chat for the dashboard's agent panel, in the VS Code
@@ -37,9 +52,23 @@ import {
  * exposes nothing programmatically (Claude Code has no model-list command),
  * that absence is stated instead of papered over with a guessed list.
  *
- * Connections are stored per dashboard user. CLI-backed connections spend
- * the *host owner's* accounts, so they are restricted to system
- * administrators.
+ * ### Two ways to be connected
+ *
+ * **Own account** — the user supplies a credential they minted themselves
+ * (`claude setup-token`, or an API key) and it is stored encrypted per user.
+ * Their prompts run under their account and bill it. Any user may do this;
+ * see `@coord/workspace-manager`'s user-credentials module for why a
+ * server-side OAuth grant is not available from these vendors and what is
+ * used instead.
+ *
+ * **Host login** — the deployment's own machine is signed in via the vendor
+ * CLI and every prompt spends the *host owner's* account. That is the
+ * original single-operator arrangement, and because one person pays for
+ * everyone it stays restricted to system administrators.
+ *
+ * A user's own credential is preferred whenever one exists, so a deployment
+ * can move from the shared login to per-user accounts one user at a time
+ * without a flag day.
  */
 
 export type ProviderId = "anthropic" | "openai" | "google";
@@ -122,13 +151,22 @@ export interface ProviderStatus {
   id: ProviderId;
   name: string;
   connected: boolean;
-  kind?: "account";
+  kind?: "account" | "own-credential";
   /** Effective model/effort after per-user settings. */
   model: string;
   effort?: string;
   cli: ProviderCliState;
   exposesThinking: boolean;
+  /**
+   * Whether *this user, right now* would need administrator rights to use the
+   * provider — true only when they would be falling back to the shared host
+   * login. Connecting an own credential clears it.
+   */
   requiresAdmin: boolean;
+  /** The user's own stored credential, without the secret. */
+  ownCredential?: UserCredentialSummary;
+  /** Credential kinds this provider can accept from a user. */
+  acceptedCredentialKinds: UserCredentialKind[];
 }
 
 export interface ProviderModelOption {
@@ -176,6 +214,37 @@ const PROVIDER_NAMES: Record<ProviderId, string> = {
   anthropic: "Anthropic",
   openai: "OpenAI",
   google: "Google",
+};
+
+/** The dashboard names providers by vendor; the CLIs name them by tool. */
+const PROVIDER_VENDORS: Record<ProviderId, VendorCliKind> = {
+  anthropic: "claude",
+  openai: "codex",
+  google: "gemini",
+};
+
+/** What a user has to do to obtain a credential we can accept. */
+export const CREDENTIAL_INSTRUCTIONS: Record<ProviderId, string[]> = {
+  anthropic: [
+    "Run `claude setup-token` on your own machine and finish the browser " +
+      "sign-in. It prints a long-lived token starting `sk-ant-oat` that " +
+      "spends your own Claude subscription.",
+    "Or paste an Anthropic API key from console.anthropic.com, which bills " +
+      "that key's account instead.",
+  ],
+  openai: [
+    "Sign in with your ChatGPT account: this deployment shows you a link and " +
+      "a one-time code, you approve it in your own browser, and the session " +
+      "it receives is its own — nothing of yours is copied.",
+    "Or paste an OpenAI API key from platform.openai.com, which bills that " +
+      "key's account instead of your subscription.",
+  ],
+  google: [
+    "Paste a Google AI Studio API key from aistudio.google.com. This is the " +
+      "recommended way to connect Gemini.",
+    "Advanced: paste the contents of ~/.gemini/oauth_creds.json to use your " +
+      `Google subscription. ${SESSION_FILE_SHARES_REFRESH_TOKEN}`,
+  ],
 };
 
 /** Names the window a Codex rate limit covers, from its own minute count. */
@@ -341,6 +410,11 @@ const DEFAULT_CLAUDE_EFFORT = "high";
 const MAX_MESSAGES = 40;
 const MAX_MESSAGE_CHARS = 32_000;
 const CLI_TIMEOUT_MS = 240_000;
+/**
+ * A connect request is a person waiting on a form, and the probe is one
+ * trivial prompt, so it gets a far shorter deadline than a real completion.
+ */
+const CREDENTIAL_PROBE_TIMEOUT_MS = 90_000;
 /** Usage moves slowly; re-probing on every render would be wasteful. */
 const USAGE_CACHE_MS = 120_000;
 const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
@@ -348,8 +422,220 @@ const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 // "claude-fable-5[1m]" context variant it caches for its own picker).
 const MODEL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,99}$/u;
 
+/**
+ * The vendor's own words for why a credential was refused.
+ *
+ * The CLIs put the useful line ("OAuth access token is invalid", "Not logged
+ * in") on either stream and pad it with banners, so the first line that reads
+ * like a diagnosis is preferred over the first line outright.
+ */
+function probeFailureDetail(output: ProcessOutput): string {
+  const lines = `${output.stderr}\n${output.stdout}`
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0 && !line.startsWith("{"));
+  const diagnosis = lines.find((line) =>
+    /error|invalid|expired|unauthor|denied|forbidden|not logged in|failed/iu.test(
+      line,
+    ),
+  );
+  return (
+    diagnosis ??
+    lines[0] ??
+    (output.exitCode === 124
+      ? "the CLI did not answer before the deadline"
+      : `the CLI exited ${output.exitCode}`)
+  ).slice(0, 300);
+}
+
 export type ProcessRunner = typeof runProcess;
 export type DetachedSpawner = (command: string, args: string[]) => void;
+
+/**
+ * A CLI held open across several HTTP requests.
+ *
+ * Device authorization is the one flow that cannot be a single call: the CLI
+ * prints a code, then waits — for as long as the person takes to walk to their
+ * browser and approve it. So the process outlives the request that started it,
+ * and the dashboard polls. This is the seam that makes that testable without a
+ * real login.
+ */
+export interface LongRunningProcess {
+  /** Resolves when the CLI exits, however it exits. */
+  done: Promise<ProcessOutput>;
+  kill(): void;
+}
+
+export type LongRunningSpawner = (
+  command: string,
+  args: readonly string[],
+  options: { env: NodeJS.ProcessEnv; cwd?: string },
+  onLine: (line: string) => void,
+) => LongRunningProcess;
+
+/** Terminal colour codes, which the Codex CLI wraps its device code in. */
+const ANSI = /\[[0-9;]*m/gu;
+
+export function stripAnsi(value: string): string {
+  return value.replace(ANSI, "");
+}
+
+/**
+ * Default {@link LongRunningSpawner}: a plain child process whose stdout is
+ * split into lines and whose handle stays available for cancellation.
+ */
+function spawnLongRunning(
+  command: string,
+  args: readonly string[],
+  options: { env: NodeJS.ProcessEnv; cwd?: string },
+  onLine: (line: string) => void,
+): LongRunningProcess {
+  const startedAt = Date.now();
+  const child = spawn(command, [...args], {
+    env: options.env,
+    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "";
+  let stderr = "";
+  let pending = "";
+  const consume = (chunk: string): void => {
+    stdout += chunk;
+    pending += chunk;
+    const lines = pending.split(/\r?\n/u);
+    pending = lines.pop() ?? "";
+    for (const line of lines) {
+      onLine(line);
+    }
+  };
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", consume);
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk: string) => {
+    stderr += chunk;
+    // The Codex CLI prints its instructions to stdout but its warnings to
+    // stderr; the device code has been seen on both across versions, so both
+    // are scanned.
+    consume("");
+    for (const line of chunk.split(/\r?\n/u)) {
+      onLine(line);
+    }
+  });
+  const done = new Promise<ProcessOutput>((resolve) => {
+    const settle = (exitCode: number): void => {
+      if (pending.trim().length > 0) {
+        onLine(pending);
+        pending = "";
+      }
+      resolve({
+        exitCode,
+        stdout,
+        stderr,
+        durationMs: Date.now() - startedAt,
+      });
+    };
+    child.on("error", (error) => {
+      stderr += `\n${error.message}`;
+      settle(1);
+    });
+    child.on("close", (code) => {
+      settle(code ?? 1);
+    });
+  });
+  return {
+    done,
+    kill: () => {
+      child.kill();
+    },
+  };
+}
+
+/** What the browser needs to show a device-authorization prompt. */
+export interface DeviceAuthStart {
+  flowId: string;
+  verificationUrl: string;
+  userCode: string;
+  expiresAt: string;
+}
+
+export interface DeviceAuthState {
+  flowId: string;
+  status: "pending" | "completed" | "failed" | "expired";
+  verificationUrl?: string;
+  userCode?: string;
+  expiresAt?: string;
+  /** The vendor's own words when it did not work out. */
+  detail?: string;
+  account?: string;
+}
+
+interface DeviceAuthFlow {
+  id: string;
+  userId: string;
+  provider: ProviderId;
+  home: string;
+  verificationUrl: string | undefined;
+  userCode: string | undefined;
+  expiresAtMs: number;
+  status: DeviceAuthState["status"];
+  detail: string | undefined;
+  account: string | undefined;
+  process: LongRunningProcess;
+  timer: NodeJS.Timeout | undefined;
+}
+
+/**
+ * Pulls the verification URL and one-time code out of the CLI's own output.
+ *
+ * The CLI writes these for a human in a terminal — numbered steps, colour
+ * codes, an expiry in prose — so they are recovered by shape rather than by
+ * position, and colour codes are stripped first or the URL would carry them.
+ */
+export function parseDeviceAuthLine(line: string): {
+  url?: string;
+  code?: string;
+  expiresInMinutes?: number;
+} {
+  const clean = stripAnsi(line).trim();
+  const result: { url?: string; code?: string; expiresInMinutes?: number } = {};
+  const url = /https?:\/\/[^\s"'<>]+/u.exec(clean);
+  if (url !== null) {
+    result.url = url[0];
+  }
+  // Deliberately anchored to the whole line: a bare grouped code on its own
+  // line is the code, whereas the same shape inside prose is not.
+  const code = /^([A-Z0-9]{4,8}-[A-Z0-9]{4,8})$/u.exec(clean);
+  if (code !== null && code[1] !== undefined) {
+    result.code = code[1];
+  }
+  const expiry = /expires? in (\d{1,3}) minutes?/iu.exec(clean);
+  if (expiry !== null && expiry[1] !== undefined) {
+    result.expiresInMinutes = Number.parseInt(expiry[1], 10);
+  }
+  return result;
+}
+
+/**
+ * Removes a staged credential home, tolerating a child still holding it.
+ *
+ * Windows keeps a directory locked until every handle inside the exited
+ * process is released, and that lags the exit itself — so removing a device-
+ * auth home straight after `kill()` fails with `EBUSY` and turns "Cancel" into
+ * a server error. Verified against the real CLI, which is how this was found.
+ */
+async function removeCredentialHome(directory: string): Promise<void> {
+  await rm(directory, {
+    recursive: true,
+    force: true,
+    maxRetries: 20,
+    retryDelay: 100,
+  });
+}
+
+/** How long to wait for the CLI to print a code before giving up on it. */
+const DEVICE_AUTH_PROMPT_TIMEOUT_MS = 60_000;
+/** Fallback when the CLI does not state an expiry in its own output. */
+const DEVICE_AUTH_DEFAULT_EXPIRY_MS = 15 * 60_000;
 
 /**
  * Runs a CLI and hands back every stdout line the moment it arrives, while
@@ -479,7 +765,15 @@ export interface ProviderChatServiceOptions {
   streamRunner?: StreamRunner;
   /** Launches a browser-opening login flow without holding the request. */
   detachedSpawner?: DetachedSpawner;
+  /** Holds a CLI open across requests, for device authorization. */
+  longRunningSpawner?: LongRunningSpawner;
   homeDirectory?: string;
+  /**
+   * Per-user credential storage. Share one instance with everything else that
+   * reads credentials: opening the store can generate the key file, and two
+   * openers racing on that would leave half the records unreadable.
+   */
+  credentials?: UserCredentialStore;
 }
 
 function assertMessages(value: unknown): ChatMessage[] {
@@ -571,6 +865,9 @@ export class ProviderChatService {
     { at: number; report: ProviderUsageReport }
   >();
   private readonly streamRunner: StreamRunner;
+  private readonly longRunningSpawner: LongRunningSpawner;
+  private readonly deviceAuthFlows = new Map<string, DeviceAuthFlow>();
+  private credentialStorePromise: Promise<UserCredentialStore> | undefined;
 
   public constructor(
     private readonly project: CoordinatorProject,
@@ -578,6 +875,10 @@ export class ProviderChatService {
   ) {
     this.runner = options.runner ?? runProcess;
     this.streamRunner = options.streamRunner ?? streamProcess;
+    this.longRunningSpawner = options.longRunningSpawner ?? spawnLongRunning;
+    if (options.credentials !== undefined) {
+      this.credentialStorePromise = Promise.resolve(options.credentials);
+    }
     this.homeDirectory = options.homeDirectory ?? os.homedir();
     this.detachedSpawner =
       options.detachedSpawner ??
@@ -590,12 +891,40 @@ export class ProviderChatService {
       });
   }
 
+  private get secretsDirectory(): string {
+    return path.join(this.project.directory, "secrets");
+  }
+
   private get secretsPath(): string {
-    return path.join(
-      this.project.directory,
-      "secrets",
-      "provider-connections.json",
+    return path.join(this.secretsDirectory, "provider-connections.json");
+  }
+
+  /**
+   * Opened once and reused. Opening generates a key file when the deployment
+   * has not configured one, so doing it per request would race on that write.
+   */
+  private async credentialStore(): Promise<UserCredentialStore> {
+    this.credentialStorePromise ??= UserCredentialStore.open(
+      this.secretsDirectory,
     );
+    return await this.credentialStorePromise;
+  }
+
+  /** The user's own credential, or undefined when they have not supplied one. */
+  private async ownCredential(
+    userId: string,
+    provider: ProviderId,
+  ): Promise<UserCredential | undefined> {
+    try {
+      return await (
+        await this.credentialStore()
+      ).get(userId, PROVIDER_VENDORS[provider]);
+    } catch (error) {
+      if (error instanceof UserCredentialError) {
+        throw new ProviderChatError(409, error.code, error.message);
+      }
+      throw error;
+    }
   }
 
   private async readConnections(): Promise<ConnectionFile> {
@@ -867,17 +1196,28 @@ export class ProviderChatService {
     systemAdmin: boolean;
   }): Promise<ProviderStatus[]> {
     const connections = (await this.readConnections())[input.userId] ?? {};
+    const store = await this.credentialStore();
     const statuses: ProviderStatus[] = [];
     for (const id of PROVIDER_IDS) {
       const connection = connections[id];
       const cli = await this.detect(id);
       const settings = connection?.settings ?? {};
+      const own = await store.summary(input.userId, PROVIDER_VENDORS[id]);
+      // An own credential authenticates on its own and needs no host login,
+      // so it is checked before the shared-login path and outranks it.
+      const connected =
+        own !== undefined ||
+        (connection !== undefined && input.systemAdmin && cli.loggedIn);
       statuses.push({
         id,
         name: PROVIDER_NAMES[id],
-        connected:
-          connection !== undefined && input.systemAdmin && cli.loggedIn,
-        ...(connection === undefined ? {} : { kind: "account" as const }),
+        connected,
+        ...(own !== undefined
+          ? { kind: "own-credential" as const, ownCredential: own }
+          : connection === undefined
+            ? {}
+            : { kind: "account" as const }),
+        acceptedCredentialKinds: supportedCredentialKinds(PROVIDER_VENDORS[id]),
         model:
           settings.model ??
           (id === "anthropic"
@@ -892,10 +1232,502 @@ export class ProviderChatService {
           : { effort: settings.effort }),
         cli,
         exposesThinking: id === "openai",
-        requiresAdmin: true,
+        requiresAdmin: own === undefined,
       });
     }
     return statuses;
+  }
+
+  /* ------------------------------------------------ own credentials ----- */
+
+  /**
+   * Stores a credential the user supplies, after proving it works.
+   *
+   * Verification is not a formality. A credential that is merely stored looks
+   * connected in the UI and only fails much later, mid-task, where the error
+   * surfaces as a failed run rather than a typo at connect time. So the
+   * credential answers a real prompt first, under the same isolation its
+   * tasks will run with, and is stored only if it does.
+   */
+  public async connectOwnCredential(input: {
+    userId: string;
+    provider: ProviderId;
+    /**
+     * Only affects how the *other* providers are reported back: an
+     * administrator still sees the ones the shared host login covers. It
+     * grants nothing here — any user may connect their own account.
+     */
+    systemAdmin?: boolean;
+    kind: UserCredentialKind;
+    secret: string;
+    label?: string;
+  }): Promise<ProviderStatus[]> {
+    const vendor = PROVIDER_VENDORS[input.provider];
+    if (!supportedCredentialKinds(vendor).includes(input.kind)) {
+      throw new ProviderChatError(
+        400,
+        "unsupported_kind",
+        `${PROVIDER_NAMES[input.provider]} cannot accept a ${input.kind} per ` +
+          `user; ${CREDENTIAL_INSTRUCTIONS[input.provider][0] ?? ""}`,
+      );
+    }
+    const secret = input.secret.trim();
+    // A session file is a whole JSON document — a real Codex auth.json runs
+    // past 4.5 KB on its id_token alone — so it cannot share the cap that
+    // suits a pasted key.
+    const limit = input.kind === "session_file" ? 64_000 : 4_096;
+    if (secret.length === 0 || secret.length > limit) {
+      throw new ProviderChatError(
+        400,
+        "invalid_secret",
+        input.kind === "session_file"
+          ? `Paste the entire file contents (up to ${limit} characters)`
+          : "Paste the credential exactly as the provider issued it",
+      );
+    }
+    if (input.kind === "session_file") {
+      // Shape is checked before the CLI is involved, so a user who pasted the
+      // wrong file is told which file to paste instead of watching a probe
+      // fail for reasons that look like a rejected account.
+      try {
+        assertSessionFile(vendor, secret);
+      } catch (error) {
+        throw new ProviderChatError(
+          400,
+          "invalid_session_file",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
+
+    const cli = await this.detect(input.provider);
+    if (!cli.detected) {
+      throw new ProviderChatError(
+        409,
+        "cli_unavailable",
+        `No usable ${PROVIDER_NAMES[input.provider]} CLI was found on this host`,
+      );
+    }
+
+    const account = await this.verifyCredential(input.provider, {
+      vendor,
+      kind: input.kind,
+      secret,
+      label: input.label,
+      origin: input.kind === "session_file" ? "copied" : "pasted",
+      createdAt: new Date().toISOString(),
+      lastVerifiedAt: undefined,
+      hint: credentialHint(input.kind, secret),
+    });
+
+    const store = await this.credentialStore();
+    await store.put(input.userId, vendor, {
+      kind: input.kind,
+      secret,
+      origin: input.kind === "session_file" ? "copied" : "pasted",
+      ...(input.label === undefined ? {} : { label: input.label }),
+    });
+    await store.markVerified(input.userId, vendor, account);
+
+    // A stored credential is a connection in its own right, so the settings
+    // record is created if absent; without it the user has no model/effort.
+    const file = await this.readConnections();
+    if (file[input.userId]?.[input.provider] === undefined) {
+      file[input.userId] = {
+        ...file[input.userId],
+        [input.provider]: {
+          kind: "account",
+          createdAt: new Date().toISOString(),
+        },
+      };
+      await this.writeConnections(file);
+    }
+
+    return await this.list({
+      userId: input.userId,
+      systemAdmin: input.systemAdmin ?? false,
+    });
+  }
+
+  /* --------------------------------------------- device authorization --- */
+
+  /**
+   * Starts `codex login --device-auth` against an isolated home.
+   *
+   * This is the only per-user connection that is a genuine grant rather than a
+   * copied secret: the CLI runs here, the user approves it in their own
+   * browser on their own ChatGPT account, and what lands is a session issued
+   * to this deployment. Nothing of the user's is pasted, and no refresh token
+   * is shared with their own machine.
+   *
+   * The CLI is left running deliberately — it is what polls the vendor and
+   * writes `auth.json` when approval arrives. {@link deviceAuthStatus} reads
+   * the outcome; {@link cancelDeviceAuth} and the expiry timer guarantee the
+   * process and its home are not left behind.
+   */
+  public async startDeviceAuth(input: {
+    userId: string;
+    provider: ProviderId;
+  }): Promise<DeviceAuthStart> {
+    if (input.provider !== "openai") {
+      throw new ProviderChatError(
+        400,
+        "unsupported_flow",
+        `${PROVIDER_NAMES[input.provider]} has no device-authorization flow; ` +
+          "connect it with a credential instead",
+      );
+    }
+    const cli = await this.detect(input.provider);
+    if (!cli.detected) {
+      throw new ProviderChatError(
+        409,
+        "cli_unavailable",
+        `No usable ${PROVIDER_NAMES[input.provider]} CLI was found on this host`,
+      );
+    }
+
+    // One flow per user and provider: starting again abandons the old code,
+    // which is what a user pressing the button twice means.
+    await this.cancelDeviceAuthFor(input.userId, input.provider);
+
+    const home = await mkdtemp(path.join(os.tmpdir(), "coord-device-"));
+    const env: NodeJS.ProcessEnv = {
+      ...sanitizeChildEnv(process.env),
+      CODEX_HOME: home,
+    };
+    delete env["OPENAI_API_KEY"];
+
+    const flow: DeviceAuthFlow = {
+      id: randomUUID(),
+      userId: input.userId,
+      provider: input.provider,
+      home,
+      verificationUrl: undefined,
+      userCode: undefined,
+      expiresAtMs: Date.now() + DEVICE_AUTH_DEFAULT_EXPIRY_MS,
+      status: "pending",
+      detail: undefined,
+      account: undefined,
+      process: undefined as unknown as LongRunningProcess,
+      timer: undefined,
+    };
+
+    let announce: () => void = () => {};
+    const announced = new Promise<void>((resolve) => {
+      announce = resolve;
+    });
+
+    flow.process = this.longRunningSpawner(
+      resolveCodexCommand(this.homeDirectory),
+      ["login", "--device-auth"],
+      { env, cwd: home },
+      (line) => {
+        const parsed = parseDeviceAuthLine(line);
+        // The URL is printed before the code, and only the code completes the
+        // pair, so the promise is resolved on whichever arrives last.
+        flow.verificationUrl ??= parsed.url;
+        flow.userCode ??= parsed.code;
+        if (parsed.expiresInMinutes !== undefined) {
+          flow.expiresAtMs = Date.now() + parsed.expiresInMinutes * 60_000;
+        }
+        if (flow.verificationUrl !== undefined && flow.userCode !== undefined) {
+          announce();
+        }
+      },
+    );
+
+    this.deviceAuthFlows.set(flow.id, flow);
+    void flow.process.done.then(
+      (output) => this.finishDeviceAuth(flow, output),
+      (error: unknown) => {
+        flow.status = "failed";
+        flow.detail = error instanceof Error ? error.message : String(error);
+      },
+    );
+    flow.timer = setTimeout(() => {
+      if (flow.status === "pending") {
+        flow.status = "expired";
+        flow.detail = "The one-time code expired before it was approved";
+        flow.process.kill();
+        void flow.process.done
+          .catch(() => undefined)
+          .then(() => removeCredentialHome(flow.home));
+      }
+    }, DEVICE_AUTH_DEFAULT_EXPIRY_MS);
+    flow.timer.unref?.();
+
+    const timeout = new Promise<never>((_resolve, reject) => {
+      const timer = setTimeout(() => {
+        reject(
+          new ProviderChatError(
+            502,
+            "device_auth_unavailable",
+            "The Codex CLI did not print a device code. Its output was: " +
+              (flow.detail ?? "nothing recognizable"),
+          ),
+        );
+      }, DEVICE_AUTH_PROMPT_TIMEOUT_MS);
+      timer.unref?.();
+    });
+
+    try {
+      await Promise.race([announced, timeout]);
+    } catch (error) {
+      await this.cancelDeviceAuth({
+        userId: input.userId,
+        flowId: flow.id,
+      });
+      throw error;
+    }
+
+    return {
+      flowId: flow.id,
+      verificationUrl: flow.verificationUrl as string,
+      userCode: flow.userCode as string,
+      expiresAt: new Date(flow.expiresAtMs).toISOString(),
+    };
+  }
+
+  /**
+   * Turns an exited login process into a stored credential, or an explanation.
+   *
+   * `auth.json` is the artifact that matters, not the exit code: the CLI is
+   * interactive and can exit non-zero for reasons unrelated to whether the
+   * grant landed. So the file is what decides, and it is validated before it
+   * is trusted.
+   */
+  private async finishDeviceAuth(
+    flow: DeviceAuthFlow,
+    output: ProcessOutput,
+  ): Promise<void> {
+    if (flow.status !== "pending") {
+      return;
+    }
+    try {
+      const authPath = path.join(flow.home, "auth.json");
+      const secret = await readFile(authPath, "utf8");
+      assertSessionFile("codex", secret);
+
+      const account = await this.verifyCredential(flow.provider, {
+        vendor: "codex",
+        kind: "session_file",
+        secret,
+        label: undefined,
+        origin: "device_auth",
+        createdAt: new Date().toISOString(),
+        lastVerifiedAt: undefined,
+        hint: credentialHint("session_file", secret),
+      });
+
+      const store = await this.credentialStore();
+      await store.put(flow.userId, "codex", {
+        kind: "session_file",
+        secret,
+        origin: "device_auth",
+        label: account ?? "ChatGPT sign-in",
+      });
+      await store.markVerified(flow.userId, "codex", account);
+      await this.ensureConnectionRecord(flow.userId, flow.provider);
+
+      flow.status = "completed";
+      flow.account = account;
+    } catch (error) {
+      flow.status = "failed";
+      flow.detail =
+        error instanceof ProviderChatError
+          ? error.message
+          : (error as NodeJS.ErrnoException).code === "ENOENT"
+            ? `The sign-in did not complete: ${probeFailureDetail(output)}`
+            : error instanceof Error
+              ? error.message
+              : String(error);
+    } finally {
+      if (flow.timer !== undefined) {
+        clearTimeout(flow.timer);
+      }
+      // The staged home has served its purpose either way: the credential is
+      // in the vault now, and leaving a live session on disk would outlast the
+      // isolation everything else here maintains.
+      await removeCredentialHome(flow.home);
+    }
+  }
+
+  public async deviceAuthStatus(input: {
+    userId: string;
+    flowId: string;
+  }): Promise<DeviceAuthState> {
+    const flow = this.deviceAuthFlows.get(input.flowId);
+    if (flow === undefined || flow.userId !== input.userId) {
+      throw new ProviderChatError(
+        404,
+        "unknown_flow",
+        "That sign-in is no longer in progress; start it again",
+      );
+    }
+    if (flow.status === "pending" && Date.now() > flow.expiresAtMs) {
+      flow.status = "expired";
+      flow.detail = "The one-time code expired before it was approved";
+      flow.process.kill();
+    }
+    const state: DeviceAuthState = {
+      flowId: flow.id,
+      status: flow.status,
+      ...(flow.verificationUrl === undefined
+        ? {}
+        : { verificationUrl: flow.verificationUrl }),
+      ...(flow.userCode === undefined ? {} : { userCode: flow.userCode }),
+      expiresAt: new Date(flow.expiresAtMs).toISOString(),
+      ...(flow.detail === undefined ? {} : { detail: flow.detail }),
+      ...(flow.account === undefined ? {} : { account: flow.account }),
+    };
+    if (flow.status !== "pending") {
+      // Terminal states are read once by the poller and then discarded, so a
+      // long-lived dashboard cannot accumulate finished flows.
+      this.deviceAuthFlows.delete(flow.id);
+    }
+    return state;
+  }
+
+  public async cancelDeviceAuth(input: {
+    userId: string;
+    flowId: string;
+  }): Promise<void> {
+    const flow = this.deviceAuthFlows.get(input.flowId);
+    if (flow === undefined || flow.userId !== input.userId) {
+      return;
+    }
+    await this.disposeDeviceAuth(flow);
+  }
+
+  private async cancelDeviceAuthFor(
+    userId: string,
+    provider: ProviderId,
+  ): Promise<void> {
+    for (const flow of [...this.deviceAuthFlows.values()]) {
+      if (flow.userId === userId && flow.provider === provider) {
+        await this.disposeDeviceAuth(flow);
+      }
+    }
+  }
+
+  private async disposeDeviceAuth(flow: DeviceAuthFlow): Promise<void> {
+    this.deviceAuthFlows.delete(flow.id);
+    if (flow.timer !== undefined) {
+      clearTimeout(flow.timer);
+    }
+    if (flow.status === "pending") {
+      flow.status = "failed";
+      flow.process.kill();
+      // The exit must be awaited, not just requested: the home cannot be
+      // removed while the child still holds it.
+      await flow.process.done.catch(() => undefined);
+    }
+    await removeCredentialHome(flow.home);
+  }
+
+  /** Creates the settings record a connection needs, if it has none yet. */
+  private async ensureConnectionRecord(
+    userId: string,
+    provider: ProviderId,
+  ): Promise<void> {
+    const file = await this.readConnections();
+    if (file[userId]?.[provider] === undefined) {
+      file[userId] = {
+        ...file[userId],
+        [provider]: { kind: "account", createdAt: new Date().toISOString() },
+      };
+      await this.writeConnections(file);
+    }
+  }
+
+  /**
+   * Runs the smallest real call each CLI supports and returns the account it
+   * reports, when it reports one.
+   */
+  private async verifyCredential(
+    provider: ProviderId,
+    credential: UserCredential,
+  ): Promise<string | undefined> {
+    const vendor = PROVIDER_VENDORS[provider];
+    return await withCredentialHome(
+      { vendor, credential, baseEnv: sanitizeChildEnv(process.env) },
+      async (home) => {
+        const probe = await this.probeCredential(provider, home);
+        if (probe.ok) {
+          return probe.account;
+        }
+        throw new ProviderChatError(
+          409,
+          "credential_rejected",
+          `${PROVIDER_NAMES[provider]} rejected that credential: ${probe.detail}`,
+        );
+      },
+    );
+  }
+
+  private async probeCredential(
+    provider: ProviderId,
+    home: CredentialHome,
+  ): Promise<{ ok: boolean; account?: string; detail: string }> {
+    const scratch = await this.scratchDirectory();
+    const options = {
+      cwd: scratch,
+      env: home.env,
+      timeoutMs: CREDENTIAL_PROBE_TIMEOUT_MS,
+      maxOutputBytes: MAX_OUTPUT_BYTES,
+    };
+
+    if (provider === "anthropic") {
+      const output = await this.runner(
+        resolveClaudeCommand("claude"),
+        [
+          "-p",
+          "Reply with exactly: pong",
+          "--output-format",
+          "stream-json",
+          "--verbose",
+          "--model",
+          DEFAULT_CLAUDE_MODEL,
+        ],
+        options,
+      );
+      if (output.exitCode === 0 && output.stdout.includes("pong")) {
+        return { ok: true, detail: "verified" };
+      }
+      return { ok: false, detail: probeFailureDetail(output) };
+    }
+
+    if (provider === "openai") {
+      const output = await this.runner(
+        resolveCodexCommand(this.homeDirectory),
+        [
+          "exec",
+          "--json",
+          "--skip-git-repo-check",
+          "--sandbox",
+          "read-only",
+          "-C",
+          scratch,
+          "Reply with exactly: pong",
+        ],
+        options,
+      );
+      if (output.exitCode === 0 && output.stdout.includes("pong")) {
+        return { ok: true, detail: "verified" };
+      }
+      return { ok: false, detail: probeFailureDetail(output) };
+    }
+
+    const gemini = resolveGeminiCommand();
+    const output = await this.runner(
+      gemini.command,
+      [...gemini.prefixArgs, "-p", "Reply with exactly: pong", "-o", "json"],
+      options,
+    );
+    if (output.exitCode === 0 && output.stdout.includes("pong")) {
+      return { ok: true, detail: "verified" };
+    }
+    return { ok: false, detail: probeFailureDetail(output) };
   }
 
   /**
@@ -1006,10 +1838,18 @@ export class ProviderChatService {
     return await this.list(input);
   }
 
+  /**
+   * Disconnecting also destroys the user's stored credential. Leaving the
+   * secret behind would mean a provider the user believes they detached still
+   * holds a working key to their account.
+   */
   public async disconnect(input: {
     userId: string;
     provider: ProviderId;
   }): Promise<void> {
+    await (
+      await this.credentialStore()
+    ).delete(input.userId, PROVIDER_VENDORS[input.provider]);
     const file = await this.readConnections();
     const userConnections = file[input.userId];
     if (userConnections !== undefined) {
@@ -1255,45 +2095,66 @@ export class ProviderChatService {
     onEvent: (event: ChatStreamEvent) => void,
   ): Promise<ChatReply> {
     const prompt = await this.prepareCompletion(input);
-    if (input.provider === "anthropic") {
-      return await this.streamViaClaudeCli(
-        prompt.text,
-        prompt.settings,
-        input.cliSessionId,
-        onEvent,
-      );
-    }
-    return await this.streamViaCodexCli(
-      prompt.text,
-      prompt.settings,
-      input.cliSessionId,
-      onEvent,
+    return await this.withCompletionEnv(
+      input.provider,
+      prompt.credential,
+      async (env) =>
+        input.provider === "anthropic"
+          ? await this.streamViaClaudeCli(
+              prompt.text,
+              prompt.settings,
+              input.cliSessionId,
+              onEvent,
+              env,
+            )
+          : await this.streamViaCodexCli(
+              prompt.text,
+              prompt.settings,
+              input.cliSessionId,
+              onEvent,
+              env,
+            ),
     );
   }
 
-  /** Shared gate: connection, admin, message shape. */
+  /**
+   * Shared gate: connection, authority, message shape — and which account
+   * will pay.
+   *
+   * The admin check applies only to the shared host login, because that is
+   * the case where one person's account funds another person's prompt. A user
+   * running on their own credential is spending their own money and needs no
+   * elevated rights.
+   */
   private async prepareCompletion(input: {
     userId: string;
     systemAdmin: boolean;
     provider: ProviderId;
     messages: unknown;
-  }): Promise<{ text: string; settings: ProviderSettings }> {
+  }): Promise<{
+    text: string;
+    settings: ProviderSettings;
+    credential: UserCredential | undefined;
+  }> {
     const messages = assertMessages(input.messages);
+    const credential = await this.ownCredential(input.userId, input.provider);
     const connection = (await this.readConnections())[input.userId]?.[
       input.provider
     ];
-    if (connection === undefined) {
+    if (connection === undefined && credential === undefined) {
       throw new ProviderChatError(
         409,
         "not_connected",
         `Connect ${PROVIDER_NAMES[input.provider]} before chatting`,
       );
     }
-    if (!input.systemAdmin) {
+    if (credential === undefined && !input.systemAdmin) {
       throw new ProviderChatError(
         403,
         "admin_required",
-        "CLI-backed provider chat is restricted to system administrators",
+        `Chatting on this deployment's shared ${PROVIDER_NAMES[input.provider]} ` +
+          "login is restricted to system administrators — connect your own " +
+          "account instead",
       );
     }
     const latest = messages.at(-1);
@@ -1304,14 +2165,44 @@ export class ProviderChatService {
         "The last message must be from the user",
       );
     }
-    if (input.provider === "google") {
+    if (input.provider === "google" && credential === undefined) {
       throw new ProviderChatError(
         409,
         "provider_blocked",
         "Gemini chat is unavailable until the signed-in Google account is eligible",
       );
     }
-    return { text: latest.content, settings: connection.settings ?? {} };
+    return {
+      text: latest.content,
+      settings: connection?.settings ?? {},
+      credential,
+    };
+  }
+
+  /**
+   * Runs `use` with the environment the caller's prompt should execute under.
+   *
+   * With an own credential that is an isolated home carrying only their
+   * secret; without one it is the ambient environment, which is what reaches
+   * the host's own CLI login. Every completion path goes through here so the
+   * two cases cannot drift apart.
+   */
+  private async withCompletionEnv<T>(
+    provider: ProviderId,
+    credential: UserCredential | undefined,
+    use: (env: NodeJS.ProcessEnv | undefined) => Promise<T>,
+  ): Promise<T> {
+    if (credential === undefined) {
+      return await use(undefined);
+    }
+    return await withCredentialHome(
+      {
+        vendor: PROVIDER_VENDORS[provider],
+        credential,
+        baseEnv: sanitizeChildEnv(process.env),
+      },
+      async (home) => await use(home.env),
+    );
   }
 
   public async complete(input: {
@@ -1322,17 +2213,23 @@ export class ProviderChatService {
     cliSessionId?: string;
   }): Promise<ChatReply> {
     const prompt = await this.prepareCompletion(input);
-    if (input.provider === "anthropic") {
-      return await this.completeViaClaudeCli(
-        prompt.text,
-        prompt.settings,
-        input.cliSessionId,
-      );
-    }
-    return await this.completeViaCodexCli(
-      prompt.text,
-      prompt.settings,
-      input.cliSessionId,
+    return await this.withCompletionEnv(
+      input.provider,
+      prompt.credential,
+      async (env) =>
+        input.provider === "anthropic"
+          ? await this.completeViaClaudeCli(
+              prompt.text,
+              prompt.settings,
+              input.cliSessionId,
+              env,
+            )
+          : await this.completeViaCodexCli(
+              prompt.text,
+              prompt.settings,
+              input.cliSessionId,
+              env,
+            ),
     );
   }
 
@@ -1365,6 +2262,7 @@ export class ProviderChatService {
     settings: ProviderSettings,
     cliSessionId: string | undefined,
     onEvent: (event: ChatStreamEvent) => void,
+    env: NodeJS.ProcessEnv | undefined,
   ): Promise<ChatReply> {
     const scratch = await this.scratchDirectory();
     const model = settings.model ?? DEFAULT_CLAUDE_MODEL;
@@ -1452,6 +2350,7 @@ export class ProviderChatService {
         {
           cwd: scratch,
           ...(usePositional ? {} : { input: prompt }),
+          ...(env === undefined ? {} : { env }),
           timeoutMs: CLI_TIMEOUT_MS,
           maxOutputBytes: MAX_OUTPUT_BYTES,
         },
@@ -1479,6 +2378,7 @@ export class ProviderChatService {
     settings: ProviderSettings,
     cliSessionId: string | undefined,
     onEvent: (event: ChatStreamEvent) => void,
+    env: NodeJS.ProcessEnv | undefined,
   ): Promise<ChatReply> {
     const scratch = await this.scratchDirectory();
     const command = resolveCodexCommand(this.homeDirectory);
@@ -1553,6 +2453,7 @@ export class ProviderChatService {
         argsFor(resume),
         {
           cwd: scratch,
+          ...(env === undefined ? {} : { env }),
           timeoutMs: CLI_TIMEOUT_MS,
           maxOutputBytes: MAX_OUTPUT_BYTES,
         },
@@ -1589,6 +2490,7 @@ export class ProviderChatService {
     prompt: string,
     settings: ProviderSettings,
     cliSessionId: string | undefined,
+    env: NodeJS.ProcessEnv | undefined,
   ): Promise<ChatReply> {
     const scratch = await this.scratchDirectory();
     const model = settings.model ?? DEFAULT_CLAUDE_MODEL;
@@ -1612,6 +2514,7 @@ export class ProviderChatService {
       await this.runner(resolveClaudeCommand("claude"), argsFor(resume), {
         cwd: scratch,
         ...(usePositional ? {} : { input: prompt }),
+        ...(env === undefined ? {} : { env }),
         timeoutMs: CLI_TIMEOUT_MS,
         maxOutputBytes: MAX_OUTPUT_BYTES,
       });
@@ -1639,6 +2542,7 @@ export class ProviderChatService {
     prompt: string,
     settings: ProviderSettings,
     cliSessionId: string | undefined,
+    env: NodeJS.ProcessEnv | undefined,
   ): Promise<ChatReply> {
     const scratch = await this.scratchDirectory();
     const command = resolveCodexCommand(this.homeDirectory);
@@ -1679,6 +2583,7 @@ export class ProviderChatService {
     const runOnce = async (resume: boolean): Promise<ProcessOutput> =>
       await this.runner(command, argsFor(resume), {
         cwd: scratch,
+        ...(env === undefined ? {} : { env }),
         timeoutMs: CLI_TIMEOUT_MS,
         maxOutputBytes: MAX_OUTPUT_BYTES,
       });

@@ -25,6 +25,10 @@ import {
 } from "./control-plane-lock.js";
 import { OverlayWorkspaceService } from "./overlay.js";
 import { ProviderChatService, type ProviderId } from "./providers.js";
+import {
+  UserCredentialStore,
+  type UserCredentialKind,
+} from "@coord/workspace-manager";
 
 function argument(name: string): string | undefined {
   const prefix = `--${name}=`;
@@ -106,7 +110,19 @@ async function serve(
 
   const repositories = new RepositoryService();
   const overlays = new OverlayWorkspaceService(project, store, repositories);
-  const providerChat = new ProviderChatService(project);
+  // One store for the whole process: the chat panel writes credentials and
+  // task runs read them, and opening it twice could race on generating the
+  // key file.
+  const credentials = await UserCredentialStore.open(
+    path.join(project.directory, "secrets"),
+  );
+  const providerChat = new ProviderChatService(project, { credentials });
+  // A deployment serving more than one person sets this so a task never
+  // quietly bills the host owner for someone else's work.
+  const credentialPolicy =
+    process.env["COORD_CREDENTIAL_POLICY"] === "refuse"
+      ? ("refuse" as const)
+      : ("host-login" as const);
 
   const operations: ApiOperations = {
     chatProviders: {
@@ -121,6 +137,22 @@ async function serve(
           ...input,
           provider: input.provider as ProviderId,
         }),
+      connectCredential: (input) =>
+        providerChat.connectOwnCredential({
+          ...input,
+          provider: input.provider as ProviderId,
+          // The gateway already rejects any other value.
+          kind: input.kind as UserCredentialKind,
+        }),
+      deviceAuth: {
+        start: (input) =>
+          providerChat.startDeviceAuth({
+            ...input,
+            provider: input.provider as ProviderId,
+          }),
+        status: (input) => providerChat.deviceAuthStatus(input),
+        cancel: (input) => providerChat.cancelDeviceAuth(input),
+      },
       disconnect: (input) =>
         providerChat.disconnect({
           ...input,
@@ -194,6 +226,8 @@ async function serve(
       await runPendingTasks(project, store, {
         projectId: input.projectId,
         repositoryId: input.repositoryId,
+        credentials,
+        credentialPolicy,
       });
     },
     async projectMetrics(input) {

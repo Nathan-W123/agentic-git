@@ -293,6 +293,30 @@ export async function applyProviderSetting(providerId, field, value) {
   return state.providers;
 }
 
+/**
+ * Stores a credential of the caller's own for a provider.
+ *
+ * The secret goes up and nothing comes back but the ordinary provider list:
+ * the server never returns it, so there is nothing here to keep or to leak
+ * into a log. What changes in the response is `ownCredential` appearing and
+ * `requiresAdmin` clearing, which is what the screen re-renders from.
+ */
+export async function connectProviderCredential(providerId, kind, secret, label) {
+  const response = await api(
+    `/chat/providers/${encodeURIComponent(providerId)}/credential`,
+    {
+      method: "POST",
+      body: {
+        kind,
+        secret,
+        ...(label === undefined || label === "" ? {} : { label }),
+      },
+    },
+  );
+  state.providers = response.providers ?? state.providers;
+  return state.providers;
+}
+
 /* ------------------------------------------------------------- socket ---- */
 
 export function connectSocket(onEvent) {

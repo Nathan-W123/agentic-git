@@ -247,6 +247,32 @@ export interface ChatProviderOperations {
     systemAdmin: boolean;
     provider: string;
   }): Promise<unknown>;
+  /**
+   * Connects the caller's *own* provider account from a credential they
+   * supply. Absent on deployments that only offer the shared host login.
+   */
+  connectCredential?(input: {
+    userId: string;
+    systemAdmin: boolean;
+    provider: string;
+    kind: string;
+    secret: string;
+    label?: string;
+  }): Promise<unknown>;
+  /**
+   * Device authorization, where the vendor issues this deployment its own
+   * session rather than the user handing over a copy of theirs.
+   *
+   * It cannot be a single call: the CLI prints a code and then waits for the
+   * user to approve it in a browser, so the flow is started, polled, and
+   * either completes or is cancelled. Absent on deployments whose providers
+   * offer no such flow.
+   */
+  deviceAuth?: {
+    start(input: { userId: string; provider: string }): Promise<unknown>;
+    status(input: { userId: string; flowId: string }): Promise<unknown>;
+    cancel(input: { userId: string; flowId: string }): Promise<void>;
+  };
   disconnect(input: { userId: string; provider: string }): Promise<void>;
   /** Model/effort choices the connected account actually reports. */
   options(input: { provider: string }): Promise<unknown>;
@@ -748,6 +774,9 @@ export class ApiGateway {
       const authRoute = [
         `${API_PREFIX}/auth/login`,
         `${API_PREFIX}/auth/bootstrap`,
+        // Registration mints an account from an unauthenticated request, so
+        // it belongs on the stricter limiter with the other two.
+        `${API_PREFIX}/auth/register`,
       ].includes(url.pathname);
       const rate = (authRoute ? this.authLimiter : this.limiter).consume(
         `${ip}:${authRoute ? "auth" : "api"}`,
@@ -795,6 +824,8 @@ export class ApiGateway {
           [
             `${API_PREFIX}/auth/login`,
             `${API_PREFIX}/auth/bootstrap`,
+            // Creating an account cannot require an account.
+            `${API_PREFIX}/auth/register`,
           ].includes(url.pathname)) ||
         (request.method === "POST" &&
           url.pathname.endsWith("/accept") &&
@@ -907,6 +938,51 @@ export class ApiGateway {
       await this.options.store.appendAudit(undefined, {
         type: "user_authenticated",
         data: { userId: user.id, bootstrap: true },
+      });
+      this.sendJson(response, 201, {
+        user: issued.principal.user,
+        memberships: issued.principal.memberships,
+        csrfToken: issued.csrfToken,
+      });
+      return;
+    }
+
+    if (method === "POST" && path === `${API_PREFIX}/auth/register`) {
+      // Open registration: anybody who can reach this control plane can make
+      // an account. That is a deployment decision rather than an oversight,
+      // and `COORD_DISABLE_REGISTRATION=1` closes it without a deploy for
+      // installations that expect invitations to be the only way in.
+      if (process.env["COORD_DISABLE_REGISTRATION"] === "1") {
+        throw new HttpError(
+          403,
+          "registration_closed",
+          "This control plane does not accept new accounts",
+        );
+      }
+      const body = objectBody(await this.readJson(request));
+      const user = await this.auth.register({
+        email: emailField(body["email"]) ?? "",
+        displayName:
+          stringField(body["displayName"], "displayName", { max: 120 }) ?? "",
+        password: stringField(body["password"], "password", { max: 256 }) ?? "",
+        ...(body["organizationName"] === undefined
+          ? {}
+          : {
+              organizationName:
+                stringField(body["organizationName"], "organizationName", {
+                  max: 120,
+                }) ?? "",
+            }),
+      });
+      const issued = await this.auth.issueSession(
+        user,
+        this.remoteAddress(request),
+        request.headers["user-agent"] ?? "",
+      );
+      response.setHeader("Set-Cookie", issued.cookies);
+      await this.options.store.appendAudit(undefined, {
+        type: "user_authenticated",
+        data: { userId: user.id, registered: true },
       });
       this.sendJson(response, 201, {
         user: issued.principal.user,
@@ -1854,38 +1930,34 @@ export class ApiGateway {
         if (!canAssignRole(authorized.role, role)) {
           throw new HttpError(403, "forbidden", "You cannot assign that role");
         }
-        // An invitation may name one repository, which is what it then
-        // grants; without one it admits the person to the whole organization.
-        const repositoryId = stringField(
-          body["repositoryId"],
-          "repositoryId",
-          { max: 128, optional: true },
+        // An invitation names exactly one repository, and that is all it
+        // grants.
+        //
+        // The upstream design allowed the name to be omitted, in which case
+        // the invitation admitted the person to the whole organization —
+        // every repository it holds, including ones created later. That is a
+        // much larger thing to hand out than the person offering it usually
+        // means to, and it cannot be narrowed afterwards: an organization role
+        // reaches everything by design (see `authorizeRepository`), so the
+        // only way back is to remove the member entirely. Requiring the
+        // repository makes the smaller grant the only one on offer.
+        const repositoryId = stringField(body["repositoryId"], "repositoryId", {
+          max: 128,
+        });
+        const owned = await this.options.store.listProjectRepositories(
+          stringField(body["projectId"], "projectId", { max: 128 }) ?? "",
         );
-        if (repositoryId !== undefined) {
-          const owned = await this.options.store.listProjectRepositories(
-            stringField(body["projectId"], "projectId", { max: 128 }) ?? "",
+        if (!owned.some((entry) => entry.id === repositoryId)) {
+          throw new HttpError(
+            404,
+            "not_found",
+            "Repository was not found in that project",
           );
-          if (!owned.some((entry) => entry.id === repositoryId)) {
-            throw new HttpError(
-              404,
-              "not_found",
-              "Repository was not found in that project",
-            );
-          }
         }
-        const existing = await this.options.store.getUserByEmail(email);
-        if (existing !== undefined && repositoryId === undefined) {
-          const memberships = await this.options.store.listMemberships(
-            organizationId,
-          );
-          if (memberships.some((entry) => entry.userId === existing.id)) {
-            throw new HttpError(
-              409,
-              "already_a_member",
-              "That person is already in this organization",
-            );
-          }
-        }
+        // Deliberately no "already a member" refusal. That check belonged to
+        // the organization-wide invitation, where a second one would have
+        // added nothing; a repository grant is worth offering to someone who
+        // is already in the organization but cannot reach this repository.
         const id = `inv_${randomBytes(9).toString("base64url")}`;
         const secret = randomBytes(32).toString("base64url");
         const now = new Date();
@@ -3038,7 +3110,7 @@ export class ApiGateway {
         path,
         new RegExp(
           `^${API_PREFIX}/chat/providers/(anthropic|openai|google)` +
-            `/(signin|options|settings|usage)$`,
+            `/(signin|options|settings|usage|credential|device-auth)$`,
           "u",
         ),
       );
@@ -3054,6 +3126,100 @@ export class ApiGateway {
             ),
           });
           return;
+        }
+        if (action === "credential" && method === "POST") {
+          if (chatOperations.connectCredential === undefined) {
+            throw new HttpError(
+              501,
+              "unsupported",
+              "This deployment does not accept per-user provider credentials",
+            );
+          }
+          const body = objectBody(await this.readJson(request));
+          const kind = stringField(body["kind"], "kind", { max: 20 }) ?? "";
+          if (!["oauth_token", "api_key", "session_file"].includes(kind)) {
+            throw new HttpError(
+              400,
+              "invalid_request",
+              "kind must be oauth_token, api_key or session_file",
+            );
+          }
+          // The secret is read but never echoed: the response is the same
+          // provider list every other action returns, so nothing that reaches
+          // a log or a browser carries it.
+          // A session file is a whole JSON document and runs well past the
+          // limit that suits a pasted key, so the cap follows the kind.
+          const secret =
+            stringField(body["secret"], "secret", {
+              max: kind === "session_file" ? 64_000 : 4096,
+            }) ?? "";
+          const label = stringField(body["label"], "label", {
+            max: 80,
+            optional: true,
+          });
+          this.sendJson(response, 200, {
+            providers: await performChat(() =>
+              // Non-null assertion is unnecessary; the guard above narrowed it.
+              (chatOperations.connectCredential as NonNullable<
+                ChatProviderOperations["connectCredential"]
+              >)({
+                userId: identity.userId,
+                systemAdmin: identity.systemAdmin,
+                provider,
+                kind,
+                secret,
+                ...(label === undefined ? {} : { label }),
+              }),
+            ),
+          });
+          return;
+        }
+        if (action === "device-auth") {
+          if (chatOperations.deviceAuth === undefined) {
+            throw new HttpError(
+              501,
+              "unsupported",
+              "This deployment does not support device authorization",
+            );
+          }
+          const deviceAuth = chatOperations.deviceAuth;
+          if (method === "POST") {
+            this.sendJson(response, 200, {
+              deviceAuth: await performChat(() =>
+                deviceAuth.start({ userId: identity.userId, provider }),
+              ),
+            });
+            return;
+          }
+          // The flow id travels in the query string rather than the path so
+          // the whole family stays on one route shape. It is a random opaque
+          // identifier and is scoped to the caller server-side regardless.
+          const flowId =
+            stringField(
+              new URL(request.url ?? "", "http://localhost").searchParams.get(
+                "flow",
+              ),
+              "flow",
+              { max: 64 },
+            ) ?? "";
+          if (flowId.length === 0) {
+            throw new HttpError(400, "invalid_request", "flow is required");
+          }
+          if (method === "GET") {
+            this.sendJson(response, 200, {
+              deviceAuth: await performChat(() =>
+                deviceAuth.status({ userId: identity.userId, flowId }),
+              ),
+            });
+            return;
+          }
+          if (method === "DELETE") {
+            await performChat(() =>
+              deviceAuth.cancel({ userId: identity.userId, flowId }),
+            );
+            this.sendJson(response, 200, { cancelled: true });
+            return;
+          }
         }
         if (action === "options" && method === "GET") {
           this.sendJson(response, 200, {

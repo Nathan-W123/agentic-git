@@ -11,6 +11,7 @@
 
 import {
   api,
+  connectProviderCredential,
   myAgents,
   persist,
   state,
@@ -20,6 +21,7 @@ import {
 import { chatComposer, chatThread } from "./chat.js";
 import {
   agentFace,
+  agentLabelOf,
   badge,
   bar,
   esc,
@@ -27,6 +29,7 @@ import {
   iconButton,
   emptyState,
   searchBox,
+  showModal,
   statTile,
   tabs,
   toast,
@@ -322,15 +325,142 @@ export function selectAgent(agentId, rerender) {
   rerender();
 }
 
-/** Connecting an agent is a sign-in against that provider's own CLI. */
+/** How somebody gets a credential we can accept, per provider. */
+const CREDENTIAL_HELP = {
+  anthropic: {
+    hint: "Run <code>claude setup-token</code> on your own machine and finish the browser sign-in. It prints a token starting <code>sk-ant-oat</code> that spends your own Claude subscription.",
+    placeholder: "sk-ant-oat-…",
+    kinds: [
+      ["oauth_token", "Subscription token (claude setup-token)"],
+      ["api_key", "API key from console.anthropic.com"],
+    ],
+  },
+  openai: {
+    // Codex has no `setup-token` equivalent, so a ChatGPT subscription can
+    // only be brought over as the session file the CLI itself wrote.
+    hint: "On a ChatGPT subscription, sign in with <code>codex</code> on your own machine and paste the contents of <code>~/.codex/auth.json</code>. On API credits, paste a key from platform.openai.com instead.",
+    placeholder: "sk-… or the contents of auth.json",
+    kinds: [
+      ["session_file", "ChatGPT subscription (contents of ~/.codex/auth.json)"],
+      ["api_key", "API key from platform.openai.com"],
+    ],
+  },
+  google: {
+    hint: "On a Gemini subscription, sign in with <code>gemini</code> on your own machine and paste the contents of <code>~/.gemini/oauth_creds.json</code>. Otherwise paste an API key from aistudio.google.com.",
+    placeholder: "AIza… or the contents of oauth_creds.json",
+    kinds: [
+      ["session_file", "Gemini subscription (contents of ~/.gemini/oauth_creds.json)"],
+      ["api_key", "API key from Google AI Studio"],
+    ],
+  },
+};
+
+/**
+ * Said once, on the kinds it is true of.
+ *
+ * A copied session file shares a rotating refresh token with the machine it
+ * came from, so the two can revoke each other by refreshing. That is a real
+ * consequence of using it and belongs in front of somebody about to paste
+ * one, not in a comment they will never read.
+ */
+const SESSION_FILE_WARNING =
+  "A copied session file shares a refresh token with the machine it came " +
+  "from: signing out there, or a refresh on either side, can invalidate the " +
+  "other. An API key or subscription token does not do this.";
+
+/**
+ * Connecting means handing over a credential of your own — not borrowing the
+ * host's.
+ *
+ * This used to POST straight to the CLI sign-in, which authenticates as
+ * whoever owns the machine. That is the wrong default for everyone except the
+ * person who set the host up: it spends their account, and for anybody else it
+ * fails outright with an administrator error. So the credential is the default
+ * and the only path offered here; the CLI remains available to system
+ * administrators through the provider's own settings.
+ */
 export async function connectAgent(providerId, rerender) {
+  const help = CREDENTIAL_HELP[providerId] ?? {
+    hint: "Paste a credential for this provider.",
+    placeholder: "",
+    kinds: [["api_key", "API key"]],
+  };
+  const values = await showModal({
+    title: `Connect ${agentLabelOf(providerId)}`,
+    subtitle: "Your credential, used only for you.",
+    confirm: "Connect",
+    body: `
+      <p class="modal-hint">${help.hint}</p>
+      ${
+        help.kinds.length > 1
+          ? `<label class="field"><span>Credential type</span>
+               <select class="input" name="kind">
+                 ${help.kinds
+                   .map(([id, label]) => `<option value="${id}">${esc(label)}</option>`)
+                   .join("")}
+               </select></label>`
+          : `<input type="hidden" name="kind" value="${help.kinds[0][0]}">`
+      }
+      <label class="field"><span>Credential</span>
+        ${
+          // A session file is a whole JSON document, so a one-line masked
+          // input cannot hold one legibly. Providers that accept a file get a
+          // textarea, which takes a pasted key just as well.
+          help.kinds.some(([id]) => id === "session_file")
+            ? `<textarea class="input cred-paste" name="secret" rows="4"
+                 autocomplete="off" placeholder="${esc(help.placeholder)}"
+                 required></textarea>`
+            : `<input class="input" name="secret" type="password" autocomplete="off"
+                 placeholder="${esc(help.placeholder)}" required>`
+        }</label>
+      <label class="field"><span>Label <span class="field-optional">optional</span></span>
+        <input class="input" name="label" autocomplete="off"
+          placeholder="Which account this is"></label>
+      ${
+        help.kinds.some(([id]) => id === "session_file")
+          ? `<p class="modal-hint">${esc(SESSION_FILE_WARNING)}</p>`
+          : ""
+      }
+      <p class="modal-hint">Stored encrypted, never shown again, and never
+        shared with anyone else on this deployment.</p>`,
+  });
+  if (values === undefined) {
+    return;
+  }
+  const secret = String(values.secret ?? "").trim();
+  if (secret === "") {
+    toast("A credential is required", "error");
+    return;
+  }
+  try {
+    await connectProviderCredential(
+      providerId,
+      String(values.kind ?? "api_key"),
+      secret,
+      String(values.label ?? "").trim(),
+    );
+    toast(`${providerId} connected`, "ok");
+    rerender();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * The old behaviour, kept for whoever owns the host.
+ *
+ * Signing in through the vendor CLI authenticates as the host account, so it
+ * is useful exactly once — for the administrator who wants this deployment to
+ * have a shared login — and is refused for everybody else by the server.
+ */
+export async function connectAgentViaCli(providerId, rerender) {
   try {
     const response = await api(
       `/chat/providers/${encodeURIComponent(providerId)}`,
       { method: "POST", body: {} },
     );
     state.providers = response.providers ?? state.providers;
-    toast(`${providerId} connected`, "ok");
+    toast(`${providerId} connected on the host account`, "ok");
     rerender();
   } catch (error) {
     toast(error.message, "error");

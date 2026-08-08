@@ -277,21 +277,32 @@ function renderInvite() {
 function renderAuth() {
   const setupRequired = state.health?.setupRequired === true;
   const bootstrap = authMode === "bootstrap";
+  const register = authMode === "register";
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">
         ${brandMark(54)}
         <div>
-          <h1>${bootstrap ? "Set up your control room" : "Sign in to Lattice"}</h1>
+          <h1>${
+            bootstrap
+              ? "Set up your control room"
+              : register
+                ? "Create your account"
+                : "Sign in to Lattice"
+          }</h1>
           <p>${
             bootstrap
               ? "Create the first owner for this control plane."
-              : "One live codebase, coordinated across your team and their agents."
+              : register
+                ? "You get your own team and project to start building in."
+                : "One live codebase, coordinated across your team and their agents."
           }</p>
         </div>
       </div>
 
-      <form class="auth-card" data-act="${bootstrap ? "bootstrap" : "login"}">
+      <form class="auth-card" data-act="${
+        bootstrap ? "bootstrap" : register ? "register" : "login"
+      }">
         ${
           bootstrap
             ? `<label class="field"><span>Bootstrap token</span>
@@ -301,7 +312,13 @@ function renderAuth() {
                  <input class="input" name="displayName" autocomplete="name" required></label>
                <label class="field"><span>Team name</span>
                  <input class="input" name="organizationName" value="Local team" required></label>`
-            : ""
+            : register
+              ? `<label class="field"><span>Your name</span>
+                   <input class="input" name="displayName" autocomplete="name" required></label>
+                 <label class="field"><span>Team name <span class="field-optional">optional</span></span>
+                   <input class="input" name="organizationName"
+                     placeholder="Defaults to your name"></label>`
+              : ""
         }
         <label class="field">
           <span>Email address</span>
@@ -311,12 +328,12 @@ function renderAuth() {
         <label class="field">
           <span>Password</span>
           <input class="input" name="password" type="password" minlength="12"
-            autocomplete="${bootstrap ? "new-password" : "current-password"}"
+            autocomplete="${bootstrap || register ? "new-password" : "current-password"}"
             placeholder="••••••••••••" required>
         </label>
 
         ${
-          bootstrap
+          bootstrap || register
             ? ""
             : // No "remember me": sessions run to a fixed server-side lifetime and
               // there is no per-login control over it, so the checkbox could
@@ -326,7 +343,13 @@ function renderAuth() {
         }
 
         <button class="btn btn-primary btn-wide" type="submit">
-          ${bootstrap ? "Create control room" : "Sign in"}
+          ${
+            bootstrap
+              ? "Create control room"
+              : register
+                ? "Create account"
+                : "Sign in"
+          }
         </button>
 
         <p class="form-msg" id="auth-msg" role="alert"></p>
@@ -337,7 +360,9 @@ function renderAuth() {
           ? `This control plane has no owner yet. <a class="link-muted" href="#" data-act="auth-mode" data-value="bootstrap">Run first-time setup</a>.`
           : bootstrap
             ? `Already have an account? <a class="link-muted" href="#" data-act="auth-mode" data-value="login">Sign in</a>.`
-            : "Access is granted by your organization owner."
+            : register
+              ? `Already have an account? <a class="link-muted" href="#" data-act="auth-mode" data-value="login">Sign in</a>.`
+              : `New here? <a class="link-muted" href="#" data-act="auth-mode" data-value="register">Create an account</a>.`
       }</p>
     </div>
   </main>`;
@@ -375,6 +400,38 @@ async function submitBootstrap(form) {
       },
     });
     authMode = "login";
+    await boot();
+  } catch (error) {
+    $("#auth-msg").textContent = error.message;
+  }
+}
+
+/**
+ * Signs somebody up and drops them straight inside.
+ *
+ * The response sets the session cookie, so there is no second login step: the
+ * point of registering is to arrive, and sending a person who has just chosen
+ * a password back to a form asking for it is the kind of seam that makes an
+ * app feel unfinished. `boot()` then lands them on their own — empty — project,
+ * which is where creating a repository starts.
+ */
+async function submitRegister(form) {
+  const data = new FormData(form);
+  const organizationName = String(data.get("organizationName") ?? "").trim();
+  try {
+    await api("/auth/register", {
+      method: "POST",
+      body: {
+        displayName: String(data.get("displayName") ?? ""),
+        email: String(data.get("email") ?? ""),
+        password: String(data.get("password") ?? ""),
+        // Omitted rather than sent empty, so the server picks its default
+        // instead of naming a team the empty string.
+        ...(organizationName === "" ? {} : { organizationName }),
+      },
+    });
+    authMode = "login";
+    window.location.hash = "#repositories";
     await boot();
   } catch (error) {
     $("#auth-msg").textContent = error.message;
@@ -1401,6 +1458,9 @@ document.addEventListener("submit", (event) => {
       return;
     case "bootstrap":
       void submitBootstrap(form);
+      return;
+    case "register":
+      void submitRegister(form);
       return;
     case "policy-save":
       void savePolicy(form);

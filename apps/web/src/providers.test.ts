@@ -726,3 +726,331 @@ test("codex jsonl failures and truncated streams are loud", () => {
     /stream disconnected/u,
   );
 });
+
+/* --------------------------------------------- per-user credentials ----- */
+
+/**
+ * A user's own credential is the whole point of the multi-tenant path, so
+ * these tests pin the properties that make it trustworthy: it is proven
+ * against the CLI before being stored, it reaches the CLI in the vendor's own
+ * variable with the host's login unreachable, it lifts the administrator gate
+ * only for the user who supplied it, and disconnecting destroys it.
+ */
+
+interface Captured {
+  command: string;
+  args: readonly string[];
+  env: NodeJS.ProcessEnv | undefined;
+}
+
+/**
+ * A signed-in host CLI that answers the connect probe.
+ *
+ * Distinct from {@link CLAUDE_OK} because verification asks for a specific
+ * sentinel reply: a CLI can exit zero while printing an authentication
+ * failure, so the probe insists on seeing the answer it asked for.
+ */
+const CLAUDE_PONG = {
+  claude: (args: readonly string[]) =>
+    args[0] === "auth"
+      ? output(JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }))
+      : output(
+          [
+            JSON.stringify({
+              type: "assistant",
+              message: { content: [{ type: "text", text: "pong" }] },
+            }),
+            JSON.stringify({
+              type: "result",
+              is_error: false,
+              result: "pong",
+              session_id: "sess-abcd1234",
+              usage: { input_tokens: 1, output_tokens: 1 },
+            }),
+          ].join("\n"),
+        ),
+};
+
+/** Like {@link scriptedRunner} but keeps what each call was launched with. */
+function capturingRunner(
+  script: Record<string, (args: readonly string[]) => ReturnType<typeof output>>,
+  calls: Captured[],
+): ProcessRunner {
+  const inner = scriptedRunner(script) as (
+    command: string,
+    args: readonly string[],
+    options?: unknown,
+  ) => ReturnType<ProcessRunner>;
+  return (async (
+    command: string,
+    args: readonly string[],
+    options?: { env?: NodeJS.ProcessEnv },
+  ) => {
+    calls.push({ command, args, env: options?.env });
+    return await inner(command, args, options);
+  }) as ProcessRunner;
+}
+
+test("a credential the CLI rejects is reported, not stored", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) =>
+        args[0] === "auth"
+          ? output(JSON.stringify({ loggedIn: false, authMethod: "none" }))
+          : output(
+              "",
+              1,
+              "Failed to authenticate. API Error: 401 OAuth access token is invalid.",
+            ),
+    }),
+  });
+
+  await assert.rejects(
+    service.connectOwnCredential({
+      userId: "u1",
+      provider: "anthropic",
+      kind: "oauth_token",
+      secret: "sk-ant-oat01-wrong",
+    }),
+    (error: unknown) =>
+      error instanceof ProviderChatError &&
+      error.code === "credential_rejected" &&
+      /OAuth access token is invalid/u.test(error.message),
+  );
+
+  const statuses = await service.list({ userId: "u1", systemAdmin: false });
+  const anthropic = statuses.find((entry) => entry.id === "anthropic");
+  assert.equal(anthropic?.connected, false);
+  assert.equal(anthropic?.ownCredential, undefined);
+});
+
+test("an own credential connects without admin rights and reaches the CLI alone", async () => {
+  const harness = await createHarness();
+  const calls: Captured[] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: capturingRunner(
+      {
+        claude: (args) =>
+          args[0] === "auth"
+            ? // The host itself is signed in as somebody else entirely.
+              output(JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }))
+            : output(
+                [
+                  JSON.stringify({
+                    type: "assistant",
+                    message: { content: [{ type: "text", text: "pong" }] },
+                  }),
+                  JSON.stringify({
+                    type: "result",
+                    is_error: false,
+                    result: "pong",
+                    session_id: "sess-abcd1234",
+                    usage: { input_tokens: 1, output_tokens: 1 },
+                  }),
+                ].join("\n"),
+              ),
+      },
+      calls,
+    ),
+  });
+
+  const statuses = await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-users-own-token",
+    label: "personal",
+  });
+  const anthropic = statuses.find((entry) => entry.id === "anthropic");
+  assert.equal(anthropic?.connected, true);
+  assert.equal(anthropic?.kind, "own-credential");
+  assert.equal(anthropic?.requiresAdmin, false, "no admin rights are needed");
+  assert.equal(anthropic?.ownCredential?.label, "personal");
+  assert.equal(anthropic?.ownCredential?.hint, "oken");
+  assert.ok(
+    !JSON.stringify(statuses).includes("users-own-token"),
+    "the secret must never travel back to the browser",
+  );
+
+  // A non-administrator can now actually use it.
+  calls.length = 0;
+  const reply = await service.complete({
+    userId: "u1",
+    systemAdmin: false,
+    provider: "anthropic",
+    messages: [{ role: "user", content: "ping" }],
+  });
+  assert.equal(reply.text, "pong");
+
+  const completion = calls.find((call) => call.args[0] === "-p");
+  assert.ok(completion !== undefined, "the CLI ran the completion");
+  assert.equal(
+    completion.env?.["CLAUDE_CODE_OAUTH_TOKEN"],
+    "sk-ant-oat01-users-own-token",
+  );
+  // The isolated configuration directory is what keeps the host's own login
+  // out of reach; without it the CLI could answer as the host owner instead.
+  assert.ok(
+    (completion.env?.["CLAUDE_CONFIG_DIR"] ?? "").length > 0,
+    "the CLI must be pointed away from the host's configuration",
+  );
+  assert.equal(completion.env?.["ANTHROPIC_API_KEY"], undefined);
+});
+
+test("one user's credential never answers another user's prompt", async () => {
+  const harness = await createHarness();
+  const calls: Captured[] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: capturingRunner(CLAUDE_PONG, calls),
+  });
+
+  await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-belongs-to-u1",
+  });
+  // Only what runs on u2's behalf is of interest; u1's own connect probe
+  // legitimately carried u1's token.
+  calls.length = 0;
+
+  // u2 has connected nothing, so the only account available to them is the
+  // shared host login, which stays administrator-only.
+  const forU2 = await service.list({ userId: "u2", systemAdmin: false });
+  assert.equal(
+    forU2.find((entry) => entry.id === "anthropic")?.connected,
+    false,
+  );
+  await assert.rejects(
+    service.complete({
+      userId: "u2",
+      systemAdmin: false,
+      provider: "anthropic",
+      messages: [{ role: "user", content: "ping" }],
+    }),
+    (error: unknown) => error instanceof ProviderChatError,
+  );
+  assert.ok(
+    !calls.some((call) =>
+      Object.values(call.env ?? {}).includes("sk-ant-oat01-belongs-to-u1"),
+    ),
+    "one user's token must never be handed to a process run for another",
+  );
+});
+
+test("an admin on the shared login still runs under the host's own environment", async () => {
+  const harness = await createHarness();
+  const calls: Captured[] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: capturingRunner(CLAUDE_OK, calls),
+  });
+  await service.connect({
+    userId: "admin",
+    systemAdmin: true,
+    provider: "anthropic",
+  });
+
+  calls.length = 0;
+  await service.complete({
+    userId: "admin",
+    systemAdmin: true,
+    provider: "anthropic",
+    messages: [{ role: "user", content: "ping" }],
+  });
+  const completion = calls.find((call) => call.args[0] === "-p");
+  assert.equal(
+    completion?.env,
+    undefined,
+    "the shared-login path inherits the host environment as it always did",
+  );
+});
+
+test("disconnecting destroys the stored credential", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+  });
+  await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-to-be-destroyed",
+  });
+  await service.disconnect({ userId: "u1", provider: "anthropic" });
+
+  const after = await service.list({ userId: "u1", systemAdmin: false });
+  const anthropic = after.find((entry) => entry.id === "anthropic");
+  assert.equal(anthropic?.connected, false);
+  assert.equal(anthropic?.ownCredential, undefined);
+  // A prompt after disconnecting must not still find a working key.
+  await assert.rejects(
+    service.complete({
+      userId: "u1",
+      systemAdmin: false,
+      provider: "anthropic",
+      messages: [{ role: "user", content: "ping" }],
+    }),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "not_connected",
+  );
+});
+
+test("connecting one account does not hide an admin's other shared logins", async () => {
+  const harness = await createHarness();
+  await seedCodexCache(harness.home);
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      ...CLAUDE_PONG,
+      codex: (args) =>
+        args[0] === "--version" ? output("codex 1.0.0") : output("logged in"),
+    }),
+  });
+  await service.connect({
+    userId: "admin",
+    systemAdmin: true,
+    provider: "openai",
+  });
+
+  const statuses = await service.connectOwnCredential({
+    userId: "admin",
+    systemAdmin: true,
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-admins-own",
+  });
+
+  assert.equal(
+    statuses.find((entry) => entry.id === "anthropic")?.kind,
+    "own-credential",
+  );
+  assert.equal(
+    statuses.find((entry) => entry.id === "openai")?.connected,
+    true,
+    "the shared login the admin already had must still read as connected",
+  );
+});
+
+test("a vendor that cannot take a credential per user says so", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_OK),
+  });
+  await assert.rejects(
+    service.connectOwnCredential({
+      userId: "u1",
+      provider: "openai",
+      kind: "oauth_token",
+      secret: "whatever",
+    }),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "unsupported_kind",
+  );
+});
