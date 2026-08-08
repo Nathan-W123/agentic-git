@@ -170,15 +170,25 @@ export function icon(name, extra = "") {
   return extra === "" ? glyph : glyph.replace("<svg ", `<svg ${extra} `);
 }
 
-/** The product mark: a hexagon node with its three coordination links. */
+/**
+ * The product mark: a small character rather than a geometric logo.
+ *
+ * Lattic's whole subject is agents working alongside people, so the mark is
+ * one of the same doodles the agents are drawn with — the lattice it sits in
+ * is the coordination, and the face is what is being coordinated.
+ */
 export function brandMark(size = 34) {
   return `<svg class="brand-mark" width="${size}" height="${size}" viewBox="0 0 40 40" fill="none" aria-hidden="true">
-    <path d="M20 2.6 34.6 11v18L20 37.4 5.4 29V11z" fill="#12111f" stroke="#8b5cf6" stroke-width="1.6"/>
-    <circle cx="20" cy="20" r="4" fill="#8b5cf6"/>
-    <circle cx="20" cy="9.6" r="2.2" fill="#a78bfa"/>
-    <circle cx="29.4" cy="25.4" r="2.2" fill="#a78bfa"/>
-    <circle cx="10.6" cy="25.4" r="2.2" fill="#a78bfa"/>
-    <path d="M20 12v4M22.6 22.4l4.6 2.2M17.4 22.4l-4.6 2.2" stroke="#8b5cf6" stroke-width="1.4" stroke-linecap="round"/>
+    <path d="M20 3.2 34 11v18l-14 7.8L6 29V11z" fill="var(--accent-wash)"
+      stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round"/>
+    <path d="M13.5 15.5h13a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z"
+      fill="none" stroke="var(--accent)" stroke-width="1.6"/>
+    <path d="M20 11.4v4.1" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
+    <circle cx="20" cy="10.4" r="1.5" fill="var(--accent-bright)"/>
+    <circle cx="16.6" cy="19.9" r="1.5" fill="var(--accent-bright)"/>
+    <circle cx="23.4" cy="19.9" r="1.5" fill="var(--accent-bright)"/>
+    <path d="M17.4 23.2c1.6 1 3.6 1 5.2 0" stroke="var(--accent-bright)"
+      stroke-width="1.5" stroke-linecap="round"/>
   </svg>`;
 }
 
@@ -236,44 +246,128 @@ export function avatarStack(names, max = 4, size = 26) {
 /* ------------------------------------------------------ agent identity ---- */
 
 /**
- * Provider identity. Marks are original shapes, evocative of each vendor
- * rather than reproductions of their trademarks.
+ * Agent identity is two independent signals.
+ *
+ * The **doodle** says which agent it is — Claude, Codex, Gemini, Grok,
+ * DeepSeek, or an unrecognised one. The **colour** says whose agent it is, and
+ * is the owner's chosen colour, not the vendor's. On a shared view that means
+ * every blue doodle belongs to one person and every pink doodle to another,
+ * while the faces still tell you what kind of agent each one is. Tying colour
+ * to the vendor instead would waste the only channel that can answer "whose?".
  */
-export const PROVIDERS = {
-  anthropic: { label: "Claude", tint: "#c98a63", mark: "claude" },
-  openai: { label: "Codex", tint: "#8fa3bf", mark: "codex" },
-  google: { label: "Gemini", tint: "#5b8dd9", mark: "gemini" },
-  deepseek: { label: "DeepSeek", tint: "#d98a4a", mark: "spark" },
-  perplexity: { label: "Perplexity", tint: "#3fa8b5", mark: "spark" },
-  scribe: { label: "Scribe", tint: "#6cc27a", mark: "spark" },
-  generic: { label: "Agent", tint: "#8b5cf6", mark: "spark" },
+export const AGENTS = {
+  anthropic: { label: "Claude", doodle: "claude" },
+  openai: { label: "Codex", doodle: "codex" },
+  google: { label: "Gemini", doodle: "gemini" },
+  xai: { label: "Grok", doodle: "grok" },
+  deepseek: { label: "DeepSeek", doodle: "deepseek" },
+  generic: { label: "Agent", doodle: "generic" },
 };
 
-const FACE_MARKS = {
-  claude:
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8.6" cy="10.5" r="1.5" fill="currentColor" stroke="none"/><circle cx="15.4" cy="10.5" r="1.5" fill="currentColor" stroke="none"/><path d="M9 15.2c1.8 1.3 4.2 1.3 6 0"/></svg>',
-  codex:
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="m9.4 9.6-2.6 2.6 2.6 2.6"/><path d="m14.6 9.6 2.6 2.6-2.6 2.6"/></svg>',
-  gemini:
-    '<svg viewBox="0 0 24 24" fill="currentColor" stroke="none"><path d="M12 4c.5 4.3 3.7 7.5 8 8-4.3.5-7.5 3.7-8 8-.5-4.3-3.7-7.5-8-8 4.3-.5 7.5-3.7 8-8z"/></svg>',
-  spark:
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><circle cx="8.6" cy="10.8" r="1.3" fill="currentColor" stroke="none"/><circle cx="15.4" cy="10.8" r="1.3" fill="currentColor" stroke="none"/><path d="M9.4 15h5.2"/></svg>',
+/** Aliases, so a task's free-form agent id still finds the right face. */
+const AGENT_ALIASES = {
+  claude: "anthropic",
+  codex: "openai",
+  gpt: "openai",
+  gemini: "google",
+  grok: "xai",
+  deepseek: "deepseek",
 };
 
-export function providerOf(id) {
-  return PROVIDERS[id] ?? PROVIDERS.generic;
+export function agentKindOf(id) {
+  const text = String(id ?? "").toLowerCase();
+  if (AGENTS[text] !== undefined) {
+    return text;
+  }
+  for (const [needle, kind] of Object.entries(AGENT_ALIASES)) {
+    if (text.includes(needle)) {
+      return kind;
+    }
+  }
+  return "generic";
+}
+
+export function agentLabelOf(id) {
+  return AGENTS[agentKindOf(id)].label;
 }
 
 /**
- * The agent mascot: a tinted ring with a small face and a presence dot.
- * Restrained on purpose — playful at a glance, invisible when scanning.
+ * Six characters, drawn on one 24×24 grid so they read as a family.
+ *
+ * Each is a face plus one distinguishing feature, monochrome in
+ * `currentColor` so the owner's colour is the only thing tinting them.
+ */
+const DOODLES = {
+  // Claude: friendly, wide smile, small antenna tuft.
+  claude: `<circle cx="9" cy="10.4" r="1.5" fill="currentColor"/>
+    <circle cx="15" cy="10.4" r="1.5" fill="currentColor"/>
+    <path d="M8.8 14.4c1.9 1.9 4.5 1.9 6.4 0" stroke-width="1.7"/>
+    <path d="M12 4.6v2.2" stroke-width="1.6"/><circle cx="12" cy="3.7" r="1.1" fill="currentColor"/>`,
+  // Codex: angle-bracket eyes, straight mouth — the literal one.
+  codex: `<path d="m9.6 8.9-2.3 2 2.3 2M14.4 8.9l2.3 2-2.3 2" stroke-width="1.7"/>
+    <path d="M9.2 15.2h5.6" stroke-width="1.7"/>`,
+  // Gemini: twin sparks above a small smile.
+  gemini: `<path d="M8.4 5.2c.3 1.7 1.5 2.9 3.2 3.2-1.7.3-2.9 1.5-3.2 3.2-.3-1.7-1.5-2.9-3.2-3.2 1.7-.3 2.9-1.5 3.2-3.2z" fill="currentColor" stroke="none"/>
+    <path d="M16.4 7.8c.2 1.2 1 2 2.2 2.2-1.2.2-2 1-2.2 2.2-.2-1.2-1-2-2.2-2.2 1.2-.2 2-1 2.2-2.2z" fill="currentColor" stroke="none"/>
+    <path d="M8.9 15.4c1.8 1.6 4.4 1.6 6.2 0" stroke-width="1.7"/>`,
+  // Grok: one raised brow and an off-centre smirk.
+  grok: `<path d="M6.9 8.2 10.4 7" stroke-width="1.6"/>
+    <circle cx="9" cy="10.6" r="1.5" fill="currentColor"/>
+    <circle cx="15" cy="10.6" r="1.5" fill="currentColor"/>
+    <path d="M9.2 15c1.6 1.2 3.6 1.4 5.4.2" stroke-width="1.7"/>`,
+  // DeepSeek: a diving mask — eyes behind a single visor.
+  deepseek: `<path d="M6.4 9.2h11.2a1 1 0 0 1 1 1.2l-.5 2.2a1.4 1.4 0 0 1-1.4 1.1h-2.2a1.4 1.4 0 0 1-1.3-.9L12 11.8l-1.2 1c-.2.6-.7.9-1.3.9H7.3a1.4 1.4 0 0 1-1.4-1.1l-.5-2.2a1 1 0 0 1 1-1.2z" stroke-width="1.5"/>
+    <path d="M9.6 17.2c1.5 1 3.3 1 4.8 0" stroke-width="1.6"/>`,
+  // Anything unrecognised: the plainest face in the set.
+  generic: `<circle cx="9.2" cy="10.6" r="1.4" fill="currentColor"/>
+    <circle cx="14.8" cy="10.6" r="1.4" fill="currentColor"/>
+    <path d="M9.4 14.8h5.2" stroke-width="1.7"/>`,
+};
+
+export function providerOf(id) {
+  const kind = agentKindOf(id);
+  return { label: AGENTS[kind].label, doodle: kind };
+}
+
+/**
+ * The doodle alone, at whatever colour the caller sets on it.
+ *
+ * The lookup goes through `AGENTS[...].doodle` rather than indexing `DOODLES`
+ * by the agent key: the two are deliberately named differently (`anthropic`
+ * the provider, `claude` the character), and indexing one with the other's key
+ * silently yields the fallback face for every agent.
+ */
+export function agentDoodle(kind) {
+  const name = AGENTS[agentKindOf(kind)].doodle;
+  return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor"
+    stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${
+      DOODLES[name] ?? DOODLES.generic
+    }</svg>`;
+}
+
+/**
+ * One agent, as its owner's colour.
+ *
+ * `agent.color` is the owner's identity colour; callers pass the colour of
+ * whoever the agent belongs to, which is what makes a shared view legible.
  */
 export function agentFace(agent, size = 34) {
-  const provider = providerOf(agent?.provider);
+  const kind = agentKindOf(agent?.provider ?? agent?.id);
   const presence = agent?.presence ?? "offline";
-  return `<span class="agent-face sz-${size}" style="color:${provider.tint}" title="${esc(
-    agent?.name ?? provider.label,
-  )}">${FACE_MARKS[provider.mark] ?? FACE_MARKS.spark}<i class="presence presence-${presence}"></i></span>`;
+  const color = safeColor(agent?.color) ?? "var(--accent)";
+  return `<span class="agent-face sz-${size}" style="color:${color}" title="${esc(
+    agent?.name ?? AGENTS[kind].label,
+  )}">${agentDoodle(kind)}<i class="presence presence-${presence}"></i></span>`;
+}
+
+/**
+ * Colours reaching a `style` attribute are validated here as well as at the
+ * API: this module also renders values that never made a round trip.
+ */
+export function safeColor(value) {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/iu.test(value.trim())
+    ? value.trim().toLowerCase()
+    : undefined;
 }
 
 /* ------------------------------------------------------------- status ---- */

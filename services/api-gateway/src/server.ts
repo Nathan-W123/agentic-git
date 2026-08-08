@@ -334,6 +334,25 @@ class HttpError extends Error {
   }
 }
 
+/**
+ * A colour, accepted only as `#rrggbb`.
+ *
+ * The value is written into a `style` attribute by the dashboard, so anything
+ * looser than an exact hex triple is an injection point: `red;background:url()`
+ * is a perfectly good CSS colour prefix. Validating at the edge means the
+ * browser never has to sanitise it.
+ */
+function hexColorField(value: unknown, field: string): string {
+  if (typeof value !== "string" || !/^#[0-9a-f]{6}$/iu.test(value.trim())) {
+    throw new HttpError(
+      400,
+      "invalid_request",
+      `${field} must be a #rrggbb colour`,
+    );
+  }
+  return value.trim().toLowerCase();
+}
+
 function stringField(
   value: unknown,
   field: string,
@@ -445,6 +464,7 @@ function publicUser(user: {
   systemAdmin: boolean;
   disabled: boolean;
   createdAt: string;
+  appearance?: { accent?: string; agentColor?: string };
 }): Omit<typeof user, "passwordDigest"> {
   return {
     id: user.id,
@@ -453,6 +473,9 @@ function publicUser(user: {
     systemAdmin: user.systemAdmin,
     disabled: user.disabled,
     createdAt: user.createdAt,
+    // Deliberately public within the organization: an agent colour only
+    // identifies its owner if the people working alongside them can read it.
+    ...(user.appearance === undefined ? {} : { appearance: user.appearance }),
   };
 }
 
@@ -864,6 +887,31 @@ export class ApiGateway {
     }
     if (method === "GET" && path === `${API_PREFIX}/auth/me`) {
       this.sendJson(response, 200, principal);
+      return;
+    }
+
+    // A person's own interface colours. Scoped to the authenticated principal
+    // with no user id in the path, so there is no request shape that edits
+    // somebody else's appearance.
+    if (method === "PATCH" && path === `${API_PREFIX}/auth/me/appearance`) {
+      const body = objectBody(await this.readJson(request));
+      // A PATCH names only what it changes. The stored value is one object, so
+      // an unnamed field has to be carried over: sending just `agentColor`
+      // must not silently clear the accent the user picked a moment earlier.
+      const current = await this.options.store.getUser(principal.user.id);
+      const appearance = {
+        ...current?.appearance,
+        ...(body["accent"] === undefined
+          ? {}
+          : { accent: hexColorField(body["accent"], "accent") }),
+        ...(body["agentColor"] === undefined
+          ? {}
+          : { agentColor: hexColorField(body["agentColor"], "agentColor") }),
+      };
+      const updated = await this.options.store.updateUser(principal.user.id, {
+        appearance,
+      });
+      this.sendJson(response, 200, { user: publicUser(updated) });
       return;
     }
 

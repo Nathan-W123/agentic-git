@@ -81,6 +81,7 @@ import type {
   TokenUsageRecord,
   SubmittedTaskStatus,
   UserAccount,
+  UserAppearance,
   LeaseTaskInput,
   LeasedWork,
   SaveWorkLeasePlanInput,
@@ -348,23 +349,27 @@ export class SqliteCoordinationStore implements CoordinationStore {
       passwordDigest?: string;
       disabled?: boolean;
       systemAdmin?: boolean;
+      appearance?: UserAppearance;
     },
   ): Promise<UserAccount> {
     const existing = await this.getUser(id);
     if (existing === undefined) {
       throw new Error(`Unknown user: ${id}`);
     }
+    const appearance = input.appearance ?? existing.appearance;
     const user: UserAccount = {
       ...existing,
       displayName: input.displayName?.trim() ?? existing.displayName,
       passwordDigest: input.passwordDigest ?? existing.passwordDigest,
       disabled: input.disabled ?? existing.disabled,
       systemAdmin: input.systemAdmin ?? existing.systemAdmin,
+      ...(appearance === undefined ? {} : { appearance }),
     };
     this.db
       .prepare(
         `UPDATE users
-         SET display_name = ?, password_digest = ?, disabled = ?, system_admin = ?
+         SET display_name = ?, password_digest = ?, disabled = ?, system_admin = ?,
+             appearance = ?
          WHERE id = ?`,
       )
       .run(
@@ -372,6 +377,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         user.passwordDigest,
         user.disabled ? 1 : 0,
         user.systemAdmin ? 1 : 0,
+        appearance === undefined ? null : JSON.stringify(appearance),
         id,
       );
     return user;
@@ -2684,6 +2690,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
   }
 
   private toUser(row: Row): UserAccount {
+    const appearance = row["appearance"];
     return {
       id: text(row, "id"),
       email: text(row, "email"),
@@ -2692,6 +2699,11 @@ export class SqliteCoordinationStore implements CoordinationStore {
       systemAdmin: integer(row, "system_admin") === 1,
       disabled: integer(row, "disabled") === 1,
       createdAt: text(row, "created_at"),
+      // A row written before the column existed, or by a client that never
+      // chose, reads as absent rather than as an empty preference.
+      ...(typeof appearance === "string" && appearance.length > 0
+        ? { appearance: JSON.parse(appearance) as UserAppearance }
+        : {}),
     };
   }
 

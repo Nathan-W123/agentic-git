@@ -443,3 +443,125 @@ test("the diff shown is the patch the coordinator recorded", async () => {
   assert.match(source, /changeSets\[changeSets\.length - 1\]/u);
   assert.match(source, /parsePatch\(patch\.patch\)/u);
 });
+
+/* ------------------------------------------------------ agent identity ---- */
+
+test("there is one doodle per agent kind and they are all distinct", async () => {
+  const source = await publicFile("ui.js");
+  const block = /const DOODLES = \{([\s\S]*?)\n\};/u.exec(source)?.[1] ?? "";
+  const kinds = [...block.matchAll(/^\s{2}([a-z]+):/gmu)].map((m) => m[1]);
+  assert.deepEqual(kinds, [
+    "claude",
+    "codex",
+    "gemini",
+    "grok",
+    "deepseek",
+    "generic",
+  ]);
+  // Six characters that all render the same path would defeat the point of
+  // having six.
+  const bodies = [...block.matchAll(/`([\s\S]*?)`/gu)].map((m) => m[1]);
+  assert.equal(bodies.length, 6);
+  assert.equal(new Set(bodies).size, 6, "each doodle should be its own drawing");
+});
+
+test("every agent kind resolves to its own character", async () => {
+  const source = await publicFile("ui.js");
+  // The agent keys and the doodle names are deliberately different words
+  // (`anthropic` the provider, `claude` the character). Indexing the drawings
+  // with the provider key yields the fallback face for every agent, which
+  // looks like a styling bug and is really a lookup bug — so assert the whole
+  // path from key to drawing, not just that the table has six entries.
+  const agents = /export const AGENTS = \{([\s\S]*?)\n\};/u.exec(source)?.[1] ?? "";
+  const pairs = [...agents.matchAll(/(\w+): \{ label: "[^"]+", doodle: "(\w+)" \}/gu)];
+  assert.equal(pairs.length, 6, "there should be six agent kinds");
+
+  const block = /const DOODLES = \{([\s\S]*?)\n\};/u.exec(source)?.[1] ?? "";
+  const drawings = new Map(
+    [...block.matchAll(/^\s{2}(\w+): `([\s\S]*?)`,$/gmu)].map((m) => [m[1], m[2]]),
+  );
+  const resolved = new Set();
+  for (const [key, doodle] of pairs.map((m) => [m[1], m[2]])) {
+    const drawing = drawings.get(doodle);
+    assert.notEqual(drawing, undefined, `${key} resolves to a missing doodle`);
+    resolved.add(drawing);
+  }
+  assert.equal(resolved.size, 6, "each agent kind should look different");
+
+  // And the accessor must go through that mapping rather than index directly.
+  const start = source.indexOf("export function agentDoodle");
+  assert.match(
+    source.slice(start, source.indexOf("\n}", start)),
+    /AGENTS\[agentKindOf\(kind\)\]\.doodle/u,
+  );
+});
+
+test("a doodle is tinted by its owner, never by its vendor", async () => {
+  const ui = await publicFile("ui.js");
+  const start = ui.indexOf("export function agentFace");
+  const body = ui.slice(start, ui.indexOf("\n}", start));
+  // The shape answers "which agent"; the colour answers "whose agent". A
+  // per-vendor tint would spend the only channel that can carry ownership.
+  assert.match(body, /agent\?\.color/u);
+  assert.equal(/tint/u.test(body), false);
+
+  const coordinator = await publicFile("screen-coordinator.js");
+  // The shared view is the whole reason the colour is an identity, so it must
+  // colour by who submitted the work rather than by the signed-in user.
+  assert.match(coordinator, /agentColorFor\(task\.submittedBy\)/u);
+});
+
+test("an agent colour is stored on the account, not in the browser", async () => {
+  const data = await publicFile("data.js");
+  const start = data.indexOf("export async function saveAppearance");
+  const body = data.slice(start, data.indexOf("\n}", start));
+  // localStorage would make the choice invisible to the colleagues it exists
+  // to inform.
+  assert.match(body, /\/auth\/me\/appearance/u);
+  assert.equal(/localStorage/u.test(body), false);
+});
+
+test("a user with no chosen colour still reads as themselves", async () => {
+  const data = await publicFile("data.js");
+  const start = data.indexOf("export function agentColorFor");
+  const body = data.slice(start, data.indexOf("\n}", start));
+  // Falling back to one shared default would draw every unconfigured team
+  // member's agents identically, which is the confusion the feature removes.
+  assert.match(body, /charCodeAt/u);
+  assert.match(body, /PALETTE\[/u);
+});
+
+test("the theme is driven by custom properties rather than per-component colour", async () => {
+  const app = await browserSource();
+  const start = app.indexOf("function applyTheme");
+  const body = app.slice(start, app.indexOf("\n}", start));
+  for (const token of [
+    "--accent",
+    "--accent-bright",
+    "--accent-wash",
+    "--accent-line",
+  ]) {
+    assert.match(body, new RegExp(token, "u"), `${token} should be re-themed`);
+  }
+});
+
+test("a colour that reaches a style attribute is validated first", async () => {
+  const ui = await publicFile("ui.js");
+  // `red;background:url(...)` is a valid CSS colour prefix, so anything looser
+  // than an exact hex triple is an injection point.
+  assert.match(ui, /\/\^#\[0-9a-f\]\{6\}\$\/iu/u);
+  const start = ui.indexOf("export function agentFace");
+  assert.match(ui.slice(start, ui.indexOf("\n}", start)), /safeColor\(/u);
+});
+
+test("the product is named Lattic throughout the browser surface", async () => {
+  assert.match(await browserSource(), /<b>Lattic<\/b>/u);
+  assert.match(await publicFile("index.html"), /<title>Lattic<\/title>/u);
+  for (const file of ["app.js", "index.html", "manifest.webmanifest"]) {
+    assert.equal(
+      /Agentic/u.test(await publicFile(file)),
+      false,
+      `${file} still says Agentic`,
+    );
+  }
+});

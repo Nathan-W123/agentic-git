@@ -1684,3 +1684,76 @@ test("a worker cannot touch another user's lease", async (t) => {
     assert.equal(response.status, 404, action);
   }
 });
+
+test("a member's agent colour is readable by the colleagues it identifies", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const setup = await bootstrap(owner);
+
+  const chosen = await owner.request("/api/v1/auth/me/appearance", {
+    method: "PATCH",
+    body: { accent: "#4F8EF7", agentColor: "#E05F9E" },
+  });
+  assert.equal(chosen.status, 200);
+  // Normalised on the way in, so two spellings of one colour compare equal.
+  assert.equal(chosen.data.user.appearance.agentColor, "#e05f9e");
+  assert.equal(chosen.data.user.appearance.accent, "#4f8ef7");
+
+  const me = await owner.request("/api/v1/auth/me");
+  assert.equal(me.data.user.appearance.agentColor, "#e05f9e");
+
+  // The point of the colour is that other people can read it: a teammate
+  // listing the organization's members has to see it, or "pink doodles are
+  // Nathan's agents" is not a thing anyone can learn.
+  const members = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/members`,
+  );
+  assert.equal(members.status, 200);
+  const listed = members.data.members.find(
+    (member: any) => member.userId === setup.user.id,
+  );
+  assert.equal(listed.user.appearance.agentColor, "#e05f9e");
+});
+
+test("changing one colour leaves the other one alone", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  await client.request("/api/v1/auth/me/appearance", {
+    method: "PATCH",
+    body: { accent: "#2fae7f" },
+  });
+  // A PATCH names only what it changes; the accent picked a moment ago must
+  // survive a later choice of agent colour.
+  const second = await client.request("/api/v1/auth/me/appearance", {
+    method: "PATCH",
+    body: { agentColor: "#e05f9e" },
+  });
+  assert.equal(second.status, 200);
+  assert.deepEqual(second.data.user.appearance, {
+    accent: "#2fae7f",
+    agentColor: "#e05f9e",
+  });
+});
+
+test("an agent colour must be a plain hex triple", async (t) => {
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  // The value is written into a style attribute, so a CSS colour that happens
+  // to carry a second declaration must not survive the edge.
+  for (const value of [
+    "red;background:url(https://x)",
+    "rgb(1,2,3)",
+    "#fff",
+    "javascript:alert(1)",
+  ]) {
+    const rejected = await client.request("/api/v1/auth/me/appearance", {
+      method: "PATCH",
+      body: { agentColor: value },
+    });
+    assert.equal(rejected.status, 400, `${value} should be refused`);
+  }
+});

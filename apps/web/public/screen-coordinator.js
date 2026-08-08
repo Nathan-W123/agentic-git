@@ -10,6 +10,7 @@
 
 import {
   activeTasks,
+  agentColorFor,
   coordinatorActivity,
   conflictCount,
   heldFiles,
@@ -23,6 +24,7 @@ import {
 } from "./data.js";
 import {
   agentFace,
+  agentLabelOf,
   bar,
   chip,
   clockTime,
@@ -69,12 +71,18 @@ function flowDiagram() {
     .map((task, index) => {
       const tone = NODE_TONES[index % NODE_TONES.length];
       const label = STATUS_LABEL[task.status] ?? task.status;
-      const agent = { provider: providerOf(task.agentId), presence: "online" };
+      // Colour by who submitted the task, not by which vendor answered it:
+      // on this screen the question is whose agent is holding things up.
+      const agent = {
+        provider: task.agentId,
+        presence: "online",
+        color: agentColorFor(task.submittedBy),
+      };
       return `<div class="flow-node ${tone}">
         <div class="fn-head">
           ${agentFace(agent, 28)}
           <span style="min-width:0">
-            <div class="fn-name">${esc(agentLabel(task.agentId))}</div>
+            <div class="fn-name">${esc(agentLabelOf(task.agentId))}</div>
             <div class="fn-task">${esc(truncate(task.objective, 22))}</div>
           </span>
         </div>
@@ -92,7 +100,7 @@ function flowDiagram() {
       </svg>
       ${nodes}
       <div class="flow-core">
-        ${agentFace({ provider: "generic", presence: "online" }, 34)}
+        ${agentFace({ provider: "generic", presence: "online", name: "Coordinator" }, 34)}
         <div class="fc-name">Coordinator</div>
         <div class="fc-sub">Orchestrating</div>
       </div>
@@ -104,25 +112,6 @@ function flowDiagram() {
       <span>${dot("grey")}Idle</span>
     </div>
   </div>`;
-}
-
-function providerOf(agentId) {
-  const id = String(agentId ?? "").toLowerCase();
-  if (id.includes("claude") || id.includes("anthropic")) {
-    return "anthropic";
-  }
-  if (id.includes("codex") || id.includes("openai")) {
-    return "openai";
-  }
-  if (id.includes("gemini") || id.includes("google")) {
-    return "google";
-  }
-  return "generic";
-}
-
-function agentLabel(agentId) {
-  const id = String(agentId ?? "agent");
-  return id.charAt(0).toUpperCase() + id.slice(1);
 }
 
 function truncate(value, length) {
@@ -150,7 +139,7 @@ function activityPanel() {
                     <div class="act-title">${esc(row.title)}</div>
                     <div class="act-sub">${esc(truncate(row.detail, 54))}</div>
                   </span>
-                  <span>${row.agent ? chip(agentLabel(row.agent)) : ""}</span>
+                  <span>${row.agent ? chip(agentLabelOf(row.agent)) : ""}</span>
                 </div>`,
               )
               .join("")
@@ -246,7 +235,7 @@ function locksPanel() {
                     <div class="lr-state">Editing</div>
                   </span>
                   <span class="lr-right">
-                    ${chip(agentLabel(lock.agentId))}
+                    ${chip(agentLabelOf(lock.agentId))}
                     <div class="lr-time">${esc(clockTime(lock.since))}</div>
                   </span>
                 </div>`,
@@ -299,7 +288,7 @@ function locksTab() {
                     <div class="lr-file">${esc(lock.path)}</div>
                     <div class="lr-state">Task ${esc(String(lock.taskId).slice(0, 10))}</div>
                   </span>
-                  <span class="lr-right">${chip(agentLabel(lock.agentId))}
+                  <span class="lr-right">${chip(agentLabelOf(lock.agentId))}
                     <div class="lr-time">${esc(relativeTime(lock.since))}</div></span>
                 </div>`,
               )
@@ -326,7 +315,7 @@ function activityTab() {
                     ${icon(activityIcon(row.type))}</span>
                   <span><div class="act-title">${esc(row.title)}</div>
                   <div class="act-sub">${esc(row.detail)}</div></span>
-                  <span>${row.agent ? chip(agentLabel(row.agent)) : ""}</span>
+                  <span>${row.agent ? chip(agentLabelOf(row.agent)) : ""}</span>
                 </div>`,
               )
               .join("")

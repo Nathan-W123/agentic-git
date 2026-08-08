@@ -1,5 +1,5 @@
 /**
- * Agentic Coordinator — control room entry point.
+ * Lattic — control room entry point.
  *
  * The shell, the router, and the one delegated event listener live here;
  * every screen is a module that returns markup. Rendering is whole-screen and
@@ -10,6 +10,7 @@
  */
 
 import {
+  PALETTE,
   api,
   closeSocket,
   connectSocket,
@@ -19,6 +20,8 @@ import {
   loadHealth,
   loadProviders,
   markRead,
+  myAccent,
+  myAgentColor,
   myAgents,
   notifications,
   persist,
@@ -28,6 +31,8 @@ import {
 import {
   $,
   $$,
+  agentDoodle,
+  agentLabelOf,
   avatar,
   brandMark,
   esc,
@@ -71,7 +76,7 @@ import {
   readOne,
   renderNotifications,
 } from "./screen-notifications.js";
-import { applyProviderSetting } from "./data.js";
+import { applyProviderSetting, saveAppearance } from "./data.js";
 
 /* ---------------------------------------------------------- formatting ---- */
 
@@ -199,7 +204,7 @@ function renderAuth() {
       <div class="auth-mascot">
         ${brandMark(54)}
         <div>
-          <h1>${bootstrap ? "Set up your control room" : "Sign in to Agentic"}</h1>
+          <h1>${bootstrap ? "Set up your control room" : "Sign in to Lattic"}</h1>
           <p>${
             bootstrap
               ? "Create the first owner for this control plane."
@@ -328,7 +333,7 @@ function sidebar() {
   return `<aside class="sidebar">
     <a class="brand" href="#repositories">
       ${brandMark(34)}
-      <span class="brand-text"><b>Agentic</b><span>Coordinator</span></span>
+      <span class="brand-text"><b>Lattic</b><span>Coordinator</span></span>
     </a>
 
     ${
@@ -422,6 +427,8 @@ function settingsScreen() {
     </div>
 
     <div class="settings-grid">
+      ${appearanceCard()}
+
       <section class="card">
         <div class="panel-head"><div><h3>Approval policy</h3>
           <p>What must stop for a person before it reaches canonical</p></div></div>
@@ -569,6 +576,76 @@ function settingsScreen() {
   </div></div>`;
 }
 
+/**
+ * Colour choices.
+ *
+ * Two separate decisions that happen to share a picker. The interface accent
+ * is a personal preference and changes nothing for anyone else. The agent
+ * colour is an identity: it is stored on the account, travels with every one
+ * of that person's agents, and is what colleagues read on the coordinator's
+ * shared views — so the copy has to say so, or people will assume it is
+ * decoration and pick the same colour as everyone else.
+ */
+function appearanceCard() {
+  const accent = myAccent();
+  const agentColor = myAgentColor();
+  const swatches = (act, current) =>
+    PALETTE.map(
+      (entry) => `<button type="button" class="swatch${
+        entry.value === current ? " on" : ""
+      }" data-act="${act}" data-value="${esc(entry.value)}"
+        style="--swatch:${esc(entry.value)}" title="${esc(entry.label)}"
+        aria-label="${esc(entry.label)}"></button>`,
+    ).join("");
+
+  return `<section class="card">
+    <div class="panel-head"><div><h3>Appearance</h3>
+      <p>How Lattic looks to you, and how your agents look to everyone</p></div></div>
+
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">Primary colour</div>
+        <div class="sr-sub">Accents, highlights, and the active state across the
+          interface. Only you see this.</div>
+      </span>
+    </div>
+    <div style="padding:0 17px 16px">
+      <div class="swatches">${swatches("set-accent", accent)}</div>
+    </div>
+
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">Your agents' colour</div>
+        <div class="sr-sub">Every agent you connect is drawn in this colour, on
+          shared views too — so your teammates can tell your agents from
+          theirs. The doodle says which agent; the colour says whose.</div>
+      </span>
+    </div>
+    <div style="padding:0 17px 16px">
+      <div class="swatches">${swatches("set-agent-color", agentColor)}</div>
+      <div class="doodle-preview" style="color:${esc(agentColor)}">
+        ${["anthropic", "openai", "google", "xai", "deepseek", "generic"]
+          .map(
+            (kind) => `<span class="doodle-chip">
+              <span class="doodle">${agentDoodle(kind)}</span>
+              <b>${esc(agentLabelOf(kind))}</b>
+            </span>`,
+          )
+          .join("")}
+      </div>
+    </div>
+  </section>`;
+}
+
+async function saveAppearanceChoice(patch) {
+  try {
+    await saveAppearance(patch);
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 async function savePolicy(form) {
   const data = new FormData(form);
   try {
@@ -590,6 +667,48 @@ async function savePolicy(form) {
   } catch (error) {
     toast(error.message, "error");
   }
+}
+
+/* -------------------------------------------------------------- theme ---- */
+
+/**
+ * Pushes the accent into the stylesheet's custom properties.
+ *
+ * Every accent-coloured surface already reads `--accent`, so one assignment
+ * re-themes the whole interface without any component knowing a colour
+ * changed. The lighter and washed variants are derived here rather than stored,
+ * so a chosen colour cannot drift out of step with its own tints.
+ */
+function applyTheme() {
+  const accent = myAccent();
+  const root = document.documentElement.style;
+  root.setProperty("--accent", accent);
+  root.setProperty("--accent-bright", mix(accent, "#ffffff", 0.32));
+  root.setProperty("--accent-dim", mix(accent, "#000000", 0.22));
+  root.setProperty("--accent-wash", withAlpha(accent, 0.12));
+  root.setProperty("--accent-wash-strong", withAlpha(accent, 0.2));
+  root.setProperty("--accent-line", withAlpha(accent, 0.38));
+  document
+    .querySelector('meta[name="theme-color"]')
+    ?.setAttribute("content", accent);
+}
+
+function channels(hex) {
+  return [1, 3, 5].map((at) => Number.parseInt(hex.slice(at, at + 2), 16));
+}
+
+function mix(hex, towards, amount) {
+  const from = channels(hex);
+  const to = channels(towards);
+  const parts = from.map((value, index) =>
+    Math.round(value + (to[index] - value) * amount),
+  );
+  return `#${parts.map((value) => value.toString(16).padStart(2, "0")).join("")}`;
+}
+
+function withAlpha(hex, alpha) {
+  const [red, green, blue] = channels(hex);
+  return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
 }
 
 /* ------------------------------------------------------------- router ---- */
@@ -633,6 +752,7 @@ export function render() {
   if (state.principal === undefined) {
     return;
   }
+  applyTheme();
   if (!state.loaded) {
     root.innerHTML = `<div class="app"><div class="main">
       <div class="page">${emptyState(
@@ -913,6 +1033,12 @@ document.addEventListener("click", (event) => {
       return;
 
     /* Settings */
+    case "set-accent":
+      void saveAppearanceChoice({ accent: value });
+      return;
+    case "set-agent-color":
+      void saveAppearanceChoice({ agentColor: value });
+      return;
     case "toggle": {
       const field = node.dataset.field;
       const input = node.parentElement?.querySelector(`input[name="${field}"]`);

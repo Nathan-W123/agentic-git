@@ -56,6 +56,8 @@ export interface PublicUser {
   email: string;
   displayName: string;
   systemAdmin: boolean;
+  /** Interface colours; the agent colour identifies this user to colleagues. */
+  appearance?: { accent?: string; agentColor?: string };
 }
 
 /**
@@ -122,6 +124,10 @@ function publicUser(user: UserAccount): PublicUser {
     email: user.email,
     displayName: user.displayName,
     systemAdmin: user.systemAdmin,
+    // The principal is rebuilt from the store on every request, so a colour
+    // changed in one tab is live in the next request rather than at next
+    // sign-in.
+    ...(user.appearance === undefined ? {} : { appearance: user.appearance }),
   };
 }
 

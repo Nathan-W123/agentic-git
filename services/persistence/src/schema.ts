@@ -572,6 +572,19 @@ export const MIGRATIONS: readonly Migration[] = [
          ON workers(organization_id, last_seen_at DESC)`,
     ],
   },
+  {
+    // How a person's agents are drawn, stored on the user rather than in the
+    // browser.
+    //
+    // The colour is an identity signal, not a local preference: the point of
+    // choosing one is that colleagues can tell whose agents are whose on the
+    // coordinator's shared views. A value only the chooser could see would
+    // answer no question anyone has. Nullable, because "never chose" is a real
+    // state and the interface derives a stable default from the user id.
+    version: 15,
+    name: "user-appearance",
+    statements: [`ALTER TABLE users ADD COLUMN appearance TEXT`],
+  },
 ];
 
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(

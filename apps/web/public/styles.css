@@ -1,11 +1,15 @@
 /*
- * Agentic Coordinator — control room styling.
+ * Lattic — control room styling.
  *
- * One dark theme, deliberately restrained: deep navy ground, a single purple
- * accent, and semantic colour used only where it carries meaning (green for
- * healthy and added, red for failed and deleted, orange for waiting, blue for
+ * One dark theme, deliberately restrained: deep navy ground, a single accent,
+ * and semantic colour used only where it carries meaning (green for healthy
+ * and added, red for failed and deleted, orange for waiting, blue for
  * secondary task state). Thin borders and generous negative space do the
  * structural work that heavy panels and gradients would otherwise do.
+ *
+ * The accent tokens below are defaults. Every accent-coloured surface reads
+ * them through `--accent`, so the interface re-themes from one assignment when
+ * a user picks a different primary colour.
  */
 
 /* ------------------------------------------------------------- tokens ---- */
@@ -3094,6 +3098,72 @@ svg {
 .switch.on::after {
   transform: translateX(17px);
   background: #fff;
+}
+
+/* -------------------------------------------------------- colour picker ---- */
+
+.swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 9px;
+}
+
+.swatch {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: var(--swatch);
+  border: 2px solid transparent;
+  box-shadow: 0 0 0 1px var(--border-strong);
+  transition: transform 0.14s ease, box-shadow 0.14s ease;
+}
+
+.swatch:hover {
+  transform: scale(1.08);
+}
+
+/* The ring is drawn in the swatch's own colour so the selected state reads
+   without depending on the accent, which the accent picker is busy changing. */
+.swatch.on {
+  border-color: var(--bg-card);
+  box-shadow: 0 0 0 2px var(--swatch);
+}
+
+.doodle-preview {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  margin-top: 16px;
+  padding-top: 15px;
+  border-top: 1px solid var(--border-soft);
+}
+
+/* The chip inherits the agent colour from the preview row; only its caption
+   is muted, so setting `color` here would tint the doodle with label grey. */
+.doodle-chip {
+  display: grid;
+  justify-items: center;
+  gap: 6px;
+  font-size: 10.5px;
+}
+
+.doodle-chip b {
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.doodle-chip .doodle {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1.5px solid currentColor;
+}
+
+.doodle-chip .doodle svg {
+  width: 68%;
+  height: 68%;
 }
 
 /* ------------------------------------------------------------- toasts ---- */

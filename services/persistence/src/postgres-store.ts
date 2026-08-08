@@ -80,6 +80,7 @@ import type {
   TokenUsageRecord,
   SubmittedTaskStatus,
   UserAccount,
+  UserAppearance,
   LeaseTaskInput,
   LeasedWork,
   SaveWorkLeasePlanInput,
@@ -437,24 +438,35 @@ export class PostgresCoordinationStore implements CoordinationStore {
       passwordDigest?: string;
       disabled?: boolean;
       systemAdmin?: boolean;
+      appearance?: UserAppearance;
     },
   ): Promise<UserAccount> {
     const existing = await this.getUser(id);
     if (existing === undefined) {
       throw new Error(`Unknown user: ${id}`);
     }
+    const appearance = input.appearance ?? existing.appearance;
     const user: UserAccount = {
       ...existing,
       displayName: input.displayName?.trim() ?? existing.displayName,
       passwordDigest: input.passwordDigest ?? existing.passwordDigest,
       disabled: input.disabled ?? existing.disabled,
       systemAdmin: input.systemAdmin ?? existing.systemAdmin,
+      ...(appearance === undefined ? {} : { appearance }),
     };
     await this.query(
       `UPDATE users
-       SET display_name = $1, password_digest = $2, disabled = $3, system_admin = $4
-       WHERE id = $5`,
-      [user.displayName, user.passwordDigest, user.disabled, user.systemAdmin, id],
+       SET display_name = $1, password_digest = $2, disabled = $3,
+           system_admin = $4, appearance = $5
+       WHERE id = $6`,
+      [
+        user.displayName,
+        user.passwordDigest,
+        user.disabled,
+        user.systemAdmin,
+        appearance === undefined ? null : JSON.stringify(appearance),
+        id,
+      ],
     );
     return user;
   }
@@ -2654,6 +2666,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
   }
 
   private toUser(row: Row): UserAccount {
+    const appearance = row["appearance"];
     return {
       id: text(row, "id"),
       email: text(row, "email"),
@@ -2662,6 +2675,11 @@ export class PostgresCoordinationStore implements CoordinationStore {
       systemAdmin: flag(row, "system_admin"),
       disabled: flag(row, "disabled"),
       createdAt: text(row, "created_at"),
+      // A row written before the column existed, or by a client that never
+      // chose, reads as absent rather than as an empty preference.
+      ...(typeof appearance === "string" && appearance.length > 0
+        ? { appearance: JSON.parse(appearance) as UserAppearance }
+        : {}),
     };
   }
 

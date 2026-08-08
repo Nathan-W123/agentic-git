@@ -515,4 +515,10 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON workers(organization_id, last_seen_at DESC)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 15,
+    name: "user-appearance",
+    statements: [`ALTER TABLE users ADD COLUMN appearance TEXT`],
+  },
 ];

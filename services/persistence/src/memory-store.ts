@@ -72,6 +72,7 @@ import type {
   TokenUsageFilter,
   TokenUsageRecord,
   UserAccount,
+  UserAppearance,
 } from "./store.js";
 import {
   DEFAULT_ORGANIZATION_ID,
@@ -279,9 +280,13 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       passwordDigest?: string;
       disabled?: boolean;
       systemAdmin?: boolean;
+      appearance?: UserAppearance;
     },
   ): Promise<UserAccount> {
     const user = this.requireUser(id);
+    if (input.appearance !== undefined) {
+      user.appearance = input.appearance;
+    }
     if (input.displayName !== undefined) {
       user.displayName = input.displayName.trim();
     }

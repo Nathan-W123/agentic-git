@@ -317,6 +317,91 @@ export function socketLive() {
   return state.socket?.readyState === WebSocket.OPEN;
 }
 
+/* --------------------------------------------------------- appearance ---- */
+
+export const DEFAULT_ACCENT = "#8b5cf6";
+
+/**
+ * The palette offered in settings.
+ *
+ * Eight widely separated hues, all legible on the dark ground. Kept short on
+ * purpose: an agent colour is only useful as an identity if a team's choices
+ * are easy to tell apart, and a continuous picker guarantees two people
+ * eventually land on near-identical blues.
+ */
+export const PALETTE = [
+  { value: "#8b5cf6", label: "Violet" },
+  { value: "#4f8ef7", label: "Blue" },
+  { value: "#2fae7f", label: "Green" },
+  { value: "#e0663d", label: "Orange" },
+  { value: "#e05f9e", label: "Pink" },
+  { value: "#3fa8b5", label: "Teal" },
+  { value: "#d7a13b", label: "Amber" },
+  { value: "#a06ee0", label: "Lilac" },
+];
+
+function validColor(value) {
+  return typeof value === "string" && /^#[0-9a-f]{6}$/iu.test(value.trim())
+    ? value.trim().toLowerCase()
+    : undefined;
+}
+
+/**
+ * The colour a user's agents are drawn in.
+ *
+ * Falls back to a stable colour derived from the user id rather than to one
+ * shared default, so two people who never opened settings still read as two
+ * people. Chosen values always win.
+ */
+export function agentColorFor(userId) {
+  const appearance = appearanceFor(userId);
+  const chosen = validColor(appearance?.agentColor);
+  if (chosen !== undefined) {
+    return chosen;
+  }
+  const text = String(userId ?? "");
+  let hash = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    hash = (hash * 31 + text.charCodeAt(index)) >>> 0;
+  }
+  return PALETTE[hash % PALETTE.length].value;
+}
+
+function appearanceFor(userId) {
+  if (userId === currentUserId() || userId === undefined) {
+    return state.principal?.user?.appearance;
+  }
+  const member = state.members.find(
+    (entry) => (entry.user?.id ?? entry.userId) === userId,
+  );
+  return member?.user?.appearance;
+}
+
+export function myAgentColor() {
+  return agentColorFor(currentUserId());
+}
+
+export function myAccent() {
+  return (
+    validColor(state.principal?.user?.appearance?.accent) ?? DEFAULT_ACCENT
+  );
+}
+
+/** Saves an appearance choice and re-reads the principal it now belongs to. */
+export async function saveAppearance(patch) {
+  const response = await api("/auth/me/appearance", {
+    method: "PATCH",
+    body: patch,
+  });
+  if (state.principal?.user !== undefined && response.user !== undefined) {
+    state.principal = {
+      ...state.principal,
+      user: { ...state.principal.user, ...response.user },
+    };
+  }
+  return response.user;
+}
+
 /* ---------------------------------------------------------- selectors ---- */
 
 export function currentRepository() {
@@ -519,6 +604,7 @@ export function myAgents() {
       task: running,
       progress: running === undefined ? 0 : taskProgress(running),
       contextPercent: contextPercentFor(provider.id),
+      color: myAgentColor(),
       detail: provider.explanation ?? "",
     };
   });

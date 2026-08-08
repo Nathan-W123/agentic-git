@@ -65,6 +65,19 @@ export interface Organization {
   createdAt: string;
 }
 
+/**
+ * How one person's agents are drawn.
+ *
+ * `accent` is a personal interface preference. `agentColor` is not: it is the
+ * colour every one of this user's agents is drawn in, on shared views as well
+ * as their own, so colleagues can tell at a glance whose agent is holding a
+ * file. Both are `#rrggbb` or absent.
+ */
+export interface UserAppearance {
+  accent?: string;
+  agentColor?: string;
+}
+
 export interface UserAccount {
   id: UserId;
   email: string;
@@ -73,6 +86,7 @@ export interface UserAccount {
   systemAdmin: boolean;
   disabled: boolean;
   createdAt: string;
+  appearance?: UserAppearance;
 }
 
 export interface OrganizationMembership {
@@ -575,6 +589,7 @@ export interface CoordinationStore {
       passwordDigest?: string;
       disabled?: boolean;
       systemAdmin?: boolean;
+      appearance?: UserAppearance;
     },
   ): Promise<UserAccount>;
   getUser(id: UserId): Promise<UserAccount | undefined>;
