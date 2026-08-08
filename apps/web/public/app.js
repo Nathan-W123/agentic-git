@@ -730,19 +730,33 @@ async function saveAppearanceChoice(patch) {
  * from. Saying so in the dialog is the difference between a considered choice
  * and a surprise.
  */
-async function inviteSomebody(rerender) {
-  const repository = currentRepository();
+async function inviteSomebody(rerender, repositoryId) {
+  const preselected = repositoryId ?? currentRepository()?.id ?? "";
   const values = await showModal({
     title: "Invite someone to collaborate",
     subtitle:
-      `They will be able to reach every repository in ${
-        state.project?.name ?? "this project"
-      }${repository === undefined ? "" : `, including ${repository.id}`}.`,
+      "Access is granted per repository. Pick the one to share, or share " +
+      "everything if they are joining the team properly.",
     confirm: "Create invite link",
     body: `<label class="field">
         <span>Email address</span>
         <input class="input" name="email" type="email" required
           placeholder="colleague@company.com">
+      </label>
+      <label class="field">
+        <span>Repository</span>
+        <select class="input" name="repositoryId">
+          ${state.repositories
+            .map(
+              (repo) => `<option value="${esc(repo.id)}"${
+                repo.id === preselected ? " selected" : ""
+              }>${esc(repo.id)}</option>`,
+            )
+            .join("")}
+          <option value=""${preselected === "" ? " selected" : ""}>
+            Every repository in ${esc(state.project?.name ?? "this project")}
+          </option>
+        </select>
       </label>
       <label class="field">
         <span>Role</span>
@@ -759,9 +773,13 @@ async function inviteSomebody(rerender) {
     return;
   }
   try {
-    const created = await createInvitation(values.email.trim(), values.role);
+    const created = await createInvitation(
+      values.email.trim(),
+      values.role,
+      values.repositoryId,
+    );
     rerender();
-    await showInviteLink(created.token, values.email.trim());
+    await showInviteLink(created.token, values.email.trim(), values.repositoryId);
   } catch (error) {
     toast(error.message, "error");
   }
@@ -774,12 +792,14 @@ async function inviteSomebody(rerender) {
  * copy it — which the copy has to say, or somebody will close it and assume
  * they can find it again later.
  */
-async function showInviteLink(token, email) {
+async function showInviteLink(token, email, repositoryId) {
   const link = invitationLink(token);
   await showModal({
     title: "Send this link",
-    subtitle: `${email} can use it once, within seven days. It is not stored,
-      so this is the only time it can be copied.`,
+    subtitle: `${email} will get ${
+      repositoryId ? repositoryId : "every repository in this project"
+    }. The link works once, within seven days, and is not stored — so this is
+      the only time it can be copied.`,
     confirm: "Copy link",
     cancel: "Done",
     body: `<div class="invite-link"><code>${esc(link)}</code></div>`,
@@ -809,16 +829,17 @@ function invitationsCard() {
     ${
       rows.length === 0
         ? `<div class="set-row"><span class="sr-body"><div class="sr-sub">
-            No invitations yet. Anyone you invite joins with the role you pick
-            and can reach every repository in this project.</div></span></div>`
+            No invitations yet. An invitation grants one repository by
+            default, so sharing something does not hand over everything.
+            </div></span></div>`
         : rows
             .map(
               (invite) => `<div class="set-row">
                 <span class="sr-body">
                   <div class="sr-title">${esc(invite.email)}</div>
-                  <div class="sr-sub">${esc(invite.role)} · invited ${esc(
-                    relativeTime(invite.createdAt),
-                  )}</div>
+                  <div class="sr-sub">${esc(invite.role)} on ${esc(
+                    invite.repositoryId ?? "every repository",
+                  )} · invited ${esc(relativeTime(invite.createdAt))}</div>
                 </span>
                 <span class="sr-ctl">
                   ${badge(invite.status)}
@@ -1118,7 +1139,7 @@ document.addEventListener("click", (event) => {
     case "repo-menu":
       showMenu(node, [
         { act: "open-repo", value, label: "Open", iconName: "arrowRight" },
-        { act: "invite", label: "Invite someone…", iconName: "users" },
+        { act: "invite-repo", value, label: "Invite to this repository…", iconName: "users" },
         {
           act: "star",
           value,
@@ -1321,6 +1342,10 @@ document.addEventListener("click", (event) => {
     case "invite":
       closePopover();
       void inviteSomebody(render);
+      return;
+    case "invite-repo":
+      closePopover();
+      void inviteSomebody(render, value);
       return;
     case "invite-revoke":
       void revokeInvitation(value)

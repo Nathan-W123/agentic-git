@@ -370,10 +370,26 @@ export async function loadInvitations() {
   return state.invitations;
 }
 
-export async function createInvitation(email, role) {
+/**
+ * Invites somebody.
+ *
+ * A repository id narrows the invitation to that one repository; without it
+ * the invitation admits the person to every repository the organization has,
+ * which is a different and much larger thing to hand out.
+ */
+export async function createInvitation(email, role, repositoryId) {
   const response = await api(
     `/organizations/${encodeURIComponent(state.organizationId)}/invitations`,
-    { method: "POST", body: { email, role } },
+    {
+      method: "POST",
+      body: {
+        email,
+        role,
+        ...(repositoryId === undefined || repositoryId === ""
+          ? {}
+          : { repositoryId, projectId: state.projectId }),
+      },
+    },
   );
   await loadInvitations();
   return response;

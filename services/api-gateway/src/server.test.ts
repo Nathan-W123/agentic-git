@@ -1902,3 +1902,222 @@ test("inviting somebody who is already a member says so", async (t) => {
   assert.equal(again.status, 409);
   assert.equal(again.data.error.code, "already_a_member");
 });
+
+/** Invites somebody to one repository and returns a client signed in as them. */
+async function joinRepository(
+  runtime: TestRuntime,
+  owner: TestClient,
+  email: string,
+  repositoryId: string,
+  role = "developer",
+): Promise<TestClient> {
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    {
+      method: "POST",
+      body: { email, role, repositoryId, projectId: DEFAULT_PROJECT_ID },
+    },
+  );
+  assert.equal(invited.status, 201, JSON.stringify(invited.data));
+  const client = new TestClient(runtime.origin);
+  const accepted = await client.request(
+    `/api/v1/invitations/${invited.data.token}/accept`,
+    { method: "POST", body: { displayName: "Guest", password: PASSWORD } },
+  );
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  return client;
+}
+
+test("a repository invitation grants that repository and no other", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  for (const id of ["shared", "private"]) {
+    assert.equal(
+      (
+        await owner.request(
+          `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+          { method: "POST", body: { id, branch: "main" } },
+        )
+      ).status,
+      201,
+    );
+  }
+
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "guest@example.com",
+    "shared",
+  );
+
+  // The list is how the interface learns what exists, so it must not mention
+  // the repository they were not given.
+  const listed = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+  );
+  assert.equal(listed.status, 200);
+  assert.deepEqual(
+    listed.data.repositories.map((entry: { id: string }) => entry.id),
+    ["shared"],
+  );
+
+  // And the routes enforce it independently of the list, answering exactly as
+  // they would for a repository that does not exist.
+  const refused = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/private/versions`,
+  );
+  assert.equal(refused.status, 404);
+  const submitted = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`,
+    {
+      method: "POST",
+      body: { repositoryId: "private", objective: "Sneak a change in" },
+    },
+  );
+  assert.equal(submitted.status, 404);
+
+  // The one they were given genuinely works.
+  const allowed = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`,
+    {
+      method: "POST",
+      body: { repositoryId: "shared", objective: "Do the work I was asked to" },
+    },
+  );
+  assert.equal(allowed.status, 201, JSON.stringify(allowed.data));
+});
+
+test("a guest's task list shows only their own repository's work", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  for (const id of ["shared", "private"]) {
+    await owner.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`, {
+      method: "POST",
+      body: { id, branch: "main" },
+    });
+    await owner.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`, {
+      method: "POST",
+      body: { repositoryId: id, objective: `work on ${id}` },
+    });
+  }
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "reader@example.com",
+    "shared",
+  );
+  const tasks = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`,
+  );
+  assert.equal(tasks.status, 200);
+  // Objectives are free text and often say more than a repository name does,
+  // so a leak here would be a real disclosure rather than a cosmetic one.
+  assert.deepEqual(
+    tasks.data.tasks.map((task: { repositoryId: string }) => task.repositoryId),
+    ["shared"],
+  );
+
+  const owned = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`,
+  );
+  // The owner still sees everything: scoping an organization role down to
+  // explicit grants would let owners lock themselves out of their own work.
+  assert.equal(owned.data.tasks.length, 2);
+});
+
+test("an organization invitation still reaches every repository", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  for (const id of ["alpha", "beta"]) {
+    await owner.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`, {
+      method: "POST",
+      body: { id, branch: "main" },
+    });
+  }
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: { email: "staff@example.com", role: "developer" } },
+  );
+  const member = new TestClient(runtime.origin);
+  await member.request(`/api/v1/invitations/${invited.data.token}/accept`, {
+    method: "POST",
+    body: { displayName: "Staff", password: PASSWORD },
+  });
+  const listed = await member.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+  );
+  assert.deepEqual(
+    listed.data.repositories.map((entry: { id: string }) => entry.id).sort(),
+    ["alpha", "beta"],
+  );
+});
+
+test("a repository guest can find the project their repository is in", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await owner.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`, {
+    method: "POST",
+    body: { id: "shared", branch: "main" },
+  });
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "finder@example.com",
+    "shared",
+  );
+
+  // A grant carries no organization membership, so listing organizations and
+  // projects by membership alone would sign this person in successfully and
+  // then show them nothing at all.
+  const organizations = await guest.request("/api/v1/organizations");
+  assert.equal(organizations.status, 200);
+  assert.deepEqual(
+    organizations.data.organizations.map((entry: { id: string }) => entry.id),
+    [DEFAULT_ORGANIZATION_ID],
+  );
+  const projects = await guest.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/projects`,
+  );
+  assert.equal(projects.status, 200);
+  assert.deepEqual(
+    projects.data.projects.map((entry: { id: string }) => entry.id),
+    [DEFAULT_PROJECT_ID],
+  );
+});
+
+test("a stranger with no grant and no membership still sees nothing", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  // Reached through the admin path so this account has neither a membership
+  // nor a grant — the case the projects fallback must not accidentally admit.
+  await owner.request("/api/v1/admin/users", {
+    method: "POST",
+    body: {
+      email: "stranger@example.com",
+      displayName: "Stranger",
+      password: PASSWORD,
+    },
+  });
+  const stranger = new TestClient(runtime.origin);
+  await stranger.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "stranger@example.com", password: PASSWORD },
+  });
+  assert.deepEqual(
+    (await stranger.request("/api/v1/organizations")).data.organizations,
+    [],
+  );
+  assert.equal(
+    (
+      await stranger.request(
+        `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/projects`,
+      )
+    ).status,
+    403,
+  );
+});

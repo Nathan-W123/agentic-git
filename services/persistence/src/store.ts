@@ -74,6 +74,21 @@ export interface Organization {
  * file. Both are `#rrggbb` or absent.
  */
 /**
+ * One person's access to one repository.
+ *
+ * Additive to organization membership rather than a replacement for it: an
+ * organization role still reaches every repository, and a grant is how
+ * somebody with no such role reaches one.
+ */
+export interface RepositoryGrant {
+  repositoryId: string;
+  userId: UserId;
+  role: OrganizationRole;
+  grantedBy: UserId | undefined;
+  createdAt: string;
+}
+
+/**
  * A pending invitation into an organization.
  *
  * The secret is never stored — only its hash — so a leaked database yields no
@@ -84,6 +99,8 @@ export interface Organization {
 export interface InvitationRecord {
   id: string;
   organizationId: string;
+  /** When set, accepting grants this repository rather than the organization. */
+  repositoryId: string | undefined;
   email: string;
   role: OrganizationRole;
   secretHash: string;
@@ -734,6 +751,12 @@ export interface CoordinationStore {
    */
   recordTokenUsage(input: RecordTokenUsageInput): Promise<TokenUsageRecord>;
   listTokenUsage(filter?: TokenUsageFilter): Promise<TokenUsageRecord[]>;
+
+  saveRepositoryGrant(grant: RepositoryGrant): Promise<void>;
+  removeRepositoryGrant(repositoryId: string, userId: UserId): Promise<void>;
+  listRepositoryGrants(repositoryId: string): Promise<RepositoryGrant[]>;
+  /** Every repository this user has been granted, across all of them. */
+  listGrantsForUser(userId: UserId): Promise<RepositoryGrant[]>;
 
   createInvitation(invitation: InvitationRecord): Promise<void>;
   getInvitation(id: string): Promise<InvitationRecord | undefined>;

@@ -14,7 +14,9 @@ import type { Duplex } from "node:stream";
 
 import type {
   CoordinationStore,
+  Organization,
   OrganizationRole,
+  ProjectRecord,
   WorkLease,
   WorkerRecord,
   StoredRepository,
@@ -40,6 +42,7 @@ import {
 import {
   authorizeOrganization,
   authorizeProject,
+  authorizeRepository,
   canAssignRole,
   ALL_PERMISSIONS,
   assertTokenScope,
@@ -463,10 +466,30 @@ function matchPath(pathname: string, pattern: RegExp): string[] | undefined {
   }
 }
 
+/**
+ * Drops rows for repositories the caller cannot reach.
+ *
+ * Per-repository access is only real if the lists respect it. Tasks, runs and
+ * approvals all carry the repository they belong to, so one helper narrows
+ * them; `undefined` means an organization role, which reaches everything.
+ */
+function narrowToRepositories<T extends { repositoryId?: string }>(
+  rows: readonly T[],
+  repositories: ReadonlySet<string> | undefined,
+): T[] {
+  if (repositories === undefined) {
+    return [...rows];
+  }
+  return rows.filter(
+    (row) => row.repositoryId !== undefined && repositories.has(row.repositoryId),
+  );
+}
+
 /** An invitation without its secret, which is never stored recoverably. */
 function publicInvitation(invitation: {
   id: string;
   organizationId: string;
+  repositoryId?: string | undefined;
   email: string;
   role: OrganizationRole;
   invitedBy: string;
@@ -487,6 +510,7 @@ function publicInvitation(invitation: {
   return {
     id: invitation.id,
     organizationId: invitation.organizationId,
+    repositoryId: invitation.repositoryId,
     email: invitation.email,
     role: invitation.role,
     invitedBy: invitation.invitedBy,
@@ -960,6 +984,9 @@ export class ApiGateway {
             role: invitation.role,
             status: state,
             organizationName: organization?.name ?? "this organization",
+            ...(invitation.repositoryId === undefined
+              ? {}
+              : { repositoryId: invitation.repositoryId }),
             expiresAt: invitation.expiresAt,
           },
         });
@@ -1013,15 +1040,32 @@ export class ApiGateway {
             "This invitation has already been used",
           );
         }
-        await this.options.store.saveMembership({
-          organizationId: invitation.organizationId,
-          userId: user.id,
-          role: invitation.role,
-        });
+        // A repository-scoped invitation grants that repository and nothing
+        // else — deliberately no organization membership, because any
+        // organization role reaches every repository and would undo the point
+        // of scoping the invitation in the first place.
+        if (invitation.repositoryId === undefined) {
+          await this.options.store.saveMembership({
+            organizationId: invitation.organizationId,
+            userId: user.id,
+            role: invitation.role,
+          });
+        } else {
+          await this.options.store.saveRepositoryGrant({
+            repositoryId: invitation.repositoryId,
+            userId: user.id,
+            role: invitation.role,
+            grantedBy: invitation.invitedBy,
+            createdAt: new Date().toISOString(),
+          });
+        }
         await this.options.store.appendAudit(undefined, {
           type: "membership_changed",
           data: {
             organizationId: invitation.organizationId,
+            ...(invitation.repositoryId === undefined
+              ? {}
+              : { repositoryId: invitation.repositoryId }),
             userId: user.id,
             role: invitation.role,
             action: "accepted_invitation",
@@ -1672,9 +1716,7 @@ export class ApiGateway {
 
     if (method === "GET" && path === `${API_PREFIX}/organizations`) {
       this.sendJson(response, 200, {
-        organizations: await this.options.store.listOrganizations(
-          principal.user.systemAdmin ? undefined : principal.user.id,
-        ),
+        organizations: await this.reachableOrganizations(principal),
       });
       return;
     }
@@ -1812,8 +1854,27 @@ export class ApiGateway {
         if (!canAssignRole(authorized.role, role)) {
           throw new HttpError(403, "forbidden", "You cannot assign that role");
         }
+        // An invitation may name one repository, which is what it then
+        // grants; without one it admits the person to the whole organization.
+        const repositoryId = stringField(
+          body["repositoryId"],
+          "repositoryId",
+          { max: 128, optional: true },
+        );
+        if (repositoryId !== undefined) {
+          const owned = await this.options.store.listProjectRepositories(
+            stringField(body["projectId"], "projectId", { max: 128 }) ?? "",
+          );
+          if (!owned.some((entry) => entry.id === repositoryId)) {
+            throw new HttpError(
+              404,
+              "not_found",
+              "Repository was not found in that project",
+            );
+          }
+        }
         const existing = await this.options.store.getUserByEmail(email);
-        if (existing !== undefined) {
+        if (existing !== undefined && repositoryId === undefined) {
           const memberships = await this.options.store.listMemberships(
             organizationId,
           );
@@ -1831,6 +1892,7 @@ export class ApiGateway {
         const invitation = {
           id,
           organizationId,
+          repositoryId,
           email,
           role,
           secretHash: hashSecret(secret),
@@ -2064,16 +2126,50 @@ export class ApiGateway {
     );
     if (projectsMatch !== undefined) {
       const organizationId = projectsMatch[0] ?? "";
-      await authorizeOrganization(
-        this.options.store,
-        principal,
-        organizationId,
-        method === "GET" ? "view" : "manage_project",
-      );
+      // Reading the project list is the one place a grant alone has to be
+      // enough: somebody invited to a single repository has no organization
+      // role, and without this they sign in successfully and can see nothing.
+      // Everything beyond reading still requires a real organization role.
+      let hasOrganizationRole = true;
       if (method === "GET") {
-        this.sendJson(response, 200, {
-          projects: await this.options.store.listProjects(organizationId),
-        });
+        try {
+          await authorizeOrganization(
+            this.options.store,
+            principal,
+            organizationId,
+            "view",
+          );
+        } catch (error) {
+          hasOrganizationRole = false;
+          const grants = await this.options.store.listGrantsForUser(
+            principal.user.id,
+          );
+          if (grants.length === 0) {
+            throw error;
+          }
+        }
+      } else {
+        await authorizeOrganization(
+          this.options.store,
+          principal,
+          organizationId,
+          "manage_project",
+        );
+      }
+      if (method === "GET") {
+        const projects = await this.reachableProjects(
+          principal,
+          organizationId,
+          hasOrganizationRole,
+        );
+        if (!hasOrganizationRole && projects.length === 0) {
+          throw new AuthenticationError(
+            "You do not have permission to perform this action",
+            403,
+            "forbidden",
+          );
+        }
+        this.sendJson(response, 200, { projects });
         return;
       }
       if (method === "POST") {
@@ -2222,15 +2318,22 @@ export class ApiGateway {
     );
     if (repositoriesMatch !== undefined && method === "GET") {
       const projectId = repositoriesMatch[0] ?? "";
-      await authorizeProject(
+      const { repositories } = await authorizeProject(
         this.options.store,
         principal,
         projectId,
         "view",
       );
+      const all = await this.options.store.listProjectRepositories(projectId);
       this.sendJson(response, 200, {
+        // Somebody holding a grant sees the repositories they were granted and
+        // no others: this list is how the interface learns what exists, so
+        // returning everything here would defeat the grant regardless of what
+        // the per-repository routes enforce.
         repositories:
-          await this.options.store.listProjectRepositories(projectId),
+          repositories === undefined
+            ? all
+            : all.filter((entry) => repositories.has(entry.id)),
       });
       return;
     }
@@ -2332,7 +2435,7 @@ export class ApiGateway {
     );
     if (tasksMatch !== undefined) {
       const projectId = tasksMatch[0] ?? "";
-      await authorizeProject(
+      const authorized = await authorizeProject(
         this.options.store,
         principal,
         projectId,
@@ -2351,11 +2454,12 @@ export class ApiGateway {
             `Task status must be one of ${TASK_STATUSES.join(", ")}`,
           );
         }
+        const tasks = await this.options.store.listSubmittedTasks({
+          projectId,
+          ...(status === undefined ? {} : { status }),
+        });
         this.sendJson(response, 200, {
-          tasks: await this.options.store.listSubmittedTasks({
-            projectId,
-            ...(status === undefined ? {} : { status }),
-          }),
+          tasks: narrowToRepositories(tasks, authorized.repositories),
         });
         return;
       }
@@ -2367,7 +2471,12 @@ export class ApiGateway {
           !(await this.options.store.projectHasRepository(
             projectId,
             repositoryId,
-          ))
+          )) ||
+          // Reaching the project is not permission to put work into a
+          // repository inside it. Same answer either way, so a probe cannot
+          // tell "not linked" from "not yours".
+          (authorized.repositories !== undefined &&
+            !authorized.repositories.has(repositoryId))
         ) {
           throw new HttpError(
             404,
@@ -2460,10 +2569,11 @@ export class ApiGateway {
     );
     if (runMatch !== undefined && method === "POST") {
       const [projectId = "", repositoryId = ""] = runMatch;
-      await authorizeProject(
+      await authorizeRepository(
         this.options.store,
         principal,
         projectId,
+        repositoryId,
         "run_task",
       );
       if (
@@ -2622,7 +2732,13 @@ export class ApiGateway {
     );
     if (versionsMatch !== undefined && method === "GET") {
       const [projectId = "", repositoryId = ""] = versionsMatch;
-      await authorizeProject(this.options.store, principal, projectId, "view");
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
       if (
         !(await this.options.store.projectHasRepository(projectId, repositoryId))
       ) {
@@ -2658,10 +2774,11 @@ export class ApiGateway {
       // Reverting canonical wholesale is a project-management act, not
       // ordinary task work, so it needs more than the run_task a developer
       // carries.
-      await authorizeProject(
+      await authorizeRepository(
         this.options.store,
         principal,
         projectId,
+        repositoryId,
         "manage_project",
       );
       if (
@@ -2746,10 +2863,11 @@ export class ApiGateway {
           "This deployment does not support overlay workspaces",
         );
       }
-      await authorizeProject(
+      await authorizeRepository(
         this.options.store,
         principal,
         projectId,
+        repositoryId,
         action === "exec" ? "run_task" : "submit_task",
       );
       const scope = {
@@ -3084,7 +3202,7 @@ export class ApiGateway {
     );
     if (runsMatch !== undefined && method === "GET") {
       const projectId = runsMatch[0] ?? "";
-      await authorizeProject(
+      const authorized = await authorizeProject(
         this.options.store,
         principal,
         projectId,
@@ -3095,7 +3213,10 @@ export class ApiGateway {
         Math.max(1, Number.parseInt(url.searchParams.get("limit") ?? "100", 10)),
       );
       this.sendJson(response, 200, {
-        runs: (await this.options.store.listRuns(limit * 5))
+        runs: narrowToRepositories(
+          await this.options.store.listRuns(limit * 5),
+          authorized.repositories,
+        )
           .filter((run) => run.projectId === projectId)
           .slice(0, limit),
       });
@@ -3128,7 +3249,7 @@ export class ApiGateway {
     );
     if (approvalsMatch !== undefined && method === "GET") {
       const projectId = approvalsMatch[0] ?? "";
-      await authorizeProject(
+      const authorized = await authorizeProject(
         this.options.store,
         principal,
         projectId,
@@ -3147,10 +3268,13 @@ export class ApiGateway {
         );
       }
       this.sendJson(response, 200, {
-        approvals: await this.options.store.listApprovals({
-          projectId,
-          ...(status === undefined ? {} : { status }),
-        }),
+        approvals: narrowToRepositories(
+          await this.options.store.listApprovals({
+            projectId,
+            ...(status === undefined ? {} : { status }),
+          }),
+          authorized.repositories,
+        ),
       });
       return;
     }
@@ -3421,6 +3545,80 @@ export class ApiGateway {
     }
 
     throw new HttpError(404, "not_found", "Route was not found");
+  }
+
+  /**
+   * Organizations the caller can reach at all.
+   *
+   * Membership is no longer the only route in: somebody invited to a single
+   * repository holds a grant and no organization role, and listing only their
+   * memberships would leave them signed in and staring at nothing. The
+   * organizations behind their grants are added so the interface can find the
+   * project the repository lives in.
+   */
+  private async reachableOrganizations(
+    principal: AuthenticatedPrincipal,
+  ): Promise<Organization[]> {
+    const byMembership = await this.options.store.listOrganizations(
+      principal.user.systemAdmin ? undefined : principal.user.id,
+    );
+    if (principal.user.systemAdmin) {
+      return byMembership;
+    }
+    const grants = await this.options.store.listGrantsForUser(
+      principal.user.id,
+    );
+    if (grants.length === 0) {
+      return byMembership;
+    }
+    const granted = new Set(grants.map((grant) => grant.repositoryId));
+    const seen = new Set(byMembership.map((entry) => entry.id));
+    const found = [...byMembership];
+    for (const organization of await this.options.store.listOrganizations()) {
+      if (seen.has(organization.id)) {
+        continue;
+      }
+      for (const project of await this.options.store.listProjects(
+        organization.id,
+      )) {
+        const repositories = await this.options.store.listProjectRepositories(
+          project.id,
+        );
+        if (repositories.some((entry) => granted.has(entry.id))) {
+          found.push(organization);
+          seen.add(organization.id);
+          break;
+        }
+      }
+    }
+    return found;
+  }
+
+  /** Projects the caller can reach, by membership or by a repository grant. */
+  private async reachableProjects(
+    principal: AuthenticatedPrincipal,
+    organizationId: string,
+    hasOrganizationRole: boolean,
+  ): Promise<ProjectRecord[]> {
+    const projects = await this.options.store.listProjects(organizationId);
+    if (hasOrganizationRole || principal.user.systemAdmin) {
+      return projects;
+    }
+    const granted = new Set(
+      (await this.options.store.listGrantsForUser(principal.user.id)).map(
+        (grant) => grant.repositoryId,
+      ),
+    );
+    const reachable: ProjectRecord[] = [];
+    for (const project of projects) {
+      const repositories = await this.options.store.listProjectRepositories(
+        project.id,
+      );
+      if (repositories.some((entry) => granted.has(entry.id))) {
+        reachable.push(project);
+      }
+    }
+    return reachable;
   }
 
   private requirePrincipal(context: RequestContext): AuthenticatedPrincipal {

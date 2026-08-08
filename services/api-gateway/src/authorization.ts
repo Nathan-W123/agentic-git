@@ -3,6 +3,7 @@ import type {
   Organization,
   OrganizationRole,
   ProjectRecord,
+  RepositoryGrant,
 } from "@coord/persistence";
 
 import {
@@ -57,6 +58,36 @@ export interface AuthorizedOrganization {
 
 export interface AuthorizedProject extends AuthorizedOrganization {
   project: ProjectRecord;
+  /**
+   * Repositories the caller may see, or `undefined` for "all of them".
+   *
+   * Undefined rather than a list because an organization role reaches every
+   * repository, including ones created after this request — a snapshot list
+   * would silently become wrong.
+   */
+  repositories: ReadonlySet<string> | undefined;
+}
+
+/** Roles in ascending order of what they can do, for taking the higher of two. */
+const ROLE_RANK: Readonly<Record<OrganizationRole, number>> = {
+  viewer: 0,
+  reviewer: 1,
+  developer: 2,
+  admin: 3,
+  owner: 4,
+};
+
+function higherRole(
+  left: OrganizationRole | undefined,
+  right: OrganizationRole | undefined,
+): OrganizationRole | undefined {
+  if (left === undefined) {
+    return right;
+  }
+  if (right === undefined) {
+    return left;
+  }
+  return ROLE_RANK[left] >= ROLE_RANK[right] ? left : right;
 }
 
 function roleFor(
@@ -178,6 +209,19 @@ export async function authorizeOrganization(
   return { organization, role };
 }
 
+/**
+ * Authorizes a project, honouring per-repository grants.
+ *
+ * Access comes from either of two places now: an organization role, which
+ * reaches everything, or a grant on a single repository, which reaches only
+ * that one. Somebody with a grant and no organization role is a real case —
+ * that is the whole point of sharing one repository — so this cannot simply
+ * require an organization role and stop.
+ *
+ * The effective role is the higher of the two, and `repositories` records what
+ * that role may be exercised on. Callers reading repository-shaped data must
+ * narrow by it, or per-repository access leaks through the lists.
+ */
 export async function authorizeProject(
   store: CoordinationStore,
   principal: AuthenticatedPrincipal,
@@ -192,12 +236,25 @@ export async function authorizeProject(
       "not_found",
     );
   }
-  const { organization, role } = await authorizeOrganization(
-    store,
-    principal,
-    project.organizationId,
-    permission,
+  assertTokenOrganization(principal, project.organizationId);
+  const organization = await store.getOrganization(project.organizationId);
+  if (organization === undefined) {
+    throw new AuthenticationError("Organization was not found", 404, "not_found");
+  }
+
+  const organizationRole = roleFor(principal, project.organizationId);
+  const grants =
+    organizationRole === undefined
+      ? await grantsInProject(store, principal, project)
+      : [];
+  const grantRole = grants.reduce<OrganizationRole | undefined>(
+    (highest, grant) => higherRole(highest, grant.role),
+    undefined,
   );
+  const role = higherRole(organizationRole, grantRole);
+  assertPermission(role, permission);
+  assertTokenScope(principal, permission);
+
   if (project.archived && permission !== "view") {
     throw new AuthenticationError(
       "Archived projects are read-only",
@@ -205,7 +262,66 @@ export async function authorizeProject(
       "project_archived",
     );
   }
-  return { project, organization, role };
+  return {
+    project,
+    organization,
+    role,
+    repositories:
+      organizationRole === undefined
+        ? new Set(grants.map((grant) => grant.repositoryId))
+        : undefined,
+  };
+}
+
+/** The caller's grants, limited to repositories this project actually owns. */
+async function grantsInProject(
+  store: CoordinationStore,
+  principal: AuthenticatedPrincipal,
+  project: ProjectRecord,
+): Promise<RepositoryGrant[]> {
+  const grants = await store.listGrantsForUser(principal.user.id);
+  if (grants.length === 0) {
+    return [];
+  }
+  const repositories = await store.listProjectRepositories(project.id);
+  const owned = new Set(repositories.map((repository) => repository.id));
+  return grants.filter((grant) => owned.has(grant.repositoryId));
+}
+
+/**
+ * Authorizes one named repository.
+ *
+ * A project-level check is not enough once access can be per repository: a
+ * developer granted one repository would otherwise pass every route that only
+ * proves they can reach the project, and the repository id in the path would
+ * never be examined at all.
+ */
+export async function authorizeRepository(
+  store: CoordinationStore,
+  principal: AuthenticatedPrincipal,
+  projectId: string,
+  repositoryId: string,
+  permission: Permission,
+): Promise<AuthorizedProject> {
+  const authorized = await authorizeProject(
+    store,
+    principal,
+    projectId,
+    permission,
+  );
+  if (
+    authorized.repositories !== undefined &&
+    !authorized.repositories.has(repositoryId)
+  ) {
+    // Deliberately the same answer as a repository that does not exist, so the
+    // error cannot be used to discover what a team has.
+    throw new AuthenticationError(
+      "Repository was not found",
+      404,
+      "not_found",
+    );
+  }
+  return authorized;
 }
 
 export function canAssignRole(

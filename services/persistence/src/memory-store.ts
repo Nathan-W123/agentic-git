@@ -72,6 +72,7 @@ import type {
   TokenUsageFilter,
   TokenUsageRecord,
   InvitationRecord,
+  RepositoryGrant,
   UserAccount,
   UserAppearance,
 } from "./store.js";
@@ -794,6 +795,36 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   /* ------------------------------------------------------- invitations ---- */
 
   private readonly invitations = new Map<string, InvitationRecord>();
+
+
+  /* -------------------------------------------------- repository grants ---- */
+
+  private readonly grants = new Map<string, RepositoryGrant>();
+
+  public async saveRepositoryGrant(grant: RepositoryGrant): Promise<void> {
+    this.grants.set(`${grant.repositoryId}\u0000${grant.userId}`, { ...grant });
+  }
+
+  public async removeRepositoryGrant(
+    repositoryId: string,
+    userId: string,
+  ): Promise<void> {
+    this.grants.delete(`${repositoryId}\u0000${userId}`);
+  }
+
+  public async listRepositoryGrants(
+    repositoryId: string,
+  ): Promise<RepositoryGrant[]> {
+    return [...this.grants.values()]
+      .filter((grant) => grant.repositoryId === repositoryId)
+      .map((grant) => ({ ...grant }));
+  }
+
+  public async listGrantsForUser(userId: string): Promise<RepositoryGrant[]> {
+    return [...this.grants.values()]
+      .filter((grant) => grant.userId === userId)
+      .map((grant) => ({ ...grant }));
+  }
 
   public async createInvitation(invitation: InvitationRecord): Promise<void> {
     this.invitations.set(invitation.id, { ...invitation });

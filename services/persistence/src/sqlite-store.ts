@@ -81,6 +81,7 @@ import type {
   TokenUsageRecord,
   SubmittedTaskStatus,
   InvitationRecord,
+  RepositoryGrant,
   UserAccount,
   UserAppearance,
   LeaseTaskInput,
@@ -1167,17 +1168,79 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
   /* ------------------------------------------------------- invitations ---- */
 
+
+  /* -------------------------------------------------- repository grants ---- */
+
+  public async saveRepositoryGrant(grant: RepositoryGrant): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO repository_grants
+           (repository_id, user_id, role, granted_by, created_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(repository_id, user_id)
+         DO UPDATE SET role = excluded.role`,
+      )
+      .run(
+        grant.repositoryId,
+        grant.userId,
+        grant.role,
+        grant.grantedBy ?? null,
+        grant.createdAt,
+      );
+  }
+
+  public async removeRepositoryGrant(
+    repositoryId: string,
+    userId: string,
+  ): Promise<void> {
+    this.db
+      .prepare(
+        "DELETE FROM repository_grants WHERE repository_id = ? AND user_id = ?",
+      )
+      .run(repositoryId, userId);
+  }
+
+  public async listRepositoryGrants(
+    repositoryId: string,
+  ): Promise<RepositoryGrant[]> {
+    const rows = this.db
+      .prepare(
+        "SELECT * FROM repository_grants WHERE repository_id = ? ORDER BY created_at",
+      )
+      .all(repositoryId) as Row[];
+    return rows.map((row) => this.toGrant(row));
+  }
+
+  public async listGrantsForUser(userId: string): Promise<RepositoryGrant[]> {
+    const rows = this.db
+      .prepare("SELECT * FROM repository_grants WHERE user_id = ?")
+      .all(userId) as Row[];
+    return rows.map((row) => this.toGrant(row));
+  }
+
+  private toGrant(row: Row): RepositoryGrant {
+    return {
+      repositoryId: text(row, "repository_id"),
+      userId: text(row, "user_id"),
+      role: text(row, "role") as RepositoryGrant["role"],
+      grantedBy: optionalText(row, "granted_by"),
+      createdAt: text(row, "created_at"),
+    };
+  }
+
   public async createInvitation(invitation: InvitationRecord): Promise<void> {
     this.db
       .prepare(
         `INSERT INTO invitations
-           (id, organization_id, email, role, secret_hash, invited_by,
-            created_at, expires_at, accepted_at, accepted_by, revoked_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+           (id, organization_id, repository_id, email, role, secret_hash,
+            invited_by, created_at, expires_at, accepted_at, accepted_by,
+            revoked_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
       )
       .run(
         invitation.id,
         invitation.organizationId,
+        invitation.repositoryId ?? null,
         invitation.email,
         invitation.role,
         invitation.secretHash,
@@ -1234,6 +1297,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
     return {
       id: text(row, "id"),
       organizationId: text(row, "organization_id"),
+      repositoryId: optionalText(row, "repository_id"),
       email: text(row, "email"),
       role: text(row, "role") as InvitationRecord["role"],
       secretHash: text(row, "secret_hash"),

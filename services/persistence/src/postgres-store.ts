@@ -80,6 +80,7 @@ import type {
   TokenUsageRecord,
   SubmittedTaskStatus,
   InvitationRecord,
+  RepositoryGrant,
   UserAccount,
   UserAppearance,
   LeaseTaskInput,
@@ -1211,15 +1212,75 @@ export class PostgresCoordinationStore implements CoordinationStore {
 
   /* ------------------------------------------------------- invitations ---- */
 
+
+  /* -------------------------------------------------- repository grants ---- */
+
+  public async saveRepositoryGrant(grant: RepositoryGrant): Promise<void> {
+    await this.query(
+      `INSERT INTO repository_grants
+         (repository_id, user_id, role, granted_by, created_at)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (repository_id, user_id)
+       DO UPDATE SET role = EXCLUDED.role`,
+      [
+        grant.repositoryId,
+        grant.userId,
+        grant.role,
+        grant.grantedBy ?? null,
+        grant.createdAt,
+      ],
+    );
+  }
+
+  public async removeRepositoryGrant(
+    repositoryId: string,
+    userId: string,
+  ): Promise<void> {
+    await this.query(
+      "DELETE FROM repository_grants WHERE repository_id = $1 AND user_id = $2",
+      [repositoryId, userId],
+    );
+  }
+
+  public async listRepositoryGrants(
+    repositoryId: string,
+  ): Promise<RepositoryGrant[]> {
+    const rows = await this.rows(
+      "SELECT * FROM repository_grants WHERE repository_id = $1 ORDER BY created_at",
+      [repositoryId],
+    );
+    return rows.map((row) => this.toGrant(row));
+  }
+
+  public async listGrantsForUser(userId: string): Promise<RepositoryGrant[]> {
+    const rows = await this.rows(
+      "SELECT * FROM repository_grants WHERE user_id = $1",
+      [userId],
+    );
+    return rows.map((row) => this.toGrant(row));
+  }
+
+  private toGrant(row: Row): RepositoryGrant {
+    return {
+      repositoryId: text(row, "repository_id"),
+      userId: text(row, "user_id"),
+      role: text(row, "role") as RepositoryGrant["role"],
+      grantedBy: optionalText(row, "granted_by"),
+      createdAt: text(row, "created_at"),
+    };
+  }
+
   public async createInvitation(invitation: InvitationRecord): Promise<void> {
     await this.query(
       `INSERT INTO invitations
-         (id, organization_id, email, role, secret_hash, invited_by,
-          created_at, expires_at, accepted_at, accepted_by, revoked_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL, NULL, NULL)`,
+         (id, organization_id, repository_id, email, role, secret_hash,
+          invited_by, created_at, expires_at, accepted_at, accepted_by,
+          revoked_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULL, NULL, NULL)`,
       [
         invitation.id,
         invitation.organizationId,
+        invitation.repositoryId ?? null,
         // Lowercased here because this schema has no case-insensitive collation
         // on the column, and an invitation must match the address regardless of
         // how the recipient types it.
@@ -1274,6 +1335,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     return {
       id: text(row, "id"),
       organizationId: text(row, "organization_id"),
+      repositoryId: optionalText(row, "repository_id"),
       email: text(row, "email"),
       role: text(row, "role") as InvitationRecord["role"],
       secretHash: text(row, "secret_hash"),

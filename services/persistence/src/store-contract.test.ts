@@ -2182,6 +2182,7 @@ for (const backend of backends) {
       await store.createInvitation({
         id: "inv_1",
         organizationId: DEFAULT_ORGANIZATION_ID,
+        repositoryId: undefined,
         email: "joiner@example.com",
         role: "developer",
         secretHash: "hash",
@@ -2237,6 +2238,7 @@ for (const backend of backends) {
       await store.createInvitation({
         id: "inv_2",
         organizationId: DEFAULT_ORGANIZATION_ID,
+        repositoryId: REPOSITORY.id,
         email: "late@example.com",
         role: "viewer",
         secretHash: "hash",
@@ -2252,6 +2254,47 @@ for (const backend of backends) {
         await store.acceptInvitation("inv_2", joiner.id, "2026-01-04T00:00:00.000Z"),
         false,
       );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a grant reaches one repository and no others`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "granted@example.com",
+        displayName: "Granted",
+        passwordDigest: "digest",
+      });
+      await store.saveRepositoryGrant({
+        repositoryId: "repo_shared",
+        userId: user.id,
+        role: "developer",
+        grantedBy: undefined,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+      const mine = await store.listGrantsForUser(user.id);
+      assert.equal(mine.length, 1);
+      assert.equal(mine[0]?.repositoryId, "repo_shared");
+      // Nothing about this grant says anything about any other repository.
+      assert.deepEqual(await store.listRepositoryGrants("repo_private"), []);
+
+      // Re-granting changes the role rather than duplicating the person.
+      await store.saveRepositoryGrant({
+        repositoryId: "repo_shared",
+        userId: user.id,
+        role: "reviewer",
+        grantedBy: undefined,
+        createdAt: "2026-01-02T00:00:00.000Z",
+      });
+      const after = await store.listRepositoryGrants("repo_shared");
+      assert.equal(after.length, 1);
+      assert.equal(after[0]?.role, "reviewer");
+
+      await store.removeRepositoryGrant("repo_shared", user.id);
+      assert.deepEqual(await store.listGrantsForUser(user.id), []);
     } finally {
       await store.close();
       await cleanup();
