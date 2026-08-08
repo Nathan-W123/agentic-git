@@ -1,0 +1,6426 @@
+{
+  "arm": "coordinated",
+  "label": "v2-coord-4",
+  "scenario": "team-queue-wired",
+  "bands": [
+    "deep",
+    "partial",
+    "independent"
+  ],
+  "workers": 5,
+  "env": {
+    "COORD_REPOSITORY_PARALLELISM": "default",
+    "COORD_AGENT_ADAPTER": "claude",
+    "COORD_AGENT_ARGS": "[\"--model\",\"opus\"]",
+    "COORD_AGENT_EFFORT": "high"
+  },
+  "startedAt": "2026-08-07T06:03:38.320Z",
+  "elapsedMs": 546884,
+  "wallClockMs": 546884,
+  "budgetExhausted": false,
+  "completionOrder": [
+    "task_fda88176-0ce5-4019-af32-15faa839edc3",
+    "task_c683a6c1-d94d-4260-ac71-468b2c1c9cff",
+    "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+    "task_c6c8e3c7-138a-4f23-97f2-4b0429a7a946",
+    "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+    "task_647e8e65-eded-41d3-92b4-1570232d73a1",
+    "task_2528fe53-d30c-409e-b605-9e17f1145859",
+    "task_1d20be09-4e77-433b-a49e-8a4ff7837146",
+    "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d"
+  ],
+  "metrics": {
+    "transportFailures": 0,
+    "transportRequeues": 0,
+    "tasksIntegrated": 9,
+    "tasksFailed": 1,
+    "tasksOutstanding": 0,
+    "tasksTotal": 10,
+    "leaseIterations": 28,
+    "acceptedIterations": 9,
+    "deferredIterations": 18,
+    "conflictsDetected": 13,
+    "partialAdmissions": 0,
+    "planTimeRequeues": 18,
+    "resultTimeRequeues": 0,
+    "replansTotal": 18,
+    "plansReused": 0,
+    "plansAmended": 14,
+    "integrationsPromoted": 9,
+    "validationRuns": 9,
+    "validationFailures": 0,
+    "observedTokensTotal": 0,
+    "observedTokensByPhase": {
+      "planning": 0,
+      "execution": 0
+    },
+    "codexInvocations": 0,
+    "codexInvocationsWithoutTokenLine": 0,
+    "controlPlaneTokensTotal": 0,
+    "reportedTokensTotal": 2741008,
+    "reportedTokensByPhase": {
+      "planning": 1258586,
+      "execution": 1482422
+    },
+    "reportedTokenRows": 23
+  },
+  "outcome": {
+    "kind": "coordinated",
+    "validation": {
+      "passed": true,
+      "output": "✔ audit records the actor and marks privileged actions (0.9379ms)\n✔ audit records the originating ip address (0.2717ms)\n✔ loyal customers are discounted and new ones are not (0.8192ms)\n✔ the loyalty threshold is more than twenty five orders (0.258ms)\n✔ loyal customers get fifteen percent off (0.119ms)\n✔ notifications use the account channel (1.9763ms)\n✔ exports keep id, name and status columns (1.1596ms)\n✔ exports include a createdAt column (0.2783ms)\n✔ rows without createdAt fall back to an empty value (0.151ms)\n✔ money renders with a currency symbol (1.0862ms)\n✔ rounding leaves a positive amount positive and never grows it much (0.5766ms)\n✔ search matches on name and rejects empty queries (2.9999ms)\n✔ search matches on email address (0.5138ms)\n✔ search tolerates accounts without an email (0.3179ms)\n✔ tax is charged on a standard order (0.9252ms)\n✔ an order mixing digital and physical lines is still taxed (0.1718ms)\n✔ an order whose lines are all digital is charged no tax (0.1107ms)\n✔ an order total is a positive number (1.5503ms)\n✔ a bigger basket costs more than a smaller one (0.1539ms)\n✔ every order carries the flat handling charge (0.1094ms)\n✔ handling is charged on top of a discounted basket (0.1063ms)\n✔ a card order costs five percent more than the same order paid another way (0.1771ms)\n✔ an order with no payment method or a non-card method is unchanged (0.1176ms)\n✔ the card surcharge applies on top of a discounted basket (0.1005ms)\n✔ webhook delivery reports the endpoint it used (1.2632ms)\n✔ webhook delivery calls the transport once when it succeeds (0.2171ms)\n✔ webhook delivery retries until the transport succeeds (0.1446ms)\n✔ webhook delivery gives up after the maximum number of attempts (0.1587ms)\nℹ tests 28\nℹ suites 0\nℹ pass 28\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 256.5768\n"
+    },
+    "survival": [
+      {
+        "taskId": "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+        "scenarioTaskId": "task_handling_fee",
+        "band": "deep",
+        "addedLines": 16,
+        "survivingLines": 11,
+        "survivalRatio": 0.6875,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": true
+      },
+      {
+        "taskId": "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+        "scenarioTaskId": "task_card_surcharge",
+        "band": "deep",
+        "addedLines": 21,
+        "survivingLines": 20,
+        "survivalRatio": 0.9523809523809523,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": true
+      },
+      {
+        "taskId": "task_fda88176-0ce5-4019-af32-15faa839edc3",
+        "scenarioTaskId": "task_loyalty_tier",
+        "band": "partial",
+        "addedLines": 7,
+        "survivingLines": 7,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_1d20be09-4e77-433b-a49e-8a4ff7837146",
+        "scenarioTaskId": "task_zero_rated_goods",
+        "band": "partial",
+        "addedLines": 18,
+        "survivingLines": 18,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+        "scenarioTaskId": "task_rounding",
+        "band": "partial",
+        "addedLines": 4,
+        "survivingLines": 4,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_c683a6c1-d94d-4260-ac71-468b2c1c9cff",
+        "scenarioTaskId": "task_webhook_retry",
+        "band": "independent",
+        "addedLines": 29,
+        "survivingLines": 29,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_647e8e65-eded-41d3-92b4-1570232d73a1",
+        "scenarioTaskId": "task_audit_ip",
+        "band": "independent",
+        "addedLines": 5,
+        "survivingLines": 5,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_2528fe53-d30c-409e-b605-9e17f1145859",
+        "scenarioTaskId": "task_export_created_at",
+        "band": "independent",
+        "addedLines": 11,
+        "survivingLines": 11,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_c6c8e3c7-138a-4f23-97f2-4b0429a7a946",
+        "scenarioTaskId": "task_search_email",
+        "band": "independent",
+        "addedLines": 15,
+        "survivingLines": 15,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      }
+    ],
+    "behaviouralSurvival": [
+      {
+        "scenarioTaskId": "task_handling_fee",
+        "judged": true,
+        "testFiles": [
+          "test/total.test.js"
+        ],
+        "passed": false,
+        "output": "✔ an order total is a positive number (0.9836ms)\n✔ a bigger basket costs more than a smaller one (2.4486ms)\n✔ every order carries the flat handling charge (0.5381ms)\n✖ handling is charged on top of a discounted basket (1.3584ms)\nℹ tests 4\nℹ suites 0\nℹ pass 3\nℹ fail 1\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 140.5087\n\n✖ failing tests:\n\ntest at test\\total.test.js:31:1\n✖ handling is charged on top of a discounted basket (1.3584ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  46.8 !== 47\n  \n      at TestContext.<anonymous> (file:///C:/Users/nward/AppData/Local/Temp/coord-team-YTYNJz/probe-task_handling_fee/test/total.test.js:34:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1325:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)\n      at Test.postRun (node:internal/test_runner/test:1465:19)\n      at Test.run (node:internal/test_runner/test:1390:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 46.8,\n    expected: 47,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n"
+      },
+      {
+        "scenarioTaskId": "task_free_delivery",
+        "judged": false,
+        "reason": "no promoted commit for this task in the final tree"
+      },
+      {
+        "scenarioTaskId": "task_card_surcharge",
+        "judged": true,
+        "testFiles": [
+          "test/total.test.js"
+        ],
+        "passed": false,
+        "output": "Temp/coord-team-YTYNJz/probe-task_card_surcharge/test/total.test.js:39:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1325:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)\n      at Test.postRun (node:internal/test_runner/test:1465:19)\n      at Test.run (node:internal/test_runner/test:1390:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 56.7,\n    expected: 57,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n\ntest at test\\total.test.js:48:1\n✖ the card surcharge applies on top of a discounted basket (0.2184ms)\n  AssertionError [ERR_ASSERTION]: Expected values to be strictly equal:\n  \n  49.14 !== 49\n  \n      at TestContext.<anonymous> (file:///C:/Users/nward/AppData/Local/Temp/coord-team-YTYNJz/probe-task_card_surcharge/test/total.test.js:50:10)\n      at Test.runInAsyncScope (node:async_hooks:227:14)\n      at Test.run (node:internal/test_runner/test:1325:25)\n      at Test.processPendingSubtests (node:internal/test_runner/test:911:18)\n      at Test.postRun (node:internal/test_runner/test:1465:19)\n      at Test.run (node:internal/test_runner/test:1390:12)\n      at async Test.processPendingSubtests (node:internal/test_runner/test:911:7) {\n    generatedMessage: true,\n    code: 'ERR_ASSERTION',\n    actual: 49.14,\n    expected: 49,\n    operator: 'strictEqual',\n    diff: 'simple'\n  }\n"
+      },
+      {
+        "scenarioTaskId": "task_loyalty_tier",
+        "judged": true,
+        "testFiles": [
+          "test/discount.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_zero_rated_goods",
+        "judged": true,
+        "testFiles": [
+          "test/tax.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_rounding",
+        "judged": true,
+        "testFiles": [
+          "test/total.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_webhook_retry",
+        "judged": true,
+        "testFiles": [
+          "test/webhook.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_audit_ip",
+        "judged": true,
+        "testFiles": [
+          "test/audit.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_export_created_at",
+        "judged": true,
+        "testFiles": [
+          "test/export.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_search_email",
+        "judged": true,
+        "testFiles": [
+          "test/search.test.js"
+        ],
+        "passed": true
+      }
+    ],
+    "lostWork": {
+      "tasksWithChangesets": 9,
+      "tasksWhollyOverwritten": 0,
+      "tasksPartiallyOverwritten": 2,
+      "tasksLosingWork": 2,
+      "lostTaskRate": 0.2222222222222222,
+      "tasksLosingWorkIds": [
+        "task_card_surcharge",
+        "task_handling_fee"
+      ],
+      "behaviouralJudged": 9,
+      "behaviouralLost": 2,
+      "behaviouralLostRate": 0.2222222222222222,
+      "behaviouralLostIds": [
+        "task_card_surcharge",
+        "task_handling_fee"
+      ]
+    }
+  },
+  "plans": [
+    {
+      "runId": "run_a06a0bcf-2762-4af2-929b-1fa783e89598",
+      "taskId": "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+      "scenarioTaskId": "task_rounding",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T06:12:41.959Z",
+      "plan": {
+        "taskId": "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+        "objective": "Round every amount a customer is shown to whole pence so totals never display long decimals",
+        "expectedFiles": [
+          "src/format/money.js",
+          "test/money.test.js",
+          "test/total.test.js"
+        ],
+        "expectedSymbols": [
+          "CARD_SURCHARGE",
+          "HANDLING",
+          "PLACES",
+          "formatMoney",
+          "orderTotal",
+          "roundMoney"
+        ],
+        "expectedApis": [
+          "formatMoney(amount)",
+          "roundMoney(amount)"
+        ],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "a card order costs five percent more than the same order paid another way",
+          "an order with no payment method or a non-card method is unchanged",
+          "every order carries the flat handling charge",
+          "handling is charged on top of a discounted basket",
+          "test/money.test.js",
+          "test/total.test.js",
+          "the card surcharge applies on top of a discounted basket"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Unchanged in substance from the previous plan: flip the customer-facing rounding precision in src/format/money.js from whole pounds (PLACES = 0) to whole pence (PLACES = 2) so roundMoney keeps two decimal places and formatMoney/orderTotal stop truncating to pounds or emitting long decimals; no new module, API, or config is added and no behavior is removed. src/pricing/total.js still needs no edit: the 5% CARD_SURCHARGE is applied inside orderTotal before the single roundMoney call, so it flows through the same rounding path as the flat HANDLING charge. test/total.test.js cases written under PLACES = 0 must be re-derived for pence precision: 'handling is charged on top of a discounted basket' ((34 + 3 + 2) * 1.2) asserted as 47 becomes 46.8; 'a card order costs five percent more than the same order paid another way' (54 * 1.05) asserted as 57 becomes 56.7 (its greater-than comparison still holds); 'the card surcharge applies on top of a discounted basket' (46.8 * 1.05) asserted as 49 becomes 49.14. The whole-pound cases (6, 54, and the cash/no-payment case) stay exact, as do the order-independent 'positive number' and 'bigger basket' assertions. Amendment for canonical sequence 9 (b18d934): it touched only src/pricing/tax.js and test/tax.test.js — a STANDARD_RATE/isDigitalOnly digital-goods tax exemption in taxFor — neither of which this plan claims, edits, or shares symbols with, so no claimed file assumption changes and nothing becomes stale. One thing for the implementer to check while running the suite: if taxFor (or its tests) routes amounts through roundMoney/formatMoney, the three tax assertions ('tax is charged on a standard order', 'an order whose lines are all digital is charged no tax', 'an order mixing digital and physical lines is still taxed') may shift from whole-pound to pence values and should be re-derived the same way as the total.test.js cases; the zero-tax digital-only case is unaffected either way. Earlier advances (sequences 7-8: audit originating-IP in src/audit/log.js, CSV createdAt in src/export/csv.js) likewise remain outside scope, and README.md documents only the surcharge and CSV column so it stays out of scope."
+      }
+    },
+    {
+      "runId": "run_c5651a81-7a7f-46c6-abca-b1268f7f4e24",
+      "taskId": "task_1d20be09-4e77-433b-a49e-8a4ff7837146",
+      "scenarioTaskId": "task_zero_rated_goods",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T06:10:26.370Z",
+      "plan": {
+        "taskId": "task_1d20be09-4e77-433b-a49e-8a4ff7837146",
+        "objective": "Orders that contain only digital goods should not be charged tax",
+        "expectedFiles": [
+          "src/pricing/tax.js",
+          "test/tax.test.js"
+        ],
+        "expectedSymbols": [
+          "CARD_SURCHARGE (in src/pricing/total.js, unchanged; surcharge is applied after tax so a digital-only card order pays 1.05 x the untaxed total)",
+          "STANDARD_RATE",
+          "isDigitalOnly (new local helper in src/pricing/tax.js)",
+          "line.digital (new order line field convention)",
+          "order",
+          "orderTotal (caller in src/pricing/total.js, unchanged)",
+          "taxFor"
+        ],
+        "expectedApis": [
+          "taxFor(amount, order) — same signature; the previously ignored `order` argument (currently `void order;`) becomes meaningful and returns 0 for digital-only orders"
+        ],
+        "expectedSchemas": [
+          "Order line object gains an optional boolean `digital` flag: { price, quantity, digital? }"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "tax is charged on a standard order",
+          "test/tax.test.js",
+          "test/tax.test.js — existing: tax is charged on a standard order",
+          "test/tax.test.js — new: an order mixing digital and physical lines is still taxed",
+          "test/tax.test.js — new: an order whose lines are all digital is charged no tax",
+          "test/total.test.js — existing regression guard: 'every order carries the flat handling charge' asserts orderTotal with lines: [] equals 6, so an empty line list must NOT be treated as digital-only",
+          "test/total.test.js — existing regression guards for the new card surcharge ('a card order costs five percent more than the same order paid another way' = 57, 'the card surcharge applies on top of a discounted basket' = 49, 'an order with no payment method or a non-card method is unchanged' = 54) must still pass unchanged, since none of those fixtures set line.digital"
+        ],
+        "expectedServices": [],
+        "dependencies": [
+          "../src/pricing/tax.js",
+          "file:src/pricing/tax.js",
+          "node:assert/strict",
+          "node:test",
+          "symbol:taxFor",
+          "symbol:test"
+        ],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "medium",
+        "intent": "Add a conditional tax exemption: change taxFor in src/pricing/tax.js so it inspects the order it already receives and returns zero tax when the order has at least one line and every line is flagged digital; all other orders (including empty-line and mixed digital/physical orders) keep the existing 20% standard rate. src/pricing/total.js is not modified. The canonical advance (sequence 6, 35be7a7) added a 5% CARD_SURCHARGE in src/pricing/total.js applied after tax, plus new total.test.js cases; orderTotal still calls taxFor(withCharges, order) on the same line, so the plan's only claimed touchpoint there is intact. The surcharge composes with the exemption without extra work — a digital-only card order simply pays 1.05 x the untaxed (lines + delivery + handling) amount — and the empty-lines guard still expects 6, confirming empty orders stay taxed. No file assumptions are stale; the plan is unchanged apart from recording the new total.test.js surcharge cases as regression guards.",
+        "grounding": {
+          "confidence": "grounded",
+          "revision": "35be7a75076f777d0ce2010525d37a9397299ce2",
+          "missingFiles": [],
+          "unresolvedSymbols": [
+            "CARD_SURCHARGE (in src/pricing/total.js, unchanged; surcharge is applied after tax so a digital-only card order pays 1.05 x the untaxed total)",
+            "isDigitalOnly (new local helper in src/pricing/tax.js)",
+            "line.digital (new order line field convention)",
+            "orderTotal (caller in src/pricing/total.js, unchanged)"
+          ],
+          "fileReferents": [],
+          "symbolReferents": [],
+          "notes": [
+            "declared symbol CARD_SURCHARGE (in src/pricing/total.js, unchanged; surcharge is applied after tax so a digital-only card order pays 1.05 x the untaxed total) does not resolve at 35be7a75076f777d0ce2010525d37a9397299ce2 and matches nothing; treated as a new symbol",
+            "declared symbol isDigitalOnly (new local helper in src/pricing/tax.js) does not resolve at 35be7a75076f777d0ce2010525d37a9397299ce2 and matches nothing; treated as a new symbol",
+            "declared symbol line.digital (new order line field convention) does not resolve at 35be7a75076f777d0ce2010525d37a9397299ce2 and matches nothing; treated as a new symbol",
+            "declared symbol orderTotal (caller in src/pricing/total.js, unchanged) does not resolve at 35be7a75076f777d0ce2010525d37a9397299ce2 and matches nothing; treated as a new symbol"
+          ]
+        }
+      }
+    },
+    {
+      "runId": "run_09bd3c2f-6e08-4770-be51-3cbb24ddb534",
+      "taskId": "task_2528fe53-d30c-409e-b605-9e17f1145859",
+      "scenarioTaskId": "task_export_created_at",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T06:10:09.079Z",
+      "plan": {
+        "taskId": "task_2528fe53-d30c-409e-b605-9e17f1145859",
+        "objective": "Add a created-at column to the CSV export",
+        "expectedFiles": [
+          "src/export/csv.js",
+          "test/export.test.js"
+        ],
+        "expectedSymbols": [
+          "COLUMNS",
+          "exportColumns",
+          "toCsv"
+        ],
+        "expectedApis": [
+          "exportColumns()",
+          "toCsv(rows)"
+        ],
+        "expectedSchemas": [
+          "CSV export header row: id,name,status,createdAt",
+          "export row object shape: { id, name, status, createdAt }"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/export.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [
+          "node:assert/strict",
+          "node:test"
+        ],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Unchanged from the previous plan: the canonical advance touched only README.md, src/pricing/total.js, and test/total.test.js (card surcharge / handling charge work), none of which this plan claims or depends on. Adding behavior: append a new \"createdAt\" column to the COLUMNS list in src/export/csv.js so exportColumns() returns it and toCsv() emits it in both the header and every body row (missing values fall back to the existing \"\" default), plus extend test/export.test.js to cover the new column while keeping the existing id/name/status assertions. No columns are removed or reordered, no other module is touched, and no flags or configuration are introduced. Note that `node --test` now also runs the updated pricing tests, which must stay green but require no changes from this task."
+      }
+    },
+    {
+      "runId": "run_b14b1d27-183e-4513-980b-ece71da2f349",
+      "taskId": "task_647e8e65-eded-41d3-92b4-1570232d73a1",
+      "scenarioTaskId": "task_audit_ip",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T06:10:04.627Z",
+      "plan": {
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "dependencies": [
+          "../src/audit/log.js",
+          "file:src/audit/log.js",
+          "node:assert/strict",
+          "node:test",
+          "symbol:auditEntry",
+          "symbol:isPrivileged",
+          "symbol:test"
+        ],
+        "expectedApis": [
+          "auditEntry(actor, action, subject, ip)"
+        ],
+        "expectedConfigKeys": [],
+        "expectedFiles": [
+          "src/audit/log.js",
+          "test/audit.test.js"
+        ],
+        "expectedSchemas": [
+          "audit entry object: { actor, action, subject, ip }"
+        ],
+        "expectedServices": [
+          "accounts-service audit module (src/audit)"
+        ],
+        "expectedSymbols": [
+          "auditEntry",
+          "isPrivileged"
+        ],
+        "expectedTests": [
+          "audit records the actor and marks privileged actions",
+          "test/audit.test.js"
+        ],
+        "externalAccess": [],
+        "intent": "Unchanged from the previous plan. The canonical advance (sequence 6, 35be7a7) touched only README.md, src/pricing/total.js and test/total.test.js — the card-payment surcharge on order totals — none of which this plan claimed, so no file assumptions are stale and no dependencies shifted. The work remains additive and confined to the audit module: extend auditEntry to accept an originating IP address and record it as a new `ip` field on the returned audit entry object, with coverage added in test/audit.test.js. No existing fields or behavior are removed or altered; isPrivileged is unchanged, and pricing (including the new handling charge and card surcharge), notify, export and search stay untouched.",
+        "objective": "Record the originating IP address on every audit entry",
+        "riskLevel": "low",
+        "taskId": "task_647e8e65-eded-41d3-92b4-1570232d73a1",
+        "grounding": {
+          "confidence": "verified",
+          "revision": "35be7a75076f777d0ce2010525d37a9397299ce2",
+          "missingFiles": [],
+          "unresolvedSymbols": [],
+          "fileReferents": [],
+          "symbolReferents": [],
+          "notes": []
+        }
+      }
+    },
+    {
+      "runId": "run_4b94e970-6ce2-496a-a8a2-f8346a381861",
+      "taskId": "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+      "scenarioTaskId": "task_card_surcharge",
+      "band": "deep",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T06:08:51.450Z",
+      "plan": {
+        "taskId": "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+        "objective": "Orders paid by card should cost an extra five percent on top of what the customer would otherwise pay",
+        "expectedFiles": [
+          "README.md",
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ],
+        "expectedSymbols": [
+          "CARD_SURCHARGE",
+          "DELIVERY",
+          "HANDLING",
+          "discountRate",
+          "discounted",
+          "large",
+          "lines",
+          "order",
+          "orderTotal",
+          "roundMoney",
+          "small",
+          "taxFor",
+          "total",
+          "withCharges"
+        ],
+        "expectedApis": [
+          "orderTotal(order) — reads a new optional order.payment field; returns a 5% higher total when order.payment === \"card\""
+        ],
+        "expectedSchemas": [
+          "order object gains an optional `payment` property (string, e.g. \"card\"); absent or non-card values leave the total unchanged"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "a bigger basket costs more than a smaller one",
+          "an order total is a positive number",
+          "every order carries the flat handling charge",
+          "handling is charged on top of a discounted basket",
+          "test/total.test.js",
+          "test/total.test.js — a card order costs five percent more than the same order paid another way",
+          "test/total.test.js — an order with no payment method or a non-card method is unchanged",
+          "test/total.test.js — the card surcharge applies on top of a discounted basket"
+        ],
+        "expectedServices": [
+          "accounts-service (pricing module)"
+        ],
+        "dependencies": [
+          "../format/money.js",
+          "../src/pricing/total.js",
+          "./discount.js",
+          "./tax.js",
+          "file:src/format/money.js",
+          "file:src/pricing/discount.js",
+          "file:src/pricing/tax.js",
+          "file:src/pricing/total.js",
+          "node:assert/strict",
+          "node:test",
+          "symbol:discountRate",
+          "symbol:order",
+          "symbol:orderTotal",
+          "symbol:roundMoney",
+          "symbol:taxFor",
+          "symbol:test"
+        ],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add a new five percent card-payment surcharge applied to the final payable amount in orderTotal (after discount, delivery, handling and tax, before rounding), enabled only when order.payment === \"card\"; orders with no payment method or a non-card method keep their current total, so no existing behavior is removed or disabled.",
+        "grounding": {
+          "confidence": "grounded",
+          "revision": "7c15455dbdd5db95be0fddcd84b4767cc368a113",
+          "missingFiles": [],
+          "unresolvedSymbols": [
+            "CARD_SURCHARGE"
+          ],
+          "fileReferents": [],
+          "symbolReferents": [],
+          "notes": [
+            "declared symbol CARD_SURCHARGE does not resolve at 7c15455dbdd5db95be0fddcd84b4767cc368a113 and matches nothing; treated as a new symbol"
+          ]
+        }
+      }
+    },
+    {
+      "runId": "run_be048aa6-4d92-4357-b578-f2bb32136d4d",
+      "taskId": "task_c6c8e3c7-138a-4f23-97f2-4b0429a7a946",
+      "scenarioTaskId": "task_search_email",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T06:08:09.352Z",
+      "plan": {
+        "taskId": "task_c6c8e3c7-138a-4f23-97f2-4b0429a7a946",
+        "objective": "Make account search match on email address as well as name",
+        "expectedFiles": [
+          "src/search/accounts.js",
+          "test/search.test.js"
+        ],
+        "expectedSymbols": [
+          "searchAccounts"
+        ],
+        "expectedApis": [
+          "searchAccounts(accounts, query)"
+        ],
+        "expectedSchemas": [
+          "account object shape: { name: string, email?: string }"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/search.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add email-address matching to the existing case-insensitive substring account search in searchAccounts, so an account matches when the trimmed lowercased query is a substring of either its name or its email; preserve current behavior of returning an empty array for blank queries, tolerate accounts missing an email field, and extend test/search.test.js with email-match coverage. No behavior is removed or disabled."
+      }
+    },
+    {
+      "runId": "run_ae394633-1ae9-4b14-81cc-2e6f6bad2554",
+      "taskId": "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+      "scenarioTaskId": "task_handling_fee",
+      "band": "deep",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T06:06:28.281Z",
+      "plan": {
+        "taskId": "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+        "objective": "Add a flat two pound handling charge to every order's total",
+        "expectedFiles": [
+          "README.md",
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ],
+        "expectedSymbols": [
+          "DELIVERY",
+          "HANDLING",
+          "discountRate",
+          "orderTotal",
+          "roundMoney",
+          "taxFor"
+        ],
+        "expectedApis": [
+          "orderTotal(order)"
+        ],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/total.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [
+          "src/pricing/discount.js (discountRate consumed by orderTotal; read-only for this task)"
+        ],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add behavior: introduce a new flat £2 handling charge constant in src/pricing/total.js and include it in every order total (added to the discounted line subtotal alongside the existing £3 delivery charge, before tax is applied and before rounding), plus a test in test/total.test.js asserting the charge is present. No existing charge is removed or disabled. Amendment: canonical moved to 2b23369, which changed the loyalty discount in src/pricing/discount.js (LOYAL_ORDERS, LOYAL_RATE, discountRate) to 15% off for customers with more than twenty five orders. src/pricing/total.js and test/total.test.js were not touched, so the plan stands unchanged in scope — but any expected totals written in test/total.test.js must be computed with the current loyalty rule (15% above the >25-order threshold), not the previous 10%. Do not modify src/pricing/discount.js or test/discount.test.js."
+      }
+    },
+    {
+      "runId": "run_628a7b0d-87ab-4767-a7a7-22630f844ab4",
+      "taskId": "task_c683a6c1-d94d-4260-ac71-468b2c1c9cff",
+      "scenarioTaskId": "task_webhook_retry",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T06:06:22.627Z",
+      "plan": {
+        "taskId": "task_c683a6c1-d94d-4260-ac71-468b2c1c9cff",
+        "objective": "Retry webhook delivery up to three times when the transport reports a failure",
+        "expectedFiles": [
+          "src/notify/webhook.js",
+          "test/webhook.test.js"
+        ],
+        "expectedSymbols": [
+          "MAX_ATTEMPTS",
+          "deliver",
+          "response",
+          "result"
+        ],
+        "expectedApis": [
+          "deliver(subscriber, event, transport) -> { url, delivered, attempts }"
+        ],
+        "expectedSchemas": [
+          "webhook delivery result object: { url: string, delivered: boolean, attempts: number }"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/webhook.test.js",
+          "webhook delivery reports the endpoint it used"
+        ],
+        "expectedServices": [],
+        "dependencies": [
+          "../src/notify/webhook.js",
+          "file:src/notify/webhook.js",
+          "node:assert/strict",
+          "node:test",
+          "symbol:deliver",
+          "symbol:test",
+          "symbol:transport"
+        ],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add retry behavior to the existing webhook deliver() in src/notify/webhook.js: when the transport returns a non-ok response it is re-invoked, up to a maximum of three total attempts, returning as soon as one succeeds; the result gains an attempts count while url and delivered keep their current meaning. No existing behavior is removed or disabled and the single-success path stays a single transport call. Scope is confined to src/notify/webhook.js and new cases in test/webhook.test.js (retry-then-succeed, exhausted failures, attempt counting); no other module, config key, or dependency is touched. Assumption stated explicitly: \"up to three times\" is implemented as three attempts in total (initial call plus two retries) via a MAX_ATTEMPTS constant, so a caller can adjust it in one place if four attempts were intended.",
+        "grounding": {
+          "confidence": "grounded",
+          "revision": "2b2336957305041583d0d1c29a24ff92a5c1226d",
+          "missingFiles": [],
+          "unresolvedSymbols": [
+            "MAX_ATTEMPTS"
+          ],
+          "fileReferents": [],
+          "symbolReferents": [],
+          "notes": [
+            "declared symbol MAX_ATTEMPTS does not resolve at 2b2336957305041583d0d1c29a24ff92a5c1226d and matches nothing; treated as a new symbol"
+          ]
+        }
+      }
+    },
+    {
+      "runId": "run_ec6cd29f-29ff-402a-839f-c582b12be815",
+      "taskId": "task_fda88176-0ce5-4019-af32-15faa839edc3",
+      "scenarioTaskId": "task_loyalty_tier",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T06:04:51.533Z",
+      "plan": {
+        "taskId": "task_fda88176-0ce5-4019-af32-15faa839edc3",
+        "objective": "Customers who have placed more than twenty five orders should get fifteen percent off instead of ten",
+        "expectedFiles": [
+          "src/pricing/discount.js",
+          "test/discount.test.js"
+        ],
+        "expectedSymbols": [
+          "LOYAL_ORDERS",
+          "LOYAL_RATE",
+          "discountRate"
+        ],
+        "expectedApis": [
+          "discountRate(customer)"
+        ],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/discount.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Modify existing loyalty discount behavior in src/pricing/discount.js: raise the qualifying threshold constant LOYAL_ORDERS from 10 to 25 (still strictly greater-than) and raise LOYAL_RATE from 0.1 to 0.15, so only customers with more than 25 orders receive a discount and it is 15% instead of 10%. Customers with 25 or fewer orders, and undefined customers, continue to receive 0. No behavior is added, removed, enabled, or disabled; only the constants change. test/discount.test.js is updated to assert the new threshold boundary (25 -> 0, 26 -> 0.15) and the exact rate. src/pricing/total.js consumes discountRate unchanged and needs no edit; test/total.test.js uses orders: 3 and stays unaffected."
+      }
+    }
+  ],
+  "assessments": [
+    {
+      "taskId": "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+      "taskIds": [
+        "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+        "task_fda88176-0ce5-4019-af32-15faa839edc3"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 50
+        },
+        {
+          "kind": "intent_conflict",
+          "resources": [
+            "src/pricing/total.js#orderTotal -> src/pricing/discount.js#discountRate"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 20,
+          "advisory": true,
+          "explanation": "grounded symbols are linked by src/pricing/total.js#orderTotal -> src/pricing/discount.js#discountRate; shared intent terms: boundary, check/stay, discount, extend/continue, order, price, src, still, threshold, total, untouched/unaffected (grounded at 02d5302dad4475df7743cb6a9d12927534824eae; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)"
+        }
+      ]
+    },
+    {
+      "taskId": "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+      "taskIds": [
+        "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+        "task_fda88176-0ce5-4019-af32-15faa839edc3"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 50
+        },
+        {
+          "kind": "intent_conflict",
+          "resources": [
+            "src/pricing/total.js#orderTotal -> src/pricing/discount.js#discountRate"
+          ],
+          "taskIds": [
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 20,
+          "advisory": true,
+          "explanation": "grounded symbols are linked by src/pricing/total.js#orderTotal -> src/pricing/discount.js#discountRate; shared intent terms: assert, constant, disable, discount, order, price, remove, src, total (grounded at 02d5302dad4475df7743cb6a9d12927534824eae; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)"
+        }
+      ]
+    },
+    {
+      "taskId": "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+      "taskIds": [
+        "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+        "task_fda88176-0ce5-4019-af32-15faa839edc3"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 50
+        },
+        {
+          "kind": "intent_conflict",
+          "resources": [
+            "src/pricing/total.js#orderTotal -> src/pricing/discount.js#discountRate"
+          ],
+          "taskIds": [
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 23,
+          "advisory": true,
+          "explanation": "grounded symbols are linked by src/pricing/total.js#orderTotal -> src/pricing/discount.js#discountRate; shared intent terms: amount/total, cost/price, disable, discount, more, order, price, remove, src, total; opposing terms (less/more) (grounded at 02d5302dad4475df7743cb6a9d12927534824eae; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)"
+        }
+      ]
+    },
+    {
+      "taskId": "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+      "taskIds": [
+        "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+        "task_fda88176-0ce5-4019-af32-15faa839edc3"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 50
+        },
+        {
+          "kind": "intent_conflict",
+          "resources": [
+            "src/pricing/total.js#orderTotal -> src/pricing/discount.js#discountRate"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 20,
+          "advisory": true,
+          "explanation": "grounded symbols are linked by src/pricing/total.js#orderTotal -> src/pricing/discount.js#discountRate; shared intent terms: boundary, check/stay, discount, extend/continue, order, price, src, still, threshold, total, untouched/unaffected (grounded at 02d5302dad4475df7743cb6a9d12927534824eae; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)"
+        }
+      ]
+    },
+    {
+      "taskId": "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+      "taskIds": [
+        "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+        "task_fda88176-0ce5-4019-af32-15faa839edc3"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 50
+        },
+        {
+          "kind": "intent_conflict",
+          "resources": [
+            "src/pricing/total.js#orderTotal -> src/pricing/discount.js#discountRate"
+          ],
+          "taskIds": [
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 20,
+          "advisory": true,
+          "explanation": "grounded symbols are linked by src/pricing/total.js#orderTotal -> src/pricing/discount.js#discountRate; shared intent terms: assert, constant, disable, discount, order, price, remove, src, total (grounded at 02d5302dad4475df7743cb6a9d12927534824eae; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)"
+        }
+      ]
+    },
+    {
+      "taskId": "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+      "taskIds": [
+        "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+        "task_fda88176-0ce5-4019-af32-15faa839edc3"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 50
+        },
+        {
+          "kind": "intent_conflict",
+          "resources": [
+            "src/pricing/total.js#orderTotal -> src/pricing/discount.js#discountRate"
+          ],
+          "taskIds": [
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+            "task_fda88176-0ce5-4019-af32-15faa839edc3"
+          ],
+          "score": 23,
+          "advisory": true,
+          "explanation": "grounded symbols are linked by src/pricing/total.js#orderTotal -> src/pricing/discount.js#discountRate; shared intent terms: amount/total, cost/price, disable, discount, more, order, price, remove, src, total; opposing terms (less/more) (grounded at 02d5302dad4475df7743cb6a9d12927534824eae; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)"
+        }
+      ]
+    },
+    {
+      "taskId": "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+      "taskIds": [
+        "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+        "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "roundMoney",
+            "small",
+            "taxFor",
+            "total",
+            "withDelivery"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 385
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "api_overlap",
+          "resources": [
+            "orderTotal(order)"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 30
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 30
+        }
+      ]
+    },
+    {
+      "taskId": "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+      "taskIds": [
+        "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+        "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "roundMoney",
+            "small",
+            "taxFor",
+            "total",
+            "withDelivery"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 385
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "api_overlap",
+          "resources": [
+            "orderTotal(order)"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 30
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 30
+        }
+      ]
+    },
+    {
+      "taskId": "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+      "taskIds": [
+        "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+        "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "roundMoney",
+            "small",
+            "taxFor",
+            "total",
+            "withDelivery"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 385
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "api_overlap",
+          "resources": [
+            "orderTotal(order)"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 30
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 30
+        }
+      ]
+    },
+    {
+      "taskId": "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+      "taskIds": [
+        "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+        "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "roundMoney",
+            "small",
+            "total",
+            "withDelivery"
+          ],
+          "taskIds": [
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 350
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "api_overlap",
+          "resources": [
+            "orderTotal(order)"
+          ],
+          "taskIds": [
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 30
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 30
+        }
+      ]
+    },
+    {
+      "taskId": "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+      "taskIds": [
+        "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+        "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "roundMoney",
+            "small",
+            "taxFor",
+            "total",
+            "withDelivery"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 385
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "api_overlap",
+          "resources": [
+            "orderTotal(order)"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 30
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+            "task_a656956c-4428-4664-9846-e0f730e8ebb1"
+          ],
+          "score": 30
+        }
+      ]
+    },
+    {
+      "taskId": "task_1d20be09-4e77-433b-a49e-8a4ff7837146",
+      "taskIds": [
+        "task_1d20be09-4e77-433b-a49e-8a4ff7837146",
+        "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "order",
+            "taxFor"
+          ],
+          "taskIds": [
+            "task_1d20be09-4e77-433b-a49e-8a4ff7837146",
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72"
+          ],
+          "score": 70
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/tax.js",
+            "symbol:order",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_1d20be09-4e77-433b-a49e-8a4ff7837146",
+            "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72"
+          ],
+          "score": 75
+        }
+      ]
+    },
+    {
+      "taskId": "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+      "taskIds": [
+        "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+        "task_1d20be09-4e77-433b-a49e-8a4ff7837146"
+      ],
+      "score": 60,
+      "disposition": "sequence",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "order"
+          ],
+          "taskIds": [
+            "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+            "task_1d20be09-4e77-433b-a49e-8a4ff7837146"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "symbol:order"
+          ],
+          "taskIds": [
+            "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+            "task_1d20be09-4e77-433b-a49e-8a4ff7837146"
+          ],
+          "score": 25
+        }
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+      "scenarioTaskId": "task_handling_fee",
+      "status": "integrated",
+      "agentId": "codex-a",
+      "band": "deep",
+      "objective": "Add a flat two pound handling charge to every order's total"
+    },
+    {
+      "id": "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+      "scenarioTaskId": "task_free_delivery",
+      "status": "failed",
+      "agentId": "codex-b",
+      "band": "deep",
+      "objective": "Orders of one hundred pounds or more should not be charged for delivery, and every other order should be charged three pounds"
+    },
+    {
+      "id": "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+      "scenarioTaskId": "task_card_surcharge",
+      "status": "integrated",
+      "agentId": "codex-c",
+      "band": "deep",
+      "objective": "Orders paid by card should cost an extra five percent on top of what the customer would otherwise pay"
+    },
+    {
+      "id": "task_fda88176-0ce5-4019-af32-15faa839edc3",
+      "scenarioTaskId": "task_loyalty_tier",
+      "status": "integrated",
+      "agentId": "codex-d",
+      "band": "partial",
+      "objective": "Customers who have placed more than twenty five orders should get fifteen percent off instead of ten"
+    },
+    {
+      "id": "task_1d20be09-4e77-433b-a49e-8a4ff7837146",
+      "scenarioTaskId": "task_zero_rated_goods",
+      "status": "integrated",
+      "agentId": "codex-e",
+      "band": "partial",
+      "objective": "Orders that contain only digital goods should not be charged tax"
+    },
+    {
+      "id": "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+      "scenarioTaskId": "task_rounding",
+      "status": "integrated",
+      "agentId": "codex-a",
+      "band": "partial",
+      "objective": "Round every amount a customer is shown to whole pence so totals never display long decimals"
+    },
+    {
+      "id": "task_c683a6c1-d94d-4260-ac71-468b2c1c9cff",
+      "scenarioTaskId": "task_webhook_retry",
+      "status": "integrated",
+      "agentId": "codex-b",
+      "band": "independent",
+      "objective": "Retry webhook delivery up to three times when the transport reports a failure"
+    },
+    {
+      "id": "task_647e8e65-eded-41d3-92b4-1570232d73a1",
+      "scenarioTaskId": "task_audit_ip",
+      "status": "integrated",
+      "agentId": "codex-c",
+      "band": "independent",
+      "objective": "Record the originating IP address on every audit entry"
+    },
+    {
+      "id": "task_2528fe53-d30c-409e-b605-9e17f1145859",
+      "scenarioTaskId": "task_export_created_at",
+      "status": "integrated",
+      "agentId": "codex-d",
+      "band": "independent",
+      "objective": "Add a created-at column to the CSV export"
+    },
+    {
+      "id": "task_c6c8e3c7-138a-4f23-97f2-4b0429a7a946",
+      "scenarioTaskId": "task_search_email",
+      "status": "integrated",
+      "agentId": "codex-e",
+      "band": "independent",
+      "objective": "Make account search match on email address as well as name"
+    }
+  ],
+  "iterations": [
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:03:40.401Z",
+      "finishedAt": "2026-08-07T06:03:41.786Z",
+      "elapsedMs": 1385,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:03:43.304Z",
+      "finishedAt": "2026-08-07T06:03:43.986Z",
+      "elapsedMs": 682,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:03:45.488Z",
+      "finishedAt": "2026-08-07T06:03:46.118Z",
+      "elapsedMs": 630,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:03:47.628Z",
+      "finishedAt": "2026-08-07T06:03:48.568Z",
+      "elapsedMs": 940,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:03:50.080Z",
+      "finishedAt": "2026-08-07T06:03:50.702Z",
+      "elapsedMs": 622,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:03:52.203Z",
+      "finishedAt": "2026-08-07T06:03:53.205Z",
+      "elapsedMs": 1002,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:03:54.711Z",
+      "finishedAt": "2026-08-07T06:03:57.004Z",
+      "elapsedMs": 2293,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:03:58.518Z",
+      "finishedAt": "2026-08-07T06:03:59.451Z",
+      "elapsedMs": 933,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:00.958Z",
+      "finishedAt": "2026-08-07T06:04:02.318Z",
+      "elapsedMs": 1360,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:03.836Z",
+      "finishedAt": "2026-08-07T06:04:14.481Z",
+      "elapsedMs": 10645,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:17.811Z",
+      "finishedAt": "2026-08-07T06:04:20.763Z",
+      "elapsedMs": 2952,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:22.266Z",
+      "finishedAt": "2026-08-07T06:04:22.959Z",
+      "elapsedMs": 693,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:24.469Z",
+      "finishedAt": "2026-08-07T06:04:25.140Z",
+      "elapsedMs": 671,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:26.647Z",
+      "finishedAt": "2026-08-07T06:04:27.386Z",
+      "elapsedMs": 739,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:28.901Z",
+      "finishedAt": "2026-08-07T06:04:29.785Z",
+      "elapsedMs": 884,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:31.301Z",
+      "finishedAt": "2026-08-07T06:04:32.591Z",
+      "elapsedMs": 1290,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:34.103Z",
+      "finishedAt": "2026-08-07T06:04:34.547Z",
+      "elapsedMs": 444,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:36.062Z",
+      "finishedAt": "2026-08-07T06:04:37.353Z",
+      "elapsedMs": 1291,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:38.855Z",
+      "finishedAt": "2026-08-07T06:04:39.711Z",
+      "elapsedMs": 856,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:41.228Z",
+      "finishedAt": "2026-08-07T06:04:41.999Z",
+      "elapsedMs": 771,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:43.502Z",
+      "finishedAt": "2026-08-07T06:04:44.328Z",
+      "elapsedMs": 826,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:45.833Z",
+      "finishedAt": "2026-08-07T06:04:46.519Z",
+      "elapsedMs": 686,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:04:48.035Z",
+      "finishedAt": "2026-08-07T06:04:49.915Z",
+      "elapsedMs": 1880,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "taskId": "task_fda88176-0ce5-4019-af32-15faa839edc3",
+      "startedAt": "2026-08-07T06:03:40.400Z",
+      "finishedAt": "2026-08-07T06:04:53.646Z",
+      "elapsedMs": 73246,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "taskId": "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+      "startedAt": "2026-08-07T06:03:40.400Z",
+      "finishedAt": "2026-08-07T06:04:55.038Z",
+      "elapsedMs": 74638,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:04:56.544Z",
+      "finishedAt": "2026-08-07T06:04:57.156Z",
+      "elapsedMs": 612,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+      "startedAt": "2026-08-07T06:03:40.399Z",
+      "finishedAt": "2026-08-07T06:04:58.056Z",
+      "elapsedMs": 77657,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:04:59.565Z",
+      "finishedAt": "2026-08-07T06:05:00.374Z",
+      "elapsedMs": 809,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:05:01.882Z",
+      "finishedAt": "2026-08-07T06:05:02.546Z",
+      "elapsedMs": 664,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:05:04.049Z",
+      "finishedAt": "2026-08-07T06:05:04.493Z",
+      "elapsedMs": 444,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+      "startedAt": "2026-08-07T06:03:40.401Z",
+      "finishedAt": "2026-08-07T06:05:05.322Z",
+      "elapsedMs": 84921,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:06.833Z",
+      "finishedAt": "2026-08-07T06:05:07.927Z",
+      "elapsedMs": 1094,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:09.429Z",
+      "finishedAt": "2026-08-07T06:05:10.101Z",
+      "elapsedMs": 672,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:11.604Z",
+      "finishedAt": "2026-08-07T06:05:12.241Z",
+      "elapsedMs": 637,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:13.741Z",
+      "finishedAt": "2026-08-07T06:05:14.387Z",
+      "elapsedMs": 646,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:15.903Z",
+      "finishedAt": "2026-08-07T06:05:16.732Z",
+      "elapsedMs": 829,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:18.237Z",
+      "finishedAt": "2026-08-07T06:05:19.408Z",
+      "elapsedMs": 1171,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:20.913Z",
+      "finishedAt": "2026-08-07T06:05:21.395Z",
+      "elapsedMs": 482,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:22.902Z",
+      "finishedAt": "2026-08-07T06:05:23.357Z",
+      "elapsedMs": 455,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:24.867Z",
+      "finishedAt": "2026-08-07T06:05:25.655Z",
+      "elapsedMs": 788,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:27.165Z",
+      "finishedAt": "2026-08-07T06:05:27.567Z",
+      "elapsedMs": 402,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:29.074Z",
+      "finishedAt": "2026-08-07T06:05:29.809Z",
+      "elapsedMs": 735,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:31.317Z",
+      "finishedAt": "2026-08-07T06:05:32.508Z",
+      "elapsedMs": 1191,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:34.014Z",
+      "finishedAt": "2026-08-07T06:05:34.824Z",
+      "elapsedMs": 810,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:36.331Z",
+      "finishedAt": "2026-08-07T06:05:37.409Z",
+      "elapsedMs": 1078,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:38.921Z",
+      "finishedAt": "2026-08-07T06:05:39.751Z",
+      "elapsedMs": 830,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:41.252Z",
+      "finishedAt": "2026-08-07T06:05:41.827Z",
+      "elapsedMs": 575,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:43.332Z",
+      "finishedAt": "2026-08-07T06:05:44.054Z",
+      "elapsedMs": 722,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:45.564Z",
+      "finishedAt": "2026-08-07T06:05:46.054Z",
+      "elapsedMs": 490,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:47.566Z",
+      "finishedAt": "2026-08-07T06:05:48.101Z",
+      "elapsedMs": 535,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:05:49.615Z",
+      "finishedAt": "2026-08-07T06:05:50.117Z",
+      "elapsedMs": 502,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+      "startedAt": "2026-08-07T06:04:51.417Z",
+      "finishedAt": "2026-08-07T06:05:50.572Z",
+      "elapsedMs": 59155,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:05:52.082Z",
+      "finishedAt": "2026-08-07T06:05:52.835Z",
+      "elapsedMs": 753,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:05:54.347Z",
+      "finishedAt": "2026-08-07T06:05:55.063Z",
+      "elapsedMs": 716,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:05:56.578Z",
+      "finishedAt": "2026-08-07T06:05:57.295Z",
+      "elapsedMs": 717,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:05:58.802Z",
+      "finishedAt": "2026-08-07T06:06:00.153Z",
+      "elapsedMs": 1351,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:06:01.658Z",
+      "finishedAt": "2026-08-07T06:06:02.642Z",
+      "elapsedMs": 984,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:06:04.157Z",
+      "finishedAt": "2026-08-07T06:06:05.662Z",
+      "elapsedMs": 1505,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:06:07.186Z",
+      "finishedAt": "2026-08-07T06:06:07.737Z",
+      "elapsedMs": 551,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:06:09.243Z",
+      "finishedAt": "2026-08-07T06:06:10.137Z",
+      "elapsedMs": 894,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:06:11.638Z",
+      "finishedAt": "2026-08-07T06:06:13.055Z",
+      "elapsedMs": 1417,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:06:14.557Z",
+      "finishedAt": "2026-08-07T06:06:17.139Z",
+      "elapsedMs": 2582,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:06:18.645Z",
+      "finishedAt": "2026-08-07T06:06:19.819Z",
+      "elapsedMs": 1174,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "taskId": "task_c683a6c1-d94d-4260-ac71-468b2c1c9cff",
+      "startedAt": "2026-08-07T06:04:53.646Z",
+      "finishedAt": "2026-08-07T06:06:26.386Z",
+      "elapsedMs": 92740,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:06:26.386Z",
+      "finishedAt": "2026-08-07T06:06:27.022Z",
+      "elapsedMs": 636,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+      "startedAt": "2026-08-07T06:05:51.628Z",
+      "finishedAt": "2026-08-07T06:06:31.806Z",
+      "elapsedMs": 40178,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 0,
+      "taskId": "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+      "startedAt": "2026-08-07T06:05:06.005Z",
+      "finishedAt": "2026-08-07T06:06:32.876Z",
+      "elapsedMs": 86871,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 1,
+      "taskId": "task_a656956c-4428-4664-9846-e0f730e8ebb1",
+      "startedAt": "2026-08-07T06:04:58.661Z",
+      "finishedAt": "2026-08-07T06:06:34.107Z",
+      "elapsedMs": 95446,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:06:34.386Z",
+      "finishedAt": "2026-08-07T06:06:34.953Z",
+      "elapsedMs": 567,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:06:36.459Z",
+      "finishedAt": "2026-08-07T06:06:37.048Z",
+      "elapsedMs": 589,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:06:38.553Z",
+      "finishedAt": "2026-08-07T06:06:39.055Z",
+      "elapsedMs": 502,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:06:40.569Z",
+      "finishedAt": "2026-08-07T06:06:41.068Z",
+      "elapsedMs": 499,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:06:42.583Z",
+      "finishedAt": "2026-08-07T06:06:43.157Z",
+      "elapsedMs": 574,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:06:44.670Z",
+      "finishedAt": "2026-08-07T06:06:45.009Z",
+      "elapsedMs": 339,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:06:46.515Z",
+      "finishedAt": "2026-08-07T06:06:46.732Z",
+      "elapsedMs": 217,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:06:48.269Z",
+      "finishedAt": "2026-08-07T06:06:49.091Z",
+      "elapsedMs": 822,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:06:50.600Z",
+      "finishedAt": "2026-08-07T06:06:51.216Z",
+      "elapsedMs": 616,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:06:52.726Z",
+      "finishedAt": "2026-08-07T06:06:53.226Z",
+      "elapsedMs": 500,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+      "startedAt": "2026-08-07T06:06:33.313Z",
+      "finishedAt": "2026-08-07T06:06:58.566Z",
+      "elapsedMs": 25253,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:07:00.066Z",
+      "finishedAt": "2026-08-07T06:07:01.067Z",
+      "elapsedMs": 1001,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:07:02.569Z",
+      "finishedAt": "2026-08-07T06:07:04.211Z",
+      "elapsedMs": 1642,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:07:05.727Z",
+      "finishedAt": "2026-08-07T06:07:06.322Z",
+      "elapsedMs": 595,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:07:07.824Z",
+      "finishedAt": "2026-08-07T06:07:08.667Z",
+      "elapsedMs": 843,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:07:10.168Z",
+      "finishedAt": "2026-08-07T06:07:10.823Z",
+      "elapsedMs": 655,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_2528fe53-d30c-409e-b605-9e17f1145859",
+      "startedAt": "2026-08-07T06:06:21.333Z",
+      "finishedAt": "2026-08-07T06:07:12.683Z",
+      "elapsedMs": 51350,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:07:14.185Z",
+      "finishedAt": "2026-08-07T06:07:14.471Z",
+      "elapsedMs": 286,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:07:15.975Z",
+      "finishedAt": "2026-08-07T06:07:16.230Z",
+      "elapsedMs": 255,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:07:17.747Z",
+      "finishedAt": "2026-08-07T06:07:18.072Z",
+      "elapsedMs": 325,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "taskId": "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+      "startedAt": "2026-08-07T06:06:28.536Z",
+      "finishedAt": "2026-08-07T06:07:19.764Z",
+      "elapsedMs": 51228,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:21.283Z",
+      "finishedAt": "2026-08-07T06:07:21.709Z",
+      "elapsedMs": 426,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:23.220Z",
+      "finishedAt": "2026-08-07T06:07:23.501Z",
+      "elapsedMs": 281,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:25.014Z",
+      "finishedAt": "2026-08-07T06:07:25.283Z",
+      "elapsedMs": 269,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:26.785Z",
+      "finishedAt": "2026-08-07T06:07:27.177Z",
+      "elapsedMs": 392,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:28.688Z",
+      "finishedAt": "2026-08-07T06:07:28.974Z",
+      "elapsedMs": 286,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:30.479Z",
+      "finishedAt": "2026-08-07T06:07:30.699Z",
+      "elapsedMs": 220,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:32.207Z",
+      "finishedAt": "2026-08-07T06:07:32.709Z",
+      "elapsedMs": 502,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:34.218Z",
+      "finishedAt": "2026-08-07T06:07:34.587Z",
+      "elapsedMs": 369,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:36.089Z",
+      "finishedAt": "2026-08-07T06:07:36.335Z",
+      "elapsedMs": 246,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:37.846Z",
+      "finishedAt": "2026-08-07T06:07:38.099Z",
+      "elapsedMs": 253,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:39.615Z",
+      "finishedAt": "2026-08-07T06:07:39.939Z",
+      "elapsedMs": 324,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:41.456Z",
+      "finishedAt": "2026-08-07T06:07:41.733Z",
+      "elapsedMs": 277,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:43.249Z",
+      "finishedAt": "2026-08-07T06:07:43.631Z",
+      "elapsedMs": 382,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:45.133Z",
+      "finishedAt": "2026-08-07T06:07:45.431Z",
+      "elapsedMs": 298,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:46.937Z",
+      "finishedAt": "2026-08-07T06:07:47.259Z",
+      "elapsedMs": 322,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:48.766Z",
+      "finishedAt": "2026-08-07T06:07:49.133Z",
+      "elapsedMs": 367,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:50.644Z",
+      "finishedAt": "2026-08-07T06:07:51.058Z",
+      "elapsedMs": 414,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:52.570Z",
+      "finishedAt": "2026-08-07T06:07:52.988Z",
+      "elapsedMs": 418,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:07:54.502Z",
+      "finishedAt": "2026-08-07T06:07:54.825Z",
+      "elapsedMs": 323,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_aefe4b4f-ef4f-496f-b413-891a36307071",
+      "startedAt": "2026-08-07T06:07:12.332Z",
+      "finishedAt": "2026-08-07T06:07:56.368Z",
+      "elapsedMs": 44036,
+      "worked": true,
+      "accepted": false,
+      "tokens": 0,
+      "reason": "claude planned task_aefe4b4f-496f-496f-b413-891a36307071 but was started for task_aefe4b4f-ef4f-496f-b413-891a36307071"
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:07:56.368Z",
+      "finishedAt": "2026-08-07T06:07:56.767Z",
+      "elapsedMs": 399,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:07:58.279Z",
+      "finishedAt": "2026-08-07T06:07:58.735Z",
+      "elapsedMs": 456,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:08:00.240Z",
+      "finishedAt": "2026-08-07T06:08:00.489Z",
+      "elapsedMs": 249,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:08:01.993Z",
+      "finishedAt": "2026-08-07T06:08:02.304Z",
+      "elapsedMs": 311,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:08:03.809Z",
+      "finishedAt": "2026-08-07T06:08:04.244Z",
+      "elapsedMs": 435,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:08:05.756Z",
+      "finishedAt": "2026-08-07T06:08:06.136Z",
+      "elapsedMs": 380,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:08:07.638Z",
+      "finishedAt": "2026-08-07T06:08:08.238Z",
+      "elapsedMs": 600,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_c6c8e3c7-138a-4f23-97f2-4b0429a7a946",
+      "startedAt": "2026-08-07T06:06:54.729Z",
+      "finishedAt": "2026-08-07T06:08:11.458Z",
+      "elapsedMs": 76729,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:08:11.458Z",
+      "finishedAt": "2026-08-07T06:08:11.559Z",
+      "elapsedMs": 101,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_1d20be09-4e77-433b-a49e-8a4ff7837146",
+      "startedAt": "2026-08-07T06:07:19.587Z",
+      "finishedAt": "2026-08-07T06:08:13.966Z",
+      "elapsedMs": 54379,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:08:15.480Z",
+      "finishedAt": "2026-08-07T06:08:15.571Z",
+      "elapsedMs": 91,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:08:17.088Z",
+      "finishedAt": "2026-08-07T06:08:17.191Z",
+      "elapsedMs": 103,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:08:18.698Z",
+      "finishedAt": "2026-08-07T06:08:18.828Z",
+      "elapsedMs": 130,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:08:20.338Z",
+      "finishedAt": "2026-08-07T06:08:20.487Z",
+      "elapsedMs": 149,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:08:21.994Z",
+      "finishedAt": "2026-08-07T06:08:22.899Z",
+      "elapsedMs": 905,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:08:24.404Z",
+      "finishedAt": "2026-08-07T06:08:24.996Z",
+      "elapsedMs": 592,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:08:26.503Z",
+      "finishedAt": "2026-08-07T06:08:27.204Z",
+      "elapsedMs": 701,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "taskId": "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+      "startedAt": "2026-08-07T06:07:56.326Z",
+      "finishedAt": "2026-08-07T06:08:27.983Z",
+      "elapsedMs": 31657,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:08:29.490Z",
+      "finishedAt": "2026-08-07T06:08:29.588Z",
+      "elapsedMs": 98,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:08:31.091Z",
+      "finishedAt": "2026-08-07T06:08:31.204Z",
+      "elapsedMs": 113,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:08:32.711Z",
+      "finishedAt": "2026-08-07T06:08:32.809Z",
+      "elapsedMs": 98,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:08:34.309Z",
+      "finishedAt": "2026-08-07T06:08:34.486Z",
+      "elapsedMs": 177,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:08:35.989Z",
+      "finishedAt": "2026-08-07T06:08:36.171Z",
+      "elapsedMs": 182,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:08:37.684Z",
+      "finishedAt": "2026-08-07T06:08:37.791Z",
+      "elapsedMs": 107,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:08:39.308Z",
+      "finishedAt": "2026-08-07T06:08:39.417Z",
+      "elapsedMs": 109,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:08:40.919Z",
+      "finishedAt": "2026-08-07T06:08:41.106Z",
+      "elapsedMs": 187,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:08:42.621Z",
+      "finishedAt": "2026-08-07T06:08:42.913Z",
+      "elapsedMs": 292,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_647e8e65-eded-41d3-92b4-1570232d73a1",
+      "startedAt": "2026-08-07T06:08:09.743Z",
+      "finishedAt": "2026-08-07T06:08:44.067Z",
+      "elapsedMs": 34324,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:08:45.578Z",
+      "finishedAt": "2026-08-07T06:08:45.768Z",
+      "elapsedMs": 190,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:08:47.272Z",
+      "finishedAt": "2026-08-07T06:08:47.433Z",
+      "elapsedMs": 161,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:08:48.946Z",
+      "finishedAt": "2026-08-07T06:08:49.105Z",
+      "elapsedMs": 159,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:08:50.621Z",
+      "finishedAt": "2026-08-07T06:08:50.812Z",
+      "elapsedMs": 191,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "taskId": "task_9f6a8cff-5a34-4e9f-bacb-3788c5563b72",
+      "startedAt": "2026-08-07T06:06:34.107Z",
+      "finishedAt": "2026-08-07T06:08:53.483Z",
+      "elapsedMs": 139376,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:08:53.483Z",
+      "finishedAt": "2026-08-07T06:08:53.488Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:08:55.000Z",
+      "finishedAt": "2026-08-07T06:08:55.020Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:08:56.531Z",
+      "finishedAt": "2026-08-07T06:08:56.549Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_2528fe53-d30c-409e-b605-9e17f1145859",
+      "startedAt": "2026-08-07T06:08:13.065Z",
+      "finishedAt": "2026-08-07T06:08:58.028Z",
+      "elapsedMs": 44963,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:08:59.538Z",
+      "finishedAt": "2026-08-07T06:08:59.556Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:09:01.065Z",
+      "finishedAt": "2026-08-07T06:09:01.087Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_1d20be09-4e77-433b-a49e-8a4ff7837146",
+      "startedAt": "2026-08-07T06:08:28.716Z",
+      "finishedAt": "2026-08-07T06:09:04.335Z",
+      "elapsedMs": 35619,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 2,
+      "taskId": "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+      "startedAt": "2026-08-07T06:08:44.420Z",
+      "finishedAt": "2026-08-07T06:09:05.946Z",
+      "elapsedMs": 21526,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:09:07.457Z",
+      "finishedAt": "2026-08-07T06:09:07.472Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_647e8e65-eded-41d3-92b4-1570232d73a1",
+      "startedAt": "2026-08-07T06:08:52.348Z",
+      "finishedAt": "2026-08-07T06:09:07.930Z",
+      "elapsedMs": 15582,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:09.434Z",
+      "finishedAt": "2026-08-07T06:09:09.451Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:10.951Z",
+      "finishedAt": "2026-08-07T06:09:10.956Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:12.468Z",
+      "finishedAt": "2026-08-07T06:09:12.493Z",
+      "elapsedMs": 25,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:14.002Z",
+      "finishedAt": "2026-08-07T06:09:14.023Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:15.532Z",
+      "finishedAt": "2026-08-07T06:09:15.549Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:17.062Z",
+      "finishedAt": "2026-08-07T06:09:17.084Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:18.671Z",
+      "finishedAt": "2026-08-07T06:09:18.684Z",
+      "elapsedMs": 13,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:20.192Z",
+      "finishedAt": "2026-08-07T06:09:20.211Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:21.719Z",
+      "finishedAt": "2026-08-07T06:09:21.737Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:23.241Z",
+      "finishedAt": "2026-08-07T06:09:23.244Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:24.750Z",
+      "finishedAt": "2026-08-07T06:09:24.772Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:26.581Z",
+      "finishedAt": "2026-08-07T06:09:26.589Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:28.099Z",
+      "finishedAt": "2026-08-07T06:09:28.116Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:29.622Z",
+      "finishedAt": "2026-08-07T06:09:29.640Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:31.155Z",
+      "finishedAt": "2026-08-07T06:09:31.174Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:32.681Z",
+      "finishedAt": "2026-08-07T06:09:32.696Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:34.198Z",
+      "finishedAt": "2026-08-07T06:09:34.218Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:35.733Z",
+      "finishedAt": "2026-08-07T06:09:35.770Z",
+      "elapsedMs": 37,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:37.271Z",
+      "finishedAt": "2026-08-07T06:09:37.289Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:38.794Z",
+      "finishedAt": "2026-08-07T06:09:38.816Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:40.347Z",
+      "finishedAt": "2026-08-07T06:09:40.365Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:41.869Z",
+      "finishedAt": "2026-08-07T06:09:41.887Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:43.403Z",
+      "finishedAt": "2026-08-07T06:09:43.421Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:44.930Z",
+      "finishedAt": "2026-08-07T06:09:44.949Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:46.462Z",
+      "finishedAt": "2026-08-07T06:09:46.482Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:47.990Z",
+      "finishedAt": "2026-08-07T06:09:48.008Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:49.516Z",
+      "finishedAt": "2026-08-07T06:09:49.538Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:51.043Z",
+      "finishedAt": "2026-08-07T06:09:51.063Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:52.564Z",
+      "finishedAt": "2026-08-07T06:09:52.584Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:54.086Z",
+      "finishedAt": "2026-08-07T06:09:54.112Z",
+      "elapsedMs": 26,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:55.618Z",
+      "finishedAt": "2026-08-07T06:09:55.646Z",
+      "elapsedMs": 28,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:57.156Z",
+      "finishedAt": "2026-08-07T06:09:57.178Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:09:58.685Z",
+      "finishedAt": "2026-08-07T06:09:58.704Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:10:00.214Z",
+      "finishedAt": "2026-08-07T06:10:00.217Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:10:01.724Z",
+      "finishedAt": "2026-08-07T06:10:01.742Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:10:03.258Z",
+      "finishedAt": "2026-08-07T06:10:03.275Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:10:04.777Z",
+      "finishedAt": "2026-08-07T06:10:04.795Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:10:06.307Z",
+      "finishedAt": "2026-08-07T06:10:06.325Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "taskId": "task_647e8e65-eded-41d3-92b4-1570232d73a1",
+      "startedAt": "2026-08-07T06:09:08.982Z",
+      "finishedAt": "2026-08-07T06:10:07.121Z",
+      "elapsedMs": 58139,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:07.122Z",
+      "finishedAt": "2026-08-07T06:10:07.136Z",
+      "elapsedMs": 14,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:10:07.832Z",
+      "finishedAt": "2026-08-07T06:10:07.839Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:08.753Z",
+      "finishedAt": "2026-08-07T06:10:08.758Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:10:09.350Z",
+      "finishedAt": "2026-08-07T06:10:09.356Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:10.271Z",
+      "finishedAt": "2026-08-07T06:10:10.290Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:10:10.861Z",
+      "finishedAt": "2026-08-07T06:10:10.879Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:11.795Z",
+      "finishedAt": "2026-08-07T06:10:11.815Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "taskId": "task_2528fe53-d30c-409e-b605-9e17f1145859",
+      "startedAt": "2026-08-07T06:08:58.060Z",
+      "finishedAt": "2026-08-07T06:10:11.973Z",
+      "elapsedMs": 73913,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:11.973Z",
+      "finishedAt": "2026-08-07T06:10:11.986Z",
+      "elapsedMs": 13,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:10:12.386Z",
+      "finishedAt": "2026-08-07T06:10:12.404Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:13.333Z",
+      "finishedAt": "2026-08-07T06:10:13.353Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:13.500Z",
+      "finishedAt": "2026-08-07T06:10:13.519Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:10:13.906Z",
+      "finishedAt": "2026-08-07T06:10:13.926Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:14.856Z",
+      "finishedAt": "2026-08-07T06:10:14.874Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:15.027Z",
+      "finishedAt": "2026-08-07T06:10:15.044Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:10:15.432Z",
+      "finishedAt": "2026-08-07T06:10:15.453Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:16.383Z",
+      "finishedAt": "2026-08-07T06:10:16.400Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:16.553Z",
+      "finishedAt": "2026-08-07T06:10:16.571Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:10:16.955Z",
+      "finishedAt": "2026-08-07T06:10:16.973Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:17.906Z",
+      "finishedAt": "2026-08-07T06:10:17.909Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:18.075Z",
+      "finishedAt": "2026-08-07T06:10:18.093Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:19.422Z",
+      "finishedAt": "2026-08-07T06:10:19.443Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:19.606Z",
+      "finishedAt": "2026-08-07T06:10:19.648Z",
+      "elapsedMs": 42,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+      "startedAt": "2026-08-07T06:09:05.845Z",
+      "finishedAt": "2026-08-07T06:10:19.818Z",
+      "elapsedMs": 73973,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:20.957Z",
+      "finishedAt": "2026-08-07T06:10:20.974Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:21.157Z",
+      "finishedAt": "2026-08-07T06:10:21.188Z",
+      "elapsedMs": 31,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:21.327Z",
+      "finishedAt": "2026-08-07T06:10:21.331Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:22.484Z",
+      "finishedAt": "2026-08-07T06:10:22.505Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:22.700Z",
+      "finishedAt": "2026-08-07T06:10:22.705Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:22.839Z",
+      "finishedAt": "2026-08-07T06:10:22.857Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:24.012Z",
+      "finishedAt": "2026-08-07T06:10:24.027Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:24.210Z",
+      "finishedAt": "2026-08-07T06:10:24.243Z",
+      "elapsedMs": 33,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:24.372Z",
+      "finishedAt": "2026-08-07T06:10:24.380Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:25.533Z",
+      "finishedAt": "2026-08-07T06:10:25.549Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:25.757Z",
+      "finishedAt": "2026-08-07T06:10:25.773Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:25.880Z",
+      "finishedAt": "2026-08-07T06:10:25.889Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:27.053Z",
+      "finishedAt": "2026-08-07T06:10:27.073Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:27.315Z",
+      "finishedAt": "2026-08-07T06:10:27.335Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:27.396Z",
+      "finishedAt": "2026-08-07T06:10:27.413Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:28.581Z",
+      "finishedAt": "2026-08-07T06:10:28.602Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:28.851Z",
+      "finishedAt": "2026-08-07T06:10:28.874Z",
+      "elapsedMs": 23,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:28.927Z",
+      "finishedAt": "2026-08-07T06:10:28.947Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:30.109Z",
+      "finishedAt": "2026-08-07T06:10:30.119Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:30.375Z",
+      "finishedAt": "2026-08-07T06:10:30.398Z",
+      "elapsedMs": 23,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:30.453Z",
+      "finishedAt": "2026-08-07T06:10:30.475Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_1d20be09-4e77-433b-a49e-8a4ff7837146",
+      "startedAt": "2026-08-07T06:09:02.592Z",
+      "finishedAt": "2026-08-07T06:10:31.189Z",
+      "elapsedMs": 88597,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:31.189Z",
+      "finishedAt": "2026-08-07T06:10:31.207Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:31.626Z",
+      "finishedAt": "2026-08-07T06:10:31.646Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:31.906Z",
+      "finishedAt": "2026-08-07T06:10:31.924Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:31.982Z",
+      "finishedAt": "2026-08-07T06:10:32.001Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:32.717Z",
+      "finishedAt": "2026-08-07T06:10:32.720Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:33.153Z",
+      "finishedAt": "2026-08-07T06:10:33.171Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:33.433Z",
+      "finishedAt": "2026-08-07T06:10:33.451Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:33.512Z",
+      "finishedAt": "2026-08-07T06:10:33.532Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:34.228Z",
+      "finishedAt": "2026-08-07T06:10:34.246Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:34.680Z",
+      "finishedAt": "2026-08-07T06:10:34.698Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:34.957Z",
+      "finishedAt": "2026-08-07T06:10:34.961Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:35.036Z",
+      "finishedAt": "2026-08-07T06:10:35.055Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:35.754Z",
+      "finishedAt": "2026-08-07T06:10:35.766Z",
+      "elapsedMs": 12,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:36.214Z",
+      "finishedAt": "2026-08-07T06:10:36.235Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:36.463Z",
+      "finishedAt": "2026-08-07T06:10:36.483Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:36.558Z",
+      "finishedAt": "2026-08-07T06:10:36.576Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:37.275Z",
+      "finishedAt": "2026-08-07T06:10:37.279Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:37.743Z",
+      "finishedAt": "2026-08-07T06:10:37.749Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:37.991Z",
+      "finishedAt": "2026-08-07T06:10:38.010Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:38.082Z",
+      "finishedAt": "2026-08-07T06:10:38.100Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:38.781Z",
+      "finishedAt": "2026-08-07T06:10:38.802Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:39.265Z",
+      "finishedAt": "2026-08-07T06:10:39.285Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:39.517Z",
+      "finishedAt": "2026-08-07T06:10:39.537Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:39.611Z",
+      "finishedAt": "2026-08-07T06:10:39.630Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:40.311Z",
+      "finishedAt": "2026-08-07T06:10:40.331Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:40.790Z",
+      "finishedAt": "2026-08-07T06:10:40.794Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:41.041Z",
+      "finishedAt": "2026-08-07T06:10:41.060Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:41.135Z",
+      "finishedAt": "2026-08-07T06:10:41.156Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:41.839Z",
+      "finishedAt": "2026-08-07T06:10:41.859Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:42.296Z",
+      "finishedAt": "2026-08-07T06:10:42.318Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:42.561Z",
+      "finishedAt": "2026-08-07T06:10:42.580Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:42.670Z",
+      "finishedAt": "2026-08-07T06:10:42.689Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:43.373Z",
+      "finishedAt": "2026-08-07T06:10:43.393Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:43.825Z",
+      "finishedAt": "2026-08-07T06:10:43.846Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:44.091Z",
+      "finishedAt": "2026-08-07T06:10:44.111Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:44.201Z",
+      "finishedAt": "2026-08-07T06:10:44.221Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:44.894Z",
+      "finishedAt": "2026-08-07T06:10:44.912Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:45.348Z",
+      "finishedAt": "2026-08-07T06:10:45.367Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:45.626Z",
+      "finishedAt": "2026-08-07T06:10:45.645Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:45.737Z",
+      "finishedAt": "2026-08-07T06:10:45.757Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:46.423Z",
+      "finishedAt": "2026-08-07T06:10:46.441Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:46.878Z",
+      "finishedAt": "2026-08-07T06:10:46.901Z",
+      "elapsedMs": 23,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:47.159Z",
+      "finishedAt": "2026-08-07T06:10:47.177Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:47.270Z",
+      "finishedAt": "2026-08-07T06:10:47.289Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:47.944Z",
+      "finishedAt": "2026-08-07T06:10:47.965Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:48.412Z",
+      "finishedAt": "2026-08-07T06:10:48.421Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:48.679Z",
+      "finishedAt": "2026-08-07T06:10:48.699Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:48.803Z",
+      "finishedAt": "2026-08-07T06:10:48.822Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:49.479Z",
+      "finishedAt": "2026-08-07T06:10:49.483Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:49.933Z",
+      "finishedAt": "2026-08-07T06:10:49.951Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:50.201Z",
+      "finishedAt": "2026-08-07T06:10:50.221Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:50.327Z",
+      "finishedAt": "2026-08-07T06:10:50.348Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:50.988Z",
+      "finishedAt": "2026-08-07T06:10:51.008Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:51.458Z",
+      "finishedAt": "2026-08-07T06:10:51.477Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:51.728Z",
+      "finishedAt": "2026-08-07T06:10:51.747Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:51.854Z",
+      "finishedAt": "2026-08-07T06:10:51.872Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:52.520Z",
+      "finishedAt": "2026-08-07T06:10:52.538Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:52.988Z",
+      "finishedAt": "2026-08-07T06:10:53.007Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:53.254Z",
+      "finishedAt": "2026-08-07T06:10:53.272Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:54.392Z",
+      "finishedAt": "2026-08-07T06:10:54.398Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:54.393Z",
+      "finishedAt": "2026-08-07T06:10:54.399Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:54.511Z",
+      "finishedAt": "2026-08-07T06:10:54.530Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:54.788Z",
+      "finishedAt": "2026-08-07T06:10:54.790Z",
+      "elapsedMs": 2,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:55.907Z",
+      "finishedAt": "2026-08-07T06:10:55.911Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:55.908Z",
+      "finishedAt": "2026-08-07T06:10:55.917Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:56.033Z",
+      "finishedAt": "2026-08-07T06:10:56.050Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:56.299Z",
+      "finishedAt": "2026-08-07T06:10:56.319Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:57.412Z",
+      "finishedAt": "2026-08-07T06:10:57.439Z",
+      "elapsedMs": 27,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:57.436Z",
+      "finishedAt": "2026-08-07T06:10:57.442Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:57.553Z",
+      "finishedAt": "2026-08-07T06:10:57.556Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:57.834Z",
+      "finishedAt": "2026-08-07T06:10:57.852Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T06:10:58.951Z",
+      "finishedAt": "2026-08-07T06:10:58.955Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:10:58.952Z",
+      "finishedAt": "2026-08-07T06:10:58.956Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:10:59.070Z",
+      "finishedAt": "2026-08-07T06:10:59.124Z",
+      "elapsedMs": 54,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:10:59.367Z",
+      "finishedAt": "2026-08-07T06:10:59.384Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:02.241Z",
+      "finishedAt": "2026-08-07T06:11:03.222Z",
+      "elapsedMs": 981,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:02.241Z",
+      "finishedAt": "2026-08-07T06:11:03.224Z",
+      "elapsedMs": 983,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:02.241Z",
+      "finishedAt": "2026-08-07T06:11:03.224Z",
+      "elapsedMs": 983,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+      "startedAt": "2026-08-07T06:10:18.977Z",
+      "finishedAt": "2026-08-07T06:11:03.926Z",
+      "elapsedMs": 44949,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:04.735Z",
+      "finishedAt": "2026-08-07T06:11:04.760Z",
+      "elapsedMs": 25,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:04.736Z",
+      "finishedAt": "2026-08-07T06:11:04.761Z",
+      "elapsedMs": 25,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:04.736Z",
+      "finishedAt": "2026-08-07T06:11:04.761Z",
+      "elapsedMs": 25,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:05.431Z",
+      "finishedAt": "2026-08-07T06:11:05.439Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:06.267Z",
+      "finishedAt": "2026-08-07T06:11:06.284Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:06.268Z",
+      "finishedAt": "2026-08-07T06:11:06.284Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:06.268Z",
+      "finishedAt": "2026-08-07T06:11:06.284Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:06.949Z",
+      "finishedAt": "2026-08-07T06:11:06.974Z",
+      "elapsedMs": 25,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:07.792Z",
+      "finishedAt": "2026-08-07T06:11:07.813Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:07.793Z",
+      "finishedAt": "2026-08-07T06:11:07.813Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:07.793Z",
+      "finishedAt": "2026-08-07T06:11:07.814Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:08.490Z",
+      "finishedAt": "2026-08-07T06:11:08.510Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:09.326Z",
+      "finishedAt": "2026-08-07T06:11:09.337Z",
+      "elapsedMs": 11,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:09.327Z",
+      "finishedAt": "2026-08-07T06:11:09.337Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:09.328Z",
+      "finishedAt": "2026-08-07T06:11:09.337Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:10.014Z",
+      "finishedAt": "2026-08-07T06:11:10.033Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:10.853Z",
+      "finishedAt": "2026-08-07T06:11:10.872Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:10.853Z",
+      "finishedAt": "2026-08-07T06:11:10.872Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:10.854Z",
+      "finishedAt": "2026-08-07T06:11:10.872Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:11.536Z",
+      "finishedAt": "2026-08-07T06:11:11.554Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:12.374Z",
+      "finishedAt": "2026-08-07T06:11:12.381Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:12.375Z",
+      "finishedAt": "2026-08-07T06:11:12.381Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:12.375Z",
+      "finishedAt": "2026-08-07T06:11:12.383Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:13.055Z",
+      "finishedAt": "2026-08-07T06:11:13.073Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:13.895Z",
+      "finishedAt": "2026-08-07T06:11:13.904Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:13.895Z",
+      "finishedAt": "2026-08-07T06:11:13.904Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:13.896Z",
+      "finishedAt": "2026-08-07T06:11:13.904Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:14.577Z",
+      "finishedAt": "2026-08-07T06:11:14.595Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:15.419Z",
+      "finishedAt": "2026-08-07T06:11:15.440Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:15.420Z",
+      "finishedAt": "2026-08-07T06:11:15.440Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:15.420Z",
+      "finishedAt": "2026-08-07T06:11:15.440Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:16.104Z",
+      "finishedAt": "2026-08-07T06:11:16.123Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:16.943Z",
+      "finishedAt": "2026-08-07T06:11:16.949Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:16.944Z",
+      "finishedAt": "2026-08-07T06:11:16.949Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:16.945Z",
+      "finishedAt": "2026-08-07T06:11:16.951Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:17.631Z",
+      "finishedAt": "2026-08-07T06:11:17.658Z",
+      "elapsedMs": 27,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:18.456Z",
+      "finishedAt": "2026-08-07T06:11:18.460Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:18.456Z",
+      "finishedAt": "2026-08-07T06:11:18.460Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:18.456Z",
+      "finishedAt": "2026-08-07T06:11:18.460Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:19.173Z",
+      "finishedAt": "2026-08-07T06:11:19.191Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:19.966Z",
+      "finishedAt": "2026-08-07T06:11:19.988Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:19.967Z",
+      "finishedAt": "2026-08-07T06:11:19.988Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:19.967Z",
+      "finishedAt": "2026-08-07T06:11:19.988Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:20.699Z",
+      "finishedAt": "2026-08-07T06:11:20.719Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:21.493Z",
+      "finishedAt": "2026-08-07T06:11:21.515Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:21.494Z",
+      "finishedAt": "2026-08-07T06:11:21.515Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:21.495Z",
+      "finishedAt": "2026-08-07T06:11:21.515Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:22.226Z",
+      "finishedAt": "2026-08-07T06:11:22.247Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:23.022Z",
+      "finishedAt": "2026-08-07T06:11:23.029Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:23.022Z",
+      "finishedAt": "2026-08-07T06:11:23.031Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:23.023Z",
+      "finishedAt": "2026-08-07T06:11:23.031Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:23.758Z",
+      "finishedAt": "2026-08-07T06:11:23.776Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:24.535Z",
+      "finishedAt": "2026-08-07T06:11:24.538Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:24.535Z",
+      "finishedAt": "2026-08-07T06:11:24.538Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:24.536Z",
+      "finishedAt": "2026-08-07T06:11:24.539Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:25.283Z",
+      "finishedAt": "2026-08-07T06:11:25.301Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:26.053Z",
+      "finishedAt": "2026-08-07T06:11:26.073Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:26.054Z",
+      "finishedAt": "2026-08-07T06:11:26.073Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:26.054Z",
+      "finishedAt": "2026-08-07T06:11:26.073Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:26.803Z",
+      "finishedAt": "2026-08-07T06:11:26.819Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:27.581Z",
+      "finishedAt": "2026-08-07T06:11:27.590Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:27.582Z",
+      "finishedAt": "2026-08-07T06:11:27.591Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:27.583Z",
+      "finishedAt": "2026-08-07T06:11:27.591Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:28.328Z",
+      "finishedAt": "2026-08-07T06:11:28.347Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:29.092Z",
+      "finishedAt": "2026-08-07T06:11:29.111Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:29.093Z",
+      "finishedAt": "2026-08-07T06:11:29.111Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:29.093Z",
+      "finishedAt": "2026-08-07T06:11:29.111Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:29.856Z",
+      "finishedAt": "2026-08-07T06:11:29.874Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:30.623Z",
+      "finishedAt": "2026-08-07T06:11:30.646Z",
+      "elapsedMs": 23,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:30.624Z",
+      "finishedAt": "2026-08-07T06:11:30.646Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:30.624Z",
+      "finishedAt": "2026-08-07T06:11:30.646Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:31.385Z",
+      "finishedAt": "2026-08-07T06:11:31.404Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:32.151Z",
+      "finishedAt": "2026-08-07T06:11:32.155Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:32.151Z",
+      "finishedAt": "2026-08-07T06:11:32.155Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:32.151Z",
+      "finishedAt": "2026-08-07T06:11:32.156Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:32.917Z",
+      "finishedAt": "2026-08-07T06:11:32.935Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:33.659Z",
+      "finishedAt": "2026-08-07T06:11:33.678Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:33.659Z",
+      "finishedAt": "2026-08-07T06:11:33.678Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:33.660Z",
+      "finishedAt": "2026-08-07T06:11:33.678Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:34.452Z",
+      "finishedAt": "2026-08-07T06:11:34.463Z",
+      "elapsedMs": 11,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:35.183Z",
+      "finishedAt": "2026-08-07T06:11:35.207Z",
+      "elapsedMs": 24,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:35.184Z",
+      "finishedAt": "2026-08-07T06:11:35.207Z",
+      "elapsedMs": 23,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:35.184Z",
+      "finishedAt": "2026-08-07T06:11:35.207Z",
+      "elapsedMs": 23,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:35.969Z",
+      "finishedAt": "2026-08-07T06:11:35.989Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:36.708Z",
+      "finishedAt": "2026-08-07T06:11:36.715Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:36.709Z",
+      "finishedAt": "2026-08-07T06:11:36.715Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:36.709Z",
+      "finishedAt": "2026-08-07T06:11:36.716Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:37.544Z",
+      "finishedAt": "2026-08-07T06:11:37.552Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:38.215Z",
+      "finishedAt": "2026-08-07T06:11:38.221Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:38.216Z",
+      "finishedAt": "2026-08-07T06:11:38.221Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:38.217Z",
+      "finishedAt": "2026-08-07T06:11:38.222Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:39.065Z",
+      "finishedAt": "2026-08-07T06:11:39.069Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:39.725Z",
+      "finishedAt": "2026-08-07T06:11:39.745Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:39.726Z",
+      "finishedAt": "2026-08-07T06:11:39.745Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:39.726Z",
+      "finishedAt": "2026-08-07T06:11:39.745Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:40.586Z",
+      "finishedAt": "2026-08-07T06:11:40.599Z",
+      "elapsedMs": 13,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:41.258Z",
+      "finishedAt": "2026-08-07T06:11:41.266Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:41.259Z",
+      "finishedAt": "2026-08-07T06:11:41.266Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:41.260Z",
+      "finishedAt": "2026-08-07T06:11:41.270Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:42.115Z",
+      "finishedAt": "2026-08-07T06:11:42.137Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:42.773Z",
+      "finishedAt": "2026-08-07T06:11:42.793Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:42.773Z",
+      "finishedAt": "2026-08-07T06:11:42.793Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:42.774Z",
+      "finishedAt": "2026-08-07T06:11:42.793Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:43.727Z",
+      "finishedAt": "2026-08-07T06:11:43.738Z",
+      "elapsedMs": 11,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:44.294Z",
+      "finishedAt": "2026-08-07T06:11:44.301Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:44.295Z",
+      "finishedAt": "2026-08-07T06:11:44.301Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:44.295Z",
+      "finishedAt": "2026-08-07T06:11:44.303Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:45.246Z",
+      "finishedAt": "2026-08-07T06:11:45.266Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:45.816Z",
+      "finishedAt": "2026-08-07T06:11:45.823Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:45.816Z",
+      "finishedAt": "2026-08-07T06:11:45.823Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:45.817Z",
+      "finishedAt": "2026-08-07T06:11:45.823Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:46.767Z",
+      "finishedAt": "2026-08-07T06:11:46.785Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:47.327Z",
+      "finishedAt": "2026-08-07T06:11:47.346Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:47.328Z",
+      "finishedAt": "2026-08-07T06:11:47.346Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:47.328Z",
+      "finishedAt": "2026-08-07T06:11:47.349Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:48.300Z",
+      "finishedAt": "2026-08-07T06:11:48.346Z",
+      "elapsedMs": 46,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:48.849Z",
+      "finishedAt": "2026-08-07T06:11:48.853Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:48.850Z",
+      "finishedAt": "2026-08-07T06:11:48.855Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:48.850Z",
+      "finishedAt": "2026-08-07T06:11:48.855Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:49.861Z",
+      "finishedAt": "2026-08-07T06:11:49.879Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:50.357Z",
+      "finishedAt": "2026-08-07T06:11:50.365Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:50.358Z",
+      "finishedAt": "2026-08-07T06:11:50.365Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:50.359Z",
+      "finishedAt": "2026-08-07T06:11:50.365Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:51.395Z",
+      "finishedAt": "2026-08-07T06:11:51.414Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:51.867Z",
+      "finishedAt": "2026-08-07T06:11:51.889Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:51.868Z",
+      "finishedAt": "2026-08-07T06:11:51.889Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:51.869Z",
+      "finishedAt": "2026-08-07T06:11:51.889Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:52.927Z",
+      "finishedAt": "2026-08-07T06:11:52.942Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:53.404Z",
+      "finishedAt": "2026-08-07T06:11:53.411Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:53.405Z",
+      "finishedAt": "2026-08-07T06:11:53.411Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:53.406Z",
+      "finishedAt": "2026-08-07T06:11:53.413Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:54.451Z",
+      "finishedAt": "2026-08-07T06:11:54.471Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:54.917Z",
+      "finishedAt": "2026-08-07T06:11:54.926Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:54.918Z",
+      "finishedAt": "2026-08-07T06:11:54.926Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:54.918Z",
+      "finishedAt": "2026-08-07T06:11:54.926Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:55.981Z",
+      "finishedAt": "2026-08-07T06:11:56.003Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:56.433Z",
+      "finishedAt": "2026-08-07T06:11:56.458Z",
+      "elapsedMs": 25,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:56.434Z",
+      "finishedAt": "2026-08-07T06:11:56.458Z",
+      "elapsedMs": 24,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:56.434Z",
+      "finishedAt": "2026-08-07T06:11:56.458Z",
+      "elapsedMs": 24,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:57.505Z",
+      "finishedAt": "2026-08-07T06:11:57.523Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:57.974Z",
+      "finishedAt": "2026-08-07T06:11:57.981Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:57.975Z",
+      "finishedAt": "2026-08-07T06:11:57.981Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:57.976Z",
+      "finishedAt": "2026-08-07T06:11:57.984Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:11:59.035Z",
+      "finishedAt": "2026-08-07T06:11:59.053Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:11:59.488Z",
+      "finishedAt": "2026-08-07T06:11:59.496Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:11:59.489Z",
+      "finishedAt": "2026-08-07T06:11:59.496Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:11:59.490Z",
+      "finishedAt": "2026-08-07T06:11:59.496Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:00.562Z",
+      "finishedAt": "2026-08-07T06:12:00.584Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:01.000Z",
+      "finishedAt": "2026-08-07T06:12:01.022Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:01.001Z",
+      "finishedAt": "2026-08-07T06:12:01.022Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:01.002Z",
+      "finishedAt": "2026-08-07T06:12:01.022Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:02.092Z",
+      "finishedAt": "2026-08-07T06:12:02.111Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:02.529Z",
+      "finishedAt": "2026-08-07T06:12:02.538Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:02.532Z",
+      "finishedAt": "2026-08-07T06:12:02.538Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:02.533Z",
+      "finishedAt": "2026-08-07T06:12:02.540Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:03.629Z",
+      "finishedAt": "2026-08-07T06:12:03.644Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:04.052Z",
+      "finishedAt": "2026-08-07T06:12:04.059Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:04.053Z",
+      "finishedAt": "2026-08-07T06:12:04.059Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:04.054Z",
+      "finishedAt": "2026-08-07T06:12:04.061Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:05.149Z",
+      "finishedAt": "2026-08-07T06:12:05.165Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:05.572Z",
+      "finishedAt": "2026-08-07T06:12:05.579Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:05.572Z",
+      "finishedAt": "2026-08-07T06:12:05.579Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:05.573Z",
+      "finishedAt": "2026-08-07T06:12:05.579Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:06.668Z",
+      "finishedAt": "2026-08-07T06:12:06.688Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:07.090Z",
+      "finishedAt": "2026-08-07T06:12:07.112Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:07.091Z",
+      "finishedAt": "2026-08-07T06:12:07.112Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:07.091Z",
+      "finishedAt": "2026-08-07T06:12:07.112Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:08.193Z",
+      "finishedAt": "2026-08-07T06:12:08.212Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:08.620Z",
+      "finishedAt": "2026-08-07T06:12:08.638Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:08.620Z",
+      "finishedAt": "2026-08-07T06:12:08.639Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:08.621Z",
+      "finishedAt": "2026-08-07T06:12:08.639Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:09.717Z",
+      "finishedAt": "2026-08-07T06:12:09.735Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:10.151Z",
+      "finishedAt": "2026-08-07T06:12:10.161Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:10.152Z",
+      "finishedAt": "2026-08-07T06:12:10.161Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:10.153Z",
+      "finishedAt": "2026-08-07T06:12:10.161Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:11.246Z",
+      "finishedAt": "2026-08-07T06:12:11.264Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:11.670Z",
+      "finishedAt": "2026-08-07T06:12:11.692Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:11.671Z",
+      "finishedAt": "2026-08-07T06:12:11.693Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:11.672Z",
+      "finishedAt": "2026-08-07T06:12:11.693Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:12.765Z",
+      "finishedAt": "2026-08-07T06:12:12.786Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:13.205Z",
+      "finishedAt": "2026-08-07T06:12:13.228Z",
+      "elapsedMs": 23,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:13.206Z",
+      "finishedAt": "2026-08-07T06:12:13.228Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:13.206Z",
+      "finishedAt": "2026-08-07T06:12:13.228Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:14.300Z",
+      "finishedAt": "2026-08-07T06:12:14.305Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:14.743Z",
+      "finishedAt": "2026-08-07T06:12:14.753Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:14.744Z",
+      "finishedAt": "2026-08-07T06:12:14.753Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:14.744Z",
+      "finishedAt": "2026-08-07T06:12:14.753Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:15.815Z",
+      "finishedAt": "2026-08-07T06:12:15.836Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:16.256Z",
+      "finishedAt": "2026-08-07T06:12:16.276Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:16.256Z",
+      "finishedAt": "2026-08-07T06:12:16.277Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:16.257Z",
+      "finishedAt": "2026-08-07T06:12:16.277Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:17.343Z",
+      "finishedAt": "2026-08-07T06:12:17.362Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:17.781Z",
+      "finishedAt": "2026-08-07T06:12:17.803Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:17.781Z",
+      "finishedAt": "2026-08-07T06:12:17.803Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:17.781Z",
+      "finishedAt": "2026-08-07T06:12:17.803Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:18.886Z",
+      "finishedAt": "2026-08-07T06:12:18.895Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:19.314Z",
+      "finishedAt": "2026-08-07T06:12:19.322Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:19.315Z",
+      "finishedAt": "2026-08-07T06:12:19.322Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:19.316Z",
+      "finishedAt": "2026-08-07T06:12:19.322Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:20.407Z",
+      "finishedAt": "2026-08-07T06:12:20.427Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:20.833Z",
+      "finishedAt": "2026-08-07T06:12:20.838Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:20.834Z",
+      "finishedAt": "2026-08-07T06:12:20.838Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:20.835Z",
+      "finishedAt": "2026-08-07T06:12:20.840Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:21.972Z",
+      "finishedAt": "2026-08-07T06:12:21.982Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:22.341Z",
+      "finishedAt": "2026-08-07T06:12:22.360Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:22.341Z",
+      "finishedAt": "2026-08-07T06:12:22.360Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:22.341Z",
+      "finishedAt": "2026-08-07T06:12:22.360Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:23.488Z",
+      "finishedAt": "2026-08-07T06:12:23.508Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:23.861Z",
+      "finishedAt": "2026-08-07T06:12:23.865Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:23.861Z",
+      "finishedAt": "2026-08-07T06:12:23.866Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:23.861Z",
+      "finishedAt": "2026-08-07T06:12:23.866Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:25.014Z",
+      "finishedAt": "2026-08-07T06:12:25.018Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:25.370Z",
+      "finishedAt": "2026-08-07T06:12:25.392Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:25.371Z",
+      "finishedAt": "2026-08-07T06:12:25.392Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:25.371Z",
+      "finishedAt": "2026-08-07T06:12:25.393Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:26.525Z",
+      "finishedAt": "2026-08-07T06:12:26.527Z",
+      "elapsedMs": 2,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:26.906Z",
+      "finishedAt": "2026-08-07T06:12:26.922Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:26.907Z",
+      "finishedAt": "2026-08-07T06:12:26.922Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:26.907Z",
+      "finishedAt": "2026-08-07T06:12:26.922Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:28.039Z",
+      "finishedAt": "2026-08-07T06:12:28.058Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:28.432Z",
+      "finishedAt": "2026-08-07T06:12:28.443Z",
+      "elapsedMs": 11,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:28.433Z",
+      "finishedAt": "2026-08-07T06:12:28.443Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:28.434Z",
+      "finishedAt": "2026-08-07T06:12:28.443Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:29.562Z",
+      "finishedAt": "2026-08-07T06:12:29.582Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:29.957Z",
+      "finishedAt": "2026-08-07T06:12:29.979Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:29.957Z",
+      "finishedAt": "2026-08-07T06:12:29.979Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:29.958Z",
+      "finishedAt": "2026-08-07T06:12:29.979Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:31.091Z",
+      "finishedAt": "2026-08-07T06:12:31.109Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:31.495Z",
+      "finishedAt": "2026-08-07T06:12:31.501Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:31.496Z",
+      "finishedAt": "2026-08-07T06:12:31.501Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:31.497Z",
+      "finishedAt": "2026-08-07T06:12:31.503Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:32.622Z",
+      "finishedAt": "2026-08-07T06:12:32.642Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:33.034Z",
+      "finishedAt": "2026-08-07T06:12:33.039Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:33.034Z",
+      "finishedAt": "2026-08-07T06:12:33.039Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:33.035Z",
+      "finishedAt": "2026-08-07T06:12:33.040Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:34.152Z",
+      "finishedAt": "2026-08-07T06:12:34.168Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:34.556Z",
+      "finishedAt": "2026-08-07T06:12:34.575Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:34.557Z",
+      "finishedAt": "2026-08-07T06:12:34.576Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:34.557Z",
+      "finishedAt": "2026-08-07T06:12:34.576Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:35.679Z",
+      "finishedAt": "2026-08-07T06:12:35.697Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:36.086Z",
+      "finishedAt": "2026-08-07T06:12:36.106Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:36.087Z",
+      "finishedAt": "2026-08-07T06:12:36.106Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:36.088Z",
+      "finishedAt": "2026-08-07T06:12:36.107Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:37.199Z",
+      "finishedAt": "2026-08-07T06:12:37.222Z",
+      "elapsedMs": 23,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:37.611Z",
+      "finishedAt": "2026-08-07T06:12:37.621Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:37.612Z",
+      "finishedAt": "2026-08-07T06:12:37.621Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:37.612Z",
+      "finishedAt": "2026-08-07T06:12:37.621Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:38.737Z",
+      "finishedAt": "2026-08-07T06:12:38.756Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:39.126Z",
+      "finishedAt": "2026-08-07T06:12:39.131Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:39.126Z",
+      "finishedAt": "2026-08-07T06:12:39.131Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:39.127Z",
+      "finishedAt": "2026-08-07T06:12:39.133Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:40.263Z",
+      "finishedAt": "2026-08-07T06:12:40.279Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:40.638Z",
+      "finishedAt": "2026-08-07T06:12:40.644Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:40.640Z",
+      "finishedAt": "2026-08-07T06:12:40.644Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:40.641Z",
+      "finishedAt": "2026-08-07T06:12:40.645Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:41.789Z",
+      "finishedAt": "2026-08-07T06:12:41.794Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:42.153Z",
+      "finishedAt": "2026-08-07T06:12:42.172Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:42.154Z",
+      "finishedAt": "2026-08-07T06:12:42.172Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:42.154Z",
+      "finishedAt": "2026-08-07T06:12:42.172Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T06:12:43.299Z",
+      "finishedAt": "2026-08-07T06:12:43.316Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T06:12:43.684Z",
+      "finishedAt": "2026-08-07T06:12:43.702Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T06:12:43.684Z",
+      "finishedAt": "2026-08-07T06:12:43.702Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T06:12:43.685Z",
+      "finishedAt": "2026-08-07T06:12:43.702Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_0b77ea9c-b3a4-47b6-b834-bfaa7cbf709d",
+      "startedAt": "2026-08-07T06:11:02.240Z",
+      "finishedAt": "2026-08-07T06:12:43.957Z",
+      "elapsedMs": 101717,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    }
+  ]
+}

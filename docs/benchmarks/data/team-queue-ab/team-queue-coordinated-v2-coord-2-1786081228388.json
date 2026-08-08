@@ -1,0 +1,6311 @@
+{
+  "arm": "coordinated",
+  "label": "v2-coord-2",
+  "scenario": "team-queue-wired",
+  "bands": [
+    "deep",
+    "partial",
+    "independent"
+  ],
+  "workers": 5,
+  "env": {
+    "COORD_REPOSITORY_PARALLELISM": "default",
+    "COORD_AGENT_ADAPTER": "claude",
+    "COORD_AGENT_ARGS": "[\"--model\",\"opus\"]",
+    "COORD_AGENT_EFFORT": "high"
+  },
+  "startedAt": "2026-08-07T05:29:39.166Z",
+  "elapsedMs": 641386,
+  "wallClockMs": 641386,
+  "budgetExhausted": false,
+  "completionOrder": [
+    "task_19b62a33-f962-423c-a472-1cff38ed0f1d",
+    "task_133d7fd6-b38b-44ed-ba1b-23ffb173f446",
+    "task_18d8eed5-0619-4c67-b238-93e8c7a40061",
+    "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501",
+    "task_006cd529-109f-48a3-907d-926f8ae4a1fc",
+    "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+    "task_b300f210-9de4-4a45-bc06-a9b4e0be1cce",
+    "task_5019a984-27d6-42b9-9822-ca65a434412e",
+    "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+    "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8"
+  ],
+  "metrics": {
+    "transportFailures": 0,
+    "transportRequeues": 0,
+    "tasksIntegrated": 10,
+    "tasksFailed": 0,
+    "tasksOutstanding": 0,
+    "tasksTotal": 10,
+    "leaseIterations": 36,
+    "acceptedIterations": 10,
+    "deferredIterations": 24,
+    "conflictsDetected": 27,
+    "partialAdmissions": 0,
+    "planTimeRequeues": 26,
+    "resultTimeRequeues": 0,
+    "replansTotal": 26,
+    "plansReused": 0,
+    "plansAmended": 19,
+    "integrationsPromoted": 10,
+    "validationRuns": 10,
+    "validationFailures": 0,
+    "observedTokensTotal": 0,
+    "observedTokensByPhase": {
+      "planning": 0,
+      "execution": 0
+    },
+    "codexInvocations": 0,
+    "codexInvocationsWithoutTokenLine": 0,
+    "controlPlaneTokensTotal": 0,
+    "reportedTokensTotal": 4034300,
+    "reportedTokensByPhase": {
+      "planning": 1649500,
+      "execution": 2384800
+    },
+    "reportedTokenRows": 31
+  },
+  "outcome": {
+    "kind": "coordinated",
+    "validation": {
+      "passed": true,
+      "output": "✔ audit records the actor and marks privileged actions (0.6166ms)\n✔ audit records the originating ip address (0.632ms)\n✔ loyal customers are discounted and new ones are not (0.628ms)\n✔ the loyalty threshold is more than twenty five orders (0.1585ms)\n✔ notifications use the account channel (0.5792ms)\n✔ exports keep id, name and status columns (2.5586ms)\n✔ exports include a trailing createdAt column (0.8028ms)\n✔ rows without createdAt export an empty value (0.122ms)\n✔ money renders with a currency symbol (0.7939ms)\n✔ rounding leaves a positive amount positive and never grows it much (0.148ms)\n✔ rounding keeps whole pence (0.0881ms)\n✔ formatting never shows more than two decimals (0.0828ms)\n✔ search matches on name and rejects empty queries (1.6428ms)\n✔ search matches on email address (0.2079ms)\n✔ tax is charged on a standard order (0.7806ms)\n✔ an order of only digital lines is charged no tax (0.1656ms)\n✔ an order mixing digital and physical lines is still charged tax (0.1169ms)\n✔ an order with no lines is still charged tax (0.0883ms)\n✔ an order total is a positive number (0.8043ms)\n✔ a bigger basket costs more than a smaller one (0.1331ms)\n✔ a total includes the flat handling charge (0.0898ms)\n✔ an empty basket still pays delivery and handling (0.0982ms)\n✔ a basket just under a hundred still pays delivery (0.0941ms)\n✔ a basket of exactly a hundred gets free delivery (0.0798ms)\n✔ a basket over a hundred gets free delivery but still pays handling (0.0852ms)\n✔ paying by card costs five percent more (0.0926ms)\n✔ paying another way costs no more than usual (0.1537ms)\n✔ the card surcharge covers free delivery, handling and tax (0.1802ms)\n✔ a card total is still rounded to whole pence (0.107ms)\n✔ webhook delivery reports the endpoint it used (0.6715ms)\n✔ webhook delivery does not retry a first-attempt success (0.1435ms)\n✔ webhook delivery retries until the transport succeeds (0.1078ms)\n✔ webhook delivery gives up after three failed attempts (0.1309ms)\nℹ tests 33\nℹ suites 0\nℹ pass 33\nℹ fail 0\nℹ cancelled 0\nℹ skipped 0\nℹ todo 0\nℹ duration_ms 320.4292\n"
+    },
+    "survival": [
+      {
+        "taskId": "task_19b62a33-f962-423c-a472-1cff38ed0f1d",
+        "scenarioTaskId": "task_handling_fee",
+        "band": "deep",
+        "addedLines": 11,
+        "survivingLines": 7,
+        "survivalRatio": 0.6363636363636364,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": true
+      },
+      {
+        "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+        "scenarioTaskId": "task_free_delivery",
+        "band": "deep",
+        "addedLines": 19,
+        "survivingLines": 18,
+        "survivalRatio": 0.9473684210526315,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": true
+      },
+      {
+        "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+        "scenarioTaskId": "task_card_surcharge",
+        "band": "deep",
+        "addedLines": 21,
+        "survivingLines": 21,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "scenarioTaskId": "task_loyalty_tier",
+        "band": "partial",
+        "addedLines": 5,
+        "survivingLines": 5,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+        "scenarioTaskId": "task_zero_rated_goods",
+        "band": "partial",
+        "addedLines": 17,
+        "survivingLines": 17,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501",
+        "scenarioTaskId": "task_rounding",
+        "band": "partial",
+        "addedLines": 10,
+        "survivingLines": 10,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_b300f210-9de4-4a45-bc06-a9b4e0be1cce",
+        "scenarioTaskId": "task_webhook_retry",
+        "band": "independent",
+        "addedLines": 29,
+        "survivingLines": 29,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_133d7fd6-b38b-44ed-ba1b-23ffb173f446",
+        "scenarioTaskId": "task_audit_ip",
+        "band": "independent",
+        "addedLines": 8,
+        "survivingLines": 8,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_006cd529-109f-48a3-907d-926f8ae4a1fc",
+        "scenarioTaskId": "task_export_created_at",
+        "band": "independent",
+        "addedLines": 9,
+        "survivingLines": 9,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      },
+      {
+        "taskId": "task_18d8eed5-0619-4c67-b238-93e8c7a40061",
+        "scenarioTaskId": "task_search_email",
+        "band": "independent",
+        "addedLines": 11,
+        "survivingLines": 11,
+        "survivalRatio": 1,
+        "whollyOverwritten": false,
+        "partiallyOverwritten": false
+      }
+    ],
+    "behaviouralSurvival": [
+      {
+        "scenarioTaskId": "task_handling_fee",
+        "judged": true,
+        "testFiles": [
+          "test/total.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_free_delivery",
+        "judged": true,
+        "testFiles": [
+          "test/total.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_card_surcharge",
+        "judged": true,
+        "testFiles": [
+          "test/total.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_loyalty_tier",
+        "judged": true,
+        "testFiles": [
+          "test/discount.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_zero_rated_goods",
+        "judged": true,
+        "testFiles": [
+          "test/tax.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_rounding",
+        "judged": true,
+        "testFiles": [
+          "test/money.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_webhook_retry",
+        "judged": true,
+        "testFiles": [
+          "test/webhook.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_audit_ip",
+        "judged": true,
+        "testFiles": [
+          "test/audit.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_export_created_at",
+        "judged": true,
+        "testFiles": [
+          "test/export.test.js"
+        ],
+        "passed": true
+      },
+      {
+        "scenarioTaskId": "task_search_email",
+        "judged": true,
+        "testFiles": [
+          "test/search.test.js"
+        ],
+        "passed": true
+      }
+    ],
+    "lostWork": {
+      "tasksWithChangesets": 10,
+      "tasksWhollyOverwritten": 0,
+      "tasksPartiallyOverwritten": 2,
+      "tasksLosingWork": 2,
+      "lostTaskRate": 0.2,
+      "tasksLosingWorkIds": [
+        "task_free_delivery",
+        "task_handling_fee"
+      ],
+      "behaviouralJudged": 10,
+      "behaviouralLost": 0,
+      "behaviouralLostRate": 0,
+      "behaviouralLostIds": []
+    }
+  },
+  "plans": [
+    {
+      "runId": "run_557e2e90-e008-4774-af13-19870a2ae7e7",
+      "taskId": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+      "scenarioTaskId": "task_zero_rated_goods",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T05:40:18.297Z",
+      "plan": {
+        "taskId": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+        "objective": "Orders that contain only digital goods should not be charged tax",
+        "expectedFiles": [
+          "src/pricing/tax.js",
+          "test/tax.test.js"
+        ],
+        "expectedSymbols": [
+          "STANDARD_RATE",
+          "order",
+          "orderTotal",
+          "taxFor"
+        ],
+        "expectedApis": [
+          "taxFor(amount, order)"
+        ],
+        "expectedSchemas": [
+          "order.lines[].digital (boolean, optional; true marks a line as a digital good)"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "tax is charged on a standard order",
+          "test/tax.test.js",
+          "test/tax.test.js: an order mixing digital and physical lines is still charged tax",
+          "test/tax.test.js: an order of only digital lines is charged no tax",
+          "test/tax.test.js: an order with no lines is still charged tax",
+          "test/tax.test.js: tax is charged on a standard order",
+          "test/total.test.js (must keep passing unmodified, including the card-surcharge cases added by the canonical change)"
+        ],
+        "expectedServices": [
+          "accounts-service pricing module (src/pricing)"
+        ],
+        "dependencies": [
+          "../src/pricing/tax.js",
+          "file:src/pricing/tax.js",
+          "node:assert/strict",
+          "node:test",
+          "symbol:taxFor",
+          "symbol:test"
+        ],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add a conditional tax exemption in src/pricing/tax.js: taxFor returns 0 when an order has at least one line and every line is marked digital (line.digital === true), leaving mixed orders, physical orders, and empty baskets taxed at the existing 20% STANDARD_RATE. The canonical change since the previous plan touched src/pricing/total.js and test/total.test.js (card surcharge: CARD_SURCHARGE_RATE applied to the rounded total). Verified against the current revision: orderTotal still computes `withFees + taxFor(withFees, order)` and forwards the whole order to taxFor, so the taxFor signature this plan relies on is unchanged and total.js still needs no edit. The card surcharge is applied after tax, so a digital-only card order will correctly get 5% on a tax-free total. Every fixture in test/total.test.js uses lines without a digital flag, so all existing total tests (including the new card-surcharge and rounding cases) keep passing unmodified. No stale file assumptions; plan carried forward.",
+        "grounding": {
+          "confidence": "verified",
+          "revision": "77ad3c573229174490d15793b64ca82a5f256976",
+          "missingFiles": [],
+          "unresolvedSymbols": [],
+          "fileReferents": [],
+          "symbolReferents": [],
+          "notes": []
+        }
+      }
+    },
+    {
+      "runId": "run_f4fb44d1-2808-45a4-85f3-7869dfa1ad1d",
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "scenarioTaskId": "task_loyalty_tier",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T05:40:06.153Z",
+      "plan": {
+        "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "objective": "Customers who have placed more than twenty five orders should get fifteen percent off instead of ten",
+        "expectedFiles": [
+          "src/pricing/discount.js",
+          "test/discount.test.js"
+        ],
+        "expectedSymbols": [
+          "LOYAL_ORDERS",
+          "LOYAL_RATE",
+          "discountRate"
+        ],
+        "expectedApis": [
+          "discountRate(customer)"
+        ],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/discount.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Change existing loyalty discount parameters in src/pricing/discount.js: raise the qualifying order-count threshold from more-than-10 to more-than-25 (LOYAL_ORDERS 10 -> 25) and raise the discount rate from 10% to 15% (LOYAL_RATE 0.1 -> 0.15). No behavior is added, removed, enabled, or disabled. test/discount.test.js is extended to pin the new boundary (25 -> 0, 26 -> 0.15). The canonical branch advanced again while planning: a card-payment surcharge change (CARD_SURCHARGE_RATE, orderTotal fee composition) confined to src/pricing/total.js and test/total.test.js, following earlier delivery/handling-fee and webhook-retry changes in the same and other files. None of those files or symbols are claimed by this plan and none share symbols with the discount module, so the plan is unchanged; the discount continues to be applied via the existing discountRate() call inside the order-total calculation, ahead of delivery, handling, and card-surcharge fees. Leave src/pricing/total.js, test/total.test.js, src/notify/webhook.js, and test/webhook.test.js untouched."
+      }
+    },
+    {
+      "runId": "run_2a761cb8-ba5a-4a87-aa05-00edd34087b2",
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "scenarioTaskId": "task_card_surcharge",
+      "band": "deep",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T05:39:07.492Z",
+      "plan": {
+        "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+        "objective": "Orders paid by card should cost an extra five percent on top of what the customer would otherwise pay",
+        "expectedFiles": [
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ],
+        "expectedSymbols": [
+          "CARD_SURCHARGE_RATE",
+          "DELIVERY",
+          "FREE_DELIVERY_THRESHOLD",
+          "HANDLING",
+          "delivery",
+          "discountRate",
+          "discounted",
+          "large",
+          "lines",
+          "order",
+          "orderTotal",
+          "roundMoney",
+          "small",
+          "taxFor",
+          "total",
+          "withFees"
+        ],
+        "expectedApis": [
+          "orderTotal(order) — now reads order.payment (card indicator) in addition to order.lines and order.customer"
+        ],
+        "expectedSchemas": [
+          "order object gains an optional payment method field (e.g. order.payment === \"card\") consumed by orderTotal; absent/other values behave exactly as today"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "a basket just under a hundred still pays delivery",
+          "a basket of exactly a hundred gets free delivery",
+          "a basket over a hundred gets free delivery but still pays handling",
+          "a bigger basket costs more than a smaller one",
+          "a total includes the flat handling charge",
+          "an empty basket still pays delivery and handling",
+          "an order total is a positive number",
+          "test/total.test.js",
+          "test/total.test.js: card-paid order costs 5% more than the same order paid another way",
+          "test/total.test.js: non-card order totals are unchanged — existing assertions of 54, 6, 114, 122.4 and 146.4 must still hold",
+          "test/total.test.js: surcharge applies to the full amount including delivery (or free delivery above the hundred threshold), handling and tax, and the result stays rounded to two decimal places"
+        ],
+        "expectedServices": [
+          "accounts-service pricing module (src/pricing)"
+        ],
+        "dependencies": [
+          "../format/money.js",
+          "../src/pricing/total.js",
+          "./discount.js",
+          "./tax.js",
+          "file:src/format/money.js",
+          "file:src/pricing/discount.js",
+          "file:src/pricing/tax.js",
+          "file:src/pricing/total.js",
+          "node:assert/strict",
+          "node:test",
+          "src/format/money.js (roundMoney)",
+          "src/pricing/discount.js (discountRate)",
+          "src/pricing/tax.js (taxFor)",
+          "symbol:discountRate",
+          "symbol:order",
+          "symbol:orderTotal",
+          "symbol:roundMoney",
+          "symbol:taxFor",
+          "symbol:test"
+        ],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "medium",
+        "intent": "Add a card-payment surcharge inside orderTotal (src/pricing/total.js): compute the otherwise-final amount exactly as today — line items less the customer discount, plus delivery (free at or above FREE_DELIVERY_THRESHOLD of 100, otherwise DELIVERY of 3), plus HANDLING, plus taxFor — then multiply by 1 + CARD_SURCHARGE_RATE (0.05) when the order is paid by card, applying the multiplier before the existing roundMoney call so output precision is unchanged. Non-card orders keep identical behaviour. The canonical advance (sequence 7, 231323f) changed the same two files this plan claims: total.js now has FREE_DELIVERY_THRESHOLD and a conditional `delivery` inside the `withFees` sum, and total.test.js gained three delivery-threshold cases. This does not change the surcharge design — the surcharge still wraps the whole `withFees + tax` expression — but the plan's symbol list and test expectations are updated to the post-change shape, and new card tests must cover both the paying-delivery and free-delivery branches.",
+        "grounding": {
+          "confidence": "grounded",
+          "revision": "231323f1dbf11e2b49c5c10baf5cafd9cf72a6a0",
+          "missingFiles": [],
+          "unresolvedSymbols": [
+            "CARD_SURCHARGE_RATE"
+          ],
+          "fileReferents": [],
+          "symbolReferents": [],
+          "notes": [
+            "declared symbol CARD_SURCHARGE_RATE does not resolve at 231323f1dbf11e2b49c5c10baf5cafd9cf72a6a0 and matches nothing; treated as a new symbol"
+          ]
+        }
+      }
+    },
+    {
+      "runId": "run_843cb52b-0e65-44fc-b8f8-743578dc3711",
+      "taskId": "task_b300f210-9de4-4a45-bc06-a9b4e0be1cce",
+      "scenarioTaskId": "task_webhook_retry",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T05:38:06.089Z",
+      "plan": {
+        "taskId": "task_b300f210-9de4-4a45-bc06-a9b4e0be1cce",
+        "objective": "Retry webhook delivery up to three times when the transport reports a failure",
+        "expectedFiles": [
+          "src/notify/webhook.js",
+          "test/webhook.test.js"
+        ],
+        "expectedSymbols": [
+          "MAX_DELIVERY_ATTEMPTS",
+          "deliver",
+          "response",
+          "result"
+        ],
+        "expectedApis": [
+          "deliver(subscriber, event, transport)"
+        ],
+        "expectedSchemas": [
+          "delivery result object { url, delivered } from src/notify/webhook.js deliver(); may gain an attempts count field",
+          "transport callback contract: transport(url, event) -> { ok: boolean }"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/webhook.test.js",
+          "webhook delivery reports the endpoint it used"
+        ],
+        "expectedServices": [],
+        "dependencies": [
+          "../src/notify/webhook.js",
+          "file:src/notify/webhook.js",
+          "node:assert/strict",
+          "node:test",
+          "symbol:deliver",
+          "symbol:test",
+          "symbol:transport"
+        ],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Unchanged from the previous plan. The canonical advance (sequence 6 -> 7, revision 231323f) touched only src/pricing/total.js and test/total.test.js, adding free-delivery-threshold pricing symbols (DELIVERY, FREE_DELIVERY_THRESHOLD, HANDLING, orderTotal, withFees, etc.) and basket-total tests. This plan claims neither of those files nor any of those symbols, and the webhook notifier has no dependency on the pricing module, so no file assumptions went stale and nothing needed removing. Plan as before: add retry behavior to the existing webhook deliver() helper — when the injected transport returns a non-ok response, re-invoke it up to a maximum of three total attempts (MAX_DELIVERY_ATTEMPTS), stopping early on the first success, and report the final delivered state. No existing behavior is removed: a first-attempt success still calls the transport exactly once and returns the same { url, delivered } shape, so the existing webhook test keeps passing. Change stays confined to src/notify/webhook.js plus a new case in test/webhook.test.js, honoring the README rule that a module change must not touch another module's tests.",
+        "grounding": {
+          "confidence": "grounded",
+          "revision": "231323f1dbf11e2b49c5c10baf5cafd9cf72a6a0",
+          "missingFiles": [],
+          "unresolvedSymbols": [
+            "MAX_DELIVERY_ATTEMPTS"
+          ],
+          "fileReferents": [],
+          "symbolReferents": [],
+          "notes": [
+            "declared symbol MAX_DELIVERY_ATTEMPTS does not resolve at 231323f1dbf11e2b49c5c10baf5cafd9cf72a6a0 and matches nothing; treated as a new symbol"
+          ]
+        }
+      }
+    },
+    {
+      "runId": "run_55c68509-b682-4928-945b-fdd0ea4acb7d",
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "scenarioTaskId": "task_free_delivery",
+      "band": "deep",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T05:36:45.446Z",
+      "plan": {
+        "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+        "objective": "Orders of one hundred pounds or more should not be charged for delivery, and every other order should be charged three pounds",
+        "expectedFiles": [
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ],
+        "expectedSymbols": [
+          "DELIVERY",
+          "FREE_DELIVERY_THRESHOLD",
+          "HANDLING",
+          "discounted",
+          "lines",
+          "orderTotal",
+          "withFees"
+        ],
+        "expectedApis": [],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/total.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Unchanged in substance from the previous plan. The canonical change since it was written (sequence 5, 6ebaf11) touched only src/format/money.js and test/money.test.js (roundMoney/formatMoney/PLACES — rounding every customer-facing amount to whole pence). This plan claims neither file, so no file assumptions go stale: roundMoney remains an unchanged upstream helper that src/pricing/total.js calls and that this task neither edits nor re-specifies. Its stricter two-decimal rounding is behaviour-neutral for the values in play here, since all expected totals in test/total.test.js are whole pounds. The earlier account-search (src/search/accounts.js) and audit-log (src/audit/log.js) changes remain unrelated to pricing. Work to do: add a conditional free-delivery rule in src/pricing/total.js. The module currently applies an unconditional flat HANDLING charge of 2 summed with DELIVERY in `const withFees = discounted + DELIVERY + HANDLING;`. Keep DELIVERY = 3 and HANDLING = 2 as they are, add a new FREE_DELIVERY_THRESHOLD = 100, and make only the delivery component conditional — charge 0 delivery when the post-discount goods subtotal (`discounted`) is >= FREE_DELIVERY_THRESHOLD and 3 otherwise, while HANDLING continues to be added to every order including free-delivery and empty ones. Tax is still computed on the goods subtotal plus whatever fees are charged, and the result stays rounded via the existing roundMoney helper (call site unchanged). Extend test/total.test.js with cases below, exactly at (100 must be free), and above the threshold, asserting the handling charge still applies at and above the threshold; the four existing tests (\"an order total is a positive number\", \"a bigger basket costs more than a smaller one\", \"a total includes the flat handling charge\", \"an empty basket still pays delivery and handling\") all use sub-100 baskets and must keep their current expected values (54 and 6) unchanged. No other module, test file, API, schema, or config changes."
+      }
+    },
+    {
+      "runId": "run_c5d87029-96b3-4f39-86a6-339a523e300b",
+      "taskId": "task_006cd529-109f-48a3-907d-926f8ae4a1fc",
+      "scenarioTaskId": "task_export_created_at",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T05:36:23.775Z",
+      "plan": {
+        "taskId": "task_006cd529-109f-48a3-907d-926f8ae4a1fc",
+        "objective": "Add a created-at column to the CSV export",
+        "expectedFiles": [
+          "src/export/csv.js",
+          "test/export.test.js"
+        ],
+        "expectedSymbols": [
+          "COLUMNS",
+          "body",
+          "column",
+          "exportColumns",
+          "header",
+          "toCsv"
+        ],
+        "expectedApis": [
+          "exportColumns()",
+          "toCsv(rows)"
+        ],
+        "expectedSchemas": [
+          "CSV export column set: id,name,status,createdAt",
+          "CSV export row shape consumed by toCsv (row.createdAt)"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "exports keep id, name and status columns",
+          "test/export.test.js"
+        ],
+        "expectedServices": [
+          "accounts-service export module (src/export)"
+        ],
+        "dependencies": [
+          "../src/export/csv.js",
+          "file:src/export/csv.js",
+          "node:assert/strict",
+          "node:test",
+          "symbol:exportColumns",
+          "symbol:test",
+          "symbol:toCsv"
+        ],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Unchanged from the previous plan: append a new trailing \"createdAt\" column to the COLUMNS constant in src/export/csv.js so exported rows carry record creation time; existing id/name/status columns and their order stay the same, and rows lacking the field serialise to an empty value via the existing `row[key] ?? \"\"` fallback. Test coverage in test/export.test.js is extended for the new column. The canonical advance (sequence 5, 6ebaf11) touched only src/format/money.js and test/money.test.js — money rounding/formatting helpers (PLACES, formatMoney, roundMoney) — which this plan never claimed and which the export module does not use, so no file assumptions are stale and nothing in the plan changes. No other module imports the export helpers, so no other files or tests change.",
+        "grounding": {
+          "confidence": "verified",
+          "revision": "6ebaf11702c64a70789a24cd37919e3c79020b0e",
+          "missingFiles": [],
+          "unresolvedSymbols": [],
+          "fileReferents": [],
+          "symbolReferents": [],
+          "notes": []
+        }
+      }
+    },
+    {
+      "runId": "run_012042aa-e6cb-445c-a786-1d9ecbc003cc",
+      "taskId": "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501",
+      "scenarioTaskId": "task_rounding",
+      "band": "partial",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T05:34:40.213Z",
+      "plan": {
+        "taskId": "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501",
+        "objective": "Round every amount a customer is shown to whole pence so totals never display long decimals",
+        "expectedFiles": [
+          "src/format/money.js",
+          "test/money.test.js"
+        ],
+        "expectedSymbols": [
+          "PLACES",
+          "formatMoney",
+          "orderTotal",
+          "roundMoney",
+          "rounded",
+          "scale"
+        ],
+        "expectedApis": [],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "money renders with a currency symbol",
+          "rounding leaves a positive amount positive and never grows it much",
+          "test/money.test.js",
+          "test/total.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [
+          "../src/format/money.js",
+          "file:src/format/money.js",
+          "node:assert/strict",
+          "node:test",
+          "symbol:formatMoney",
+          "symbol:roundMoney",
+          "symbol:test"
+        ],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Change existing customer-facing rounding precision in src/format/money.js from whole pounds (PLACES = 0) to whole pence (PLACES = 2), so roundMoney and its consumers (formatMoney, orderTotal) never emit long decimals; add a money-module test pinning two-decimal rounding. No new modules, APIs, or removed behavior.",
+        "grounding": {
+          "confidence": "verified",
+          "revision": "2eb3dffa4130069e5cd00f6f2c67f35c1f4786d0",
+          "missingFiles": [],
+          "unresolvedSymbols": [],
+          "fileReferents": [],
+          "symbolReferents": [],
+          "notes": []
+        }
+      }
+    },
+    {
+      "runId": "run_5882d151-4aca-4217-b670-cb13c91baad1",
+      "taskId": "task_18d8eed5-0619-4c67-b238-93e8c7a40061",
+      "scenarioTaskId": "task_search_email",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T05:34:09.008Z",
+      "plan": {
+        "taskId": "task_18d8eed5-0619-4c67-b238-93e8c7a40061",
+        "objective": "Make account search match on email address as well as name",
+        "expectedFiles": [
+          "src/search/accounts.js",
+          "test/search.test.js"
+        ],
+        "expectedSymbols": [
+          "searchAccounts"
+        ],
+        "expectedApis": [
+          "searchAccounts(accounts, query)"
+        ],
+        "expectedSchemas": [
+          "account object: { name: string, email?: string }"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/search.test.js"
+        ],
+        "expectedServices": [
+          "accounts-service search module (src/search)"
+        ],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add email-address matching to the existing case-insensitive substring account search: searchAccounts in src/search/accounts.js currently filters only on account.name and will be broadened to also match account.email (tolerating accounts with no email field), leaving the empty/whitespace-query short-circuit and the returned shape unchanged; test/search.test.js gains coverage for an email-only match while keeping the existing name and empty-query assertions. No other module or test is touched, per the README's one-module-per-test-file rule."
+      }
+    },
+    {
+      "runId": "run_bf02bbec-09ac-411d-805e-2a8379330abe",
+      "taskId": "task_133d7fd6-b38b-44ed-ba1b-23ffb173f446",
+      "scenarioTaskId": "task_audit_ip",
+      "band": "independent",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T05:32:40.047Z",
+      "plan": {
+        "taskId": "task_133d7fd6-b38b-44ed-ba1b-23ffb173f446",
+        "objective": "Record the originating IP address on every audit entry",
+        "expectedFiles": [
+          "src/audit/log.js",
+          "test/audit.test.js"
+        ],
+        "expectedSymbols": [
+          "auditEntry",
+          "isPrivileged"
+        ],
+        "expectedApis": [
+          "auditEntry(actor, action, subject, ip)"
+        ],
+        "expectedSchemas": [
+          "audit entry object: { actor, action, subject, ip }"
+        ],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "audit records the actor and marks privileged actions",
+          "test/audit.test.js"
+        ],
+        "expectedServices": [
+          "accounts-service"
+        ],
+        "dependencies": [
+          "../src/audit/log.js",
+          "file:src/audit/log.js",
+          "node:assert/strict",
+          "node:test",
+          "symbol:auditEntry",
+          "symbol:isPrivileged",
+          "symbol:test"
+        ],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Add an originating IP address field to audit entries by extending auditEntry with an ip parameter that is included on the returned entry object, and cover it in the audit module's own test; no existing fields or behavior are removed or disabled, and no other module is touched.",
+        "grounding": {
+          "confidence": "verified",
+          "revision": "47868c8c10b49522c9b42706b94b179a9fc42581",
+          "missingFiles": [],
+          "unresolvedSymbols": [],
+          "fileReferents": [],
+          "symbolReferents": [],
+          "notes": []
+        }
+      }
+    },
+    {
+      "runId": "run_04d4b0ab-7736-4e2b-afbe-87de0afbaa07",
+      "taskId": "task_19b62a33-f962-423c-a472-1cff38ed0f1d",
+      "scenarioTaskId": "task_handling_fee",
+      "band": "deep",
+      "revision": 1,
+      "reason": "initial",
+      "createdAt": "2026-08-07T05:31:21.922Z",
+      "plan": {
+        "taskId": "task_19b62a33-f962-423c-a472-1cff38ed0f1d",
+        "objective": "Add a flat two pound handling charge to every order's total",
+        "expectedFiles": [
+          "src/pricing/total.js",
+          "test/total.test.js"
+        ],
+        "expectedSymbols": [
+          "DELIVERY",
+          "HANDLING",
+          "discountRate",
+          "orderTotal",
+          "roundMoney",
+          "taxFor"
+        ],
+        "expectedApis": [
+          "orderTotal(order)"
+        ],
+        "expectedSchemas": [],
+        "expectedConfigKeys": [],
+        "expectedTests": [
+          "test/total.test.js"
+        ],
+        "expectedServices": [],
+        "dependencies": [],
+        "commands": [
+          {
+            "executable": "node",
+            "args": [
+              "--test"
+            ],
+            "label": "repository tests"
+          }
+        ],
+        "externalAccess": [],
+        "riskLevel": "low",
+        "intent": "Adding behavior: introduce a new flat £2 handling fee constant in src/pricing/total.js and include it in every orderTotal calculation alongside the existing £3 DELIVERY constant (added to the discounted subtotal before tax is computed, so handling is taxed like delivery), then extend test/total.test.js to assert the fee is applied. No existing behavior is removed or disabled; no other module (audit, export, notify, search) references orderTotal, so pricing is the only affected area."
+      }
+    }
+  ],
+  "assessments": [
+    {
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "taskIds": [
+        "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+      ],
+      "score": 85,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 50
+        }
+      ]
+    },
+    {
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "taskIds": [
+        "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+        "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "small",
+            "total",
+            "withDelivery"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 315
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 30
+        }
+      ]
+    },
+    {
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "taskIds": [
+        "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+      ],
+      "score": 85,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 50
+        }
+      ]
+    },
+    {
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "taskIds": [
+        "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+        "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "small",
+            "total",
+            "withDelivery"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 315
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 30
+        }
+      ]
+    },
+    {
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "taskIds": [
+        "task_5019a984-27d6-42b9-9822-ca65a434412e",
+        "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "discountRate",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "roundMoney",
+            "small",
+            "taxFor",
+            "total",
+            "withDelivery"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 420
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "api_overlap",
+          "resources": [
+            "orderTotal(order)"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 30
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 30
+        }
+      ]
+    },
+    {
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "taskIds": [
+        "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+      ],
+      "score": 85,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 50
+        }
+      ]
+    },
+    {
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "taskIds": [
+        "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+        "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "small",
+            "total",
+            "withDelivery"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 315
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 30
+        }
+      ]
+    },
+    {
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "taskIds": [
+        "task_5019a984-27d6-42b9-9822-ca65a434412e",
+        "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "discountRate",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "roundMoney",
+            "small",
+            "taxFor",
+            "total",
+            "withDelivery"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 420
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "api_overlap",
+          "resources": [
+            "orderTotal(order)"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 30
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 30
+        }
+      ]
+    },
+    {
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "taskIds": [
+        "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+      ],
+      "score": 85,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 50
+        }
+      ]
+    },
+    {
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "taskIds": [
+        "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+        "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "small",
+            "total",
+            "withDelivery"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 315
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_19b62a33-f962-423c-a472-1cff38ed0f1d"
+          ],
+          "score": 30
+        }
+      ]
+    },
+    {
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "taskIds": [
+        "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+        "task_5019a984-27d6-42b9-9822-ca65a434412e"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "HANDLING",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "small",
+            "total",
+            "withFees"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 350
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "a total includes the flat handling charge",
+            "an empty basket still pays delivery and handling",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 50
+        },
+        {
+          "kind": "intent_conflict",
+          "resources": [
+            "src/pricing/total.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 27,
+          "advisory": true,
+          "explanation": "both intents ground to src/pricing/total.js; shared intent terms: cost/price, delivery, discount, good/full, otherwise, plus, positive/plus, price, round, sum/amount, sum/total, tax, total, unchanged, via; opposing terms (empty/full) (grounded at 47868c8c10b49522c9b42706b94b179a9fc42581; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)"
+        }
+      ]
+    },
+    {
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "taskIds": [
+        "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "task_5019a984-27d6-42b9-9822-ca65a434412e"
+      ],
+      "score": 85,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 50
+        }
+      ]
+    },
+    {
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "taskIds": [
+        "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+        "task_5019a984-27d6-42b9-9822-ca65a434412e"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "HANDLING",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "small",
+            "total",
+            "withFees"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 350
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "a total includes the flat handling charge",
+            "an empty basket still pays delivery and handling",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 50
+        },
+        {
+          "kind": "intent_conflict",
+          "resources": [
+            "src/pricing/total.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 27,
+          "advisory": true,
+          "explanation": "both intents ground to src/pricing/total.js; shared intent terms: cost/price, delivery, discount, good/full, otherwise, plus, positive/plus, price, round, sum/amount, sum/total, tax, total, unchanged, via; opposing terms (empty/full) (grounded at 47868c8c10b49522c9b42706b94b179a9fc42581; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)"
+        }
+      ]
+    },
+    {
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "taskIds": [
+        "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "task_5019a984-27d6-42b9-9822-ca65a434412e"
+      ],
+      "score": 85,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 50
+        }
+      ]
+    },
+    {
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "taskIds": [
+        "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+        "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "orderTotal"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/format/money.js",
+            "symbol:orderTotal",
+            "symbol:roundMoney"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501"
+          ],
+          "score": 75
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501"
+          ],
+          "score": 10
+        }
+      ]
+    },
+    {
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "taskIds": [
+        "task_5019a984-27d6-42b9-9822-ca65a434412e",
+        "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "orderTotal"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/format/money.js",
+            "symbol:orderTotal",
+            "symbol:roundMoney"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501"
+          ],
+          "score": 75
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501"
+          ],
+          "score": 10
+        }
+      ]
+    },
+    {
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "taskIds": [
+        "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+        "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "orderTotal"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/format/money.js",
+            "symbol:orderTotal",
+            "symbol:roundMoney"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501"
+          ],
+          "score": 75
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+            "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501"
+          ],
+          "score": 10
+        }
+      ]
+    },
+    {
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "taskIds": [
+        "task_5019a984-27d6-42b9-9822-ca65a434412e",
+        "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "HANDLING",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "small",
+            "total",
+            "withFees"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+          ],
+          "score": 350
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "a total includes the flat handling charge",
+            "an empty basket still pays delivery and handling",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+          ],
+          "score": 50
+        }
+      ]
+    },
+    {
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "taskIds": [
+        "task_5019a984-27d6-42b9-9822-ca65a434412e",
+        "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "HANDLING",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "small",
+            "total",
+            "withFees"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+          ],
+          "score": 350
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "a total includes the flat handling charge",
+            "an empty basket still pays delivery and handling",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+          ],
+          "score": 50
+        }
+      ]
+    },
+    {
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "taskIds": [
+        "task_5019a984-27d6-42b9-9822-ca65a434412e",
+        "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "file_overlap",
+          "resources": [
+            "src/pricing/total.js",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+          ],
+          "score": 40
+        },
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "DELIVERY",
+            "HANDLING",
+            "discounted",
+            "large",
+            "lines",
+            "order",
+            "orderTotal",
+            "small",
+            "total",
+            "withFees"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+          ],
+          "score": 350
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/total.js",
+            "symbol:discountRate",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:roundMoney",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+          ],
+          "score": 150
+        },
+        {
+          "kind": "test_overlap",
+          "resources": [
+            "a bigger basket costs more than a smaller one",
+            "a total includes the flat handling charge",
+            "an empty basket still pays delivery and handling",
+            "an order total is a positive number",
+            "test/total.test.js"
+          ],
+          "taskIds": [
+            "task_5019a984-27d6-42b9-9822-ca65a434412e",
+            "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f"
+          ],
+          "score": 50
+        }
+      ]
+    },
+    {
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "taskIds": [
+        "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "task_5019a984-27d6-42b9-9822-ca65a434412e"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 50
+        },
+        {
+          "kind": "intent_conflict",
+          "resources": [
+            "src/pricing/total.js"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 27,
+          "advisory": true,
+          "explanation": "both intents ground to src/pricing/total.js; shared intent terms: advance, branch, call, canonical, continue/cover, cover, delivery, discount, expectation, extend/cover, file, handle, inside, must, note/line, now, order, plan, price, raise/advance, rate, src, task/tax, threshold, total; opposing terms (confine/free) (grounded at 231323f1dbf11e2b49c5c10baf5cafd9cf72a6a0; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)"
+        }
+      ]
+    },
+    {
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "taskIds": [
+        "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "task_5019a984-27d6-42b9-9822-ca65a434412e"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 50
+        },
+        {
+          "kind": "intent_conflict",
+          "resources": [
+            "src/pricing/total.js"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 27,
+          "advisory": true,
+          "explanation": "both intents ground to src/pricing/total.js; shared intent terms: advance, branch, call, canonical, continue/cover, cover, delivery, discount, expectation, extend/cover, file, handle, inside, must, note/line, now, order, plan, price, raise/advance, rate, src, task/tax, threshold, total; opposing terms (confine/free) (grounded at 231323f1dbf11e2b49c5c10baf5cafd9cf72a6a0; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)"
+        }
+      ]
+    },
+    {
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "taskIds": [
+        "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "task_5019a984-27d6-42b9-9822-ca65a434412e"
+      ],
+      "score": 85,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 50
+        }
+      ]
+    },
+    {
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "taskIds": [
+        "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "task_5019a984-27d6-42b9-9822-ca65a434412e"
+      ],
+      "score": 85,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 50
+        }
+      ]
+    },
+    {
+      "taskId": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+      "taskIds": [
+        "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+        "task_5019a984-27d6-42b9-9822-ca65a434412e"
+      ],
+      "score": 100,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "order",
+            "orderTotal",
+            "taxFor"
+          ],
+          "taskIds": [
+            "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 105
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/tax.js",
+            "service:accounts-service pricing module (src/pricing)",
+            "symbol:order",
+            "symbol:orderTotal",
+            "symbol:taxFor"
+          ],
+          "taskIds": [
+            "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 125
+        }
+      ]
+    },
+    {
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "taskIds": [
+        "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+        "task_5019a984-27d6-42b9-9822-ca65a434412e"
+      ],
+      "score": 85,
+      "disposition": "block",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "symbol_overlap",
+          "resources": [
+            "discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 35
+        },
+        {
+          "kind": "dependency_impact",
+          "resources": [
+            "file:src/pricing/discount.js",
+            "symbol:discountRate"
+          ],
+          "taskIds": [
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+            "task_5019a984-27d6-42b9-9822-ca65a434412e"
+          ],
+          "score": 50
+        }
+      ]
+    },
+    {
+      "taskId": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+      "taskIds": [
+        "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+        "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2"
+      ],
+      "score": 27,
+      "disposition": "concurrent_with_notification",
+      "stage": "remote_plan_admission",
+      "evidence": [
+        {
+          "kind": "intent_conflict",
+          "resources": [
+            "src/pricing/total.js"
+          ],
+          "taskIds": [
+            "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+            "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2"
+          ],
+          "score": 27,
+          "advisory": true,
+          "explanation": "both intents ground to src/pricing/total.js; shared intent terms: canonical, card, card-surcharge, card_surcharge_rate, carry/extend, file, flag/pin, forward/ahead, order, ordertotal, pass/extend, plan, price, rate, rely/count, src, surcharge, total, unchanged; opposing terms (free/confine) (grounded at 77ad3c573229174490d15793b64ca82a5f256976; advisory — this signal is unvalidated, see docs/benchmarks/intent-grounding-wired.md)"
+        }
+      ]
+    }
+  ],
+  "tasks": [
+    {
+      "id": "task_19b62a33-f962-423c-a472-1cff38ed0f1d",
+      "scenarioTaskId": "task_handling_fee",
+      "status": "integrated",
+      "agentId": "codex-a",
+      "band": "deep",
+      "objective": "Add a flat two pound handling charge to every order's total"
+    },
+    {
+      "id": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "scenarioTaskId": "task_free_delivery",
+      "status": "integrated",
+      "agentId": "codex-b",
+      "band": "deep",
+      "objective": "Orders of one hundred pounds or more should not be charged for delivery, and every other order should be charged three pounds"
+    },
+    {
+      "id": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "scenarioTaskId": "task_card_surcharge",
+      "status": "integrated",
+      "agentId": "codex-c",
+      "band": "deep",
+      "objective": "Orders paid by card should cost an extra five percent on top of what the customer would otherwise pay"
+    },
+    {
+      "id": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "scenarioTaskId": "task_loyalty_tier",
+      "status": "integrated",
+      "agentId": "codex-d",
+      "band": "partial",
+      "objective": "Customers who have placed more than twenty five orders should get fifteen percent off instead of ten"
+    },
+    {
+      "id": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+      "scenarioTaskId": "task_zero_rated_goods",
+      "status": "integrated",
+      "agentId": "codex-e",
+      "band": "partial",
+      "objective": "Orders that contain only digital goods should not be charged tax"
+    },
+    {
+      "id": "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501",
+      "scenarioTaskId": "task_rounding",
+      "status": "integrated",
+      "agentId": "codex-a",
+      "band": "partial",
+      "objective": "Round every amount a customer is shown to whole pence so totals never display long decimals"
+    },
+    {
+      "id": "task_b300f210-9de4-4a45-bc06-a9b4e0be1cce",
+      "scenarioTaskId": "task_webhook_retry",
+      "status": "integrated",
+      "agentId": "codex-b",
+      "band": "independent",
+      "objective": "Retry webhook delivery up to three times when the transport reports a failure"
+    },
+    {
+      "id": "task_133d7fd6-b38b-44ed-ba1b-23ffb173f446",
+      "scenarioTaskId": "task_audit_ip",
+      "status": "integrated",
+      "agentId": "codex-c",
+      "band": "independent",
+      "objective": "Record the originating IP address on every audit entry"
+    },
+    {
+      "id": "task_006cd529-109f-48a3-907d-926f8ae4a1fc",
+      "scenarioTaskId": "task_export_created_at",
+      "status": "integrated",
+      "agentId": "codex-d",
+      "band": "independent",
+      "objective": "Add a created-at column to the CSV export"
+    },
+    {
+      "id": "task_18d8eed5-0619-4c67-b238-93e8c7a40061",
+      "scenarioTaskId": "task_search_email",
+      "status": "integrated",
+      "agentId": "codex-e",
+      "band": "independent",
+      "objective": "Make account search match on email address as well as name"
+    }
+  ],
+  "iterations": [
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:29:41.695Z",
+      "finishedAt": "2026-08-07T05:29:45.668Z",
+      "elapsedMs": 3973,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:29:47.170Z",
+      "finishedAt": "2026-08-07T05:29:51.441Z",
+      "elapsedMs": 4271,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:29:52.955Z",
+      "finishedAt": "2026-08-07T05:29:54.652Z",
+      "elapsedMs": 1697,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:29:56.167Z",
+      "finishedAt": "2026-08-07T05:29:57.930Z",
+      "elapsedMs": 1763,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:29:59.452Z",
+      "finishedAt": "2026-08-07T05:30:01.146Z",
+      "elapsedMs": 1694,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:02.647Z",
+      "finishedAt": "2026-08-07T05:30:03.780Z",
+      "elapsedMs": 1133,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:05.283Z",
+      "finishedAt": "2026-08-07T05:30:06.692Z",
+      "elapsedMs": 1409,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:08.207Z",
+      "finishedAt": "2026-08-07T05:30:09.459Z",
+      "elapsedMs": 1252,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:10.974Z",
+      "finishedAt": "2026-08-07T05:30:12.060Z",
+      "elapsedMs": 1086,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:13.576Z",
+      "finishedAt": "2026-08-07T05:30:14.705Z",
+      "elapsedMs": 1129,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:16.220Z",
+      "finishedAt": "2026-08-07T05:30:17.135Z",
+      "elapsedMs": 915,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:18.649Z",
+      "finishedAt": "2026-08-07T05:30:19.802Z",
+      "elapsedMs": 1153,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:21.307Z",
+      "finishedAt": "2026-08-07T05:30:22.254Z",
+      "elapsedMs": 947,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:23.764Z",
+      "finishedAt": "2026-08-07T05:30:24.894Z",
+      "elapsedMs": 1130,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:26.398Z",
+      "finishedAt": "2026-08-07T05:30:28.748Z",
+      "elapsedMs": 2350,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:30.253Z",
+      "finishedAt": "2026-08-07T05:30:32.236Z",
+      "elapsedMs": 1983,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:33.737Z",
+      "finishedAt": "2026-08-07T05:30:35.402Z",
+      "elapsedMs": 1665,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:36.915Z",
+      "finishedAt": "2026-08-07T05:30:37.907Z",
+      "elapsedMs": 992,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:39.423Z",
+      "finishedAt": "2026-08-07T05:30:40.464Z",
+      "elapsedMs": 1041,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:41.979Z",
+      "finishedAt": "2026-08-07T05:30:43.032Z",
+      "elapsedMs": 1053,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:44.539Z",
+      "finishedAt": "2026-08-07T05:30:46.528Z",
+      "elapsedMs": 1989,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:48.032Z",
+      "finishedAt": "2026-08-07T05:30:49.166Z",
+      "elapsedMs": 1134,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:50.667Z",
+      "finishedAt": "2026-08-07T05:30:51.960Z",
+      "elapsedMs": 1293,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:53.474Z",
+      "finishedAt": "2026-08-07T05:30:54.604Z",
+      "elapsedMs": 1130,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:56.122Z",
+      "finishedAt": "2026-08-07T05:30:57.450Z",
+      "elapsedMs": 1328,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:30:58.965Z",
+      "finishedAt": "2026-08-07T05:30:59.819Z",
+      "elapsedMs": 854,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:31:01.329Z",
+      "finishedAt": "2026-08-07T05:31:01.763Z",
+      "elapsedMs": 434,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:31:03.265Z",
+      "finishedAt": "2026-08-07T05:31:03.818Z",
+      "elapsedMs": 553,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:31:05.323Z",
+      "finishedAt": "2026-08-07T05:31:06.018Z",
+      "elapsedMs": 695,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:31:07.533Z",
+      "finishedAt": "2026-08-07T05:31:08.037Z",
+      "elapsedMs": 504,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:31:09.541Z",
+      "finishedAt": "2026-08-07T05:31:10.005Z",
+      "elapsedMs": 464,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:31:11.514Z",
+      "finishedAt": "2026-08-07T05:31:11.954Z",
+      "elapsedMs": 440,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:31:13.462Z",
+      "finishedAt": "2026-08-07T05:31:14.027Z",
+      "elapsedMs": 565,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:31:15.538Z",
+      "finishedAt": "2026-08-07T05:31:16.198Z",
+      "elapsedMs": 660,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:31:17.702Z",
+      "finishedAt": "2026-08-07T05:31:18.172Z",
+      "elapsedMs": 470,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:31:19.681Z",
+      "finishedAt": "2026-08-07T05:31:20.173Z",
+      "elapsedMs": 492,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "taskId": "task_19b62a33-f962-423c-a472-1cff38ed0f1d",
+      "startedAt": "2026-08-07T05:29:41.693Z",
+      "finishedAt": "2026-08-07T05:31:26.414Z",
+      "elapsedMs": 104721,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:31:26.414Z",
+      "finishedAt": "2026-08-07T05:31:27.840Z",
+      "elapsedMs": 1426,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "startedAt": "2026-08-07T05:29:41.693Z",
+      "finishedAt": "2026-08-07T05:31:31.672Z",
+      "elapsedMs": 109979,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 0,
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "startedAt": "2026-08-07T05:29:41.692Z",
+      "finishedAt": "2026-08-07T05:31:34.085Z",
+      "elapsedMs": 112393,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:31:35.604Z",
+      "finishedAt": "2026-08-07T05:31:36.577Z",
+      "elapsedMs": 973,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:31:38.086Z",
+      "finishedAt": "2026-08-07T05:31:39.157Z",
+      "elapsedMs": 1071,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:31:40.668Z",
+      "finishedAt": "2026-08-07T05:31:41.420Z",
+      "elapsedMs": 752,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:31:42.932Z",
+      "finishedAt": "2026-08-07T05:31:43.293Z",
+      "elapsedMs": 361,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:31:44.804Z",
+      "finishedAt": "2026-08-07T05:31:45.344Z",
+      "elapsedMs": 540,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:31:46.852Z",
+      "finishedAt": "2026-08-07T05:31:47.503Z",
+      "elapsedMs": 651,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:31:49.010Z",
+      "finishedAt": "2026-08-07T05:31:49.401Z",
+      "elapsedMs": 391,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:31:50.903Z",
+      "finishedAt": "2026-08-07T05:31:51.449Z",
+      "elapsedMs": 546,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:31:52.965Z",
+      "finishedAt": "2026-08-07T05:31:53.344Z",
+      "elapsedMs": 379,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:31:54.850Z",
+      "finishedAt": "2026-08-07T05:31:55.198Z",
+      "elapsedMs": 348,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:31:56.702Z",
+      "finishedAt": "2026-08-07T05:31:57.089Z",
+      "elapsedMs": 387,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_b300f210-9de4-4a45-bc06-a9b4e0be1cce",
+      "startedAt": "2026-08-07T05:31:21.684Z",
+      "finishedAt": "2026-08-07T05:31:58.793Z",
+      "elapsedMs": 37109,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:00.301Z",
+      "finishedAt": "2026-08-07T05:32:01.305Z",
+      "elapsedMs": 1004,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:02.820Z",
+      "finishedAt": "2026-08-07T05:32:03.719Z",
+      "elapsedMs": 899,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:05.220Z",
+      "finishedAt": "2026-08-07T05:32:06.329Z",
+      "elapsedMs": 1109,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:07.841Z",
+      "finishedAt": "2026-08-07T05:32:08.567Z",
+      "elapsedMs": 726,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:10.070Z",
+      "finishedAt": "2026-08-07T05:32:10.559Z",
+      "elapsedMs": 489,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:12.073Z",
+      "finishedAt": "2026-08-07T05:32:12.763Z",
+      "elapsedMs": 690,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:14.267Z",
+      "finishedAt": "2026-08-07T05:32:14.841Z",
+      "elapsedMs": 574,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:16.342Z",
+      "finishedAt": "2026-08-07T05:32:17.200Z",
+      "elapsedMs": 858,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:18.710Z",
+      "finishedAt": "2026-08-07T05:32:19.213Z",
+      "elapsedMs": 503,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:20.719Z",
+      "finishedAt": "2026-08-07T05:32:21.302Z",
+      "elapsedMs": 583,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:22.806Z",
+      "finishedAt": "2026-08-07T05:32:23.396Z",
+      "elapsedMs": 590,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:24.911Z",
+      "finishedAt": "2026-08-07T05:32:25.677Z",
+      "elapsedMs": 766,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:27.189Z",
+      "finishedAt": "2026-08-07T05:32:28.162Z",
+      "elapsedMs": 973,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:29.667Z",
+      "finishedAt": "2026-08-07T05:32:30.304Z",
+      "elapsedMs": 637,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:31.819Z",
+      "finishedAt": "2026-08-07T05:32:32.570Z",
+      "elapsedMs": 751,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:34.074Z",
+      "finishedAt": "2026-08-07T05:32:34.635Z",
+      "elapsedMs": 561,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:36.150Z",
+      "finishedAt": "2026-08-07T05:32:36.763Z",
+      "elapsedMs": 613,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:32:38.275Z",
+      "finishedAt": "2026-08-07T05:32:39.150Z",
+      "elapsedMs": 875,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "startedAt": "2026-08-07T05:29:41.694Z",
+      "finishedAt": "2026-08-07T05:32:39.928Z",
+      "elapsedMs": 178234,
+      "worked": true,
+      "accepted": false,
+      "tokens": 0,
+      "reason": "Canonical changed while the task was remote; it was requeued to replan"
+    },
+    {
+      "worker": 2,
+      "taskId": "task_133d7fd6-b38b-44ed-ba1b-23ffb173f446",
+      "startedAt": "2026-08-07T05:31:29.351Z",
+      "finishedAt": "2026-08-07T05:32:44.487Z",
+      "elapsedMs": 75136,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "startedAt": "2026-08-07T05:31:33.196Z",
+      "finishedAt": "2026-08-07T05:32:48.864Z",
+      "elapsedMs": 75668,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 0,
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "startedAt": "2026-08-07T05:31:58.599Z",
+      "finishedAt": "2026-08-07T05:32:49.416Z",
+      "elapsedMs": 50817,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:32:50.931Z",
+      "finishedAt": "2026-08-07T05:32:52.067Z",
+      "elapsedMs": 1136,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:32:53.579Z",
+      "finishedAt": "2026-08-07T05:32:54.826Z",
+      "elapsedMs": 1247,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:32:56.344Z",
+      "finishedAt": "2026-08-07T05:32:57.484Z",
+      "elapsedMs": 1140,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:32:58.990Z",
+      "finishedAt": "2026-08-07T05:32:59.594Z",
+      "elapsedMs": 604,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:01.121Z",
+      "finishedAt": "2026-08-07T05:33:02.006Z",
+      "elapsedMs": 885,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:03.511Z",
+      "finishedAt": "2026-08-07T05:33:04.507Z",
+      "elapsedMs": 996,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:06.019Z",
+      "finishedAt": "2026-08-07T05:33:06.964Z",
+      "elapsedMs": 945,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:08.477Z",
+      "finishedAt": "2026-08-07T05:33:09.023Z",
+      "elapsedMs": 546,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:10.533Z",
+      "finishedAt": "2026-08-07T05:33:11.274Z",
+      "elapsedMs": 741,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:12.781Z",
+      "finishedAt": "2026-08-07T05:33:13.246Z",
+      "elapsedMs": 465,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:14.758Z",
+      "finishedAt": "2026-08-07T05:33:15.637Z",
+      "elapsedMs": 879,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:17.149Z",
+      "finishedAt": "2026-08-07T05:33:17.797Z",
+      "elapsedMs": 648,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:19.304Z",
+      "finishedAt": "2026-08-07T05:33:20.091Z",
+      "elapsedMs": 787,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:21.595Z",
+      "finishedAt": "2026-08-07T05:33:22.293Z",
+      "elapsedMs": 698,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:23.808Z",
+      "finishedAt": "2026-08-07T05:33:24.505Z",
+      "elapsedMs": 697,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:26.013Z",
+      "finishedAt": "2026-08-07T05:33:26.868Z",
+      "elapsedMs": 855,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:28.382Z",
+      "finishedAt": "2026-08-07T05:33:28.954Z",
+      "elapsedMs": 572,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:33:30.456Z",
+      "finishedAt": "2026-08-07T05:33:30.824Z",
+      "elapsedMs": 368,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+      "startedAt": "2026-08-07T05:32:40.653Z",
+      "finishedAt": "2026-08-07T05:33:33.654Z",
+      "elapsedMs": 53001,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:33:35.155Z",
+      "finishedAt": "2026-08-07T05:33:36.323Z",
+      "elapsedMs": 1168,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:33:37.827Z",
+      "finishedAt": "2026-08-07T05:33:38.238Z",
+      "elapsedMs": 411,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:33:39.746Z",
+      "finishedAt": "2026-08-07T05:33:41.214Z",
+      "elapsedMs": 1468,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:33:42.727Z",
+      "finishedAt": "2026-08-07T05:33:43.721Z",
+      "elapsedMs": 994,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "startedAt": "2026-08-07T05:32:39.928Z",
+      "finishedAt": "2026-08-07T05:33:45.149Z",
+      "elapsedMs": 65221,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:33:46.652Z",
+      "finishedAt": "2026-08-07T05:33:47.412Z",
+      "elapsedMs": 760,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:33:48.923Z",
+      "finishedAt": "2026-08-07T05:33:49.677Z",
+      "elapsedMs": 754,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:33:51.183Z",
+      "finishedAt": "2026-08-07T05:33:51.641Z",
+      "elapsedMs": 458,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:33:53.154Z",
+      "finishedAt": "2026-08-07T05:33:54.347Z",
+      "elapsedMs": 1193,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:33:55.869Z",
+      "finishedAt": "2026-08-07T05:33:56.528Z",
+      "elapsedMs": 659,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:33:58.037Z",
+      "finishedAt": "2026-08-07T05:33:58.742Z",
+      "elapsedMs": 705,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:34:00.247Z",
+      "finishedAt": "2026-08-07T05:34:00.930Z",
+      "elapsedMs": 683,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:34:02.440Z",
+      "finishedAt": "2026-08-07T05:34:03.246Z",
+      "elapsedMs": 806,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:34:04.750Z",
+      "finishedAt": "2026-08-07T05:34:05.325Z",
+      "elapsedMs": 575,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:34:06.834Z",
+      "finishedAt": "2026-08-07T05:34:08.289Z",
+      "elapsedMs": 1455,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "taskId": "task_18d8eed5-0619-4c67-b238-93e8c7a40061",
+      "startedAt": "2026-08-07T05:32:44.487Z",
+      "finishedAt": "2026-08-07T05:34:13.888Z",
+      "elapsedMs": 89401,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:34:13.888Z",
+      "finishedAt": "2026-08-07T05:34:14.565Z",
+      "elapsedMs": 677,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:34:16.069Z",
+      "finishedAt": "2026-08-07T05:34:17.023Z",
+      "elapsedMs": 954,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "startedAt": "2026-08-07T05:33:45.223Z",
+      "finishedAt": "2026-08-07T05:34:21.484Z",
+      "elapsedMs": 36261,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:34:22.994Z",
+      "finishedAt": "2026-08-07T05:34:24.080Z",
+      "elapsedMs": 1086,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "startedAt": "2026-08-07T05:33:32.390Z",
+      "finishedAt": "2026-08-07T05:34:27.572Z",
+      "elapsedMs": 55182,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:34:29.074Z",
+      "finishedAt": "2026-08-07T05:34:29.886Z",
+      "elapsedMs": 812,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+      "startedAt": "2026-08-07T05:34:09.789Z",
+      "finishedAt": "2026-08-07T05:34:33.593Z",
+      "elapsedMs": 23804,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:34:35.108Z",
+      "finishedAt": "2026-08-07T05:34:36.403Z",
+      "elapsedMs": 1295,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:34:38.004Z",
+      "finishedAt": "2026-08-07T05:34:41.215Z",
+      "elapsedMs": 3211,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "taskId": "task_a1f98b7a-3e80-4f7d-9951-0b96b8472501",
+      "startedAt": "2026-08-07T05:32:50.370Z",
+      "finishedAt": "2026-08-07T05:34:49.292Z",
+      "elapsedMs": 118922,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:34:49.293Z",
+      "finishedAt": "2026-08-07T05:34:50.205Z",
+      "elapsedMs": 912,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:34:51.713Z",
+      "finishedAt": "2026-08-07T05:34:52.994Z",
+      "elapsedMs": 1281,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:34:54.508Z",
+      "finishedAt": "2026-08-07T05:34:55.241Z",
+      "elapsedMs": 733,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:34:56.746Z",
+      "finishedAt": "2026-08-07T05:34:57.138Z",
+      "elapsedMs": 392,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:34:58.654Z",
+      "finishedAt": "2026-08-07T05:34:59.039Z",
+      "elapsedMs": 385,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:35:00.554Z",
+      "finishedAt": "2026-08-07T05:35:00.798Z",
+      "elapsedMs": 244,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:35:02.315Z",
+      "finishedAt": "2026-08-07T05:35:02.511Z",
+      "elapsedMs": 196,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:35:04.019Z",
+      "finishedAt": "2026-08-07T05:35:04.170Z",
+      "elapsedMs": 151,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "startedAt": "2026-08-07T05:34:18.552Z",
+      "finishedAt": "2026-08-07T05:35:05.798Z",
+      "elapsedMs": 47246,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:35:07.303Z",
+      "finishedAt": "2026-08-07T05:35:07.643Z",
+      "elapsedMs": 340,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:35:09.155Z",
+      "finishedAt": "2026-08-07T05:35:09.548Z",
+      "elapsedMs": 393,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "startedAt": "2026-08-07T05:34:42.727Z",
+      "finishedAt": "2026-08-07T05:35:10.869Z",
+      "elapsedMs": 28142,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:35:12.376Z",
+      "finishedAt": "2026-08-07T05:35:12.734Z",
+      "elapsedMs": 358,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:35:14.246Z",
+      "finishedAt": "2026-08-07T05:35:14.793Z",
+      "elapsedMs": 547,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:35:16.296Z",
+      "finishedAt": "2026-08-07T05:35:16.632Z",
+      "elapsedMs": 336,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:35:18.134Z",
+      "finishedAt": "2026-08-07T05:35:18.284Z",
+      "elapsedMs": 150,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:35:19.800Z",
+      "finishedAt": "2026-08-07T05:35:20.113Z",
+      "elapsedMs": 313,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:35:21.616Z",
+      "finishedAt": "2026-08-07T05:35:21.784Z",
+      "elapsedMs": 168,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:35:23.299Z",
+      "finishedAt": "2026-08-07T05:35:23.446Z",
+      "elapsedMs": 147,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_006cd529-109f-48a3-907d-926f8ae4a1fc",
+      "startedAt": "2026-08-07T05:34:25.588Z",
+      "finishedAt": "2026-08-07T05:35:24.425Z",
+      "elapsedMs": 58837,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:35:25.939Z",
+      "finishedAt": "2026-08-07T05:35:26.163Z",
+      "elapsedMs": 224,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_b300f210-9de4-4a45-bc06-a9b4e0be1cce",
+      "startedAt": "2026-08-07T05:34:31.391Z",
+      "finishedAt": "2026-08-07T05:35:28.510Z",
+      "elapsedMs": 57119,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:30.019Z",
+      "finishedAt": "2026-08-07T05:35:30.310Z",
+      "elapsedMs": 291,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:31.819Z",
+      "finishedAt": "2026-08-07T05:35:32.198Z",
+      "elapsedMs": 379,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:33.703Z",
+      "finishedAt": "2026-08-07T05:35:33.961Z",
+      "elapsedMs": 258,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:35.469Z",
+      "finishedAt": "2026-08-07T05:35:35.685Z",
+      "elapsedMs": 216,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:37.188Z",
+      "finishedAt": "2026-08-07T05:35:37.508Z",
+      "elapsedMs": 320,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:39.016Z",
+      "finishedAt": "2026-08-07T05:35:39.375Z",
+      "elapsedMs": 359,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:40.878Z",
+      "finishedAt": "2026-08-07T05:35:41.081Z",
+      "elapsedMs": 203,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:42.584Z",
+      "finishedAt": "2026-08-07T05:35:42.774Z",
+      "elapsedMs": 190,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:44.279Z",
+      "finishedAt": "2026-08-07T05:35:44.487Z",
+      "elapsedMs": 208,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:45.989Z",
+      "finishedAt": "2026-08-07T05:35:46.199Z",
+      "elapsedMs": 210,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:47.707Z",
+      "finishedAt": "2026-08-07T05:35:47.973Z",
+      "elapsedMs": 266,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:49.475Z",
+      "finishedAt": "2026-08-07T05:35:49.827Z",
+      "elapsedMs": 352,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:51.340Z",
+      "finishedAt": "2026-08-07T05:35:51.558Z",
+      "elapsedMs": 218,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:53.066Z",
+      "finishedAt": "2026-08-07T05:35:53.309Z",
+      "elapsedMs": 243,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:54.820Z",
+      "finishedAt": "2026-08-07T05:35:54.962Z",
+      "elapsedMs": 142,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:56.469Z",
+      "finishedAt": "2026-08-07T05:35:56.648Z",
+      "elapsedMs": 179,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:58.160Z",
+      "finishedAt": "2026-08-07T05:35:58.377Z",
+      "elapsedMs": 217,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:35:59.886Z",
+      "finishedAt": "2026-08-07T05:36:00.192Z",
+      "elapsedMs": 306,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:01.703Z",
+      "finishedAt": "2026-08-07T05:36:02.010Z",
+      "elapsedMs": 307,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:03.519Z",
+      "finishedAt": "2026-08-07T05:36:03.709Z",
+      "elapsedMs": 190,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:05.209Z",
+      "finishedAt": "2026-08-07T05:36:05.533Z",
+      "elapsedMs": 324,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:07.045Z",
+      "finishedAt": "2026-08-07T05:36:07.364Z",
+      "elapsedMs": 319,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:08.871Z",
+      "finishedAt": "2026-08-07T05:36:09.053Z",
+      "elapsedMs": 182,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:10.558Z",
+      "finishedAt": "2026-08-07T05:36:10.807Z",
+      "elapsedMs": 249,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:12.312Z",
+      "finishedAt": "2026-08-07T05:36:12.626Z",
+      "elapsedMs": 314,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:14.130Z",
+      "finishedAt": "2026-08-07T05:36:14.361Z",
+      "elapsedMs": 231,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:15.865Z",
+      "finishedAt": "2026-08-07T05:36:16.092Z",
+      "elapsedMs": 227,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:17.599Z",
+      "finishedAt": "2026-08-07T05:36:17.858Z",
+      "elapsedMs": 259,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:19.372Z",
+      "finishedAt": "2026-08-07T05:36:19.558Z",
+      "elapsedMs": 186,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:21.060Z",
+      "finishedAt": "2026-08-07T05:36:21.290Z",
+      "elapsedMs": 230,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:36:22.791Z",
+      "finishedAt": "2026-08-07T05:36:23.122Z",
+      "elapsedMs": 331,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_006cd529-109f-48a3-907d-926f8ae4a1fc",
+      "startedAt": "2026-08-07T05:35:27.678Z",
+      "finishedAt": "2026-08-07T05:36:26.960Z",
+      "elapsedMs": 59282,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:36:26.960Z",
+      "finishedAt": "2026-08-07T05:36:27.225Z",
+      "elapsedMs": 265,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:36:28.730Z",
+      "finishedAt": "2026-08-07T05:36:29.177Z",
+      "elapsedMs": 447,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+      "startedAt": "2026-08-07T05:35:24.957Z",
+      "finishedAt": "2026-08-07T05:36:33.306Z",
+      "elapsedMs": 68349,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:36:34.812Z",
+      "finishedAt": "2026-08-07T05:36:34.946Z",
+      "elapsedMs": 134,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "startedAt": "2026-08-07T05:35:05.685Z",
+      "finishedAt": "2026-08-07T05:36:37.281Z",
+      "elapsedMs": 91596,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:36:38.781Z",
+      "finishedAt": "2026-08-07T05:36:38.921Z",
+      "elapsedMs": 140,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:36:40.435Z",
+      "finishedAt": "2026-08-07T05:36:40.636Z",
+      "elapsedMs": 201,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:36:42.152Z",
+      "finishedAt": "2026-08-07T05:36:42.348Z",
+      "elapsedMs": 196,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:36:43.849Z",
+      "finishedAt": "2026-08-07T05:36:44.043Z",
+      "elapsedMs": 194,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_b300f210-9de4-4a45-bc06-a9b4e0be1cce",
+      "startedAt": "2026-08-07T05:36:24.624Z",
+      "finishedAt": "2026-08-07T05:36:46.323Z",
+      "elapsedMs": 21699,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 2,
+      "taskId": "task_e580c8ce-d3c0-43ef-bad8-cfcbfc26012f",
+      "startedAt": "2026-08-07T05:35:11.058Z",
+      "finishedAt": "2026-08-07T05:36:52.735Z",
+      "elapsedMs": 101677,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:36:52.735Z",
+      "finishedAt": "2026-08-07T05:36:52.739Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:36:54.249Z",
+      "finishedAt": "2026-08-07T05:36:54.262Z",
+      "elapsedMs": 13,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:36:55.767Z",
+      "finishedAt": "2026-08-07T05:36:55.784Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:36:57.293Z",
+      "finishedAt": "2026-08-07T05:36:57.315Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:36:58.819Z",
+      "finishedAt": "2026-08-07T05:36:58.834Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:37:00.342Z",
+      "finishedAt": "2026-08-07T05:37:00.360Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:37:01.863Z",
+      "finishedAt": "2026-08-07T05:37:01.880Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:37:03.383Z",
+      "finishedAt": "2026-08-07T05:37:03.403Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:37:04.912Z",
+      "finishedAt": "2026-08-07T05:37:04.934Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:37:06.449Z",
+      "finishedAt": "2026-08-07T05:37:06.466Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:37:07.974Z",
+      "finishedAt": "2026-08-07T05:37:07.991Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "taskId": "task_b300f210-9de4-4a45-bc06-a9b4e0be1cce",
+      "startedAt": "2026-08-07T05:36:45.587Z",
+      "finishedAt": "2026-08-07T05:37:09.020Z",
+      "elapsedMs": 23433,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:37:10.534Z",
+      "finishedAt": "2026-08-07T05:37:10.536Z",
+      "elapsedMs": 2,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:37:12.045Z",
+      "finishedAt": "2026-08-07T05:37:12.069Z",
+      "elapsedMs": 24,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:37:13.572Z",
+      "finishedAt": "2026-08-07T05:37:13.588Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "startedAt": "2026-08-07T05:36:47.826Z",
+      "finishedAt": "2026-08-07T05:37:15.086Z",
+      "elapsedMs": 27260,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:37:16.591Z",
+      "finishedAt": "2026-08-07T05:37:16.608Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:37:18.131Z",
+      "finishedAt": "2026-08-07T05:37:18.133Z",
+      "elapsedMs": 2,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "startedAt": "2026-08-07T05:36:36.449Z",
+      "finishedAt": "2026-08-07T05:37:18.553Z",
+      "elapsedMs": 42104,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:20.056Z",
+      "finishedAt": "2026-08-07T05:37:20.091Z",
+      "elapsedMs": 35,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:21.594Z",
+      "finishedAt": "2026-08-07T05:37:21.647Z",
+      "elapsedMs": 53,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:23.147Z",
+      "finishedAt": "2026-08-07T05:37:23.165Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:24.677Z",
+      "finishedAt": "2026-08-07T05:37:24.694Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:26.205Z",
+      "finishedAt": "2026-08-07T05:37:26.223Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:27.734Z",
+      "finishedAt": "2026-08-07T05:37:27.756Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:29.259Z",
+      "finishedAt": "2026-08-07T05:37:29.285Z",
+      "elapsedMs": 26,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:30.793Z",
+      "finishedAt": "2026-08-07T05:37:30.807Z",
+      "elapsedMs": 14,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:32.315Z",
+      "finishedAt": "2026-08-07T05:37:32.333Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:33.840Z",
+      "finishedAt": "2026-08-07T05:37:33.858Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:35.366Z",
+      "finishedAt": "2026-08-07T05:37:35.385Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:36.893Z",
+      "finishedAt": "2026-08-07T05:37:36.912Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+      "startedAt": "2026-08-07T05:36:31.903Z",
+      "finishedAt": "2026-08-07T05:37:38.375Z",
+      "elapsedMs": 66472,
+      "worked": true,
+      "accepted": false,
+      "tokens": 0,
+      "reason": "Canonical changed while the task was remote; it was requeued to replan"
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:38.446Z",
+      "finishedAt": "2026-08-07T05:37:38.790Z",
+      "elapsedMs": 344,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:40.291Z",
+      "finishedAt": "2026-08-07T05:37:40.307Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:41.842Z",
+      "finishedAt": "2026-08-07T05:37:41.847Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:46.097Z",
+      "finishedAt": "2026-08-07T05:37:46.100Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:47.602Z",
+      "finishedAt": "2026-08-07T05:37:47.621Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:49.129Z",
+      "finishedAt": "2026-08-07T05:37:49.145Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:50.655Z",
+      "finishedAt": "2026-08-07T05:37:50.672Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:52.185Z",
+      "finishedAt": "2026-08-07T05:37:52.204Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:53.710Z",
+      "finishedAt": "2026-08-07T05:37:53.727Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:55.235Z",
+      "finishedAt": "2026-08-07T05:37:55.237Z",
+      "elapsedMs": 2,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:56.752Z",
+      "finishedAt": "2026-08-07T05:37:56.767Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:58.279Z",
+      "finishedAt": "2026-08-07T05:37:58.297Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:37:59.810Z",
+      "finishedAt": "2026-08-07T05:37:59.829Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:01.341Z",
+      "finishedAt": "2026-08-07T05:38:01.357Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:02.870Z",
+      "finishedAt": "2026-08-07T05:38:02.889Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:04.392Z",
+      "finishedAt": "2026-08-07T05:38:04.410Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:05.911Z",
+      "finishedAt": "2026-08-07T05:38:05.914Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:07.418Z",
+      "finishedAt": "2026-08-07T05:38:07.421Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "taskId": "task_b300f210-9de4-4a45-bc06-a9b4e0be1cce",
+      "startedAt": "2026-08-07T05:37:09.503Z",
+      "finishedAt": "2026-08-07T05:38:07.777Z",
+      "elapsedMs": 58274,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:07.778Z",
+      "finishedAt": "2026-08-07T05:38:07.793Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:08.932Z",
+      "finishedAt": "2026-08-07T05:38:08.936Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:09.307Z",
+      "finishedAt": "2026-08-07T05:38:09.338Z",
+      "elapsedMs": 31,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:10.446Z",
+      "finishedAt": "2026-08-07T05:38:10.466Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:10.855Z",
+      "finishedAt": "2026-08-07T05:38:10.873Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:11.970Z",
+      "finishedAt": "2026-08-07T05:38:11.989Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:12.378Z",
+      "finishedAt": "2026-08-07T05:38:12.396Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:13.497Z",
+      "finishedAt": "2026-08-07T05:38:13.516Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:13.904Z",
+      "finishedAt": "2026-08-07T05:38:13.921Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:15.030Z",
+      "finishedAt": "2026-08-07T05:38:15.045Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:15.436Z",
+      "finishedAt": "2026-08-07T05:38:15.454Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:16.551Z",
+      "finishedAt": "2026-08-07T05:38:16.570Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:16.957Z",
+      "finishedAt": "2026-08-07T05:38:16.974Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:18.071Z",
+      "finishedAt": "2026-08-07T05:38:18.090Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:18.484Z",
+      "finishedAt": "2026-08-07T05:38:18.502Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:38:19.602Z",
+      "finishedAt": "2026-08-07T05:38:19.620Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:20.004Z",
+      "finishedAt": "2026-08-07T05:38:20.021Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "startedAt": "2026-08-07T05:37:19.635Z",
+      "finishedAt": "2026-08-07T05:38:21.165Z",
+      "elapsedMs": 61530,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:21.530Z",
+      "finishedAt": "2026-08-07T05:38:21.550Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:38:22.678Z",
+      "finishedAt": "2026-08-07T05:38:22.696Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:23.054Z",
+      "finishedAt": "2026-08-07T05:38:23.073Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:38:24.212Z",
+      "finishedAt": "2026-08-07T05:38:24.229Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:24.597Z",
+      "finishedAt": "2026-08-07T05:38:24.608Z",
+      "elapsedMs": 11,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:38:25.737Z",
+      "finishedAt": "2026-08-07T05:38:25.740Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:26.123Z",
+      "finishedAt": "2026-08-07T05:38:26.140Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:38:27.244Z",
+      "finishedAt": "2026-08-07T05:38:27.262Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:27.649Z",
+      "finishedAt": "2026-08-07T05:38:27.668Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:38:28.771Z",
+      "finishedAt": "2026-08-07T05:38:28.790Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:29.173Z",
+      "finishedAt": "2026-08-07T05:38:29.189Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:38:30.292Z",
+      "finishedAt": "2026-08-07T05:38:30.311Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:30.698Z",
+      "finishedAt": "2026-08-07T05:38:30.715Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:38:31.822Z",
+      "finishedAt": "2026-08-07T05:38:31.841Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:32.226Z",
+      "finishedAt": "2026-08-07T05:38:32.244Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:38:33.348Z",
+      "finishedAt": "2026-08-07T05:38:33.370Z",
+      "elapsedMs": 22,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:33.754Z",
+      "finishedAt": "2026-08-07T05:38:33.772Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:38:34.875Z",
+      "finishedAt": "2026-08-07T05:38:34.893Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:35.279Z",
+      "finishedAt": "2026-08-07T05:38:35.297Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:38:36.408Z",
+      "finishedAt": "2026-08-07T05:38:36.425Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:36.810Z",
+      "finishedAt": "2026-08-07T05:38:36.829Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:38:37.935Z",
+      "finishedAt": "2026-08-07T05:38:37.953Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:38.334Z",
+      "finishedAt": "2026-08-07T05:38:38.337Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "taskId": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+      "startedAt": "2026-08-07T05:37:38.375Z",
+      "finishedAt": "2026-08-07T05:38:38.757Z",
+      "elapsedMs": 60382,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:39.841Z",
+      "finishedAt": "2026-08-07T05:38:39.859Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:40.262Z",
+      "finishedAt": "2026-08-07T05:38:40.278Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:41.369Z",
+      "finishedAt": "2026-08-07T05:38:41.386Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:41.789Z",
+      "finishedAt": "2026-08-07T05:38:41.807Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:42.899Z",
+      "finishedAt": "2026-08-07T05:38:42.916Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:43.314Z",
+      "finishedAt": "2026-08-07T05:38:43.333Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:44.420Z",
+      "finishedAt": "2026-08-07T05:38:44.438Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:44.839Z",
+      "finishedAt": "2026-08-07T05:38:44.856Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:45.943Z",
+      "finishedAt": "2026-08-07T05:38:45.961Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:46.361Z",
+      "finishedAt": "2026-08-07T05:38:46.378Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:47.468Z",
+      "finishedAt": "2026-08-07T05:38:47.486Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:47.885Z",
+      "finishedAt": "2026-08-07T05:38:47.904Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:48.992Z",
+      "finishedAt": "2026-08-07T05:38:49.010Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:49.409Z",
+      "finishedAt": "2026-08-07T05:38:49.428Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:50.513Z",
+      "finishedAt": "2026-08-07T05:38:50.531Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:50.930Z",
+      "finishedAt": "2026-08-07T05:38:50.947Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:52.031Z",
+      "finishedAt": "2026-08-07T05:38:52.035Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:52.451Z",
+      "finishedAt": "2026-08-07T05:38:52.468Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:53.536Z",
+      "finishedAt": "2026-08-07T05:38:53.553Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:53.970Z",
+      "finishedAt": "2026-08-07T05:38:53.988Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:55.062Z",
+      "finishedAt": "2026-08-07T05:38:55.068Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:55.493Z",
+      "finishedAt": "2026-08-07T05:38:55.511Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:56.581Z",
+      "finishedAt": "2026-08-07T05:38:56.591Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:57.018Z",
+      "finishedAt": "2026-08-07T05:38:57.046Z",
+      "elapsedMs": 28,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:58.092Z",
+      "finishedAt": "2026-08-07T05:38:58.110Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:38:58.547Z",
+      "finishedAt": "2026-08-07T05:38:58.549Z",
+      "elapsedMs": 2,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:38:59.617Z",
+      "finishedAt": "2026-08-07T05:38:59.638Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:00.055Z",
+      "finishedAt": "2026-08-07T05:39:00.075Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:01.152Z",
+      "finishedAt": "2026-08-07T05:39:01.169Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:01.588Z",
+      "finishedAt": "2026-08-07T05:39:01.605Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:02.678Z",
+      "finishedAt": "2026-08-07T05:39:02.696Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:03.123Z",
+      "finishedAt": "2026-08-07T05:39:03.130Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:04.208Z",
+      "finishedAt": "2026-08-07T05:39:04.226Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:04.641Z",
+      "finishedAt": "2026-08-07T05:39:04.661Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:05.735Z",
+      "finishedAt": "2026-08-07T05:39:05.755Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:06.174Z",
+      "finishedAt": "2026-08-07T05:39:06.191Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:07.265Z",
+      "finishedAt": "2026-08-07T05:39:07.279Z",
+      "elapsedMs": 14,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:07.702Z",
+      "finishedAt": "2026-08-07T05:39:07.718Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:08.794Z",
+      "finishedAt": "2026-08-07T05:39:08.811Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:09.231Z",
+      "finishedAt": "2026-08-07T05:39:09.249Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "taskId": "task_5019a984-27d6-42b9-9822-ca65a434412e",
+      "startedAt": "2026-08-07T05:37:15.090Z",
+      "finishedAt": "2026-08-07T05:39:09.314Z",
+      "elapsedMs": 114224,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:39:09.315Z",
+      "finishedAt": "2026-08-07T05:39:09.325Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:10.323Z",
+      "finishedAt": "2026-08-07T05:39:10.341Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:10.760Z",
+      "finishedAt": "2026-08-07T05:39:10.777Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "startedAt": "2026-08-07T05:39:10.838Z",
+      "finishedAt": "2026-08-07T05:39:10.845Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:11.877Z",
+      "finishedAt": "2026-08-07T05:39:11.886Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:12.561Z",
+      "finishedAt": "2026-08-07T05:39:12.786Z",
+      "elapsedMs": 225,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+      "startedAt": "2026-08-07T05:38:39.467Z",
+      "finishedAt": "2026-08-07T05:39:13.107Z",
+      "elapsedMs": 33640,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:13.395Z",
+      "finishedAt": "2026-08-07T05:39:13.411Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:14.300Z",
+      "finishedAt": "2026-08-07T05:39:14.317Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:39:14.612Z",
+      "finishedAt": "2026-08-07T05:39:14.629Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:14.922Z",
+      "finishedAt": "2026-08-07T05:39:14.938Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:15.827Z",
+      "finishedAt": "2026-08-07T05:39:15.845Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:39:16.137Z",
+      "finishedAt": "2026-08-07T05:39:16.138Z",
+      "elapsedMs": 1,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:16.447Z",
+      "finishedAt": "2026-08-07T05:39:16.477Z",
+      "elapsedMs": 30,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:17.346Z",
+      "finishedAt": "2026-08-07T05:39:17.363Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:39:17.642Z",
+      "finishedAt": "2026-08-07T05:39:17.667Z",
+      "elapsedMs": 25,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:17.986Z",
+      "finishedAt": "2026-08-07T05:39:18.002Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:18.870Z",
+      "finishedAt": "2026-08-07T05:39:18.890Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:39:19.185Z",
+      "finishedAt": "2026-08-07T05:39:19.226Z",
+      "elapsedMs": 41,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:19.510Z",
+      "finishedAt": "2026-08-07T05:39:19.526Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:20.398Z",
+      "finishedAt": "2026-08-07T05:39:20.417Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:39:20.740Z",
+      "finishedAt": "2026-08-07T05:39:20.760Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:21.037Z",
+      "finishedAt": "2026-08-07T05:39:21.056Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:21.923Z",
+      "finishedAt": "2026-08-07T05:39:21.933Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "startedAt": "2026-08-07T05:38:21.120Z",
+      "finishedAt": "2026-08-07T05:39:22.327Z",
+      "elapsedMs": 61207,
+      "worked": true,
+      "accepted": false,
+      "deferred": true,
+      "tokens": 0,
+      "reason": "blocked: Canonical advanced before this plan was submitted; the task was requeued to replan"
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:22.563Z",
+      "finishedAt": "2026-08-07T05:39:22.579Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:23.436Z",
+      "finishedAt": "2026-08-07T05:39:23.442Z",
+      "elapsedMs": 6,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:23.840Z",
+      "finishedAt": "2026-08-07T05:39:23.843Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:24.092Z",
+      "finishedAt": "2026-08-07T05:39:24.109Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:24.957Z",
+      "finishedAt": "2026-08-07T05:39:24.976Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:25.346Z",
+      "finishedAt": "2026-08-07T05:39:25.364Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:25.622Z",
+      "finishedAt": "2026-08-07T05:39:25.639Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:26.493Z",
+      "finishedAt": "2026-08-07T05:39:26.505Z",
+      "elapsedMs": 12,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:26.870Z",
+      "finishedAt": "2026-08-07T05:39:26.888Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:27.151Z",
+      "finishedAt": "2026-08-07T05:39:27.170Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:28.017Z",
+      "finishedAt": "2026-08-07T05:39:28.043Z",
+      "elapsedMs": 26,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:28.391Z",
+      "finishedAt": "2026-08-07T05:39:28.410Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:28.684Z",
+      "finishedAt": "2026-08-07T05:39:28.702Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:29.555Z",
+      "finishedAt": "2026-08-07T05:39:29.563Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:29.910Z",
+      "finishedAt": "2026-08-07T05:39:29.926Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:30.212Z",
+      "finishedAt": "2026-08-07T05:39:30.231Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:31.072Z",
+      "finishedAt": "2026-08-07T05:39:31.091Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:31.434Z",
+      "finishedAt": "2026-08-07T05:39:31.452Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:31.741Z",
+      "finishedAt": "2026-08-07T05:39:31.759Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:32.601Z",
+      "finishedAt": "2026-08-07T05:39:32.620Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:32.958Z",
+      "finishedAt": "2026-08-07T05:39:32.976Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:33.269Z",
+      "finishedAt": "2026-08-07T05:39:33.290Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:34.125Z",
+      "finishedAt": "2026-08-07T05:39:34.144Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:34.481Z",
+      "finishedAt": "2026-08-07T05:39:34.507Z",
+      "elapsedMs": 26,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:34.805Z",
+      "finishedAt": "2026-08-07T05:39:34.824Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:35.646Z",
+      "finishedAt": "2026-08-07T05:39:35.662Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:36.023Z",
+      "finishedAt": "2026-08-07T05:39:36.030Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:36.338Z",
+      "finishedAt": "2026-08-07T05:39:36.357Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:37.168Z",
+      "finishedAt": "2026-08-07T05:39:37.193Z",
+      "elapsedMs": 25,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:37.535Z",
+      "finishedAt": "2026-08-07T05:39:37.552Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:37.869Z",
+      "finishedAt": "2026-08-07T05:39:37.873Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:38.697Z",
+      "finishedAt": "2026-08-07T05:39:38.714Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:39.055Z",
+      "finishedAt": "2026-08-07T05:39:39.072Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:39.384Z",
+      "finishedAt": "2026-08-07T05:39:39.403Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:40.220Z",
+      "finishedAt": "2026-08-07T05:39:40.236Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:40.588Z",
+      "finishedAt": "2026-08-07T05:39:40.605Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:40.912Z",
+      "finishedAt": "2026-08-07T05:39:40.917Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:41.743Z",
+      "finishedAt": "2026-08-07T05:39:41.760Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:42.116Z",
+      "finishedAt": "2026-08-07T05:39:42.133Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:42.423Z",
+      "finishedAt": "2026-08-07T05:39:42.440Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:43.275Z",
+      "finishedAt": "2026-08-07T05:39:43.292Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:43.642Z",
+      "finishedAt": "2026-08-07T05:39:43.661Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:43.953Z",
+      "finishedAt": "2026-08-07T05:39:43.969Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:44.806Z",
+      "finishedAt": "2026-08-07T05:39:44.831Z",
+      "elapsedMs": 25,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:45.164Z",
+      "finishedAt": "2026-08-07T05:39:45.184Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:45.476Z",
+      "finishedAt": "2026-08-07T05:39:45.495Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:46.344Z",
+      "finishedAt": "2026-08-07T05:39:46.363Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:46.698Z",
+      "finishedAt": "2026-08-07T05:39:46.717Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:47.013Z",
+      "finishedAt": "2026-08-07T05:39:47.031Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:47.879Z",
+      "finishedAt": "2026-08-07T05:39:47.896Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:48.219Z",
+      "finishedAt": "2026-08-07T05:39:48.238Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:48.532Z",
+      "finishedAt": "2026-08-07T05:39:48.550Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:49.402Z",
+      "finishedAt": "2026-08-07T05:39:49.421Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:49.743Z",
+      "finishedAt": "2026-08-07T05:39:49.762Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:50.057Z",
+      "finishedAt": "2026-08-07T05:39:50.080Z",
+      "elapsedMs": 23,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:50.926Z",
+      "finishedAt": "2026-08-07T05:39:50.945Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:51.272Z",
+      "finishedAt": "2026-08-07T05:39:51.286Z",
+      "elapsedMs": 14,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:51.597Z",
+      "finishedAt": "2026-08-07T05:39:51.613Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:52.448Z",
+      "finishedAt": "2026-08-07T05:39:52.467Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:52.795Z",
+      "finishedAt": "2026-08-07T05:39:52.810Z",
+      "elapsedMs": 15,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:53.118Z",
+      "finishedAt": "2026-08-07T05:39:53.120Z",
+      "elapsedMs": 2,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:53.987Z",
+      "finishedAt": "2026-08-07T05:39:54.005Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:54.318Z",
+      "finishedAt": "2026-08-07T05:39:54.336Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:54.626Z",
+      "finishedAt": "2026-08-07T05:39:54.644Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:55.513Z",
+      "finishedAt": "2026-08-07T05:39:55.529Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:55.837Z",
+      "finishedAt": "2026-08-07T05:39:55.840Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:56.148Z",
+      "finishedAt": "2026-08-07T05:39:56.165Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:57.043Z",
+      "finishedAt": "2026-08-07T05:39:57.061Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:57.354Z",
+      "finishedAt": "2026-08-07T05:39:57.372Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:57.679Z",
+      "finishedAt": "2026-08-07T05:39:57.695Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:39:58.562Z",
+      "finishedAt": "2026-08-07T05:39:58.580Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:39:58.875Z",
+      "finishedAt": "2026-08-07T05:39:58.893Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:39:59.204Z",
+      "finishedAt": "2026-08-07T05:39:59.223Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:00.093Z",
+      "finishedAt": "2026-08-07T05:40:00.112Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:00.408Z",
+      "finishedAt": "2026-08-07T05:40:00.425Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:00.745Z",
+      "finishedAt": "2026-08-07T05:40:00.756Z",
+      "elapsedMs": 11,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:01.623Z",
+      "finishedAt": "2026-08-07T05:40:01.642Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:01.939Z",
+      "finishedAt": "2026-08-07T05:40:01.951Z",
+      "elapsedMs": 12,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:02.268Z",
+      "finishedAt": "2026-08-07T05:40:02.284Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:03.161Z",
+      "finishedAt": "2026-08-07T05:40:03.177Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:03.458Z",
+      "finishedAt": "2026-08-07T05:40:03.476Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:03.788Z",
+      "finishedAt": "2026-08-07T05:40:03.805Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:04.681Z",
+      "finishedAt": "2026-08-07T05:40:04.698Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:04.980Z",
+      "finishedAt": "2026-08-07T05:40:04.987Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:05.320Z",
+      "finishedAt": "2026-08-07T05:40:05.339Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:06.199Z",
+      "finishedAt": "2026-08-07T05:40:06.216Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:06.490Z",
+      "finishedAt": "2026-08-07T05:40:06.497Z",
+      "elapsedMs": 7,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:06.842Z",
+      "finishedAt": "2026-08-07T05:40:06.859Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:07.720Z",
+      "finishedAt": "2026-08-07T05:40:07.745Z",
+      "elapsedMs": 25,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:08.002Z",
+      "finishedAt": "2026-08-07T05:40:08.007Z",
+      "elapsedMs": 5,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "taskId": "task_cc3f34b6-5bb6-4574-9b0e-f5625abf50f2",
+      "startedAt": "2026-08-07T05:39:22.269Z",
+      "finishedAt": "2026-08-07T05:40:08.016Z",
+      "elapsedMs": 45747,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:40:08.016Z",
+      "finishedAt": "2026-08-07T05:40:08.020Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:08.364Z",
+      "finishedAt": "2026-08-07T05:40:08.391Z",
+      "elapsedMs": 27,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:09.248Z",
+      "finishedAt": "2026-08-07T05:40:09.266Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:09.520Z",
+      "finishedAt": "2026-08-07T05:40:09.536Z",
+      "elapsedMs": 16,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:40:09.520Z",
+      "finishedAt": "2026-08-07T05:40:09.537Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:09.891Z",
+      "finishedAt": "2026-08-07T05:40:09.908Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:10.771Z",
+      "finishedAt": "2026-08-07T05:40:10.792Z",
+      "elapsedMs": 21,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:11.038Z",
+      "finishedAt": "2026-08-07T05:40:11.058Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:40:11.039Z",
+      "finishedAt": "2026-08-07T05:40:11.058Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:11.419Z",
+      "finishedAt": "2026-08-07T05:40:11.436Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:12.304Z",
+      "finishedAt": "2026-08-07T05:40:12.307Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:12.573Z",
+      "finishedAt": "2026-08-07T05:40:12.593Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:40:12.574Z",
+      "finishedAt": "2026-08-07T05:40:12.593Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:12.952Z",
+      "finishedAt": "2026-08-07T05:40:12.971Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:13.814Z",
+      "finishedAt": "2026-08-07T05:40:13.833Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:14.095Z",
+      "finishedAt": "2026-08-07T05:40:14.115Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:40:14.096Z",
+      "finishedAt": "2026-08-07T05:40:14.115Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:14.473Z",
+      "finishedAt": "2026-08-07T05:40:14.492Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:15.392Z",
+      "finishedAt": "2026-08-07T05:40:15.410Z",
+      "elapsedMs": 18,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:15.631Z",
+      "finishedAt": "2026-08-07T05:40:15.641Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:40:15.633Z",
+      "finishedAt": "2026-08-07T05:40:15.642Z",
+      "elapsedMs": 9,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:15.992Z",
+      "finishedAt": "2026-08-07T05:40:16.012Z",
+      "elapsedMs": 20,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:16.924Z",
+      "finishedAt": "2026-08-07T05:40:16.942Z",
+      "elapsedMs": 19,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:17.155Z",
+      "finishedAt": "2026-08-07T05:40:17.157Z",
+      "elapsedMs": 2,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:40:17.156Z",
+      "finishedAt": "2026-08-07T05:40:17.159Z",
+      "elapsedMs": 3,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:17.511Z",
+      "finishedAt": "2026-08-07T05:40:17.519Z",
+      "elapsedMs": 8,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 4,
+      "startedAt": "2026-08-07T05:40:18.460Z",
+      "finishedAt": "2026-08-07T05:40:18.470Z",
+      "elapsedMs": 10,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 3,
+      "startedAt": "2026-08-07T05:40:18.673Z",
+      "finishedAt": "2026-08-07T05:40:18.677Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 0,
+      "startedAt": "2026-08-07T05:40:18.673Z",
+      "finishedAt": "2026-08-07T05:40:18.677Z",
+      "elapsedMs": 4,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 2,
+      "startedAt": "2026-08-07T05:40:19.020Z",
+      "finishedAt": "2026-08-07T05:40:19.037Z",
+      "elapsedMs": 17,
+      "worked": false,
+      "tokens": 0
+    },
+    {
+      "worker": 1,
+      "taskId": "task_78a5b403-29d2-47fe-b9ab-5daeb71f56f8",
+      "startedAt": "2026-08-07T05:39:12.562Z",
+      "finishedAt": "2026-08-07T05:40:19.951Z",
+      "elapsedMs": 67389,
+      "worked": true,
+      "accepted": true,
+      "tokens": 0
+    }
+  ]
+}
