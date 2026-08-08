@@ -242,8 +242,13 @@ function renderInvite() {
       <div class="auth-mascot">${brandMark(54)}
         <div>
           <h1>Join ${esc(invite.organizationName)}</h1>
-          <p>You have been invited as a ${esc(invite.role)}. Choose a password
-            and you are in.</p>
+          <!-- Both names, always. The headline is the team you are joining,
+               which is a name somebody chose and may be anything at all — an
+               organization called after a product reads as that product
+               unless the product says so itself. -->
+          <p>You have been invited to
+            <b>${esc(invite.organizationName)}</b> on Lattice as a
+            ${esc(invite.role)}. Choose a password and you are in.</p>
         </div>
       </div>
       <form class="auth-card" data-act="invite-accept">

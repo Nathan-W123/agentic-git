@@ -732,3 +732,14 @@ test("controls the deployment cannot honour are disabled, not chatty", async () 
   // entirely rather than present and refusing.
   assert.equal(/data-act="oauth"/u.test(app), false);
 });
+
+test("the invite screen names the product, not only the team", async () => {
+  const app = await browserSource();
+  const start = app.indexOf("function renderInvite");
+  const body = app.slice(start, app.indexOf("\nfunction renderAuth", start));
+  // The headline is whatever the organization is called, which is a name
+  // somebody chose — an organization named after some product reads as that
+  // product unless this screen says which one it actually is.
+  assert.match(body, /organizationName/u);
+  assert.match(body, /on Lattice/u);
+});
