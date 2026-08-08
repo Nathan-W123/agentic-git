@@ -68,6 +68,12 @@ export const state = {
   ),
   notificationFilter: "all",
 
+  /* Favourites are a personal shortcut, not shared state, so they live in
+     this browser rather than on the account. */
+  favourites: new Set(
+    JSON.parse(window.localStorage.getItem("ag.favourites") ?? "[]"),
+  ),
+
   /* Filters */
   repoQuery: "",
   repoSort: "recent",
@@ -79,6 +85,23 @@ export const state = {
   socket: undefined,
   timer: undefined,
 };
+
+export function isFavourite(repositoryId) {
+  return state.favourites.has(repositoryId);
+}
+
+export function toggleFavourite(repositoryId) {
+  if (state.favourites.has(repositoryId)) {
+    state.favourites.delete(repositoryId);
+  } else {
+    state.favourites.add(repositoryId);
+  }
+  window.localStorage.setItem(
+    "ag.favourites",
+    JSON.stringify([...state.favourites]),
+  );
+  return state.favourites.has(repositoryId);
+}
 
 export function persist(key, value) {
   window.localStorage.setItem(key, String(value));
@@ -498,6 +521,19 @@ const STAGE_PROGRESS = {
 
 export function taskProgress(task) {
   return STAGE_PROGRESS[task?.status] ?? 0;
+}
+
+/**
+ * Whether a task has actually started.
+ *
+ * Queued work has no meaningful progress, and drawing it as a nearly-empty bar
+ * made every waiting task look identically stuck. The stage name is the
+ * honest readout until an agent is running.
+ */
+const NOT_STARTED = new Set(["submitted", "queued", "approved", "awaiting_approval"]);
+
+export function taskStarted(task) {
+  return !NOT_STARTED.has(task?.status);
 }
 
 /** Files an executing plan declared — the resources it currently holds. */

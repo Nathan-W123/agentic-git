@@ -674,3 +674,61 @@ test("the product is named Lattice throughout the browser surface", async () => 
     );
   }
 });
+
+/* ------------------------------------------------------------ controls ---- */
+
+test("anything the interface can hide, it can also bring back", async () => {
+  const code = await publicFile("screen-code.js");
+  const app = await browserSource();
+  // The chat panel's open state is persisted, so a close with no matching
+  // open is not a session-long annoyance — it is permanent.
+  const closers = [...code.matchAll(/data-act="chat-(close|toggle)"/gu)].map(
+    (match) => match[1],
+  );
+  assert.equal(
+    closers.includes("toggle"),
+    true,
+    "the Code toolbar needs a control that reopens the chat",
+  );
+  assert.match(app, /case "chat-toggle":/u);
+});
+
+test("a control that claims to remember something actually does", async () => {
+  const data = await publicFile("data.js");
+  const repos = await publicFile("screen-repos.js");
+  const app = await browserSource();
+  // The star used to announce that favourites were stored while storing
+  // nothing and never filling in — a control asserting an effect it does not
+  // have is worse than no control.
+  assert.match(data, /export function toggleFavourite/u);
+  assert.match(data, /localStorage\.setItem\(\s*"ag\.favourites"/u);
+  assert.match(repos, /isFavourite\(repo\.id\)/u);
+  assert.match(repos, /aria-pressed="\$\{isFavourite\(repo\.id\)\}"/u);
+  assert.match(app, /case "star":\s*toggleFavourite\(value\);/u);
+});
+
+test("no control's whole behaviour is an apology", async () => {
+  const app = await browserSource();
+  // A button that only raises a toast saying it does nothing is worse than no
+  // button: it costs a click to learn there is nothing there. Each case in the
+  // delegated handler must do something beyond toasting.
+  const cases = [
+    ...app.matchAll(/case "([a-z-]+)":\s*\n\s*(toast\([^;]*\);)\s*\n\s*return;/gu),
+  ].map((match) => match[1]);
+  assert.deepEqual(
+    cases,
+    [],
+    `these controls only toast: ${cases.join(", ")}`,
+  );
+});
+
+test("controls the deployment cannot honour are disabled, not chatty", async () => {
+  const chat = await publicFile("chat.js");
+  // Attachments need a backend that is not there. A visibly disabled control
+  // with a reason is honest; a live one that toasts an excuse is not.
+  assert.match(chat, /<button type="button" class="icon-btn" disabled[\s\S]{0,120}paperclip/u);
+  const app = await browserSource();
+  // Sign-in providers this control plane does not implement are absent
+  // entirely rather than present and refusing.
+  assert.equal(/data-act="oauth"/u.test(app), false);
+});

@@ -360,6 +360,23 @@ svg {
   color: var(--green);
 }
 
+.hint-code {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--text-2);
+  background: var(--bg-inset);
+  border: 1px solid var(--border-soft);
+  border-radius: 6px;
+  padding: 4px 8px;
+  white-space: nowrap;
+}
+
+.auth-hint {
+  font-size: 12px;
+  color: var(--text-3);
+  text-align: right;
+}
+
 /* ------------------------------------------------------------ buttons ---- */
 
 .btn {
@@ -449,6 +466,12 @@ svg {
 .icon-btn.sm {
   width: 26px;
   height: 26px;
+}
+
+/* A toggle that is currently on, so the control shows its own state. */
+.icon-btn.on {
+  background: var(--accent-wash);
+  color: var(--accent-bright);
 }
 
 .icon-btn.sm svg {
@@ -752,6 +775,51 @@ svg {
    viewport rather than collapse to its content. */
 .main.bare {
   grid-template-rows: minmax(0, 1fr);
+}
+
+.main.has-banner {
+  grid-template-rows: auto auto 1fr;
+}
+
+.main.bare.has-banner {
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.banner {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 9px 20px;
+  background: var(--orange-wash);
+  border-bottom: 1px solid rgba(251, 191, 36, 0.24);
+  color: var(--orange);
+  font-size: 12.5px;
+}
+
+.banner-busy {
+  background: var(--accent-wash);
+  border-bottom-color: var(--accent-line);
+  color: var(--accent-bright);
+}
+
+.banner-busy svg {
+  animation: banner-spin 1.1s linear infinite;
+}
+
+@keyframes banner-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.banner svg {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+
+.banner .spacer {
+  flex: 1;
 }
 
 .topbar {
@@ -1544,6 +1612,14 @@ svg {
   color: var(--orange);
 }
 
+.star.on svg {
+  fill: currentColor;
+}
+
+.star:hover {
+  color: var(--orange);
+}
+
 .info-strip {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -1623,6 +1699,35 @@ svg {
   grid-template-rows: auto 1fr;
   min-height: 0;
   background: var(--bg-panel);
+}
+
+.tree-pane.filtering {
+  grid-template-rows: auto auto 1fr;
+}
+
+.tree-empty {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  padding: 14px 12px;
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.55;
+}
+
+.tree-empty-note {
+  font-size: 11px;
+  color: var(--text-4);
+}
+
+.tree-search {
+  padding: 0 10px 10px;
+}
+
+.tree-search input {
+  padding-top: 6px;
+  padding-bottom: 6px;
+  font-size: 12.5px;
 }
 
 .tree-head {
@@ -2122,6 +2227,20 @@ svg {
 
 .composer:focus-within {
   border-color: var(--accent-line);
+}
+
+/* Stands in for the composer when there is no agent to talk to. */
+.composer-blocked {
+  display: grid;
+  gap: 10px;
+  justify-items: start;
+  padding: 13px;
+}
+
+.composer-blocked p {
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.5;
 }
 
 .composer textarea {
@@ -2838,6 +2957,12 @@ svg {
   color: var(--text-2);
 }
 
+.mt-stage {
+  font-size: 11.5px;
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
 .mini-task .mt-pct {
   font-size: 11.5px;
   color: var(--text-3);
@@ -3236,6 +3361,52 @@ svg {
   animation: none;
 }
 
+/* --------------------------------------------------------------- menu ---- */
+
+.popover:has(.menu) {
+  padding: 6px;
+}
+
+.menu {
+  display: grid;
+  gap: 1px;
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  text-align: left;
+}
+
+.menu-item:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.menu-item:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.menu-item svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+  color: var(--text-3);
+}
+
+.menu-sep {
+  height: 1px;
+  margin: 4px 2px;
+  background: var(--border-soft);
+}
+
 /* -------------------------------------------------------- colour picker ---- */
 
 .swatches {
@@ -3341,6 +3512,11 @@ svg {
   pointer-events: none;
 }
 
+.toasts-alert {
+  bottom: auto;
+  top: 20px;
+}
+
 .toast {
   padding: 10px 15px;
   background: var(--bg-card-2);
@@ -3355,6 +3531,25 @@ svg {
 .toast.error {
   border-color: rgba(248, 113, 113, 0.4);
   color: #fca5a5;
+  pointer-events: auto;
+  padding-right: 34px;
+  position: relative;
+}
+
+.toast-close {
+  position: absolute;
+  top: 5px;
+  right: 7px;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  color: inherit;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.toast-close:hover {
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .toast.ok {

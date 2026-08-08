@@ -33,6 +33,7 @@ import { chatPanel } from "./chat.js";
 import {
   agentFace,
   clockTime,
+  searchBox,
   elapsed,
   esc,
   icon,
@@ -141,6 +142,12 @@ function flagFor(path) {
   return patch === undefined ? undefined : FLAG_FOR_STATUS[patch.status] ?? "M";
 }
 
+/** Narrows the tree to a query, matching on the whole path. */
+function matchesQuery(path) {
+  const query = String(state.treeQuery ?? "").trim().toLowerCase();
+  return query === "" || path.toLowerCase().includes(query);
+}
+
 /** Every path worth showing: changed files first, then the rest of the tree. */
 function treeEntries() {
   const seen = new Map();
@@ -155,9 +162,9 @@ function treeEntries() {
       seen.set(file.path, { path: file.path });
     }
   }
-  return [...seen.values()].sort((left, right) =>
-    left.path.localeCompare(right.path),
-  );
+  return [...seen.values()]
+    .filter((entry) => matchesQuery(entry.path))
+    .sort((left, right) => left.path.localeCompare(right.path));
 }
 
 /* -------------------------------------------------------------- tree ---- */
@@ -197,7 +204,7 @@ function treeNode(node, depth) {
 
 function treePane() {
   const entries = treeEntries();
-  return `<aside class="tree-pane">
+  return `<aside class="tree-pane${state.treeQuery === undefined ? "" : " filtering"}">
     <header class="tree-head">
       <span>Files</span>
       <span class="spacer"></span>
@@ -206,14 +213,82 @@ function treePane() {
       ${iconButton("refresh", { act: "files-refresh", title: "Refresh", small: true })}
       ${iconButton("dots", { act: "files-menu", title: "More", small: true })}
     </header>
+    ${
+      state.treeQuery === undefined
+        ? ""
+        : `<div class="tree-search">${searchBox(
+            "Filter files...",
+            state.treeQuery,
+            "tree-search",
+          )}</div>`
+    }
     <div class="tree-body">${
       entries.length === 0
-        ? `<p style="padding:14px 10px;color:var(--text-4);font-size:12px">
-             No files yet. Open a workspace or run a task to populate this tree.
-           </p>`
+        ? emptyTree()
         : treeNode(buildTree(entries), 0)
     }</div>
   </aside>`;
+}
+
+/**
+ * What the tree says when it has nothing to show.
+ *
+ * A repository with no runs has no changeset, and the canonical tree is not
+ * reachable over HTTP — only a workspace is. Rather than leave a dead panel or
+ * quietly materialise a worktree nobody asked for, the empty state offers the
+ * action and says what it does.
+ */
+function emptyTree() {
+  if (state.treeQuery) {
+    return `<p class="tree-empty">No file matches that filter.</p>`;
+  }
+  if (state.workspace?.exists === true) {
+    return `<p class="tree-empty">This workspace is empty.</p>`;
+  }
+  if (state.workspace === undefined) {
+    return `<p class="tree-empty">This deployment does not provide browsable
+      workspaces, so only files touched by a changeset appear here.</p>`;
+  }
+  return `<div class="tree-empty">
+    <p>No changeset has been collected for this repository yet.</p>
+    <button class="btn btn-sm" data-act="workspace-open"${
+      state.workspaceOpening === true ? " disabled" : ""
+    }>${icon("folder")} ${
+      state.workspaceOpening === true ? "Opening…" : "Browse repository files"
+    }</button>
+    <p class="tree-empty-note">Opens your own workspace on the current
+      canonical revision. Nothing is shared until you submit.</p>
+  </div>`;
+}
+
+/** Materialises this user's overlay workspace so the tree has something. */
+export async function openWorkspace(rerender) {
+  const repository = currentRepository();
+  if (repository === undefined || state.workspaceOpening === true) {
+    return;
+  }
+  state.workspaceOpening = true;
+  rerender();
+  try {
+    const project = encodeURIComponent(state.projectId);
+    const repo = encodeURIComponent(repository.id);
+    const opened = await api(
+      `/projects/${project}/repositories/${repo}/workspace`,
+      { method: "POST", body: {} },
+    );
+    state.workspace = opened.workspace;
+    const files = await apiOptional(
+      `/projects/${project}/repositories/${repo}/workspace/files`,
+      { files: [] },
+    );
+    state.files = files.files ?? [];
+    toast(`Workspace ready — ${state.files.length} files`, "ok");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.workspaceOpening = false;
+    rerender();
+  }
 }
 
 /* ------------------------------------------------------------ toolbar ---- */
@@ -237,6 +312,9 @@ function toolbar() {
     <button class="btn btn-sm btn-primary" data-act="code-summary" id="summary-btn">
       ${icon("sparkle")} Summary
     </button>
+    <button class="icon-btn${state.chatOpen ? " on" : ""}" data-act="chat-toggle"
+      title="${state.chatOpen ? "Hide" : "Show"} agent chat"
+      aria-pressed="${state.chatOpen}">${icon("robot")}</button>
     ${iconButton("dots", { act: "code-menu", title: "More actions" })}
   </div>`;
 }
@@ -256,7 +334,6 @@ function tabStrip() {
         </div>`;
       })
       .join("")}
-    <button class="code-tab add" data-act="tab-add" title="Open a file">${icon("plus")}</button>
   </div>`;
 }
 

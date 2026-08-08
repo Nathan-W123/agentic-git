@@ -25,7 +25,9 @@ import {
   myAgents,
   notifications,
   persist,
+  isFavourite,
   state,
+  toggleFavourite,
   unreadCount,
 } from "./data.js";
 import {
@@ -40,6 +42,7 @@ import {
   iconButton,
   emptyState,
   closePopover,
+  showMenu,
   showPopover,
   toast,
 } from "./ui.js";
@@ -56,6 +59,7 @@ import {
   ensureCodeData,
   invalidateCode,
   openFile,
+  openWorkspace,
   renderCode,
   runTests,
   setDiffMode,
@@ -190,12 +194,6 @@ function minutesValue(milliseconds) {
 
 let authMode = "login";
 
-function oauthButton(provider, label) {
-  return `<button class="btn" type="button" data-act="oauth" data-value="${provider}">
-    ${icon(provider)} ${esc(label)}
-  </button>`;
-}
-
 function renderAuth() {
   const setupRequired = state.health?.setupRequired === true;
   const bootstrap = authMode === "bootstrap";
@@ -240,27 +238,17 @@ function renderAuth() {
         ${
           bootstrap
             ? ""
-            : `<div class="auth-row">
-                <label class="checkline">
-                  <input type="checkbox" name="remember" checked> Remember me
-                </label>
-                <a class="link-muted" href="#" data-act="forgot">Forgot password?</a>
-              </div>`
+            : // No "remember me": sessions run to a fixed server-side lifetime and
+              // there is no per-login control over it, so the checkbox could
+              // only ever have been decoration.
+              `<p class="auth-hint">Forgotten your password? Your organization
+                owner can reset it.</p>`
         }
 
         <button class="btn btn-primary btn-wide" type="submit">
           ${bootstrap ? "Create control room" : "Sign in"}
         </button>
 
-        ${
-          bootstrap
-            ? ""
-            : `<div class="auth-sep">or continue with</div>
-               <div class="oauth-grid">
-                 ${oauthButton("google", "Google")}
-                 ${oauthButton("github", "GitHub")}
-               </div>`
-        }
         <p class="form-msg" id="auth-msg" role="alert"></p>
       </form>
 
@@ -510,12 +498,11 @@ function settingsScreen() {
             <div class="sr-title">${esc(repository?.id ?? "No repository open")}</div>
             <div class="sr-sub">${esc(
               repository?.remoteUrl ?? "No remote recorded",
-            )}</div>
+            )}. Publishing canonical to a remote branch is a CLI operation;
+            there is no HTTP route for it, so this is not a button.</div>
           </span>
           <span class="sr-ctl">
-            <button class="btn btn-sm" data-act="repo-export"${
-              repository === undefined ? " disabled" : ""
-            }>${icon("external")} Export</button>
+            <code class="hint-code">coord repo push</code>
           </span>
         </div>
         <div class="set-row">
@@ -595,6 +582,7 @@ function appearanceCard() {
         entry.value === current ? " on" : ""
       }" data-act="${act}" data-value="${esc(entry.value)}"
         style="--swatch:${esc(entry.value)}" title="${esc(entry.label)}"
+        aria-pressed="${entry.value === current}"
         aria-label="${esc(entry.label)}"></button>`,
     ).join("");
 
@@ -744,6 +732,30 @@ function screen() {
   }
 }
 
+/**
+ * A refresh that failed, said permanently.
+ *
+ * Everything on screen is a snapshot from the last successful load. When a
+ * refresh fails the data silently goes stale, and a toast that clears itself
+ * leaves no sign that what you are reading is old.
+ */
+function banner() {
+  if (state.refreshing === true && state.loadError === undefined) {
+    return `<div class="banner banner-busy" role="status">
+      ${icon("refresh")}<span>Refreshing…</span></div>`;
+  }
+  if (state.loadError === undefined) {
+    return "";
+  }
+  return `<div class="banner" role="status">
+    ${icon("alert")}
+    <span>Showing the last data that loaded — this refresh failed:
+      ${esc(state.loadError)}</span>
+    <span class="spacer"></span>
+    <button class="btn btn-sm" data-act="retry-load">Try again</button>
+  </div>`;
+}
+
 /** Screens that bring their own header do not also get the global topbar. */
 const BARE = new Set(["code", "coordinator"]);
 
@@ -778,7 +790,10 @@ export function render() {
   }
   root.innerHTML = `<div class="${classes.join(" ")}">
     ${sidebar()}
-    <div class="main${BARE.has(state.route) ? " bare" : ""}">
+    <div class="main${BARE.has(state.route) ? " bare" : ""}${
+      state.loadError === undefined ? "" : " has-banner"
+    }">
+      ${banner()}
       ${BARE.has(state.route) ? "" : topbar()}
       ${screen()}
     </div>
@@ -863,12 +878,6 @@ document.addEventListener("click", (event) => {
       event.preventDefault();
       toast("Ask your organization owner to reset the password.");
       return;
-    case "oauth":
-      toast(
-        `${value === "google" ? "Google" : "GitHub"} sign-in is not configured on this control plane.`,
-        "error",
-      );
-      return;
     case "logout":
       void api("/auth/logout", { method: "POST", body: {} })
         .catch(() => undefined)
@@ -894,17 +903,74 @@ document.addEventListener("click", (event) => {
       render();
       return;
     case "star":
-      toast("Favourites are stored per browser.");
+      toggleFavourite(value);
+      render();
+      return;
+    case "user-menu":
+      showMenu(node, [
+        { act: "nav", value: "settings", label: "Settings", iconName: "gear" },
+        { separator: true },
+        { act: "logout", label: "Sign out", iconName: "logout" },
+      ]);
       return;
     case "repo-menu":
-    case "files-menu":
-    case "code-menu":
-    case "agent-filter-more":
-    case "user-menu":
-      toast("More actions are on the way.");
+      showMenu(node, [
+        { act: "open-repo", value, label: "Open", iconName: "arrowRight" },
+        {
+          act: "star",
+          value,
+          label: isFavourite(value) ? "Remove from favourites" : "Add to favourites",
+          iconName: "star",
+        },
+        { separator: true },
+        { act: "copy-id", value, label: "Copy repository id", iconName: "file" },
+      ]);
       return;
-    case "repo-export":
-      toast("Export publishes canonical to a dedicated branch from the CLI.");
+    case "files-menu":
+      showMenu(node, [
+        { act: "files-refresh", label: "Refresh files", iconName: "refresh" },
+        { act: "tree-collapse", label: "Collapse all folders", iconName: "chevronUp" },
+      ]);
+      return;
+    case "code-menu":
+      showMenu(node, [
+        {
+          act: "chat-toggle",
+          label: state.chatOpen ? "Hide agent chat" : "Show agent chat",
+          iconName: "robot",
+        },
+        {
+          act: "diff-mode",
+          value: state.diffMode === "split" ? "unified" : "split",
+          label: state.diffMode === "split" ? "Unified diff" : "Split diff",
+          iconName: "columns",
+        },
+        { separator: true },
+        { act: "files-refresh", label: "Reload from the control plane", iconName: "refresh" },
+      ]);
+      return;
+    case "copy-id":
+      void navigator.clipboard
+        ?.writeText(value)
+        .then(() => toast("Repository id copied", "ok"))
+        .catch(() => toast("Could not copy to the clipboard", "error"));
+      closePopover();
+      return;
+    case "tree-collapse":
+      state.expanded.clear();
+      closePopover();
+      render();
+      return;
+    case "workspace-open":
+      void openWorkspace(render);
+      return;
+    case "retry-load":
+      void refresh();
+      return;
+    case "files-refresh":
+      closePopover();
+      invalidateCode();
+      void refresh();
       return;
 
     /* Code */
@@ -918,9 +984,6 @@ document.addEventListener("click", (event) => {
     case "tab-close":
       event.stopPropagation();
       closeFile(value, render);
-      return;
-    case "tab-add":
-      toast("Pick a file from the tree to open it.");
       return;
     case "diff-mode":
       setDiffMode(value, render);
@@ -938,7 +1001,11 @@ document.addEventListener("click", (event) => {
       );
       return;
     case "code-search":
-      toast("Search the file tree from the Files panel.");
+      state.treeQuery = state.treeQuery === undefined ? "" : undefined;
+      render();
+      if (state.treeQuery !== undefined) {
+        $("[data-act='tree-search']")?.focus();
+      }
       return;
     case "pop-close":
       closePopover();
@@ -956,6 +1023,7 @@ document.addEventListener("click", (event) => {
       setDiffMode("split", render);
       return;
     case "chat-close":
+    case "chat-toggle":
       toggleChat(render);
       return;
 
@@ -971,13 +1039,27 @@ document.addEventListener("click", (event) => {
       state.agentFilter = value;
       render();
       return;
-    case "agent-add":
-    case "agent-connect": {
-      const provider =
-        value ??
-        state.providers.find((entry) => !entry.connected)?.id ??
-        "anthropic";
-      void connectAgent(provider, render);
+    case "agent-connect":
+      void connectAgent(value, render);
+      return;
+    case "agent-add": {
+      // Which agent to connect is the user's decision. Silently picking the
+      // first unconnected provider made "Add Agent" a lottery on a screen
+      // whose whole subject is which agents are yours.
+      const choices = state.providers.filter((entry) => !entry.connected);
+      if (choices.length === 0) {
+        toast("Every available agent is already connected.");
+        return;
+      }
+      showMenu(
+        node,
+        choices.map((entry) => ({
+          act: "agent-connect",
+          value: entry.id,
+          label: `Connect ${agentLabelOf(entry.id)}`,
+          iconName: "robot",
+        })),
+      );
       return;
     }
     case "agent-disconnect":
@@ -1050,12 +1132,17 @@ document.addEventListener("click", (event) => {
     }
 
     /* Composer affordances */
-    case "chat-attach":
-      toast("Attachments are not enabled on this deployment.");
+    case "chat-mention": {
+      const input = $("[data-act='chat-input']");
+      if (input === null) {
+        return;
+      }
+      const at = input.selectionStart ?? input.value.length;
+      input.value = `${input.value.slice(0, at)}@${input.value.slice(at)}`;
+      input.focus();
+      input.setSelectionRange(at + 1, at + 1);
       return;
-    case "chat-mention":
-      toast("Type @ in the message to reference a file.");
-      return;
+    }
     default:
   }
 });
@@ -1146,6 +1233,17 @@ document.addEventListener("input", (event) => {
     }
     return;
   }
+  if (act === "tree-search") {
+    state.treeQuery = node.value;
+    const focused = document.activeElement === node;
+    render();
+    if (focused) {
+      const next = $("[data-act='tree-search']");
+      next?.focus();
+      next?.setSelectionRange(next.value.length, next.value.length);
+    }
+    return;
+  }
   if (act === "chat-input") {
     node.style.height = "auto";
     node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
@@ -1191,7 +1289,11 @@ function showApp() {
 }
 
 /** Refreshes context, then re-renders whatever screen is showing. */
-async function refresh() {
+async function refresh({ quiet = false } = {}) {
+  if (!quiet) {
+    state.refreshing = true;
+    render();
+  }
   try {
     await loadContext();
     invalidateCode();
@@ -1202,7 +1304,13 @@ async function refresh() {
       showAuth();
       return;
     }
+    // Recorded as well as announced: the toast says it happened, the banner
+    // keeps saying the screen is stale until a load succeeds.
+    state.loadError = error.message;
+    render();
     toast(error.message, "error");
+  } finally {
+    state.refreshing = false;
   }
 }
 
@@ -1231,13 +1339,13 @@ async function boot() {
     // The stream tells us something changed; the store stays the source of
     // truth, so re-read rather than patching state from the frame.
     window.clearTimeout(state.timer);
-    state.timer = window.setTimeout(() => void refresh(), 400);
+    state.timer = window.setTimeout(() => void refresh({ quiet: true }), 400);
   });
 
   window.clearInterval(state.poll);
   state.poll = window.setInterval(() => {
     if (document.visibilityState === "visible") {
-      void refresh();
+      void refresh({ quiet: true });
     }
   }, 30_000);
 }

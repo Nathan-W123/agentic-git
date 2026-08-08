@@ -789,16 +789,32 @@ export function elapsed(milliseconds) {
 
 /* ------------------------------------------------------------- toasts ---- */
 
+/**
+ * A transient message — except when it is an error.
+ *
+ * A failure that erases itself after four seconds is a failure nobody can act
+ * on, so errors stay until dismissed and are announced assertively. Anything
+ * else is incidental and clears itself.
+ */
 export function toast(message, tone = "") {
-  const host = $("#toasts");
+  const host = $(tone === "error" ? "#toasts-alert" : "#toasts");
   if (host === null) {
     return;
   }
   const node = document.createElement("div");
   node.className = cx("toast", tone);
   node.textContent = message;
+  if (tone === "error") {
+    const dismiss = document.createElement("button");
+    dismiss.className = "toast-close";
+    dismiss.setAttribute("aria-label", "Dismiss");
+    dismiss.textContent = "×";
+    dismiss.addEventListener("click", () => node.remove());
+    node.append(dismiss);
+  } else {
+    window.setTimeout(() => node.remove(), 4200);
+  }
   host.append(node);
-  window.setTimeout(() => node.remove(), 4200);
 }
 
 /* -------------------------------------------------------------- modal ---- */
@@ -836,9 +852,15 @@ export function showModal({ title, subtitle = "", body = "", confirm = "Confirm"
   });
 }
 
+/** Where focus goes when the popover closes. */
+let popoverReturn;
+
 /** Anchored popover, used by the Code screen's Summary. */
 export function showPopover(anchor, html, { width = 400 } = {}) {
   closePopover();
+  // Remembered so focus can go back where it came from: a popover that dumps
+  // focus at the top of the document strands anyone navigating by keyboard.
+  popoverReturn = anchor instanceof HTMLElement ? anchor : undefined;
   const layer = document.createElement("div");
   layer.className = "pop-layer";
   layer.id = "pop-layer";
@@ -859,15 +881,64 @@ export function showPopover(anchor, html, { width = 400 } = {}) {
       closePopover();
     }
   });
-  const onKey = (event) => {
+  // Focus moves into the popover, and Tab is kept inside it while it is open.
+  const focusable = () =>
+    $$('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])', pop)
+      .filter((node) => !node.disabled);
+  focusable()[0]?.focus();
+  layer.addEventListener("keydown", (event) => {
     if (event.key === "Escape") {
       closePopover();
+      return;
     }
-  };
-  document.addEventListener("keydown", onKey, { once: true });
+    if (event.key !== "Tab") {
+      return;
+    }
+    const nodes = focusable();
+    if (nodes.length === 0) {
+      return;
+    }
+    const first = nodes[0];
+    const last = nodes[nodes.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  });
   return pop;
 }
 
+/**
+ * A short menu, anchored to the control that opened it.
+ *
+ * Exists so a "..." button has somewhere real to go. Items are ordinary
+ * delegated actions, so a menu entry behaves exactly like the button it
+ * stands in for.
+ */
+export function showMenu(anchor, items) {
+  const body = items
+    .map((item) =>
+      item.separator === true
+        ? `<div class="menu-sep"></div>`
+        : `<button type="button" class="menu-item" data-act="${item.act}"${
+            item.value === undefined ? "" : ` data-value="${esc(item.value)}"`
+          }${item.disabled === true ? " disabled" : ""}>${
+            item.iconName === undefined ? "" : icon(item.iconName)
+          }<span>${esc(item.label)}</span></button>`,
+    )
+    .join("");
+  return showPopover(anchor, `<div class="menu">${body}</div>`, { width: 216 });
+}
+
 export function closePopover() {
-  $("#pop-layer")?.remove();
+  const open = $("#pop-layer");
+  if (open === null) {
+    return;
+  }
+  open.remove();
+  popoverReturn?.focus();
+  popoverReturn = undefined;
 }

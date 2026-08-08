@@ -19,7 +19,11 @@
     <div id="auth-root" hidden></div>
     <div id="app-root" hidden></div>
 
+    <!-- Two regions, because a failure and a confirmation do not deserve the
+         same urgency: errors interrupt, everything else waits its turn. -->
     <div class="toasts" id="toasts" aria-live="polite"></div>
+    <div class="toasts toasts-alert" id="toasts-alert" role="alert"
+      aria-live="assertive"></div>
     <div id="layer-root"></div>
     <dialog class="modal" id="modal"></dialog>
 

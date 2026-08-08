@@ -20,6 +20,7 @@ import {
   state,
   systemHealth,
   taskProgress,
+  taskStarted,
   waitingTasks,
 } from "./data.js";
 import {
@@ -201,8 +202,14 @@ function tasksPanel() {
                   <span class="mt-name" title="${esc(task.objective)}">${esc(
                     task.objective,
                   )}</span>
-                  ${bar(taskProgress(task), tone === "purple" ? "" : tone)}
-                  <span class="mt-pct">${taskProgress(task)}%</span>
+                  ${
+                    taskStarted(task)
+                      ? `${bar(taskProgress(task), tone === "purple" ? "" : tone)}
+                         <span class="mt-pct">${taskProgress(task)}%</span>`
+                      : `<span class="mt-stage">${esc(
+                          STATUS_LABEL[task.status] ?? task.status,
+                        )}</span>`
+                  }
                 </div>`;
               })
               .join("")}</div>`

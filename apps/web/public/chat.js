@@ -122,6 +122,18 @@ export function chatThread(agent) {
  * panel is for talking to an agent, not for reading telemetry.
  */
 export function chatComposer(agent, placeholder = "Ask your agent to do anything...") {
+  // Nothing can be sent to an agent that is not connected, so the composer
+  // says so and stays out of the way rather than accepting a message and
+  // failing it into a toast a moment later.
+  if (agent !== undefined && agent.connected !== true) {
+    return `<div class="composer composer-blocked">
+      <p>${esc(agent.name)} is not connected, so it cannot be messaged yet.</p>
+      <button class="btn btn-sm" data-act="agent-connect"
+        data-value="${esc(agent.id)}">Connect ${esc(
+          agent.name.split(" ")[0],
+        )}</button>
+    </div>`;
+  }
   const options = state.providerOptions[agent?.id];
   const models = (options?.models ?? []).map((model) => ({
     value: model.id,
@@ -133,18 +145,22 @@ export function chatComposer(agent, placeholder = "Ask your agent to do anything
     []
   ).map((effort) => ({ value: effort, label: titleCase(effort) }));
   const busy = state.sending[agent?.id] === true;
+  const ready = agent !== undefined;
 
   return `<form class="composer" data-act="chat-submit">
     <textarea data-act="chat-input" rows="1" spellcheck="true"
-      placeholder="${esc(placeholder)}"${busy ? " disabled" : ""}></textarea>
+      placeholder="${esc(placeholder)}"${busy || !ready ? " disabled" : ""}></textarea>
     <div class="composer-bar">
-      ${iconButton("paperclip", { act: "chat-attach", title: "Attach a file" })}
+      <button type="button" class="icon-btn" disabled
+        title="Attachments are not available on this deployment">${icon("paperclip")}</button>
       ${iconButton("at", { act: "chat-mention", title: "Mention a file or agent" })}
       ${contextRing(contextPercentFor(agent?.id), true)}
       <span class="spacer"></span>
       ${miniSelect("chat-model", models, agent?.model ?? "", "Model")}
       ${miniSelect("chat-effort", efforts, agent?.effort ?? "", "Reasoning effort")}
-      <button class="send-btn" type="submit" title="Send"${busy ? " disabled" : ""}>
+      <button class="send-btn" type="submit" title="Send"${
+        busy || !ready ? " disabled" : ""
+      }>
         ${busy ? icon("clock") : icon("send")}
       </button>
     </div>

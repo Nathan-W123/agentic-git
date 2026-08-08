@@ -11,6 +11,7 @@ import {
   api,
   collaborators,
   currentUserName,
+  isFavourite,
   loadContext,
   persist,
   state,
@@ -71,6 +72,13 @@ function visibleRepositories() {
       String(right.updatedAt ?? "").localeCompare(String(left.updatedAt ?? "")),
     );
   }
+  // Favourites first within whichever order was chosen: marking one is a
+  // request to see it sooner, which a star that only changed colour would not
+  // honour.
+  rows.sort(
+    (left, right) =>
+      Number(isFavourite(right.id)) - Number(isFavourite(left.id)),
+  );
   return rows;
 }
 
@@ -84,8 +92,11 @@ function repositoryCard(repo) {
       <div style="min-width:0;flex:1">
         <div class="rc-name">
           <span>${esc(repo.id)}</span>
-          <button class="star" data-act="star" data-value="${esc(repo.id)}"
-            title="Favourite">${icon("star")}</button>
+          <button class="star${isFavourite(repo.id) ? " on" : ""}"
+            data-act="star" data-value="${esc(repo.id)}"
+            aria-pressed="${isFavourite(repo.id)}"
+            title="${isFavourite(repo.id) ? "Remove from favourites" : "Add to favourites"}"
+            >${icon("star")}</button>
         </div>
         <div class="rc-branch">${icon("branch")}${esc(repo.branch ?? "main")}</div>
       </div>
@@ -148,7 +159,9 @@ export function renderRepositories() {
       ${selectBox(
         "repo-sort",
         [
-          { value: "recent", label: "Last opened" },
+          // "Last opened" was a lie: nothing records opens, and this orders by
+          // the newest run or task the repository has.
+          { value: "recent", label: "Recent activity" },
           { value: "name", label: "Name" },
         ],
         state.repoSort,

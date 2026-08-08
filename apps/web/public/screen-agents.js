@@ -9,7 +9,14 @@
  * doing to the codebase — lives on the Coordinator screen instead.
  */
 
-import { api, myAgents, persist, state, taskProgress } from "./data.js";
+import {
+  api,
+  myAgents,
+  persist,
+  state,
+  taskProgress,
+  taskStarted,
+} from "./data.js";
 import { chatComposer, chatThread } from "./chat.js";
 import {
   agentFace,
@@ -65,8 +72,12 @@ function agentRow(agent, active) {
           : `${task.repositoryId ?? ""}`,
       )}</div>
     </span>
-    <span class="ar-prog">${bar(agent.progress, agent.status === "working" ? "" : "grey")}
-      <span class="ar-pct">${Math.round(agent.progress)}%</span></span>
+    <span class="ar-prog">${
+      task !== undefined && !taskStarted(task)
+        ? `<span class="mt-stage">Queued</span>`
+        : `${bar(agent.progress, agent.status === "working" ? "" : "grey")}
+           <span class="ar-pct">${Math.round(agent.progress)}%</span>`
+    }</span>
     <span class="ar-more">${iconButton("dots", {
       act: "agent-menu",
       value: agent.id,
@@ -136,8 +147,12 @@ function tabBody(tab, agent) {
         <div class="ar-name">${esc(task.objective)}</div>
         <div class="ar-role">${esc(task.repositoryId ?? "")} · ${esc(task.status)}</div>
       </div>
-      <div class="ar-prog">${bar(taskProgress(task))}
-        <span class="ar-pct">${taskProgress(task)}%</span></div>
+      <div class="ar-prog">${
+        taskStarted(task)
+          ? `${bar(taskProgress(task))}
+             <span class="ar-pct">${taskProgress(task)}%</span>`
+          : `<span class="mt-stage">Queued — waiting for a free slot</span>`
+      }</div>
       <div class="sum-actions">
         <button class="btn btn-sm" data-act="task-cancel" data-value="${esc(task.id)}">
           Cancel task
@@ -273,7 +288,6 @@ export function renderAgents() {
             state.agentQuery,
             "agent-search",
           )}</span>
-          ${iconButton("filter", { act: "agent-filter-more", title: "Filter" })}
         </div>
         ${
           shown.length === 0
