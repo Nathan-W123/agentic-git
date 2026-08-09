@@ -36,6 +36,28 @@ export interface CoordinatorContext {
   canonicalVersion: CanonicalVersion;
   workspacePath: string;
   planRevision?: number;
+  /**
+   * Present when this is a second pass over work the agent has already done,
+   * because part of it collided with somebody else's change.
+   *
+   * The alternative is throwing the run away and having a fresh agent
+   * rediscover the whole task from nothing, at roughly 145k tokens. This
+   * session still has the task in context and the collision is usually a
+   * couple of lines, so it is asked to redo only that.
+   *
+   * The named files have already been overwritten in the workspace with what
+   * canonical holds now, so the agent is looking at the other change rather
+   * than at its own losing copy. Everything it is not told about here landed
+   * and must be left alone.
+   */
+  repair?: ConflictRepair;
+}
+
+export interface ConflictRepair {
+  /** Files reset to canonical, for the agent to re-apply its intent to. */
+  files: string[];
+  /** Why they came back, in a form worth putting in front of a model. */
+  reason: string;
 }
 
 export type AgentEvent =

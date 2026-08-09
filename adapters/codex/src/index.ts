@@ -1120,6 +1120,28 @@ export class CodexAdapter implements AgentAdapter {
     const validationLabels = record.input.task.validationCommands.map(
       (command) => command.label,
     );
+    if (context.repair !== undefined) {
+      // A second pass over work this session already did. Kept narrow on
+      // purpose: everything else it wrote is already in canonical, and
+      // restating the whole task invites it to redo work that landed.
+      return [
+        "Part of your change could not be kept, because these files changed " +
+          "in canonical while you were working.",
+        `Files to reconcile: ${JSON.stringify(context.repair.files)}`,
+        context.repair.reason,
+        "Those files in the workspace now hold the current canonical content, " +
+          "not your earlier edits. Re-apply only your intended change on top " +
+          "of what is there.",
+        "Every other file you edited has already been integrated. Do not " +
+          "touch anything outside the listed files.",
+        "Return only the JSON object required by the output schema, with " +
+          "outcome=completed.",
+        `Task, for context only: ${record.input.task.objective}`,
+        `Approved plan: ${JSON.stringify(approvedPlan)}`,
+        `Canonical revision: ${context.canonicalVersion.revision}`,
+        `Coordinator validation labels (do not execute): ${JSON.stringify(validationLabels)}`,
+      ].join("\n");
+    }
     return [
       "Implement the approved task in the current workspace.",
       `Execution deadline: ${this.executionTimeoutMs} ms. Prioritize a complete minimal implementation.`,

@@ -1,3 +1,6 @@
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+
 import type {
   AgentAdapter,
   AgentEvent,
@@ -28,6 +31,7 @@ import {
   type AuditEventType,
   type CanonicalVersion,
   type ChangeSet,
+  type IntegrationResult,
   type ConflictAssessment,
   type CoordinationRunResult,
   type CoordinatorDecision,
@@ -133,6 +137,13 @@ export interface CoordinatorDependencies {
   approvals?: ApprovalController;
   audit?: InMemoryAuditLog;
   store?: CoordinationStore;
+  /**
+   * Ask the agent that produced a result to redo the part that collided,
+   * rather than ending its session and paying for a fresh one to rediscover
+   * the whole task. On by default; set false to restore the previous
+   * behaviour, in which any collision cost a full replan.
+   */
+  repairConflicts?: boolean;
 }
 
 export class Coordinator {
@@ -146,6 +157,7 @@ export class Coordinator {
   private readonly approvals: ApprovalController | undefined;
   private readonly audit: InMemoryAuditLog;
   private readonly store: CoordinationStore | undefined;
+  private readonly repairConflicts: boolean;
 
   public constructor(dependencies: CoordinatorDependencies = {}) {
     this.repositories = dependencies.repositories ?? new RepositoryService();
@@ -161,6 +173,7 @@ export class Coordinator {
       dependencies.intelligence ??
       new CodeIntelligenceService(this.repositories);
     this.approvalPolicy = dependencies.approvalPolicy ?? new ApprovalPolicy();
+    this.repairConflicts = dependencies.repairConflicts ?? true;
     this.store = dependencies.store;
     this.approvals =
       dependencies.approvals ??
@@ -1284,6 +1297,121 @@ export class Coordinator {
     }
   }
 
+  /**
+   * The files a result still owes after integration answered.
+   *
+   * Two shapes reach here. Salvage kept most of a changeset and handed back
+   * the contested remainder; or nothing could be kept at all and the whole
+   * changeset is outstanding. Both are the same question to an agent that is
+   * still holding the task: which files do you need to do again?
+   */
+  private contestedPaths(
+    integration: IntegrationResult,
+    changeSet: ChangeSet,
+  ): string[] {
+    if (integration.status === "conflict") {
+      return [...new Set(changeSet.patches.map((patch) => patch.path))].sort();
+    }
+    return [
+      ...new Set(
+        (integration.salvagedDeferred ?? []).map((patch) => patch.path),
+      ),
+    ].sort();
+  }
+
+  /**
+   * Asks the agent that just did the work to redo only what collided.
+   *
+   * The alternative this replaces is the expensive one: end the session, and
+   * have a fresh agent rediscover the entire task from nothing — sixteen to
+   * twenty-six times a run in the A/B series, at roughly 145k tokens each.
+   * This session is still open and still has the task in context, and after
+   * salvage the collision is usually a couple of lines, so what it is asked
+   * costs a fraction of that.
+   *
+   * The contested files are reset to what canonical holds now before the
+   * agent is asked. That matters: an agent shown its own losing copy has no
+   * way to see what it is supposed to reconcile with, and would simply write
+   * the same thing again.
+   *
+   * Exactly one attempt. A second collision means the file is genuinely
+   * contended rather than merely overtaken, and the existing requeue is the
+   * right answer for that — it is also what stops two agents trading repairs
+   * for as long as they both keep losing.
+   */
+  private async repairChangeSet(
+    input: CoordinatorRunInput,
+    result: PreparedTask,
+    contested: readonly string[],
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<ChangeSet | undefined> {
+    const canonical = await this.repositories.getCanonicalVersion(
+      input.repository,
+    );
+    // Show the agent the change it lost to, not its own copy of the file.
+    for (const repositoryPath of contested) {
+      const target = path.join(result.workspace.path, repositoryPath);
+      try {
+        const current = await this.repositories.readFile(
+          input.repository,
+          canonical.revision,
+          repositoryPath,
+        );
+        await mkdir(path.dirname(target), { recursive: true });
+        await writeFile(target, current, "utf8");
+      } catch {
+        // Absent from canonical means the other change deleted it. Leaving
+        // the agent's copy in place is the honest state to reason from.
+      }
+    }
+
+    await this.trace(recorder, runAudit, "replan_requested", result.task.id, {
+      stage: "conflict_repair",
+      files: [...contested],
+      canonicalRevision: canonical.revision,
+    });
+    await recorder?.status(
+      result.task.id,
+      "running",
+      `Reconciling ${contested.length} file(s) that changed underneath this work`,
+    );
+
+    await result.adapter.sendContext(result.session.id, {
+      decision: result.decision,
+      canonicalVersion: canonical,
+      workspacePath: result.workspace.path,
+      repair: {
+        files: [...contested],
+        reason:
+          "These files changed in canonical while you were working, so your " +
+          "edits to them were not kept. They have been reset to the current " +
+          "canonical content. Re-apply only your intended change to them, on " +
+          "top of what is now there. Everything else you did has already " +
+          "been integrated — do not redo it.",
+      },
+    });
+
+    const repaired = await result.adapter.collectChanges(result.session.id);
+    assertChangeSetWithinPlan(result.plan, repaired);
+    if (repaired.patches.length === 0) {
+      return undefined;
+    }
+    await recorder?.changeSet(repaired);
+    await this.trace(
+      recorder,
+      runAudit,
+      "changeset_collected",
+      result.task.id,
+      {
+        changeSetId: repaired.id,
+        files: repaired.patches.map((patch) => patch.path),
+        repairOf: result.changeSet.id,
+      },
+    );
+    return repaired;
+  }
+
   private async integrateTask(
     input: CoordinatorRunInput,
     result: PreparedTask,
@@ -1293,7 +1421,7 @@ export class Coordinator {
     let taskResult: TaskExecutionResult;
     try {
       await recorder?.status(result.task.id, "validating");
-      const integration = await this.integrations.integrate({
+      let integration = await this.integrations.integrate({
         repository: input.repository,
         integrationRoot: input.integrationRoot,
         changeSet: result.changeSet,
@@ -1301,7 +1429,98 @@ export class Coordinator {
         commitMessage: `coord(${result.task.id}): ${result.task.objective}`,
         author: agentCommitIdentity(result.task.agentId),
         trailers: [{ key: "Agent", value: result.task.agentId }],
+        // Safe here in a way it is not everywhere: the agent is still open
+        // below, so the half salvage cannot take is asked for rather than
+        // dropped. A caller with nowhere to put the remainder must not set
+        // this.
+        salvageConflicts: this.repairConflicts,
       });
+
+      const contested = this.repairConflicts
+        ? this.contestedPaths(integration, result.changeSet)
+        : [];
+      if (contested.length > 0) {
+        // A repair that cannot be attempted — an agent with no way to
+        // reconcile, a cancelled session, a model that answers badly — must
+        // not cost the work that already landed. Whatever salvage promoted is
+        // in canonical, and the first answer stands.
+        let repaired: ChangeSet | undefined;
+        try {
+          repaired = await this.repairChangeSet(
+            input,
+            result,
+            contested,
+            recorder,
+            runAudit,
+          );
+        } catch (error) {
+          await this.trace(recorder, runAudit, "task_failed", result.task.id, {
+            stage: "conflict_repair",
+            files: [...contested],
+            error: errorMessage(error),
+          });
+        }
+        if (repaired !== undefined) {
+          // The repair is not privileged: same validation, same policy gate,
+          // same compare-and-swap. A changeset a person had to approve the
+          // first time is approved again here, because what it contains now
+          // is not what they approved.
+          const reviewReasons = this.approvalPolicy.changesetReasons(
+            result.plan,
+            repaired,
+            { planWasReviewed: true },
+          );
+          if (reviewReasons.length > 0) {
+            await recorder?.status(
+              result.task.id,
+              "awaiting_approval",
+              reviewReasons.join("; "),
+            );
+            await this.requireApproval(
+              input,
+              result,
+              "changeset",
+              reviewReasons,
+              recorder,
+              runAudit,
+              { changeSetId: repaired.id },
+            );
+          }
+          const second = await this.integrations.integrate({
+            repository: input.repository,
+            integrationRoot: input.integrationRoot,
+            changeSet: repaired,
+            validationCommands: result.task.validationCommands,
+            commitMessage: `coord(${result.task.id}): ${result.task.objective}`,
+            author: agentCommitIdentity(result.task.agentId),
+            trailers: [
+              { key: "Agent", value: result.task.agentId },
+              { key: "Conflict-Repair", value: contested.join(" ") },
+            ],
+            // One attempt. A second collision means genuine contention, and
+            // the requeue that already exists is the right answer to that.
+            salvageConflicts: false,
+          });
+          await recorder?.integration(second);
+          await this.trace(
+            recorder,
+            runAudit,
+            "validation_completed",
+            result.task.id,
+            {
+              stage: "conflict_repair",
+              status: second.status,
+              files: [...contested],
+            },
+          );
+          // A repair that fails leaves the first answer standing: whatever
+          // salvage promoted is in canonical either way, and a failed second
+          // pass must not present itself as the outcome of the task.
+          if (second.status === "integrated") {
+            integration = second;
+          }
+        }
+      }
       await recorder?.integration(integration);
       await this.trace(
         recorder,

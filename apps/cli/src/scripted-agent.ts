@@ -23,6 +23,16 @@ export interface ScriptedAgentBehavior {
   plan: AgentPlan;
   replan?: (request: ReplanRequest) => AgentPlan | Promise<AgentPlan>;
   execute: (workspacePath: string) => Promise<void>;
+  /**
+   * Re-applies the agent's intent to files that changed underneath it.
+   *
+   * Called instead of `execute` when the coordinator asks for a repair. The
+   * named files already hold current canonical content, so a scripted agent
+   * models a real one by editing on top of what is there rather than by
+   * writing what it wrote the first time. Absent means this agent cannot
+   * repair, which is the honest default for one that only knows one edit.
+   */
+  repair?: (workspacePath: string, files: string[]) => Promise<void>;
 }
 
 interface ScriptedSession {
@@ -109,12 +119,30 @@ export class ScriptedAgentAdapter implements AgentAdapter {
     }
 
     record.context = context;
+    const repair = context.repair;
     this.emit(record, {
       event: "progress",
-      message: `Editing ${record.plan.expectedFiles.join(", ")}`,
+      message:
+        repair === undefined
+          ? `Editing ${record.plan.expectedFiles.join(", ")}`
+          : `Reconciling ${repair.files.join(", ")}`,
       occurredAt: new Date().toISOString(),
     });
-    await this.options.behavior.execute(context.workspacePath);
+    if (repair !== undefined) {
+      const reconcile = this.options.behavior.repair;
+      if (reconcile === undefined) {
+        // An agent that cannot reconcile must not answer as though it did:
+        // returning its original edits would re-propose exactly what already
+        // lost, and returning nothing at least fails honestly.
+        throw new Error(
+          `Scripted agent ${this.options.agentId} was asked to repair ` +
+            `${repair.files.join(", ")} but has no repair behaviour`,
+        );
+      }
+      await reconcile(context.workspacePath, [...repair.files]);
+    } else {
+      await this.options.behavior.execute(context.workspacePath);
+    }
     this.emit(record, {
       event: "completed",
       occurredAt: new Date().toISOString(),
