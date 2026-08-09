@@ -406,14 +406,32 @@ function pause(ms) {
  * `null` when the user walked away.
  */
 async function signInAgent(providerId, mode, rerender) {
+  // Opened now, empty, and pointed at the vendor once the URL is known.
+  // A tab opened after the `await` below is a popup as far as the browser is
+  // concerned — the click that authorised it is long over — so it gets
+  // blocked. Claiming it during the gesture and navigating it later is what
+  // makes "press Connect and the sign-in page appears" actually happen.
+  //
+  // Claude looked like it worked without this only because its CLI opens a
+  // browser itself — on the *server*, which is the user's own machine here
+  // and somebody else's everywhere else. Codex's CLI prints the URL and opens
+  // nothing, which is how the difference showed up.
+  const tab = window.open("", "_blank", "noopener,noreferrer");
   let flow;
   try {
     flow = await startProviderSignIn(providerId);
   } catch (error) {
+    tab?.close();
     // Not fatal: the credential path below still works, and saying why beats
     // silently showing a paste box the user did not ask for.
     toast(`${agentLabelOf(providerId)} sign-in unavailable — ${error.message}`, "error");
     return false;
+  }
+
+  // If the tab was blocked anyway, the link in the dialog is still there and
+  // still works — this is a shortcut, not the only route.
+  if (tab !== null && tab !== undefined) {
+    tab.location = flow.verificationUrl;
   }
 
   const exchange = (flow.mode ?? mode) === "code_exchange";
