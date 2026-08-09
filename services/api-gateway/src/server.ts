@@ -3198,13 +3198,18 @@ export class ApiGateway {
           // The flow id travels in the query string rather than the path so
           // the whole family stays on one route shape. It is a random opaque
           // identifier and is scoped to the caller server-side regardless.
+          // `searchParams.get` answers `null` for an absent parameter, and
+          // `null` is not `undefined`, so it has to be normalised before
+          // `stringField` will treat it as optional rather than as the wrong
+          // type. Starting a flow legitimately names none, and without this
+          // the start request is refused with "flow must be a string".
           const flowId =
             stringField(
               new URL(request.url ?? "", "http://localhost").searchParams.get(
                 "flow",
-              ),
+              ) ?? undefined,
               "flow",
-              { max: 64 },
+              { max: 64, optional: true },
             ) ?? "";
           // A POST naming no flow starts one; a POST naming a flow answers
           // it. Same route, and which it is is a property of the request

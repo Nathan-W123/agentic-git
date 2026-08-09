@@ -667,23 +667,40 @@ function settingsScreen() {
                 deployment.</div></span></div>`
             : state.providers
                 .map(
-                  (provider) => `<div class="set-row">
+                  (provider) => {
+                    // "Connected" has meant two different things here, and the
+                    // difference is the whole point of per-user accounts: a
+                    // provider reads as connected whenever *this machine's*
+                    // CLI is signed in, which is somebody else's account for
+                    // everyone but the person who set the host up. Offering
+                    // "Disconnect" in that state hid the connect flow behind a
+                    // button that did the opposite — there was no way to
+                    // attach your own account at all.
+                    //
+                    // So the control follows the user's own credential, not
+                    // the machine's, and the subtitle says which is in use.
+                    const mine = provider.ownCredential !== undefined;
+                    const hostAccount = provider.connected && !mine;
+                    return `<div class="set-row">
                     <span class="sr-body">
                       <div class="sr-title">${esc(provider.name ?? provider.id)}</div>
                       <div class="sr-sub">${esc(
-                        provider.connected
-                          ? (provider.model ?? "Connected")
-                          : "Not connected",
+                        mine
+                          ? (provider.model ?? "Connected as you")
+                          : hostAccount
+                            ? "Using this machine's account — connect your own"
+                            : "Not connected",
                       )}</div>
                     </span>
                     <span class="sr-ctl">
                       <button class="btn btn-sm" data-act="${
-                        provider.connected ? "agent-disconnect" : "agent-connect"
+                        mine ? "agent-disconnect" : "agent-connect"
                       }" data-value="${esc(provider.id)}">
-                        ${provider.connected ? "Disconnect" : "Connect"}
+                        ${mine ? "Disconnect" : hostAccount ? "Connect yours" : "Connect"}
                       </button>
                     </span>
-                  </div>`,
+                  </div>`;
+                  },
                 )
                 .join("")
         }
@@ -1327,9 +1344,16 @@ document.addEventListener("click", (event) => {
       // Which agent to connect is the user's decision. Silently picking the
       // first unconnected provider made "Add Agent" a lottery on a screen
       // whose whole subject is which agents are yours.
-      const choices = state.providers.filter((entry) => !entry.connected);
+      // Offered on whether *you* have connected it, not on whether the host
+      // machine happens to be signed in. Filtering on `connected` hid every
+      // provider the host was logged into, which on a developer's own machine
+      // is usually all of them — so "Add agent" reported that everything was
+      // already connected while the user had connected nothing.
+      const choices = state.providers.filter(
+        (entry) => entry.ownCredential === undefined,
+      );
       if (choices.length === 0) {
-        toast("Every available agent is already connected.");
+        toast("You have connected every available agent.");
         return;
       }
       showMenu(
@@ -1337,7 +1361,9 @@ document.addEventListener("click", (event) => {
         choices.map((entry) => ({
           act: "agent-connect",
           value: entry.id,
-          label: `Connect ${agentLabelOf(entry.id)}`,
+          label: entry.connected
+            ? `Connect your own ${agentLabelOf(entry.id)}`
+            : `Connect ${agentLabelOf(entry.id)}`,
           iconName: "robot",
         })),
       );
