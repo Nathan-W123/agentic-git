@@ -115,7 +115,7 @@ function scriptedDeviceAuth(options: {
         })();
       };
     });
-    return { done, kill: () => release?.() };
+    return { done, kill: () => release?.(), write: () => undefined };
   };
   return { spawner, calls, finish: () => release?.() };
 }

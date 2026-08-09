@@ -464,17 +464,37 @@ export interface LongRunningProcess {
   /** Resolves when the CLI exits, however it exits. */
   done: Promise<ProcessOutput>;
   kill(): void;
+  /**
+   * Sends a line to the CLI's stdin.
+   *
+   * Only meaningful for a flow spawned with `stdin: "pipe"`. Anthropic's
+   * sign-in is a conversation rather than a poll: the CLI prints a URL, the
+   * user signs in on their own machine and is given a code, and the CLI waits
+   * on stdin for that code. Without a way to answer it, the flow cannot be
+   * completed from a server at all.
+   */
+  write(line: string): void;
 }
 
 export type LongRunningSpawner = (
   command: string,
   args: readonly string[],
-  options: { env: NodeJS.ProcessEnv; cwd?: string },
+  options: { env: NodeJS.ProcessEnv; cwd?: string; stdin?: "ignore" | "pipe" },
   onLine: (line: string) => void,
 ) => LongRunningProcess;
 
 /** Terminal colour codes, which the Codex CLI wraps its device code in. */
 const ANSI = /\[[0-9;]*m/gu;
+
+/**
+ * Written by character code rather than as an escape.
+ *
+ * This file gets rewritten by tooling often enough that a literal
+ * backslash-n has been turned into a real line break inside a string literal
+ * here before, which produces a string containing a newline where the
+ * two-character escape was meant and does not always fail loudly.
+ */
+const NEWLINE = String.fromCharCode(10);
 
 export function stripAnsi(value: string): string {
   return value.replace(ANSI, "");
@@ -487,15 +507,29 @@ export function stripAnsi(value: string): string {
 function spawnLongRunning(
   command: string,
   args: readonly string[],
-  options: { env: NodeJS.ProcessEnv; cwd?: string },
+  options: { env: NodeJS.ProcessEnv; cwd?: string; stdin?: "ignore" | "pipe" },
   onLine: (line: string) => void,
 ): LongRunningProcess {
   const startedAt = Date.now();
   const child = spawn(command, [...args], {
     env: options.env,
     ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-    stdio: ["ignore", "pipe", "pipe"],
+    // Written as two literal tuples rather than one computed array so the
+    // child's stdout and stderr stay typed as present. Stdin defaults to
+    // `ignore`, which is what a polling flow wants: a CLI that never reads it
+    // should see it closed rather than held open.
+    stdio:
+      options.stdin === "pipe"
+        ? (["pipe", "pipe", "pipe"] as const)
+        : (["ignore", "pipe", "pipe"] as const),
   });
+  // Narrowed once, explicitly: both are always piped above, but the stdio
+  // tuple is chosen at runtime so the types no longer say so.
+  const stdoutStream = child.stdout;
+  const stderrStream = child.stderr;
+  if (stdoutStream === null || stderrStream === null) {
+    throw new Error(`${command} was spawned without pipes`);
+  }
   let stdout = "";
   let stderr = "";
   let pending = "";
@@ -508,10 +542,10 @@ function spawnLongRunning(
       onLine(line);
     }
   };
-  child.stdout.setEncoding("utf8");
-  child.stdout.on("data", consume);
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (chunk: string) => {
+  stdoutStream.setEncoding("utf8");
+  stdoutStream.on("data", consume);
+  stderrStream.setEncoding("utf8");
+  stderrStream.on("data", (chunk: string) => {
     stderr += chunk;
     // The Codex CLI prints its instructions to stdout but its warnings to
     // stderr; the device code has been seen on both across versions, so both
@@ -546,6 +580,13 @@ function spawnLongRunning(
     done,
     kill: () => {
       child.kill();
+    },
+    write: (value: string) => {
+      // The newline is what submits the answer, so it is added here rather
+      // than trusted to the caller. A CLI that is not listening is not an
+      // error worth failing a sign-in over: the flow's own status check is
+      // what decides whether it worked.
+      child.stdin?.write(value + NEWLINE);
     },
   };
 }
