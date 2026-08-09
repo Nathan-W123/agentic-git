@@ -152,6 +152,7 @@ async function serve(
           }),
         status: (input) => providerChat.deviceAuthStatus(input),
         cancel: (input) => providerChat.cancelDeviceAuth(input),
+        submitCode: (input) => providerChat.submitDeviceAuthCode(input),
       },
       disconnect: (input) =>
         providerChat.disconnect({

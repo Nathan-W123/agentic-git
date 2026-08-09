@@ -1,11 +1,19 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
+  captureClaudeSession,
   openCredentialHome,
   resolveCredentialKey,
   supportedCredentialKinds,
@@ -416,5 +424,64 @@ test("a session file records the recommended kind ordering", async () => {
   // vendors whose session files share a refresh token with the user's machine.
   assert.deepEqual(supportedCredentialKinds("codex"), ["api_key", "session_file"]);
   assert.deepEqual(supportedCredentialKinds("gemini"), ["api_key", "session_file"]);
-  assert.equal(supportsUserCredential("claude", "session_file"), false);
+  // Claude can hold a session file now — a browser sign-in captures one — but
+  // it is never offered for pasting, because no file on the user's machine is
+  // one. Delivery accepts it; the connect UI does not list it.
+  assert.equal(supportsUserCredential("claude", "session_file"), true);
+  assert.ok(!supportedCredentialKinds("claude").includes("session_file"));
+});
+
+/**
+ * A captured browser sign-in has to survive the round trip, because the CLI
+ * is only ever given the copy: the directory it signed into is destroyed as
+ * soon as the credential is stored, so anything lost here is lost for good.
+ */
+test("a captured Claude sign-in is restored into the CLI's own config directory", async (t) => {
+  const directory = await scratch(t);
+  const signedIn = path.join(directory, "signed-in");
+  await mkdir(signedIn, { recursive: true });
+  await writeFile(
+    path.join(signedIn, ".credentials.json"),
+    '{"claudeAiOauth":{"accessToken":"secret-token"}}',
+    "utf8",
+  );
+  await writeFile(path.join(signedIn, ".claude.json"), '{"theme":"dark"}', "utf8");
+  // A directory alongside the files must not derail the capture.
+  await mkdir(path.join(signedIn, "backups"), { recursive: true });
+
+  const secret = await captureClaudeSession(signedIn);
+  const vault = store(directory);
+  await vault.put("user-1", "claude", { kind: "session_file", secret });
+  const credential = await vault.get("user-1", "claude");
+  assert.ok(credential !== undefined);
+
+  const home = await openCredentialHome({ vendor: "claude", credential });
+  try {
+    const configDirectory = String(home.env["CLAUDE_CONFIG_DIR"]);
+    assert.equal(
+      await readFile(path.join(configDirectory, ".credentials.json"), "utf8"),
+      '{"claudeAiOauth":{"accessToken":"secret-token"}}',
+    );
+    assert.equal(
+      await readFile(path.join(configDirectory, ".claude.json"), "utf8"),
+      '{"theme":"dark"}',
+    );
+    // The host's own credentials must not be reachable from that environment.
+    assert.equal(home.env["ANTHROPIC_API_KEY"], undefined);
+    assert.equal(home.env["CLAUDE_CODE_OAUTH_TOKEN"], undefined);
+  } finally {
+    await home.close();
+  }
+});
+
+test("a capture of a directory with nothing in it is refused", async (t) => {
+  const directory = await scratch(t);
+  const empty = path.join(directory, "empty");
+  await mkdir(empty, { recursive: true });
+  await assert.rejects(
+    () => captureClaudeSession(empty),
+    (error: unknown) =>
+      error instanceof UserCredentialError &&
+      error.code === "invalid_session_file",
+  );
 });

@@ -5,7 +5,10 @@ import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/
 import os from "node:os";
 import path from "node:path";
 
-import { resolveClaudeCommand } from "@coord/adapter-prompt-cli";
+import {
+  extractJsonObject,
+  resolveClaudeCommand,
+} from "@coord/adapter-prompt-cli";
 import type { CoordinatorProject } from "@coord/cli/project";
 import {
   runProcess,
@@ -17,6 +20,7 @@ import {
   UserCredentialError,
   UserCredentialStore,
   assertSessionFile,
+  captureClaudeSession,
   credentialHint,
   SESSION_FILE_SHARES_REFRESH_TOKEN,
   withCredentialHome,
@@ -591,12 +595,28 @@ function spawnLongRunning(
   };
 }
 
+/**
+ * How a browser sign-in finishes, which differs by vendor and changes what
+ * the screen has to render.
+ *
+ * `approve` is Codex: the CLI shows a code, the user approves it, and the CLI
+ * polls until the vendor says yes. Nothing comes back to us.
+ *
+ * `code_exchange` is Claude: the CLI shows a URL, the user signs in and is
+ * handed a code, and that code has to be given back to the waiting CLI. It is
+ * one extra step for the user and a whole extra leg for the server, which is
+ * why the two are named rather than collapsed.
+ */
+export type DeviceAuthMode = "approve" | "code_exchange";
+
 /** What the browser needs to show a device-authorization prompt. */
 export interface DeviceAuthStart {
   flowId: string;
   verificationUrl: string;
+  /** Absent on `code_exchange`, where the browser issues the code instead. */
   userCode: string;
   expiresAt: string;
+  mode: DeviceAuthMode;
 }
 
 export interface DeviceAuthState {
@@ -605,6 +625,7 @@ export interface DeviceAuthState {
   verificationUrl?: string;
   userCode?: string;
   expiresAt?: string;
+  mode?: DeviceAuthMode;
   /** The vendor's own words when it did not work out. */
   detail?: string;
   account?: string;
@@ -619,10 +640,13 @@ interface DeviceAuthFlow {
   userCode: string | undefined;
   expiresAtMs: number;
   status: DeviceAuthState["status"];
+  mode: DeviceAuthMode;
   detail: string | undefined;
   account: string | undefined;
   process: LongRunningProcess;
   timer: NodeJS.Timeout | undefined;
+  /** Set once a code has been handed to the CLI, so it is not sent twice. */
+  codeSubmitted: boolean;
 }
 
 /**
@@ -1410,12 +1434,14 @@ export class ProviderChatService {
     userId: string;
     provider: ProviderId;
   }): Promise<DeviceAuthStart> {
-    if (input.provider !== "openai") {
+    if (input.provider === "google") {
+      // The Gemini CLI has no login subcommand at all — authentication is a
+      // menu inside its interactive UI — so there is nothing here to drive.
       throw new ProviderChatError(
         400,
         "unsupported_flow",
-        `${PROVIDER_NAMES[input.provider]} has no device-authorization flow; ` +
-          "connect it with a credential instead",
+        `${PROVIDER_NAMES[input.provider]} has no sign-in flow that can be ` +
+          "driven from a server; connect it with a credential instead",
       );
     }
     const cli = await this.detect(input.provider);
@@ -1431,12 +1457,23 @@ export class ProviderChatService {
     // which is what a user pressing the button twice means.
     await this.cancelDeviceAuthFor(input.userId, input.provider);
 
+    const anthropic = input.provider === "anthropic";
     const home = await mkdtemp(path.join(os.tmpdir(), "coord-device-"));
     const env: NodeJS.ProcessEnv = {
       ...sanitizeChildEnv(process.env),
-      CODEX_HOME: home,
+      ...(anthropic ? { CLAUDE_CONFIG_DIR: home } : { CODEX_HOME: home }),
     };
-    delete env["OPENAI_API_KEY"];
+    // The host's own keys must not be visible to a sign-in: an inherited one
+    // would let the CLI succeed without the user ever signing in, and the
+    // credential captured afterwards would be the host owner's.
+    for (const name of [
+      "OPENAI_API_KEY",
+      "ANTHROPIC_API_KEY",
+      "ANTHROPIC_AUTH_TOKEN",
+      "CLAUDE_CODE_OAUTH_TOKEN",
+    ]) {
+      delete env[name];
+    }
 
     const flow: DeviceAuthFlow = {
       id: randomUUID(),
@@ -1447,10 +1484,12 @@ export class ProviderChatService {
       userCode: undefined,
       expiresAtMs: Date.now() + DEVICE_AUTH_DEFAULT_EXPIRY_MS,
       status: "pending",
+      mode: anthropic ? "code_exchange" : "approve",
       detail: undefined,
       account: undefined,
       process: undefined as unknown as LongRunningProcess,
       timer: undefined,
+      codeSubmitted: false,
     };
 
     let announce: () => void = () => {};
@@ -1459,19 +1498,28 @@ export class ProviderChatService {
     });
 
     flow.process = this.longRunningSpawner(
-      resolveCodexCommand(this.homeDirectory),
-      ["login", "--device-auth"],
-      { env, cwd: home },
+      anthropic
+        ? resolveClaudeCommand("claude")
+        : resolveCodexCommand(this.homeDirectory),
+      anthropic ? ["auth", "login"] : ["login", "--device-auth"],
+      // Claude waits on stdin for the code the browser hands the user, so its
+      // flow must be able to answer. Codex never reads stdin and keeps it
+      // closed.
+      { env, cwd: home, ...(anthropic ? { stdin: "pipe" as const } : {}) },
       (line) => {
         const parsed = parseDeviceAuthLine(line);
-        // The URL is printed before the code, and only the code completes the
-        // pair, so the promise is resolved on whichever arrives last.
         flow.verificationUrl ??= parsed.url;
         flow.userCode ??= parsed.code;
         if (parsed.expiresInMinutes !== undefined) {
           flow.expiresAtMs = Date.now() + parsed.expiresInMinutes * 60_000;
         }
-        if (flow.verificationUrl !== undefined && flow.userCode !== undefined) {
+        // Codex prints the URL before the code and only the pair is usable,
+        // so it waits for whichever arrives last. Claude issues no code here
+        // — the browser does — so its URL alone is the whole prompt.
+        if (
+          flow.verificationUrl !== undefined &&
+          (flow.mode === "code_exchange" || flow.userCode !== undefined)
+        ) {
           announce();
         }
       },
@@ -1503,7 +1551,8 @@ export class ProviderChatService {
           new ProviderChatError(
             502,
             "device_auth_unavailable",
-            "The Codex CLI did not print a device code. Its output was: " +
+            `The ${PROVIDER_NAMES[input.provider]} CLI did not print a ` +
+              "sign-in prompt. Its output was: " +
               (flow.detail ?? "nothing recognizable"),
           ),
         );
@@ -1524,9 +1573,61 @@ export class ProviderChatService {
     return {
       flowId: flow.id,
       verificationUrl: flow.verificationUrl as string,
-      userCode: flow.userCode as string,
+      userCode: flow.userCode ?? "",
       expiresAt: new Date(flow.expiresAtMs).toISOString(),
+      mode: flow.mode,
     };
+  }
+
+  /**
+   * Hands the CLI the code the browser gave the user.
+   *
+   * This is the leg a polling flow does not have. The CLI is sitting on
+   * stdin waiting for it, and until it arrives the sign-in cannot finish —
+   * which is also why the flow is per user and looked up by owner: a code is
+   * a bearer secret for somebody's account for as long as it is live.
+   */
+  public async submitDeviceAuthCode(input: {
+    userId: string;
+    flowId: string;
+    code: string;
+  }): Promise<DeviceAuthState> {
+    const flow = this.deviceAuthFlows.get(input.flowId);
+    if (flow === undefined || flow.userId !== input.userId) {
+      throw new ProviderChatError(404, "unknown_flow", "No such sign-in");
+    }
+    if (flow.mode !== "code_exchange") {
+      throw new ProviderChatError(
+        400,
+        "unsupported_flow",
+        `${PROVIDER_NAMES[flow.provider]} approves in the browser and takes ` +
+          "no code here",
+      );
+    }
+    if (flow.status !== "pending") {
+      return this.describeDeviceAuth(flow);
+    }
+    const code = input.code.trim();
+    // Anything the CLI would read as more than one answer is refused rather
+    // than sent: a newline here would submit a second line to a prompt that
+    // is not expecting one.
+    if (code.length === 0 || /\s/u.test(code)) {
+      throw new ProviderChatError(
+        400,
+        "invalid_code",
+        "Paste the single code the sign-in page gave you",
+      );
+    }
+    if (flow.codeSubmitted) {
+      throw new ProviderChatError(
+        409,
+        "code_already_submitted",
+        "That sign-in already has a code; start again if it did not work",
+      );
+    }
+    flow.codeSubmitted = true;
+    flow.process.write(code);
+    return this.describeDeviceAuth(flow);
   }
 
   /**
@@ -1542,6 +1643,10 @@ export class ProviderChatService {
     output: ProcessOutput,
   ): Promise<void> {
     if (flow.status !== "pending") {
+      return;
+    }
+    if (flow.provider === "anthropic") {
+      await this.finishClaudeAuth(flow, output);
       return;
     }
     try {
@@ -1610,9 +1715,99 @@ export class ProviderChatService {
       flow.detail = "The one-time code expired before it was approved";
       flow.process.kill();
     }
-    const state: DeviceAuthState = {
+    const state = this.describeDeviceAuth(flow);
+    if (flow.status !== "pending") {
+      // Terminal states are read once by the poller and then discarded, so a
+      // long-lived dashboard cannot accumulate finished flows.
+      this.deviceAuthFlows.delete(flow.id);
+    }
+    return state;
+  }
+
+  /**
+   * Turns a finished `claude auth login` into a stored credential.
+   *
+   * The CLI prints no token — it writes into the configuration directory —
+   * and the file it uses has moved between versions. So rather than reading a
+   * layout this would then be pinned to, the CLI is *asked*: `claude auth
+   * status --json` reports `loggedIn` against the same directory, and only a
+   * yes is treated as a sign-in. That makes a future layout change surface
+   * here, as a refused connection with the CLI's own words, instead of as a
+   * credential that stores cleanly and fails silently when it is used.
+   *
+   * The exit code is deliberately not the test. The CLI is interactive and
+   * can exit non-zero for reasons that have nothing to do with whether the
+   * sign-in landed.
+   */
+  private async finishClaudeAuth(
+    flow: DeviceAuthFlow,
+    output: ProcessOutput,
+  ): Promise<void> {
+    try {
+      const status = await this.runner(
+        resolveClaudeCommand("claude"),
+        ["auth", "status", "--json"],
+        {
+          env: {
+            ...sanitizeChildEnv(process.env),
+            CLAUDE_CONFIG_DIR: flow.home,
+          },
+          cwd: flow.home,
+          timeoutMs: 30_000,
+        },
+      );
+      const report = extractJsonObject(
+        status.stdout,
+        "the Claude sign-in status",
+      ) as { loggedIn?: unknown; authMethod?: unknown };
+      if (report.loggedIn !== true) {
+        throw new ProviderChatError(
+          400,
+          "sign_in_incomplete",
+          `The sign-in did not complete: ${probeFailureDetail(output)}`,
+        );
+      }
+
+      const secret = await captureClaudeSession(flow.home);
+      const store = await this.credentialStore();
+      const account =
+        typeof report.authMethod === "string" && report.authMethod.length > 0
+          ? `Claude sign-in (${report.authMethod})`
+          : "Claude sign-in";
+      await store.put(flow.userId, "claude", {
+        kind: "session_file",
+        secret,
+        origin: "device_auth",
+        label: account,
+      });
+      await store.markVerified(flow.userId, "claude", account);
+      await this.ensureConnectionRecord(flow.userId, flow.provider);
+
+      flow.status = "completed";
+      flow.account = account;
+    } catch (error) {
+      flow.status = "failed";
+      flow.detail =
+        error instanceof ProviderChatError || error instanceof Error
+          ? error.message
+          : String(error);
+    } finally {
+      if (flow.timer !== undefined) {
+        clearTimeout(flow.timer);
+      }
+      // The staged home has done its job either way: the credential is in the
+      // vault now, and leaving a live session on disk would outlast the
+      // isolation everything else here maintains.
+      await removeCredentialHome(flow.home);
+    }
+  }
+
+  /** The flow as the browser sees it. Reading it changes nothing. */
+  private describeDeviceAuth(flow: DeviceAuthFlow): DeviceAuthState {
+    return {
       flowId: flow.id,
       status: flow.status,
+      mode: flow.mode,
       ...(flow.verificationUrl === undefined
         ? {}
         : { verificationUrl: flow.verificationUrl }),
@@ -1621,12 +1816,6 @@ export class ProviderChatService {
       ...(flow.detail === undefined ? {} : { detail: flow.detail }),
       ...(flow.account === undefined ? {} : { account: flow.account }),
     };
-    if (flow.status !== "pending") {
-      // Terminal states are read once by the poller and then discarded, so a
-      // long-lived dashboard cannot accumulate finished flows.
-      this.deviceAuthFlows.delete(flow.id);
-    }
-    return state;
   }
 
   public async cancelDeviceAuth(input: {

@@ -261,7 +261,7 @@ test("a login that never writes auth.json fails instead of looking connected", a
   );
 });
 
-test("providers without a device flow say so rather than pretending", async () => {
+test("providers without a sign-in flow say so rather than pretending", async () => {
   const harness = await createHarness();
   const service = new ProviderChatService(harness.project, {
     homeDirectory: harness.home,
@@ -269,11 +269,188 @@ test("providers without a device flow say so rather than pretending", async () =
       claude: () => output(JSON.stringify({ loggedIn: true })),
     }),
   });
-  for (const provider of ["anthropic", "google"] as const) {
-    await assert.rejects(
-      service.startDeviceAuth({ userId: "u1", provider }),
-      (error: unknown) =>
-        error instanceof ProviderChatError && error.code === "unsupported_flow",
-    );
-  }
+  // Anthropic used to be on this list. It is not any more: `claude auth login`
+  // can be driven from a server, and the test for that is below. Google stays,
+  // because its CLI has no login subcommand at all — authentication is a menu
+  // inside the interactive UI, so there is nothing here to drive.
+  await assert.rejects(
+    service.startDeviceAuth({ userId: "u1", provider: "google" }),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "unsupported_flow",
+  );
+});
+
+/**
+ * The real `claude auth login` banner, as the installed CLI prints it when no
+ * browser opens. The redirect target matters and is kept verbatim: it is
+ * `platform.claude.com`, not a localhost port, which is the whole reason this
+ * flow can be driven from a server the user's browser cannot reach.
+ */
+const CLAUDE_LOGIN_OUTPUT = [
+  "Opening browser to sign in…",
+  "If the browser didn't open, visit: https://claude.com/cai/oauth/authorize" +
+    "?code=true&client_id=9d1c250a&response_type=code" +
+    "&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback",
+  "Paste code here if prompted > ",
+];
+
+/**
+ * A Claude sign-in under test control: it prints the banner, waits on stdin,
+ * and only writes its configuration once a code has been handed to it — which
+ * is exactly the ordering the server has to get right.
+ */
+function scriptedClaudeLogin(options: { writesFiles?: Record<string, string> }) {
+  const calls: Array<{ env: NodeJS.ProcessEnv }> = [];
+  const submitted: string[] = [];
+  let release: (() => void) | undefined;
+  const spawner = (
+    _command: string,
+    _args: readonly string[],
+    spawnOptions: { env: NodeJS.ProcessEnv; stdin?: string },
+    onLine: (line: string) => void,
+  ) => {
+    calls.push({ env: spawnOptions.env });
+    for (const line of CLAUDE_LOGIN_OUTPUT) {
+      onLine(line);
+    }
+    const done = new Promise<ReturnType<typeof output>>((resolve) => {
+      release = () => {
+        void (async () => {
+          const home = String(spawnOptions.env["CLAUDE_CONFIG_DIR"]);
+          for (const [name, contents] of Object.entries(
+            options.writesFiles ?? {},
+          )) {
+            await writeFile(path.join(home, name), contents, "utf8");
+          }
+          resolve(output("", 0));
+        })();
+      };
+    });
+    return {
+      done,
+      kill: () => release?.(),
+      write: (value: string) => {
+        submitted.push(value);
+        // The real CLI exits once it has the code.
+        release?.();
+      },
+    };
+  };
+  return { spawner, calls, submitted };
+}
+
+test("Claude sign-in shows a URL, takes a pasted code, and stores the session", async () => {
+  const harness = await createHarness();
+  const login = scriptedClaudeLogin({
+    writesFiles: { ".credentials.json": '{"claudeAiOauth":{"accessToken":"x"}}' },
+  });
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) =>
+        args[0] === "auth" && args[1] === "status"
+          ? output(JSON.stringify({ loggedIn: true, authMethod: "claudeai" }))
+          : output(JSON.stringify({ result: "pong" })),
+    }),
+    longRunningSpawner: login.spawner,
+  });
+
+  const started = await service.startDeviceAuth({
+    userId: "u1",
+    provider: "anthropic",
+  });
+  // The browser issues the code for this flow, so none is shown here — the
+  // screen has to render a paste box rather than a code to approve.
+  assert.equal(started.mode, "code_exchange");
+  assert.match(started.verificationUrl, /^https:\/\/claude\.com\/cai\/oauth/u);
+  assert.equal(started.userCode, "");
+
+  // The sign-in must not be able to reach the host's own Claude credentials,
+  // or it would succeed as the host owner without anybody signing in.
+  const spawnEnv = login.calls[0]?.env ?? {};
+  assert.ok(String(spawnEnv["CLAUDE_CONFIG_DIR"] ?? "").length > 0);
+  assert.equal(spawnEnv["ANTHROPIC_API_KEY"], undefined);
+  assert.equal(spawnEnv["CLAUDE_CODE_OAUTH_TOKEN"], undefined);
+
+  await service.submitDeviceAuthCode({
+    userId: "u1",
+    flowId: started.flowId,
+    code: "abc123",
+  });
+  assert.deepEqual(login.submitted, ["abc123"]);
+
+  assert.equal(await settledStatus(service, "u1", started.flowId), "completed");
+
+  const statuses = await service.list({ userId: "u1", systemAdmin: false });
+  const anthropic = statuses.find((entry) => entry.id === "anthropic");
+  assert.ok(anthropic?.ownCredential !== undefined);
+});
+
+test("a Claude sign-in the CLI does not confirm is refused", async () => {
+  const harness = await createHarness();
+  // The process exits and writes something, but the CLI itself reports that
+  // nobody is signed in. Storing that would produce a credential that fails
+  // silently the first time a task tried to use it.
+  const login = scriptedClaudeLogin({ writesFiles: { ".claude.json": "{}" } });
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: () => output(JSON.stringify({ loggedIn: false, authMethod: "none" })),
+    }),
+    longRunningSpawner: login.spawner,
+  });
+
+  const started = await service.startDeviceAuth({
+    userId: "u1",
+    provider: "anthropic",
+  });
+  await service.submitDeviceAuthCode({
+    userId: "u1",
+    flowId: started.flowId,
+    code: "wrong",
+  });
+  assert.equal(await settledStatus(service, "u1", started.flowId), "failed");
+
+  const statuses = await service.list({ userId: "u1", systemAdmin: false });
+  assert.equal(
+    statuses.find((entry) => entry.id === "anthropic")?.ownCredential,
+    undefined,
+  );
+});
+
+test("one user cannot hand a code to another user's sign-in", async () => {
+  const harness = await createHarness();
+  const login = scriptedClaudeLogin({});
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({ claude: () => output("{}") }),
+    longRunningSpawner: login.spawner,
+  });
+  const started = await service.startDeviceAuth({
+    userId: "u1",
+    provider: "anthropic",
+  });
+
+  await assert.rejects(
+    service.submitDeviceAuthCode({
+      userId: "u2",
+      flowId: started.flowId,
+      code: "abc123",
+    }),
+    /No such sign-in/u,
+  );
+  assert.deepEqual(login.submitted, []);
+});
+
+test("Google has no sign-in flow to drive, and says so", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({}),
+    longRunningSpawner: scriptedClaudeLogin({}).spawner,
+  });
+  await assert.rejects(
+    service.startDeviceAuth({ userId: "u1", provider: "google" }),
+    /no sign-in flow that can be driven from a server/u,
+  );
 });

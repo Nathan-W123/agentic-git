@@ -272,6 +272,18 @@ export interface ChatProviderOperations {
     start(input: { userId: string; provider: string }): Promise<unknown>;
     status(input: { userId: string; flowId: string }): Promise<unknown>;
     cancel(input: { userId: string; flowId: string }): Promise<void>;
+    /**
+     * Hands a waiting sign-in the code the browser gave the user.
+     *
+     * Only some vendors need this leg. Codex approves in the browser and the
+     * CLI polls; Anthropic issues the user a code that has to be given back
+     * to the CLI sitting on stdin.
+     */
+    submitCode?(input: {
+      userId: string;
+      flowId: string;
+      code: string;
+    }): Promise<unknown>;
   };
   disconnect(input: { userId: string; provider: string }): Promise<void>;
   /** Model/effort choices the connected account actually reports. */
@@ -3183,14 +3195,6 @@ export class ApiGateway {
             );
           }
           const deviceAuth = chatOperations.deviceAuth;
-          if (method === "POST") {
-            this.sendJson(response, 200, {
-              deviceAuth: await performChat(() =>
-                deviceAuth.start({ userId: identity.userId, provider }),
-              ),
-            });
-            return;
-          }
           // The flow id travels in the query string rather than the path so
           // the whole family stays on one route shape. It is a random opaque
           // identifier and is scoped to the caller server-side regardless.
@@ -3202,8 +3206,37 @@ export class ApiGateway {
               "flow",
               { max: 64 },
             ) ?? "";
+          // A POST naming no flow starts one; a POST naming a flow answers
+          // it. Same route, and which it is is a property of the request
+          // rather than something the caller has to select.
+          if (method === "POST" && flowId.length === 0) {
+            this.sendJson(response, 200, {
+              deviceAuth: await performChat(() =>
+                deviceAuth.start({ userId: identity.userId, provider }),
+              ),
+            });
+            return;
+          }
           if (flowId.length === 0) {
             throw new HttpError(400, "invalid_request", "flow is required");
+          }
+          if (method === "POST") {
+            const submitCode = deviceAuth.submitCode;
+            if (submitCode === undefined) {
+              throw new HttpError(
+                501,
+                "unsupported",
+                "This deployment cannot accept a sign-in code",
+              );
+            }
+            const body = objectBody(await this.readJson(request));
+            const code = stringField(body["code"], "code", { max: 512 }) ?? "";
+            this.sendJson(response, 200, {
+              deviceAuth: await performChat(() =>
+                submitCode({ userId: identity.userId, flowId, code }),
+              ),
+            });
+            return;
           }
           if (method === "GET") {
             this.sendJson(response, 200, {

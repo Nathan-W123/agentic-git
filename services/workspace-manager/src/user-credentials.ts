@@ -4,7 +4,15 @@ import {
   randomBytes,
   scryptSync,
 } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readdir,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -444,6 +452,10 @@ const DELIVERY: Record<
   claude: {
     oauth_token: { via: "env", variable: "CLAUDE_CODE_OAUTH_TOKEN" },
     api_key: { via: "env", variable: "ANTHROPIC_API_KEY" },
+    // What a browser sign-in leaves behind. `claude auth login` writes into
+    // its configuration directory rather than printing a token, so what is
+    // captured is the directory itself.
+    session_file: { via: "files" },
   },
   codex: {
     api_key: { via: "files" },
@@ -485,6 +497,70 @@ async function writeCodexAuthFile(
  * directory listing. Catching that here turns a mystified CLI failure minutes
  * later into a precise message at the moment of pasting.
  */
+/**
+ * How a captured Claude sign-in travels.
+ *
+ * `claude auth login` prints no token — it writes into whatever
+ * `CLAUDE_CONFIG_DIR` points at, and the file it uses has moved between
+ * versions. Rather than encode a guess about that layout, the whole directory
+ * is captured as a name-to-contents map and written back verbatim when the
+ * CLI is next launched. What makes that safe rather than superstitious is
+ * that the capture is verified by asking the CLI itself: `claude auth status
+ * --json` reports `loggedIn`, so a layout change surfaces as a refused
+ * connection at sign-in time rather than as a credential that stores cleanly
+ * and fails silently the first time a task uses it.
+ *
+ * Directories are skipped and each file is capped: this is a credential
+ * store, not a backup, and a session needing megabytes is not one.
+ */
+export const CLAUDE_SESSION_FILES = "files";
+const MAX_CAPTURED_FILE_BYTES = 256 * 1024;
+const MAX_CAPTURED_FILES = 32;
+
+/** Serialises a signed-in configuration directory for the credential store. */
+export async function captureClaudeSession(
+  configDirectory: string,
+): Promise<string> {
+  const entries = await readdir(configDirectory, { withFileTypes: true });
+  const files: Record<string, string> = {};
+  for (const entry of entries) {
+    if (!entry.isFile() || Object.keys(files).length >= MAX_CAPTURED_FILES) {
+      continue;
+    }
+    const full = path.join(configDirectory, entry.name);
+    if ((await stat(full)).size > MAX_CAPTURED_FILE_BYTES) {
+      continue;
+    }
+    files[entry.name] = await readFile(full, "utf8");
+  }
+  if (Object.keys(files).length === 0) {
+    throw new UserCredentialError(
+      "The sign-in completed but wrote nothing to capture",
+      "invalid_session_file",
+    );
+  }
+  return JSON.stringify({ [CLAUDE_SESSION_FILES]: files });
+}
+
+/** Writes a captured sign-in back into a configuration directory. */
+export async function restoreClaudeSession(
+  configDirectory: string,
+  secret: string,
+): Promise<void> {
+  const parsed = JSON.parse(secret) as Record<string, Record<string, string>>;
+  for (const [name, contents] of Object.entries(
+    parsed[CLAUDE_SESSION_FILES] ?? {},
+  )) {
+    // Flattened deliberately: a captured name is only ever a file at the
+    // directory's top level, and honouring a path separator here would let a
+    // tampered record write outside the staged home.
+    await writeFile(path.join(configDirectory, path.basename(name)), contents, {
+      encoding: "utf8",
+      mode: 0o600,
+    });
+  }
+}
+
 export function assertSessionFile(
   vendor: VendorCliKind,
   secret: string,
@@ -507,6 +583,25 @@ export function assertSessionFile(
     );
   }
   const record = parsed as Record<string, unknown>;
+
+  if (vendor === "claude") {
+    const files = record[CLAUDE_SESSION_FILES];
+    const valid =
+      typeof files === "object" &&
+      files !== null &&
+      Object.keys(files as Record<string, unknown>).length > 0 &&
+      Object.values(files as Record<string, unknown>).every(
+        (value) => typeof value === "string",
+      );
+    if (!valid) {
+      throw new UserCredentialError(
+        "That is not a captured Claude sign-in. Connect Claude through the " +
+          "dashboard rather than pasting a file.",
+        "invalid_session_file",
+      );
+    }
+    return;
+  }
 
   if (vendor === "codex") {
     const tokens = record["tokens"];
@@ -603,10 +698,29 @@ export function supportsUserCredential(
  * The connect UI offers `[0]` by default, so the order is a product decision
  * and not incidental — see the note on {@link DELIVERY}.
  */
+/**
+ * Kinds a sign-in flow produces, which a user cannot supply by hand.
+ *
+ * Claude's session file is captured from a browser sign-in this deployment
+ * ran; there is no file on the user's machine that is one. Offering it in the
+ * paste dropdown would invite somebody to hunt for a file that does not
+ * exist, so {@link supportedCredentialKinds} — which is what the connect UI
+ * lists — leaves it out while the store and delivery still accept it.
+ */
+const CAPTURE_ONLY_KINDS: Partial<
+  Record<VendorCliKind, readonly UserCredentialKind[]>
+> = {
+  claude: ["session_file"],
+};
+
+/** The kinds the connect UI offers, in the order it should offer them. */
 export function supportedCredentialKinds(
   vendor: VendorCliKind,
 ): UserCredentialKind[] {
-  return Object.keys(DELIVERY[vendor]) as UserCredentialKind[];
+  const captureOnly = new Set(CAPTURE_ONLY_KINDS[vendor] ?? []);
+  return (Object.keys(DELIVERY[vendor]) as UserCredentialKind[]).filter(
+    (kind) => !captureOnly.has(kind),
+  );
 }
 
 export interface CredentialHome {
@@ -663,6 +777,9 @@ export async function openCredentialHome(input: {
     const configDirectory = path.join(directory, "config");
     await mkdir(configDirectory, { recursive: true });
     env[configVariable] = configDirectory;
+    if (vendor === "claude" && credential.kind === "session_file") {
+      await restoreClaudeSession(configDirectory, credential.secret);
+    }
     if (vendor === "codex") {
       if (credential.kind === "session_file") {
         // The subscription login travels verbatim: it carries `auth_mode`,
