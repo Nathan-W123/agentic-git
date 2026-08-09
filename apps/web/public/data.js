@@ -317,6 +317,57 @@ export async function connectProviderCredential(providerId, kind, secret, label)
   return state.providers;
 }
 
+/**
+ * Signing a provider in through the browser, rather than fetching a secret.
+ *
+ * Four calls on one route, because the flow is a conversation: start it, poll
+ * it, sometimes answer it with a code the vendor's page gave the user, and
+ * abandon it if they close the dialog. The flow id is opaque and scoped to
+ * the caller server-side, so it travels in the query string.
+ */
+export async function startProviderSignIn(providerId) {
+  const response = await api(
+    `/chat/providers/${encodeURIComponent(providerId)}/device-auth`,
+    { method: "POST" },
+  );
+  return response.deviceAuth;
+}
+
+export async function providerSignInStatus(providerId, flowId) {
+  const response = await api(
+    `/chat/providers/${encodeURIComponent(providerId)}/device-auth` +
+      `?flow=${encodeURIComponent(flowId)}`,
+  );
+  return response.deviceAuth;
+}
+
+/** Hands the waiting CLI the code the vendor's page showed the user. */
+export async function submitProviderSignInCode(providerId, flowId, code) {
+  const response = await api(
+    `/chat/providers/${encodeURIComponent(providerId)}/device-auth` +
+      `?flow=${encodeURIComponent(flowId)}`,
+    { method: "POST", body: { code } },
+  );
+  return response.deviceAuth;
+}
+
+/**
+ * Abandons a sign-in. Deliberately swallows its own failure: this runs when
+ * somebody closes the dialog, and a dead flow they have already walked away
+ * from is not worth an error toast.
+ */
+export async function cancelProviderSignIn(providerId, flowId) {
+  try {
+    await api(
+      `/chat/providers/${encodeURIComponent(providerId)}/device-auth` +
+        `?flow=${encodeURIComponent(flowId)}`,
+      { method: "DELETE" },
+    );
+  } catch {
+    // Nothing to do about it, and nothing the user needs to see.
+  }
+}
+
 /* ------------------------------------------------------------- socket ---- */
 
 export function connectSocket(onEvent) {

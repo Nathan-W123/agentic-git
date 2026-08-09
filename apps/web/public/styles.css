@@ -3864,3 +3864,15 @@ dialog.modal::backdrop {
   resize: vertical;
   min-height: 76px;
 }
+
+/* The one-time code a device sign-in shows. Large and monospaced because it
+   is read off the screen and typed into a phone or another window, and a
+   mistaken character costs the whole attempt. */
+.modal-code {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 1.5rem;
+  letter-spacing: 0.12em;
+  text-align: center;
+  user-select: all;
+  padding: 0.6rem 0;
+}

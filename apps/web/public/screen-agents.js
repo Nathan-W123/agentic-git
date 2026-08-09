@@ -11,10 +11,15 @@
 
 import {
   api,
+  cancelProviderSignIn,
   connectProviderCredential,
+  loadContext,
   myAgents,
   persist,
+  providerSignInStatus,
+  startProviderSignIn,
   state,
+  submitProviderSignInCode,
   taskProgress,
   taskStarted,
 } from "./data.js";
@@ -379,7 +384,117 @@ const SESSION_FILE_WARNING =
  * and the only path offered here; the CLI remains available to system
  * administrators through the provider's own settings.
  */
+/** Waits, so a sign-in can be polled without spinning the browser. */
+function pause(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/**
+ * Signing in through the browser, where the vendor allows it.
+ *
+ * This is what "connect" should have meant all along: the deployment runs the
+ * vendor's own sign-in, the user approves it on their own machine, and no
+ * secret is ever hunted down or pasted. It is offered first, and a credential
+ * is what happens when it is not available or does not work.
+ *
+ * Two shapes, and the server says which. `approve` shows a code the user
+ * confirms in the browser and the CLI polls for the answer. `code_exchange`
+ * shows a link and takes a code back — the vendor's page issues it, and the
+ * waiting CLI needs it before it can finish.
+ *
+ * Returns `true` when connected, `false` to fall back to a credential, and
+ * `null` when the user walked away.
+ */
+async function signInAgent(providerId, mode, rerender) {
+  let flow;
+  try {
+    flow = await startProviderSignIn(providerId);
+  } catch (error) {
+    // Not fatal: the credential path below still works, and saying why beats
+    // silently showing a paste box the user did not ask for.
+    toast(`${agentLabelOf(providerId)} sign-in unavailable — ${error.message}`, "error");
+    return false;
+  }
+
+  const exchange = (flow.mode ?? mode) === "code_exchange";
+  const link =
+    `<p class="modal-hint"><a class="link" target="_blank" rel="noopener noreferrer"
+       href="${esc(flow.verificationUrl)}">Open the ${esc(agentLabelOf(providerId))} sign-in page</a>
+     — it opens in a new tab, on your own account.</p>`;
+  const values = await showModal({
+    title: `Sign in to ${agentLabelOf(providerId)}`,
+    subtitle: "Your account, not this machine's.",
+    confirm: exchange ? "Connect" : "I've approved it",
+    body: exchange
+      ? `${link}
+         <label class="field"><span>Code from that page</span>
+           <input class="input" name="code" autocomplete="off"
+             placeholder="Paste the code it gives you" required></label>
+         <p class="modal-hint">Sign in there, then paste the code it shows you
+           back here. Nothing else is stored, and this deployment never sees
+           your password.</p>`
+      : `${link}
+         <p class="modal-code">${esc(flow.userCode ?? "")}</p>
+         <p class="modal-hint">Enter that code on the page, approve it, then
+           come back here.</p>`,
+  });
+
+  if (values === undefined) {
+    await cancelProviderSignIn(providerId, flow.flowId);
+    return null;
+  }
+
+  try {
+    if (exchange) {
+      const code = String(values.code ?? "").trim();
+      if (code === "") {
+        toast("The code from the sign-in page is required", "error");
+        await cancelProviderSignIn(providerId, flow.flowId);
+        return null;
+      }
+      await submitProviderSignInCode(providerId, flow.flowId, code);
+    }
+    // The CLI finishes on its own clock — it has a browser round trip to wait
+    // on either way — so the outcome is polled rather than assumed.
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const state_ = await providerSignInStatus(providerId, flow.flowId);
+      if (state_.status === "completed") {
+        toast(`${agentLabelOf(providerId)} connected as ${state_.account ?? "your account"}`);
+        await loadContext();
+        rerender();
+        return true;
+      }
+      if (state_.status !== "pending") {
+        toast(state_.detail ?? `${agentLabelOf(providerId)} sign-in did not complete`, "error");
+        return false;
+      }
+      await pause(1000);
+    }
+    toast(`${agentLabelOf(providerId)} sign-in timed out`, "error");
+    await cancelProviderSignIn(providerId, flow.flowId);
+    return false;
+  } catch (error) {
+    toast(error.message, "error");
+    return false;
+  }
+}
+
 export async function connectAgent(providerId, rerender) {
+  // Sign-in first where the vendor supports it, because the alternative is
+  // asking somebody to go and find a secret. The server reports which
+  // providers can, so this does not have to know.
+  const signInFlow = (state.providers ?? []).find(
+    (entry) => entry.id === providerId,
+  )?.signInFlow;
+  if (signInFlow !== undefined) {
+    const outcome = await signInAgent(providerId, signInFlow, rerender);
+    if (outcome === true || outcome === null) {
+      return;
+    }
+    // Falling through on failure rather than dead-ending: a credential still
+    // works, and the reason the sign-in failed has already been shown.
+  }
+
   const help = CREDENTIAL_HELP[providerId] ?? {
     hint: "Paste a credential for this provider.",
     placeholder: "",

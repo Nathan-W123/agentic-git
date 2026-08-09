@@ -171,7 +171,28 @@ export interface ProviderStatus {
   ownCredential?: UserCredentialSummary;
   /** Credential kinds this provider can accept from a user. */
   acceptedCredentialKinds: UserCredentialKind[];
+  /**
+   * How this provider signs a user in through their browser, or absent when
+   * it cannot.
+   *
+   * The screen needs this to decide what to offer before anything is clicked:
+   * a provider that can sign in should lead with that rather than asking
+   * somebody to go and find a credential, and the two modes render
+   * differently — `approve` shows a code to confirm, `code_exchange` shows a
+   * box to paste the browser's code into. Reported by the server because only
+   * the server knows which CLIs are drivable.
+   */
+  signInFlow?: DeviceAuthMode;
 }
+
+/** Which providers can be signed into from here, and how. */
+const SIGN_IN_FLOWS: Partial<Record<ProviderId, DeviceAuthMode>> = {
+  openai: "approve",
+  anthropic: "code_exchange",
+  // Google is deliberately absent: the Gemini CLI has no login subcommand —
+  // authentication is a menu inside its interactive UI — so there is nothing
+  // here to drive.
+};
 
 export interface ProviderModelOption {
   id: string;
@@ -1283,6 +1304,9 @@ export class ProviderChatService {
             ? {}
             : { kind: "account" as const }),
         acceptedCredentialKinds: supportedCredentialKinds(PROVIDER_VENDORS[id]),
+        ...(SIGN_IN_FLOWS[id] === undefined
+          ? {}
+          : { signInFlow: SIGN_IN_FLOWS[id] }),
         model:
           settings.model ??
           (id === "anthropic"
@@ -1434,7 +1458,8 @@ export class ProviderChatService {
     userId: string;
     provider: ProviderId;
   }): Promise<DeviceAuthStart> {
-    if (input.provider === "google") {
+    const signInFlow = SIGN_IN_FLOWS[input.provider];
+    if (signInFlow === undefined) {
       // The Gemini CLI has no login subcommand at all — authentication is a
       // menu inside its interactive UI — so there is nothing here to drive.
       throw new ProviderChatError(
@@ -1484,7 +1509,7 @@ export class ProviderChatService {
       userCode: undefined,
       expiresAtMs: Date.now() + DEVICE_AUTH_DEFAULT_EXPIRY_MS,
       status: "pending",
-      mode: anthropic ? "code_exchange" : "approve",
+      mode: signInFlow,
       detail: undefined,
       account: undefined,
       process: undefined as unknown as LongRunningProcess,
