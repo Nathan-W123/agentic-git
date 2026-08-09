@@ -14,6 +14,7 @@ import {
   cancelProviderSignIn,
   connectProviderCredential,
   loadContext,
+  loadProviders,
   myAgents,
   persist,
   providerSignInStatus,
@@ -485,7 +486,15 @@ async function signInAgent(providerId, mode, rerender) {
       const state_ = await providerSignInStatus(providerId, flow.flowId);
       if (state_.status === "completed") {
         toast(`${agentLabelOf(providerId)} connected as ${state_.account ?? "your account"}`);
-        await loadContext();
+        // `loadProviders`, not `loadContext`: the context call reads
+        // organizations, projects and repositories and never touches
+        // `state.providers`. Refreshing the wrong thing is why a sign-in
+        // could report success — the credential really was stored — while
+        // the screen went on showing the provider as unconnected and it
+        // never appeared in the agent list. The paste path did not have this
+        // fault because storing a credential returns the new provider list
+        // in its own response.
+        await loadProviders();
         rerender();
         return true;
       }
