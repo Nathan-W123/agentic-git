@@ -559,8 +559,16 @@ export function agentFace(agent, size = 34) {
   const color = safeColor(agent?.color) ?? "var(--accent)";
   // The kind and presence are on the element so the stylesheet can give each
   // character its own tempo and hold a disconnected one perfectly still.
-  return `<span class="agent-face sz-${size}" data-kind="${kind}"
-    data-presence="${presence}" style="color:${color}" title="${esc(
+  // The size travels as a custom property rather than as an `sz-${size}`
+  // class. The class only ever worked for sizes somebody had hand-written a
+  // rule for — 28, 34 and 40 — and callers ask for 20, 24, 30 and 32 as well.
+  // Those had no rule at all, so the SVG had nothing bounding it and grew to
+  // fill its container: a 30px face rendered 300px wide and made the chats
+  // roster unnavigable. A number that has to be mirrored in a stylesheet to
+  // mean anything is not a size argument, it is a trap.
+  return `<span class="agent-face" data-kind="${kind}"
+    data-presence="${presence}" style="color:${color};--face-size:${Number(size)}px"
+    title="${esc(
       agent?.name ?? AGENTS[kind].label,
     )}">${agentDoodle(kind)}<i class="presence presence-${presence}"></i></span>`;
 }

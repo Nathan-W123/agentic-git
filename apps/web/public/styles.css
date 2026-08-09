@@ -988,26 +988,15 @@ svg {
   display: grid;
   place-items: center;
   flex: none;
+  /* Set inline by `agentFace`, so every size a caller asks for works rather
+     than only the handful that once had their own rule here. */
+  width: var(--face-size, 34px);
+  height: var(--face-size, 34px);
 }
 
 .agent-face svg {
   width: 100%;
   height: 100%;
-}
-
-.agent-face.sz-28 {
-  width: 28px;
-  height: 28px;
-}
-
-.agent-face.sz-34 {
-  width: 34px;
-  height: 34px;
-}
-
-.agent-face.sz-40 {
-  width: 40px;
-  height: 40px;
 }
 
 .agent-face .presence {
