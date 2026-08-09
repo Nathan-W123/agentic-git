@@ -416,7 +416,11 @@ async function signInAgent(providerId, mode, rerender) {
   // browser itself — on the *server*, which is the user's own machine here
   // and somebody else's everywhere else. Codex's CLI prints the URL and opens
   // nothing, which is how the difference showed up.
-  const tab = window.open("", "_blank", "noopener,noreferrer");
+  // Deliberately without `noopener`: that feature makes `window.open` return
+  // null, and a null handle cannot be navigated — the tab opens and sits on
+  // about:blank forever. The opener reference is dropped below instead, which
+  // gets the same protection while keeping the handle.
+  const tab = window.open("", "_blank");
   let flow;
   try {
     flow = await startProviderSignIn(providerId);
@@ -431,7 +435,10 @@ async function signInAgent(providerId, mode, rerender) {
   // If the tab was blocked anyway, the link in the dialog is still there and
   // still works — this is a shortcut, not the only route.
   if (tab !== null && tab !== undefined) {
-    tab.location = flow.verificationUrl;
+    // Cut the back-reference before navigating, so the vendor's page cannot
+    // reach back into this one.
+    tab.opener = null;
+    tab.location.replace(flow.verificationUrl);
   }
 
   const exchange = (flow.mode ?? mode) === "code_exchange";

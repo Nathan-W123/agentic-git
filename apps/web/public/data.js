@@ -589,6 +589,24 @@ export function currentRepository() {
   );
 }
 
+/**
+ * The repository whose channel is on screen.
+ *
+ * Not the same as `state.repositoryId`, and that difference was a silent bug:
+ * `currentRepository` falls back to the first repository when nothing has been
+ * picked, so the Chats screen rendered "#demo" and addressed it, while
+ * `state.repositoryId` was still empty. Every action that read the raw field
+ * — send, reply, mentions — saw no repository and returned without doing
+ * anything or saying why. Typing a message and pressing send simply did
+ * nothing.
+ *
+ * Render and actions have to agree on which channel is open, so both ask
+ * here.
+ */
+export function activeChannelId() {
+  return currentRepository()?.id ?? state.repositoryId ?? "";
+}
+
 export function currentUserName() {
   return (
     state.principal?.user?.displayName ??
