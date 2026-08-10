@@ -3519,9 +3519,15 @@ svg {
 
 .rr-usage {
   position: absolute;
+  /* Width is stated, not inherited. Anchoring moved to the avatar so the card
+     opens from the agent rather than the whole row — but the avatar is about
+     thirty pixels wide, and stretching to its edges squeezed the card into a
+     column barely wider than the face, wrapping every label to one word a
+     line. It opens from the avatar's left edge at the width the content
+     needs, still inside the sidebar so nothing clips it. */
   left: 0;
-  right: 0;
-  top: calc(100% - 2px);
+  width: 232px;
+  top: calc(100% + 2px);
   z-index: 40;
   padding: 10px 12px;
   border: 1px solid var(--border-soft);

@@ -742,3 +742,29 @@ test("the invite screen names the product, not only the team", async () => {
   assert.match(body, /organizationName/u);
   assert.match(body, /on Lattice/u);
 });
+
+/**
+ * A call sign has one job: to be the only thing it could refer to.
+ *
+ * Mentions are matched with `content.includes("@" + name)` against every
+ * candidate, so a name that is a prefix of another name matches inside it —
+ * "@Poseidon" would carry "@Pos" with it, and both agents would be dispatched
+ * from one sentence. Nothing about adding a name to the list makes that
+ * visible, so it is asserted here rather than left to be noticed in a channel.
+ */
+test("no agent call sign is a prefix of another", async () => {
+  const source = await publicFile("data.js");
+  const block = /export const AGENT_CODE_NAMES = \[([\s\S]*?)\n\];/u.exec(source);
+  assert.notEqual(block, null);
+  const names = [...(block?.[1] ?? "").matchAll(/"([^"]+)"/gu)].map(
+    (match) => match[1] as string,
+  );
+  assert.ok(names.length >= 30, `only ${names.length} call signs`);
+  assert.equal(new Set(names).size, names.length, "call signs must be unique");
+  const collisions = names.flatMap((shorter) =>
+    names
+      .filter((longer) => longer !== shorter && longer.startsWith(shorter))
+      .map((longer) => `${shorter} is a prefix of ${longer}`),
+  );
+  assert.deepEqual(collisions, []);
+});

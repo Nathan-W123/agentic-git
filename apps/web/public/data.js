@@ -552,16 +552,21 @@ export const TYPING_SWEEP_MS = TYPING_TTL_MS + 250;
  * name, and none of them will ever come out unpronounceable or unfortunate.
  */
 export const AGENT_CODE_NAMES = [
-  "Icarus", "Bravo", "Vesper", "Atlas", "Cobalt", "Nimbus", "Orion", "Quill",
-  "Saber", "Tundra", "Vector", "Zephyr", "Onyx", "Peregrine", "Rialto",
-  "Solstice", "Talon", "Umbra", "Verdant", "Wren", "Xenon", "Yarrow", "Zenith",
-  "Aster", "Basalt", "Cinder", "Dunlin", "Ember", "Fathom", "Gallant",
-  "Harrier", "Indigo", "Juniper", "Kestrel", "Lumen", "Marlin", "Nocturne",
-  "Obsidian", "Pallas", "Quarry", "Ridge", "Sable", "Thistle", "Ursa",
-  "Vantage", "Willow", "Ardent", "Beacon", "Citrine", "Delta", "Echo",
-  "Foxglove", "Granite", "Halcyon", "Ivory", "Jetty", "Kilo", "Lyra",
-  "Meridian", "Nova", "Osprey", "Petrel", "Quasar", "Rowan", "Sierra",
-  "Tempest", "Ulysses", "Vigil", "Whistler", "Yonder",
+  // The NATO alphabet, which exists precisely to stay unambiguous over a bad
+  // connection — the same job a name has in a busy channel.
+  "Alfa", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel",
+  "India", "Juliett", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa",
+  "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor", "Whiskey",
+  "Xray", "Yankee", "Zulu",
+  // Greek myth, for the same reason call signs have always borrowed from it:
+  // one word, already known, and nothing like a username.
+  "Achilles", "Aegis", "Ajax", "Andromeda", "Apollo", "Argus", "Artemis",
+  "Atlas", "Boreas", "Calypso", "Cassandra", "Castor", "Chiron", "Daedalus",
+  "Eos", "Erebus", "Gaia", "Hecate", "Helios", "Hermes", "Hestia", "Hydra",
+  "Hyperion", "Icarus", "Iris", "Kratos", "Leto", "Medea", "Morpheus",
+  "Nemesis", "Nereus", "Nike", "Notus", "Odysseus", "Orion", "Orpheus",
+  "Pallas", "Pandora", "Perseus", "Phoenix", "Pollux", "Poseidon",
+  "Prometheus", "Rhea", "Selene", "Thalia", "Theseus", "Triton", "Zephyrus",
 ];
 
 /** Names already spoken for in this channel, however they were set. */
