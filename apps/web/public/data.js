@@ -1389,12 +1389,36 @@ const channelPath = (repositoryId, suffix = "") =>
  * content was showing. Returns `false` without throwing when this deployment
  * has no channel endpoint yet, so the seeded demo content keeps working.
  */
+/**
+ * A stored message in the shape the screens read.
+ *
+ * The store timestamps records as `createdAt`; everything on this side —
+ * `clockTime`, the day separators, the unread count — reads `at`, which is
+ * what a locally-posted message carries. Untranslated, every message the
+ * server sent arrived with no `at` at all, and `clockTime` fell back to the
+ * current time: a transcript where every line claimed to have been written
+ * just now, and moved forward again on every render.
+ *
+ * Translated here, at the one place server records enter, rather than at each
+ * place one is read.
+ */
+function withSentTime(message) {
+  return {
+    ...message,
+    at: message.at ?? message.createdAt,
+    replies: (message.replies ?? []).map((reply) => ({
+      ...reply,
+      at: reply.at ?? reply.createdAt,
+    })),
+  };
+}
+
 async function loadChannel(repositoryId) {
   const response = await apiOptional(channelPath(repositoryId, "/messages"), undefined);
   if (response === undefined) {
     return false;
   }
-  state.channelMessages[repositoryId] = response.messages ?? [];
+  state.channelMessages[repositoryId] = (response.messages ?? []).map(withSentTime);
   state.channelAgentOverrides[repositoryId] = {
     ...state.channelAgentOverrides[repositoryId],
     ...response.agentOverrides,

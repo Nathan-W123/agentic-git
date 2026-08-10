@@ -71,6 +71,8 @@ export interface RepoAddOptions {
   branch?: string;
   projectId?: string;
   setDefault?: boolean;
+  /** The authenticated caller creating this repository, if there is one. */
+  createdBy?: string;
 }
 
 export interface RepoCreateOptions {
@@ -78,6 +80,8 @@ export interface RepoCreateOptions {
   branch?: string;
   projectId?: string;
   setDefault?: boolean;
+  /** The authenticated caller creating this repository, if there is one. */
+  createdBy?: string;
 }
 
 /**
@@ -104,6 +108,9 @@ export async function repoCreate(
       ...(options.setDefault === undefined
         ? {}
         : { setDefault: options.setDefault }),
+      ...(options.createdBy === undefined
+        ? {}
+        : { createdBy: options.createdBy }),
     });
   } finally {
     await rm(sourcePath, { recursive: true, force: true });
@@ -153,6 +160,9 @@ export async function repoAdd(
       id: canonical.id,
       path: canonical.path,
       branch: canonical.branch,
+      ...(options.createdBy === undefined
+        ? {}
+        : { createdBy: options.createdBy }),
     };
     const version = await repositories.getCanonicalVersion(canonical);
     await store.saveRepository(stored);
@@ -209,6 +219,8 @@ export interface GitHubRepoImportOptions {
   token?: string;
   projectId?: string;
   setDefault?: boolean;
+  /** The authenticated caller importing this repository, if there is one. */
+  createdBy?: string;
 }
 
 /** Imports a public or token-authenticated GitHub repository as canonical. */
@@ -256,6 +268,9 @@ export async function repoImportGitHub(
       branch: canonical.branch,
       provider: "github",
       remoteUrl,
+      ...(options.createdBy === undefined
+        ? {}
+        : { createdBy: options.createdBy }),
     };
     const version = await repositories.getCanonicalVersion(canonical);
     await store.saveRepository(stored);

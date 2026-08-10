@@ -421,6 +421,31 @@ async function invitableRepository(
   return id;
 }
 
+/**
+ * Puts every connected agent into a channel, the way the roster UI does.
+ *
+ * A repository created through the API now starts with nobody in its channel
+ * — see `markChannelMembershipChosen`. Membership used to arrive by accident,
+ * through a grandfather backfill meant for repositories that predate opt-in
+ * and which a brand-new repository was also taking. So a test that wants a
+ * roster now has to say so, exactly as a person does.
+ */
+async function joinAllConnectedAgents(
+  runtime: TestRuntime,
+  repositoryId: string,
+): Promise<void> {
+  for (const [userId, connections] of runtime.chatConnections) {
+    for (const connection of connections) {
+      await runtime.store.setChannelAgentMember(
+        repositoryId,
+        userId,
+        connection.provider,
+        true,
+      );
+    }
+  }
+}
+
 /** The body every invitation needs: who, what role, and which repository. */
 function inviteBody(
   email: string,
@@ -2536,6 +2561,7 @@ test("the channel roster is the real connected agents of everyone with access to
   ]);
   runtime.chatConnections.set(guest.id, [{ provider: "anthropic" }]);
   runtime.chatConnections.set(stranger.id, [{ provider: "anthropic" }]);
+  await joinAllConnectedAgents(runtime, repositoryId);
 
   const roster = await owner.request(`${base}/agents`);
   assert.equal(roster.status, 200);
@@ -2732,6 +2758,7 @@ test("a personal agent refuses a stranger's @mention and dispatches nothing", as
   runtime.chatConnections.set(bootstrapped.user.id, [
     { provider: "anthropic", visibility: "personal" },
   ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
 
   const colleague = await addColleague(runtime, "colleague-personal@example.com");
 
@@ -2773,6 +2800,7 @@ test("an org-wide agent accepts a stranger's @mention and dispatches under the o
   runtime.chatConnections.set(bootstrapped.user.id, [
     { provider: "anthropic", visibility: "org" },
   ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
 
   const colleague = await addColleague(runtime, "colleague-org@example.com");
 
@@ -2810,6 +2838,7 @@ test("an agent's own owner can always @mention it, personal or org-wide", async 
   runtime.chatConnections.set(bootstrapped.user.id, [
     { provider: "anthropic", visibility: "personal" },
   ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
 
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
@@ -2855,6 +2884,7 @@ test("a clearly-scoped task message auto-claims to the one obviously-best agent"
   const database = await addColleague(runtime, "database-obvious@example.com");
   runtime.chatConnections.set(backend.id, [{ provider: "openai", visibility: "org" }]);
   runtime.chatConnections.set(database.id, [{ provider: "google", visibility: "org" }]);
+  await joinAllConnectedAgents(runtime, repositoryId);
 
   // Rename each connected agent to reflect its lane, the same customization
   // `setChannelAgentOverride` already offers — see `scoreCandidate`'s doc
@@ -2921,6 +2951,7 @@ test("an ambiguous task message is dispatched anyway, deterministically", async 
   const second = await addColleague(runtime, "second-ambiguous@example.com");
   runtime.chatConnections.set(first.id, [{ provider: "openai", visibility: "org" }]);
   runtime.chatConnections.set(second.id, [{ provider: "google", visibility: "org" }]);
+  await joinAllConnectedAgents(runtime, repositoryId);
 
   // Same three content words in both names, in different order — a real
   // near-tie between two equally-plausible agents, not a contrived one.
@@ -3059,6 +3090,7 @@ test("an explicit @mention suppresses auto-claim even when an unmentioned agent 
   ]);
   const backend = await addColleague(runtime, "backend-vs-mention@example.com");
   runtime.chatConnections.set(backend.id, [{ provider: "openai", visibility: "org" }]);
+  await joinAllConnectedAgents(runtime, repositoryId);
 
   // Owner's own agent's name is the strongest textual match for the message
   // below, but it is not the one @mentioned.
@@ -3148,6 +3180,7 @@ test("a question to an agent is answered in the channel, not turned into a task"
   runtime.chatConnections.set(bootstrapped.user.id, [
     { provider: "anthropic", visibility: "personal" },
   ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
 
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
@@ -3174,6 +3207,7 @@ test("a request that names no verb this list knows is still work when an agent i
   runtime.chatConnections.set(bootstrapped.user.id, [
     { provider: "anthropic", visibility: "personal" },
   ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
 
   // "kick off" is in no verb list here. Naming the agent is the intent, and
   // answering this with chat instead of doing it would be the worse failure.
@@ -3256,6 +3290,7 @@ test("an unaddressed task is taken even when it matches no agent's role", async 
   runtime.chatConnections.set(bootstrapped.user.id, [
     { provider: "anthropic", visibility: "personal" },
   ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
 
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
@@ -3334,6 +3369,7 @@ test("a reply in an agent's thread is answered by that agent, with the thread as
   const ownerId = bootstrapped.user.id;
   runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
   const repositoryId = await invitableRepository(owner, "thread-reply-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
   const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
 
   // The thread as the task narrator leaves it: an agent-authored root, and a
@@ -3431,6 +3467,7 @@ test("a channel's role override reaches the roster and the objective a dispatche
   runtime.chatConnections.set(bootstrapped.user.id, [
     { provider: "anthropic", visibility: "org" },
   ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
 
   // Before any override, the agent is unlabeled — no vendor-guessed default.
   // (The roster route itself carries no `role` field; the client resolves it
@@ -3482,48 +3519,66 @@ test("a channel's role override reaches the roster and the objective a dispatche
 
 /*
  * Opt-in channel membership: connecting a vendor CLI makes an agent usable,
- * not automatically present in every repository's channel. The first read of
- * a repository's roster grandfathers in whatever was already reachable then
- * (see `channelAgentConnections`'s doc comment); anything connected after
- * that must be added explicitly through the membership route.
+ * not automatically present in every repository's channel. A repository that
+ * predates opt-in grandfathers in whatever was reachable at its first roster
+ * read (see `channelAgentConnections`'s doc comment). A repository created
+ * after it has nothing predating it, so it grandfathers nothing — reported
+ * from the app as "i created a new repo and my claude agent was already added
+ * to it", which was the backfill firing on a channel with no prior roster to
+ * protect.
  */
 
-test("channel membership is opt-in: a newly connected agent stays out until added, and the pre-existing roster is grandfathered in once", async (t) => {
+test("channel membership is opt-in: an older repository grandfathers once, a new one starts empty", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
-  const repositoryId = await invitableRepository(owner, "membership-repo");
-  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
-
   runtime.chatConnections.set(bootstrapped.user.id, [
     { provider: "anthropic", visibility: "org" },
   ]);
 
-  // First read of this repository's roster: nothing has opted in yet, but
-  // anthropic is reachable, so this is exactly the moment the one-time
-  // backfill treats it as "already there" and grandfathers it in.
-  const first = await owner.request(`${base}/agents`);
-  assert.equal(first.status, 200, JSON.stringify(first.data));
+  // A repository that predates opt-in, written straight to the store the way
+  // one already in the database at deploy time looks: never marked, so its
+  // first roster read is the one-time backfill.
+  await runtime.store.saveRepository({
+    id: "legacy-repo",
+    path: "/canonical/legacy-repo.git",
+    branch: "main",
+  });
+  await runtime.store.linkRepository(DEFAULT_PROJECT_ID, "legacy-repo");
+  const legacyBase = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/legacy-repo/channel`;
+  const grandfathered = await owner.request(`${legacyBase}/agents`);
+  assert.equal(grandfathered.status, 200, JSON.stringify(grandfathered.data));
   assert.deepEqual(
-    first.data.agents.map((agent: any) => agent.provider).sort(),
+    grandfathered.data.agents.map((agent: any) => agent.provider).sort(),
     ["anthropic"],
+    "an agent already working in a repository must not vanish mid-session",
   );
 
-  // A second agent connects *after* that first read. It must not appear
-  // automatically — the whole point of opt-in.
+  // A repository created now has nothing predating it. Its roster is empty
+  // until somebody chooses, even though the same agent is connected.
+  const repositoryId = await invitableRepository(owner, "membership-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const fresh = await owner.request(`${base}/agents`);
+  assert.equal(fresh.status, 200, JSON.stringify(fresh.data));
+  assert.deepEqual(
+    fresh.data.agents,
+    [],
+    "a repository created just now has nothing to grandfather in",
+  );
+
+  // A second agent connects. It must not appear automatically either.
   runtime.chatConnections.set(bootstrapped.user.id, [
     { provider: "anthropic", visibility: "org" },
     { provider: "openai", visibility: "org" },
   ]);
-  const second = await owner.request(`${base}/agents`);
-  assert.equal(second.status, 200);
+  const stillEmpty = await owner.request(`${base}/agents`);
   assert.deepEqual(
-    second.data.agents.map((agent: any) => agent.provider).sort(),
-    ["anthropic"],
+    stillEmpty.data.agents,
+    [],
     "a newly connected agent must not silently join a channel it was never added to",
   );
 
-  // Explicitly adding it works, and is idempotent.
+  // Explicitly adding works, and is idempotent.
   const added = await owner.request(`${base}/agents/openai/membership`, {
     method: "POST",
   });
@@ -3534,25 +3589,23 @@ test("channel membership is opt-in: a newly connected agent stays out until adde
   });
   assert.equal(addedAgain.status, 200);
 
-  const third = await owner.request(`${base}/agents`);
+  const afterAdd = await owner.request(`${base}/agents`);
   assert.deepEqual(
-    third.data.agents.map((agent: any) => agent.provider).sort(),
-    ["anthropic", "openai"],
+    afterAdd.data.agents.map((agent: any) => agent.provider).sort(),
+    ["openai"],
+    "adding one agent adds exactly it",
   );
 
-  // Removing membership takes it back out, and it also stops being
-  // @mentionable — `channelAgentConnections` backs both the roster route
-  // and mention resolution with the same membership-filtered set.
+  // Removing takes it back out, and it also stops being @mentionable —
+  // `channelAgentConnections` backs both the roster route and mention
+  // resolution with the same membership-filtered set.
   const removed = await owner.request(`${base}/agents/openai/membership`, {
     method: "DELETE",
   });
   assert.equal(removed.status, 200);
   assert.equal(removed.data.member, false);
-  const fourth = await owner.request(`${base}/agents`);
-  assert.deepEqual(
-    fourth.data.agents.map((agent: any) => agent.provider).sort(),
-    ["anthropic"],
-  );
+  const afterRemove = await owner.request(`${base}/agents`);
+  assert.deepEqual(afterRemove.data.agents, []);
 });
 
 /** Logs a store-created user into a fresh client, the way every test below needs. */

@@ -3399,6 +3399,49 @@ svg {
   text-align: left;
   color: var(--text-2);
   transition: background 0.13s ease, color 0.13s ease;
+  /* A div now, because it contains a button — see `chanRow`. These are the
+     three things `<button>` was providing for free. */
+  cursor: pointer;
+  user-select: none;
+  box-sizing: border-box;
+}
+
+.chan-row .cr-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Present on hover and on keyboard focus, absent otherwise: one channel's
+   menu is not worth a permanent column of dots down the sidebar. It reserves
+   its width either way, so nothing shifts when it appears. */
+.chan-row .cr-more {
+  flex: none;
+  display: inline-flex;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.chan-row:hover .cr-more,
+.chan-row:focus-within .cr-more,
+.chan-row.active .cr-more {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  /* Nothing hovers on a touch screen, so the menu simply stays. */
+  .chan-row .cr-more {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chan-row,
+  .chan-row .cr-more {
+    transition: none;
+  }
 }
 
 .chan-row:hover {
