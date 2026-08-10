@@ -5268,7 +5268,10 @@ dialog.modal::backdrop {
   z-index: 40;
   display: flex;
   flex-direction: column;
-  max-height: 52%;
+  /* Height is set inline from the remembered drag; the cap is a guard for a
+     stored value carried over from a taller window, not the usual limit. */
+  max-height: 85%;
+  min-height: 120px;
   background: var(--bg-inset);
   border-top: 1px solid var(--border-strong);
   box-shadow: var(--shadow-pop);
@@ -5376,4 +5379,50 @@ dialog.modal::backdrop {
 
 .term-form input::placeholder {
   color: var(--text-4);
+}
+
+/* The drag handle is the drawer's top edge. Only 5px tall, so it gets a
+   generous invisible reach above and below via padding on a taller box --
+   a 5px target is a fair bit of aiming for something people grab often. */
+.term-grip {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 11px;
+  cursor: ns-resize;
+  touch-action: none;
+  z-index: 1;
+}
+
+.term-grip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 44px;
+  margin-left: -22px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-strong);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.term-grip:hover::after,
+.term-grip:focus-visible::after {
+  opacity: 1;
+}
+
+.term-grip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* While dragging, the pointer is often over the message list or the editor;
+   without this the cursor flickers and text selects under it. */
+body.resizing-ns,
+body.resizing-ns * {
+  cursor: ns-resize !important;
+  user-select: none !important;
 }

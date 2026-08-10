@@ -583,9 +583,21 @@ function messageList(repositoryId) {
  */
 const THREAD_FINISHED_RE = /^(Done —|I could not|This was cancelled)/u;
 
+/**
+ * Who `@` can currently complete to, narrowed by what has been typed.
+ *
+ * Nameless participants are dropped rather than matched against. A member
+ * with no display name and no email, or an agent connected before it was
+ * given a call sign, has nothing to insert after the `@` -- and reading
+ * `.toLowerCase()` off the missing name used to throw from inside the
+ * composer's keydown handler. That took `preventDefault` down with it, so
+ * Up and Down stopped moving the highlight and Enter fell through to the
+ * textarea and opened a new line instead of accepting the selection.
+ */
 function channelMentionCandidates(repositoryId) {
   const query = state.mentionQuery.trim().toLowerCase();
   return channelParticipants(repositoryId)
+    .filter((entry) => typeof entry.name === "string" && entry.name !== "")
     .filter((entry) => query === "" || entry.name.toLowerCase().includes(query))
     .slice(0, 6);
 }
@@ -630,7 +642,11 @@ function terminalDrawer() {
       return `<pre class="term-out${entry.bad === true ? " bad" : ""}">${esc(entry.text)}</pre>`;
     })
     .join("");
-  return `<section class="term-drawer" aria-label="Sandbox terminal">
+  return `<section class="term-drawer" aria-label="Sandbox terminal"
+    style="height:${Number(state.termHeight)}px">
+    <div class="term-grip" data-act="chan-term-resize" role="separator"
+      aria-label="Resize terminal" aria-orientation="horizontal"
+      tabindex="0" title="Drag to resize"></div>
     <header class="term-head">
       <span class="term-ico">${icon("terminal")}</span>
       <strong>Terminal</strong>
@@ -1458,6 +1474,68 @@ export function pickMention(name, rerender) {
 
 /** How many transcript entries the drawer keeps before dropping the oldest. */
 const TERM_LOG_LIMIT = 300;
+
+/** Small enough to still show the prompt and a line; the ceiling is the
+    column's own height, applied at drag time since it varies. */
+const TERM_MIN_HEIGHT = 120;
+
+function clampTermHeight(px, columnHeight) {
+  const ceiling = Math.max(TERM_MIN_HEIGHT, Math.round(columnHeight * 0.85));
+  return Math.min(ceiling, Math.max(TERM_MIN_HEIGHT, Math.round(px)));
+}
+
+/**
+ * Drags the drawer's top edge.
+ *
+ * Sized against the conversation column rather than the viewport, because
+ * that is what the drawer is positioned inside -- measuring the window would
+ * let it be dragged taller than the space it can occupy. The height is
+ * written straight to the node during the drag and only committed to state
+ * on release: re-rendering the channel on every pointer move would rebuild
+ * the message list for each pixel.
+ */
+export function startTerminalResize(event, rerender) {
+  const drawer = event.target.closest(".term-drawer");
+  const column = drawer?.parentElement;
+  if (drawer == null || column == null) {
+    return;
+  }
+  event.preventDefault();
+  const columnHeight = column.getBoundingClientRect().height;
+  const startY = event.clientY;
+  const startHeight = drawer.getBoundingClientRect().height;
+  const onMove = (move) => {
+    // Upward drag is a negative delta and should grow the drawer.
+    const next = clampTermHeight(startHeight - (move.clientY - startY), columnHeight);
+    drawer.style.height = `${next}px`;
+  };
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    document.body.classList.remove("resizing-ns");
+    state.termHeight = Math.round(drawer.getBoundingClientRect().height);
+    persist("ag.termHeight", state.termHeight);
+    rerender();
+  };
+  document.body.classList.add("resizing-ns");
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
+/** Keyboard equivalent of the drag, so the grip is not mouse-only. */
+export function nudgeTerminalHeight(event, rerender) {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+    return;
+  }
+  event.preventDefault();
+  const column = document.querySelector(".chan-main");
+  const columnHeight = column?.getBoundingClientRect().height ?? 600;
+  const step = event.key === "ArrowUp" ? 32 : -32;
+  state.termHeight = clampTermHeight(state.termHeight + step, columnHeight);
+  persist("ag.termHeight", state.termHeight);
+  rerender();
+  document.querySelector("[data-act='chan-term-resize']")?.focus();
+}
 
 function termPush(entry) {
   state.termLog.push(entry);

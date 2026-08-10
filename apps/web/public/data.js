@@ -165,6 +165,8 @@ export const state = {
      live line, not recalling". */
   termOpen: false,
   termBusy: false,
+  /* Drawer height in pixels, dragged by its top edge and remembered. */
+  termHeight: Number(localStorage.getItem("ag.termHeight")) || 260,
   termDraft: "",
   termLog: [],
   termPast: [],

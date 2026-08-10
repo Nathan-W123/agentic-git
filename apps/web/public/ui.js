@@ -155,7 +155,9 @@ export const ICONS = {
   layers: S(
     '<path d="m12 3 8.5 4.5L12 12 3.5 7.5z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5"/>',
   ),
-  terminal: S('<path d="m5 8 4 4-4 4"/><path d="M12 16h7"/>'),
+  terminal: S(
+    '<rect x="2.5" y="4" width="19" height="16" rx="2.5"/><path d="m6.5 9 3 3-3 3"/><path d="M13 15h4.5"/>',
+  ),
   refresh: S(
     '<path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20.5 4v4h-4"/>',
   ),

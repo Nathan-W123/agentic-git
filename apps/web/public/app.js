@@ -128,11 +128,13 @@ import {
   channelInfoPopoverHtml,
   handleComposerKeydown,
   handleTerminalKeydown,
+  nudgeTerminalHeight,
   openChannel,
   pickMention,
   renderChats,
   restoreChannelScroll,
   runTerminalCommand,
+  startTerminalResize,
   submitComposerMessage,
   submitThreadReply,
   updateComposerInput,
@@ -2965,6 +2967,18 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.target?.dataset?.act === "chan-term-input") {
     handleTerminalKeydown(event, render);
+  }
+  if (event.target?.dataset?.act === "chan-term-resize") {
+    nudgeTerminalHeight(event, render);
+  }
+});
+
+/* The terminal drawer's top edge is a drag handle. Started on pointerdown
+   rather than click, and tracked on `window`, so the pointer outrunning the
+   4px grip mid-drag does not drop the resize. */
+document.addEventListener("pointerdown", (event) => {
+  if (event.target?.dataset?.act === "chan-term-resize") {
+    startTerminalResize(event, render);
   }
 });
 
