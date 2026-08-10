@@ -37,6 +37,8 @@ import {
   isFavourite,
   channelAgentsFor,
   activeChannelId,
+  canLeaveRepository,
+  canManageRepository,
   closeChannelFile,
   loadChannelFile,
   moveChannelFile,
@@ -2408,12 +2410,34 @@ document.addEventListener("click", (event) => {
      */
     case "channel-menu":
       showMenu(node, [
-        {
-          act: "channel-leave",
-          value,
-          label: `Leave #${value}`,
-          iconName: "logout",
-        },
+        // Leaving is only offered to somebody who can actually leave. Access
+        // that comes from an organization role reaches every repository the
+        // organization owns, so there is no per-repository grant to give up —
+        // the server says so with a 409, and offering the button anyway meant
+        // the only item in this menu was one that could not work.
+        ...(canLeaveRepository()
+          ? [
+              {
+                act: "channel-leave",
+                value,
+                label: `Leave #${value}`,
+                iconName: "logout",
+              },
+            ]
+          : []),
+        // Deleting is the admin's counterpart: somebody whose access is
+        // organization-wide cannot leave a repository, but can remove it.
+        // Without this the menu had nothing to offer them at all.
+        ...(canManageRepository(value)
+          ? [
+              {
+                act: "channel-delete-repo",
+                value,
+                label: `Delete #${value}`,
+                iconName: "close",
+              },
+            ]
+          : []),
       ]);
       return;
     /**
