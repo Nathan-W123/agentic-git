@@ -3509,8 +3509,12 @@ svg {
    `.chan-roster` scrolls, and a scroll container clips any absolutely
    positioned descendant that reaches outside it — so a card opening sideways
    out of the sidebar is not merely off-panel, it is invisible. */
-.roster-row-main {
+/* Anchored to the avatar, not the row: the card is about the agent, and a
+   row-wide trigger meant it opened while reaching for rename or remove. */
+.rr-avatar {
   position: relative;
+  display: inline-flex;
+  flex: none;
 }
 
 .rr-usage {
@@ -3532,8 +3536,8 @@ svg {
   pointer-events: none;
 }
 
-.roster-row-main:hover .rr-usage,
-.roster-row-main:focus-visible .rr-usage {
+.rr-avatar:hover .rr-usage,
+.rr-avatar:focus-within .rr-usage {
   opacity: 1;
   visibility: visible;
 }

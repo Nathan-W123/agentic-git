@@ -2145,6 +2145,14 @@ document.addEventListener("click", (event) => {
      * the server's membership route refuses a teammate's agent anyway.
      */
     case "channel-agent-menu": {
+      // Anchor to the channel's own dots button, not to the menu item that
+      // was clicked: `showMenu` closes the open popover first, which detaches
+      // that item, and an anchor no longer in the document positions the new
+      // menu against the corner of the screen instead of the channel.
+      const anchor =
+        document.querySelector(
+          `[data-act="channel-menu"][data-value="${CSS.escape(value)}"]`,
+        ) ?? node;
       // Only trust membership once the roster for *this* repository has
       // actually been fetched. Before that `channelAgentsFor` shows every
       // connected agent provisionally, which would read as "already here" and
@@ -2164,7 +2172,7 @@ document.addEventListener("click", (event) => {
       );
       const connected = myAgents().filter((agent) => agent.connected === true);
       showMenu(
-        node,
+        anchor,
         connected.length === 0
           ? [
               {
@@ -2178,7 +2186,7 @@ document.addEventListener("click", (event) => {
               // Carries the repository too: this menu can be opened from a
               // channel that is not the one currently on screen, and adding
               // to whichever happens to be open would be silently wrong.
-              act: "channel-agent-add-to",
+              act: "channel-agent-pick",
               value: `${value}|${agent.id}`,
               label: inChannel.has(agent.id)
                 ? `${agent.name} · already here`
@@ -2189,12 +2197,47 @@ document.addEventListener("click", (event) => {
       );
       return;
     }
-    case "channel-agent-add-to": {
+    /**
+     * Who may use it is asked while adding it, not discovered later in a
+     * settings panel. Both answers add the agent; they differ only in whether
+     * a teammate's prompt may spend this account.
+     */
+    case "channel-agent-pick": {
       const split = value.indexOf("|");
-      addChannelAgent(value.slice(0, split), value.slice(split + 1));
+      const repositoryId = value.slice(0, split);
+      const agentId = value.slice(split + 1);
+      const anchor =
+        document.querySelector(
+          `[data-act="channel-menu"][data-value="${CSS.escape(repositoryId)}"]`,
+        ) ?? node;
+      showMenu(anchor, [
+        {
+          act: "channel-agent-add-to",
+          value: `${value}|personal`,
+          label: "Add for just me",
+          iconName: "shield",
+        },
+        {
+          act: "channel-agent-add-to",
+          value: `${value}|org`,
+          label: "Add and share with the org",
+          iconName: "users",
+        },
+      ]);
+      return;
+    }
+    case "channel-agent-add-to": {
+      const [repositoryId = "", agentId = "", scope = "personal"] = value.split("|");
+      addChannelAgent(repositoryId, agentId);
       closePopover();
       render();
       refreshChannelInfoPopover();
+      // Visibility is a property of the credential, so this is the same
+      // account-wide switch the roster offers — said at the moment somebody
+      // is already deciding who the agent is for.
+      void applyProviderSetting(agentId, "visibility", scope)
+        .then(() => render())
+        .catch((error) => toast(error.message, "error"));
       return;
     }
     case "invite-revoke":

@@ -233,10 +233,12 @@ function rosterRow(agent, canModerate) {
   const settingsOpen = state.chatSettingsOpenId === agent.id;
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
-      data-act="channel-settings-toggle" data-value="${esc(agent.id)}"
-      data-hover="agent-usage" data-hover-value="${esc(agent.id)}">
-      ${usageTip(agent)}
-      ${agentFace(agent, 30)}
+      data-act="channel-settings-toggle" data-value="${esc(agent.id)}">
+      <span class="rr-avatar" data-hover="agent-usage"
+        data-hover-value="${esc(agent.id)}">
+        ${usageTip(agent)}
+        ${agentFace(agent, 30)}
+      </span>
       <span class="rr-body">
         <div class="rr-name">${esc(agent.name)}</div>
         <div class="rr-role${agent.role ? "" : " rr-role-empty"}">${
