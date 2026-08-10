@@ -961,8 +961,13 @@ export class ProviderChatService {
     ProviderId,
     { at: number; state: ProviderCliState }
   >();
+  /**
+   * Keyed by caller *and* provider. Usage is now read under whoever asked,
+   * so a key of provider alone would hand one person's consumption figures
+   * to the next person who hovered.
+   */
   private readonly usageCache = new Map<
-    ProviderId,
+    string,
     { at: number; report: ProviderUsageReport }
   >();
   private readonly streamRunner: StreamRunner;
@@ -1082,6 +1087,14 @@ export class ProviderChatService {
    */
   public async usage(input: {
     provider: ProviderId;
+    /**
+     * Whose usage. Without this the question was asked of whatever CLI login
+     * the container itself happens to have — which, on a deployment where
+     * everyone signs in as themselves, is nobody. `/usage` then had no
+     * account to report on and said so, and the answer read as a fault in
+     * the CLI rather than the question being addressed to the wrong account.
+     */
+    userId?: string;
   }): Promise<ProviderUsageReport> {
     if (input.provider === "google") {
       return {
@@ -1091,8 +1104,12 @@ export class ProviderChatService {
           "No usage figures are available for this provider.",
       };
     }
+    // Caller and provider both, so one person's figures are never handed to
+    // the next person who asks. "host" stands for a caller with no credential
+    // of their own, which is the shared login the container itself carries.
+    const usageKey = `${input.userId ?? "host"}:${input.provider}`;
     if (input.provider === "openai") {
-      const cachedCodex = this.usageCache.get(input.provider);
+      const cachedCodex = this.usageCache.get(usageKey);
       if (
         cachedCodex !== undefined &&
         Date.now() - cachedCodex.at < USAGE_CACHE_MS
@@ -1100,28 +1117,43 @@ export class ProviderChatService {
         return cachedCodex.report;
       }
       const report = await this.codexUsage();
-      this.usageCache.set(input.provider, { at: Date.now(), report });
+      this.usageCache.set(usageKey, { at: Date.now(), report });
       return report;
     }
-    const cached = this.usageCache.get(input.provider);
+    const cached = this.usageCache.get(usageKey);
     if (cached !== undefined && Date.now() - cached.at < USAGE_CACHE_MS) {
       return cached.report;
     }
     let report: ProviderUsageReport;
     try {
-      const result = await this.runner(
-        resolveClaudeCommand("claude"),
-        ["-p", "/usage", "--output-format", "json"],
-        { timeoutMs: 60_000, maxOutputBytes: 262_144 },
+      const credential =
+        input.userId === undefined
+          ? undefined
+          : await this.ownCredential(input.userId, input.provider);
+      // The same seam completions run through, so the figure reported is for
+      // the account the prompts are actually billed to. Without a credential
+      // of one's own this falls through to the ambient environment, which is
+      // the host's shared login — the account being spent in that case too.
+      const result = await this.withCompletionEnv(
+        input.provider,
+        credential,
+        async (env) =>
+          await this.runner(
+            resolveClaudeCommand("claude"),
+            ["-p", "/usage", "--output-format", "json"],
+            {
+              timeoutMs: 60_000,
+              maxOutputBytes: 262_144,
+              ...(env === undefined ? {} : { env }),
+            },
+          ),
       );
-      report =
-        result.exitCode === 0
-          ? parseClaudeUsage(result.stdout)
-          : {
-              source: "claude /usage",
-              windows: [],
-              unavailableReason: "The claude CLI could not report usage.",
-            };
+      // Parsed whatever the exit code, for the same reason detection stopped
+      // reading it: `claude` exits non-zero merely for being signed out while
+      // still printing the status it was asked for. Throwing that away turned
+      // a readable answer into "could not report usage", and `parseClaudeUsage`
+      // already says plainly when there is no percentage in the output.
+      report = parseClaudeUsage(result.stdout);
     } catch (error) {
       report = {
         source: "claude /usage",
@@ -1130,7 +1162,7 @@ export class ProviderChatService {
           error instanceof Error ? error.message : String(error),
       };
     }
-    this.usageCache.set(input.provider, { at: Date.now(), report });
+    this.usageCache.set(usageKey, { at: Date.now(), report });
     return report;
   }
 

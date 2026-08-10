@@ -845,7 +845,7 @@ export interface ChatProviderOperations {
   /** Model/effort choices the connected account actually reports. */
   options(input: { provider: string }): Promise<unknown>;
   /** Consumption the provider's own CLI publishes, when it publishes any. */
-  usage(input: { provider: string }): Promise<unknown>;
+  usage(input: { provider: string; userId?: string }): Promise<unknown>;
   setSettings(input: {
     userId: string;
     provider: string;
@@ -4628,7 +4628,9 @@ export class ApiGateway {
         }
         if (action === "usage" && method === "GET") {
           this.sendJson(response, 200, {
-            usage: await performChat(() => chatOperations.usage({ provider })),
+            usage: await performChat(() =>
+              chatOperations.usage({ provider, userId: identity.userId }),
+            ),
           });
           return;
         }
