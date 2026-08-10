@@ -430,8 +430,15 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
     : {
         source,
         windows: [],
-        unavailableReason:
-          "The claude CLI did not report a usage percentage in this run.",
+        // Percentages exist because a *subscription* has limits to be a
+        // percentage of; `/usage` opens with "You are currently using your
+        // subscription to power your Claude Code usage" when it has them. An
+        // API key has no such ceiling, so there is nothing to report and no
+        // fault to find — saying only "did not report" sent people looking
+        // for a break that was not there.
+        unavailableReason: /api\s*key/iu.test(text)
+          ? "This account bills per API key, which has no subscription limit to report a percentage of."
+          : "The claude CLI reported no usage percentage. That is expected unless the account is on a subscription with limits.",
       };
 }
 

@@ -14,6 +14,7 @@ import {
   api,
   closeSocket,
   connectSocket,
+  TYPING_SWEEP_MS,
   noteTyping,
   sendTyping,
   currentRepository,
@@ -237,6 +238,8 @@ function minutesValue(milliseconds) {
 /* --------------------------------------------------------------- auth ---- */
 
 let authMode = "login";
+/** Pending re-render that takes stale typing dots down once their TTL passes. */
+let typingSweep;
 
 /**
  * The screen somebody lands on when they open an invite link.
@@ -2441,7 +2444,7 @@ document.addEventListener("input", (event) => {
   }
   if (act === "channel-input") {
     // No thread id: this is the room itself, and the dots belong there only.
-    sendTyping(activeChannelId(), undefined);
+    sendTyping(activeChannelId(), undefined, node.value);
     updateComposerInput(node, render);
     return;
   }
@@ -2470,7 +2473,7 @@ document.addEventListener("input", (event) => {
   if (act === "channel-thread-input") {
     // Scoped to the open thread, so typing a reply raises dots inside that
     // thread and leaves the channel behind it quiet.
-    sendTyping(activeChannelId(), state.activeChannelThread);
+    sendTyping(activeChannelId(), state.activeChannelThread, node.value);
     state.threadDraft = node.value;
     const focused = document.activeElement === node;
     const selStart = node.selectionStart;
@@ -2691,6 +2694,17 @@ async function boot() {
       noteTyping(frame);
       if (state.route === "chats") {
         render();
+        // `typingOn` only drops expired entries when something reads it, and
+        // the last frame is by definition the last thing that would have. One
+        // sweep after the TTL is what actually takes the dots down when the
+        // other person stops — without it they sat there until an unrelated
+        // re-render happened to come along, which is to say forever.
+        clearTimeout(typingSweep);
+        typingSweep = setTimeout(() => {
+          if (state.route === "chats") {
+            render();
+          }
+        }, TYPING_SWEEP_MS);
       }
       return;
     }
