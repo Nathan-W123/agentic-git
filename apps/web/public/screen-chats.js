@@ -363,6 +363,22 @@ function rosterRow(agent, canModerate) {
 }
 
 function chanSidebar(activeRepositoryId) {
+  return `<aside class="chan-sidebar">${chanSidebarSections(activeRepositoryId)}</aside>`;
+}
+
+/**
+ * The channel list and the roster, without the `<aside>` around them.
+ *
+ * Separated so the phone drawer can hold them. On a wide window these are
+ * their own column beside the transcript; on a phone the outer nav and this
+ * column are two off-canvas panels that would each need their own gesture and
+ * their own half of the screen, which is two drawers to learn and neither of
+ * them complete. `sidebar()` in app.js puts these sections underneath the nav
+ * tabs so one swipe reveals the whole left side — tabs, channels, and everyone
+ * in the repository — and the standalone `.chan-sidebar` is hidden at that
+ * width so the markup exists once.
+ */
+export function chanSidebarSections(activeRepositoryId) {
   const query = state.chatQuery.trim().toLowerCase();
   const channels = [...state.repositories]
     .filter((repo) => query === "" || repo.id.toLowerCase().includes(query))
@@ -373,7 +389,7 @@ function chanSidebar(activeRepositoryId) {
   // to names — the role has to come from somewhere, and it is on the record.
   const people = state.members ?? [];
 
-  return `<aside class="chan-sidebar">
+  return `
     <div class="chan-sidebar-head">
       ${searchBox("Search channels...", state.chatQuery, "channel-search")}
       <button type="button" class="chan-new" data-act="channel-new" title="New chat">
@@ -420,8 +436,7 @@ function chanSidebar(activeRepositoryId) {
         data-value="${esc(activeRepositoryId ?? "")}">
         ${icon("plus")}<span>Add an agent</span>
       </button>
-    </div>
-  </aside>`;
+    </div>`;
 }
 
 /* ---------------------------------------------------------- chan main ---- */
