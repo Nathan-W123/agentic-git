@@ -1020,7 +1020,12 @@ export interface WorkAssignment {
 export interface ApiGatewayOptions {
   store: CoordinationStore;
   operations: ApiOperations;
-  bootstrapToken: string;
+  /**
+   * Secret required to claim the first owner account. Omitted or empty leaves
+   * first-run setup open — see the field of the same name on the gateway for
+   * what that does and does not expose.
+   */
+  bootstrapToken?: string;
   allowedOrigins?: readonly string[];
   secureCookies?: boolean;
   staticAssets?: ReadonlyMap<string, StaticAsset>;
@@ -1297,9 +1302,32 @@ export class ApiGateway {
   private readonly bodyLimit: number;
   private readonly allowedOrigins: ReadonlySet<string>;
   private bootstrapInProgress = false;
+  /**
+   * The configured token, trimmed once here so nothing downstream compares
+   * against whitespace, or `undefined` when first-run setup is open.
+   *
+   * Trimmed because the length check below always trimmed before measuring
+   * but the value kept for comparison did not — so a `COORD_BOOTSTRAP_TOKEN`
+   * set with a trailing newline (the ordinary result of pasting into a
+   * hosting provider's variable editor) passed startup validation and then
+   * rejected the very token the operator had just copied out of that box.
+   *
+   * Optional because the token guards exactly one thing: claiming the first
+   * owner account on a deployment that has no users. `AuthService.bootstrap`
+   * refuses outright once any user exists, so the window it protects opens at
+   * deploy and closes at first signup. A deployment whose URL is not public
+   * can reasonably decide that window needs no secret; one whose URL is
+   * public should set a token, because whoever claims that window becomes
+   * the system administrator.
+   */
+  private readonly bootstrapToken: string | undefined;
 
   public constructor(private readonly options: ApiGatewayOptions) {
-    if (options.bootstrapToken.trim().length < 24) {
+    const configured = (options.bootstrapToken ?? "").trim();
+    this.bootstrapToken = configured.length === 0 ? undefined : configured;
+    // Only meaningful when one is set: a token short enough to guess is worse
+    // than none, because it reads as protection.
+    if (this.bootstrapToken !== undefined && this.bootstrapToken.length < 24) {
       throw new Error("Bootstrap token must contain at least 24 characters");
     }
     this.bodyLimit = options.requestBodyLimit ?? MAX_JSON_BYTES;
@@ -1607,6 +1635,11 @@ export class ApiGateway {
         status: "ok",
         database: "ready",
         setupRequired: (await this.options.store.countUsers()) === 0,
+        // So the setup form knows whether to ask for a token at all, rather
+        // than showing a required field that this deployment does not want
+        // and cannot be filled in correctly. Says whether a secret is needed,
+        // never anything about what it is.
+        bootstrapTokenRequired: this.bootstrapToken !== undefined,
         webSocketConnections: this.webSockets.connections,
         ...(docker === undefined ? {} : { docker }),
         time: new Date().toISOString(),
@@ -1615,11 +1648,23 @@ export class ApiGateway {
     }
 
     if (method === "POST" && path === `${API_PREFIX}/auth/bootstrap`) {
+      // Trimmed on arrival for the same reason the configured value is:
+      // this token is copied out of one box and pasted into another, and a
+      // stray newline either side is a property of the clipboard, never of
+      // what the operator meant. A bootstrap token with meaningful leading or
+      // trailing whitespace does not exist.
       const token =
         typeof request.headers["x-bootstrap-token"] === "string"
-          ? request.headers["x-bootstrap-token"]
+          ? request.headers["x-bootstrap-token"].trim()
           : "";
-      if (!safeEqual(token, this.options.bootstrapToken)) {
+      // No token configured means first-run setup is open. Still not a way in
+      // to an already-claimed deployment: `AuthService.bootstrap` refuses with
+      // `bootstrap_complete` the moment a user exists, so this is a door that
+      // locks itself behind the first person through it.
+      if (
+        this.bootstrapToken !== undefined &&
+        !safeEqual(token, this.bootstrapToken)
+      ) {
         throw new HttpError(403, "invalid_bootstrap_token", "Bootstrap token is invalid");
       }
       const body = objectBody(await this.readJson(request));
