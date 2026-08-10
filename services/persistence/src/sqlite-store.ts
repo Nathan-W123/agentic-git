@@ -62,6 +62,7 @@ import type {
   ChannelReply,
   AuditArchiveResult,
   AuditEventFilter,
+  AuditorCursor,
   AuthSessionRecord,
   CoordinationStore,
   CreateApprovalInput,
@@ -1524,6 +1525,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
         .prepare(
           "DELETE FROM channel_membership_backfills WHERE repository_id = ?",
         )
+        .run(id);
+      this.db
+        .prepare("DELETE FROM auditor_cursors WHERE repository_id = ?")
         .run(id);
       this.db
         .prepare("DELETE FROM repository_grants WHERE repository_id = ?")
@@ -3174,6 +3178,61 @@ export class SqliteCoordinationStore implements CoordinationStore {
       )
       .get(repositoryId, userId) as Row | undefined;
     return row === undefined ? undefined : text(row, "read_at");
+  }
+
+  public async getAuditorCursor(
+    repositoryId: string,
+  ): Promise<AuditorCursor | undefined> {
+    const row = this.db
+      .prepare(
+        `SELECT repository_id, revision, sequence, paused, updated_at
+           FROM auditor_cursors WHERE repository_id = ?`,
+      )
+      .get(repositoryId) as Row | undefined;
+    return row === undefined
+      ? undefined
+      : {
+          repositoryId: text(row, "repository_id"),
+          revision: text(row, "revision"),
+          sequence: integer(row, "sequence"),
+          paused: integer(row, "paused") !== 0,
+          updatedAt: text(row, "updated_at"),
+        };
+  }
+
+  public async saveAuditorCursor(
+    cursor: Omit<AuditorCursor, "paused">,
+  ): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO auditor_cursors (repository_id, revision, sequence, paused, updated_at)
+         VALUES (?, ?, ?, 0, ?)
+         ON CONFLICT(repository_id) DO UPDATE SET
+           revision = excluded.revision,
+           sequence = excluded.sequence,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        cursor.repositoryId,
+        cursor.revision,
+        cursor.sequence,
+        cursor.updatedAt,
+      );
+  }
+
+  public async setAuditorPaused(
+    repositoryId: string,
+    paused: boolean,
+  ): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO auditor_cursors (repository_id, revision, sequence, paused, updated_at)
+         VALUES (?, '', 0, ?, ?)
+         ON CONFLICT(repository_id) DO UPDATE SET
+           paused = excluded.paused,
+           updated_at = excluded.updated_at`,
+      )
+      .run(repositoryId, paused ? 1 : 0, new Date().toISOString());
   }
 
   private toChannelMessageBase(

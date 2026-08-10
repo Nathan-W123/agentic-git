@@ -752,6 +752,34 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE repositories ADD COLUMN created_by TEXT REFERENCES users(id)`,
     ],
   },
+  {
+    // How far each repository's auditor has looked. One row per repository,
+    // not per (repository, agent): the auditor is one to a repository by
+    // construction, and keying on the agent would restart the audit history
+    // from zero every time the role changed hands — re-auditing everything
+    // already reported, on the new holder's account.
+    version: 22,
+    name: "auditor-cursor",
+    statements: [
+      `CREATE TABLE auditor_cursors (
+        repository_id TEXT PRIMARY KEY,
+        revision TEXT NOT NULL,
+        sequence INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+    ],
+  },
+  {
+    // Auditing switched off per repository without demoting the agent. The
+    // default is off-the-switch, not paused: an existing auditor keeps
+    // auditing across this migration, which is what its operator already
+    // agreed to.
+    version: 23,
+    name: "auditor-paused",
+    statements: [
+      `ALTER TABLE auditor_cursors ADD COLUMN paused INTEGER NOT NULL DEFAULT 0`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

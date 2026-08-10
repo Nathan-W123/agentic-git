@@ -640,6 +640,51 @@ export interface ChannelMessage {
   reactions: Record<string, ChannelReaction>;
 }
 
+/**
+ * How far a repository's auditor has already looked, and how much it has
+ * spent looking.
+ *
+ * Two positions rather than one, because they answer different questions and
+ * neither substitutes for the other. `sequence` is the audit log position the
+ * watcher has consumed: it is what makes the poll idempotent, so a restart
+ * re-reads nothing and a promotion that arrived while the process was down is
+ * still seen. `revision` is where canonical stood when the last audit
+ * actually ran: it is what the *next* audit diffs against, so a run that
+ * crashes between consuming the event and finishing the audit does not
+ * silently skip the change it was about to look at.
+ *
+ * Storing only the sequence would lose the diff base the moment the log is
+ * compacted; storing only the revision would re-audit every promotion again
+ * after a restart, which is exactly the unbounded background spend the
+ * feature has to avoid.
+ */
+export interface AuditorCursor {
+  repositoryId: string;
+  /**
+   * Canonical revision the last completed audit examined up to, or `""` when
+   * this repository's auditor has not yet finished one — a row can exist
+   * before any audit has run, because pausing writes one.
+   */
+  revision: string;
+  /** Highest `canonical_promoted` audit-log sequence already consumed. */
+  sequence: number;
+  /**
+   * Whether auditing is switched off here.
+   *
+   * Separate from holding the role, and deliberately so: an auditor on a busy
+   * repository costs a model call per merge, and the answer to "this is too
+   * expensive this week" should not be to demote the agent and lose its
+   * place. Pausing keeps the cursor, so resuming audits the gap rather than
+   * starting over or skipping what happened while it was off.
+   *
+   * A repository with no row at all is *not* paused: auditing is on from the
+   * moment an agent is promoted, and absence means "nothing has said
+   * otherwise".
+   */
+  paused: boolean;
+  updatedAt: string;
+}
+
 export interface AppendChannelMessageInput {
   repositoryId: string;
   projectId: ProjectId;
@@ -1100,6 +1145,21 @@ export interface CoordinationStore {
     repositoryId: string,
     userId: UserId,
   ): Promise<string | undefined>;
+
+  /** How far this repository's auditor has already looked. */
+  getAuditorCursor(repositoryId: string): Promise<AuditorCursor | undefined>;
+  /**
+   * Records progress. Leaves `paused` alone: an audit finishing must not
+   * switch auditing back on underneath somebody who just switched it off.
+   */
+  saveAuditorCursor(
+    cursor: Omit<AuditorCursor, "paused">,
+  ): Promise<void>;
+  /**
+   * Switches auditing off or on, leaving the position alone so a resume
+   * audits the gap rather than starting over.
+   */
+  setAuditorPaused(repositoryId: string, paused: boolean): Promise<void>;
 
   close(): Promise<void>;
 }

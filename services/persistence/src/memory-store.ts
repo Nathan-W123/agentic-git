@@ -56,6 +56,7 @@ import type {
   ChannelReply,
   AuditArchiveResult,
   AuditEventFilter,
+  AuditorCursor,
   AuthSessionRecord,
   CoordinationStore,
   CreateApprovalInput,
@@ -199,6 +200,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly channelMembershipBackfilled = new Set<string>();
   /** Keyed by `repositoryId\0userId`. */
   private readonly channelReadCursors = new Map<string, string>();
+  private readonly auditorCursors = new Map<string, AuditorCursor>();
 
   public constructor() {
     const now = new Date().toISOString();
@@ -1073,6 +1075,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       }
     }
     this.channelMembershipBackfilled.delete(id);
+    this.auditorCursors.delete(id);
     for (const key of [...this.grants.keys()]) {
       if (key.startsWith(`${id}\0`)) {
         this.grants.delete(key);
@@ -2052,6 +2055,37 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     userId: string,
   ): Promise<string | undefined> {
     return this.channelReadCursors.get(this.channelReadKey(repositoryId, userId));
+  }
+
+  public async getAuditorCursor(
+    repositoryId: string,
+  ): Promise<AuditorCursor | undefined> {
+    const cursor = this.auditorCursors.get(repositoryId);
+    return cursor === undefined ? undefined : copy(cursor);
+  }
+
+  public async saveAuditorCursor(
+    cursor: Omit<AuditorCursor, "paused">,
+  ): Promise<void> {
+    const existing = this.auditorCursors.get(cursor.repositoryId);
+    this.auditorCursors.set(cursor.repositoryId, {
+      ...copy(cursor),
+      paused: existing?.paused ?? false,
+    });
+  }
+
+  public async setAuditorPaused(
+    repositoryId: string,
+    paused: boolean,
+  ): Promise<void> {
+    const existing = this.auditorCursors.get(repositoryId);
+    this.auditorCursors.set(repositoryId, {
+      repositoryId,
+      revision: existing?.revision ?? "",
+      sequence: existing?.sequence ?? 0,
+      paused,
+      updatedAt: new Date().toISOString(),
+    });
   }
 
   public async close(): Promise<void> {

@@ -3646,6 +3646,41 @@ svg {
   flex: none;
 }
 
+/* The auditor's on/off switch. Only ever drawn on one row, so it is sized to
+   sit inside the icon-button rhythm beside it rather than to be noticed. */
+.roster-row .rr-switch {
+  width: 26px;
+  height: 15px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2, transparent);
+  cursor: pointer;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.roster-row .rr-switch.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.roster-row .rr-switch-dot {
+  width: 11px;
+  height: 11px;
+  margin-left: 1px;
+  border-radius: 50%;
+  background: var(--text-dim, #888);
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.roster-row .rr-switch.on .rr-switch-dot {
+  transform: translateX(11px);
+  background: #fff;
+}
+
 .roster-rename {
   padding: 6px 8px 8px 41px;
 }

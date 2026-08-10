@@ -106,6 +106,13 @@ export const state = {
   channelRoster: {},
   channelRosterLoaded: new Set(),
   channelRosterLoadingId: undefined,
+  /**
+   * Whether each repository's auditor is switched off, keyed by repository
+   * id. Absent means on: a repository nobody has switched off is auditing,
+   * and so is one whose roster has not loaded yet — the toggle only renders
+   * beside an auditor, which only appears once the roster is in.
+   */
+  auditorPaused: {},
   /** Repository-scoped grants, keyed by repository id — see `ensureRepositoryGrants`. */
   repositoryGrants: {},
   activeChannelThread: undefined,
@@ -1762,6 +1769,9 @@ async function loadChannelRoster(repositoryId) {
     return false;
   }
   state.channelRoster[repositoryId] = response.agents ?? [];
+  // Sent with the roster because the switch it draws sits on the roster. See
+  // the route's own comment for why it is not a separate request.
+  state.auditorPaused[repositoryId] = response.auditorPaused === true;
   return true;
 }
 
@@ -2115,6 +2125,23 @@ export async function leaveRepository(repositoryId) {
     { method: "DELETE" },
   );
   await loadContext();
+}
+
+/**
+ * Switches this repository's auditing off, or back on.
+ *
+ * Turning it back on audits everything merged while it was off before it
+ * resumes waiting — that is the server's doing, not this call's, but it is
+ * why this returns what happened: "on" and "on, and it is auditing right
+ * now" are different things to tell somebody.
+ */
+export async function setAuditorPaused(repositoryId, paused) {
+  const response = await api(repositoryPath(repositoryId, "/auditor"), {
+    method: "POST",
+    body: { paused },
+  });
+  state.auditorPaused[repositoryId] = response?.paused === true;
+  return response?.resumed;
 }
 
 /** Every repository-scoped grant on this repository, for the co-owner panel. */

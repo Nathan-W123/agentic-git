@@ -256,14 +256,24 @@ function personRow(person) {
   </div>`;
 }
 
+/** The one role the system acts on, so the one role worth offering. */
+const AUDITOR_ROLE = "auditor";
+
+function isAuditor(agent) {
+  return (agent.role ?? "").trim().toLowerCase() === AUDITOR_ROLE;
+}
+
 function rosterRow(agent, canModerate) {
   const renaming = state.chatRenamingId === agent.id;
   const settingsOpen = state.chatSettingsOpenId === agent.id;
+  const auditor = isAuditor(agent);
+  const paused = state.auditorPaused[activeChannelId()] === true;
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
       data-act="channel-settings-toggle" data-value="${esc(agent.id)}">
       <span class="rr-avatar" data-hover="agent-usage"
-        data-hover-value="${esc(agent.id)}">
+        data-hover-value="${esc(agent.id)}" tabindex="0"
+        aria-label="Usage for ${esc(agent.name)}">
         ${usageTip(agent)}
         ${agentFace(agent, 30)}
       </span>
@@ -271,13 +281,31 @@ function rosterRow(agent, canModerate) {
         <div class="rr-name">${esc(agent.name)}</div>
         <div class="rr-role${agent.role ? "" : " rr-role-empty"}">${
           agent.role
-            ? `${esc(agent.role)}${agent.mine ? " · Your agent" : ""}`
+            ? `${esc(agent.role)}${auditor && paused ? " · paused" : ""}${
+                agent.mine ? " · Your agent" : ""
+              }`
             : agent.mine
               ? "Your agent · no role set"
               : "No role set"
         }</div>
       </span>
       <span class="rr-actions">
+        ${
+          // Only the auditor gets a switch, because it is the only role that
+          // spends without being asked. Moderators only: turning it back on
+          // starts an audit, which costs money, so it is the same decision
+          // the promotion route guards.
+          auditor && canModerate
+            ? `<button type="button" class="rr-switch${paused ? "" : " on"}"
+                data-act="auditor-toggle" data-value="${esc(String(paused))}"
+                role="switch" aria-checked="${paused ? "false" : "true"}"
+                title="${
+                  paused
+                    ? "Auditing is off. Turn it on to audit everything merged since it was switched off."
+                    : "Auditing is on. Turn it off to stop audits without demoting this agent."
+                }"><span class="rr-switch-dot"></span></button>`
+            : ""
+        }
         ${iconButton("pencil", {
           act: "channel-rename-toggle",
           value: agent.id,
@@ -318,7 +346,15 @@ function rosterRow(agent, canModerate) {
             <input data-act="channel-rename-input" data-value="${esc(agent.id)}"
               value="${esc(agent.name)}" placeholder="${esc(agent.name)}" autocomplete="off">
             <input data-act="channel-role-input" data-value="${esc(agent.id)}"
-              value="${esc(agent.role ?? "")}" placeholder="Role in this channel" autocomplete="off">
+              value="${esc(agent.role ?? "")}" placeholder="Role in this channel"
+              list="channel-role-options" autocomplete="off">
+            <datalist id="channel-role-options">
+              <!-- Every other role is free text that reaches the agent as a
+                   sentence and nothing else, so there is nothing to offer.
+                   \`auditor\` is the one the code acts on, and a reserved word
+                   nobody can discover is a reserved word nobody uses. -->
+              <option value="${AUDITOR_ROLE}">Audits every merge, unprompted</option>
+            </datalist>
           </form>`
         : ""
     }

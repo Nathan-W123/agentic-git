@@ -1113,6 +1113,52 @@ export class RepositoryService {
       .sort();
   }
 
+  /**
+   * The unified diff between two canonical revisions, truncated to a budget.
+   *
+   * For readers that want to *understand* a change rather than replay it —
+   * the auditor, which sends this to a model and pays per token for it. The
+   * budget is enforced here rather than by the caller because the caller
+   * cannot know how big a diff is until it has already paid to receive it,
+   * and an unbounded `git diff` on a revision that reformatted the tree is
+   * both a memory problem locally and a very expensive prompt afterwards.
+   *
+   * Truncation is reported rather than hidden: a reader told it is seeing
+   * part of a change can say so, and one that quietly saw half of it will
+   * report the missing half as absent.
+   *
+   * Binary files are summarised by Git itself ("Binary files … differ") and
+   * left that way; there is nothing useful to read in the bytes and every
+   * byte would be paid for.
+   */
+  public async diffBetween(
+    repository: CanonicalRepository,
+    fromRevision: string,
+    toRevision: string,
+    maxBytes = 200_000,
+  ): Promise<{ patch: string; truncated: boolean }> {
+    if (fromRevision === toRevision) {
+      return { patch: "", truncated: false };
+    }
+    const result = await this.git.run([
+      `--git-dir=${repository.path}`,
+      "diff",
+      "--no-color",
+      "--no-renames",
+      // Keeps a hunk readable on its own: three lines of context is the Git
+      // default and the point at which a reviewer can tell what a changed
+      // line sits inside without paying for the whole file.
+      "--unified=3",
+      fromRevision,
+      toRevision,
+      "--",
+    ]);
+    const patch = result.stdout;
+    return patch.length <= maxBytes
+      ? { patch, truncated: false }
+      : { patch: patch.slice(0, maxBytes), truncated: true };
+  }
+
   public getGitClient(): GitClient {
     return this.git;
   }

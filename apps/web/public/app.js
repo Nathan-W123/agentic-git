@@ -56,6 +56,7 @@ import {
   setChannelAgentSetting,
   deleteRepository,
   leaveRepository,
+  setAuditorPaused,
   setRepositoryGrant,
   revokeRepositoryGrant,
   state,
@@ -1050,6 +1051,32 @@ async function leaveRepositoryAction(repositoryId) {
     await leaveRepository(repositoryId);
     closePopover();
     toast(`Left ${repositoryId}`, "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Turning auditing off, or back on.
+ *
+ * Switching off is silent — it is a cost decision and needs no ceremony.
+ * Switching on says what it is about to do, because it starts spending
+ * immediately and the person who flicked it is owed that much warning.
+ */
+async function toggleAuditingAction(repositoryId, paused) {
+  try {
+    const resumed = await setAuditorPaused(repositoryId, paused);
+    toast(
+      paused
+        ? "Auditing paused"
+        : resumed === "audited"
+          ? "Auditing on — reviewing everything merged since it was paused"
+          : resumed === "nothing_to_audit"
+            ? "Auditing on — nothing new to review"
+            : "Auditing on",
+      "ok",
+    );
     render();
   } catch (error) {
     toast(error.message, "error");
@@ -2126,6 +2153,12 @@ document.addEventListener("click", (event) => {
     case "channel-settings-toggle":
       state.chatSettingsOpenId = state.chatSettingsOpenId === value ? undefined : value;
       render();
+      return;
+    case "auditor-toggle":
+      // `value` is the *current* paused state, so the new one is its
+      // opposite — read off the button that was drawn rather than from a
+      // second lookup that could disagree with what was on screen.
+      void toggleAuditingAction(activeChannelId(), value !== "true");
       return;
     case "channel-info":
       showPopover(node, channelInfoPopoverHtml(value));

@@ -58,6 +58,17 @@ interface TestRuntime {
    */
   chatPrompts: Array<{ userId: string; provider: string; prompt: string }>;
   chatAnswer: { text?: string; fail?: string };
+  /** Every canonical diff the auditor asked for, in order. */
+  canonicalDiffs: Array<{
+    projectId: string;
+    repositoryId: string;
+    fromRevision: string;
+    toRevision: string;
+  }>;
+  /** What `canonicalDiff` answers; mutated in place by tests. */
+  canonicalDiff: { files: string[]; patch: string; truncated: boolean };
+  /** Where `canonicalHead` says canonical stands; mutated in place. */
+  canonicalState: { head: string | undefined };
 }
 
 class TestClient {
@@ -175,6 +186,7 @@ async function startRuntime(
     allowedOrigins?: readonly string[];
     webSocketPollIntervalMs?: number;
     webSocketReauthorizeIntervalMs?: number;
+    auditorPollIntervalMs?: number;
   } = {},
 ): Promise<TestRuntime> {
   const store = new InMemoryCoordinationStore();
@@ -185,6 +197,15 @@ async function startRuntime(
   const submittedTasks: TestRuntime["submittedTasks"] = [];
   const chatPrompts: TestRuntime["chatPrompts"] = [];
   const chatAnswer: TestRuntime["chatAnswer"] = {};
+  const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
+  const canonicalState: TestRuntime["canonicalState"] = {
+    head: "b".repeat(40),
+  };
+  const canonicalDiff: TestRuntime["canonicalDiff"] = {
+    files: ["src/server.ts"],
+    patch: "@@ -1 +1 @@\n-const ok = a && b;\n+const ok = a || b;",
+    truncated: false,
+  };
   const operations: ApiOperations = {
     chatProviders: {
       async list() {
@@ -284,6 +305,13 @@ async function startRuntime(
       });
     },
     async runRepository() {},
+    async canonicalDiff(input) {
+      canonicalDiffs.push(input);
+      return canonicalDiff;
+    },
+    async canonicalHead() {
+      return canonicalState.head;
+    },
     async projectMetrics(input) {
       return { stub: true, projectId: input.projectId };
     },
@@ -356,6 +384,9 @@ async function startRuntime(
           webSocketReauthorizeIntervalMs:
             options.webSocketReauthorizeIntervalMs,
         }),
+    ...(options.auditorPollIntervalMs === undefined
+      ? {}
+      : { auditorPollIntervalMs: options.auditorPollIntervalMs }),
     staticAssets: new Map([
       [
         "/index.html",
@@ -384,6 +415,9 @@ async function startRuntime(
     submittedTasks,
     chatPrompts,
     chatAnswer,
+    canonicalDiffs,
+    canonicalDiff,
+    canonicalState,
   };
 }
 
@@ -4113,6 +4147,493 @@ test("auditor is a reserved role: owner-only, and one to a repository", async (t
     body: { role: "  Auditor " },
   });
   assert.equal(shouted.status, 409, JSON.stringify(shouted.data));
+});
+
+test("a personal agent cannot be made auditor, an org-wide one can", async (t) => {
+  // An auditor spends its owner's account continuously and unprompted, and
+  // promotion needs only `manage_project` — so without this rule an admin
+  // could commit a colleague's personal subscription to a permanent cost
+  // they never agreed to. An org-wide credential is already published as
+  // spendable by other people's requests; that is the consent this needs.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "spend");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "personal" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const channel = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+
+  const personal = await owner.request(`${channel}/${ownerId}:anthropic`, {
+    method: "POST",
+    body: { role: "auditor" },
+  });
+  assert.equal(personal.status, 409, JSON.stringify(personal.data));
+  assert.equal(personal.data.error.code, "auditor_must_be_org_wide");
+
+  // The same agent may still hold any ordinary role: the restriction is on
+  // the one role that spends without being asked, not on the agent.
+  const plain = await owner.request(`${channel}/${ownerId}:anthropic`, {
+    method: "POST",
+    body: { role: "Backend Engineer" },
+  });
+  assert.equal(plain.status, 200, JSON.stringify(plain.data));
+
+  const orgWide = await owner.request(`${channel}/${ownerId}:openai`, {
+    method: "POST",
+    body: { role: "auditor" },
+  });
+  assert.equal(orgWide.status, 200, JSON.stringify(orgWide.data));
+});
+
+test("the auditor audits a canonical advance and posts what it finds", async (t) => {
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "watched");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const channel = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+  const promoted = await owner.request(`${channel}/${ownerId}:openai`, {
+    method: "POST",
+    body: { role: "auditor" },
+  });
+  assert.equal(promoted.status, 200, JSON.stringify(promoted.data));
+
+  runtime.chatAnswer.text = [
+    "FINDING",
+    "severity: high",
+    "files: src/server.ts",
+    "selffix: no",
+    "title: Inverted condition admits unauthorized callers",
+    "detail: The guard was changed from && to ||, so either check passing is",
+    "enough where both were required.",
+    "END",
+  ].join("\n");
+
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: "task-1",
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+    },
+  });
+
+  await waitFor(
+    async () =>
+      (
+        await runtime.store.listChannelMessages(repo, ownerId)
+      ).some((message) => message.content.includes("Audited")),
+    "the auditor never posted its findings",
+  );
+
+  // It read the change it was woken by, not the whole tree.
+  assert.equal(runtime.canonicalDiffs.length, 1);
+  assert.equal(runtime.canonicalDiffs[0]?.fromRevision, "a".repeat(40));
+  assert.equal(runtime.canonicalDiffs[0]?.toRevision, "b".repeat(40));
+  // And it audited on its own account, unprompted.
+  assert.equal(runtime.chatPrompts[0]?.userId, ownerId);
+  assert.match(runtime.chatPrompts[0]?.prompt ?? "", /const ok = a \|\| b;/u);
+
+  const [message] = await runtime.store.listChannelMessages(repo, ownerId);
+  assert.equal(message?.authorId, `${ownerId}:openai`);
+  assert.equal(message?.replies.length, 1);
+  assert.match(
+    message?.replies[0]?.content ?? "",
+    /1\. Inverted condition admits unauthorized callers/u,
+  );
+
+  // The cursor moved, so a restart does not audit this advance again.
+  const cursor = await runtime.store.getAuditorCursor(repo);
+  assert.equal(cursor?.revision, "b".repeat(40));
+});
+
+test("a clean audit says nothing at all", async (t) => {
+  // An auditor that posts "all clear" after every merge is one everybody
+  // mutes, and a muted auditor is worse than none.
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "clean");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents/${ownerId}:openai`,
+    { method: "POST", body: { role: "auditor" } },
+  );
+  runtime.chatAnswer.text = "NO FINDINGS";
+
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: "task-1",
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+    },
+  });
+
+  await waitFor(
+    async () => runtime.canonicalDiffs.length > 0,
+    "the auditor never looked at the change",
+  );
+  await waitFor(
+    async () => (await runtime.store.getAuditorCursor(repo)) !== undefined,
+    "the auditor never recorded that it had looked",
+  );
+  assert.deepEqual(await runtime.store.listChannelMessages(repo, ownerId), []);
+});
+
+test("a repository with no auditor is never audited", async (t) => {
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "unwatched");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: "task-1",
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+    },
+  });
+
+  // Nothing to wait on, so this waits for the poller to have run at all and
+  // then asserts it did nothing.
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.deepEqual(runtime.canonicalDiffs, []);
+  assert.deepEqual(await runtime.store.listChannelMessages(repo, ownerId), []);
+});
+
+test('approving a finding with "yes, do it" dispatches the fix', async (t) => {
+  // The wording matters: `looksLikeTaskRequest` returns false for this, so
+  // without the auditor's own approval reading the reply would fall through
+  // to the agent answering a question about its own finding — which looks
+  // exactly like it worked.
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "approved");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents/${ownerId}:openai`,
+    { method: "POST", body: { role: "auditor" } },
+  );
+  runtime.chatAnswer.text = [
+    "FINDING",
+    "severity: medium",
+    "files: src/retry.ts",
+    "selffix: yes",
+    "title: Retry loop runs one time too many",
+    "detail: The bound is inclusive where it should be exclusive.",
+    "END",
+  ].join("\n");
+
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: "task-1",
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+    },
+  });
+  await waitFor(
+    async () =>
+      (await runtime.store.listChannelMessages(repo, ownerId)).length > 0,
+    "the auditor never posted its findings",
+  );
+  const [audit] = await runtime.store.listChannelMessages(repo, ownerId);
+  assert.notEqual(audit, undefined);
+
+  const reply = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages/${audit?.id}/replies`,
+    { method: "POST", body: { content: "yes, do it" } },
+  );
+  assert.equal(reply.status, 201, JSON.stringify(reply.data));
+
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "approving the finding never dispatched a fix",
+  );
+  const [task] = runtime.submittedTasks;
+  assert.match(task?.objective ?? "", /Retry loop runs one time too many/u);
+  assert.match(task?.objective ?? "", /src\/retry\.ts/u);
+  // Submitted against the auditor's owner, which is who agreed to spend.
+  assert.equal(task?.actorId, ownerId);
+  // The finding was marked self-fixable and nobody else was named, so the
+  // auditor took it rather than handing it on.
+  assert.equal(task?.repositoryId, repo);
+});
+
+test("a rejection in an auditor thread dispatches nothing", async (t) => {
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "declined");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents/${ownerId}:openai`,
+    { method: "POST", body: { role: "auditor" } },
+  );
+  runtime.chatAnswer.text = [
+    "FINDING",
+    "severity: low",
+    "files: src/a.ts",
+    "selffix: yes",
+    "title: Redundant null check",
+    "detail: The value cannot be null here.",
+    "END",
+  ].join("\n");
+
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: "task-1",
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+    },
+  });
+  await waitFor(
+    async () =>
+      (await runtime.store.listChannelMessages(repo, ownerId)).length > 0,
+    "the auditor never posted its findings",
+  );
+  const [audit] = await runtime.store.listChannelMessages(repo, ownerId);
+
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages/${audit?.id}/replies`,
+    { method: "POST", body: { content: "no, that is a false positive" } },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.deepEqual(runtime.submittedTasks, []);
+});
+
+/** Promotes an org-wide agent to auditor and returns the owner's id. */
+async function repositoryWithAuditor(
+  runtime: TestRuntime,
+  owner: TestClient,
+  ownerId: string,
+  repositoryId: string,
+): Promise<void> {
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const promoted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/agents/${ownerId}:openai`,
+    { method: "POST", body: { role: "auditor" } },
+  );
+  assert.equal(promoted.status, 200, JSON.stringify(promoted.data));
+}
+
+test("auditing can be switched off, and merges during the pause are not audited", async (t) => {
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "paused");
+  await repositoryWithAuditor(runtime, owner, ownerId, repo);
+  runtime.chatAnswer.text = "NO FINDINGS";
+
+  const off = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/auditor`,
+    { method: "POST", body: { paused: true } },
+  );
+  assert.equal(off.status, 200, JSON.stringify(off.data));
+  assert.equal(off.data.paused, true);
+
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: "task-1",
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+    },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 200));
+  assert.deepEqual(runtime.canonicalDiffs, []);
+
+  // The roster reports the switch, so the toggle can be drawn from one read.
+  const roster = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`,
+  );
+  assert.equal(roster.data.auditorPaused, true);
+});
+
+test("switching auditing back on audits the gap immediately", async (t) => {
+  // The point of a pause rather than a demotion: the cursor is kept, so
+  // resuming reviews what landed while it was off instead of skipping it.
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "resumed");
+  await repositoryWithAuditor(runtime, owner, ownerId, repo);
+  runtime.chatAnswer.text = "NO FINDINGS";
+
+  // One audit first, so there is a real revision to resume from.
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: "task-1",
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+    },
+  });
+  await waitFor(
+    async () => (await runtime.store.getAuditorCursor(repo)) !== undefined,
+    "the first audit never ran",
+  );
+  assert.equal(runtime.canonicalDiffs.length, 1);
+
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/auditor`,
+    { method: "POST", body: { paused: true } },
+  );
+  // Two merges land unseen while it is off.
+  runtime.canonicalState.head = "d".repeat(40);
+  runtime.chatAnswer.text = [
+    "FINDING",
+    "severity: high",
+    "files: src/server.ts",
+    "selffix: no",
+    "title: Something landed while auditing was off",
+    "detail: Found on resume.",
+    "END",
+  ].join("\n");
+
+  const on = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/auditor`,
+    { method: "POST", body: { paused: false } },
+  );
+  assert.equal(on.status, 200, JSON.stringify(on.data));
+  assert.equal(on.data.paused, false);
+  assert.equal(on.data.resumed, "audited");
+
+  await waitFor(
+    async () =>
+      (await runtime.store.listChannelMessages(repo, ownerId)).length > 0,
+    "resuming never produced an audit",
+  );
+  // The gap, in one range: from where it last finished to where canonical is
+  // now — not from the event it missed, and not from the beginning.
+  const resumeDiff = runtime.canonicalDiffs[1];
+  assert.equal(resumeDiff?.fromRevision, "b".repeat(40));
+  assert.equal(resumeDiff?.toRevision, "d".repeat(40));
+  assert.equal((await runtime.store.getAuditorCursor(repo))?.paused, false);
+});
+
+test("resuming with nothing new to review says so and spends nothing", async (t) => {
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "quiet");
+  await repositoryWithAuditor(runtime, owner, ownerId, repo);
+  runtime.chatAnswer.text = "NO FINDINGS";
+
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: "task-1",
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+    },
+  });
+  await waitFor(
+    async () => (await runtime.store.getAuditorCursor(repo)) !== undefined,
+    "the first audit never ran",
+  );
+
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/auditor`,
+    { method: "POST", body: { paused: true } },
+  );
+  // Canonical has not moved since the last audit.
+  const on = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/auditor`,
+    { method: "POST", body: { paused: false } },
+  );
+  assert.equal(on.data.resumed, "nothing_to_audit");
+  assert.equal(runtime.canonicalDiffs.length, 1, "no second diff was read");
+});
+
+test("the auditor switch needs manage_project, and an auditor to switch", async (t) => {
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "switchguard");
+
+  // Nothing holds the role yet.
+  const none = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/auditor`,
+    { method: "POST", body: { paused: true } },
+  );
+  assert.equal(none.status, 404, JSON.stringify(none.data));
+  assert.equal(none.data.error.code, "no_auditor");
+
+  await repositoryWithAuditor(runtime, owner, ownerId, repo);
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "switchguest@example.com",
+    repo,
+  );
+  const refused = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/auditor`,
+    { method: "POST", body: { paused: true } },
+  );
+  assert.equal(
+    refused.status === 200,
+    false,
+    "a collaborator must not switch auditing",
+  );
+
+  const bad = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/auditor`,
+    { method: "POST", body: { paused: "yes" } },
+  );
+  assert.equal(bad.status, 400, JSON.stringify(bad.data));
 });
 
 test("a collaborator cannot promote an auditor, but can still set a plain role", async (t) => {
