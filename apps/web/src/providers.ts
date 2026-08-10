@@ -139,6 +139,16 @@ export interface ChatReply {
 export interface ProviderSettings {
   model?: string;
   effort?: string;
+  /**
+   * The agent's call sign, held once per connected account.
+   *
+   * It belongs here rather than on a channel because it is the agent's name,
+   * not its name *in a room*: somebody who has met Icarus in one channel
+   * should meet the same Icarus in the next. A channel may still override it
+   * -- two people's agents can collide in a room that neither of them chose --
+   * but the override is the exception and this is the default.
+   */
+  callSign?: string;
 }
 
 export interface ProviderCliState {
@@ -155,6 +165,8 @@ export interface ProviderCliState {
 export interface ProviderStatus {
   id: ProviderId;
   name: string;
+  /** The agent's own name, held per account rather than per channel. */
+  callSign?: string;
   connected: boolean;
   kind?: "account" | "own-credential";
   /** Effective model/effort after per-user settings. */
@@ -1135,6 +1147,7 @@ export class ProviderChatService {
       // of one's own this falls through to the ambient environment, which is
       // the host's shared login — the account being spent in that case too.
       const result = await this.withCompletionEnv(
+        input.userId,
         input.provider,
         credential,
         async (env) =>
@@ -1359,6 +1372,12 @@ export class ProviderChatService {
             ? {}
             : { kind: "account" as const }),
         acceptedCredentialKinds: supportedCredentialKinds(PROVIDER_VENDORS[id]),
+        // Absent until the agent is named, which the dashboard does the
+        // moment it connects. Sent even when absent is impossible to
+        // distinguish from "named the empty string", so it is simply omitted.
+        ...(settings.callSign === undefined
+          ? {}
+          : { callSign: settings.callSign }),
         ...(SIGN_IN_FLOWS[id] === undefined
           ? {}
           : { signInFlow: SIGN_IN_FLOWS[id] }),
@@ -2384,6 +2403,7 @@ export class ProviderChatService {
     provider: ProviderId;
     model?: string;
     effort?: string;
+    callSign?: string;
     visibility?: "personal" | "org";
   }): Promise<ProviderStatus[]> {
     const file = await this.readConnections();
@@ -2434,6 +2454,25 @@ export class ProviderChatService {
       }
       settings.effort = input.effort;
     }
+    // A call sign is the agent's name and nothing more: no vocabulary to
+    // validate against, so the only rules are that it is not blank and not an
+    // essay. Clearing it back to the vendor label is done by sending an empty
+    // string, the same way model and effort clear.
+    if (input.callSign !== undefined) {
+      const trimmed = input.callSign.trim();
+      if (trimmed.length > 40) {
+        throw new ProviderChatError(
+          400,
+          "invalid_call_sign",
+          "A call sign is at most 40 characters",
+        );
+      }
+      if (trimmed === "") {
+        delete settings.callSign;
+      } else {
+        settings.callSign = trimmed;
+      }
+    }
     connection.settings = settings;
     await this.writeConnections(file);
     // Visibility lives on the stored credential, not on this settings record:
@@ -2483,6 +2522,7 @@ export class ProviderChatService {
   ): Promise<ChatReply> {
     const prompt = await this.prepareCompletion(input);
     return await this.withCompletionEnv(
+      input.userId,
       input.provider,
       prompt.credential,
       async (env) =>
@@ -2575,6 +2615,7 @@ export class ProviderChatService {
    * two cases cannot drift apart.
    */
   private async withCompletionEnv<T>(
+    userId: string | undefined,
     provider: ProviderId,
     credential: UserCredential | undefined,
     use: (env: NodeJS.ProcessEnv | undefined) => Promise<T>,
@@ -2587,6 +2628,23 @@ export class ProviderChatService {
         vendor: PROVIDER_VENDORS[provider],
         credential,
         baseEnv: sanitizeChildEnv(process.env),
+        // Chat runs the CLI the same way a task does, so it rotates the token
+        // the same way. Storing it here means a channel conversation keeps
+        // the account alive rather than quietly ageing it out.
+        ...(userId === undefined
+          ? {}
+          : {
+              onRotate: async (secret: string) => {
+                const store = await this.credentialStore();
+                await store.put(userId, PROVIDER_VENDORS[provider], {
+                  kind: credential.kind,
+                  secret,
+                  ...(credential.visibility === undefined
+                    ? {}
+                    : { visibility: credential.visibility }),
+                });
+              },
+            }),
       },
       async (home) => await use(home.env),
     );
@@ -2602,6 +2660,7 @@ export class ProviderChatService {
     const prompt = await this.prepareCompletion(input);
     try {
       return await this.withCompletionEnv(
+        input.userId,
         input.provider,
         prompt.credential,
         async (env) =>
