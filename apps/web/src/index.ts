@@ -118,12 +118,14 @@ async function serve(
   }
 
   const setupRequired = (await store.countUsers()) === 0;
-  const generatedToken =
-    process.env["COORD_BOOTSTRAP_TOKEN"] === undefined
-      ? randomBytes(32).toString("base64url")
-      : undefined;
-  const bootstrapToken =
-    process.env["COORD_BOOTSTRAP_TOKEN"] ?? generatedToken ?? "";
+  // Unset means first-run setup is open, not "invent one". Generating a token
+  // per boot made the deployment unenterable in the ordinary case: nothing
+  // persists it, so it existed only in that boot's log, and every restart —
+  // every redeploy, every crash-retry — replaced it with a new one while the
+  // operator was still holding the old. A secret nobody can hold is not a
+  // secret, it is a lockout. A deployment that wants the guard sets the
+  // variable, and then it is stable because they chose it.
+  const bootstrapToken = process.env["COORD_BOOTSTRAP_TOKEN"]?.trim();
 
   const repositories = new RepositoryService();
   const overlays = new OverlayWorkspaceService(project, store, repositories);
@@ -379,7 +381,9 @@ async function serve(
   const runningGateway = new ApiGateway({
     store,
     operations,
-    bootstrapToken,
+    // Omitted rather than passed as undefined: `exactOptionalPropertyTypes`
+    // draws the distinction, and "absent" is what open setup means here.
+    ...(bootstrapToken === undefined ? {} : { bootstrapToken }),
     allowedOrigins: configuredOrigins(),
     secureCookies: process.env["COORD_SECURE_COOKIES"] === "true",
     staticAssets: await loadStaticAssets(),
@@ -416,8 +420,13 @@ async function serve(
 
   console.log(`Coordinator control room: http://${host}:${port}`);
   console.log(`Project: ${project.root}`);
-  if (setupRequired && generatedToken !== undefined) {
-    console.log(`First-run bootstrap token: ${generatedToken}`);
+  if (setupRequired) {
+    console.log(
+      bootstrapToken === undefined
+        ? "First-run setup is open — the first account created becomes the " +
+            "owner. Set COORD_BOOTSTRAP_TOKEN to require a secret for it."
+        : "First-run setup requires COORD_BOOTSTRAP_TOKEN.",
+    );
   }
 
   let closing = false;

@@ -74,7 +74,8 @@ interface TestRuntime {
 class TestClient {
   private readonly cookies = new Map<string, string>();
 
-  public constructor(private readonly origin: string) {}
+  /** Public so a test can open a second, cookie-less client on the same server. */
+  public constructor(public readonly origin: string) {}
 
   public get cookieHeader(): string {
     return [...this.cookies]
@@ -4147,6 +4148,199 @@ test("auditor is a reserved role: owner-only, and one to a repository", async (t
     body: { role: "  Auditor " },
   });
   assert.equal(shouted.status, 409, JSON.stringify(shouted.data));
+});
+
+test("a bootstrap token survives the whitespace pasting adds to it", async (t) => {
+  // The token is copied out of a hosting provider's variable editor and
+  // pasted into a form. Both boxes attract a trailing newline, neither shows
+  // it, and the comparison used to fail on it — while the startup length
+  // check trimmed first, so a server configured with a trailing newline
+  // started happily and then rejected the very token it was configured with.
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  const response = await client.request("/api/v1/auth/bootstrap", {
+    method: "POST",
+    headers: { "X-Bootstrap-Token": `  ${BOOTSTRAP_TOKEN}\t ` },
+    body: {
+      email: "owner@example.com",
+      displayName: "Owner",
+      password: PASSWORD,
+      organizationName: "Relay Test",
+    },
+  });
+  assert.equal(response.status, 201, JSON.stringify(response.data));
+
+  // Still not a way in for a token that is merely close.
+  const wrong = new TestClient(runtime.origin);
+  const refused = await wrong.request("/api/v1/auth/bootstrap", {
+    method: "POST",
+    headers: { "X-Bootstrap-Token": `${BOOTSTRAP_TOKEN}x` },
+    body: {
+      email: "other@example.com",
+      displayName: "Other",
+      password: PASSWORD,
+      organizationName: "Nope",
+    },
+  });
+  assert.equal(refused.status, 403, JSON.stringify(refused.data));
+  assert.equal(refused.data.error.code, "invalid_bootstrap_token");
+});
+
+test("a gateway configured with a padded token still starts and accepts it", async (t) => {
+  // The other half: the padding is on the *server's* value, which is what a
+  // pasted `COORD_BOOTSTRAP_TOKEN` actually looks like.
+  const store = new InMemoryCoordinationStore();
+  const gateway = new ApiGateway({
+    store,
+    operations: { async createRepository() { throw new Error("unused"); } } as unknown as ApiOperations,
+    bootstrapToken: `${BOOTSTRAP_TOKEN}\n`,
+  });
+  t.after(async () => {
+    await gateway.close();
+    await store.close();
+  });
+  await new Promise<void>((resolve, reject) => {
+    gateway.server.once("error", reject);
+    gateway.server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = gateway.server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("Test gateway did not bind a TCP port");
+  }
+  const client = new TestClient(`http://127.0.0.1:${address.port}`);
+  const response = await client.request("/api/v1/auth/bootstrap", {
+    method: "POST",
+    headers: { "X-Bootstrap-Token": BOOTSTRAP_TOKEN },
+    body: {
+      email: "owner@example.com",
+      displayName: "Owner",
+      password: PASSWORD,
+      organizationName: "Relay Test",
+    },
+  });
+  assert.equal(response.status, 201, JSON.stringify(response.data));
+});
+
+/** A gateway with whatever bootstrap configuration a test wants. */
+async function startBareGateway(
+  t: TestContext,
+  options: { bootstrapToken?: string },
+): Promise<{ client: TestClient; store: CoordinationStore }> {
+  const store = new InMemoryCoordinationStore();
+  const gateway = new ApiGateway({
+    store,
+    operations: {} as unknown as ApiOperations,
+    ...(options.bootstrapToken === undefined
+      ? {}
+      : { bootstrapToken: options.bootstrapToken }),
+  });
+  t.after(async () => {
+    await gateway.close();
+    await store.close();
+  });
+  await new Promise<void>((resolve, reject) => {
+    gateway.server.once("error", reject);
+    gateway.server.listen(0, "127.0.0.1", resolve);
+  });
+  const address = gateway.server.address();
+  if (address === null || typeof address === "string") {
+    throw new Error("Test gateway did not bind a TCP port");
+  }
+  return { client: new TestClient(`http://127.0.0.1:${address.port}`), store };
+}
+
+test("with no token configured, first-run setup is open", async (t) => {
+  const { client } = await startBareGateway(t, {});
+
+  // The form is told not to ask for one, rather than asking for a value that
+  // cannot be supplied.
+  const health = await client.request("/api/v1/health");
+  assert.equal(health.data.setupRequired, true);
+  assert.equal(health.data.bootstrapTokenRequired, false);
+
+  const created = await client.request("/api/v1/auth/bootstrap", {
+    method: "POST",
+    body: {
+      email: "owner@example.com",
+      displayName: "Owner",
+      password: PASSWORD,
+      organizationName: "Relay Test",
+    },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+
+  // And the door locks behind the first person through it: open setup is a
+  // window that closes, not a permanently unauthenticated route.
+  const second = await new TestClient(client.origin).request(
+    "/api/v1/auth/bootstrap",
+    {
+      method: "POST",
+      body: {
+        email: "intruder@example.com",
+        displayName: "Intruder",
+        password: PASSWORD,
+        organizationName: "Theirs",
+      },
+    },
+  );
+  assert.equal(second.status === 201, false, "setup must not run twice");
+  const afterwards = await client.request("/api/v1/health");
+  assert.equal(afterwards.data.setupRequired, false);
+});
+
+test("an empty token is the same as none, not a token nobody can send", async (t) => {
+  // `COORD_BOOTSTRAP_TOKEN=` in a hosting provider's variable editor is the
+  // ordinary way to clear one, and it arrives as an empty string.
+  const { client } = await startBareGateway(t, { bootstrapToken: "   " });
+  const health = await client.request("/api/v1/health");
+  assert.equal(health.data.bootstrapTokenRequired, false);
+  const created = await client.request("/api/v1/auth/bootstrap", {
+    method: "POST",
+    body: {
+      email: "owner@example.com",
+      displayName: "Owner",
+      password: PASSWORD,
+      organizationName: "Relay Test",
+    },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+});
+
+test("a configured token is still required, and still says so", async (t) => {
+  const { client } = await startBareGateway(t, {
+    bootstrapToken: BOOTSTRAP_TOKEN,
+  });
+  const health = await client.request("/api/v1/health");
+  assert.equal(health.data.bootstrapTokenRequired, true);
+
+  const withoutToken = await client.request("/api/v1/auth/bootstrap", {
+    method: "POST",
+    body: {
+      email: "owner@example.com",
+      displayName: "Owner",
+      password: PASSWORD,
+      organizationName: "Relay Test",
+    },
+  });
+  assert.equal(withoutToken.status, 403, JSON.stringify(withoutToken.data));
+  assert.equal(withoutToken.data.error.code, "invalid_bootstrap_token");
+});
+
+test("a token short enough to guess is refused at startup", async (t) => {
+  // Only when one is set. A short token reads as protection and is not.
+  const store = new InMemoryCoordinationStore();
+  t.after(async () => {
+    await store.close();
+  });
+  assert.throws(
+    () =>
+      new ApiGateway({
+        store,
+        operations: {} as unknown as ApiOperations,
+        bootstrapToken: "too-short",
+      }),
+    /at least 24 characters/u,
+  );
 });
 
 test("a personal agent cannot be made auditor, an org-wide one can", async (t) => {

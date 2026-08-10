@@ -353,9 +353,16 @@ function renderAuth() {
       }">
         ${
           bootstrap
-            ? `<label class="field"><span>Bootstrap token</span>
+            ? `${
+                // Only asked for when the deployment actually requires one.
+                // A required field that cannot be filled in correctly is a
+                // locked door with no key, which is what this was.
+                state.health?.bootstrapTokenRequired === false
+                  ? ""
+                  : `<label class="field"><span>Bootstrap token</span>
                  <input class="input" name="token" type="password" required
-                   placeholder="Printed by the control plane at startup"></label>
+                   placeholder="COORD_BOOTSTRAP_TOKEN"></label>`
+              }
                <label class="field"><span>Your name</span>
                  <input class="input" name="displayName" autocomplete="name" required></label>
                <label class="field"><span>Team name</span>
@@ -437,9 +444,16 @@ async function submitBootstrap(form) {
   try {
     // The one-time token authenticates the request itself, so it travels as a
     // header rather than as part of the record being created.
+    //
+    // Trimmed because this field is only ever filled by pasting, and a
+    // trailing newline picked up from a hosting provider's variable editor is
+    // invisible in the box and fatal to the comparison. The server trims too;
+    // this side also matters because a header cannot carry a newline at all —
+    // `fetch` rejects the whole request before the server sees it, which
+    // surfaces as a network error rather than as "invalid token".
     await api("/auth/bootstrap", {
       method: "POST",
-      headers: { "X-Bootstrap-Token": String(data.get("token") ?? "") },
+      headers: { "X-Bootstrap-Token": String(data.get("token") ?? "").trim() },
       body: {
         displayName: String(data.get("displayName") ?? ""),
         organizationName: String(data.get("organizationName") ?? ""),

@@ -150,8 +150,16 @@ npm.cmd run web
 ```
 
 Open `http://127.0.0.1:4317`. The first-run form creates the initial owner and
-local organization. When `COORD_BOOTSTRAP_TOKEN` is omitted, the server
-generates and prints one at startup.
+local organization.
+
+`COORD_BOOTSTRAP_TOKEN` is optional. Omit it and first-run setup is open: the
+first account created becomes the owner, and the form does not ask for a
+token. Set it and that same form requires it. Either way the door locks behind
+the first person through — once any user exists, setup refuses outright.
+
+Omitting it is reasonable when the URL is not public. **Set it for anything
+reachable by people you have not chosen**, because whoever completes setup
+becomes the system administrator.
 
 The server binds to loopback by default. Relevant deployment variables are:
 
@@ -160,7 +168,7 @@ The server binds to loopback by default. Relevant deployment variables are:
 | `COORD_PROJECT_ROOT` | Initialized coordinator project directory. |
 | `COORD_HOST` | Listen address; defaults to `127.0.0.1`. |
 | `COORD_PORT` | Listen port; defaults to `4317`. |
-| `COORD_BOOTSTRAP_TOKEN` | First-owner setup secret. |
+| `COORD_BOOTSTRAP_TOKEN` | First-owner setup secret. Optional; omit to leave setup open. |
 | `COORD_ALLOWED_ORIGINS` | Comma-separated additional browser origins. |
 | `COORD_SECURE_COOKIES` | Set `true` behind HTTPS. |
 
