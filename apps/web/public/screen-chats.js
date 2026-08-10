@@ -23,6 +23,7 @@ import {
   channelAuthor,
   channelMessagesFor,
   typingOn,
+  agentsThinkingIn,
   channelParticipants,
   channelUnreadCount,
   activeChannelId,
@@ -438,15 +439,12 @@ function typingIndicator(repositoryId, threadId) {
   // An agent is "thinking" while a task it owns is running. That is only
   // meaningful in the room itself: a task belongs to the channel, and there
   // is nothing tying one to a particular thread.
-  const busy =
-    threadId === undefined
-      ? channelAgentsFor(repositoryId).filter((agent) => agent.presence === "online")
-      : [];
+  const busy = threadId === undefined ? agentsThinkingIn(repositoryId) : [];
   if (names.length === 0 && busy.length === 0) {
     return "";
   }
   const who = [
-    ...busy.map((agent) => `${agent.name} is thinking`),
+    ...busy.map((name) => `${name} is thinking`),
     ...(names.length === 0
       ? []
       : [
@@ -478,7 +476,10 @@ function messageList(repositoryId) {
       query === ""
         ? "Say hello — messages sent here stay in this channel for your session."
         : "Try a different search term.",
-    )}${codeBlocks(repositoryId)}</div>`;
+      // Also on the empty branch: an empty channel is exactly where somebody
+      // starting to type matters most, and leaving it off here meant the dots
+      // could not appear until the room already had a message in it.
+    )}${codeBlocks(repositoryId)}${typingIndicator(repositoryId, undefined)}</div>`;
   }
   let lastDay = "";
   const rows = entries.map((entry) => {

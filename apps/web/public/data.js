@@ -510,8 +510,14 @@ const typingKey = (repositoryId, threadId) =>
  * its own TTL to read as continuous, and a frame per character would be a
  * fan-out per character to every other subscriber.
  */
-export function sendTyping(repositoryId, threadId) {
+export function sendTyping(repositoryId, threadId, draft) {
   if (!repositoryId || !state.projectId) {
+    return;
+  }
+  // Clearing the box is not typing. Without this, deleting a draft kept
+  // renewing the signal on every keystroke of the deletion, so the dots
+  // outlived the intent by a full TTL after somebody changed their mind.
+  if (typeof draft === "string" && draft.trim() === "") {
     return;
   }
   const key = typingKey(repositoryId, threadId);
@@ -527,6 +533,46 @@ export function sendTyping(repositoryId, threadId) {
     /* A dropped typing frame is not worth a toast. */
   });
 }
+
+/**
+ * Statuses where the agent itself is working.
+ *
+ * Narrower than `ACTIVE_TASK_STATUS` on purpose: that set also holds
+ * `submitted`, `queued`, `approved` and `awaiting_approval`, which mean
+ * waiting for a runner or for a person — nobody is thinking. Showing dots for
+ * those left them running long after a prompt finished, because a task parked
+ * awaiting review never leaves the active set.
+ */
+const THINKING_STATUS = new Set([
+  "planning",
+  "running",
+  "replanning",
+  "validating",
+]);
+
+/** Agents mid-task in one repository, by the name the channel shows. */
+export function agentsThinkingIn(repositoryId) {
+  if (!repositoryId) {
+    return [];
+  }
+  const busy = state.tasks.filter(
+    (task) =>
+      task.repositoryId === repositoryId && THINKING_STATUS.has(task.status),
+  );
+  if (busy.length === 0) {
+    return [];
+  }
+  return channelAgentsFor(repositoryId)
+    .filter((agent) =>
+      busy.some((task) =>
+        String(task.agentId ?? "").includes(agent.provider ?? agent.id),
+      ),
+    )
+    .map((agent) => agent.name);
+}
+
+/** How long after the last frame a surface should be swept for expiry. */
+export const TYPING_SWEEP_MS = TYPING_TTL_MS + 250;
 
 /** Records a `channel-typing` frame from somebody else. */
 export function noteTyping(frame) {
