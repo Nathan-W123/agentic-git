@@ -20,6 +20,7 @@ const PUBLIC_FILES = [
   ["code-view.js", "text/javascript; charset=utf-8"],
   ["screen-repos.js", "text/javascript; charset=utf-8"],
   ["screen-code.js", "text/javascript; charset=utf-8"],
+  ["screen-chats.js", "text/javascript; charset=utf-8"],
   ["screen-agents.js", "text/javascript; charset=utf-8"],
   ["screen-coordinator.js", "text/javascript; charset=utf-8"],
   ["screen-notifications.js", "text/javascript; charset=utf-8"],

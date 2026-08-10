@@ -163,6 +163,19 @@ export const ICONS = {
   bolt: S('<path d="M13.5 3 5 13.5h5.5L10 21l8.5-10.5H13z"/>'),
   eye: S('<path d="M2.5 12S6 5.8 12 5.8 21.5 12 21.5 12 18 18.2 12 18.2 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/>'),
   menu: S('<path d="M4 7h16M4 12h16M4 17h16"/>'),
+  chatBubble: S(
+    '<path d="M4 5.5h16v10.5H9l-4.5 4V16H4z" stroke-linejoin="round"/>',
+  ),
+  smile: S(
+    '<circle cx="12" cy="12" r="9"/><path d="M8.3 14.2c1 1.3 2.3 2 3.7 2s2.7-.7 3.7-2"/><circle cx="8.7" cy="9.8" r="1" fill="currentColor" stroke="none"/><circle cx="15.3" cy="9.8" r="1" fill="currentColor" stroke="none"/>',
+  ),
+  reply: S('<path d="M9 8 4.5 12 9 16"/><path d="M4.5 12h9a6 6 0 0 1 6 6v1"/>'),
+  hash: S(
+    '<path d="M9.5 3.5 6.8 20.5M17.2 3.5l-2.7 17M4 8.5h16M3 15.5h16"/>',
+  ),
+  pencil: S(
+    '<path d="M4 20l.9-4.2L15.6 5.1a1.5 1.5 0 0 1 2.1 0l1.2 1.2a1.5 1.5 0 0 1 0 2.1L8.2 19.1z"/><path d="M14.3 6.4l3.3 3.3"/>',
+  ),
 };
 
 export function icon(name, extra = "") {
@@ -838,7 +851,7 @@ export function showModal({ title, subtitle = "", body = "", confirm = "Confirm"
       </div>
       ${body}
       <div class="modal-actions">
-        <button class="btn" value="cancel" type="submit">${esc(cancel)}</button>
+        <button class="btn" value="cancel" type="submit" formnovalidate>${esc(cancel)}</button>
         <button class="btn btn-primary" value="confirm" type="submit">${esc(confirm)}</button>
       </div>
     </form>`;

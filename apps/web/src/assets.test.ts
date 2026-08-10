@@ -359,24 +359,23 @@ test("first-run setup is exposed only while the control plane needs an owner", a
   assert.match(source, /data-act="auth-mode" data-value="bootstrap"/u);
 });
 
-test("navigation is the six product routes and nothing invented", async () => {
+test("navigation is the four product routes and nothing invented", async () => {
   const source = await browserSource();
   const routes = /const ROUTES = new Set\(\[([\s\S]*?)\]\)/u.exec(source)?.[1];
   assert.notEqual(routes, undefined);
   const parsed = [...(routes ?? "").matchAll(/"([a-z]+)"/gu)].map(
     (match) => match[1],
   );
-  assert.deepEqual(parsed, [
-    "repositories",
-    "code",
-    "agents",
-    "coordinator",
-    "notifications",
-    "settings",
-  ]);
-  // Files, changes, and the editor are one Code view; tasks belong to the
-  // agent that owns them rather than to a page of their own.
-  assert.equal(/"my-tasks"|"activity"|"files"|"changes"/u.test(routes ?? ""), false);
+  assert.deepEqual(parsed, ["chats", "agents", "notifications", "settings"]);
+  // Code is read where it is discussed — files and diffs render inline in the
+  // channel transcript — so neither it nor the coordinator is a page of its
+  // own, and tasks still belong to the agent that owns them.
+  assert.equal(
+    /"my-tasks"|"activity"|"files"|"changes"|"code"|"coordinator"/u.test(
+      routes ?? "",
+    ),
+    false,
+  );
 });
 
 test("the summary opens over the editor instead of navigating away", async () => {

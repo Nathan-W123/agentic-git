@@ -447,23 +447,61 @@ async function signInAgent(providerId, mode, rerender) {
     `<p class="modal-hint"><a class="link" target="_blank" rel="noopener noreferrer"
        href="${esc(flow.verificationUrl)}">Open the ${esc(agentLabelOf(providerId))} sign-in page</a>
      — it opens in a new tab, on your own account.</p>`;
+  // Whether the browser hands back a code varies by vendor and by how the
+  // sign-in page resolves: approving in the browser is often enough on its
+  // own, and the CLI exits without ever prompting. So the flow is polled
+  // while the dialog is open, and the code box is a fallback rather than a
+  // requirement — asking for a code that was never issued is a dead end.
+  let finishedWithoutCode = false;
+  const watch = (async () => {
+    for (let attempt = 0; attempt < 240; attempt += 1) {
+      await pause(1500);
+      let current;
+      try {
+        current = await providerSignInStatus(providerId, flow.flowId);
+      } catch {
+        return undefined;
+      }
+      if (current.status !== "pending") {
+        if (current.status === "completed") {
+          finishedWithoutCode = true;
+          document.querySelector("#modal")?.close();
+        }
+        return current;
+      }
+    }
+    return undefined;
+  })();
+
   const values = await showModal({
     title: `Sign in to ${agentLabelOf(providerId)}`,
     subtitle: "Your account, not this machine's.",
     confirm: exchange ? "Connect" : "I've approved it",
     body: exchange
       ? `${link}
-         <label class="field"><span>Code from that page</span>
+         <label class="field"><span>Code from that page
+             <span class="field-optional">only if it shows one</span></span>
            <input class="input" name="code" autocomplete="off"
-             placeholder="Paste the code it gives you" required></label>
-         <p class="modal-hint">Sign in there, then paste the code it shows you
-           back here. Nothing else is stored, and this deployment never sees
-           your password.</p>`
+             placeholder="Paste it here if you were given one"></label>
+         <p class="modal-hint">Approve the sign-in in that tab. Most of the
+           time that is all it takes and this will finish on its own; if the
+           page shows you a code instead, paste it above. This deployment
+           never sees your password.</p>`
       : `${link}
          <p class="modal-code">${esc(flow.userCode ?? "")}</p>
          <p class="modal-hint">Enter that code on the page, approve it, then
            come back here.</p>`,
   });
+
+  if (finishedWithoutCode) {
+    const settled = await watch;
+    toast(
+      `${agentLabelOf(providerId)} connected as ${settled?.account ?? "your account"}`,
+    );
+    await loadProviders();
+    rerender();
+    return true;
+  }
 
   if (values === undefined) {
     await cancelProviderSignIn(providerId, flow.flowId);
@@ -471,13 +509,8 @@ async function signInAgent(providerId, mode, rerender) {
   }
 
   try {
-    if (exchange) {
-      const code = String(values.code ?? "").trim();
-      if (code === "") {
-        toast("The code from the sign-in page is required", "error");
-        await cancelProviderSignIn(providerId, flow.flowId);
-        return null;
-      }
+    const code = exchange ? String(values.code ?? "").trim() : "";
+    if (code !== "") {
       await submitProviderSignInCode(providerId, flow.flowId, code);
     }
     // The CLI finishes on its own clock — it has a browser round trip to wait
@@ -565,13 +598,21 @@ export async function connectAgent(providerId, rerender) {
       <label class="field"><span>Label <span class="field-optional">optional</span></span>
         <input class="input" name="label" autocomplete="off"
           placeholder="Which account this is"></label>
+      <label class="field"><span>Who can task it</span>
+        <select class="input" name="visibility">
+          <option value="personal" selected>Personal — only you can task it</option>
+          <option value="org">Org-wide — anyone with access to a repository
+            it works in can @mention it there</option>
+        </select></label>
       ${
         help.kinds.some(([id]) => id === "session_file")
           ? `<p class="modal-hint">${esc(SESSION_FILE_WARNING)}</p>`
           : ""
       }
       <p class="modal-hint">Stored encrypted, never shown again, and never
-        shared with anyone else on this deployment.</p>`,
+        shared with anyone else on this deployment. "Org-wide" only changes
+        who may @mention this agent to submit work — the credential itself is
+        still never shared.</p>`,
   });
   if (values === undefined) {
     return;
@@ -587,6 +628,7 @@ export async function connectAgent(providerId, rerender) {
       String(values.kind ?? "api_key"),
       secret,
       String(values.label ?? "").trim(),
+      values.visibility === "org" ? "org" : "personal",
     );
     toast(`${providerId} connected`, "ok");
     rerender();

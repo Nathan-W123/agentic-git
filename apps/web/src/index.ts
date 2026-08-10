@@ -55,6 +55,23 @@ function configuredOrigins(): string[] {
     .filter((entry) => entry.length > 0);
 }
 
+/**
+ * The first configured agent whose adapter runs the given vendor CLI, for a
+ * caller (channel @mention dispatch) that knows only the vendor and not this
+ * project's own agent names. `undefined` when nothing is configured for it.
+ */
+function resolveAgentIdForVendor(
+  project: CoordinatorProject,
+  vendor: "claude" | "codex" | "gemini",
+): string | undefined {
+  for (const [id, agent] of Object.entries(project.config.agents)) {
+    if (agent.adapter === vendor) {
+      return id;
+    }
+  }
+  return undefined;
+}
+
 async function main(): Promise<void> {
   const root = path.resolve(
     argument("root") ?? process.env["COORD_PROJECT_ROOT"] ?? process.cwd(),
@@ -178,6 +195,12 @@ async function serve(
           ...input,
           provider: input.provider as ProviderId,
         }),
+      connectionsFor: (userIds) => providerChat.listConnectionsFor(userIds),
+      noteAuthFailure: (input) =>
+        providerChat.noteAuthFailure({
+          ...input,
+          provider: input.provider as ProviderId,
+        }),
     },
     workspace: {
       status: (input) => overlays.status(input),
@@ -203,6 +226,7 @@ async function serve(
         id: input.id,
         projectId: input.projectId,
         ...(input.branch === undefined ? {} : { branch: input.branch }),
+        ...(input.actorId === undefined ? {} : { createdBy: input.actorId }),
       });
     },
     async importGitHub(input) {
@@ -212,15 +236,33 @@ async function serve(
         ...(input.id === undefined ? {} : { id: input.id }),
         ...(input.branch === undefined ? {} : { branch: input.branch }),
         ...(input.token === undefined ? {} : { token: input.token }),
+        ...(input.actorId === undefined ? {} : { createdBy: input.actorId }),
       });
     },
     async submitTask(input) {
+      // `agentId` names one of this project's own configured agents and
+      // wins when given explicitly (the ordinary submission path, where the
+      // caller already knows which one). `vendor` is for a caller — the
+      // channel @mention dispatcher — that knows only which vendor CLI the
+      // mentioned agent runs (claude/codex/gemini), not this deployment's
+      // internal agent names, and needs one resolved for it.
+      const agentId =
+        input.agentId ??
+        (input.vendor === undefined
+          ? undefined
+          : resolveAgentIdForVendor(project, input.vendor));
+      if (input.agentId === undefined && input.vendor !== undefined && agentId === undefined) {
+        throw new Error(
+          `No ${input.vendor} agent is configured on this deployment ` +
+            `(see "agents" in .coordinator/config.json)`,
+        );
+      }
       return await taskSubmit(project, store, {
         projectId: input.projectId,
         repositoryId: input.repositoryId,
         objective: input.objective,
         submittedBy: input.actorId,
-        ...(input.agentId === undefined ? {} : { agentId: input.agentId }),
+        ...(agentId === undefined ? {} : { agentId }),
       });
     },
     async runRepository(input) {
