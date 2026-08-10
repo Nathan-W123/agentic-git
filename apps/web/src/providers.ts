@@ -2345,6 +2345,7 @@ export class ProviderChatService {
     provider: ProviderId;
     model?: string;
     effort?: string;
+    visibility?: "personal" | "org";
   }): Promise<ProviderStatus[]> {
     const file = await this.readConnections();
     const connection = file[input.userId]?.[input.provider];
@@ -2396,6 +2397,31 @@ export class ProviderChatService {
     }
     connection.settings = settings;
     await this.writeConnections(file);
+    // Visibility lives on the stored credential, not on this settings record:
+    // it is not a preference about how the agent answers but a decision about
+    // whose credential a teammate's prompt may spend. Written after the
+    // settings above so a rejection here — no credential of one's own, which
+    // is the shared-login case — leaves model and effort already saved.
+    if (input.visibility !== undefined) {
+      if (input.visibility !== "personal" && input.visibility !== "org") {
+        throw new ProviderChatError(
+          400,
+          "invalid_visibility",
+          "Visibility must be personal or org",
+        );
+      }
+      const vendor = PROVIDER_VENDORS[input.provider];
+      const store = await this.credentialStore();
+      try {
+        await store.setVisibility(input.userId, vendor, input.visibility);
+      } catch (error) {
+        throw new ProviderChatError(
+          409,
+          "not_connected",
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    }
     return await this.list({ userId: input.userId, systemAdmin: true });
   }
 

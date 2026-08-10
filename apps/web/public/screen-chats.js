@@ -151,6 +151,30 @@ function rosterSettings(agent) {
         "Reasoning effort",
       )}
     </div>
+    ${
+      // Unlike model and effort, this is not how the agent presents itself in
+      // this room — it decides whose credential a teammate's prompt spends, so
+      // it is account-wide and offered only for one's own agent.
+      agent.mine === true
+        ? `<div>
+            <div class="rs-label">Available to</div>
+            ${miniSelect(
+              "channel-agent-visibility",
+              [
+                { value: "personal", label: "Only me" },
+                { value: "org", label: "Everyone in the org" },
+              ],
+              agent.visibility === "org" ? "org" : "personal",
+              "Available to",
+            )}
+            <div class="rs-hint">${
+              agent.visibility === "org"
+                ? "Teammates can send prompts that spend this account."
+                : "Only you can use this agent."
+            }</div>
+          </div>`
+        : ""
+    }
   </div>`;
 }
 

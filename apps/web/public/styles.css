@@ -3505,18 +3505,20 @@ svg {
   transition: background 0.13s ease;
 }
 
-/* The usage card. Anchored to the row and opening to its left, because the
-   roster is already against the right edge of the window. */
+/* The usage card opens *below* the row and inside the roster's own width.
+   `.chan-roster` scrolls, and a scroll container clips any absolutely
+   positioned descendant that reaches outside it — so a card opening sideways
+   out of the sidebar is not merely off-panel, it is invisible. */
 .roster-row-main {
   position: relative;
 }
 
 .rr-usage {
   position: absolute;
-  right: calc(100% + 8px);
-  top: 0;
+  left: 0;
+  right: 0;
+  top: calc(100% - 2px);
   z-index: 40;
-  width: 232px;
   padding: 10px 12px;
   border: 1px solid var(--border-soft);
   border-radius: 9px;
@@ -3655,6 +3657,15 @@ svg {
   text-transform: uppercase;
   letter-spacing: 0.05em;
   margin-bottom: 4px;
+}
+
+/* Spells out what the choice above actually costs — "org" means a teammate's
+   prompt spends this account, which the word alone does not say. */
+.roster-settings .rs-hint {
+  margin-top: 4px;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-3);
 }
 
 .roster-settings .mini-select {
