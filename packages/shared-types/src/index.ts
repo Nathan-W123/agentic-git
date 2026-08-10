@@ -697,7 +697,24 @@ export type AuditEventType =
    */
   | "workspace_collaboration_joined"
   /** A live editing session flushed a shared document into the overlay. */
-  | "workspace_collaboration_saved";
+  | "workspace_collaboration_saved"
+  /** A message was posted to a repository's shared group channel. */
+  | "channel_message_posted"
+  /** A threaded reply was posted under a channel message. */
+  | "channel_message_replied"
+  /** A reaction on a channel message was added or removed. */
+  | "channel_reaction_toggled"
+  /** An agent's per-channel display name, role, or model/effort setting changed. */
+  | "channel_agent_overridden"
+  /** A (user, provider) agent was added to or removed from a channel's opt-in roster. */
+  | "channel_agent_membership_changed"
+  /**
+   * A repository (and its cascaded channel state and grants) was removed.
+   * Runs and submitted tasks are never cascaded — see `removeRepository`'s
+   * doc comment in `@coord/persistence` — so this event marks the one
+   * irreversible removal of a repository's own state.
+   */
+  | "repository_deleted";
 
 export interface AuditEvent {
   id: string;

@@ -582,4 +582,91 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
     name: "repository-scoped-invitations",
     statements: [`ALTER TABLE invitations ADD COLUMN repository_id TEXT`],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    // The shared group channel: one room per repository, with every human and
+    // agent working it as a participant. Reactions are a join table keyed by
+    // (message, emoji, user) rather than a count, so "mine" can be answered
+    // correctly for whichever viewer is asking instead of only for whoever
+    // reacted most recently.
+    version: 19,
+    name: "repository-channels",
+    statements: [
+      `CREATE TABLE channel_messages (
+        id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL REFERENCES repositories(id),
+        project_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        author_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE channel_message_replies (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL REFERENCES channel_messages(id),
+        kind TEXT NOT NULL,
+        author_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE channel_message_reactions (
+        message_id TEXT NOT NULL REFERENCES channel_messages(id),
+        emoji TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (message_id, emoji, user_id)
+      )`,
+      `CREATE TABLE channel_agent_overrides (
+        repository_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        name TEXT,
+        model TEXT,
+        effort TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, agent_id)
+      )`,
+      `CREATE TABLE channel_read_cursors (
+        repository_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        read_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, user_id)
+      )`,
+      `CREATE INDEX channel_messages_by_repository
+         ON channel_messages(repository_id, created_at)`,
+      `CREATE INDEX channel_message_replies_by_message
+         ON channel_message_replies(message_id, created_at)`,
+      `CREATE INDEX channel_message_reactions_by_message
+         ON channel_message_reactions(message_id)`,
+    ],
+  },
+  {
+    // Mirrors schema.ts's migration 20 — see its comment for the full
+    // reasoning on the role column and the opt-in membership backfill.
+    version: 20,
+    name: "channel-agent-roles-and-membership",
+    statements: [
+      `ALTER TABLE channel_agent_overrides ADD COLUMN role TEXT`,
+      `CREATE TABLE channel_agent_members (
+        repository_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, user_id, provider)
+      )`,
+      `CREATE TABLE channel_membership_backfills (
+        repository_id TEXT PRIMARY KEY,
+        backfilled_at TEXT NOT NULL
+      )`,
+    ],
+  },
+  {
+    // Mirrors the SQLite migration of the same version. See its comment for
+    // why the column is nullable and why the creator is an additional path
+    // in rather than a replacement for manage_project.
+    version: 21,
+    name: "repository-creator",
+    statements: [
+      `ALTER TABLE repositories ADD COLUMN created_by TEXT REFERENCES users(id)`,
+    ],
+  },
 ];

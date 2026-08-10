@@ -49,6 +49,17 @@ export interface StoredRepository {
   branch: string;
   provider?: "local" | "git" | "github";
   remoteUrl?: string;
+  /**
+   * Who created this repository, for the creator-owns-it capabilities
+   * (deletion, repository-scoped promotion) layered on top of the ordinary
+   * org-role/grant permission pipeline.
+   *
+   * Undefined for any repository that predates this field — there is no
+   * honest way to backfill an owner for those rows, so they fall back to
+   * requiring the plain `manage_project` permission with no creator
+   * shortcut, rather than guessing.
+   */
+  createdBy?: UserId;
 }
 
 export type OrganizationRole =
@@ -591,6 +602,104 @@ export interface CreateApprovalInput {
   expiresAt: string;
 }
 
+export type ChannelEntryKind = "user" | "agent" | "system";
+
+/** One emoji's reaction summary from one viewer's point of view. */
+export interface ChannelReaction {
+  emoji: string;
+  count: number;
+  /** Whether the requesting viewer is among the reactors. */
+  mine: boolean;
+}
+
+export interface ChannelReply {
+  id: string;
+  messageId: string;
+  kind: ChannelEntryKind;
+  authorId: string;
+  content: string;
+  createdAt: string;
+}
+
+/**
+ * One message in a repository's shared group channel — the one room every
+ * human and agent working that repository shares, mirroring what
+ * `apps/web/public/data.js` produced locally before there was a server
+ * behind it.
+ */
+export interface ChannelMessage {
+  id: string;
+  repositoryId: string;
+  projectId: ProjectId;
+  kind: ChannelEntryKind;
+  authorId: string;
+  content: string;
+  createdAt: string;
+  replies: ChannelReply[];
+  /** Keyed by emoji; `mine` is relative to whichever viewer asked. */
+  reactions: Record<string, ChannelReaction>;
+}
+
+export interface AppendChannelMessageInput {
+  repositoryId: string;
+  projectId: ProjectId;
+  kind?: ChannelEntryKind;
+  authorId: string;
+  content: string;
+}
+
+export interface AddChannelReplyInput {
+  repositoryId: string;
+  messageId: string;
+  kind?: ChannelEntryKind;
+  authorId: string;
+  content: string;
+}
+
+export interface ChannelMessageFilter {
+  /** Exclusive cursor: only messages created strictly before this ISO time. */
+  before?: string;
+  limit?: number;
+}
+
+/**
+ * A per-(repository, agent) override of how an agent presents itself in one
+ * channel — a display name, a role label, and/or a model/reasoning-effort
+ * choice that is free to disagree with the agent's account-wide connection,
+ * the same way a person picks a different display name per Slack workspace.
+ *
+ * `role` is the only source of an agent's role — an agent is unlabeled ("")
+ * until a channel sets one, there is no vendor-guessed default — the same
+ * way `name` overrides the default "<Vendor> (<owner>)". One agent can be
+ * "Frontend Agent" in one repository and unlabeled, or something else
+ * entirely, in another.
+ */
+export interface ChannelAgentOverride {
+  repositoryId: string;
+  agentId: string;
+  name?: string;
+  role?: string;
+  model?: string;
+  effort?: string;
+  updatedAt: string;
+}
+
+/**
+ * One (repository, user, provider) triple that is an actual member of a
+ * channel — i.e. eligible to appear in its roster and be @mentioned there.
+ *
+ * Membership is opt-in: connecting a vendor CLI makes an agent usable, not
+ * automatically present in every repository's channel. See
+ * `channelAgentConnections` in server.ts for how this is enforced and for the
+ * one-time backfill that grandfathers in whatever was already visible before
+ * membership existed as a concept.
+ */
+export interface ChannelAgentMember {
+  repositoryId: string;
+  userId: string;
+  provider: string;
+}
+
 export const DEFAULT_ORGANIZATION_ID = "org_local";
 export const DEFAULT_PROJECT_ID = "project_local";
 
@@ -783,7 +892,18 @@ export interface CoordinationStore {
   deleteExpiredAuthSessions(now: string): Promise<number>;
 
   saveRepository(repository: StoredRepository): Promise<void>;
-  /** Removes a repository registration only when no task or run references it. */
+  /**
+   * Removes a repository registration only when no task or run references
+   * it — that is execution history, and is refused rather than lost.
+   *
+   * Everything else scoped to the repository (its shared channel — messages,
+   * replies, reactions, per-agent overrides and membership — and its
+   * per-repository access grants) is cascade-deleted: that is the
+   * repository's own state, not history, and leaving it behind would either
+   * block every future deletion outright (a channel message references its
+   * repository) or silently orphan rows a same-id repository created later
+   * would inherit.
+   */
   removeRepository(id: string): Promise<void>;
   listRepositories(): Promise<StoredRepository[]>;
   getRepository(id: string): Promise<StoredRepository | undefined>;
@@ -913,6 +1033,73 @@ export interface CoordinationStore {
   getRun(runId: string): Promise<RunDetail | undefined>;
   listAudit(runId?: string): Promise<AuditEvent[]>;
   verifyAudit(): Promise<AuditChainVerification>;
+
+  /**
+   * A repository's shared group channel, newest last.
+   *
+   * `viewerId` decides `mine` on each reaction; the stored rows have no
+   * concept of a single viewer. `filter.before` pages backward from the
+   * newest message so the client's default view (most recent) needs no
+   * cursor at all.
+   */
+  listChannelMessages(
+    repositoryId: string,
+    viewerId: UserId,
+    filter?: ChannelMessageFilter,
+  ): Promise<ChannelMessage[]>;
+  appendChannelMessage(
+    input: AppendChannelMessageInput,
+  ): Promise<ChannelMessage>;
+  addChannelReply(input: AddChannelReplyInput): Promise<ChannelReply>;
+  getChannelMessage(
+    repositoryId: string,
+    messageId: string,
+    viewerId: UserId,
+  ): Promise<ChannelMessage | undefined>;
+  /** Adds the viewer's reaction if absent, removes it if present. */
+  toggleChannelReaction(
+    repositoryId: string,
+    messageId: string,
+    userId: UserId,
+    emoji: string,
+  ): Promise<ChannelMessage>;
+  listChannelAgentOverrides(
+    repositoryId: string,
+  ): Promise<Record<string, ChannelAgentOverride>>;
+  setChannelAgentOverride(
+    repositoryId: string,
+    agentId: string,
+    patch: { name?: string; role?: string; model?: string; effort?: string },
+  ): Promise<ChannelAgentOverride>;
+  /** Every (user, provider) that is currently an opted-in member of this channel. */
+  listChannelAgentMembers(
+    repositoryId: string,
+  ): Promise<Array<{ userId: string; provider: string }>>;
+  /** Adds or removes one (repository, user, provider) membership row. */
+  setChannelAgentMember(
+    repositoryId: string,
+    userId: string,
+    provider: string,
+    isMember: boolean,
+  ): Promise<void>;
+  /**
+   * Whether the one-time grandfather backfill (see `channelAgentConnections`
+   * in server.ts) has already populated this repository's membership rows
+   * from whatever was visible before membership was opt-in. Checked and set
+   * per repository — not globally — so a repository created after this
+   * feature shipped is never backfilled and starts with no members.
+   */
+  hasBackfilledChannelMembership(repositoryId: string): Promise<boolean>;
+  markChannelMembershipBackfilled(repositoryId: string): Promise<void>;
+  markChannelRead(
+    repositoryId: string,
+    userId: UserId,
+    at: string,
+  ): Promise<void>;
+  getChannelReadCursor(
+    repositoryId: string,
+    userId: UserId,
+  ): Promise<string | undefined>;
 
   close(): Promise<void>;
 }

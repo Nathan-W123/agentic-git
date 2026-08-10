@@ -49,9 +49,17 @@ import type {
   ApiTokenRecord,
   AppendAuditInput,
   AddChangesetCommentInput,
+  AddChannelReplyInput,
+  AppendChannelMessageInput,
   ApprovalFilter,
   ArchiveAuditInput,
   ChangesetComment,
+  ChannelAgentOverride,
+  ChannelEntryKind,
+  ChannelMessage,
+  ChannelMessageFilter,
+  ChannelReaction,
+  ChannelReply,
   AuditArchiveResult,
   AuditEventFilter,
   AuthSessionRecord,
@@ -215,8 +223,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
     this.db
       .prepare(
         `INSERT INTO repositories
-           (id, path, branch, first_seen_at, provider, remote_url)
-         VALUES (?, ?, ?, ?, ?, ?)
+           (id, path, branch, first_seen_at, provider, remote_url, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO NOTHING`,
       )
       .run(
@@ -226,6 +234,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         new Date().toISOString(),
         repository.provider ?? "local",
         repository.remoteUrl ?? null,
+        repository.createdBy ?? null,
       );
     const existing = await this.getRepository(repository.id);
     if (
@@ -1466,9 +1475,59 @@ export class SqliteCoordinationStore implements CoordinationStore {
     );
   }
 
+  /**
+   * Runs and submitted tasks are execution history rather than repository
+   * state, so they are left to the `repositories(id)` foreign key on
+   * `runs`/`submitted_tasks`: deleting a repository that either still
+   * references fails loudly (SQLite's default `ON DELETE` action, with
+   * `PRAGMA foreign_keys = ON`), matching the store's documented contract.
+   *
+   * Everything else scoped to this repository — its shared channel (which
+   * would otherwise block deletion outright, since `channel_messages` also
+   * carries that foreign key) and its per-repository access grants — is the
+   * repository's *own* state, not history, and is cascaded here so a repeat
+   * registration of the same id never inherits another repository's chat
+   * room or grants.
+   */
   public async removeRepository(id: string): Promise<void> {
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      this.db
+        .prepare(
+          `DELETE FROM channel_message_reactions
+             WHERE message_id IN (
+               SELECT id FROM channel_messages WHERE repository_id = ?
+             )`,
+        )
+        .run(id);
+      this.db
+        .prepare(
+          `DELETE FROM channel_message_replies
+             WHERE message_id IN (
+               SELECT id FROM channel_messages WHERE repository_id = ?
+             )`,
+        )
+        .run(id);
+      this.db
+        .prepare("DELETE FROM channel_messages WHERE repository_id = ?")
+        .run(id);
+      this.db
+        .prepare("DELETE FROM channel_agent_overrides WHERE repository_id = ?")
+        .run(id);
+      this.db
+        .prepare("DELETE FROM channel_agent_members WHERE repository_id = ?")
+        .run(id);
+      this.db
+        .prepare("DELETE FROM channel_read_cursors WHERE repository_id = ?")
+        .run(id);
+      this.db
+        .prepare(
+          "DELETE FROM channel_membership_backfills WHERE repository_id = ?",
+        )
+        .run(id);
+      this.db
+        .prepare("DELETE FROM repository_grants WHERE repository_id = ?")
+        .run(id);
       this.db
         .prepare("DELETE FROM project_repositories WHERE repository_id = ?")
         .run(id);
@@ -2809,6 +2868,417 @@ export class SqliteCoordinationStore implements CoordinationStore {
     );
   }
 
+  public async listChannelMessages(
+    repositoryId: string,
+    viewerId: string,
+    filter: ChannelMessageFilter = {},
+  ): Promise<ChannelMessage[]> {
+    const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+    const clauses = ["repository_id = ?"];
+    const values: (string | number)[] = [repositoryId];
+    if (filter.before !== undefined) {
+      clauses.push("created_at < ?");
+      values.push(filter.before);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM channel_messages WHERE ${clauses.join(" AND ")}
+         ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+      )
+      .all(...values, limit) as Row[];
+    const bases = rows.reverse().map((row) => this.toChannelMessageBase(row));
+    return this.hydrateChannelMessages(bases, viewerId);
+  }
+
+  public async appendChannelMessage(
+    input: AppendChannelMessageInput,
+  ): Promise<ChannelMessage> {
+    const content = input.content.trim();
+    if (content.length === 0) {
+      throw new Error("A channel message must have content");
+    }
+    const message = {
+      id: createId("chanmsg"),
+      repositoryId: input.repositoryId,
+      projectId: input.projectId,
+      kind: input.kind ?? "user",
+      authorId: input.authorId,
+      content,
+      createdAt: new Date().toISOString(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO channel_messages
+           (id, repository_id, project_id, kind, author_id, content, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        message.id,
+        message.repositoryId,
+        message.projectId,
+        message.kind,
+        message.authorId,
+        message.content,
+        message.createdAt,
+      );
+    return { ...message, replies: [], reactions: {} };
+  }
+
+  public async addChannelReply(
+    input: AddChannelReplyInput,
+  ): Promise<ChannelReply> {
+    const owner = this.db
+      .prepare(
+        "SELECT id FROM channel_messages WHERE id = ? AND repository_id = ?",
+      )
+      .get(input.messageId, input.repositoryId) as Row | undefined;
+    if (owner === undefined) {
+      throw new Error(`Unknown channel message: ${input.messageId}`);
+    }
+    const content = input.content.trim();
+    if (content.length === 0) {
+      throw new Error("A reply must have content");
+    }
+    const reply: ChannelReply = {
+      id: createId("chanreply"),
+      messageId: input.messageId,
+      kind: input.kind ?? "user",
+      authorId: input.authorId,
+      content,
+      createdAt: new Date().toISOString(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO channel_message_replies
+           (id, message_id, kind, author_id, content, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .run(
+        reply.id,
+        reply.messageId,
+        reply.kind,
+        reply.authorId,
+        reply.content,
+        reply.createdAt,
+      );
+    return reply;
+  }
+
+  public async getChannelMessage(
+    repositoryId: string,
+    messageId: string,
+    viewerId: string,
+  ): Promise<ChannelMessage | undefined> {
+    const row = this.db
+      .prepare(
+        "SELECT * FROM channel_messages WHERE id = ? AND repository_id = ?",
+      )
+      .get(messageId, repositoryId) as Row | undefined;
+    if (row === undefined) {
+      return undefined;
+    }
+    const [hydrated] = this.hydrateChannelMessages(
+      [this.toChannelMessageBase(row)],
+      viewerId,
+    );
+    return hydrated;
+  }
+
+  public async toggleChannelReaction(
+    repositoryId: string,
+    messageId: string,
+    userId: string,
+    emoji: string,
+  ): Promise<ChannelMessage> {
+    const owner = this.db
+      .prepare(
+        "SELECT id FROM channel_messages WHERE id = ? AND repository_id = ?",
+      )
+      .get(messageId, repositoryId) as Row | undefined;
+    if (owner === undefined) {
+      throw new Error(`Unknown channel message: ${messageId}`);
+    }
+    const existing = this.db
+      .prepare(
+        `SELECT 1 FROM channel_message_reactions
+         WHERE message_id = ? AND emoji = ? AND user_id = ?`,
+      )
+      .get(messageId, emoji, userId) as Row | undefined;
+    if (existing === undefined) {
+      this.db
+        .prepare(
+          `INSERT INTO channel_message_reactions
+             (message_id, emoji, user_id, created_at)
+           VALUES (?, ?, ?, ?)`,
+        )
+        .run(messageId, emoji, userId, new Date().toISOString());
+    } else {
+      this.db
+        .prepare(
+          `DELETE FROM channel_message_reactions
+           WHERE message_id = ? AND emoji = ? AND user_id = ?`,
+        )
+        .run(messageId, emoji, userId);
+    }
+    const message = await this.getChannelMessage(repositoryId, messageId, userId);
+    if (message === undefined) {
+      throw new Error(`Unknown channel message: ${messageId}`);
+    }
+    return message;
+  }
+
+  public async listChannelAgentOverrides(
+    repositoryId: string,
+  ): Promise<Record<string, ChannelAgentOverride>> {
+    const rows = this.db
+      .prepare("SELECT * FROM channel_agent_overrides WHERE repository_id = ?")
+      .all(repositoryId) as Row[];
+    const result: Record<string, ChannelAgentOverride> = {};
+    for (const row of rows) {
+      const override = this.toChannelAgentOverride(row);
+      result[override.agentId] = override;
+    }
+    return result;
+  }
+
+  public async setChannelAgentOverride(
+    repositoryId: string,
+    agentId: string,
+    patch: { name?: string; role?: string; model?: string; effort?: string },
+  ): Promise<ChannelAgentOverride> {
+    const existing = this.db
+      .prepare(
+        "SELECT * FROM channel_agent_overrides WHERE repository_id = ? AND agent_id = ?",
+      )
+      .get(repositoryId, agentId) as Row | undefined;
+    const current =
+      existing === undefined ? undefined : this.toChannelAgentOverride(existing);
+    const name = patch.name ?? current?.name;
+    const role = patch.role ?? current?.role;
+    const model = patch.model ?? current?.model;
+    const effort = patch.effort ?? current?.effort;
+    const override: ChannelAgentOverride = {
+      repositoryId,
+      agentId,
+      ...(name === undefined ? {} : { name }),
+      ...(role === undefined ? {} : { role }),
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
+      updatedAt: new Date().toISOString(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO channel_agent_overrides
+           (repository_id, agent_id, name, role, model, effort, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(repository_id, agent_id) DO UPDATE SET
+           name = excluded.name,
+           role = excluded.role,
+           model = excluded.model,
+           effort = excluded.effort,
+           updated_at = excluded.updated_at`,
+      )
+      .run(
+        repositoryId,
+        agentId,
+        override.name ?? null,
+        override.role ?? null,
+        override.model ?? null,
+        override.effort ?? null,
+        override.updatedAt,
+      );
+    return override;
+  }
+
+  public async listChannelAgentMembers(
+    repositoryId: string,
+  ): Promise<Array<{ userId: string; provider: string }>> {
+    const rows = this.db
+      .prepare(
+        "SELECT user_id, provider FROM channel_agent_members WHERE repository_id = ?",
+      )
+      .all(repositoryId) as Row[];
+    return rows.map((row) => ({
+      userId: text(row, "user_id"),
+      provider: text(row, "provider"),
+    }));
+  }
+
+  public async setChannelAgentMember(
+    repositoryId: string,
+    userId: string,
+    provider: string,
+    isMember: boolean,
+  ): Promise<void> {
+    if (isMember) {
+      this.db
+        .prepare(
+          `INSERT INTO channel_agent_members (repository_id, user_id, provider, created_at)
+           VALUES (?, ?, ?, ?)
+           ON CONFLICT(repository_id, user_id, provider) DO NOTHING`,
+        )
+        .run(repositoryId, userId, provider, new Date().toISOString());
+    } else {
+      this.db
+        .prepare(
+          "DELETE FROM channel_agent_members WHERE repository_id = ? AND user_id = ? AND provider = ?",
+        )
+        .run(repositoryId, userId, provider);
+    }
+  }
+
+  public async hasBackfilledChannelMembership(
+    repositoryId: string,
+  ): Promise<boolean> {
+    const row = this.db
+      .prepare(
+        "SELECT repository_id FROM channel_membership_backfills WHERE repository_id = ?",
+      )
+      .get(repositoryId) as Row | undefined;
+    return row !== undefined;
+  }
+
+  public async markChannelMembershipBackfilled(
+    repositoryId: string,
+  ): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO channel_membership_backfills (repository_id, backfilled_at)
+         VALUES (?, ?)
+         ON CONFLICT(repository_id) DO NOTHING`,
+      )
+      .run(repositoryId, new Date().toISOString());
+  }
+
+  public async markChannelRead(
+    repositoryId: string,
+    userId: string,
+    at: string,
+  ): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO channel_read_cursors (repository_id, user_id, read_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(repository_id, user_id) DO UPDATE SET read_at = excluded.read_at`,
+      )
+      .run(repositoryId, userId, at);
+  }
+
+  public async getChannelReadCursor(
+    repositoryId: string,
+    userId: string,
+  ): Promise<string | undefined> {
+    const row = this.db
+      .prepare(
+        "SELECT read_at FROM channel_read_cursors WHERE repository_id = ? AND user_id = ?",
+      )
+      .get(repositoryId, userId) as Row | undefined;
+    return row === undefined ? undefined : text(row, "read_at");
+  }
+
+  private toChannelMessageBase(
+    row: Row,
+  ): Omit<ChannelMessage, "replies" | "reactions"> {
+    return {
+      id: text(row, "id"),
+      repositoryId: text(row, "repository_id"),
+      projectId: text(row, "project_id") as ProjectId,
+      kind: text(row, "kind") as ChannelEntryKind,
+      authorId: text(row, "author_id"),
+      content: text(row, "content"),
+      createdAt: text(row, "created_at"),
+    };
+  }
+
+  private toChannelReply(row: Row): ChannelReply {
+    return {
+      id: text(row, "id"),
+      messageId: text(row, "message_id"),
+      kind: text(row, "kind") as ChannelEntryKind,
+      authorId: text(row, "author_id"),
+      content: text(row, "content"),
+      createdAt: text(row, "created_at"),
+    };
+  }
+
+  private toChannelAgentOverride(row: Row): ChannelAgentOverride {
+    const name = optionalText(row, "name");
+    const role = optionalText(row, "role");
+    const model = optionalText(row, "model");
+    const effort = optionalText(row, "effort");
+    return {
+      repositoryId: text(row, "repository_id"),
+      agentId: text(row, "agent_id"),
+      ...(name === undefined ? {} : { name }),
+      ...(role === undefined ? {} : { role }),
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
+      updatedAt: text(row, "updated_at"),
+    };
+  }
+
+  /** Bulk-loads replies and reactions for a page of messages in two queries. */
+  private hydrateChannelMessages(
+    bases: ReadonlyArray<Omit<ChannelMessage, "replies" | "reactions">>,
+    viewerId: string,
+  ): ChannelMessage[] {
+    if (bases.length === 0) {
+      return [];
+    }
+    const ids = bases.map((base) => base.id);
+    const placeholders = ids.map(() => "?").join(", ");
+    const replyRows = this.db
+      .prepare(
+        `SELECT * FROM channel_message_replies WHERE message_id IN (${placeholders})
+         ORDER BY created_at, rowid`,
+      )
+      .all(...ids) as Row[];
+    const reactionRows = this.db
+      .prepare(
+        `SELECT * FROM channel_message_reactions WHERE message_id IN (${placeholders})`,
+      )
+      .all(...ids) as Row[];
+
+    const repliesByMessage = new Map<string, ChannelReply[]>();
+    for (const row of replyRows) {
+      const reply = this.toChannelReply(row);
+      const list = repliesByMessage.get(reply.messageId) ?? [];
+      list.push(reply);
+      repliesByMessage.set(reply.messageId, list);
+    }
+    const reactionsByMessage = new Map<string, Map<string, Set<string>>>();
+    for (const row of reactionRows) {
+      const messageId = text(row, "message_id");
+      const emoji = text(row, "emoji");
+      const userId = text(row, "user_id");
+      const byEmoji =
+        reactionsByMessage.get(messageId) ?? new Map<string, Set<string>>();
+      const reactors = byEmoji.get(emoji) ?? new Set<string>();
+      reactors.add(userId);
+      byEmoji.set(emoji, reactors);
+      reactionsByMessage.set(messageId, byEmoji);
+    }
+    return bases.map((base) => ({
+      ...base,
+      replies: repliesByMessage.get(base.id) ?? [],
+      reactions: this.toReactionMap(reactionsByMessage.get(base.id), viewerId),
+    }));
+  }
+
+  private toReactionMap(
+    byEmoji: Map<string, Set<string>> | undefined,
+    viewerId: string,
+  ): Record<string, ChannelReaction> {
+    const result: Record<string, ChannelReaction> = {};
+    if (byEmoji === undefined) {
+      return result;
+    }
+    for (const [emoji, userIds] of byEmoji) {
+      result[emoji] = { emoji, count: userIds.size, mine: userIds.has(viewerId) };
+    }
+    return result;
+  }
+
   public async close(): Promise<void> {
     this.db.close();
   }
@@ -2816,6 +3286,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
   private toRepository(row: Row): StoredRepository {
     const provider = optionalText(row, "provider");
     const remoteUrl = optionalText(row, "remote_url");
+    const createdBy = optionalText(row, "created_by");
     return {
       id: text(row, "id"),
       path: text(row, "path"),
@@ -2824,6 +3295,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         ? {}
         : { provider: provider as "git" | "github" }),
       ...(remoteUrl === undefined ? {} : { remoteUrl }),
+      ...(createdBy === undefined ? {} : { createdBy }),
     };
   }
 
