@@ -162,12 +162,54 @@ function rosterSettings(agent) {
  * The self-service button for one's own agent is unconditional, matching
  * that the server never restricts it by permission level either.
  */
+/**
+ * The hover card for one roster entry.
+ *
+ * Only for this account's own agents: the usage route reports the *caller's*
+ * account, so showing it beside a teammate's agent would put your consumption
+ * under their name. Rendered from state rather than fetched on open, so the
+ * first hover shows "Checking…" and every later one is instant.
+ */
+function usageTip(agent) {
+  if (agent.mine !== true) {
+    return "";
+  }
+  const report = state.providerUsage[agent.id];
+  let body;
+  if (report === undefined || report.loading === true) {
+    body = `<div class="rr-usage-empty">Checking usage…</div>`;
+  } else if (report.unavailableReason !== undefined) {
+    body = `<div class="rr-usage-empty">${esc(report.unavailableReason)}</div>`;
+  } else if ((report.windows ?? []).length === 0) {
+    body = `<div class="rr-usage-empty">No usage reported.</div>`;
+  } else {
+    body = `${report.windows
+      .map((window) => {
+        const percent = Math.max(0, Math.min(100, Number(window.percentUsed) || 0));
+        return `<div class="rr-usage-row">
+          <span class="rr-usage-label">${esc(window.label)}</span>
+          <span class="rr-usage-bar"><i style="width:${percent}%"></i></span>
+          <span class="rr-usage-pct">${Math.round(percent)}%</span>
+        </div>${
+          window.resetsAt === undefined
+            ? ""
+            : `<div class="rr-usage-reset">Resets ${esc(window.resetsAt)}</div>`
+        }`;
+      })
+      .join("")}
+      ${report.source === undefined ? "" : `<div class="rr-usage-src">${esc(report.source)}</div>`}`;
+  }
+  return `<div class="rr-usage" role="tooltip">${body}</div>`;
+}
+
 function rosterRow(agent, canModerate) {
   const renaming = state.chatRenamingId === agent.id;
   const settingsOpen = state.chatSettingsOpenId === agent.id;
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
-      data-act="channel-settings-toggle" data-value="${esc(agent.id)}">
+      data-act="channel-settings-toggle" data-value="${esc(agent.id)}"
+      data-hover="agent-usage" data-hover-value="${esc(agent.id)}">
+      ${usageTip(agent)}
       ${agentFace(agent, 30)}
       <span class="rr-body">
         <div class="rr-name">${esc(agent.name)}</div>

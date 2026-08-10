@@ -34,6 +34,7 @@ import {
   saveChannelFile,
   ensureChannelMessages,
   ensureChannelRoster,
+  ensureProviderUsage,
   ensureRepositoryGrants,
   refreshChannelMessages,
   addChannelAgent,
@@ -1394,6 +1395,24 @@ window.addEventListener("resize", () => {
   if (state.route === "chats" && $(".thread-panel") !== null) {
     setPanelWidth($(".thread-panel").offsetWidth);
   }
+});
+
+/**
+ * Usage is fetched the first time a pointer rests on a roster entry, not with
+ * the roster: the figure costs a CLI invocation on the server, so a channel
+ * with several agents must not pay for all of them to render. The card itself
+ * is CSS-driven, so this only fills it in — `ensureProviderUsage` keeps the
+ * answer, and a second hover re-renders from state without another request.
+ */
+document.addEventListener("mouseover", (event) => {
+  const target =
+    event.target instanceof Element
+      ? event.target.closest('[data-hover="agent-usage"]')
+      : null;
+  if (target === null) {
+    return;
+  }
+  void ensureProviderUsage(target.dataset.hoverValue, render);
 });
 
 /**
