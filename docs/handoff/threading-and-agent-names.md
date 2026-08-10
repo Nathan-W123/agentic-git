@@ -135,3 +135,39 @@ Always confirm a deploy by fetching the asset and grepping for the change;
 accounts, agent sign-ins and channel memberships are lost each time. Attach a
 volume at `/data` (service → Settings → Volumes) before treating anything
 configured in the deployment as durable.
+
+## Next task — device-auth credentials expire permanently
+
+Symptom: Codex connects through device auth, works briefly, then every run
+fails with `401 Unauthorized` on `wss://api.openai.com/v1/responses`.
+Reconnecting fixes it for about an hour.
+
+Cause, confirmed by reading both halves:
+
+- `finishDeviceAuth` (`apps/web/src/providers.ts`) stores **a snapshot of
+  `auth.json`** taken once at sign-in, as a `session_file` credential.
+- `withCredentialHome` (`services/workspace-manager/src/user-credentials.ts`)
+  writes that snapshot into a temp home for each run and deletes the home in
+  its `finally`. The Codex CLI refreshes its OAuth token during a run and
+  writes the new one into `CODEX_HOME/auth.json` — into the directory being
+  destroyed. **Every refreshed token is discarded.**
+
+So the credential is not wrong, it is frozen. It verifies at sign-in, which is
+why connecting looks fine, and dies for good once the original short-lived
+access token expires.
+
+Claude is not visibly affected because `finishClaudeAuth` handles it
+separately and `claude setup-token` issues something long-lived — the same
+discard costs it nothing for far longer. The fix should not be special-cased
+to Codex regardless; any vendor CLI that rotates its own token has this.
+
+Fix: read `auth.json` back out of the credential home after the run and, if it
+differs from what was written in, store it as the new credential.
+`openCredentialHome`/`close()` already owns writing the snapshot in, so
+writing a changed one back belongs there; `providers.ts` then persists it
+through the credential store. Needs a test that a rotated file is written back
+and a stable one is not.
+
+Note while diagnosing: every redeploy wipes `/data`, which forces a reconnect,
+which buys another hour of it appearing to work. Attach the volume first or
+this will look intermittent.
