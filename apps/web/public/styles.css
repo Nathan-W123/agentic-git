@@ -5859,3 +5859,29 @@ body.resizing-ns * {
     padding-right: var(--safe-right);
   }
 }
+
+/* --------------------------------------------- phone form controls ---- */
+/* iOS Safari zooms the whole page in when a text field smaller than 16px
+   takes focus, and it does not zoom back out. That is what "the window goes
+   misaligned" is: tapping search, opening the terminal, or typing a message
+   all focus a field, and every one of them was under 16px — 13.5px for the
+   two search boxes, 12.5px for the composer, 12px for the terminal.
+
+   16px is the threshold Safari checks, so it is the fix. The alternative —
+   `maximum-scale=1` on the viewport — also stops the zoom, by disabling
+   pinch-zoom for everyone, and taking magnification away from people who
+   need it to read is a bad trade for a layout nicety.
+
+   `.app`/`#auth-root` prefixes are here to outrank the per-component sizes
+   (`.composer textarea`, `.tree-search input`, `.roster-rename input`), which
+   are all one class deep; a bare element selector loses to every one of them
+   and would silently do nothing. */
+@media (max-width: 600px) {
+  .app input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .app textarea,
+  .app select,
+  #auth-root input,
+  #auth-root textarea {
+    font-size: 16px;
+  }
+}
