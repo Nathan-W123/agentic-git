@@ -27,8 +27,17 @@ RUN apt-get update \
 # PATH lookup off Windows, so without these installed the connect screen can
 # only offer a pasted token and reports "No usable ... CLI was found on this
 # host" — which is per-user sign-in working on a laptop but not on a deploy.
-RUN npm install -g @anthropic-ai/claude-code @openai/codex \
-  && npm cache clean --force
+# --allow-scripts is not optional here. Claude Code ships a stub bin and pulls
+# the real per-platform executable in its postinstall; npm 11 blocks install
+# scripts by default, so without this the package installs "successfully" and
+# leaves nothing runnable behind — `claude auth status` then fails and the host
+# reports no usable CLI. Codex needs no such grant: its bin is plain JS, which
+# is why it worked while Claude did not.
+RUN npm install -g --allow-scripts=@anthropic-ai/claude-code \
+      @anthropic-ai/claude-code @openai/codex \
+  && npm cache clean --force \
+  && claude --version \
+  && codex --version
 # COORD_PORT is deliberately not set here. A platform that assigns a port
 # passes it as PORT, and pinning COORD_PORT in the image would outrank it —
 # leaving the container listening where the router is not looking. Unset, the
