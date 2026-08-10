@@ -109,12 +109,28 @@ export const SESSION_FILE_SHARES_REFRESH_TOKEN =
  */
 export type CredentialOrigin = "pasted" | "copied" | "device_auth";
 
+/**
+ * Who may task this agent through a shared repository channel.
+ *
+ * `personal` (the default, and what every connection had before this field
+ * existed) means only the connecting user can task it — nobody else even sees
+ * it as more than "connected" in the roster. `org` means anyone with access
+ * to a repository this agent works in may task it there too, by @mentioning
+ * it in that repository's channel. This is metadata about who may *dispatch
+ * work*, not a secret: it is safe to return in a {@link UserCredentialSummary}
+ * to any caller who may already see the vendor name, including a teammate
+ * reading the channel roster.
+ */
+export type CredentialVisibility = "personal" | "org";
+
 export interface UserCredentialInput {
   kind: UserCredentialKind;
   secret: string;
   /** Free text the user supplies to tell their own connections apart. */
   label?: string;
   origin?: CredentialOrigin;
+  /** Defaults to `"personal"` when omitted — see {@link CredentialVisibility}. */
+  visibility?: CredentialVisibility;
 }
 
 /** Everything but the secret. Safe to return to a browser. */
@@ -125,8 +141,22 @@ export interface UserCredentialSummary {
   origin: CredentialOrigin;
   createdAt: string;
   lastVerifiedAt: string | undefined;
+  /**
+   * Set when this credential has been seen to fail authentication. Stored
+   * and usable are different things, and a screen that shows only the first
+   * reports an agent as connected while everything it is asked to do fails.
+   */
+  unusableReason?: string;
   /** Last four characters, so a user can recognize which secret is stored. */
   hint: string;
+  /**
+   * Always present, defaulting to `"personal"` for every connection made
+   * before this field existed — see {@link CredentialVisibility}. Unlike
+   * `label`, this is safe to show to someone other than the owner: it is
+   * exactly what a channel roster needs to tell a pingable agent from a
+   * visible-only one.
+   */
+  visibility: CredentialVisibility;
 }
 
 export interface UserCredential extends UserCredentialSummary {
@@ -139,7 +169,12 @@ interface StoredRecord {
   origin?: CredentialOrigin;
   createdAt: string;
   lastVerifiedAt?: string;
+  /** Why this credential stopped working, when it has. */
+  unusableReason?: string;
+  unusableAt?: string;
   hint: string;
+  /** Absent means `"personal"` — see {@link CredentialVisibility}. */
+  visibility?: CredentialVisibility;
   /** AES-256-GCM, all base64. */
   iv: string;
   tag: string;
@@ -346,6 +381,7 @@ export class UserCredentialStore {
         ? {}
         : { label: input.label }),
       ...(input.origin === undefined ? {} : { origin: input.origin }),
+      ...(input.visibility === undefined ? {} : { visibility: input.visibility }),
       createdAt: new Date().toISOString(),
       hint: credentialHint(input.kind, secret),
       ...this.encrypt(secret),
@@ -356,6 +392,32 @@ export class UserCredentialStore {
   }
 
   /** Records that the credential answered a live call, for the UI to show. */
+  /**
+   * Records that a stored credential no longer authenticates.
+   *
+   * Being stored and being usable are different things, and only the first
+   * was ever visible: a session whose OAuth refresh has stopped working sits
+   * in the vault looking exactly like a working one, so the dashboard went on
+   * reporting the agent as connected while every task it was given failed to
+   * authenticate. The reason is kept alongside so the screen can say what
+   * happened rather than only that something did.
+   */
+  public async markUnusable(
+    userId: string,
+    vendor: VendorCliKind,
+    reason: string,
+  ): Promise<void> {
+    const file = await this.read();
+    const record = file.users[userId]?.[vendor];
+    if (record === undefined) {
+      return;
+    }
+    delete record.lastVerifiedAt;
+    record.unusableReason = reason.slice(0, 300);
+    record.unusableAt = new Date().toISOString();
+    await this.write(file);
+  }
+
   public async markVerified(
     userId: string,
     vendor: VendorCliKind,
@@ -367,6 +429,8 @@ export class UserCredentialStore {
       return;
     }
     record.lastVerifiedAt = new Date().toISOString();
+    delete record.unusableReason;
+    delete record.unusableAt;
     if (label !== undefined && label.length > 0) {
       record.label = label;
     }
@@ -424,7 +488,14 @@ function summarize(
     origin: record.origin ?? "pasted",
     createdAt: record.createdAt,
     lastVerifiedAt: record.lastVerifiedAt,
+    ...(record.unusableReason === undefined
+      ? {}
+      : { unusableReason: record.unusableReason }),
     hint: record.hint,
+    // Absent on every connection made before this field existed, and on any
+    // record whose owner never opened the org-wide choice — both read as
+    // "personal", which is the behavior nothing should change under.
+    visibility: record.visibility ?? "personal",
   };
 }
 

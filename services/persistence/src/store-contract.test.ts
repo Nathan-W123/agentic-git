@@ -2300,4 +2300,435 @@ for (const backend of backends) {
       await cleanup();
     }
   });
+
+  test(`${backend.name}: createdBy persists, and is absent for repositories that predate it`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const creator = await store.createUser({
+        email: "creator@example.com",
+        displayName: "Creator",
+        passwordDigest: "digest",
+      });
+      await store.saveRepository({
+        id: "repo_with_creator",
+        path: "/with-creator.git",
+        branch: "main",
+        createdBy: creator.id,
+      });
+      assert.equal(
+        (await store.getRepository("repo_with_creator"))?.createdBy,
+        creator.id,
+      );
+
+      // No createdBy at all — the honest state for anything that predates
+      // the field, rather than a guessed owner.
+      await store.saveRepository({
+        id: "repo_without_creator",
+        path: "/without-creator.git",
+        branch: "main",
+      });
+      assert.equal(
+        (await store.getRepository("repo_without_creator"))?.createdBy,
+        undefined,
+      );
+
+      // A resubmission (e.g. a retried creation call) must not move
+      // createdBy once the first insert has recorded it.
+      await store.saveRepository({
+        id: "repo_with_creator",
+        path: "/with-creator.git",
+        branch: "main",
+      });
+      assert.equal(
+        (await store.getRepository("repo_with_creator"))?.createdBy,
+        creator.id,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: removeRepository cascades the repository's channel and grants`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_to_delete",
+        path: "/to-delete.git",
+        branch: "main",
+      });
+      const alice = await store.createUser({
+        email: "alice-delete@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+      const guest = await store.createUser({
+        email: "guest-delete@example.invalid",
+        displayName: "Guest",
+        passwordDigest: "unused",
+      });
+
+      const posted = await store.appendChannelMessage({
+        repositoryId: "repo_to_delete",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "Message in a repository about to be deleted.",
+      });
+      await store.addChannelReply({
+        repositoryId: "repo_to_delete",
+        messageId: posted.id,
+        authorId: alice.id,
+        content: "A reply too.",
+      });
+      await store.toggleChannelReaction(
+        "repo_to_delete",
+        posted.id,
+        alice.id,
+        "👍",
+      );
+      await store.setChannelAgentOverride("repo_to_delete", "agent_1", {
+        name: "Renamed Agent",
+      });
+      await store.setChannelAgentMember(
+        "repo_to_delete",
+        alice.id,
+        "anthropic",
+        true,
+      );
+      await store.markChannelRead(
+        "repo_to_delete",
+        alice.id,
+        "2026-01-01T00:00:00.000Z",
+      );
+      await store.saveRepositoryGrant({
+        repositoryId: "repo_to_delete",
+        userId: guest.id,
+        role: "developer",
+        grantedBy: alice.id,
+        createdAt: "2026-01-01T00:00:00.000Z",
+      });
+
+      await store.removeRepository("repo_to_delete");
+
+      assert.equal(await store.getRepository("repo_to_delete"), undefined);
+      assert.deepEqual(
+        await store.listChannelMessages("repo_to_delete", alice.id),
+        [],
+      );
+      assert.deepEqual(
+        await store.listChannelAgentOverrides("repo_to_delete"),
+        {},
+      );
+      assert.deepEqual(
+        await store.listChannelAgentMembers("repo_to_delete"),
+        [],
+      );
+      assert.equal(
+        await store.getChannelReadCursor("repo_to_delete", alice.id),
+        undefined,
+      );
+      assert.deepEqual(
+        await store.listRepositoryGrants("repo_to_delete"),
+        [],
+      );
+      assert.deepEqual(await store.listGrantsForUser(guest.id), []);
+
+      // A repository created later under the same id starts with none of
+      // the deleted repository's channel or grants attached to it.
+      await store.saveRepository({
+        id: "repo_to_delete",
+        path: "/to-delete-again.git",
+        branch: "main",
+      });
+      assert.deepEqual(
+        await store.listChannelMessages("repo_to_delete", alice.id),
+        [],
+      );
+      assert.deepEqual(
+        await store.listRepositoryGrants("repo_to_delete"),
+        [],
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: removeRepository refuses while a submitted task or run still references it`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_with_task",
+        path: "/with-task.git",
+        branch: "main",
+      });
+      await store.submitTask({
+        repositoryId: "repo_with_task",
+        objective: "Do something",
+        agentId: "scripted-generic-cli",
+        validationCommands: [],
+      });
+      await assert.rejects(store.removeRepository("repo_with_task"));
+      // The repository is untouched by the refused attempt.
+      assert.notEqual(
+        await store.getRepository("repo_with_task"),
+        undefined,
+      );
+
+      await store.saveRepository({
+        id: "repo_with_run",
+        path: "/with-run.git",
+        branch: "main",
+      });
+      await store.createRun({
+        repository: { id: "repo_with_run", path: "/with-run.git", branch: "main" },
+        mode: "coordinated",
+        baseVersion: BASE_VERSION,
+      });
+      await assert.rejects(store.removeRepository("repo_with_run"));
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a repository channel threads, reacts, and tracks per-viewer state`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_channel",
+        path: "/channel.git",
+        branch: "main",
+      });
+      const alice = await store.createUser({
+        email: "alice@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+      const bob = await store.createUser({
+        email: "bob@example.invalid",
+        displayName: "Bob",
+        passwordDigest: "unused",
+      });
+
+      const posted = await store.appendChannelMessage({
+        repositoryId: "repo_channel",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "  Kicking off this repository's shared channel.  ",
+      });
+      // Content is trimmed, and an empty message is not a message at all.
+      assert.equal(
+        posted.content,
+        "Kicking off this repository's shared channel.",
+      );
+      assert.equal(posted.kind, "user");
+      assert.deepEqual(posted.replies, []);
+      assert.deepEqual(posted.reactions, {});
+      await assert.rejects(
+        store.appendChannelMessage({
+          repositoryId: "repo_channel",
+          projectId: DEFAULT_PROJECT_ID,
+          authorId: alice.id,
+          content: "   ",
+        }),
+        /content/u,
+      );
+
+      const reply = await store.addChannelReply({
+        repositoryId: "repo_channel",
+        messageId: posted.id,
+        authorId: bob.id,
+        content: "Glad to be here.",
+      });
+      assert.equal(reply.messageId, posted.id);
+      await assert.rejects(
+        store.addChannelReply({
+          repositoryId: "repo_channel",
+          messageId: "chanmsg_missing",
+          authorId: bob.id,
+          content: "orphan",
+        }),
+        /Unknown channel message/u,
+      );
+
+      // Reactions are per-viewer: Alice's own reaction should not read as
+      // "mine" for Bob, and toggling twice is on, then off.
+      const afterAliceReacts = await store.toggleChannelReaction(
+        "repo_channel",
+        posted.id,
+        alice.id,
+        "👍",
+      );
+      assert.deepEqual(afterAliceReacts.reactions["👍"], {
+        emoji: "👍",
+        count: 1,
+        mine: true,
+      });
+      const seenByBob = await store.getChannelMessage(
+        "repo_channel",
+        posted.id,
+        bob.id,
+      );
+      assert.deepEqual(seenByBob?.reactions["👍"], {
+        emoji: "👍",
+        count: 1,
+        mine: false,
+      });
+      const afterBobReacts = await store.toggleChannelReaction(
+        "repo_channel",
+        posted.id,
+        bob.id,
+        "👍",
+      );
+      assert.equal(afterBobReacts.reactions["👍"]?.count, 2);
+      const afterAliceUnreacts = await store.toggleChannelReaction(
+        "repo_channel",
+        posted.id,
+        alice.id,
+        "👍",
+      );
+      assert.equal(afterAliceUnreacts.reactions["👍"]?.count, 1);
+      assert.equal(afterAliceUnreacts.reactions["👍"]?.mine, false);
+
+      // A short, deliberate gap so the second message's timestamp cannot tie
+      // with the first's — `before` pagination is a strict string compare.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const second = await store.appendChannelMessage({
+        repositoryId: "repo_channel",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: bob.id,
+        content: "Second message.",
+      });
+      const newestOnly = await store.listChannelMessages("repo_channel", alice.id, {
+        limit: 1,
+      });
+      assert.equal(newestOnly.length, 1);
+      assert.equal(newestOnly[0]?.id, second.id);
+      const olderPage = await store.listChannelMessages("repo_channel", alice.id, {
+        before: second.createdAt,
+      });
+      assert.deepEqual(
+        olderPage.map((message) => message.id),
+        [posted.id],
+      );
+      assert.equal(olderPage[0]?.replies.length, 1);
+
+      assert.equal(
+        await store.getChannelMessage("repo_channel", "chanmsg_missing", alice.id),
+        undefined,
+      );
+
+      // Per-(repository, agent) overrides merge rather than replace: setting
+      // just the model afterward must not clear the name set earlier.
+      const named = await store.setChannelAgentOverride("repo_channel", "agent_1", {
+        name: "Scout",
+      });
+      assert.equal(named.name, "Scout");
+      assert.equal(named.model, undefined);
+      const withModel = await store.setChannelAgentOverride(
+        "repo_channel",
+        "agent_1",
+        { model: "opus" },
+      );
+      assert.equal(withModel.name, "Scout");
+      assert.equal(withModel.model, "opus");
+      // A role is just another field in the same merge — set independently,
+      // and it must not disturb the name or model already there.
+      const withRole = await store.setChannelAgentOverride(
+        "repo_channel",
+        "agent_1",
+        { role: "Frontend Agent" },
+      );
+      assert.equal(withRole.name, "Scout");
+      assert.equal(withRole.model, "opus");
+      assert.equal(withRole.role, "Frontend Agent");
+      const overrides = await store.listChannelAgentOverrides("repo_channel");
+      assert.equal(overrides["agent_1"]?.name, "Scout");
+      assert.equal(overrides["agent_1"]?.role, "Frontend Agent");
+      assert.equal(Object.keys(overrides).length, 1);
+
+      // Opt-in channel membership: empty until explicitly added, additions
+      // are per (repository, user, provider), and removal is symmetric.
+      assert.deepEqual(
+        await store.listChannelAgentMembers("repo_channel"),
+        [],
+      );
+      await store.setChannelAgentMember("repo_channel", alice.id, "anthropic", true);
+      await store.setChannelAgentMember("repo_channel", bob.id, "openai", true);
+      const members = await store.listChannelAgentMembers("repo_channel");
+      assert.equal(members.length, 2);
+      assert.ok(
+        members.some(
+          (member) => member.userId === alice.id && member.provider === "anthropic",
+        ),
+      );
+      assert.ok(
+        members.some(
+          (member) => member.userId === bob.id && member.provider === "openai",
+        ),
+      );
+      // Adding the same membership twice is not an error and does not
+      // duplicate the row.
+      await store.setChannelAgentMember("repo_channel", alice.id, "anthropic", true);
+      assert.equal(
+        (await store.listChannelAgentMembers("repo_channel")).length,
+        2,
+      );
+      // Membership is scoped to its own repository.
+      assert.deepEqual(
+        await store.listChannelAgentMembers("repo_channel_other"),
+        [],
+      );
+      await store.setChannelAgentMember("repo_channel", alice.id, "anthropic", false);
+      const afterRemoval = await store.listChannelAgentMembers("repo_channel");
+      assert.equal(afterRemoval.length, 1);
+      assert.equal(afterRemoval[0]?.userId, bob.id);
+      // Removing something never present is a harmless no-op.
+      await store.setChannelAgentMember("repo_channel", alice.id, "google", false);
+
+      // The one-time backfill flag is per repository and starts unset.
+      assert.equal(
+        await store.hasBackfilledChannelMembership("repo_channel"),
+        false,
+      );
+      await store.markChannelMembershipBackfilled("repo_channel");
+      assert.equal(
+        await store.hasBackfilledChannelMembership("repo_channel"),
+        true,
+      );
+      assert.equal(
+        await store.hasBackfilledChannelMembership("repo_channel_other"),
+        false,
+      );
+      // Marking it again is idempotent, not an error.
+      await store.markChannelMembershipBackfilled("repo_channel");
+      assert.equal(
+        await store.hasBackfilledChannelMembership("repo_channel"),
+        true,
+      );
+
+      // Read cursors are per (repository, user).
+      assert.equal(
+        await store.getChannelReadCursor("repo_channel", alice.id),
+        undefined,
+      );
+      await store.markChannelRead(
+        "repo_channel",
+        alice.id,
+        "2026-01-05T00:00:00.000Z",
+      );
+      assert.equal(
+        await store.getChannelReadCursor("repo_channel", alice.id),
+        "2026-01-05T00:00:00.000Z",
+      );
+      assert.equal(
+        await store.getChannelReadCursor("repo_channel", bob.id),
+        undefined,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
 }

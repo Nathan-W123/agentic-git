@@ -10,7 +10,12 @@ import {
   type CoordinationStore,
 } from "@coord/persistence";
 
-import { ApiGateway, type ApiOperations } from "./server.js";
+import {
+  ApiGateway,
+  narrateTaskEvent,
+  summariseObjective,
+  type ApiOperations,
+} from "./server.js";
 import { hashPassword } from "./auth.js";
 
 const BOOTSTRAP_TOKEN = "bootstrap-token-with-at-least-24-characters";
@@ -21,6 +26,38 @@ interface TestRuntime {
   store: CoordinationStore;
   origin: string;
   port: number;
+  /**
+   * The vendors each user has "connected", for the `channel/agents` roster
+   * route to read back through `chatProviders.connectionsFor`. A real
+   * deployment backs this with `UserCredentialStore`; the test fixture only
+   * needs the same safe shape — vendor and visibility, and nothing else —
+   * since that route never reads a secret in the first place. `visibility`
+   * defaults to "personal" when a test omits it, same as the real store.
+   */
+  chatConnections: Map<
+    string,
+    Array<{ provider: string; visibility?: "personal" | "org" }>
+  >;
+  /**
+   * Every call the fake `submitTask` operation received, in order — for
+   * asserting @mention dispatch submits under the *mentioned agent's owner*,
+   * not the sender, and does so only when it should.
+   */
+  submittedTasks: Array<{
+    projectId: string;
+    repositoryId: string;
+    objective: string;
+    agentId?: string;
+    vendor?: string;
+    actorId: string;
+  }>;
+  /**
+   * Every prompt the fake `complete` was asked, and what it should answer —
+   * for asserting that a follow-up in a thread reaches the agent at all, and
+   * that the thread's own history goes with it.
+   */
+  chatPrompts: Array<{ userId: string; provider: string; prompt: string }>;
+  chatAnswer: { text?: string; fail?: string };
 }
 
 class TestClient {
@@ -90,6 +127,27 @@ class TestClient {
   }
 }
 
+/**
+ * Waits for something a fire-and-forget path will make true.
+ *
+ * The reply route answers the caller before the agent has been asked, on
+ * purpose — so the assertion cannot read the answer straight after the POST.
+ */
+async function waitFor(
+  condition: () => Promise<boolean>,
+  message: string,
+  timeoutMs = 4_000,
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await condition()) {
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(message);
+}
+
 async function rawHttp(port: number, request: string): Promise<string> {
   return await new Promise<string>((resolve, reject) => {
     const socket = net.createConnection(port, "127.0.0.1");
@@ -120,7 +178,61 @@ async function startRuntime(
   } = {},
 ): Promise<TestRuntime> {
   const store = new InMemoryCoordinationStore();
+  const chatConnections = new Map<
+    string,
+    Array<{ provider: string; visibility?: "personal" | "org" }>
+  >();
+  const submittedTasks: TestRuntime["submittedTasks"] = [];
+  const chatPrompts: TestRuntime["chatPrompts"] = [];
+  const chatAnswer: TestRuntime["chatAnswer"] = {};
   const operations: ApiOperations = {
+    chatProviders: {
+      async list() {
+        return [];
+      },
+      async signIn() {
+        return {};
+      },
+      async connect() {
+        return {};
+      },
+      async disconnect() {},
+      async options() {
+        return {};
+      },
+      async usage() {
+        return {};
+      },
+      async setSettings() {
+        return {};
+      },
+      async complete(input: any) {
+        chatPrompts.push({
+          userId: String(input?.userId ?? ""),
+          provider: String(input?.provider ?? ""),
+          prompt: String(input?.messages?.[0]?.content ?? ""),
+        });
+        if (chatAnswer.fail !== undefined) {
+          throw new Error(chatAnswer.fail);
+        }
+        return chatAnswer.text === undefined ? {} : { text: chatAnswer.text };
+      },
+      async connectionsFor(userIds) {
+        const result: Record<
+          string,
+          Array<{ provider: string; visibility: "personal" | "org" }>
+        > = {};
+        for (const userId of userIds) {
+          result[userId] = (chatConnections.get(userId) ?? []).map(
+            (connection) => ({
+              provider: connection.provider,
+              visibility: connection.visibility ?? "personal",
+            }),
+          );
+        }
+        return result;
+      },
+    },
     async listAgents() {
       return [
         { id: "test-agent", adapter: "generic-cli", default: true },
@@ -131,6 +243,7 @@ async function startRuntime(
         id: input.id,
         path: `/canonical/${input.id}.git`,
         branch: input.branch ?? "main",
+        createdBy: input.actorId,
       };
       await store.saveRepository(repository);
       await store.linkRepository(input.projectId, repository.id);
@@ -143,17 +256,29 @@ async function startRuntime(
         branch: input.branch ?? "main",
         provider: "github" as const,
         remoteUrl: `https://github.com/${input.repository}.git`,
+        createdBy: input.actorId,
       };
       await store.saveRepository(repository);
       await store.linkRepository(input.projectId, repository.id);
       return repository;
     },
     async submitTask(input) {
+      submittedTasks.push({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        objective: input.objective,
+        actorId: input.actorId,
+        ...(input.agentId === undefined ? {} : { agentId: input.agentId }),
+        ...(input.vendor === undefined ? {} : { vendor: input.vendor }),
+      });
       return await store.submitTask({
         projectId: input.projectId,
         repositoryId: input.repositoryId,
         objective: input.objective,
-        agentId: input.agentId ?? "test-agent",
+        // A real deployment resolves `vendor` to one of its own configured
+        // agent ids (see `resolveAgentIdForVendor` in apps/web/src/index.ts);
+        // the fixture only needs a stable, distinguishable id back.
+        agentId: input.agentId ?? (input.vendor === undefined ? "test-agent" : `test-agent-${input.vendor}`),
         validationCommands: [],
         submittedBy: input.actorId,
       });
@@ -255,6 +380,10 @@ async function startRuntime(
     store,
     origin: `http://127.0.0.1:${address.port}`,
     port: address.port,
+    chatConnections,
+    submittedTasks,
+    chatPrompts,
+    chatAnswer,
   };
 }
 
@@ -2239,6 +2368,741 @@ test("anybody can create an account, and it comes with somewhere to work", async
   assert.equal(notTheirs.status === 200, false, "another team's project must not be readable");
 });
 
+test("the repository channel round-trips messages, replies, reactions, reads, and agent overrides", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "channel-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const empty = await owner.request(`${base}/messages`);
+  assert.equal(empty.status, 200);
+  assert.deepEqual(empty.data.messages, []);
+  assert.deepEqual(empty.data.agentOverrides, {});
+  assert.equal(empty.data.readAt, undefined);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "  Kicking off this channel.  " },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(posted.data.message.content, "Kicking off this channel.");
+  assert.equal(posted.data.message.kind, "user");
+  const messageId = posted.data.message.id;
+
+  // An empty message is not a message at all.
+  const blank = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "   " },
+  });
+  assert.equal(blank.status, 400);
+
+  const reply = await owner.request(`${base}/messages/${messageId}/replies`, {
+    method: "POST",
+    body: { content: "First reply." },
+  });
+  assert.equal(reply.status, 201, JSON.stringify(reply.data));
+  assert.equal(reply.data.reply.messageId, messageId);
+
+  const reacted = await owner.request(
+    `${base}/messages/${messageId}/reactions`,
+    { method: "POST", body: { emoji: "🎉" } },
+  );
+  assert.equal(reacted.status, 200);
+  assert.equal(reacted.data.message.reactions["🎉"].count, 1);
+  assert.equal(reacted.data.message.reactions["🎉"].mine, true);
+
+  // Toggling the same emoji again removes it.
+  const unreacted = await owner.request(
+    `${base}/messages/${messageId}/reactions`,
+    { method: "POST", body: { emoji: "🎉" } },
+  );
+  assert.equal(unreacted.data.message.reactions["🎉"], undefined);
+
+  const named = await owner.request(`${base}/agents/agent_1`, {
+    method: "POST",
+    body: { name: "Scout" },
+  });
+  assert.equal(named.status, 200);
+  assert.equal(named.data.override.name, "Scout");
+
+  const read = await owner.request(`${base}/read`, { method: "POST" });
+  assert.equal(read.status, 200);
+  assert.equal(typeof read.data.readAt, "string");
+
+  const after = await owner.request(`${base}/messages`);
+  assert.equal(after.data.messages.length, 1);
+  assert.equal(after.data.messages[0].replies.length, 1);
+  assert.equal(after.data.agentOverrides["agent_1"].name, "Scout");
+  assert.equal(after.data.readAt, read.data.readAt);
+
+  // Replying to, or reacting on, a message that does not exist is a 404, not
+  // a crash.
+  const missing = await owner.request(
+    `${base}/messages/does-not-exist/replies`,
+    { method: "POST", body: { content: "orphan" } },
+  );
+  assert.equal(missing.status, 404);
+});
+
+test("the repository channel is scoped by repository access, like everything else", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "private-repo");
+
+  // Registration gives this account its own organization and project — it
+  // has no membership, and no grant, on the owner's repository.
+  const newcomer = new TestClient(runtime.origin);
+  await newcomer.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "outsider@example.com",
+      displayName: "Outsider",
+      password: PASSWORD,
+    },
+  });
+
+  // This newcomer has no membership and no grant in the owner's organization
+  // at all, so `authorizeRepository` refuses at the project level — the same
+  // 403 a totally unrelated stranger gets from every other project-scoped
+  // route (see "a stranger with no grant and no membership still sees
+  // nothing" above). The disguised-as-404 behavior is reserved for someone
+  // who *can* reach the project but not this particular repository.
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const blockedList = await newcomer.request(`${base}/messages`);
+  assert.equal(blockedList.status, 403);
+  const blockedPost = await newcomer.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "sneaking in" },
+  });
+  assert.equal(blockedPost.status, 403);
+
+  // The owner's own view is unaffected.
+  const ownersView = await owner.request(`${base}/messages`);
+  assert.equal(ownersView.status, 200);
+});
+
+test("the channel roster is the real connected agents of everyone with access to the repository", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "roster-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // Reached through an organization role — the same source `authorizeProject`
+  // reads when nobody named a narrower grant.
+  const colleague = await runtime.store.createUser({
+    email: "colleague@example.com",
+    displayName: "Colleague Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: colleague.id,
+    role: "developer",
+  });
+
+  // Reached through a per-repository grant and *no* organization role at
+  // all — the other source `authorizeRepository` accepts, and the whole
+  // reason grants exist: sharing one repository without joining the team.
+  const guest = await runtime.store.createUser({
+    email: "guest@example.com",
+    displayName: "Guest Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveRepositoryGrant({
+    repositoryId,
+    userId: guest.id,
+    role: "developer",
+    grantedBy: bootstrapped.user.id,
+    createdAt: new Date().toISOString(),
+  });
+
+  // Has agents connected, but no membership and no grant on this repository
+  // at all. Their connections exist in the same fixture map everyone else's
+  // do, so this only proves something if the route actually checks access
+  // rather than just echoing whatever `connectionsFor` was asked about.
+  const stranger = await runtime.store.createUser({
+    email: "stranger-roster@example.com",
+    displayName: "Stranger",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+
+  runtime.chatConnections.set(bootstrapped.user.id, [{ provider: "anthropic" }]);
+  runtime.chatConnections.set(colleague.id, [
+    { provider: "openai" },
+    { provider: "google" },
+  ]);
+  runtime.chatConnections.set(guest.id, [{ provider: "anthropic" }]);
+  runtime.chatConnections.set(stranger.id, [{ provider: "anthropic" }]);
+
+  const roster = await owner.request(`${base}/agents`);
+  assert.equal(roster.status, 200);
+
+  const byUser = new Map<string, string[]>();
+  for (const entry of roster.data.agents as any[]) {
+    assert.equal(entry.connected, true);
+    // The safe-to-browser shape only: no secret, no hint, no credential kind,
+    // no free-text label the credential's own owner chose for themselves.
+    for (const forbidden of ["secret", "hint", "kind", "label"]) {
+      assert.equal(
+        Object.prototype.hasOwnProperty.call(entry, forbidden),
+        false,
+        `roster entry must not carry "${forbidden}"`,
+      );
+    }
+    const list = byUser.get(entry.userId) ?? [];
+    list.push(entry.provider);
+    byUser.set(entry.userId, list);
+  }
+
+  assert.deepEqual(byUser.get(bootstrapped.user.id)?.sort(), ["anthropic"]);
+  assert.deepEqual(byUser.get(colleague.id)?.sort(), ["google", "openai"]);
+  assert.deepEqual(byUser.get(guest.id)?.sort(), ["anthropic"]);
+  // The whole point: a stranger's connected agents never surface on a
+  // repository they cannot reach, no matter what the credential store knows.
+  assert.equal(byUser.has(stranger.id), false);
+
+  const guestEntry = (roster.data.agents as any[]).find(
+    (entry) => entry.userId === guest.id,
+  );
+  assert.equal(guestEntry.userName, "Guest Dev");
+
+  // Every collaborator sees the same roster — a colleague's own agent is not
+  // theirs, but a shared channel roster is meaningless if they cannot see it.
+  const colleagueClient = new TestClient(runtime.origin);
+  await colleagueClient.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: colleague.email, password: PASSWORD },
+  });
+  const colleagueView = await colleagueClient.request(`${base}/agents`);
+  assert.equal(colleagueView.status, 200);
+  assert.deepEqual(
+    (colleagueView.data.agents as any[]).map((entry) => entry.userId).sort(),
+    (roster.data.agents as any[]).map((entry) => entry.userId).sort(),
+  );
+
+  // The stranger cannot even ask: no membership and no grant on this
+  // repository, the same 403 every other project-scoped route gives someone
+  // who cannot reach the project at all.
+  const strangerClient = new TestClient(runtime.origin);
+  await strangerClient.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "outsider-roster@example.com",
+      displayName: "Outsider",
+      password: PASSWORD,
+    },
+  });
+  const blocked = await strangerClient.request(`${base}/agents`);
+  assert.equal(blocked.status, 403);
+});
+
+test("posting to the repository channel broadcasts over the existing event socket", async (t) => {
+  const runtime = await startRuntime(t, { webSocketPollIntervalMs: 10 });
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "live-repo");
+
+  // Simulates the case the frontend cares about: a second browser tab already
+  // has the channel's event socket open when a message is posted, and must
+  // see it appear without polling or a refresh.
+  const payloads = await new Promise<any[]>((resolve, reject) => {
+    const socket = net.createConnection(runtime.port, "127.0.0.1");
+    let response = Buffer.alloc(0);
+    let headersRead = false;
+    let frameBytes = Buffer.alloc(0);
+    let posted = false;
+    const timer = setTimeout(() => {
+      socket.destroy();
+      reject(new Error("Timed out waiting for the channel message to broadcast"));
+    }, 4_000);
+    socket.once("connect", () => {
+      const key = randomBytes(16).toString("base64");
+      socket.write(
+        `GET /api/v1/events?projectId=${DEFAULT_PROJECT_ID}&after=0 HTTP/1.1\r\n` +
+          `Host: 127.0.0.1:${runtime.port}\r\n` +
+          "Upgrade: websocket\r\n" +
+          "Connection: Upgrade\r\n" +
+          `Sec-WebSocket-Key: ${key}\r\n` +
+          "Sec-WebSocket-Version: 13\r\n" +
+          `Origin: ${runtime.origin}\r\n` +
+          `Cookie: ${owner.cookieHeader}\r\n\r\n`,
+      );
+    });
+    socket.on("data", (chunk: Buffer) => {
+      try {
+        if (!headersRead) {
+          response = Buffer.concat([response, chunk]);
+          const boundary = response.indexOf("\r\n\r\n");
+          if (boundary < 0) {
+            return;
+          }
+          assert.match(
+            response.subarray(0, boundary).toString("ascii"),
+            /^HTTP\/1\.1 101 /u,
+          );
+          frameBytes = response.subarray(boundary + 4);
+          headersRead = true;
+        } else {
+          frameBytes = Buffer.concat([frameBytes, chunk]);
+        }
+        const messages = decodeTextFrames(frameBytes).map((entry) =>
+          JSON.parse(entry),
+        );
+        if (messages.some((entry) => entry.type === "connected") && !posted) {
+          posted = true;
+          void owner
+            .request(
+              `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages`,
+              { method: "POST", body: { content: "Hello, second tab." } },
+            )
+            .catch(reject);
+        }
+        if (
+          messages.some(
+            (entry) =>
+              entry.type === "audit" &&
+              entry.event?.type === "channel_message_posted" &&
+              entry.event?.data?.repositoryId === repositoryId,
+          )
+        ) {
+          clearTimeout(timer);
+          socket.destroy();
+          resolve(messages);
+        }
+      } catch (error) {
+        clearTimeout(timer);
+        socket.destroy();
+        reject(error);
+      }
+    });
+    socket.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+  });
+
+  assert.equal(
+    payloads.some(
+      (entry) => entry.type === "audit" && entry.event?.type === "channel_message_posted",
+    ),
+    true,
+  );
+});
+
+/**
+ * Adds a colleague with organization-role access to the owner's repository —
+ * the same shape the roster tests above use — and returns a logged-in client
+ * for them, for the @mention dispatch tests below.
+ */
+async function addColleague(
+  runtime: TestRuntime,
+  email: string,
+): Promise<{ id: string; email: string; client: TestClient }> {
+  const colleague = await runtime.store.createUser({
+    email,
+    displayName: "Colleague",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: colleague.id,
+    role: "developer",
+  });
+  const client = new TestClient(runtime.origin);
+  const login = await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email, password: PASSWORD },
+  });
+  assert.equal(login.status, 200);
+  return { id: colleague.id, email: colleague.email, client };
+}
+
+test("a personal agent refuses a stranger's @mention and dispatches nothing", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "mention-personal-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // "Owner"'s connected Claude is personal — the default, and what every
+  // connection had before visibility existed.
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+
+  const colleague = await addColleague(runtime, "colleague-personal@example.com");
+
+  // The exact text the frontend's mention-autocomplete would have inserted:
+  // "@" + `${AGENT_LABEL[provider]} (${firstWord(displayName)})`.
+  const posted = await colleague.client.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please fix the login bug" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // The whole point: nothing was submitted under anyone's account.
+  assert.equal(runtime.submittedTasks.length, 0);
+
+  const after = await owner.request(`${base}/messages`);
+  const systemMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "system",
+  );
+  assert.equal(systemMessages.length, 1);
+  assert.match(systemMessages[0].content, /personal to Owner/u);
+  assert.match(systemMessages[0].content, /@Claude \(Owner\)/u);
+  // The stranger's own message still posted — a refused mention must not
+  // also swallow what they typed.
+  assert.equal(
+    (after.data.messages as any[]).some(
+      (message) => message.content === "@Claude (Owner) please fix the login bug",
+    ),
+    true,
+  );
+});
+
+test("an org-wide agent accepts a stranger's @mention and dispatches under the owner's credential", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "mention-org-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+
+  const colleague = await addColleague(runtime, "colleague-org@example.com");
+
+  const posted = await colleague.client.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please fix the login bug" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(runtime.submittedTasks.length, 1);
+  const [task] = runtime.submittedTasks;
+  assert.ok(task !== undefined);
+  // Dispatched under the *mentioned agent's owner*, never the mentioner —
+  // the whole reason `actorId` here is not simply `principal.user.id`.
+  assert.equal(task.actorId, bootstrapped.user.id);
+  assert.notEqual(task.actorId, colleague.id);
+  assert.equal(task.vendor, "claude");
+  assert.match(task.objective, /please fix the login bug/u);
+
+  const after = await owner.request(`${base}/messages`);
+  const systemMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(systemMessages.length, 1);
+  assert.match(systemMessages[0].content, /On it/u);
+});
+
+test("an agent's own owner can always @mention it, personal or org-wide", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "mention-self-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) kick off the release checklist" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(runtime.submittedTasks.length, 1);
+  const [selfTask] = runtime.submittedTasks;
+  assert.ok(selfTask !== undefined);
+  assert.equal(selfTask.actorId, bootstrapped.user.id);
+  assert.equal(selfTask.vendor, "claude");
+
+  const after = await owner.request(`${base}/messages`);
+  const systemMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(systemMessages.length, 1);
+  assert.match(systemMessages[0].content, /On it/u);
+});
+
+/**
+ * Auto-claim (the no-@mention path in `dispatchChannelMentions` /
+ * `maybeAutoClaimTask`): when a channel message reads as a task and exactly
+ * one connected agent is a clear fit by role/name text, it is dispatched
+ * automatically through the same `dispatchOneMention` an explicit @mention
+ * uses. These tests cover the five scenarios called out in the brief: an
+ * obvious single match, an ambiguous tie, plain chatter, a personal agent
+ * that belongs to someone else, and an explicit @mention suppressing the
+ * whole path even when an unmentioned agent would otherwise have matched.
+ */
+test("a clearly-scoped task message auto-claims to the one obviously-best agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "auto-claim-obvious");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const backend = await addColleague(runtime, "backend-obvious@example.com");
+  const database = await addColleague(runtime, "database-obvious@example.com");
+  runtime.chatConnections.set(backend.id, [{ provider: "openai", visibility: "org" }]);
+  runtime.chatConnections.set(database.id, [{ provider: "google", visibility: "org" }]);
+
+  // Rename each connected agent to reflect its lane, the same customization
+  // `setChannelAgentOverride` already offers — see `scoreCandidate`'s doc
+  // comment for why the auto-claim scorer matches against name text as well
+  // as whatever role (if any) the channel has declared.
+  const named = await owner.request(`${base}/agents/anthropic`, {
+    method: "POST",
+    body: { name: "Settings Page Layout Bot" },
+  });
+  assert.equal(named.status, 200, JSON.stringify(named.data));
+  assert.equal(
+    (await owner.request(`${base}/agents/${backend.id}:openai`, {
+      method: "POST",
+      body: { name: "Auth Billing Backend Bot" },
+    })).status,
+    200,
+  );
+  assert.equal(
+    (await owner.request(`${base}/agents/${database.id}:google`, {
+      method: "POST",
+      body: { name: "Database Schema Migrations Bot" },
+    })).status,
+    200,
+  );
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "please update the settings page layout" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const [task] = runtime.submittedTasks;
+  assert.ok(task !== undefined);
+  assert.equal(task.actorId, bootstrapped.user.id);
+  assert.equal(task.vendor, "claude");
+
+  const after = await owner.request(`${base}/messages`);
+  const systemMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(systemMessages.length, 1, JSON.stringify(systemMessages));
+  // The claim no longer names the agent in prose, because the message is
+  // now written *by* it: the channel shows the author, so repeating the name
+  // in the text would say the same thing twice. Asserting the author is the
+  // stronger check anyway — it is what the screen actually renders from.
+  assert.equal(
+    systemMessages[0].authorId,
+    `${bootstrapped.user.id}:anthropic`,
+    JSON.stringify(systemMessages[0]),
+  );
+  assert.match(systemMessages[0].content, /On it/u);
+  assert.match(systemMessages[0].content, /Nobody was @mentioned/u);
+});
+
+test("an ambiguous task message is dispatched anyway, deterministically", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "auto-claim-ambiguous");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const first = await addColleague(runtime, "first-ambiguous@example.com");
+  const second = await addColleague(runtime, "second-ambiguous@example.com");
+  runtime.chatConnections.set(first.id, [{ provider: "openai", visibility: "org" }]);
+  runtime.chatConnections.set(second.id, [{ provider: "google", visibility: "org" }]);
+
+  // Same three content words in both names, in different order — a real
+  // near-tie between two equally-plausible agents, not a contrived one.
+  assert.equal(
+    (await owner.request(`${base}/agents/${first.id}:openai`, {
+      method: "POST",
+      body: { name: "Error Handling API Bot" },
+    })).status,
+    200,
+  );
+  assert.equal(
+    (await owner.request(`${base}/agents/${second.id}:google`, {
+      method: "POST",
+      body: { name: "Api Error Handling Service" },
+    })).status,
+    200,
+  );
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "can we clean up the error handling for the api" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // A near-tie used to mean silence, on the reasoning that a coin flip
+  // spends somebody's account. With two agents connected — the ordinary
+  // case — near-ties are the norm, and the channel answered nothing that
+  // was not @mentioned. Never answering is the worse failure, so the tie is
+  // broken rather than refused.
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  // Stable, not arbitrary: the same message must not land on a different
+  // agent each time it is sent.
+  const repeat = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "can we clean up the error handling for the api" },
+  });
+  assert.equal(repeat.status, 201);
+  assert.equal(runtime.submittedTasks.length, 2);
+  assert.equal(
+    runtime.submittedTasks[0]?.actorId,
+    runtime.submittedTasks[1]?.actorId,
+    "the same request must reach the same agent twice",
+  );
+
+  // The agent answers in its own voice, and that answer is the thread the
+  // work hangs off — not a system aside.
+  const after = await owner.request(`${base}/messages`);
+  const agentMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.ok(agentMessages.length >= 1, JSON.stringify(after.data.messages));
+  assert.match(agentMessages[0].content, /On it/u);
+  assert.ok(
+    (agentMessages[0].replies ?? []).some((reply: any) =>
+      /^Task: |could not start/u.test(String(reply.content)),
+    ),
+    JSON.stringify(agentMessages[0].replies),
+  );
+});
+
+test("a plain non-task message auto-claims nothing", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "auto-claim-chatter");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "thanks!" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const after = await owner.request(`${base}/messages`);
+  const systemMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "system",
+  );
+  assert.equal(systemMessages.length, 0, JSON.stringify(systemMessages));
+});
+
+test("a best-fit agent personal to someone else is never auto-claimed for a stranger's message", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "auto-claim-personal");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // "Owner"'s connected Claude is personal, and its name would otherwise be
+  // an obvious, unambiguous match for the message below.
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Settings Page Layout Bot" },
+    })).status,
+    200,
+  );
+
+  const stranger = await addColleague(runtime, "stranger-personal@example.com");
+  const posted = await stranger.client.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "please update the settings page layout" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // Nothing was submitted under anyone's account, and — a deliberate design
+  // choice, see `maybeAutoClaimTask`'s doc comment — no system message
+  // reveals that a personal agent would otherwise have been the pick. The
+  // stranger sees only their own message; asking for this agent by name is
+  // still available to them, and gets the usual "personal to Owner" refusal.
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const after = await owner.request(`${base}/messages`);
+  assert.equal((after.data.messages as any[]).length, 1);
+  const systemMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "system",
+  );
+  assert.equal(systemMessages.length, 0, JSON.stringify(systemMessages));
+});
+
+test("an explicit @mention suppresses auto-claim even when an unmentioned agent would otherwise match", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "auto-claim-vs-mention");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const backend = await addColleague(runtime, "backend-vs-mention@example.com");
+  runtime.chatConnections.set(backend.id, [{ provider: "openai", visibility: "org" }]);
+
+  // Owner's own agent's name is the strongest textual match for the message
+  // below, but it is not the one @mentioned.
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Settings Page Layout Bot" },
+    })).status,
+    200,
+  );
+  assert.equal(
+    (await owner.request(`${base}/agents/${backend.id}:openai`, {
+      method: "POST",
+      body: { name: "Backend Bot (Bella)" },
+    })).status,
+    200,
+  );
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "@Backend Bot (Bella) please update the settings page layout",
+    },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // Only the explicitly mentioned agent was dispatched — the whole point.
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const [task] = runtime.submittedTasks;
+  assert.ok(task !== undefined);
+  assert.equal(task.actorId, backend.id);
+  assert.equal(task.vendor, "codex");
+
+  const after = await owner.request(`${base}/messages`);
+  const systemMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(systemMessages.length, 1, JSON.stringify(systemMessages));
+  assert.match(systemMessages[0].content, /On it/u);
+  // The auto-claim explanation text never appears — confirms the mention
+  // path, not auto-claim, is what fired.
+  assert.doesNotMatch(systemMessages[0].content, /is taking this/u);
+});
+
 test("registration can be closed off", async (t) => {
   // Some deployments want invitations to be the only way in; this is the
   // switch, and it works without a redeploy.
@@ -2264,4 +3128,855 @@ test("registration can be closed off", async (t) => {
       process.env["COORD_DISABLE_REGISTRATION"] = previous;
     }
   }
+});
+
+/**
+ * A question is not a task.
+ *
+ * "@Claude what are you working on" was being filed as a submitted task
+ * named after the question, with a thread and a progress indicator attached
+ * to work that would never exist — so the agent appeared to type forever.
+ * Naming an agent is evidence the sender wants *something*; the question
+ * mark is what says it is an answer rather than work.
+ */
+test("a question to an agent is answered in the channel, not turned into a task", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "question-not-task");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) what are you working on" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // No task, and therefore no thread and nothing to keep an indicator alive.
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const after = await owner.request(`${base}/messages`);
+  const agentMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
+  assert.deepEqual(agentMessages[0].replies ?? [], []);
+});
+
+test("a request that names no verb this list knows is still work when an agent is named", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "mention-is-intent");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+
+  // "kick off" is in no verb list here. Naming the agent is the intent, and
+  // answering this with chat instead of doing it would be the worse failure.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) kick off the release checklist" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+
+  const after = await owner.request(`${base}/messages`);
+  const agentMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(agentMessages.length, 1);
+  // The thread is named, and named after the work rather than an identifier.
+  const replies = agentMessages[0].replies ?? [];
+  assert.ok(
+    replies.some((reply: any) => /^Task: /u.test(String(reply.content))),
+    JSON.stringify(replies),
+  );
+  assert.ok(
+    !replies.some((reply: any) => /task_[0-9a-f-]{8}/u.test(String(reply.content))),
+    "a task id is not a name anybody can read",
+  );
+});
+
+/**
+ * The opening line is a summary, not an echo.
+ *
+ * Reading somebody's own sentence back to them says nothing about whether it
+ * was understood, and a request usually arrives with context in front of it —
+ * "this is a greenfield project… can you get started" is a request to get
+ * started, and the first clause is background.
+ */
+test("an opening line summarises the request rather than repeating it", () => {
+  assert.equal(
+    summariseObjective("please create the initial skeleton for a browser chess game"),
+    "create the initial skeleton for a browser chess game",
+  );
+  assert.equal(
+    summariseObjective("can we make a simple chess game with a browser UI"),
+    "make a simple chess game with a browser UI",
+  );
+  // Background first, ask second: the ask is what gets summarised.
+  assert.equal(
+    summariseObjective(
+      "this is a greenfield project, the end goal is a chess engine browser based. can you get started on the skeleton",
+    ),
+    "get started on the skeleton",
+  );
+  // Nothing to strip is left alone rather than mangled.
+  assert.equal(
+    summariseObjective("kick off the release checklist"),
+    "kick off the release checklist",
+  );
+  // Long requests are cut on a word boundary, never mid-word.
+  const long = summariseObjective(
+    "rewrite the entire authentication subsystem including session handling, token rotation, and the password reset flow end to end",
+  );
+  assert.ok(long.length <= 91, long);
+  assert.ok(long.endsWith("…"), long);
+  assert.ok(!/\w…$/u.test(long.replace(/\s\S*…$/u, "")), long);
+});
+
+/**
+ * A request to the room, sharing no vocabulary with any agent's role.
+ *
+ * "can someone start building general infrastructure for a chess engine" is
+ * unmistakably a task and was met with silence, because scoring required a
+ * candidate to share a word with the message before anybody could take it.
+ * Relevance decides who; it must not decide whether.
+ */
+test("an unaddressed task is taken even when it matches no agent's role", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "unmatched-but-taken");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "can someone start building general infrastructure for a chess engine",
+    },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.equal(runtime.submittedTasks[0]?.actorId, bootstrapped.user.id);
+
+  const after = await owner.request(`${base}/messages`);
+  const agentMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
+  // Nobody was named, so the agent says why it picked the work up.
+  assert.match(agentMessages[0].content, /Nobody was @mentioned/u);
+});
+
+/**
+ * A task that ends at integration records `explanation` and a `status`, not
+ * `error` — so reading only `error` turned the most common ending into a bare
+ * "I could not finish this." with nothing a reader could act on. Observed in a
+ * real thread: a failed task, no reason given, and the question that followed
+ * it went unanswered.
+ */
+test("a failed task says why, whichever shape the failure was recorded in", () => {
+  const integration = narrateTaskEvent("task_failed", {
+    status: "policy_failed",
+    explanation: "the changeset touched a protected path",
+  });
+  assert.match(String(integration), /policy|rules would not let/iu);
+  assert.match(String(integration), /protected path/u);
+
+  // No explanation at all still names the outcome rather than shrugging.
+  assert.equal(
+    narrateTaskEvent("task_failed", { status: "conflict" }),
+    "I could not finish this — the change clashed with work that landed " +
+      "while I was writing it, and I could not merge the two.",
+  );
+
+  // The `error` shape every other emitter uses is unchanged.
+  assert.equal(
+    narrateTaskEvent("task_failed", { stage: "execution", error: "boom" }),
+    "I could not finish this: boom",
+  );
+
+  // An expired sign-in keeps its own remedy, and does not get an integration
+  // reason bolted onto it.
+  assert.match(
+    String(
+      narrateTaskEvent("task_failed", {
+        error: "OAuth session expired and could not be refreshed",
+      }),
+    ),
+    /sign-in has expired\. Reconnect me from My Agents/u,
+  );
+
+  // Nothing to say at all is still the honest fallback.
+  assert.equal(
+    narrateTaskEvent("task_failed", {}),
+    "I could not finish this.",
+  );
+});
+
+/**
+ * A thread hangs off one agent's message about one task, so a reply in it is
+ * addressed to that agent and needs no @mention. The route used to store the
+ * reply and stop, which is why "what did you get done then?" got silence.
+ */
+test("a reply in an agent's thread is answered by that agent, with the thread as context", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "thread-reply-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // The thread as the task narrator leaves it: an agent-authored root, and a
+  // failure with no detail — exactly the state the question follows.
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it — scoping a chess engine architecture.",
+  });
+  await runtime.store.addChannelReply({
+    repositoryId,
+    messageId: root.id,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "I could not finish this.",
+  });
+
+  runtime.chatAnswer.text = "I got as far as the move generator and stopped.";
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "what did you get done then?" } },
+  );
+  assert.equal(replied.status, 201);
+
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    const thread = listed.data.messages.find(
+      (message: any) => message.id === root.id,
+    );
+    return thread?.replies?.some(
+      (reply: any) => reply.content === runtime.chatAnswer.text,
+    ) === true;
+  }, "the agent never answered the question in its own thread");
+
+  const asked = runtime.chatPrompts.at(-1);
+  assert.equal(asked?.userId, ownerId);
+  assert.equal(asked?.provider, "anthropic");
+  // The thread went with the question: without it the agent is being asked
+  // what it did with no record of what it did.
+  assert.match(String(asked?.prompt), /what did you get done then\?/u);
+  assert.match(String(asked?.prompt), /scoping a chess engine architecture/u);
+  assert.match(String(asked?.prompt), /I could not finish this\./u);
+  // The answer is attributed to the agent whose thread it is, not the asker.
+  const listed = await owner.request(`${base}/messages`);
+  const answer = listed.data.messages
+    .find((message: any) => message.id === root.id)
+    ?.replies?.at(-1);
+  assert.equal(answer.kind, "agent");
+  assert.equal(answer.authorId, `${ownerId}:anthropic`);
+});
+
+/** A thread on a person's message is a conversation between people. */
+test("a reply in a person's thread does not summon an agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  runtime.chatConnections.set(bootstrapped.user.id, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "human-thread-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "Notes from standup." },
+  });
+  const before = runtime.chatPrompts.length;
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(posted.data.message.id)}/replies`,
+    { method: "POST", body: { content: "what did you get done then?" } },
+  );
+  assert.equal(replied.status, 201);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(
+    runtime.chatPrompts.length,
+    before,
+    "a human thread must not spend somebody's model usage",
+  );
+});
+
+/*
+ * Per-repository role labels: a `role` override on `setChannelAgentOverride`
+ * (see `ChannelAgentOverride` in store.ts) is the only source of an agent's
+ * role — there is no vendor-guessed default — and reaches the roster and,
+ * for a dispatched task, the objective the agent actually receives.
+ */
+
+test("a channel's role override reaches the roster and the objective a dispatched task receives", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "role-override-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+
+  // Before any override, the agent is unlabeled — no vendor-guessed default.
+  // (The roster route itself carries no `role` field; the client resolves it
+  // from `agentOverrides`, same as `name`/`model`/`effort` — see
+  // `channelAgentsFor` in data.js. What this route needs to keep working is
+  // just that it still answers normally with nothing set.)
+  const beforeRoster = await owner.request(`${base}/agents`);
+  assert.equal(beforeRoster.status, 200, JSON.stringify(beforeRoster.data));
+
+  const overridden = await owner.request(`${base}/agents/anthropic`, {
+    method: "POST",
+    body: { role: "Frontend Agent" },
+  });
+  assert.equal(overridden.status, 200, JSON.stringify(overridden.data));
+  assert.equal(overridden.data.override.role, "Frontend Agent");
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please tidy up the settings layout" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const [task] = runtime.submittedTasks;
+  assert.ok(task !== undefined);
+  // The role the channel declared reaches the actual prompt content, ahead
+  // of the request itself — see `withRoleContext` and its call site in
+  // `dispatchOneMention`.
+  assert.match(task.objective, /^Your role in this repository: Frontend Agent\.\n\n/u);
+  assert.match(task.objective, /tidy up the settings layout/u);
+
+  // Clearing the role (an empty string, same as clearing model/effort) goes
+  // back to unlabeled — there is no vendor-wide default to fall back to —
+  // so the objective is left untouched rather than prefixing anything.
+  const cleared = await owner.request(`${base}/agents/anthropic`, {
+    method: "POST",
+    body: { role: "" },
+  });
+  assert.equal(cleared.status, 200, JSON.stringify(cleared.data));
+  const postedAgain = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) one more thing please" },
+  });
+  assert.equal(postedAgain.status, 201);
+  const [, second] = runtime.submittedTasks;
+  assert.ok(second !== undefined);
+  assert.equal(second.objective, "one more thing please");
+});
+
+/*
+ * Opt-in channel membership: connecting a vendor CLI makes an agent usable,
+ * not automatically present in every repository's channel. The first read of
+ * a repository's roster grandfathers in whatever was already reachable then
+ * (see `channelAgentConnections`'s doc comment); anything connected after
+ * that must be added explicitly through the membership route.
+ */
+
+test("channel membership is opt-in: a newly connected agent stays out until added, and the pre-existing roster is grandfathered in once", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "membership-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+
+  // First read of this repository's roster: nothing has opted in yet, but
+  // anthropic is reachable, so this is exactly the moment the one-time
+  // backfill treats it as "already there" and grandfathers it in.
+  const first = await owner.request(`${base}/agents`);
+  assert.equal(first.status, 200, JSON.stringify(first.data));
+  assert.deepEqual(
+    first.data.agents.map((agent: any) => agent.provider).sort(),
+    ["anthropic"],
+  );
+
+  // A second agent connects *after* that first read. It must not appear
+  // automatically — the whole point of opt-in.
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  const second = await owner.request(`${base}/agents`);
+  assert.equal(second.status, 200);
+  assert.deepEqual(
+    second.data.agents.map((agent: any) => agent.provider).sort(),
+    ["anthropic"],
+    "a newly connected agent must not silently join a channel it was never added to",
+  );
+
+  // Explicitly adding it works, and is idempotent.
+  const added = await owner.request(`${base}/agents/openai/membership`, {
+    method: "POST",
+  });
+  assert.equal(added.status, 200, JSON.stringify(added.data));
+  assert.equal(added.data.member, true);
+  const addedAgain = await owner.request(`${base}/agents/openai/membership`, {
+    method: "POST",
+  });
+  assert.equal(addedAgain.status, 200);
+
+  const third = await owner.request(`${base}/agents`);
+  assert.deepEqual(
+    third.data.agents.map((agent: any) => agent.provider).sort(),
+    ["anthropic", "openai"],
+  );
+
+  // Removing membership takes it back out, and it also stops being
+  // @mentionable — `channelAgentConnections` backs both the roster route
+  // and mention resolution with the same membership-filtered set.
+  const removed = await owner.request(`${base}/agents/openai/membership`, {
+    method: "DELETE",
+  });
+  assert.equal(removed.status, 200);
+  assert.equal(removed.data.member, false);
+  const fourth = await owner.request(`${base}/agents`);
+  assert.deepEqual(
+    fourth.data.agents.map((agent: any) => agent.provider).sort(),
+    ["anthropic"],
+  );
+});
+
+/** Logs a store-created user into a fresh client, the way every test below needs. */
+async function loginAs(
+  origin: string,
+  email: string,
+  password = PASSWORD,
+): Promise<TestClient> {
+  const client = new TestClient(origin);
+  const response = await client.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email, password },
+  });
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  return client;
+}
+
+test("a repository's creator can delete it without manage_project, but a colleague who did not create it cannot", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const developer = await runtime.store.createUser({
+    email: "creator-dev@example.com",
+    displayName: "Creator Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: developer.id,
+    role: "developer",
+  });
+  const devClient = await loginAs(runtime.origin, developer.email);
+  await invitableRepository(devClient, "dev-created-repo");
+  assert.equal(
+    (await runtime.store.getRepository("dev-created-repo"))?.createdBy,
+    developer.id,
+  );
+
+  // A colleague who is also only a developer — not the creator, and no
+  // manage_project — cannot delete it.
+  const colleague = await runtime.store.createUser({
+    email: "colleague-dev@example.com",
+    displayName: "Colleague Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: colleague.id,
+    role: "developer",
+  });
+  const colleagueClient = await loginAs(runtime.origin, colleague.email);
+  const colleagueAttempt = await colleagueClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/dev-created-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(colleagueAttempt.status, 403);
+  assert.notEqual(
+    await runtime.store.getRepository("dev-created-repo"),
+    undefined,
+  );
+
+  // A total stranger — no membership, no grant — gets the same refusal.
+  const stranger = new TestClient(runtime.origin);
+  await stranger.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "stranger-delete@example.com",
+      displayName: "Stranger",
+      password: PASSWORD,
+    },
+  });
+  const strangerAttempt = await stranger.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/dev-created-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(strangerAttempt.status, 403);
+
+  // The developer who created it can delete it, despite lacking
+  // manage_project — the creator's own additional path in.
+  const deleted = await devClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/dev-created-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(deleted.status, 200, JSON.stringify(deleted.data));
+  assert.equal(deleted.data.removed, true);
+  assert.equal(
+    await runtime.store.getRepository("dev-created-repo"),
+    undefined,
+  );
+  const events = await runtime.store.listAuditEvents({
+    types: ["repository_deleted"],
+  });
+  assert.equal(events.length, 1);
+  assert.equal(events[0]?.event.data["repositoryId"], "dev-created-repo");
+});
+
+test("an organization admin can delete a repository they did not create", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "owner-created-repo");
+
+  const admin = await runtime.store.createUser({
+    email: "admin-not-creator@example.com",
+    displayName: "Admin",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: admin.id,
+    role: "admin",
+  });
+  const adminClient = await loginAs(runtime.origin, admin.email);
+
+  const deleted = await adminClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/owner-created-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(deleted.status, 200, JSON.stringify(deleted.data));
+  assert.equal(
+    await runtime.store.getRepository("owner-created-repo"),
+    undefined,
+  );
+});
+
+test("deleting a repository refuses while a submitted task references it", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  await invitableRepository(owner, "blocked-repo");
+
+  await runtime.store.submitTask({
+    repositoryId: "blocked-repo",
+    objective: "Do something",
+    agentId: "test-agent",
+    validationCommands: [],
+    submittedBy: bootstrapped.user.id,
+  });
+
+  const blocked = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/blocked-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(blocked.status, 422);
+  assert.notEqual(await runtime.store.getRepository("blocked-repo"), undefined);
+
+  // A cancelled task is still a task that references the repository — the
+  // store's contract is "no task or run references it", not "no active
+  // one" — so cancelling it does not unblock deletion either.
+  const pending = await runtime.store.listSubmittedTasks({
+    repositoryId: "blocked-repo",
+  });
+  for (const task of pending) {
+    await runtime.store.cancelSubmittedTask(task.id);
+  }
+  const stillBlocked = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/blocked-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(stillBlocked.status, 422);
+  assert.notEqual(await runtime.store.getRepository("blocked-repo"), undefined);
+});
+
+test("deleting a repository with no task or run referencing it cascades its channel", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  await invitableRepository(owner, "cascade-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/cascade-repo/channel`;
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "A message that had better not survive deletion." },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  const deleted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/cascade-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(deleted.status, 200, JSON.stringify(deleted.data));
+  assert.equal(await runtime.store.getRepository("cascade-repo"), undefined);
+  assert.deepEqual(
+    await runtime.store.listChannelMessages("cascade-repo", bootstrapped.user.id),
+    [],
+  );
+});
+
+test("promoting an existing member to repository owner actually grants the capability, through the real authorization pipeline", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "promote-repo");
+
+  const member = await runtime.store.createUser({
+    email: "viewer-to-promote@example.com",
+    displayName: "Viewer",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: member.id,
+    role: "viewer",
+  });
+  const memberClient = await loginAs(runtime.origin, member.email);
+
+  // Before promotion: a plain viewer cannot delete (proxy for manage_project).
+  const before = await memberClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/promote-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(before.status, 403);
+
+  // A non-member/non-admin cannot promote anybody either.
+  const unauthorizedPromote = await memberClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/promote-repo/grants/${member.id}`,
+    { method: "POST", body: { role: "owner" } },
+  );
+  assert.equal(unauthorizedPromote.status, 403);
+
+  // The owner promotes the viewer to repository-scoped owner.
+  const promoted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/promote-repo/grants/${member.id}`,
+    { method: "POST", body: { role: "owner" } },
+  );
+  assert.equal(promoted.status, 200, JSON.stringify(promoted.data));
+  assert.equal(promoted.data.grant.role, "owner");
+
+  const grants = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/promote-repo/grants`,
+  );
+  assert.equal(grants.status, 200);
+  assert.equal(grants.data.grants.length, 1);
+  assert.equal(grants.data.grants[0].userId, member.id);
+  assert.equal(grants.data.grants[0].user.displayName, "Viewer");
+
+  // After promotion: the same viewer — organization role unchanged — can now
+  // do something that requires manage_project on this one repository. This
+  // proves the grant actually composes with organization role through
+  // `authorizeRepository`, not just that the grant row exists.
+  const after = await memberClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/promote-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(after.status, 200, JSON.stringify(after.data));
+  assert.equal(
+    await runtime.store.getRepository("promote-repo"),
+    undefined,
+  );
+});
+
+test("revoking a repository grant does not orphan the repository — organization role still reaches it", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  await invitableRepository(owner, "revoke-repo");
+
+  const member = await runtime.store.createUser({
+    email: "revoke-target@example.com",
+    displayName: "Target",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: member.id,
+    role: "viewer",
+  });
+
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/revoke-repo/grants/${member.id}`,
+    { method: "POST", body: { role: "owner" } },
+  );
+  assert.equal((await runtime.store.listRepositoryGrants("revoke-repo")).length, 1);
+
+  const revoked = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/revoke-repo/grants/${member.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(revoked.status, 200, JSON.stringify(revoked.data));
+  assert.equal((await runtime.store.listRepositoryGrants("revoke-repo")).length, 0);
+
+  // The promoted member lost the elevation the grant gave them...
+  const memberClient = await loginAs(runtime.origin, member.email);
+  const memberAttempt = await memberClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/revoke-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(memberAttempt.status, 403);
+
+  // ...but the repository is not stranded: the organization owner's
+  // blanket, role-based access was never routed through the grant, so it
+  // still reaches the repository — no "last owner" guard is needed here the
+  // way organization membership needs one.
+  const ownerStillWorks = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/revoke-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(ownerStillWorks.status, 200, JSON.stringify(ownerStillWorks.data));
+});
+
+test("a human can leave a repository held only through a grant, but not one reached through an organization role", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  await invitableRepository(owner, "leave-repo");
+
+  const guest = await runtime.store.createUser({
+    email: "leave-guest@example.com",
+    displayName: "Guest",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveRepositoryGrant({
+    repositoryId: "leave-repo",
+    userId: guest.id,
+    role: "developer",
+    grantedBy: bootstrapped.user.id,
+    createdAt: new Date().toISOString(),
+  });
+  const guestClient = await loginAs(runtime.origin, guest.email);
+
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/leave-repo/channel`;
+  assert.equal((await guestClient.request(`${base}/messages`)).status, 200);
+
+  const left = await guestClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/leave-repo/grants/${guest.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(left.status, 200, JSON.stringify(left.data));
+  assert.equal(
+    await guestClient.request(`${base}/messages`).then((r) => r.status),
+    403,
+  );
+
+  // A colleague reached through an ordinary organization role — not a
+  // grant — gets a legible refusal instead of a silent no-op or a 404 that
+  // reads as "you were never here".
+  const colleague = await runtime.store.createUser({
+    email: "leave-colleague@example.com",
+    displayName: "Colleague",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: colleague.id,
+    role: "developer",
+  });
+  const colleagueClient = await loginAs(runtime.origin, colleague.email);
+  const colleagueLeave = await colleagueClient.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/leave-repo/grants/${colleague.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(colleagueLeave.status, 409);
+  assert.equal(
+    colleagueLeave.data.error.code,
+    "org_membership_reaches_repository",
+  );
+});
+
+test("loosening agent-membership removal to manage_project+ does not let an unrelated viewer remove someone's agent, and self-removal keeps working for everyone", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  await invitableRepository(owner, "moderation-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/moderation-repo/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [{ provider: "anthropic" }]);
+  // Consumes the one-time grandfather backfill (see `channelAgentConnections`
+  // in server.ts) so the explicit add/remove below is testing opt-in
+  // membership, not whatever the first-ever read happened to grandfather in.
+  await owner.request(`${base}/agents`);
+  const added = await owner.request(`${base}/agents/anthropic/membership`, {
+    method: "POST",
+  });
+  assert.equal(added.status, 200, JSON.stringify(added.data));
+
+  // A developer with no elevated permission cannot remove the owner's agent.
+  const developer = await runtime.store.createUser({
+    email: "mod-dev@example.com",
+    displayName: "Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: developer.id,
+    role: "developer",
+  });
+  const devClient = await loginAs(runtime.origin, developer.email);
+  const devAttempt = await devClient.request(
+    `${base}/agents/anthropic/membership?userId=${bootstrapped.user.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(devAttempt.status, 403);
+
+  // An admin (manage_project) can remove somebody else's agent.
+  const admin = await runtime.store.createUser({
+    email: "mod-admin@example.com",
+    displayName: "Admin",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: admin.id,
+    role: "admin",
+  });
+  const adminClient = await loginAs(runtime.origin, admin.email);
+  const adminRemoval = await adminClient.request(
+    `${base}/agents/anthropic/membership?userId=${bootstrapped.user.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(adminRemoval.status, 200, JSON.stringify(adminRemoval.data));
+  const rosterAfterModeration = await owner.request(`${base}/agents`);
+  assert.deepEqual(rosterAfterModeration.data.agents, []);
+
+  // Self-service removal still needs only submit_task — the plain developer
+  // above, with no manage_project, can remove their own membership.
+  runtime.chatConnections.set(developer.id, [{ provider: "openai" }]);
+  const devAdded = await devClient.request(`${base}/agents/openai/membership`, {
+    method: "POST",
+  });
+  assert.equal(devAdded.status, 200, JSON.stringify(devAdded.data));
+  const devSelfRemoval = await devClient.request(
+    `${base}/agents/openai/membership`,
+    { method: "DELETE" },
+  );
+  assert.equal(devSelfRemoval.status, 200, JSON.stringify(devSelfRemoval.data));
 });

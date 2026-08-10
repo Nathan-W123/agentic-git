@@ -42,9 +42,18 @@ import type {
   WorkLeaseStatus,
   WorkerRecord,
   AddChangesetCommentInput,
+  AddChannelReplyInput,
+  AppendChannelMessageInput,
   ApprovalFilter,
   ArchiveAuditInput,
   ChangesetComment,
+  ChannelAgentMember,
+  ChannelAgentOverride,
+  ChannelEntryKind,
+  ChannelMessage,
+  ChannelMessageFilter,
+  ChannelReaction,
+  ChannelReply,
   AuditArchiveResult,
   AuditEventFilter,
   AuthSessionRecord,
@@ -96,6 +105,28 @@ interface RunState {
 
 function copy<T>(value: T): T {
   return structuredClone(value);
+}
+
+interface StoredChannelReply {
+  id: string;
+  messageId: string;
+  kind: ChannelEntryKind;
+  authorId: string;
+  content: string;
+  createdAt: string;
+}
+
+interface StoredChannelMessage {
+  id: string;
+  repositoryId: string;
+  projectId: ProjectId;
+  kind: ChannelEntryKind;
+  authorId: string;
+  content: string;
+  createdAt: string;
+  replies: StoredChannelReply[];
+  /** Emoji to the set of user ids who reacted with it. */
+  reactions: Map<string, Set<string>>;
 }
 
 /**
@@ -159,6 +190,15 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly workLeases = new Map<string, WorkLease>();
   private readonly approvals = new Map<string, ApprovalRequest>();
   private readonly comments = new Map<string, ChangesetComment>();
+  private readonly channelMessages = new Map<string, StoredChannelMessage>();
+  /** Keyed by `repositoryId\0agentId`. */
+  private readonly channelAgentOverrides = new Map<string, ChannelAgentOverride>();
+  /** Keyed by `repositoryId\0userId\0provider`. */
+  private readonly channelAgentMembers = new Map<string, ChannelAgentMember>();
+  /** Repository ids whose one-time membership backfill has already run. */
+  private readonly channelMembershipBackfilled = new Set<string>();
+  /** Keyed by `repositoryId\0userId`. */
+  private readonly channelReadCursors = new Map<string, string>();
 
   public constructor() {
     const now = new Date().toISOString();
@@ -981,6 +1021,13 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         `Repository id ${repository.id} is already mapped to a different canonical repository`,
       );
     }
+    if (existing !== undefined) {
+      // First insert wins, matching the SQLite/Postgres backends'
+      // `ON CONFLICT DO NOTHING`: a resubmission (a retried creation, for
+      // instance) must not move `createdBy` or anything else already
+      // recorded for this id.
+      return;
+    }
     this.repositories.set(repository.id, copy(repository));
   }
 
@@ -995,6 +1042,40 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     for (const key of this.projectRepositories) {
       if (key.endsWith(`\0${id}`)) {
         this.projectRepositories.delete(key);
+      }
+    }
+    // Cascade the repository's *own* state — its shared channel (messages,
+    // replies, reactions, per-agent overrides and membership, the one-time
+    // backfill flag) and any per-repository access grants — rather than
+    // leaving them as orphaned rows a future repository reusing this id would
+    // silently inherit. Runs and submitted tasks are refused above instead of
+    // cascaded: they are execution history, not repository state, and the
+    // store's contract (see `removeRepository`'s doc comment) is that they
+    // block deletion rather than disappear with it.
+    for (const [messageId, message] of this.channelMessages) {
+      if (message.repositoryId === id) {
+        this.channelMessages.delete(messageId);
+      }
+    }
+    for (const key of [...this.channelAgentOverrides.keys()]) {
+      if (key.startsWith(`${id}\0`)) {
+        this.channelAgentOverrides.delete(key);
+      }
+    }
+    for (const key of [...this.channelAgentMembers.keys()]) {
+      if (key.startsWith(`${id}\0`)) {
+        this.channelAgentMembers.delete(key);
+      }
+    }
+    for (const key of [...this.channelReadCursors.keys()]) {
+      if (key.startsWith(`${id}\0`)) {
+        this.channelReadCursors.delete(key);
+      }
+    }
+    this.channelMembershipBackfilled.delete(id);
+    for (const key of [...this.grants.keys()]) {
+      if (key.startsWith(`${id}\0`)) {
+        this.grants.delete(key);
       }
     }
   }
@@ -1739,6 +1820,238 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         };
       });
     return verifyArchivedChain(segments, this.audit);
+  }
+
+  private toPublicChannelMessage(
+    message: StoredChannelMessage,
+    viewerId: string,
+  ): ChannelMessage {
+    const reactions: Record<string, ChannelReaction> = {};
+    for (const [emoji, userIds] of message.reactions) {
+      if (userIds.size === 0) {
+        continue;
+      }
+      reactions[emoji] = {
+        emoji,
+        count: userIds.size,
+        mine: userIds.has(viewerId),
+      };
+    }
+    return {
+      id: message.id,
+      repositoryId: message.repositoryId,
+      projectId: message.projectId,
+      kind: message.kind,
+      authorId: message.authorId,
+      content: message.content,
+      createdAt: message.createdAt,
+      replies: copy(message.replies),
+      reactions,
+    };
+  }
+
+  private channelAgentKey(repositoryId: string, agentId: string): string {
+    return `${repositoryId}\0${agentId}`;
+  }
+
+  private channelMemberKey(
+    repositoryId: string,
+    userId: string,
+    provider: string,
+  ): string {
+    return `${repositoryId}\0${userId}\0${provider}`;
+  }
+
+  private channelReadKey(repositoryId: string, userId: string): string {
+    return `${repositoryId}\0${userId}`;
+  }
+
+  public async listChannelMessages(
+    repositoryId: string,
+    viewerId: string,
+    filter: ChannelMessageFilter = {},
+  ): Promise<ChannelMessage[]> {
+    const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+    const rows = [...this.channelMessages.values()]
+      .filter((message) => message.repositoryId === repositoryId)
+      .filter(
+        (message) =>
+          filter.before === undefined || message.createdAt < filter.before,
+      )
+      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+    return rows
+      .slice(-limit)
+      .map((message) => this.toPublicChannelMessage(message, viewerId));
+  }
+
+  public async appendChannelMessage(
+    input: AppendChannelMessageInput,
+  ): Promise<ChannelMessage> {
+    const content = input.content.trim();
+    if (content.length === 0) {
+      throw new Error("A channel message must have content");
+    }
+    const message: StoredChannelMessage = {
+      id: createId("chanmsg"),
+      repositoryId: input.repositoryId,
+      projectId: input.projectId,
+      kind: input.kind ?? "user",
+      authorId: input.authorId,
+      content,
+      createdAt: new Date().toISOString(),
+      replies: [],
+      reactions: new Map(),
+    };
+    this.channelMessages.set(message.id, message);
+    return this.toPublicChannelMessage(message, input.authorId);
+  }
+
+  public async addChannelReply(
+    input: AddChannelReplyInput,
+  ): Promise<ChannelReply> {
+    const message = this.channelMessages.get(input.messageId);
+    if (message === undefined || message.repositoryId !== input.repositoryId) {
+      throw new Error(`Unknown channel message: ${input.messageId}`);
+    }
+    const content = input.content.trim();
+    if (content.length === 0) {
+      throw new Error("A reply must have content");
+    }
+    const reply: StoredChannelReply = {
+      id: createId("chanreply"),
+      messageId: message.id,
+      kind: input.kind ?? "user",
+      authorId: input.authorId,
+      content,
+      createdAt: new Date().toISOString(),
+    };
+    message.replies.push(reply);
+    return copy(reply);
+  }
+
+  public async getChannelMessage(
+    repositoryId: string,
+    messageId: string,
+    viewerId: string,
+  ): Promise<ChannelMessage | undefined> {
+    const message = this.channelMessages.get(messageId);
+    if (message === undefined || message.repositoryId !== repositoryId) {
+      return undefined;
+    }
+    return this.toPublicChannelMessage(message, viewerId);
+  }
+
+  public async toggleChannelReaction(
+    repositoryId: string,
+    messageId: string,
+    userId: string,
+    emoji: string,
+  ): Promise<ChannelMessage> {
+    const message = this.channelMessages.get(messageId);
+    if (message === undefined || message.repositoryId !== repositoryId) {
+      throw new Error(`Unknown channel message: ${messageId}`);
+    }
+    const reactors = message.reactions.get(emoji) ?? new Set<string>();
+    if (reactors.has(userId)) {
+      reactors.delete(userId);
+    } else {
+      reactors.add(userId);
+    }
+    if (reactors.size === 0) {
+      message.reactions.delete(emoji);
+    } else {
+      message.reactions.set(emoji, reactors);
+    }
+    return this.toPublicChannelMessage(message, userId);
+  }
+
+  public async listChannelAgentOverrides(
+    repositoryId: string,
+  ): Promise<Record<string, ChannelAgentOverride>> {
+    const result: Record<string, ChannelAgentOverride> = {};
+    for (const override of this.channelAgentOverrides.values()) {
+      if (override.repositoryId === repositoryId) {
+        result[override.agentId] = copy(override);
+      }
+    }
+    return result;
+  }
+
+  public async setChannelAgentOverride(
+    repositoryId: string,
+    agentId: string,
+    patch: { name?: string; role?: string; model?: string; effort?: string },
+  ): Promise<ChannelAgentOverride> {
+    const key = this.channelAgentKey(repositoryId, agentId);
+    const existing = this.channelAgentOverrides.get(key);
+    const name = patch.name ?? existing?.name;
+    const role = patch.role ?? existing?.role;
+    const model = patch.model ?? existing?.model;
+    const effort = patch.effort ?? existing?.effort;
+    const override: ChannelAgentOverride = {
+      repositoryId,
+      agentId,
+      ...(name === undefined ? {} : { name }),
+      ...(role === undefined ? {} : { role }),
+      ...(model === undefined ? {} : { model }),
+      ...(effort === undefined ? {} : { effort }),
+      updatedAt: new Date().toISOString(),
+    };
+    this.channelAgentOverrides.set(key, override);
+    return copy(override);
+  }
+
+  public async listChannelAgentMembers(
+    repositoryId: string,
+  ): Promise<Array<{ userId: string; provider: string }>> {
+    const result: Array<{ userId: string; provider: string }> = [];
+    for (const member of this.channelAgentMembers.values()) {
+      if (member.repositoryId === repositoryId) {
+        result.push({ userId: member.userId, provider: member.provider });
+      }
+    }
+    return result;
+  }
+
+  public async setChannelAgentMember(
+    repositoryId: string,
+    userId: string,
+    provider: string,
+    isMember: boolean,
+  ): Promise<void> {
+    const key = this.channelMemberKey(repositoryId, userId, provider);
+    if (isMember) {
+      this.channelAgentMembers.set(key, { repositoryId, userId, provider });
+    } else {
+      this.channelAgentMembers.delete(key);
+    }
+  }
+
+  public async hasBackfilledChannelMembership(
+    repositoryId: string,
+  ): Promise<boolean> {
+    return this.channelMembershipBackfilled.has(repositoryId);
+  }
+
+  public async markChannelMembershipBackfilled(
+    repositoryId: string,
+  ): Promise<void> {
+    this.channelMembershipBackfilled.add(repositoryId);
+  }
+
+  public async markChannelRead(
+    repositoryId: string,
+    userId: string,
+    at: string,
+  ): Promise<void> {
+    this.channelReadCursors.set(this.channelReadKey(repositoryId, userId), at);
+  }
+
+  public async getChannelReadCursor(
+    repositoryId: string,
+    userId: string,
+  ): Promise<string | undefined> {
+    return this.channelReadCursors.get(this.channelReadKey(repositoryId, userId));
   }
 
   public async close(): Promise<void> {

@@ -452,6 +452,22 @@ svg {
   width: 100%;
 }
 
+/* A destructive action — repository deletion — worded plainly in its own
+   confirmation modal, and given the same red the rest of the interface
+   already uses for errors (`--red`/`--red-wash`) rather than a one-off
+   colour. */
+.btn-danger {
+  background: var(--red-wash);
+  border-color: transparent;
+  color: var(--red);
+}
+
+.btn-danger:hover:not(:disabled) {
+  background: rgba(248, 113, 113, 0.22);
+  border-color: transparent;
+  color: var(--red);
+}
+
 .btn-sm {
   padding: 6px 11px;
   font-size: 12.5px;
@@ -2449,6 +2465,70 @@ svg {
   line-height: 1.55;
 }
 
+/* One of this account's other connected agents, offered for opt-in
+   membership in the channel info popover — same row shape as `.mention-item`
+   since both answer "pick an agent from a short list". */
+.pop-agent-add-list {
+  display: grid;
+  gap: 1px;
+}
+
+.pop-agent-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  text-align: left;
+}
+
+.pop-agent-add:hover {
+  background: var(--accent-wash);
+  color: var(--text);
+}
+
+.pop-agent-add-cta {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-4);
+}
+
+/* Current repository-scoped grants ("co-owners"), in the channel info
+   popover — same row shape as `.pop-agent-add-list` above. */
+.pop-grant-list {
+  display: grid;
+  gap: 1px;
+  margin-bottom: 8px;
+}
+
+.pop-grant-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 2px;
+  font-size: 12.5px;
+  color: var(--text-2);
+}
+
+.pop-grant-role {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-4);
+  text-transform: capitalize;
+}
+
+/* Leave / delete: separated from the ordinary facts above by a divider
+   rather than another unlabeled block, since both are one-way actions. */
+.pop-block-danger {
+  display: grid;
+  gap: 8px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
+}
+
 .sum-file {
   display: flex;
   align-items: center;
@@ -3228,6 +3308,680 @@ svg {
   background: #fff;
 }
 
+/* -------------------------------------------------------------- chats ---- */
+
+/*
+ * The Chats screen scopes its own accent rather than touching `--accent` at
+ * the root: every other screen's purple stays exactly as it was, and every
+ * component here — buttons, badges, the composer, mini-selects — re-themes
+ * for free because they all already read the accent tokens by name. Status
+ * colour keeps its separate meaning: green/red are untouched.
+ */
+.chats-shell {
+  --accent: #c2622a;
+  --accent-bright: #e2925a;
+  --accent-dim: #9c4d1f;
+  --accent-wash: rgba(194, 98, 42, 0.14);
+  --accent-wash-strong: rgba(194, 98, 42, 0.22);
+  --accent-line: rgba(194, 98, 42, 0.4);
+
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.chan-sidebar {
+  width: 268px;
+  flex: none;
+  display: grid;
+  grid-template-rows: auto auto 1fr;
+  min-height: 0;
+  background: var(--bg-panel);
+  border-right: 1px solid var(--border-soft);
+}
+
+.chan-sidebar-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 12px 10px;
+}
+
+.chan-sidebar-head .search {
+  flex: 1;
+}
+
+.chan-new {
+  display: inline-grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  background: var(--accent-wash);
+  color: var(--accent-bright);
+  flex: none;
+}
+
+.chan-new:hover {
+  background: var(--accent-wash-strong);
+}
+
+.chan-new svg {
+  width: 16px;
+  height: 16px;
+}
+
+.chan-list {
+  overflow-y: auto;
+  padding: 2px 8px 10px;
+  display: grid;
+  gap: 2px;
+  align-content: start;
+}
+
+.chan-list-label {
+  padding: 12px 9px 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-4);
+}
+
+.chan-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 8px;
+  text-align: left;
+  color: var(--text-2);
+  transition: background 0.13s ease, color 0.13s ease;
+}
+
+.chan-row:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.chan-row.active {
+  background: var(--accent-wash);
+  color: #fff;
+}
+
+.chan-row .cr-hash {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--text-4);
+}
+
+.chan-row.active .cr-hash {
+  color: var(--accent-bright);
+}
+
+.chan-row .cr-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chan-row.unread .cr-name {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.chan-row .cr-badge {
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 10.5px;
+  font-weight: 600;
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+
+.chan-roster {
+  overflow-y: auto;
+  border-top: 1px solid var(--border-soft);
+  padding: 4px 8px 12px;
+  min-height: 0;
+}
+
+.roster-row {
+  border-radius: 9px;
+  transition: background 0.13s ease;
+}
+
+.roster-row:hover {
+  background: var(--bg-hover);
+}
+
+.roster-row-main {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 7px 8px;
+}
+
+.roster-row .rr-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.roster-row .rr-name {
+  font-size: 12.5px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.roster-row .rr-role {
+  font-size: 10.5px;
+  color: var(--text-3);
+}
+
+.roster-row .rr-role.rr-role-empty {
+  font-style: italic;
+  opacity: 0.7;
+}
+
+.roster-row .rr-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  flex: none;
+}
+
+.roster-rename {
+  padding: 6px 8px 8px 41px;
+}
+
+.roster-rename input {
+  width: 100%;
+  background: var(--bg-inset);
+  border: 1px solid var(--accent-line);
+  border-radius: 7px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: var(--text);
+}
+
+/* The role input sits below the name input in the same form — see
+   `rosterRow` in screen-chats.js. */
+.roster-rename input + input {
+  margin-top: 6px;
+}
+
+.roster-settings {
+  display: grid;
+  gap: 8px;
+  padding: 2px 8px 10px 41px;
+}
+
+.roster-settings .rs-label {
+  font-size: 10.5px;
+  color: var(--text-4);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.roster-settings .mini-select {
+  max-width: 100%;
+  width: 100%;
+}
+
+.roster-settings .mini-select select {
+  max-width: 100%;
+}
+
+/* --------------------------------------------------------- chat main ---- */
+
+/* Flex rather than fixed grid rows. The rows were positional — header, search,
+   transcript, composer — and the search row is `hidden` until it is opened,
+   which takes it out of flow entirely and shifts every later child up a track.
+   The composer inherited the flexible row and the transcript got an `auto`
+   one, so in a channel with nothing in it yet the input sat near the top of a
+   stretched box. Here the transcript is the part that grows, by name. */
+.chan-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.chan-main > .chan-messages {
+  flex: 1;
+}
+
+.chan-main > .chan-head,
+.chan-main > .chan-search,
+.chan-main > .chan-composer-wrap {
+  flex: none;
+}
+
+.chan-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 18px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.chan-head .ch-hash {
+  width: 19px;
+  height: 19px;
+  color: var(--text-3);
+  flex: none;
+}
+
+.chan-head .ch-title {
+  min-width: 0;
+}
+
+.chan-head .ch-name {
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.chan-head .ch-desc {
+  font-size: 11.5px;
+  color: var(--text-3);
+  margin-top: 1px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chan-head .spacer {
+  flex: 1;
+}
+
+.chan-search {
+  padding: 0 18px 12px;
+}
+
+.chan-messages {
+  overflow-y: auto;
+  min-height: 0;
+  padding: 6px 18px 14px;
+}
+
+.chan-day {
+  text-align: center;
+  font-size: 11px;
+  color: var(--text-4);
+  padding: 14px 0 10px;
+}
+
+.cmsg-row {
+  display: flex;
+  gap: 12px;
+  padding: 7px 8px;
+  margin: 0 -8px;
+  border-radius: 8px;
+  position: relative;
+}
+
+.cmsg-row:hover {
+  background: var(--bg-hover);
+}
+
+.cmsg-row .cmsg-avatar {
+  flex: none;
+  margin-top: 1px;
+}
+
+.cmsg-row .cmsg-body {
+  min-width: 0;
+  flex: 1;
+}
+
+.cmsg-row .cmsg-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.cmsg-row .cmsg-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.cmsg-row .cmsg-name.agent-name {
+  color: var(--accent-bright);
+}
+
+.cmsg-row .cmsg-time {
+  font-size: 11px;
+  color: var(--text-4);
+}
+
+.cmsg-row .cmsg-text {
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-2);
+  margin-top: 2px;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.cmsg-row .cmsg-actions {
+  position: absolute;
+  top: -14px;
+  right: 8px;
+  display: flex;
+  gap: 2px;
+  background: var(--bg-card-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.cmsg-row:hover .cmsg-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* A coordinator-authored line — @mention dispatch confirmations and
+   refusals — narrating rather than participating, so it is centered like
+   `chat.js`'s own `.msg.system` rather than laid out as a message with an
+   avatar and a name. */
+.cmsg-row.cmsg-system {
+  justify-content: center;
+}
+
+.cmsg-row.cmsg-system:hover {
+  background: transparent;
+}
+
+.cmsg-reactions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 7px;
+}
+
+.cmsg-reaction {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 11px;
+  background: var(--bg-card-2);
+  border: 1px solid var(--border);
+  font-size: 11.5px;
+  color: var(--text-2);
+}
+
+.cmsg-reaction.mine {
+  background: var(--accent-wash);
+  border-color: var(--accent-line);
+  color: var(--accent-bright);
+}
+
+.cmsg-thread-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 7px;
+  font-size: 12px;
+  color: var(--accent-bright);
+}
+
+.cmsg-thread-link:hover {
+  text-decoration: underline;
+}
+
+/* ------------------------------------------------------------ mention ---- */
+
+.chan-composer-wrap {
+  position: relative;
+  margin: 0 12px 12px;
+}
+
+.chan-composer-wrap .composer {
+  margin: 0;
+}
+
+.mention-pop {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 6px);
+  background: var(--bg-card-2);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-pop);
+  padding: 4px;
+  display: grid;
+  gap: 1px;
+  max-height: 220px;
+  overflow-y: auto;
+  z-index: 5;
+}
+
+.mention-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border-radius: 7px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  text-align: left;
+}
+
+.mention-item.active,
+.mention-item:hover {
+  background: var(--accent-wash);
+  color: var(--text);
+}
+
+.mention-item .mi-kind {
+  margin-left: auto;
+  font-size: 10.5px;
+  color: var(--text-4);
+}
+
+/* -------------------------------------------------------------- thread ---- */
+
+.thread-panel {
+  /* Dragged, and remembered — see `panel-grip` handling in app.js. The floor
+     keeps a diff readable; the ceiling lets it take the whole conversation
+     area, because a file being read is sometimes the only thing you want. */
+  width: var(--panel-w, 340px);
+  min-width: 280px;
+  max-width: 100%;
+  flex: none;
+  position: relative;
+  display: grid;
+  grid-template-rows: auto 1fr auto;
+  min-height: 0;
+  background: var(--bg-panel);
+  border-left: 1px solid var(--border-soft);
+}
+
+.panel-grip {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 9px;
+  margin-left: -5px;
+  cursor: col-resize;
+  z-index: 6;
+  touch-action: none;
+}
+
+.panel-grip::after {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 4px;
+  width: 2px;
+  background: transparent;
+  transition: background 120ms ease;
+}
+
+.panel-grip:hover::after,
+.panel-grip:focus-visible::after,
+body.resizing-panel .panel-grip::after {
+  background: var(--accent);
+}
+
+.panel-grip:focus-visible {
+  outline: none;
+}
+
+/* While dragging, the pointer owns the whole window: without this the drag
+   selects text across the transcript it is passing over. */
+body.resizing-panel {
+  cursor: col-resize;
+  user-select: none;
+}
+
+.thread-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+.thread-head .spacer {
+  flex: 1;
+}
+
+.thread-body {
+  overflow-y: auto;
+  min-height: 0;
+  padding: 10px 14px 14px;
+}
+
+.thread-root {
+  padding-bottom: 12px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.thread-count {
+  font-size: 11.5px;
+  color: var(--text-3);
+  padding: 2px 2px 10px;
+}
+
+/* -------------------------------------------------------- utility rail ---- */
+
+/* ------------------------------------------------------ inline code block ---- */
+
+/* Indented to the message text column, so the files a turn touched read as
+   part of that turn rather than as a panel that happens to be nearby. */
+.cblocks {
+  margin: 4px 0 14px 62px;
+  max-width: 760px;
+  border: 1px solid var(--border-soft);
+  border-radius: 8px;
+  overflow: hidden;
+  background: var(--bg-inset);
+}
+
+.cblocks-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  background: var(--bg-panel);
+}
+
+.cblocks-head svg {
+  width: 14px;
+  height: 14px;
+}
+
+.cblock + .cblock {
+  border-top: 1px solid var(--border-soft);
+}
+
+.cblock-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 12px;
+  background: none;
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+  font: inherit;
+  color: var(--text-1);
+}
+
+.cblock-head:hover {
+  background: var(--bg-hover);
+}
+
+.cblock-caret {
+  display: inline-flex;
+  color: var(--text-3);
+}
+
+.cblock-caret svg {
+  width: 14px;
+  height: 14px;
+}
+
+.cblock-flag {
+  font-size: 11px;
+  font-weight: 700;
+  width: 12px;
+  text-align: center;
+}
+
+.cblock-path {
+  flex: 1;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cblock-stats {
+  display: flex;
+  gap: 6px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The diff scrolls inside the block: a long line must not widen the
+   transcript and push the conversation sideways. */
+.cblock-body {
+  border-top: 1px solid var(--border-soft);
+  max-height: 420px;
+  overflow: auto;
+}
+
 /* ---------------------------------------------------- character motion ---- */
 
 /*
@@ -3864,4 +4618,271 @@ dialog.modal::backdrop {
   text-align: center;
   user-select: all;
   padding: 0.6rem 0;
+}
+
+/* Somebody — or something — is mid-sentence. Three dots is the convention
+   people already read without a legend, so it is not labelled in the UI; the
+   accessible name carries the meaning for a screen reader instead. */
+.chan-typing {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 18px 10px;
+  color: var(--text-3, #8b93a7);
+  font-size: 0.86rem;
+}
+
+.typing-dots {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.typing-dots i {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.35;
+  animation: typing-bounce 1.2s infinite ease-in-out;
+}
+
+.typing-dots i:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.typing-dots i:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes typing-bounce {
+  0%, 60%, 100% { opacity: 0.3; transform: translateY(0); }
+  30% { opacity: 1; transform: translateY(-3px); }
+}
+
+/* A dot that never rests is a distraction for anyone who asked not to be
+   moved; the indicator still reads as present, just still. */
+@media (prefers-reduced-motion: reduce) {
+  .typing-dots i {
+    animation: none;
+    opacity: 0.6;
+  }
+}
+
+/* A task's running commentary. Most of a thread by volume and the least of
+   what somebody opening it wants first, so it folds away — open while the
+   work is still going, because then the latest step is the point. */
+.thread-thinking {
+  margin: 2px 0 6px;
+  border-left: 2px solid var(--line, #262b3a);
+  padding-left: 10px;
+}
+
+.thread-thinking > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  list-style: none;
+  padding: 5px 2px;
+  color: var(--text-3, #8b93a7);
+  font-size: 0.84rem;
+  user-select: none;
+}
+
+.thread-thinking > summary::-webkit-details-marker {
+  display: none;
+}
+
+/* A caret that turns, so open and closed are distinguishable at a glance
+   without reading the label. */
+.thread-thinking > summary::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform 0.15s ease;
+  flex: none;
+}
+
+.thread-thinking[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.thread-thinking > summary:hover {
+  color: var(--text-2, #b6bdd0);
+}
+
+.tt-count {
+  color: var(--text-4, #6b7285);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Inside a thread the dots sit under the last reply rather than in the room:
+   the work is happening here, so this is where somebody is waiting. */
+.thread-typing {
+  padding: 2px 4px 8px 12px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thread-thinking > summary::before {
+    transition: none;
+  }
+}
+
+/* The changed-file list, folded. A fifty-file changeset is a footnote to the
+   conversation and used to push every message out of view. */
+.cblocks > summary {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.cblocks > summary::-webkit-details-marker {
+  display: none;
+}
+
+.cblocks > summary::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform 0.15s ease;
+  flex: none;
+  margin-right: 2px;
+}
+
+.cblocks[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+/* The file currently open in the side panel, so the list says which one. */
+.cblock.active .cblock-head {
+  background: var(--surface-3, #1b2030);
+  border-radius: 6px;
+}
+
+/* A file read beside the conversation rather than inside it. */
+.file-panel .thread-head {
+  gap: 8px;
+}
+
+.file-panel .fp-path {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.82rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  direction: rtl;
+  text-align: left;
+}
+
+.file-panel .fp-stats {
+  display: inline-flex;
+  gap: 6px;
+  font-size: 0.78rem;
+  flex: none;
+}
+
+.file-panel .thread-body {
+  overflow: auto;
+}
+
+/* Diff or text, chosen in the header so the choice sits with the file it
+   applies to rather than somewhere else on the screen. */
+.fp-modes {
+  display: inline-flex;
+  flex: none;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  overflow: hidden;
+}
+
+.fp-modes button {
+  border: 0;
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 600;
+  padding: 3px 9px;
+  cursor: pointer;
+}
+
+.fp-modes button.on {
+  background: var(--accent-wash);
+  color: var(--accent-bright);
+}
+
+.fp-modes button:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.fp-editor-wrap {
+  display: flex;
+  min-height: 0;
+  padding: 0;
+}
+
+.fp-editor {
+  flex: 1;
+  min-width: 0;
+  border: 0;
+  outline: none;
+  resize: none;
+  padding: 10px 12px;
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  tab-size: 2;
+  white-space: pre;
+  overflow: auto;
+}
+
+.fp-note {
+  padding: 14px;
+  color: var(--text-dim);
+  font-size: 0.84rem;
+}
+
+.fp-note.err {
+  color: var(--danger, #d9534f);
+}
+
+.fp-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.fp-state {
+  font-size: 0.76rem;
+  color: var(--text-dim);
+}
+
+.file-panel.dirty .fp-state {
+  color: var(--accent-bright);
+}
+
+/* The unsaved marker rides the path, so it is visible with the footer
+   scrolled past on a short panel. */
+.file-panel.dirty .fp-path::before {
+  content: "● ";
+  color: var(--accent-bright);
+  direction: ltr;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cblocks > summary::before {
+    transition: none;
+  }
 }

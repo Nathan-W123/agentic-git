@@ -653,6 +653,105 @@ export const MIGRATIONS: readonly Migration[] = [
     name: "repository-scoped-invitations",
     statements: [`ALTER TABLE invitations ADD COLUMN repository_id TEXT`],
   },
+  {
+    // The shared group channel: one room per repository, with every human and
+    // agent working it as a participant. Reactions are a join table keyed by
+    // (message, emoji, user) rather than a count, so "mine" can be answered
+    // correctly for whichever viewer is asking instead of only for whoever
+    // reacted most recently.
+    version: 19,
+    name: "repository-channels",
+    statements: [
+      `CREATE TABLE channel_messages (
+        id TEXT PRIMARY KEY,
+        repository_id TEXT NOT NULL REFERENCES repositories(id),
+        project_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        author_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE channel_message_replies (
+        id TEXT PRIMARY KEY,
+        message_id TEXT NOT NULL REFERENCES channel_messages(id),
+        kind TEXT NOT NULL,
+        author_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      )`,
+      `CREATE TABLE channel_message_reactions (
+        message_id TEXT NOT NULL REFERENCES channel_messages(id),
+        emoji TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (message_id, emoji, user_id)
+      )`,
+      `CREATE TABLE channel_agent_overrides (
+        repository_id TEXT NOT NULL,
+        agent_id TEXT NOT NULL,
+        name TEXT,
+        model TEXT,
+        effort TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, agent_id)
+      )`,
+      `CREATE TABLE channel_read_cursors (
+        repository_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        read_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, user_id)
+      )`,
+      `CREATE INDEX channel_messages_by_repository
+         ON channel_messages(repository_id, created_at)`,
+      `CREATE INDEX channel_message_replies_by_message
+         ON channel_message_replies(message_id, created_at)`,
+      `CREATE INDEX channel_message_reactions_by_message
+         ON channel_message_reactions(message_id)`,
+    ],
+  },
+  {
+    // Per-repository role labels (`channel_agent_overrides.role`) and opt-in
+    // channel membership. Before this, `channelAgentConnections` in
+    // server.ts treated every agent any collaborator had connected as
+    // present in every repository's channel automatically; membership rows
+    // narrow that to an explicit allowlist. `channel_membership_backfills`
+    // exists solely so the switch to opt-in does not make an
+    // already-working agent silently vanish from a channel it was already
+    // active in — the first post-migration read of a repository's roster
+    // grandfathers in whatever was visible then, once, and never again (see
+    // `channelAgentConnections`'s doc comment for the full reasoning and the
+    // tradeoff that choice accepts).
+    version: 20,
+    name: "channel-agent-roles-and-membership",
+    statements: [
+      `ALTER TABLE channel_agent_overrides ADD COLUMN role TEXT`,
+      `CREATE TABLE channel_agent_members (
+        repository_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (repository_id, user_id, provider)
+      )`,
+      `CREATE TABLE channel_membership_backfills (
+        repository_id TEXT PRIMARY KEY,
+        backfilled_at TEXT NOT NULL
+      )`,
+    ],
+  },
+  {
+    // Who created a repository, so deletion and repository-scoped promotion
+    // can give the creator an additional path in alongside the ordinary
+    // manage_project/manage_members permission check — never a replacement
+    // for it, so an org admin who did not create a repository keeps full
+    // access. Nullable: existing rows predate this feature, and there is no
+    // honest way to backfill who created them, so they fall back to
+    // requiring manage_project with no creator shortcut.
+    version: 21,
+    name: "repository-creator",
+    statements: [
+      `ALTER TABLE repositories ADD COLUMN created_by TEXT REFERENCES users(id)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

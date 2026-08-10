@@ -25,6 +25,7 @@ import {
   SESSION_FILE_SHARES_REFRESH_TOKEN,
   withCredentialHome,
   type CredentialHome,
+  type CredentialVisibility,
   type UserCredential,
   type UserCredentialKind,
   type UserCredentialSummary,
@@ -246,6 +247,13 @@ const PROVIDER_VENDORS: Record<ProviderId, VendorCliKind> = {
   anthropic: "claude",
   openai: "codex",
   google: "gemini",
+};
+
+/** The inverse of {@link PROVIDER_VENDORS}, for reporting a stored vendor back. */
+const VENDOR_PROVIDERS: Record<VendorCliKind, ProviderId> = {
+  claude: "anthropic",
+  codex: "openai",
+  gemini: "google",
 };
 
 /** What a user has to do to obtain a credential we can accept. */
@@ -1327,6 +1335,43 @@ export class ProviderChatService {
     return statuses;
   }
 
+  /**
+   * Which vendors a set of *other* users have connected, for a shared
+   * repository channel roster.
+   *
+   * This deliberately reads far less than {@link list}: no CLI detection, no
+   * model/effort settings, no running task, and critically no secret —
+   * `UserCredentialStore.list` already returns `UserCredentialSummary`, which
+   * is documented as "everything but the secret. Safe to return to a
+   * browser." That guarantee is what makes it safe to answer this for users
+   * other than the caller. Even so, only the vendor and `visibility` travel
+   * back; the summary's free-text `label` (whatever the credential's own
+   * owner typed to tell their connections apart) is left out; it is the
+   * owner's own text about their own account, not a fact a teammate needs to
+   * see. `visibility` is different in kind: it is exactly the fact the
+   * channel roster exists to show — which of a teammate's agents can
+   * actually be @mentioned into real work versus are merely visible.
+   */
+  public async listConnectionsFor(
+    userIds: readonly string[],
+  ): Promise<
+    Record<string, Array<{ provider: ProviderId; visibility: CredentialVisibility }>>
+  > {
+    const store = await this.credentialStore();
+    const result: Record<
+      string,
+      Array<{ provider: ProviderId; visibility: CredentialVisibility }>
+    > = {};
+    for (const userId of userIds) {
+      const summaries = await store.list(userId);
+      result[userId] = summaries.map((summary) => ({
+        provider: VENDOR_PROVIDERS[summary.vendor],
+        visibility: summary.visibility,
+      }));
+    }
+    return result;
+  }
+
   /* ------------------------------------------------ own credentials ----- */
 
   /**
@@ -1350,6 +1395,13 @@ export class ProviderChatService {
     kind: UserCredentialKind;
     secret: string;
     label?: string;
+    /**
+     * "Personal" (the default) or "org-wide" — see {@link CredentialVisibility}.
+     * Chosen once, at connect time, in the connect modal; a caller that omits
+     * it gets the same personal-only behavior every connection had before
+     * this existed.
+     */
+    visibility?: CredentialVisibility;
   }): Promise<ProviderStatus[]> {
     const vendor = PROVIDER_VENDORS[input.provider];
     if (!supportedCredentialKinds(vendor).includes(input.kind)) {
@@ -1407,6 +1459,7 @@ export class ProviderChatService {
       createdAt: new Date().toISOString(),
       lastVerifiedAt: undefined,
       hint: credentialHint(input.kind, secret),
+      visibility: input.visibility ?? "personal",
     });
 
     const store = await this.credentialStore();
@@ -1415,6 +1468,7 @@ export class ProviderChatService {
       secret,
       origin: input.kind === "session_file" ? "copied" : "pasted",
       ...(input.label === undefined ? {} : { label: input.label }),
+      ...(input.visibility === undefined ? {} : { visibility: input.visibility }),
     });
     await store.markVerified(input.userId, vendor, account);
 
@@ -1688,6 +1742,11 @@ export class ProviderChatService {
         createdAt: new Date().toISOString(),
         lastVerifiedAt: undefined,
         hint: credentialHint("session_file", secret),
+        // Device authorization has no connect-modal step to offer the
+        // personal/org-wide choice in, so it keeps the safe default; a user
+        // who wants this agent org-wide can reconnect it that way once that
+        // UI exists for this flow too.
+        visibility: "personal",
       });
 
       const store = await this.credentialStore();
@@ -2468,24 +2527,87 @@ export class ProviderChatService {
     cliSessionId?: string;
   }): Promise<ChatReply> {
     const prompt = await this.prepareCompletion(input);
-    return await this.withCompletionEnv(
-      input.provider,
-      prompt.credential,
-      async (env) =>
-        input.provider === "anthropic"
-          ? await this.completeViaClaudeCli(
-              prompt.text,
-              prompt.settings,
-              input.cliSessionId,
-              env,
-            )
-          : await this.completeViaCodexCli(
-              prompt.text,
-              prompt.settings,
-              input.cliSessionId,
-              env,
-            ),
+    try {
+      return await this.withCompletionEnv(
+        input.provider,
+        prompt.credential,
+        async (env) =>
+          input.provider === "anthropic"
+            ? await this.completeViaClaudeCli(
+                prompt.text,
+                prompt.settings,
+                input.cliSessionId,
+                env,
+              )
+            : await this.completeViaCodexCli(
+                prompt.text,
+                prompt.settings,
+                input.cliSessionId,
+                env,
+              ),
+      );
+    } catch (error) {
+      // A stored credential that no longer authenticates is recorded as such
+      // here, where the failure is actually observed. Nothing else can see
+      // it: the vault knows a secret exists, and `claude auth status` reports
+      // a *stored* session rather than a working one, so without this the
+      // dashboard went on showing an agent as connected while every task and
+      // every message it was given failed to authenticate.
+      await this.noteCredentialFailure(input.userId, input.provider, error);
+      throw error;
+    }
+  }
+
+  /** Whether a failure means the credential itself has stopped working. */
+  private static isAuthFailure(message: string): boolean {
+    return /OAuth session expired|could not be refreshed|Failed to authenticate|Not logged in|invalid_api_key|unauthorized|401/iu.test(
+      message,
     );
+  }
+
+  /**
+   * Public counterpart of {@link noteCredentialFailure}, for the run path.
+   *
+   * A task fails inside the coordinator, which never touches this service, so
+   * the gateway forwards what it saw rather than the failure going unrecorded
+   * and the dashboard continuing to claim the agent is connected.
+   */
+  public async noteAuthFailure(input: {
+    userId: string;
+    provider: ProviderId;
+    reason: string;
+  }): Promise<void> {
+    try {
+      const store = await this.credentialStore();
+      await store.markUnusable(
+        input.userId,
+        PROVIDER_VENDORS[input.provider],
+        input.reason,
+      );
+    } catch {
+      // Recording a failure must never become a second one.
+    }
+  }
+
+  private async noteCredentialFailure(
+    userId: string,
+    provider: ProviderId,
+    error: unknown,
+  ): Promise<void> {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!ProviderChatService.isAuthFailure(message)) {
+      return;
+    }
+    try {
+      const store = await this.credentialStore();
+      await store.markUnusable(
+        userId,
+        PROVIDER_VENDORS[provider],
+        "The sign-in has expired. Reconnect this agent.",
+      );
+    } catch {
+      // Recording why something failed must not become a second failure.
+    }
   }
 
   private async scratchDirectory(): Promise<string> {
