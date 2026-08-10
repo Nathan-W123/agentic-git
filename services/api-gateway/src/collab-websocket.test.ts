@@ -238,6 +238,24 @@ class InMemoryWorkspace implements WorkspaceOperations {
   public async listFiles(): Promise<unknown> {
     return [];
   }
+  public async moveFile(input: {
+    userId: string;
+    repositoryId: string;
+    from: string;
+    to: string;
+  }): Promise<unknown> {
+    const from = this.key({ ...input, path: input.from });
+    const content = this.files.get(from);
+    if (content === undefined) {
+      throw Object.assign(new Error("File was not found"), {
+        status: 404,
+        code: "not_found",
+      });
+    }
+    this.files.set(this.key({ ...input, path: input.to }), content);
+    this.files.delete(from);
+    return { moved: true };
+  }
   public async readFile(input: {
     userId: string;
     repositoryId: string;

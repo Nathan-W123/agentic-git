@@ -2762,6 +2762,13 @@ export async function acceptWorkResult(
       await store.completeSubmittedTask(task.id, "integrated", run.id);
       await trace(store, run.id, "canonical_promoted", task.id, {
         projectId: task.projectId,
+        // Stamped for the same reason `changeset_collected` above stamps it:
+        // a reader of the log has the task id but no cheap way back to the
+        // repository, and anything watching canonical *per repository* — the
+        // auditor — cannot filter without it. `AuditEventFilter` has no
+        // repository term, so this field is the only thing standing between
+        // "canonical moved" and knowing where.
+        repositoryId: task.repositoryId,
         previousRevision: integration.previousVersion.revision,
         revision: integration.canonicalVersion.revision,
         changeSetId: integration.changeSetId,

@@ -340,6 +340,8 @@ export function renderCoordinator() {
 
   return `<div class="scroll">
     <div class="coord-head">
+      <button type="button" class="icon-btn menu-btn" data-act="nav-toggle"
+        title="Menu" aria-label="Menu">${icon("menu")}</button>
       <div class="coord-title">
         <h1>Coordinator
           <span class="live-badge">${dot("green", true)}${

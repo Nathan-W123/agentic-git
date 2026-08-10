@@ -52,6 +52,16 @@ export const ICONS = {
   robot: S(
     '<rect x="4" y="8" width="16" height="12" rx="3"/><path d="M12 8V4.5"/><circle cx="12" cy="3.4" r="1.3"/><circle cx="9.2" cy="13.4" r="1.15" fill="currentColor" stroke="none"/><circle cx="14.8" cy="13.4" r="1.15" fill="currentColor" stroke="none"/><path d="M9.6 16.8h4.8"/>',
   ),
+  // Head and shoulders, the two of them deliberately the same silhouette so
+  // the pair reads as one count of people beside one count of agents rather
+  // than as two unrelated pictures. Square head and antenna for the agent,
+  // round head for the person; nothing below the shoulders in either.
+  personBust: S(
+    '<circle cx="12" cy="8" r="3.4"/><path d="M5.5 19.5c0-3.3 2.9-5.6 6.5-5.6s6.5 2.3 6.5 5.6"/>',
+  ),
+  robotBust: S(
+    '<rect x="6.6" y="5.2" width="10.8" height="8.4" rx="2.4"/><path d="M12 5.2V3"/><circle cx="12" cy="2.3" r="1"/><circle cx="9.8" cy="9.2" r="0.95" fill="currentColor" stroke="none"/><circle cx="14.2" cy="9.2" r="0.95" fill="currentColor" stroke="none"/><path d="M5.5 19.5c0-3.1 2.9-5.3 6.5-5.3s6.5 2.2 6.5 5.3"/>',
+  ),
   network: S(
     '<circle cx="12" cy="12" r="3"/><circle cx="5" cy="5" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="5" cy="19" r="2"/><circle cx="19" cy="19" r="2"/><path d="m6.6 6.6 3 3M17.4 6.6l-3 3M6.6 17.4l3-3M17.4 17.4l-3-3"/>',
   ),
@@ -68,6 +78,7 @@ export const ICONS = {
   chevronRight: S('<path d="m9 6 6 6-6 6"/>'),
   chevronUp: S('<path d="m6 15 6-6 6 6"/>'),
   arrowRight: S('<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>'),
+  arrowLeft: S('<path d="M19 12H5"/><path d="m11 6-6 6 6 6"/>'),
   branch: S(
     '<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="8" r="2.4"/><path d="M6 8.4v7.2"/><path d="M18 10.4c0 4-4.2 3.4-6.6 4.6"/>',
   ),
@@ -144,7 +155,9 @@ export const ICONS = {
   layers: S(
     '<path d="m12 3 8.5 4.5L12 12 3.5 7.5z"/><path d="m3.5 12.5 8.5 4.5 8.5-4.5"/>',
   ),
-  terminal: S('<path d="m5 8 4 4-4 4"/><path d="M12 16h7"/>'),
+  terminal: S(
+    '<rect x="2.5" y="4" width="19" height="16" rx="2.5"/><path d="m6.5 9 3 3-3 3"/><path d="M13 15h4.5"/>',
+  ),
   refresh: S(
     '<path d="M20 12a8 8 0 1 1-2.3-5.6"/><path d="M20.5 4v4h-4"/>',
   ),
@@ -242,8 +255,23 @@ export function initials(name) {
   return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
 }
 
-export function avatar(name, size = 26, seed = name) {
-  return `<span class="avatar sz-${size}" style="background:${hueFor(seed)}" title="${esc(
+export function avatar(name, size = 26, seed = name, picture) {
+  // A picture replaces the initials rather than sitting beside them: the
+  // initials only exist because there is no picture.
+  // The size travels inline as well as in the class, for the same reason
+  // `agentFace` stopped relying on the class alone: `sz-${size}` only ever
+  // worked for the sizes somebody had hand-written a rule for — 20, 26, 32 and
+  // 38 — while callers ask for 20, 30, 32 and 40. The two without a rule had no
+  // dimensions at all, so a person's avatar collapsed next to an agent's face
+  // of the nominal same size, which is the mismatch this fixes. Inline wins
+  // over the class, so the existing rules stay correct where they apply.
+  const box = `width:${Number(size)}px;height:${Number(size)}px`;
+  if (typeof picture === "string" && picture !== "") {
+    return `<span class="avatar sz-${size} has-photo" style="${box}" title="${esc(
+      name,
+    )}"><img src="${esc(picture)}" alt=""></span>`;
+  }
+  return `<span class="avatar sz-${size}" style="${box};background:${hueFor(seed)}" title="${esc(
     name,
   )}">${esc(initials(name))}</span>`;
 }
@@ -962,4 +990,51 @@ export function closePopover() {
   open.remove();
   popoverReturn?.focus();
   popoverReturn = undefined;
+}
+
+/* ----------------------------------------------------------------- sound ---- */
+
+/**
+ * A short tone when a message goes out.
+ *
+ * Synthesised rather than played from a file: the page's CSP allows no
+ * external asset, and two oscillator notes cost nothing to ship and nothing
+ * to load. The context is created on first use, which is always inside a
+ * click or a keypress — a browser refuses to start audio any earlier, and
+ * building it at import time would leave it permanently suspended.
+ *
+ * Failure is silent on purpose. A blocked or unavailable audio device is not
+ * a reason to interrupt somebody who was only sending a message.
+ */
+let toneContext;
+
+export function chime(kind = "sent") {
+  try {
+    const Context = window.AudioContext ?? window.webkitAudioContext;
+    if (Context === undefined) {
+      return;
+    }
+    toneContext ??= new Context();
+    void toneContext.resume?.();
+    const at = toneContext.currentTime;
+    // Sent rises, received falls, so the two are told apart without looking.
+    const notes = kind === "received" ? [660, 495] : [523.25, 784];
+    for (const [index, frequency] of notes.entries()) {
+      const oscillator = toneContext.createOscillator();
+      const gain = toneContext.createGain();
+      oscillator.type = "sine";
+      oscillator.frequency.value = frequency;
+      // Quiet, and shaped: a square-edged tone at full volume is a beep
+      // somebody will turn off within the hour.
+      const start = at + index * 0.07;
+      gain.gain.setValueAtTime(0.0001, start);
+      gain.gain.exponentialRampToValueAtTime(0.055, start + 0.012);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.13);
+      oscillator.connect(gain).connect(toneContext.destination);
+      oscillator.start(start);
+      oscillator.stop(start + 0.14);
+    }
+  } catch {
+    /* No audio device, or a policy that forbids it. Not worth reporting. */
+  }
 }

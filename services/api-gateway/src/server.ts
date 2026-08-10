@@ -13,6 +13,7 @@ import {
 import type { Duplex } from "node:stream";
 
 import type {
+  AuditorCursor,
   CoordinationStore,
   Organization,
   OrganizationRole,
@@ -23,6 +24,18 @@ import type {
   SubmittedTask,
   SubmittedTaskStatus,
 } from "@coord/persistence";
+import {
+  buildAuditPrompt,
+  findingsReferencedBy,
+  fixObjectiveFor,
+  formatAuditSummary,
+  formatFinding,
+  isAuditorRole as roleIsAuditor,
+  parseAuditFindings,
+  parseFindingReply,
+  readsAsApproval,
+  type AuditFinding,
+} from "./auditor.js";
 import {
   assertProjectPolicy,
   createId,
@@ -128,6 +141,23 @@ const THREAD_CONTEXT_LINES = 24;
 
 /** How often the thread is brought up to date while a task is running. */
 const CHANNEL_PROGRESS_INTERVAL_MS = 2000;
+/**
+ * How often the auditor looks for new canonical promotions.
+ *
+ * Far slower than the progress poller above, which is keeping a person
+ * company while they watch. Nobody is waiting on an audit — it is work
+ * nobody asked for — so latency costs nothing and the query is a scan of a
+ * shared log.
+ */
+const AUDITOR_POLL_INTERVAL_MS = 15_000;
+/** Promotions consumed per poll, so a long backlog drains over several. */
+const AUDITOR_EVENT_BATCH = 25;
+/**
+ * How long an audit may take. Generous: it is reading a whole diff and
+ * nothing downstream is blocked on it, unlike the acknowledgement timeout
+ * above, which sits in front of a person.
+ */
+const AUDIT_TIMEOUT_MS = 180_000;
 /** How long the opening line may take before a fixed one is used instead. */
 const ACKNOWLEDGEMENT_TIMEOUT_MS = 6000;
 /**
@@ -190,6 +220,18 @@ export function summariseObjective(objective: string): string {
  * ordinary case for a freshly connected agent, not an edge case, and leaves
  * the objective untouched rather than prefixing an empty sentence.
  */
+/**
+ * The one role name the system treats as more than prose.
+ *
+ * Roles are otherwise free text that reaches the agent as a sentence and
+ * nothing else. `auditor` is reserved because holding it changes behaviour —
+ * the holder audits on its own initiative rather than waiting to be asked —
+ * so who may grant it, and how many may hold it, are enforced rather than
+ * conventions. Defined in `auditor.ts` with the rest of that behaviour and
+ * re-exported here, where callers have always found it.
+ */
+export { AUDITOR_ROLE, isAuditorRole } from "./auditor.js";
+
 export function withRoleContext(role: string, objective: string): string {
   const trimmedRole = role.trim();
   if (trimmedRole === "") {
@@ -661,6 +703,10 @@ export interface WorkspaceOperations {
   writeFile(
     input: WorkspaceScopeInput & { path: string; content: string },
   ): Promise<unknown>;
+  /** Moves or renames one path inside the overlay, atomically. */
+  moveFile(
+    input: WorkspaceScopeInput & { from: string; to: string },
+  ): Promise<unknown>;
   exec(input: WorkspaceScopeInput & { command: string }): Promise<unknown>;
   submit(input: WorkspaceScopeInput & { objective: string }): Promise<unknown>;
 }
@@ -709,6 +755,36 @@ export interface ApiOperations {
     repositoryId: string;
     actorId: string;
   }): Promise<void>;
+  /**
+   * The unified diff between two canonical revisions.
+   *
+   * The auditor's whole input. It is an operation rather than a direct
+   * `RepositoryService` call because the gateway has no repository paths and
+   * no business acquiring any — every other thing it knows about a
+   * repository's contents arrives the same way.
+   *
+   * Absent on deployments without repository access, in which case the
+   * auditor reports that it cannot read the change rather than auditing
+   * nothing and calling the repository clean.
+   */
+  canonicalDiff?(input: {
+    projectId: string;
+    repositoryId: string;
+    fromRevision: string;
+    toRevision: string;
+  }): Promise<{ files: string[]; patch: string; truncated: boolean }>;
+  /**
+   * Where canonical stands right now.
+   *
+   * Needed only by the auditor resuming after being switched off: every other
+   * audit is triggered by a promotion event that already names the revision
+   * it landed, but a resume is triggered by a person and has to ask.
+   * Undefined for a repository whose canonical branch has no commits yet.
+   */
+  canonicalHead?(input: {
+    projectId: string;
+    repositoryId: string;
+  }): Promise<string | undefined>;
   /** Canonical branch history, newest first. */
   repositoryVersions?(input: {
     projectId: string;
@@ -960,6 +1036,11 @@ export interface ApiGatewayOptions {
    * activity, and flushing idle rooms. Exposed for tests.
    */
   collabTickIntervalMs?: number;
+  /**
+   * How often the auditor looks for canonical promotions to audit. Exposed
+   * for tests, which cannot wait out the production cadence.
+   */
+  auditorPollIntervalMs?: number;
 }
 
 interface RequestContext {
@@ -1197,6 +1278,22 @@ export class ApiGateway {
   /** Tasks whose progress is being narrated into a channel thread. */
   private readonly watchedChannelTasks = new Map<string, WatchedChannelTask>();
   private channelProgressTimer: NodeJS.Timeout | undefined;
+  private auditorTimer: NodeJS.Timeout | undefined;
+  /**
+   * The audit-log position the auditor has consumed, in memory.
+   *
+   * Starts at the log head rather than at zero: a fresh process must not
+   * treat every canonical promotion in the repository's history as news and
+   * audit all of it. Nothing is lost by skipping what happened while this
+   * process was not running, because each audit diffs from the last audited
+   * revision rather than from the event it was woken by — a promotion missed
+   * during downtime is folded into the next audit instead of vanishing.
+   */
+  private auditorSequence: number | undefined;
+  /** When this process started, and so the oldest promotion it treats as news. */
+  private readonly auditorSince = new Date().toISOString();
+  /** Repositories with an audit in flight, so a slow one is not started twice. */
+  private readonly auditsRunning = new Set<string>();
   private readonly bodyLimit: number;
   private readonly allowedOrigins: ReadonlySet<string>;
   private bootstrapInProgress = false;
@@ -1308,6 +1405,7 @@ export class ApiGateway {
     });
     this.webSockets.startPolling();
     this.collaboration.start();
+    this.startAuditorWatch();
   }
 
   private async routeUpgrade(
@@ -1340,6 +1438,10 @@ export class ApiGateway {
     if (this.channelProgressTimer !== undefined) {
       clearInterval(this.channelProgressTimer);
       this.channelProgressTimer = undefined;
+    }
+    if (this.auditorTimer !== undefined) {
+      clearInterval(this.auditorTimer);
+      this.auditorTimer = undefined;
     }
     this.watchedChannelTasks.clear();
     this.webSockets.close();
@@ -3887,6 +3989,23 @@ export class ApiGateway {
         this.sendJson(response, 200, { saved: true });
         return;
       }
+      if (action === "move" && method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const from = stringField(body["from"], "from", { max: 1_000 }) ?? "";
+        const to = stringField(body["to"], "to", { max: 1_000 }) ?? "";
+        if (from === "" || to === "") {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "from and to are both required",
+          );
+        }
+        await perform(() => workspaceOperations.moveFile({ ...scope, from, to }));
+        // The same shape a save answers with: the caller's next move is to
+        // refresh the changeset either way.
+        this.sendJson(response, 200, { moved: true });
+        return;
+      }
       if (action === "exec" && method === "POST") {
         const body = objectBody(await this.readJson(request));
         const command =
@@ -4260,7 +4379,65 @@ export class ApiGateway {
         visibility: connection.visibility,
         connected: true as const,
       }));
-      this.sendJson(response, 200, { agents });
+      // Whether auditing is switched off here. Sent with the roster rather
+      // than on its own route because the switch is drawn on the roster, and
+      // a second round trip to decide how to draw one toggle is a second
+      // chance for the two to disagree. Absent row means auditing is on.
+      const auditing = await this.options.store.getAuditorCursor(repositoryId);
+      this.sendJson(response, 200, {
+        agents,
+        auditorPaused: auditing?.paused === true,
+      });
+      return;
+    }
+
+    // Auditing switched off and on for a repository, without demoting the
+    // agent that holds the role. `manage_project`, matching promotion: this
+    // decides whether an account is spent unprompted, which is the same
+    // decision promoting an auditor makes.
+    const auditorSwitchMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/auditor$`,
+        "u",
+      ),
+    );
+    if (auditorSwitchMatch !== undefined && method === "POST") {
+      const [projectId = "", repositoryId = ""] = auditorSwitchMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "manage_project",
+      );
+      const body = objectBody(await this.readJson(request));
+      const paused = body["paused"];
+      if (typeof paused !== "boolean") {
+        throw new HttpError(400, "invalid_request", "paused must be a boolean");
+      }
+      const auditor = await this.auditorFor(projectId, repositoryId);
+      if (auditor === undefined) {
+        throw new HttpError(
+          404,
+          "no_auditor",
+          "This repository has no auditor to switch on or off.",
+        );
+      }
+      await this.options.store.setAuditorPaused(repositoryId, paused);
+      await this.options.store.appendAudit(undefined, {
+        type: "channel_agent_overridden",
+        data: { projectId, repositoryId, agentId: `${auditor.userId}:${auditor.provider}`, paused },
+      });
+      // Resuming audits the gap immediately rather than waiting for the next
+      // merge — which is the whole point of a switch you can turn back on.
+      const resumed = paused
+        ? undefined
+        : await this.resumeAuditing({ projectId, repositoryId });
+      this.sendJson(response, 200, {
+        paused,
+        ...(resumed === undefined ? {} : { resumed }),
+      });
       return;
     }
 
@@ -4319,6 +4496,66 @@ export class ApiGateway {
           "invalid_request",
           "At least one of name, role, model, or effort is required",
         );
+      }
+      // `auditor` is the one role the code knows the meaning of.
+      //
+      // Every other role is free text the agent only ever sees as a sentence
+      // in its objective. This one changes what the system does — it audits
+      // unprompted, on its own schedule, spending tokens nobody asked it to —
+      // so it is not something any collaborator should be able to hand out by
+      // typing a word into a text field, and not something two agents should
+      // hold at once in the same repository.
+      if (roleIsAuditor(role)) {
+        await authorizeRepository(
+          this.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "manage_project",
+        );
+        const overrides =
+          await this.options.store.listChannelAgentOverrides(repositoryId);
+        const holder = Object.entries(overrides).find(
+          ([heldBy, entry]) => heldBy !== agentId && roleIsAuditor(entry.role),
+        );
+        if (holder !== undefined) {
+          throw new HttpError(
+            409,
+            "auditor_exists",
+            `${holder[1].name ?? holder[0]} is already the auditor here. Demote it first.`,
+          );
+        }
+        // An audit runs on its holder's own account — `dispatchOneMention`
+        // submits every task with `actorId: candidate.userId`, and the
+        // auditor's runs are no different. For an @mention that is fair: a
+        // person named the agent and its owner opted into being nameable.
+        // Nobody names an auditor. It spends continuously, forever, on
+        // whatever its owner is paying with, and the person promoting it
+        // needs only `manage_project` — so promoting a colleague's personal
+        // agent would quietly commit their subscription to a permanent
+        // background cost they never agreed to and would see only on a bill.
+        //
+        // An org-wide credential is one its owner has already published to
+        // the organization as spendable by other people's requests. That is
+        // the consent this needs, and it already exists, so the rule is that
+        // only such an agent may hold the role.
+        const candidate = (
+          await this.resolveChannelMentionCandidates(projectId, repositoryId)
+        ).find(
+          (entry) =>
+            `${entry.userId}:${entry.provider}` === agentId ||
+            entry.provider === agentId,
+        );
+        if (candidate !== undefined && candidate.visibility !== "org") {
+          throw new HttpError(
+            409,
+            "auditor_must_be_org_wide",
+            `${candidate.name} is a personal agent, and an auditor spends its ` +
+              `owner's account continuously without being asked. Ask ` +
+              `${candidate.userName} to make it org-wide first, or promote an ` +
+              `org-wide agent instead.`,
+          );
+        }
       }
       const override = await this.options.store.setChannelAgentOverride(
         repositoryId,
@@ -5649,7 +5886,7 @@ export class ApiGateway {
      * `submitTask` call below — see `maybeAutoClaimTask` — differing only in
      * how the candidate was chosen and how the claim is announced.
      */
-    trigger?: "mention" | "auto_claim";
+    trigger?: "mention" | "auto_claim" | "audit_fix";
     /**
      * Overrides the default "Submitted a task…" confirmation. Auto-claim
      * uses this to explain *why* it picked this agent, since nobody asked
@@ -5989,6 +6226,27 @@ export class ApiGateway {
       ? candidates.filter((entry) => question.includes(`@${entry.name}`))
       : [];
     const answering = mentioned.length > 0 ? mentioned : owner === undefined ? [] : [owner];
+    // An auditor's thread is the one place a bare "yes" is an instruction.
+    // Handled before the general answer-versus-work split below, because
+    // that split reads for task *verbs* and an approval has none: "yes, do
+    // it" would fall through to the auditor answering a question about its
+    // own finding, which looks for all the world like it worked.
+    if (
+      owner !== undefined &&
+      roleIsAuditor(owner.role) &&
+      (await this.dispatchApprovedFindings({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        messageId: input.messageId,
+        viewerId: input.viewerId,
+        reply: question,
+        auditor: owner,
+        named: mentioned,
+        candidates,
+      }))
+    ) {
+      return;
+    }
     // Asking for work inside a thread continues that thread rather than
     // starting a new one. This is the explicit half of grouping related work:
     // a person saying "and now do this too" has told us it belongs together,
@@ -6220,6 +6478,551 @@ export class ApiGateway {
     } catch {
       return `${fallback}${suffix}`;
     }
+  }
+
+  /**
+   * Starts the auditor's watch on canonical.
+   *
+   * A poller and not a scheduler, and the distinction is the whole design.
+   * There is no cron anywhere in this system, and an auditor on a clock
+   * would wake on a repository nobody had touched, re-read it, and bill
+   * somebody for confirming that nothing changed. Waking on `canonical_
+   * promoted` instead means the trigger is a real change by construction:
+   * no change, no event, no spend, and no code needed to arrange that.
+   *
+   * Inert unless the deployment can actually read a diff. A gateway with no
+   * `canonicalDiff` operation has no repository access, and an auditor that
+   * cannot see a change must not run and quietly report the repository
+   * clean.
+   */
+  private startAuditorWatch(): void {
+    if (
+      this.auditorTimer !== undefined ||
+      this.options.operations.canonicalDiff === undefined
+    ) {
+      return;
+    }
+    this.auditorTimer = setInterval(
+      () => {
+        void this.pumpAuditor();
+      },
+      this.options.auditorPollIntervalMs ?? AUDITOR_POLL_INTERVAL_MS,
+    );
+    // Never a reason to hold the process open for an audit.
+    this.auditorTimer.unref?.();
+  }
+
+  /**
+   * Consumes new canonical promotions and audits the repositories they
+   * touched.
+   *
+   * Deliberately quiet about everything it decides not to do: most
+   * promotions are in repositories with no auditor, and saying so anywhere
+   * would be noise proportional to how much the team ships.
+   */
+  private async pumpAuditor(): Promise<void> {
+    try {
+      // Until the first new promotion anchors a sequence, the window is
+      // "since this process started" rather than "after sequence N". There is
+      // no cheap way to ask this log for its head — the filter pages forward
+      // from the oldest match, so an unanchored `limit` query would return
+      // the *first* promotions the repository ever made and audit its whole
+      // history. A timestamp asks the question actually being asked.
+      const events = await this.options.store.listAuditEvents({
+        types: ["canonical_promoted"],
+        ...(this.auditorSequence === undefined
+          ? { occurredAfter: this.auditorSince }
+          : { afterSequence: this.auditorSequence }),
+        limit: AUDITOR_EVENT_BATCH,
+      });
+      for (const record of events) {
+        this.auditorSequence = Math.max(
+          this.auditorSequence ?? 0,
+          record.sequence,
+        );
+        const data = (record.event.data ?? {}) as Record<string, unknown>;
+        const repositoryId = data["repositoryId"];
+        const projectId = data["projectId"];
+        const revision = data["revision"];
+        const previousRevision = data["previousRevision"];
+        if (
+          typeof repositoryId !== "string" ||
+          typeof projectId !== "string" ||
+          typeof revision !== "string" ||
+          typeof previousRevision !== "string"
+        ) {
+          // Written before this event carried a repository, or by something
+          // that does not fill it in. Nothing to audit against.
+          continue;
+        }
+        await this.auditCanonicalAdvance({
+          projectId,
+          repositoryId,
+          previousRevision,
+          revision,
+          sequence: record.sequence,
+        });
+      }
+    } catch (error) {
+      // A failed poll must never take the gateway down or stop the next one.
+      process.stderr.write(
+        `[auditor] poll failed: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
+    }
+  }
+
+  /**
+   * One repository's audit of one canonical advance.
+   *
+   * The diff base is the last revision this repository's auditor actually
+   * finished looking at — not the `previousRevision` of the event that woke
+   * it. That is what makes a missed event harmless: a promotion that landed
+   * while the process was down, or while an earlier audit was still running,
+   * is inside the next audit's range instead of being skipped. The first
+   * audit in a repository has no such base and uses the event's own.
+   */
+  private async auditCanonicalAdvance(input: {
+    projectId: string;
+    repositoryId: string;
+    previousRevision: string;
+    revision: string;
+    sequence: number;
+  }): Promise<void> {
+    const { projectId, repositoryId, revision, sequence } = input;
+    if (this.auditsRunning.has(repositoryId)) {
+      // An audit outlives the poll that started it. Skipping here rather than
+      // queueing is deliberate: the next promotion's audit will diff from the
+      // running one's base and cover this change too, so nothing is lost and
+      // a busy repository cannot stack audits on top of each other.
+      return;
+    }
+    const auditor = await this.auditorFor(projectId, repositoryId);
+    if (auditor === undefined) {
+      return;
+    }
+    const cursor = await this.options.store.getAuditorCursor(repositoryId);
+    if (cursor?.paused === true) {
+      // Switched off. The cursor is deliberately left where it is, so
+      // resuming audits everything that landed in the meantime rather than
+      // skipping it — which is the difference between pausing and demoting.
+      return;
+    }
+    if (cursor !== undefined && cursor.sequence >= sequence) {
+      // Already handled by a previous process. Not an error.
+      return;
+    }
+    // `""` is a row that exists without an audit behind it — written by
+    // pausing before anything had run — and is not a revision to diff from.
+    const fromRevision =
+      cursor?.revision === undefined || cursor.revision === ""
+        ? input.previousRevision
+        : cursor.revision;
+    if (fromRevision === revision) {
+      return;
+    }
+    if (await this.projectOverTokenBudget(projectId)) {
+      // The budget exists to stop unwatched spend, and this is the least
+      // watched spend in the product. `leaseWork` would refuse the *fix*
+      // tasks later, but it would not refuse this — the audit is a chat
+      // completion, not a leased task — so the check has to be here.
+      return;
+    }
+    this.auditsRunning.add(repositoryId);
+    try {
+      await this.runAudit({
+        projectId,
+        repositoryId,
+        auditor,
+        fromRevision,
+        toRevision: revision,
+      });
+      await this.options.store.saveAuditorCursor({
+        repositoryId,
+        revision,
+        sequence,
+        updatedAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      // The cursor is deliberately not advanced: an audit that failed has not
+      // examined this range, and the next promotion should still cover it.
+      process.stderr.write(
+        `[auditor] audit failed for ${repositoryId}: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
+    } finally {
+      this.auditsRunning.delete(repositoryId);
+    }
+  }
+
+  /**
+   * Audits everything that landed while auditing was switched off.
+   *
+   * Triggered by a person turning the switch back on rather than by a
+   * promotion, so unlike every other audit it has to ask where canonical
+   * stands. The range is the same one the next promotion would have used —
+   * last audited revision to head — which is why pausing keeps the cursor:
+   * the gap is audited, not skipped, and not restarted from the beginning.
+   *
+   * Returns what happened, so the route can say so rather than making the
+   * caller guess from a bare 200.
+   */
+  private async resumeAuditing(input: {
+    projectId: string;
+    repositoryId: string;
+  }): Promise<"audited" | "nothing_to_audit" | "unavailable"> {
+    const { projectId, repositoryId } = input;
+    const auditor = await this.auditorFor(projectId, repositoryId);
+    if (auditor === undefined || this.options.operations.canonicalHead === undefined) {
+      return "unavailable";
+    }
+    if (this.auditsRunning.has(repositoryId)) {
+      return "audited";
+    }
+    const head = await this.options.operations.canonicalHead({
+      projectId,
+      repositoryId,
+    });
+    const cursor = await this.options.store.getAuditorCursor(repositoryId);
+    if (head === undefined || cursor?.revision === head) {
+      return "nothing_to_audit";
+    }
+    if (cursor === undefined || cursor.revision === "") {
+      // Never audited anything, so there is no "since" to audit from and
+      // nothing has changed on this auditor's watch. Anchoring here rather
+      // than reading the whole repository: an audit of an entire codebase is
+      // an unbounded cost nobody asked for by flicking a switch.
+      await this.options.store.saveAuditorCursor({
+        repositoryId,
+        revision: head,
+        sequence: cursor?.sequence ?? 0,
+        updatedAt: new Date().toISOString(),
+      });
+      return "nothing_to_audit";
+    }
+    if (await this.projectOverTokenBudget(projectId)) {
+      return "unavailable";
+    }
+    this.auditsRunning.add(repositoryId);
+    // Not awaited: an audit is a whole model call and the person who flicked
+    // the switch should not be watching a spinner for it. Failures land in
+    // the log, and the next promotion re-covers the range because the cursor
+    // only moves on success.
+    void (async () => {
+      try {
+        await this.runAudit({
+          projectId,
+          repositoryId,
+          auditor,
+          fromRevision: cursor.revision,
+          toRevision: head,
+        });
+        await this.options.store.saveAuditorCursor({
+          repositoryId,
+          revision: head,
+          sequence: cursor.sequence,
+          updatedAt: new Date().toISOString(),
+        });
+      } catch (error) {
+        process.stderr.write(
+          `[auditor] resume audit failed for ${repositoryId}: ${
+            error instanceof Error ? error.message : String(error)
+          }\n`,
+        );
+      } finally {
+        this.auditsRunning.delete(repositoryId);
+      }
+    })();
+    return "audited";
+  }
+
+  /** This repository's auditor, if it has one that can still be reached. */
+  private async auditorFor(
+    projectId: string,
+    repositoryId: string,
+  ): Promise<ChannelMentionCandidate | undefined> {
+    const overrides =
+      await this.options.store.listChannelAgentOverrides(repositoryId);
+    if (!Object.values(overrides).some((entry) => roleIsAuditor(entry.role))) {
+      // The common case, and the cheap one: no auditor here, so the roster is
+      // never resolved at all.
+      return undefined;
+    }
+    const candidates = await this.resolveChannelMentionCandidates(
+      projectId,
+      repositoryId,
+    );
+    return candidates.find(
+      (candidate) =>
+        roleIsAuditor(candidate.role) &&
+        // Enforced at promotion, re-checked here: a credential can be made
+        // personal again after the fact, and the moment it is, the standing
+        // permission to spend it unprompted is gone.
+        candidate.visibility === "org",
+    );
+  }
+
+  /**
+   * Whether the project has spent its daily token budget.
+   *
+   * The same 24-hour window and the same policy field `leaseWork` throttles
+   * work with, read the same way, so a project has one budget rather than
+   * one per feature that happens to spend.
+   */
+  private async projectOverTokenBudget(projectId: string): Promise<boolean> {
+    const project = await this.options.store.getProject(projectId);
+    const budget = projectBudgets(project?.policy).maxProjectTokensPerDay;
+    if (budget === undefined) {
+      return false;
+    }
+    const windowStart = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString();
+    const spent = (
+      await this.options.store.listTokenUsage({
+        projectId,
+        recordedAfter: windowStart,
+      })
+    ).reduce((sum, entry) => sum + entry.totalTokens, 0);
+    return spent >= budget;
+  }
+
+  /**
+   * Reads the change, asks the auditor about it, and writes what it says.
+   *
+   * The audit itself is a chat completion rather than a submitted task,
+   * because auditing is read-only and the task pipeline exists to land
+   * changes: a task that deliberately writes nothing comes back `empty`,
+   * which the pipeline records as a *failed* task. A clean audit is the
+   * commonest outcome there is, and it must not look like a failure.
+   *
+   * The consequence is that the diff has to be carried in the prompt — the
+   * provider CLIs run in an empty scratch directory and cannot read the
+   * repository — which is also why the diff is bounded before it gets here.
+   */
+  private async runAudit(input: {
+    projectId: string;
+    repositoryId: string;
+    auditor: ChannelMentionCandidate;
+    fromRevision: string;
+    toRevision: string;
+  }): Promise<void> {
+    const { projectId, repositoryId, auditor } = input;
+    const diff = await this.options.operations.canonicalDiff?.({
+      projectId,
+      repositoryId,
+      fromRevision: input.fromRevision,
+      toRevision: input.toRevision,
+    });
+    if (diff === undefined || diff.patch.trim().length === 0) {
+      // A promotion with no textual change — a revert to an identical tree, a
+      // merge that moved the branch pointer only. Nothing to read.
+      return;
+    }
+    const answer = await this.askAgent(
+      auditor,
+      buildAuditPrompt({
+        repositoryId,
+        fromRevision: input.fromRevision,
+        toRevision: input.toRevision,
+        files: diff.files,
+        patch: diff.patch,
+        truncated: diff.truncated,
+      }),
+      AUDIT_TIMEOUT_MS,
+    );
+    if (answer.text === undefined) {
+      throw new Error(answer.error ?? "the auditor did not answer");
+    }
+    const findings = parseAuditFindings(answer.text);
+    if (findings.length === 0) {
+      // Nothing found, so nothing said. An auditor that posts "all clear"
+      // after every merge is an auditor everybody mutes, and a muted auditor
+      // is worse than none: the one time it does find something, it is in a
+      // channel people have already learned to skip.
+      return;
+    }
+    const root = await this.appendChannelEntry({
+      projectId,
+      repositoryId,
+      kind: "agent",
+      authorId: `${auditor.userId}:${auditor.provider}`,
+      content: formatAuditSummary({
+        findings,
+        fromRevision: input.fromRevision,
+        toRevision: input.toRevision,
+        fileCount: diff.files.length,
+        truncated: diff.truncated,
+      }),
+    });
+    for (const finding of findings) {
+      await this.appendChannelThreadReply({
+        projectId,
+        repositoryId,
+        messageId: root.id,
+        authorId: `${auditor.userId}:${auditor.provider}`,
+        content: formatFinding(finding),
+      });
+    }
+  }
+
+  /**
+   * Turns an approval in an auditor's thread into real work.
+   *
+   * This is the gate the whole feature hangs on. The auditor finds things
+   * unprompted, but nothing it finds becomes work until a person says so —
+   * so an approval is the only thing here that can spend anything, and a
+   * reply that is not clearly an approval must fall through untouched to the
+   * ordinary thread behaviour rather than being guessed at.
+   *
+   * Returns whether it handled the reply.
+   */
+  private async dispatchApprovedFindings(input: {
+    projectId: string;
+    repositoryId: string;
+    messageId: string;
+    viewerId: string;
+    reply: string;
+    auditor: ChannelMentionCandidate;
+    named: ChannelMentionCandidate[];
+    candidates: ChannelMentionCandidate[];
+  }): Promise<boolean> {
+    const { projectId, repositoryId, messageId, auditor, reply } = input;
+    if (!readsAsApproval(reply)) {
+      return false;
+    }
+    const root = await this.options.store.getChannelMessage(
+      repositoryId,
+      messageId,
+      input.viewerId,
+    );
+    const findings = (root?.replies ?? [])
+      .map((entry) => parseFindingReply(entry.content))
+      .filter((finding): finding is AuditFinding => finding !== undefined);
+    if (findings.length === 0) {
+      return false;
+    }
+    const approved = findingsReferencedBy(reply, findings);
+    if (approved.length === 0) {
+      // An approval that could mean any of several findings. Asking is the
+      // only honest response: picking one would be a guess that spends
+      // somebody's account, and doing nothing silently is the failure this
+      // whole path exists to remove.
+      await this.appendChannelThreadReply({
+        projectId,
+        repositoryId,
+        messageId,
+        authorId: `${auditor.userId}:${auditor.provider}`,
+        content:
+          `Which one? Reply with its number — "yes, fix 2" — or "all" for ` +
+          `every finding above.`,
+      });
+      return true;
+    }
+    for (const finding of approved) {
+      // Who does the work, in the order the evidence is strongest. Somebody
+      // named in the reply is unambiguous and wins. Otherwise a finding the
+      // auditor said it could fix itself goes back to the auditor — that is
+      // the "handle the small ones yourself" case, and it is the auditor's
+      // own claim, made before anybody approved anything, so it cannot be
+      // shaped to grab work. Anything else goes to whichever agent's role
+      // and recent work best matches the finding.
+      const assignee =
+        input.named[0] ??
+        (finding.selfFixable
+          ? auditor
+          : ((await this.bestFitFor({
+              repositoryId,
+              text: `${finding.title} ${finding.detail} ${finding.files.join(" ")}`,
+              candidates: input.candidates.filter(
+                (candidate) =>
+                  candidate.visibility === "org" ||
+                  candidate.userId === input.viewerId,
+              ),
+            })) ?? auditor));
+      // The same refusal every other dispatch path gives. An approval is not
+      // consent to spend a stranger's subscription.
+      if (
+        assignee.visibility === "personal" &&
+        assignee.userId !== input.viewerId
+      ) {
+        await this.appendChannelThreadReply({
+          projectId,
+          repositoryId,
+          messageId,
+          authorId: `${auditor.userId}:${auditor.provider}`,
+          content:
+            `@${assignee.name} is personal to ${assignee.userName} — only ` +
+            `they can task it here. Name an org-wide agent instead.`,
+        });
+        continue;
+      }
+      await this.dispatchOneMention({
+        projectId,
+        repositoryId,
+        content: fixObjectiveFor(finding),
+        senderId: input.viewerId,
+        candidate: assignee,
+        threadMessageId: messageId,
+        trigger: "audit_fix",
+        claimMessage:
+          assignee.userId === auditor.userId &&
+          assignee.provider === auditor.provider
+            ? `Taking finding ${String(finding.index)} myself.`
+            : `Handing finding ${String(finding.index)} to @${assignee.name}.`,
+      });
+    }
+    return true;
+  }
+
+  /**
+   * The agent whose role and recent work best match a piece of text.
+   *
+   * The same scoring the no-mention auto-claim path uses, and deliberately
+   * so: "who around here handles this" is one question, and answering it two
+   * different ways in two places would mean a finding and an identically
+   * worded channel message could land on different agents.
+   *
+   * Unlike auto-claim there is no minimum score and no margin to clear. That
+   * gate exists there to decide *whether* to spend anything at all on a
+   * message nobody addressed; here a person has already approved the work,
+   * so the only open question is who, and the fallback is the auditor rather
+   * than silence.
+   */
+  private async bestFitFor(input: {
+    repositoryId: string;
+    text: string;
+    candidates: ChannelMentionCandidate[];
+  }): Promise<ChannelMentionCandidate | undefined> {
+    if (input.candidates.length === 0) {
+      return undefined;
+    }
+    const tokens = relevanceTokens(input.text);
+    const submittedTasks = await this.options.store.listSubmittedTasks({
+      repositoryId: input.repositoryId,
+    });
+    const recentByOwner = new Map<string, string[]>();
+    for (const task of submittedTasks) {
+      if (task.submittedBy === undefined) {
+        continue;
+      }
+      const list = recentByOwner.get(task.submittedBy) ?? [];
+      if (list.length < RECENT_ACTIVITY_LOOKBACK) {
+        list.push(task.objective);
+        recentByOwner.set(task.submittedBy, list);
+      }
+    }
+    const [best] = input.candidates
+      .map((candidate) => ({
+        candidate,
+        ...scoreCandidate(
+          tokens,
+          candidate,
+          recentByOwner.get(candidate.userId) ?? [],
+        ),
+      }))
+      .sort((a, b) => b.score - a.score);
+    return best?.candidate;
   }
 
   /**

@@ -576,11 +576,36 @@ export async function openSubmitterCredentialHome(
       ? refuse(`its submitter has connected no ${vendor} account`)
       : undefined;
   }
-  return await openCredentialHome({
+  const home = await openCredentialHome({
     vendor,
     credential,
     baseEnv: sanitizeChildEnv(process.env),
   });
+  // The CLI refreshes its own OAuth token during a run and writes the new one
+  // into this home, which is then deleted. Keeping it is what stops a
+  // connected account from dying an hour after it was connected — see
+  // `CredentialHome.close`.
+  return {
+    ...home,
+    close: async () => {
+      const result = await home.close();
+      const store = options.credentials;
+      if (result.rotatedSecret !== undefined && store !== undefined) {
+        await store
+          .put(task.submittedBy ?? "", vendor, {
+            kind: credential.kind,
+            secret: result.rotatedSecret,
+            ...(credential.visibility === undefined
+              ? {}
+              : { visibility: credential.visibility }),
+          })
+          // A run that produced good work must not fail because its token
+          // could not be filed. The cost of losing it is one reconnect.
+          .catch(() => undefined);
+      }
+      return result;
+    },
+  };
 }
 
 export interface RunSummary {

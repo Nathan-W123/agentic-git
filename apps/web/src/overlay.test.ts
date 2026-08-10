@@ -392,3 +392,81 @@ test("discard removes the worktree and its ownership record", async () => {
   const status = await harness.service.status(scope);
   assert.equal(status.exists, false);
 });
+
+test("a file can be moved inside the overlay, and the move is a change like any other", async () => {
+  // A move needs no pipeline of its own: the overlay is the staging area every
+  // edit already goes through, so a rename arrives at review as a deletion and
+  // an addition of the same content, revertible by the same means.
+  const harness = await createHarness();
+  const scope = scopeFor(harness);
+  await harness.service.open(scope);
+
+  await harness.service.moveOverlayFile(
+    scope,
+    "src/value.js",
+    "src/renamed/value.js",
+  );
+
+  const files = await harness.service.listFiles(scope);
+  assert.deepEqual(
+    files.map((entry) => entry.path),
+    ["src/renamed/value.js"],
+    "the file should exist only at its new path",
+  );
+  const moved = await harness.service.readOverlayFile(
+    scope,
+    "src/renamed/value.js",
+  );
+  assert.equal(unixLines(moved.content), "export const value = 1;\n");
+
+  // And the overlay reports itself dirty, which is what carries the move into
+  // a changeset when the workspace is submitted.
+  const status = await harness.service.status(scope);
+  assert.equal(status.exists, true);
+  assert.notDeepEqual(status.dirtyFiles, []);
+});
+
+test("a move refuses to overwrite, or to invent a source", async () => {
+  // Overwriting silently would destroy somebody's work with no record that it
+  // was ever there, which is worse than refusing.
+  const harness = await createHarness();
+  const scope = scopeFor(harness);
+  await harness.service.open(scope);
+  await harness.service.writeOverlayFile(scope, "src/other.js", "export const other = 1;\n");
+
+  await assert.rejects(
+    async () =>
+      await harness.service.moveOverlayFile(scope, "src/value.js", "src/other.js"),
+    (error: unknown) => (error as { code?: string }).code === "target_exists",
+  );
+  await assert.rejects(
+    async () =>
+      await harness.service.moveOverlayFile(scope, "src/absent.js", "src/new.js"),
+    (error: unknown) => (error as { code?: string }).code === "file_not_found",
+  );
+  // Both files are still where they were.
+  const files = await harness.service.listFiles(scope);
+  assert.deepEqual(
+    files.map((entry) => entry.path).sort(),
+    ["src/other.js", "src/value.js"],
+  );
+});
+
+test("a move cannot escape the overlay", async () => {
+  // Same guarantee the read and write paths have: a path is resolved inside
+  // the overlay or refused, so a rename is not a way out of it.
+  const harness = await createHarness();
+  const scope = scopeFor(harness);
+  await harness.service.open(scope);
+  const cases: [string, string][] = [
+    ["src/value.js", "../escaped.js"],
+    ["../../etc/passwd", "src/stolen.js"],
+    ["src/value.js", ".git/hooks/pre-commit"],
+  ];
+  for (const [from, to] of cases) {
+    await assert.rejects(
+      async () => await harness.service.moveOverlayFile(scope, from, to),
+      `${from} -> ${to} should be refused`,
+    );
+  }
+});

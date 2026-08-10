@@ -17,6 +17,7 @@
  */
 
 import {
+  api,
   canLeaveRepository,
   canManageRepository,
   channelAgentsFor,
@@ -38,6 +39,7 @@ import {
 } from "./data.js";
 import {
   FLAG_FOR_STATUS,
+  buildTree,
   changeSetStats,
   parsePatch,
   patchStats,
@@ -47,6 +49,7 @@ import {
   agentFace,
   avatar,
   avatarStack,
+  chime,
   clockTime,
   esc,
   icon,
@@ -120,7 +123,7 @@ function chanRow(repo, activeRepositoryId) {
   return `<div class="chan-row${active ? " active" : ""}${
     unread > 0 ? " unread" : ""
   }" role="button" tabindex="0" data-act="channel-open" data-value="${esc(repo.id)}">
-    <span class="cr-hash">${icon("hash")}</span>
+    <span class="cr-hash">${icon("chatBubble")}</span>
     <span class="cr-name">${esc(repo.id)}</span>
     ${unread > 0 ? `<span class="cr-badge">${unread > 99 ? "99+" : unread}</span>` : ""}
     <span class="cr-more">${iconButton("dots", {
@@ -228,14 +231,49 @@ function usageTip(agent) {
   return `<div class="rr-usage" role="tooltip">${body}</div>`;
 }
 
+/**
+ * One person in the roster, shaped like an agent row.
+ *
+ * Same markup deliberately: a channel's participants are people and agents
+ * side by side, and giving each its own layout would make the two lists read
+ * as unrelated things that happen to sit together. The role sits under the
+ * name exactly where an agent's does — theirs is what they were granted here,
+ * which is the same question being answered in both cases.
+ */
+function personRow(person) {
+  const name = person.user?.displayName ?? person.user?.email ?? "Someone";
+  const role = String(person.role ?? "").trim();
+  return `<div class="roster-row">
+    <div class="roster-row-main">
+      <span class="rr-avatar">${avatar(name, 30)}</span>
+      <span class="rr-body">
+        <div class="rr-name">${esc(name)}</div>
+        <div class="rr-role${role ? "" : " rr-role-empty"}">${
+          role === "" ? "No role set" : esc(role)
+        }</div>
+      </span>
+    </div>
+  </div>`;
+}
+
+/** The one role the system acts on, so the one role worth offering. */
+const AUDITOR_ROLE = "auditor";
+
+function isAuditor(agent) {
+  return (agent.role ?? "").trim().toLowerCase() === AUDITOR_ROLE;
+}
+
 function rosterRow(agent, canModerate) {
   const renaming = state.chatRenamingId === agent.id;
   const settingsOpen = state.chatSettingsOpenId === agent.id;
+  const auditor = isAuditor(agent);
+  const paused = state.auditorPaused[activeChannelId()] === true;
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
       data-act="channel-settings-toggle" data-value="${esc(agent.id)}">
       <span class="rr-avatar" data-hover="agent-usage"
-        data-hover-value="${esc(agent.id)}">
+        data-hover-value="${esc(agent.id)}" tabindex="0"
+        aria-label="Usage for ${esc(agent.name)}">
         ${usageTip(agent)}
         ${agentFace(agent, 30)}
       </span>
@@ -243,13 +281,31 @@ function rosterRow(agent, canModerate) {
         <div class="rr-name">${esc(agent.name)}</div>
         <div class="rr-role${agent.role ? "" : " rr-role-empty"}">${
           agent.role
-            ? `${esc(agent.role)}${agent.mine ? " · Your agent" : ""}`
+            ? `${esc(agent.role)}${auditor && paused ? " · paused" : ""}${
+                agent.mine ? " · Your agent" : ""
+              }`
             : agent.mine
               ? "Your agent · no role set"
               : "No role set"
         }</div>
       </span>
       <span class="rr-actions">
+        ${
+          // Only the auditor gets a switch, because it is the only role that
+          // spends without being asked. Moderators only: turning it back on
+          // starts an audit, which costs money, so it is the same decision
+          // the promotion route guards.
+          auditor && canModerate
+            ? `<button type="button" class="rr-switch${paused ? "" : " on"}"
+                data-act="auditor-toggle" data-value="${esc(String(paused))}"
+                role="switch" aria-checked="${paused ? "false" : "true"}"
+                title="${
+                  paused
+                    ? "Auditing is off. Turn it on to audit everything merged since it was switched off."
+                    : "Auditing is on. Turn it off to stop audits without demoting this agent."
+                }"><span class="rr-switch-dot"></span></button>`
+            : ""
+        }
         ${iconButton("pencil", {
           act: "channel-rename-toggle",
           value: agent.id,
@@ -290,7 +346,15 @@ function rosterRow(agent, canModerate) {
             <input data-act="channel-rename-input" data-value="${esc(agent.id)}"
               value="${esc(agent.name)}" placeholder="${esc(agent.name)}" autocomplete="off">
             <input data-act="channel-role-input" data-value="${esc(agent.id)}"
-              value="${esc(agent.role ?? "")}" placeholder="Role in this channel" autocomplete="off">
+              value="${esc(agent.role ?? "")}" placeholder="Role in this channel"
+              list="channel-role-options" autocomplete="off">
+            <datalist id="channel-role-options">
+              <!-- Every other role is free text that reaches the agent as a
+                   sentence and nothing else, so there is nothing to offer.
+                   \`auditor\` is the one the code acts on, and a reserved word
+                   nobody can discover is a reserved word nobody uses. -->
+              <option value="${AUDITOR_ROLE}">Audits every merge, unprompted</option>
+            </datalist>
           </form>`
         : ""
     }
@@ -305,6 +369,9 @@ function chanSidebar(activeRepositoryId) {
     .sort((left, right) => left.id.localeCompare(right.id));
   const roster = channelAgentsFor(activeRepositoryId);
   const canModerate = canManageRepository(activeRepositoryId);
+  // The membership records rather than `collaborators()`, which flattens them
+  // to names — the role has to come from somewhere, and it is on the record.
+  const people = state.members ?? [];
 
   return `<aside class="chan-sidebar">
     <div class="chan-sidebar-head">
@@ -322,12 +389,37 @@ function chanSidebar(activeRepositoryId) {
       }
     </div>
     <div class="chan-roster">
-      <div class="chan-list-label">Agents in #${esc(activeRepositoryId ?? "")}</div>
+      <div class="chan-list-label">Users</div>
       ${
+        // People first, then agents. The channel header already names the
+        // repository, so repeating it in the label said nothing the eye had
+        // not just read — and it grew with the name, which is why a long
+        // repository pushed the word "Agents" out of sight entirely.
+        people.length === 0
+          ? `<div class="util-empty">Nobody else has access to this repository yet.</div>`
+          : people.map((person) => personRow(person)).join("")
+      }
+      <!-- Adding somebody belongs under the list of who is already here,
+           where the question occurs to you, rather than only behind the
+           channel's menu. Each button adds the kind of participant it sits
+           beneath. -->
+      <button type="button" class="roster-add" data-act="invite-repo"
+        data-value="${esc(activeRepositoryId ?? "")}">
+        ${icon("plus")}<span>Invite someone</span>
+      </button>
+      <div class="chan-list-label">Agents</div>
+      ${
+        // No empty state. The "Add an agent" button sits directly beneath and
+        // already says what the absence means; a sentence saying the same
+        // thing above it is a line to read before reaching the thing to click.
         roster.length === 0
-          ? `<div class="util-empty">No agents connected to this repository yet.</div>`
+          ? ""
           : roster.map((agent) => rosterRow(agent, canModerate)).join("")
       }
+      <button type="button" class="roster-add" data-act="channel-agent-menu"
+        data-value="${esc(activeRepositoryId ?? "")}">
+        ${icon("plus")}<span>Add an agent</span>
+      </button>
     </div>
   </aside>`;
 }
@@ -339,17 +431,44 @@ function chanHeader(repository, repositoryId) {
   const people = collaborators();
   const faces = roster.slice(0, 3).map((agent) => agentFace(agent, 24)).join("");
   return `<header class="chan-head">
-    ${icon("hash", 'class="ch-hash"')}
+    <button type="button" class="icon-btn menu-btn" data-act="nav-toggle"
+      title="Menu" aria-label="Menu">${icon("menu")}</button>
+    <!-- Phone-only: the channel list and roster live in `.chan-sidebar`,
+         which goes off-canvas below the 600px breakpoint the same way the
+         outer app `.sidebar` already does at 900px. This is the only way
+         back to it once it is closed, so it is a real button rather than
+         something folded into a menu. -->
+    <button type="button" class="icon-btn chan-sidebar-btn" data-act="chan-sidebar-toggle"
+      title="Channels &amp; people" aria-label="Channels &amp; people">${icon("list")}</button>
+    ${icon("chatBubble", 'class="ch-hash"')}
     <div class="ch-title">
       <div class="ch-name">${esc(repositoryId ?? "")}</div>
-      <div class="ch-desc">${esc(repository?.branch ?? "main")} branch · ${
-        roster.length
-      } agent${roster.length === 1 ? "" : "s"}, ${people.length} teammate${
-        people.length === 1 ? "" : "s"
-      }</div>
+      <div class="ch-desc">
+        <span>${esc(repository?.branch ?? "main")} branch</span>
+        <span class="ch-sep">·</span>
+        <!-- Counted, not spelled out. "3 agents, 2 teammates" is six words
+             for two numbers, and it grew or shrank with the plural — the two
+             figures are easier to read as figures. The titles carry the
+             words for anyone hovering or using a screen reader. -->
+        <span class="ch-count" title="${people.length} ${
+          people.length === 1 ? "person" : "people"
+        }">${icon("personBust")}${people.length}</span>
+        <span class="ch-count" title="${roster.length} agent${
+          roster.length === 1 ? "" : "s"
+        }">${icon("robotBust")}${roster.length}</span>
+      </div>
     </div>
     <span class="spacer"></span>
     <span class="avatar-stack">${faces}${avatarStack(people, 3, 24)}</span>
+    <button type="button" class="icon-btn${state.chanTree === true ? " on" : ""}"
+      data-act="chan-tree-toggle" title="Files"
+      aria-pressed="${state.chanTree === true}">${icon("folder")}</button>
+    <button type="button" class="icon-btn${state.chanThreadList === true ? " on" : ""}"
+      data-act="channel-threads-toggle" title="Threads"
+      aria-pressed="${state.chanThreadList === true}">${icon("reply")}</button>
+    <button type="button" class="icon-btn${state.termOpen ? " on" : ""}"
+      data-act="chan-term-toggle" title="Terminal"
+      aria-pressed="${state.termOpen}">${icon("terminal")}</button>
     <button type="button" class="icon-btn${state.chanMsgSearchOpen ? " on" : ""}"
       data-act="channel-msg-search-toggle" title="Search messages"
       aria-pressed="${state.chanMsgSearchOpen}">${icon("search")}</button>
@@ -509,9 +628,21 @@ function messageList(repositoryId) {
  */
 const THREAD_FINISHED_RE = /^(Done —|I could not|This was cancelled)/u;
 
+/**
+ * Who `@` can currently complete to, narrowed by what has been typed.
+ *
+ * Nameless participants are dropped rather than matched against. A member
+ * with no display name and no email, or an agent connected before it was
+ * given a call sign, has nothing to insert after the `@` -- and reading
+ * `.toLowerCase()` off the missing name used to throw from inside the
+ * composer's keydown handler. That took `preventDefault` down with it, so
+ * Up and Down stopped moving the highlight and Enter fell through to the
+ * textarea and opened a new line instead of accepting the selection.
+ */
 function channelMentionCandidates(repositoryId) {
   const query = state.mentionQuery.trim().toLowerCase();
   return channelParticipants(repositoryId)
+    .filter((entry) => typeof entry.name === "string" && entry.name !== "")
     .filter((entry) => query === "" || entry.name.toLowerCase().includes(query))
     .slice(0, 6);
 }
@@ -534,13 +665,66 @@ function mentionPopover(candidates) {
     .join("")}</div>`;
 }
 
+/**
+ * The sandbox terminal, as a drawer over the bottom of the channel.
+ *
+ * What it talks to is not a shell session: the server runs one process per
+ * request inside the project's Docker sandbox and hands back the output. So
+ * there is no prompt to echo and nothing persists between commands except the
+ * overlay's own files -- `cd` does not stick, and neither does an export. The
+ * header says so rather than letting the resemblance to a real terminal
+ * imply otherwise.
+ */
+function terminalDrawer() {
+  const log = state.termLog
+    .map((entry) => {
+      if (entry.kind === "command") {
+        return `<div class="term-cmd"><span class="term-caret">$</span>${esc(entry.text)}</div>`;
+      }
+      if (entry.kind === "note") {
+        return `<div class="term-note">${esc(entry.text)}</div>`;
+      }
+      return `<pre class="term-out${entry.bad === true ? " bad" : ""}">${esc(entry.text)}</pre>`;
+    })
+    .join("");
+  return `<section class="term-drawer" aria-label="Sandbox terminal"
+    style="height:${Number(state.termHeight)}px">
+    <div class="term-grip" data-act="chan-term-resize" role="separator"
+      aria-label="Resize terminal" aria-orientation="horizontal"
+      tabindex="0" title="Drag to resize"></div>
+    <header class="term-head">
+      <span class="term-ico">${icon("terminal")}</span>
+      <strong>Terminal</strong>
+      <span class="term-sub">one command per run, in this repository's sandbox</span>
+      <span class="spacer"></span>
+      ${iconButton("close", { act: "chan-term-toggle", title: "Close terminal" })}
+    </header>
+    <div class="term-body" data-term-body>${
+      log === ""
+        ? `<div class="term-note">Commands run in your isolated overlay workspace. Each one is a fresh process, so a directory change or an exported variable does not carry to the next.</div>`
+        : log
+    }${state.termBusy ? `<div class="term-note">Running…</div>` : ""}</div>
+    <form class="term-form" data-act="chan-term-submit">
+      <span class="term-caret">$</span>
+      <input data-act="chan-term-input" autocomplete="off" spellcheck="false"
+        placeholder="${state.termBusy ? "Running…" : "Type a command"}"
+        value="${esc(state.termDraft)}"${state.termBusy ? " disabled" : ""} />
+    </form>
+  </section>`;
+}
+
 function composer(repositoryId) {
   const candidates = state.mentionActive ? channelMentionCandidates(repositoryId) : [];
   return `<div class="chan-composer-wrap">
     ${state.mentionActive ? mentionPopover(candidates) : ""}
+    ${composerThreadChip(repositoryId)}
     <form class="composer" data-act="channel-submit">
       <textarea data-act="channel-input" rows="1" spellcheck="true"
-        placeholder="Message #${esc(repositoryId ?? "")}">${esc(state.chatDraft)}</textarea>
+        placeholder="${
+          state.composerThreadId === undefined
+            ? `Message #${esc(repositoryId ?? "")}`
+            : "Add to this thread..."
+        }">${esc(state.chatDraft)}</textarea>
       <div class="composer-bar">
         ${iconButton("at", { act: "channel-mention-key", title: "Mention someone" })}
         <span class="spacer"></span>
@@ -564,6 +748,145 @@ function panelGrip() {
     aria-label="Resize panel"></div>`;
 }
 
+/**
+ * Every thread in the channel, as a way back into one.
+ *
+ * Threads are where the work actually happens, and once a few messages have
+ * gone by the only way back to one was to scroll the channel until its root
+ * appeared. This lists them newest first — the root's own words, since that
+ * is what someone is looking for, rather than a task id.
+ */
+/**
+ * One level of the file tree, and everything opened beneath it.
+ *
+ * Directories carry their own open state in `state.chanTreeOpen` rather than
+ * all-or-nothing expansion: a repository is mostly directories somebody is
+ * not looking at, and opening the lot to reach one file buries it.
+ */
+function chanTreeNode(node, depth) {
+  const pad = (extra) => `padding-left:${8 + depth * 12 + extra}px`;
+  const rows = [];
+  for (const directory of [...node.dirs.values()].sort((a, b) =>
+    a.name.localeCompare(b.name),
+  )) {
+    const open = (state.chanTreeOpen ?? []).includes(directory.path);
+    rows.push(`<button type="button" class="tree-row" data-act="chan-tree-dir"
+      data-value="${esc(directory.path)}" data-drop-dir="${esc(directory.path)}"
+      style="${pad(0)}">
+      ${icon("chevronRight", `class="caret${open ? " open" : ""}"`)}
+      <span class="tw-icon">${icon("folder")}</span>
+      <span class="tw-name">${esc(directory.name)}</span>
+    </button>`);
+    if (open) {
+      rows.push(chanTreeNode(directory, depth + 1));
+    }
+  }
+  for (const file of [...node.files].sort((a, b) => a.name.localeCompare(b.name))) {
+    const flag = file.flag;
+    // Draggable onto a directory row, which is the only drop target: dropping
+    // a file onto another file has no meaning, and a tree that accepted it
+    // would have to invent one.
+    rows.push(`<button type="button" class="tree-row${
+      file.path === state.chanFileView ? " active" : ""
+    }" data-act="chan-file-open" data-value="${esc(file.path)}"
+      draggable="true" data-drag-path="${esc(file.path)}"
+      style="${pad(14)}" title="${esc(file.path)}">
+      <span class="tw-icon">${icon("file")}</span>
+      <span class="tw-name">${esc(file.name)}</span>
+      ${flag ? `<span class="tw-flag flag-${flag}">${flag}</span>` : ""}
+    </button>`);
+  }
+  return rows.join("");
+}
+
+/**
+ * The repository's files, as a way into the code from the conversation.
+ *
+ * Changed files are marked with the same flag the diff blocks use, so the
+ * tree answers "what has been touched" without being a second changes view.
+ *
+ * A file can be dragged onto a directory to move it. That became honest once
+ * the overlay gained a move: the rename lands in the same staging area an
+ * edit does, so it reaches review as a deletion and an addition and is
+ * revertible the same way. Directories are the only drop target — dropping a
+ * file onto another file has no meaning worth inventing.
+ */
+function chanTreePanel(repositoryId) {
+  const patches = state.changeSet?.patches ?? [];
+  const flags = new Map(
+    patches.map((patch) => [patch.path, FLAG_FOR_STATUS[patch.status] ?? "M"]),
+  );
+  const paths = [
+    ...new Set([
+      ...(state.files ?? []).map((file) => file.path),
+      ...patches.map((patch) => patch.path),
+    ]),
+  ].map((path) => ({ path, flag: flags.get(path) }));
+  return `<aside class="thread-panel">
+    ${panelGrip()}
+    <header class="thread-head">
+      <span>Files</span>
+      <span class="spacer"></span>
+      ${iconButton("close", { act: "chan-tree-close", title: "Close" })}
+    </header>
+    <div class="thread-body tree-body">
+      ${
+        paths.length === 0
+          ? // A freshly imported repository has a canonical full of files and
+            // no workspace, and files are only ever listed from a workspace.
+            // Saying "no files" there is true of the workspace and a lie about
+            // the repository, and it left somebody who had just imported their
+            // code with nothing to do about it. So the state is named and the
+            // action that fixes it is offered here.
+            state.workspace?.exists === true
+            ? `<div class="util-empty">This repository has no files yet.</div>`
+            : `<div class="util-empty">
+                 <p>Open a workspace to browse this repository's files.</p>
+                 <button class="btn btn-primary" type="button"
+                   data-act="workspace-open">Open workspace</button>
+               </div>`
+          : chanTreeNode(buildTree(paths), 0)
+      }
+    </div>
+  </aside>`;
+}
+
+function threadListPanel(repositoryId) {
+  const threads = channelMessagesFor(repositoryId)
+    .filter((entry) => (entry.replies ?? []).length > 0)
+    .slice()
+    .reverse();
+  return `<aside class="thread-panel">
+    ${panelGrip()}
+    <header class="thread-head">
+      <span>Threads</span>
+      <span class="spacer"></span>
+      ${iconButton("close", { act: "channel-threads-close", title: "Close" })}
+    </header>
+    <div class="thread-body">
+      ${
+        threads.length === 0
+          ? `<div class="util-empty">No threads yet. A thread appears when an agent has more than one thing to say about a task.</div>`
+          : threads
+              .map((entry) => {
+                const count = (entry.replies ?? []).length;
+                const author = channelAuthor(repositoryId, entry);
+                return `<button type="button" class="thread-item"
+                  data-act="channel-thread-open" data-value="${esc(entry.id)}">
+                  <span class="ti-top">
+                    <span class="ti-who">${esc(author.name)}</span>
+                    <span class="ti-time">${esc(clockTime(entry.at))}</span>
+                  </span>
+                  <span class="ti-text">${esc(entry.content)}</span>
+                  <span class="ti-count">${count} repl${count === 1 ? "y" : "ies"}</span>
+                </button>`;
+              })
+              .join("")
+      }
+    </div>
+  </aside>`;
+}
+
 function threadPanel(repositoryId) {
   const messageId = state.activeChannelThread;
   if (messageId === undefined) {
@@ -578,6 +901,11 @@ function threadPanel(repositoryId) {
     <header class="thread-head">
       <span>Thread</span>
       <span class="spacer"></span>
+      ${iconButton("reply", {
+        act: "composer-thread-continue",
+        value: messageId,
+        title: "Send the next channel message into this thread",
+      })}
       ${iconButton("close", { act: "channel-thread-close", title: "Close thread" })}
     </header>
     <div class="thread-body">
@@ -736,7 +1064,14 @@ function filePanel() {
           aria-selected="${editing ? "true" : "false"}"
           data-act="chan-file-mode" data-mode="edit">Edit</button>
       </div>
-      ${iconButton("close", { act: "chan-file-close", title: "Close file" })}
+      ${iconButton("arrowLeft", {
+        act: "chan-file-back",
+        title: "Back to files",
+      })}
+      ${iconButton("close", {
+        act: "chan-file-close",
+        title: "Close files",
+      })}
     </header>
     ${
       editing
@@ -971,15 +1306,31 @@ export function renderChats() {
   const repository = currentRepository();
   const repositoryId = activeChannelId();
 
-  return `<div class="chats-shell">
+  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}">
     ${chanSidebar(repositoryId)}
+    ${
+      // Phone-only off-canvas drawer for `.chan-sidebar` — see the toggle
+      // button in `chanHeader`. Tapping outside the drawer is how it closes,
+      // the same as the outer app sidebar's `.nav-scrim`.
+      state.chanSidebarOpen === true
+        ? `<div class="chan-sidebar-scrim" data-act="chan-sidebar-close"></div>`
+        : ""
+    }
     <div class="chan-main">
       ${chanHeader(repository, repositoryId)}
       ${chanSearchRow()}
       ${messageList(repositoryId)}
       ${composer(repositoryId)}
+      ${state.termOpen ? terminalDrawer() : ""}
     </div>
-    ${state.chanFileView === undefined ? threadPanel(repositoryId) : filePanel()}
+    ${
+      state.chanFileView !== undefined
+        ? filePanel()
+        : state.chanTree === true
+          ? chanTreePanel(repositoryId)
+          : (threadPanel(repositoryId) ||
+           (state.chanThreadList === true ? threadListPanel(repositoryId) : ""))
+    }
   </div>`;
 }
 
@@ -1031,7 +1382,14 @@ export function openChannel(repositoryId, rerender) {
   state.repositoryId = repositoryId;
   persist("ag.repo", repositoryId);
   markChannelRead(repositoryId);
+  // Picking a channel from the phone drawer is how it closes — the drawer
+  // has no separate close button, matching the outer nav's scrim-only
+  // dismissal, and "you just navigated somewhere" is itself a close.
+  state.chanSidebarOpen = false;
   state.activeChannelThread = undefined;
+  // A thread belongs to the channel it hangs in, so an aim taken in one
+  // channel must not follow the reader into the next and post there.
+  state.composerThreadId = undefined;
   // Another channel's expanded diffs are not this channel's; collapse them so
   // the transcript opens scannable rather than mid-review.
   state.chanOpenFiles = [];
@@ -1043,8 +1401,26 @@ export function openChannel(repositoryId, rerender) {
 }
 
 export function submitComposerMessage(rerender) {
+  chime("sent");
   const repositoryId = activeChannelId();
   if (!repositoryId) {
+    return;
+  }
+  // Aimed at an existing thread rather than the channel, because the person
+  // said so. Follow-up work that belongs to a task already being tracked
+  // should land in that task's thread instead of opening a second one about
+  // the same thing — and the reply path already dispatches work into the
+  // thread it arrived in, so this needs nothing further to route.
+  const continuing = state.composerThreadId;
+  if (continuing !== undefined) {
+    const posted = postChannelReply(repositoryId, continuing, state.chatDraft);
+    if (posted === undefined) {
+      return;
+    }
+    state.chatDraft = "";
+    state.mentionActive = false;
+    markChannelRead(repositoryId);
+    rerender();
     return;
   }
   const sent = sendChannelMessage(repositoryId, state.chatDraft, "user");
@@ -1058,7 +1434,46 @@ export function submitComposerMessage(rerender) {
   scrollChannel();
 }
 
+/**
+ * The line naming the thread the next message will join.
+ *
+ * Deliberately loud and dismissable: a composer that silently posts somewhere
+ * other than the channel it is sitting under would be a trap, and the whole
+ * value of merging by hand is that it is never a guess.
+ */
+function composerThreadChip(repositoryId) {
+  const messageId = state.composerThreadId;
+  if (messageId === undefined) {
+    return "";
+  }
+  const root = channelMessagesFor(repositoryId).find(
+    (entry) => entry.id === messageId,
+  );
+  if (root === undefined) {
+    return "";
+  }
+  const title = String(
+    (root.replies ?? []).find((reply) => /^Task: /u.test(String(reply.content ?? "")))
+      ?.content ?? root.content,
+  )
+    .replace(/^Task: /u, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return `<div class="composer-thread">
+    ${icon("reply")}
+    <span class="ct-label">Continuing in</span>
+    <span class="ct-title" title="${esc(title)}">${esc(title.slice(0, 70))}</span>
+    <span class="spacer"></span>
+    ${iconButton("close", {
+      act: "composer-thread-clear",
+      title: "Post to the channel instead",
+      small: true,
+    })}
+  </div>`;
+}
+
 export function submitThreadReply(rerender) {
+  chime("sent");
   if (state.activeChannelThread === undefined) {
     return;
   }
@@ -1112,6 +1527,186 @@ export function pickMention(name, rerender) {
     next.focus();
     next.setSelectionRange(pos, pos);
   }
+}
+
+/** How many transcript entries the drawer keeps before dropping the oldest. */
+const TERM_LOG_LIMIT = 300;
+
+/** Small enough to still show the prompt and a line; the ceiling is the
+    column's own height, applied at drag time since it varies. */
+const TERM_MIN_HEIGHT = 120;
+
+function clampTermHeight(px, columnHeight) {
+  const ceiling = Math.max(TERM_MIN_HEIGHT, Math.round(columnHeight * 0.85));
+  return Math.min(ceiling, Math.max(TERM_MIN_HEIGHT, Math.round(px)));
+}
+
+/**
+ * Drags the drawer's top edge.
+ *
+ * Sized against the conversation column rather than the viewport, because
+ * that is what the drawer is positioned inside -- measuring the window would
+ * let it be dragged taller than the space it can occupy. The height is
+ * written straight to the node during the drag and only committed to state
+ * on release: re-rendering the channel on every pointer move would rebuild
+ * the message list for each pixel.
+ */
+export function startTerminalResize(event, rerender) {
+  const drawer = event.target.closest(".term-drawer");
+  const column = drawer?.parentElement;
+  if (drawer == null || column == null) {
+    return;
+  }
+  event.preventDefault();
+  const columnHeight = column.getBoundingClientRect().height;
+  const startY = event.clientY;
+  const startHeight = drawer.getBoundingClientRect().height;
+  const onMove = (move) => {
+    // Upward drag is a negative delta and should grow the drawer.
+    const next = clampTermHeight(startHeight - (move.clientY - startY), columnHeight);
+    drawer.style.height = `${next}px`;
+  };
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    document.body.classList.remove("resizing-ns");
+    state.termHeight = Math.round(drawer.getBoundingClientRect().height);
+    persist("ag.termHeight", state.termHeight);
+    rerender();
+  };
+  document.body.classList.add("resizing-ns");
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
+/** Keyboard equivalent of the drag, so the grip is not mouse-only. */
+export function nudgeTerminalHeight(event, rerender) {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+    return;
+  }
+  event.preventDefault();
+  const column = document.querySelector(".chan-main");
+  const columnHeight = column?.getBoundingClientRect().height ?? 600;
+  const step = event.key === "ArrowUp" ? 32 : -32;
+  state.termHeight = clampTermHeight(state.termHeight + step, columnHeight);
+  persist("ag.termHeight", state.termHeight);
+  rerender();
+  document.querySelector("[data-act='chan-term-resize']")?.focus();
+}
+
+function termPush(entry) {
+  state.termLog.push(entry);
+  if (state.termLog.length > TERM_LOG_LIMIT) {
+    state.termLog.splice(0, state.termLog.length - TERM_LOG_LIMIT);
+  }
+}
+
+/**
+ * Runs whatever is in the terminal drafts against the repository's overlay.
+ *
+ * Every outcome is written into the transcript rather than raised as a toast:
+ * a terminal that reports failure somewhere other than the terminal is
+ * hard to read back afterwards, and the whole point of the log is that the
+ * command and its result sit together.
+ */
+export async function runTerminalCommand(rerender) {
+  const command = state.termDraft.trim();
+  const repository = currentRepository();
+  if (command === "" || state.termBusy) {
+    return;
+  }
+  if (repository === undefined) {
+    return;
+  }
+  if (command === "clear" || command === "cls") {
+    state.termLog = [];
+    state.termDraft = "";
+    rerender();
+    focusTerminalInput();
+    return;
+  }
+  termPush({ kind: "command", text: command });
+  state.termPast.push(command);
+  state.termSeek = undefined;
+  state.termDraft = "";
+  state.termBusy = true;
+  rerender();
+  try {
+    const project = encodeURIComponent(state.projectId);
+    const repo = encodeURIComponent(repository.id);
+    const response = await api(
+      `/projects/${project}/repositories/${repo}/workspace/exec`,
+      { method: "POST", body: { command } },
+    );
+    const result = response.result ?? {};
+    const text = [result.stdout ?? "", result.stderr ?? ""]
+      .filter((part) => part !== "")
+      .join("\n");
+    const failed = result.exitCode !== 0;
+    if (text.trim() !== "") {
+      termPush({ kind: "output", text: text.replace(/\n+$/u, ""), bad: failed });
+    }
+    if (result.timedOut === true) {
+      termPush({ kind: "note", text: "Timed out and was killed." });
+    } else if (failed) {
+      termPush({ kind: "note", text: `exited ${result.exitCode}` });
+    }
+  } catch (error) {
+    // 501 is the sandbox refusing rather than the command failing, and it is
+    // the one a person is most likely to hit first, so it says what to do.
+    termPush({
+      kind: "note",
+      text:
+        error.status === 501
+          ? "No Docker sandbox is configured for this project, so the terminal is disabled. Set sandbox.mode in .coordinator/config.json and restart the server."
+          : error.message,
+    });
+  } finally {
+    state.termBusy = false;
+    rerender();
+    focusTerminalInput();
+  }
+}
+
+function focusTerminalInput() {
+  const input = document.querySelector("[data-act='chan-term-input']");
+  if (input === null) {
+    return;
+  }
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  const body = document.querySelector("[data-term-body]");
+  if (body !== null) {
+    body.scrollTop = body.scrollHeight;
+  }
+}
+
+/**
+ * Up and Down walk previously run commands, the way a shell does.
+ *
+ * Walking past the newest entry returns to whatever was being typed rather
+ * than sticking on the last command, so Down is always a way back out.
+ */
+export function handleTerminalKeydown(event, rerender) {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+    return;
+  }
+  const past = state.termPast;
+  if (past.length === 0) {
+    return;
+  }
+  event.preventDefault();
+  const seek = state.termSeek;
+  if (event.key === "ArrowUp") {
+    state.termSeek = seek === undefined ? past.length - 1 : Math.max(0, seek - 1);
+  } else if (seek === undefined || seek >= past.length - 1) {
+    state.termSeek = undefined;
+  } else {
+    state.termSeek = seek + 1;
+  }
+  state.termDraft = state.termSeek === undefined ? "" : past[state.termSeek];
+  rerender();
+  focusTerminalInput();
 }
 
 export function handleComposerKeydown(event, rerender) {

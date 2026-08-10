@@ -17,22 +17,25 @@
 :root {
   color-scheme: dark;
 
-  --bg: #0a0b0f;
-  --bg-panel: #0e1016;
-  --bg-card: #111320;
-  --bg-card-2: #14161f;
-  --bg-inset: #0c0e14;
-  --bg-hover: #171a25;
-  --bg-active: #1b1e2b;
+  /* Neutral grey, not blue-black. The surfaces were tinted toward navy, which
+     read as a colour choice competing with the accent rather than as a
+     background behind it. */
+  --bg: #191919;
+  --bg-panel: #1f1f1f;
+  --bg-card: #242424;
+  --bg-card-2: #292929;
+  --bg-inset: #151515;
+  --bg-hover: #2f2f2f;
+  --bg-active: #383838;
 
-  --border: #1e2130;
-  --border-soft: #181b26;
-  --border-strong: #2a2e40;
+  --border: #333333;
+  --border-soft: #2a2a2a;
+  --border-strong: #454545;
 
-  --text: #e7e9f0;
-  --text-2: #9aa0b4;
-  --text-3: #676d82;
-  --text-4: #4b5063;
+  --text: #ededed;
+  --text-2: #a6a6a6;
+  --text-3: #7a7a7a;
+  --text-4: #5c5c5c;
 
   --accent: #8b5cf6;
   --accent-bright: #a78bfa;
@@ -66,8 +69,8 @@
   --tree-w: 232px;
   --chat-w: 380px;
 
-  --shadow-pop: 0 18px 48px rgba(0, 0, 0, 0.55);
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 6px 16px rgba(0, 0, 0, 0.44);
+  --shadow-card: 0 1px 1px rgba(0, 0, 0, 0.28);
 
   --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
@@ -189,13 +192,7 @@ svg {
   place-items: center;
   min-height: 100vh;
   padding: 32px;
-  background:
-    radial-gradient(
-      900px 520px at 50% -10%,
-      rgba(139, 92, 246, 0.09),
-      transparent 70%
-    ),
-    var(--bg);
+  background: var(--bg);
 }
 
 .auth-box {
@@ -991,6 +988,21 @@ svg {
   margin-right: -7px;
 }
 
+/* The overlap is between faces, not past the end of the stack. Leaving the
+   negative margin on the last one makes the container's box narrower than
+   the faces drawn in it, so a flex gap after the stack measures from the
+   wrong edge and whatever follows sits closer than the gap says. */
+.avatar-stack .avatar:last-child {
+  margin-right: 0;
+}
+
+/* With no one to show, the stack is still a flex item and still collects a
+   gap on each side -- a double gap of empty space in the middle of a row of
+   evenly spaced icons. */
+.avatar-stack:empty {
+  display: none;
+}
+
 .avatar-stack .more {
   margin-left: 13px;
   font-size: 11px;
@@ -1458,11 +1470,7 @@ svg {
 }
 
 .repo-action.accent {
-  background: linear-gradient(
-    180deg,
-    rgba(139, 92, 246, 0.09),
-    rgba(139, 92, 246, 0.03)
-  );
+  background: var(--accent-wash);
   border-color: rgba(139, 92, 246, 0.32);
 }
 
@@ -2591,6 +2599,13 @@ svg {
   font-size: 12.5px;
 }
 
+/* Was an inline `style="width:190px"` on the search box's wrapper — moved
+   to a class so the phone breakpoint can override it below. */
+.agent-search-wrap {
+  width: 190px;
+  flex: none;
+}
+
 .agent-rows {
   padding: 8px;
   display: grid;
@@ -3383,10 +3398,13 @@ svg {
 .chan-list-label {
   padding: 12px 9px 6px;
   font-size: 10.5px;
-  font-weight: 600;
+  /* These name the two halves of the roster, so they are headings rather than
+     captions. At `--text-4` they read as the faintest thing in the panel,
+     which is the wrong end of the hierarchy for the only labels in it. */
+  font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--text-4);
+  color: var(--text);
 }
 
 .chan-row {
@@ -3434,6 +3452,31 @@ svg {
   /* Nothing hovers on a touch screen, so the menu simply stays. */
   .chan-row .cr-more {
     opacity: 1;
+  }
+
+  /* The react/reply buttons over a message, and the usage card over a
+     roster avatar, were both hover-only reveals with no other way to reach
+     them on a touch device — see the comment on `.cmsg-row .cmsg-actions`
+     and `.rr-usage` below, both defined later in the file. `!important`
+     rather than relying on source order: those base rules and this query
+     both match `.cmsg-row .cmsg-actions` at equal specificity, and the one
+     later in the file otherwise wins regardless of which media query is
+     active. */
+  .cmsg-row .cmsg-actions {
+    position: static !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    align-self: center;
+    margin-left: 6px;
+  }
+
+  /* `.rr-avatar:hover`/`:focus-within` already reveals this — see
+     `rosterRow` in screen-chats.js, which gives the avatar a `tabindex` so a
+     tap can focus it. This only removes the width clamp that assumed the
+     card was opening beside a mouse pointer inside a 268px sidebar; the
+     sidebar can be much narrower than that once it is a phone drawer. */
+  .rr-usage {
+    max-width: calc(100vw - 32px);
   }
 }
 
@@ -3533,7 +3576,7 @@ svg {
   border: 1px solid var(--border-soft);
   border-radius: 9px;
   background: var(--bg-panel);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 32%);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 34%);
   opacity: 0;
   visibility: hidden;
   transition:
@@ -3635,6 +3678,41 @@ svg {
   flex: none;
 }
 
+/* The auditor's on/off switch. Only ever drawn on one row, so it is sized to
+   sit inside the icon-button rhythm beside it rather than to be noticed. */
+.roster-row .rr-switch {
+  width: 26px;
+  height: 15px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2, transparent);
+  cursor: pointer;
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.roster-row .rr-switch.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.roster-row .rr-switch-dot {
+  width: 11px;
+  height: 11px;
+  margin-left: 1px;
+  border-radius: 50%;
+  background: var(--text-dim, #888);
+  transition: transform 120ms ease, background 120ms ease;
+}
+
+.roster-row .rr-switch.on .rr-switch-dot {
+  transform: translateX(11px);
+  background: #fff;
+}
+
 .roster-rename {
   padding: 6px 8px 8px 41px;
 }
@@ -3701,6 +3779,10 @@ svg {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* The terminal drawer anchors to the bottom of the conversation column,
+     not the viewport -- the roster and file panels sit alongside and should
+     stay reachable while it is open. */
+  position: relative;
 }
 
 .chan-main > .chan-messages {
@@ -4075,7 +4157,7 @@ body.resizing-panel {
   cursor: pointer;
   text-align: left;
   font: inherit;
-  color: var(--text-1);
+  color: var(--text);
 }
 
 .cblock-head:hover {
@@ -4481,6 +4563,12 @@ dialog.modal::backdrop {
 .modal-card {
   width: 448px;
   max-width: 92vw;
+  /* A phone in landscape with the on-screen keyboard up can leave less than
+     half the viewport height for the page behind it. Capped and scrollable
+     rather than trusting the dialog to fit — the fixed-width case already
+     worked from `max-width: 92vw` alone, but nothing here bounded height. */
+  max-height: min(90vh, 760px);
+  overflow-y: auto;
   background: var(--bg-card);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
@@ -4597,6 +4685,13 @@ dialog.modal::backdrop {
     display: inline-grid !important;
   }
 
+  /* Opens `.tree-pane` below — see the toggle button added to `toolbar()`
+     in screen-code.js. Above 900px the tree is an always-visible grid
+     column and this button has nothing to do, so it stays hidden there. */
+  .tree-toggle-btn {
+    display: inline-grid !important;
+  }
+
   .page {
     padding: 24px 18px 40px;
   }
@@ -4630,6 +4725,17 @@ dialog.modal::backdrop {
     width: 250px;
     z-index: 78;
     border-right: 1px solid var(--border);
+  }
+
+  /* Tapping outside the overlay tree closes it — see the `.tree-scrim` div
+     `renderCode` (screen-code.js) renders alongside it, the same pattern as
+     `.nav-scrim` and `.chat-scrim` above. */
+  .tree-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 77;
+    background: rgba(4, 5, 9, 0.45);
   }
 
   .coord-head,
@@ -4697,7 +4803,276 @@ dialog.modal::backdrop {
   }
 }
 
+/* ----------------------------------------------------------- phone ---- */
+/* Real phone widths — iPhone SE (375) through Pro Max (430), common Android
+   widths down to 360. The 900px tier above stays tablet-shaped (it already
+   does real work collapsing the outer nav, the Code chat drawer, and the
+   agent-row layout); this tier is additive rather than a lower number for
+   the same rules, because "channel list + roster fixed at 268px" and
+   "message composer with two inline mini-selects" are still fine at 820px
+   and are not fine at 380px. */
+@media (max-width: 600px) {
+  /* `.chan-sidebar` (channel list + roster) goes off-canvas the same way
+     the outer app `.sidebar` already does at 900px — toggled by the new
+     `.chan-sidebar-btn` in `chanHeader` (screen-chats.js), closed by the
+     scrim, by picking a channel, or by the outer nav's own Esc/back
+     affordances if the platform supplies them. */
+  .chan-sidebar-btn {
+    display: inline-grid !important;
+  }
+
+  .chan-sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 86vw;
+    max-width: 320px;
+    z-index: 76;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: var(--shadow-pop);
+  }
+
+  .chats-shell.roster-open .chan-sidebar {
+    transform: none;
+  }
+
+  .chan-sidebar-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 75;
+    background: rgba(4, 5, 9, 0.5);
+  }
+
+  /* The header carries a lot on desktop — title, counts, an avatar stack,
+     five toggle buttons, and now the two navigation buttons above. Wrapping
+     rather than shrinking everything to illegibility: the title stays on
+     its own line and the toggle buttons get a second row. The avatar stack
+     is dropped rather than shrunk further — it is a decorative echo of the
+     roster, which the new channels button now opens directly. */
+  .chan-head {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .chan-head .spacer {
+    flex: 1 0 100%;
+    height: 0;
+  }
+
+  .chan-head .avatar-stack {
+    display: none;
+  }
+
+  /* Same shape of overflow as the header, and the same fix: the counts and
+     buttons on the right wrap to a row of their own instead of being
+     squeezed against "Code". */
+  .code-toolbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    height: auto;
+    padding: 10px 12px;
+  }
+
+  .code-toolbar .spacer {
+    flex: 1 0 100%;
+    height: 0;
+  }
+
+  /* A long path plus the Unified/Split control can still be wider than a
+     phone screen; this keeps that inside its own bar instead of pushing the
+     editor or the whole page wider than the viewport. */
+  .code-crumb {
+    overflow-x: auto;
+  }
+
+  /* Two 50%-width code columns are unreadable under ~180px each. Stacked,
+     each keeps the full width instead. */
+  .code-body.split {
+    grid-template-columns: 1fr;
+  }
+
+  .code-body.split .side {
+    border-right: none;
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  /* Files / Threads / Thread / the file diff-or-edit panel — all four are
+     `.thread-panel` (or its `.file-panel` variant), a fixed-width column
+     beside the transcript on desktop and still fixed-width, just narrower,
+     down to 900px. Below 600px there is no honest "beside" left: it takes
+     over the screen instead, the same way the Code screen's chat pane
+     already does at 1180px. */
+  .thread-panel {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    max-width: 100vw;
+    min-width: 0;
+    z-index: 72;
+  }
+
+  /* Nothing to drag full-screen wider than the screen. */
+  .thread-panel .panel-grip {
+    display: none;
+  }
+
+  .code-shell .chat-pane {
+    width: 100vw;
+  }
+
+  /* Anchored popovers (`showPopover` in ui.js) are positioned in JS with an
+     inline `left`/`top`/`width`, computed against a desktop-shaped anchor
+     and a wide viewport — on a 360-390px screen that inline width alone
+     already overflows (see `channelInfoPopoverHtml`'s caller, which never
+     passes a narrower one). Rather than chase every call site, every
+     popover becomes a bottom sheet here: inset from the sides, anchored to
+     the bottom, `!important` because it is overriding an inline style. This
+     is also the "full-screen sheet" the channel info / roster panel needs —
+     it is the same component armed differently, not a second one. */
+  .popover {
+    left: 10px !important;
+    right: 10px !important;
+    top: auto !important;
+    bottom: 10px !important;
+    width: auto !important;
+  }
+
+  /* The message composer's mention button and send button always fit on one
+     row; the private-agent composer (`chatComposer` in chat.js) additionally
+     carries a context ring and two mini-selects for model and effort, which
+     do not. Wrapping lets those two drop to a row of their own rather than
+     overflowing the panel — no call site needs to change, `.composer-bar`
+     already has nothing after the last mini-select but the send button. */
+  .composer-bar {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  /* Touch targets, per standard mobile guidance (44px minimum). These stay
+     inside their existing 26-30px envelope on desktop, where a mouse pointer
+     does not need the extra margin and the denser toolbars rely on the
+     smaller size to fit. */
+  .icon-btn {
+    width: 38px;
+    height: 38px;
+  }
+
+  .icon-btn svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  .icon-btn.sm {
+    width: 34px;
+    height: 34px;
+  }
+
+  .icon-btn.sm svg {
+    width: 15px;
+    height: 15px;
+  }
+
+  .composer-bar .icon-btn {
+    width: 34px;
+    height: 34px;
+  }
+
+  .send-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .chan-row,
+  .roster-row-main,
+  .agent-row,
+  .tree-row,
+  .mention-item,
+  .menu-item {
+    min-height: 44px;
+  }
+
+  /* My Agents' list header: four filter tabs, a spacer, and a 190px-wide
+     search box, all on one row on desktop. The tabs alone can run past a
+     phone's width before the search box is even considered, so the whole
+     row wraps and the search box — the widest, least essential-to-see-first
+     item — drops to a full-width row of its own. */
+  .agent-list-head {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .agent-search-wrap {
+    flex: 1 0 100%;
+    width: auto;
+  }
+
+  /* Every screen's title row (`.page-head`) — icon, heading, and a trailing
+     primary action like "Add Agent" or "Create new repository" — is a
+     non-wrapping flex row with nothing to stop the action button running
+     past the viewport edge on a phone. Same fix as the other toolbars. */
+  .page-head {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+
+  .page-head .spacer {
+    flex-basis: 100%;
+    height: 0;
+  }
+}
+
+/* A smaller tier still, for the narrowest phones (iPhone SE and similar
+   ~360-375px devices) — trims chrome the 600px tier still has room for
+   rather than repeating its layout decisions. */
+@media (max-width: 400px) {
+  .page {
+    padding: 18px 14px 32px;
+  }
+
+  .chan-head .ch-desc {
+    display: none;
+  }
+
+  .chan-messages {
+    padding: 6px 12px 14px;
+  }
+
+  .chan-composer-wrap {
+    margin: 0 8px 8px;
+  }
+
+  .popover {
+    left: 8px !important;
+    right: 8px !important;
+    bottom: 8px !important;
+  }
+
+  .modal-card {
+    padding: 16px;
+  }
+}
+
 .menu-btn {
+  display: none;
+}
+
+/* Shown only inside the 900px breakpoint above — see the comment there. */
+.tree-toggle-btn {
+  display: none;
+}
+
+/* Shown only inside the 600px phone breakpoint below — see the comment
+   there. */
+.chan-sidebar-btn {
+  display: none;
+}
+
+.tree-scrim,
+.chan-sidebar-scrim {
   display: none;
 }
 
@@ -5026,4 +5401,388 @@ dialog.modal::backdrop {
   .cblocks > summary::before {
     transition: none;
   }
+}
+
+/* --------------------------------------------------- roster and threads ---- */
+
+/* Sits with the list it adds to, indented to the rows above it rather than to
+   the panel, so it reads as the next line of that list. */
+.roster-add {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  margin: 2px 0 10px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.roster-add:hover {
+  background: var(--bg-hover);
+  color: var(--text-2);
+}
+
+.roster-add svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+/* Counts in the channel header: figure beside glyph, not a sentence. */
+.ch-desc {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.ch-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-count svg {
+  width: 13px;
+  height: 13px;
+}
+
+.ch-sep {
+  opacity: 0.5;
+}
+
+/* One thread in the pullout. Three lines: who and when, what was said, and
+   how much is in it — enough to recognise a thread without opening it. */
+.thread-item {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thread-item:hover {
+  background: var(--bg-hover);
+}
+
+.ti-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.ti-who {
+  font-weight: 600;
+}
+
+.ti-time {
+  color: var(--text-4);
+  font-size: 11px;
+}
+
+.ti-text {
+  font-size: 12.5px;
+  color: var(--text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ti-count {
+  font-size: 11px;
+  color: var(--accent);
+}
+
+/* ------------------------------------------------------ avatar and theme ---- */
+
+.avatar.has-photo {
+  background: var(--bg-inset);
+  padding: 0;
+  overflow: hidden;
+}
+
+.avatar.has-photo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.avatar-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Light keeps the accent and inverts everything around it; the shadows have
+   to come down with it, since a shadow tuned for near-black reads as dirt on
+   a white surface. */
+/*
+ * Light theme — a creamy off-white, not a white.
+ *
+ * This block used to set only shadows and `color-scheme`, so switching the
+ * toggle changed almost nothing visible and the setting looked broken. Every
+ * surface, border and text tone the dark palette defines is overridden here,
+ * because those are what a theme *is*; the accent deliberately carries over
+ * unchanged, which is what the setting's own description promises.
+ *
+ * Warm rather than neutral: a pure #fff next to a purple accent reads as
+ * clinical, and off-white is easier to sit in front of for a long session.
+ */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --bg: #f4f0e6;
+  --bg-panel: #faf7ef;
+  --bg-card: #fffdf7;
+  --bg-card-2: #f6f2e8;
+  --bg-inset: #ece7db;
+  --bg-hover: #ebe5d7;
+  --bg-active: #e3dccb;
+
+  --border: #ddd5c4;
+  --border-soft: #e9e2d4;
+  --border-strong: #c6bda8;
+
+  --text: #26231e;
+  --text-2: #57524a;
+  --text-3: #837c70;
+  --text-4: #a49c8c;
+
+  --shadow-pop: 0 6px 16px rgba(15, 18, 30, 0.14);
+  --shadow-card: 0 1px 1px rgba(15, 18, 30, 0.08);
+}
+
+/* The composer aimed at a thread rather than the channel. Loud on purpose:
+   a message going somewhere other than where it looks like it will go is
+   only acceptable when the person can see it about to happen. */
+.composer-thread {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12px 6px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+  background: var(--accent-wash);
+  font-size: 0.78rem;
+  color: var(--text-2);
+}
+
+.composer-thread svg {
+  flex: none;
+  color: var(--accent-bright);
+}
+
+.composer-thread .ct-label {
+  flex: none;
+  color: var(--text-dim);
+}
+
+.composer-thread .ct-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+/* The directory a dragged file will land in. Outlined rather than filled: the
+   row is already a button with its own hover, and two filled states next to
+   each other read as a selection rather than a target. */
+.tree-row.drop-into {
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.tree-row[draggable="true"] {
+  cursor: grab;
+}
+
+/* ---------------------------------------------------- sandbox terminal ---- */
+
+/* Sits over the bottom of the channel rather than displacing it: the
+   conversation is the reason the screen is open, and a drawer that pushed
+   the message list up would reflow every message each time it opened. */
+.term-drawer {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  /* Height is set inline from the remembered drag; the cap is a guard for a
+     stored value carried over from a taller window, not the usual limit. */
+  max-height: 85%;
+  min-height: 120px;
+  background: var(--bg-inset);
+  border-top: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-pop);
+  animation: term-rise 140ms ease-out;
+}
+
+@keyframes term-rise {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+/* Someone who opens this while a long output is streaming has already told
+   us they want to read it; sliding it again on every re-render would fight
+   that. The animation is on the drawer, which only mounts once. */
+@media (prefers-reduced-motion: reduce) {
+  .term-drawer {
+    animation: none;
+  }
+}
+
+.term-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 12.5px;
+}
+
+.term-ico {
+  display: grid;
+  place-items: center;
+  width: 16px;
+  height: 16px;
+  color: var(--text-3);
+}
+
+.term-sub {
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+.term-body {
+  flex: 1;
+  overflow-y: auto;
+  padding: 10px 12px;
+  font-family: var(--font-mono, ui-monospace, "Cascadia Mono", Consolas, monospace);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.term-cmd {
+  display: flex;
+  gap: 8px;
+  color: var(--text);
+  margin-top: 6px;
+}
+
+.term-caret {
+  color: var(--accent-bright);
+  flex: none;
+  user-select: none;
+}
+
+/* Output keeps the whitespace the command produced -- columns from `ls -l`
+   or a diff are the content, not incidental formatting -- but still wraps,
+   because a drawer this short turns a horizontal scrollbar into a second
+   thing to operate before you can read the line. */
+.term-out {
+  margin: 2px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  color: var(--text-2);
+}
+
+.term-out.bad {
+  color: var(--red);
+}
+
+.term-note {
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+.term-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 12px;
+  border-top: 1px solid var(--border-soft);
+  font-family: var(--font-mono, ui-monospace, "Cascadia Mono", Consolas, monospace);
+}
+
+.term-form input {
+  flex: 1;
+  background: none;
+  border: 0;
+  outline: none;
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.term-form input::placeholder {
+  color: var(--text-4);
+}
+
+/* The drag handle is the drawer's top edge. Only 5px tall, so it gets a
+   generous invisible reach above and below via padding on a taller box --
+   a 5px target is a fair bit of aiming for something people grab often. */
+.term-grip {
+  position: absolute;
+  top: -4px;
+  left: 0;
+  right: 0;
+  height: 11px;
+  cursor: ns-resize;
+  touch-action: none;
+  z-index: 1;
+}
+
+.term-grip::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 3px;
+  width: 44px;
+  margin-left: -22px;
+  height: 3px;
+  border-radius: 2px;
+  background: var(--border-strong);
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.term-grip:hover::after,
+.term-grip:focus-visible::after {
+  opacity: 1;
+}
+
+.term-grip:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+/* While dragging, the pointer is often over the message list or the editor;
+   without this the cursor flickers and text selects under it. */
+body.resizing-ns,
+body.resizing-ns * {
+  cursor: ns-resize !important;
+  user-select: none !important;
 }

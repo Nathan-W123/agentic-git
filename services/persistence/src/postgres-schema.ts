@@ -669,4 +669,26 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE repositories ADD COLUMN created_by TEXT REFERENCES users(id)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version. See its comment for
+    // why this is keyed on the repository alone and not on the holding agent.
+    version: 22,
+    name: "auditor-cursor",
+    statements: [
+      `CREATE TABLE auditor_cursors (
+        repository_id TEXT PRIMARY KEY,
+        revision TEXT NOT NULL,
+        sequence BIGINT NOT NULL,
+        updated_at TEXT NOT NULL
+      )`,
+    ],
+  },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 23,
+    name: "auditor-paused",
+    statements: [
+      `ALTER TABLE auditor_cursors ADD COLUMN paused BOOLEAN NOT NULL DEFAULT FALSE`,
+    ],
+  },
 ];

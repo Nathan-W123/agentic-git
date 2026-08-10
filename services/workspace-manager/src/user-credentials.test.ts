@@ -217,7 +217,7 @@ test("credentials inherited from the host environment are stripped", async (t) =
   );
 });
 
-test("each launch gets its own home, and closing removes refreshed tokens", async (t) => {
+test("each launch gets its own home, and closing leaves nothing on disk", async (t) => {
   const directory = await scratch(t);
   const vault = store(directory);
   await vault.put("user-1", "claude", {
@@ -231,7 +231,10 @@ test("each launch gets its own home, and closing removes refreshed tokens", asyn
   const second = await openCredentialHome({ vendor: "claude", credential });
   assert.notEqual(first.path, second.path);
 
-  // Stand in for the token the CLI rewrites in place as it refreshes.
+  // One user's files must not be readable by the next user's process, so the
+  // directory itself always goes. What the CLI *refreshed* is read back out
+  // first — see the rotation tests below; this credential is an oauth_token,
+  // which the CLI never rewrites, so there is nothing to carry forward here.
   const refreshed = path.join(first.env["CLAUDE_CONFIG_DIR"] as string, ".credentials.json");
   await writeFile(refreshed, '{"claudeAiOauth":{}}', "utf8");
 
@@ -484,4 +487,198 @@ test("a capture of a directory with nothing in it is refused", async (t) => {
       error instanceof UserCredentialError &&
       error.code === "invalid_session_file",
   );
+});
+
+/*
+ * A stored session file is a snapshot taken once at sign-in. The vendor CLIs
+ * refresh their own OAuth token mid-run and write the new one into the home
+ * they were handed — the home that is then deleted. Discarding it left a
+ * credential that verified perfectly at sign-in and then failed every run
+ * with 401 about an hour later, which reconnecting appeared to fix.
+ */
+test("a token the CLI refreshes during a run is kept, not deleted with the home", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  const original = JSON.stringify({ tokens: { access_token: "first" } });
+  await vault.put("user-1", "codex", { kind: "session_file", secret: original });
+  const credential = await vault.get("user-1", "codex");
+  assert.ok(credential !== undefined);
+
+  const home = await openCredentialHome({ vendor: "codex", credential });
+  const authPath = path.join(home.env["CODEX_HOME"] as string, "auth.json");
+  assert.equal(
+    JSON.parse(await readFile(authPath, "utf8")).tokens.access_token,
+    "first",
+    "the run must start from the stored credential",
+  );
+
+  // Exactly what the CLI does when it refreshes: rewrite the file in place.
+  const refreshed = JSON.stringify({ tokens: { access_token: "second" } });
+  await writeFile(authPath, `${refreshed}\n`, "utf8");
+
+  const { rotatedSecret } = await home.close();
+  assert.equal(
+    rotatedSecret,
+    refreshed,
+    "the refreshed token must survive the home it was written into",
+  );
+});
+
+test("a session file the CLI left alone is not written back", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  const original = JSON.stringify({ tokens: { access_token: "unchanged" } });
+  await vault.put("user-1", "codex", { kind: "session_file", secret: original });
+  const credential = await vault.get("user-1", "codex");
+  assert.ok(credential !== undefined);
+
+  const home = await openCredentialHome({ vendor: "codex", credential });
+  const { rotatedSecret } = await home.close();
+  assert.equal(
+    rotatedSecret,
+    undefined,
+    "an untouched credential must not be rewritten on every run",
+  );
+});
+
+test("an API key is never treated as something that could rotate", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "codex", { kind: "api_key", secret: "sk-key" });
+  const credential = await vault.get("user-1", "codex");
+  assert.ok(credential !== undefined);
+
+  const home = await openCredentialHome({ vendor: "codex", credential });
+  const { rotatedSecret } = await home.close();
+  assert.equal(rotatedSecret, undefined);
+});
+
+test("withCredentialHome hands a rotated token to the caller that can store it", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  const original = JSON.stringify({ tokens: { access_token: "before" } });
+  await vault.put("user-1", "codex", { kind: "session_file", secret: original });
+  const credential = await vault.get("user-1", "codex");
+  assert.ok(credential !== undefined);
+
+  const refreshed = JSON.stringify({ tokens: { access_token: "after" } });
+  const rotations: string[] = [];
+  await withCredentialHome(
+    {
+      vendor: "codex",
+      credential,
+      onRotate: (secret) => {
+        rotations.push(secret);
+      },
+    },
+    async (home) => {
+      await writeFile(
+        path.join(home.env["CODEX_HOME"] as string, "auth.json"),
+        `${refreshed}\n`,
+        "utf8",
+      );
+    },
+  );
+  assert.deepEqual(rotations, [refreshed]);
+
+  // And the caller storing it is what makes the next run start from the new
+  // token rather than the expired one.
+  await vault.put("user-1", "codex", {
+    kind: "session_file",
+    secret: rotations[0] as string,
+  });
+  assert.equal((await vault.get("user-1", "codex"))?.secret, refreshed);
+});
+
+test("a run that fails still keeps the token it refreshed on the way down", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "codex", {
+    kind: "session_file",
+    secret: JSON.stringify({ tokens: { access_token: "start" } }),
+  });
+  const credential = await vault.get("user-1", "codex");
+  assert.ok(credential !== undefined);
+
+  const refreshed = JSON.stringify({ tokens: { access_token: "rotated" } });
+  const rotations: string[] = [];
+  await assert.rejects(
+    withCredentialHome(
+      {
+        vendor: "codex",
+        credential,
+        onRotate: (secret) => {
+          rotations.push(secret);
+        },
+      },
+      async (home) => {
+        await writeFile(
+          path.join(home.env["CODEX_HOME"] as string, "auth.json"),
+          `${refreshed}\n`,
+          "utf8",
+        );
+        throw new Error("the run failed after refreshing");
+      },
+    ),
+    /the run failed after refreshing/u,
+  );
+  assert.deepEqual(
+    rotations,
+    [refreshed],
+    "a failed run refreshes the token just the same, and losing it costs a reconnect",
+  );
+});
+
+/*
+ * Not a Codex quirk. Any vendor CLI that rotates its own token has this, and
+ * Claude only looked exempt because `claude setup-token` issues something
+ * long-lived enough that discarding the refresh costs far longer to notice.
+ */
+test("a refreshed Claude session is carried forward too", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  const original = JSON.stringify({
+    files: { ".credentials.json": '{"claudeAiOauth":{"accessToken":"first"}}' },
+  });
+  await vault.put("user-1", "claude", {
+    kind: "session_file",
+    secret: original,
+  });
+  const credential = await vault.get("user-1", "claude");
+  assert.ok(credential !== undefined);
+
+  const home = await openCredentialHome({ vendor: "claude", credential });
+  const configDirectory = home.env["CLAUDE_CONFIG_DIR"] as string;
+  await writeFile(
+    path.join(configDirectory, ".credentials.json"),
+    '{"claudeAiOauth":{"accessToken":"second"}}',
+    "utf8",
+  );
+
+  const { rotatedSecret } = await home.close();
+  assert.ok(rotatedSecret !== undefined, "the refreshed session must survive");
+  assert.match(rotatedSecret, /second/u);
+  assert.doesNotMatch(rotatedSecret, /first/u);
+});
+
+test("a refreshed Gemini session is carried forward too", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "gemini", {
+    kind: "session_file",
+    secret: JSON.stringify({ access_token: "first", refresh_token: "r1" }),
+  });
+  const credential = await vault.get("user-1", "gemini");
+  assert.ok(credential !== undefined);
+
+  const home = await openCredentialHome({ vendor: "gemini", credential });
+  const refreshed = JSON.stringify({ access_token: "second", refresh_token: "r1" });
+  await writeFile(
+    path.join(home.path, ".gemini", "oauth_creds.json"),
+    `${refreshed}\n`,
+    "utf8",
+  );
+
+  const { rotatedSecret } = await home.close();
+  assert.equal(rotatedSecret, refreshed);
 });

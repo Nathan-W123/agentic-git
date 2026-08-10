@@ -214,6 +214,7 @@ async function serve(
       readFile: (input) => overlays.readOverlayFile(input, input.path),
       writeFile: (input) =>
         overlays.writeOverlayFile(input, input.path, input.content),
+      moveFile: (input) => overlays.moveOverlayFile(input, input.from, input.to),
       exec: (input) => overlays.exec(input, input.command),
       submit: (input) => overlays.submit(input, input.objective),
     },
@@ -280,6 +281,46 @@ async function serve(
       return await computeCoordinationMetrics(store, {
         projectId: input.projectId,
       });
+    },
+    async canonicalDiff(input) {
+      const stored = await store.getRepository(input.repositoryId);
+      if (stored === undefined) {
+        throw new Error(`Unknown repository: ${input.repositoryId}`);
+      }
+      const repository = {
+        id: stored.id,
+        path: stored.path,
+        branch: stored.branch,
+      };
+      const [files, diff] = await Promise.all([
+        repositories.listChangedFiles(
+          repository,
+          input.fromRevision,
+          input.toRevision,
+        ),
+        repositories.diffBetween(
+          repository,
+          input.fromRevision,
+          input.toRevision,
+        ),
+      ]);
+      // The file list comes from Git separately rather than being parsed back
+      // out of the patch text, because the patch may have been truncated and
+      // the list of what changed is the one part that must stay complete —
+      // it is what tells a reader which of the changed files it did not get
+      // to see.
+      return { files, patch: diff.patch, truncated: diff.truncated };
+    },
+    async canonicalHead(input) {
+      const stored = await store.getRepository(input.repositoryId);
+      if (stored === undefined) {
+        throw new Error(`Unknown repository: ${input.repositoryId}`);
+      }
+      const [newest] = await repositories.listCanonicalHistory(
+        { id: stored.id, path: stored.path, branch: stored.branch },
+        1,
+      );
+      return newest?.revision;
     },
     async repositoryVersions(input) {
       const stored = await store.getRepository(input.repositoryId);

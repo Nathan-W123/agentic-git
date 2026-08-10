@@ -61,6 +61,7 @@ import type {
   ChannelReply,
   AuditArchiveResult,
   AuditEventFilter,
+  AuditorCursor,
   AuthSessionRecord,
   CoordinationStore,
   CreateApprovalInput,
@@ -1551,6 +1552,10 @@ export class PostgresCoordinationStore implements CoordinationStore {
       );
       await client.query(
         "DELETE FROM channel_membership_backfills WHERE repository_id = $1",
+        [id],
+      );
+      await client.query(
+        "DELETE FROM auditor_cursors WHERE repository_id = $1",
         [id],
       );
       await client.query(
@@ -3125,6 +3130,53 @@ export class PostgresCoordinationStore implements CoordinationStore {
       [repositoryId, userId],
     );
     return row === undefined ? undefined : text(row, "read_at");
+  }
+
+  public async getAuditorCursor(
+    repositoryId: string,
+  ): Promise<AuditorCursor | undefined> {
+    const row = await this.row(
+      `SELECT repository_id, revision, sequence, paused, updated_at
+         FROM auditor_cursors WHERE repository_id = $1`,
+      [repositoryId],
+    );
+    return row === undefined
+      ? undefined
+      : {
+          repositoryId: text(row, "repository_id"),
+          revision: text(row, "revision"),
+          sequence: Number(row["sequence"]),
+          paused: row["paused"] === true,
+          updatedAt: text(row, "updated_at"),
+        };
+  }
+
+  public async saveAuditorCursor(
+    cursor: Omit<AuditorCursor, "paused">,
+  ): Promise<void> {
+    await this.query(
+      `INSERT INTO auditor_cursors (repository_id, revision, sequence, paused, updated_at)
+       VALUES ($1, $2, $3, FALSE, $4)
+       ON CONFLICT (repository_id) DO UPDATE SET
+         revision = EXCLUDED.revision,
+         sequence = EXCLUDED.sequence,
+         updated_at = EXCLUDED.updated_at`,
+      [cursor.repositoryId, cursor.revision, cursor.sequence, cursor.updatedAt],
+    );
+  }
+
+  public async setAuditorPaused(
+    repositoryId: string,
+    paused: boolean,
+  ): Promise<void> {
+    await this.query(
+      `INSERT INTO auditor_cursors (repository_id, revision, sequence, paused, updated_at)
+       VALUES ($1, '', 0, $2, $3)
+       ON CONFLICT (repository_id) DO UPDATE SET
+         paused = EXCLUDED.paused,
+         updated_at = EXCLUDED.updated_at`,
+      [repositoryId, paused, new Date().toISOString()],
+    );
   }
 
   private toChannelMessageBase(

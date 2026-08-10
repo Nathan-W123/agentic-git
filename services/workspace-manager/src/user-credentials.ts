@@ -826,8 +826,58 @@ export interface CredentialHome {
   path: string;
   /** Environment that authenticates as this user and nobody else. */
   env: NodeJS.ProcessEnv;
-  /** Removes the directory and the refreshed tokens the CLI wrote into it. */
-  close(): Promise<void>;
+  /**
+   * Reads back anything the CLI rotated, then removes the directory.
+   *
+   * A stored session file is a snapshot taken once at sign-in. The vendor
+   * CLIs refresh their own OAuth tokens mid-run and write the new one into
+   * the home they were given — the directory this then deletes. Every
+   * refreshed token used to be discarded, so a credential that verified
+   * perfectly at sign-in died the moment its original short-lived access
+   * token expired, and reconnecting bought about an hour before it happened
+   * again.
+   *
+   * `rotatedSecret` is the replacement to store, and is absent when the CLI
+   * left the file alone — which is most runs, and must not cause a write.
+   */
+  close(): Promise<{ rotatedSecret?: string }>;
+}
+
+/**
+ * Reads a vendor's session file back out of a staged home.
+ *
+ * Deliberately mirrors where {@link openCredentialHome} wrote it rather than
+ * searching: a file that turns up somewhere unexpected is not this user's
+ * refreshed credential and must not be stored as one. `undefined` means there
+ * is nothing readable there, which is not an error — a CLI that never
+ * rotated, or a run that failed before writing, both look like this.
+ */
+async function readSessionSnapshot(
+  vendor: VendorCliKind,
+  directory: string,
+  configDirectory: string | undefined,
+): Promise<string | undefined> {
+  try {
+    if (vendor === "claude" && configDirectory !== undefined) {
+      return await captureClaudeSession(configDirectory);
+    }
+    if (vendor === "codex" && configDirectory !== undefined) {
+      const raw = await readFile(path.join(configDirectory, "auth.json"), "utf8");
+      return raw.trim();
+    }
+    if (vendor === "gemini") {
+      const raw = await readFile(
+        path.join(directory, ".gemini", "oauth_creds.json"),
+        "utf8",
+      );
+      return raw.trim();
+    }
+  } catch {
+    // Missing, unreadable, or — for Claude — nothing worth capturing. All of
+    // these mean "no rotation to record", never "lose the credential".
+    return undefined;
+  }
+  return undefined;
 }
 
 /**
@@ -933,7 +983,26 @@ export async function openCredentialHome(input: {
     path: directory,
     env,
     close: async () => {
+      // Only a session file can rotate. An API key is what the user typed and
+      // the CLI never rewrites it, so there is nothing to read back.
+      let rotatedSecret: string | undefined;
+      if (credential.kind === "session_file") {
+        const current = await readSessionSnapshot(
+          vendor,
+          directory,
+          configVariable === undefined
+            ? undefined
+            : path.join(directory, "config"),
+        );
+        // Compared against what was written in, not merely checked for
+        // existence: an unchanged file rewritten on every run would churn the
+        // credential store and re-encrypt a secret that never moved.
+        if (current !== undefined && current !== credential.secret.trim()) {
+          rotatedSecret = current;
+        }
+      }
       await rm(directory, { recursive: true, force: true });
+      return rotatedSecret === undefined ? {} : { rotatedSecret };
     },
   };
 }
@@ -944,6 +1013,14 @@ export async function withCredentialHome<T>(
     vendor: VendorCliKind;
     credential: UserCredential;
     baseEnv?: NodeJS.ProcessEnv;
+    /**
+     * Called when the CLI replaced its own session file during the run, with
+     * the replacement to store. Optional so a caller with nowhere to put it
+     * — a verification probe, a test — simply lets it go, but a caller that
+     * runs real work should persist it or the next run starts from the
+     * expired snapshot again.
+     */
+    onRotate?: (secret: string) => Promise<void> | void;
   },
   use: (home: CredentialHome) => Promise<T>,
 ): Promise<T> {
@@ -951,6 +1028,12 @@ export async function withCredentialHome<T>(
   try {
     return await use(home);
   } finally {
-    await home.close();
+    const { rotatedSecret } = await home.close();
+    if (rotatedSecret !== undefined && input.onRotate !== undefined) {
+      // Never allowed to fail the run it followed: the work is already done,
+      // and losing a refreshed token costs one reconnect, while throwing here
+      // would discard a result somebody waited for.
+      await Promise.resolve(input.onRotate(rotatedSecret)).catch(() => undefined);
+    }
   }
 }
