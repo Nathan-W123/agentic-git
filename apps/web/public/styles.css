@@ -5885,3 +5885,23 @@ body.resizing-ns * {
     font-size: 16px;
   }
 }
+
+/* ------------------------------------------------ viewport height ---- */
+/* `100vh` on iOS is the height of the screen with the browser chrome hidden,
+   not the height you can currently see. With Safari's bar showing, a
+   `height: 100vh` shell is therefore taller than its own viewport: the page
+   gains somewhere to scroll, and the first thing that scrolls away is the
+   header — up and under the status bar and the camera cutout, which is
+   exactly where the safe-area padding was trying to keep it out of. The
+   insets were being applied and then scrolled past.
+
+   `100dvh` is the visible height, and it follows the bar as it hides and
+   shows. Declared second so a browser that does not know the unit keeps the
+   `100vh` above it rather than falling back to `auto` and collapsing. */
+.app {
+  height: 100dvh;
+}
+
+.auth-shell {
+  min-height: 100dvh;
+}
