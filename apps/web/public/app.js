@@ -1634,7 +1634,7 @@ window.addEventListener("resize", () => {
  * is CSS-driven, so this only fills it in — `ensureProviderUsage` keeps the
  * answer, and a second hover re-renders from state without another request.
  */
-document.addEventListener("mouseover", (event) => {
+function requestUsageForHoverTarget(event) {
   const target =
     event.target instanceof Element
       ? event.target.closest('[data-hover="agent-usage"]')
@@ -1643,7 +1643,15 @@ document.addEventListener("mouseover", (event) => {
     return;
   }
   void ensureProviderUsage(target.dataset.hoverValue, render);
-});
+}
+document.addEventListener("mouseover", requestUsageForHoverTarget);
+// `:hover` never matches on a touch screen, so the card above has nothing to
+// reveal it there — `rosterRow` (screen-chats.js) gives `.rr-avatar` a
+// `tabindex`, and `.rr-avatar:focus-within .rr-usage` (styles.css) already
+// shows the card on focus exactly as it does on hover. This is what supplies
+// the data for a tap the same way the listener above supplies it for a
+// pointer.
+document.addEventListener("focusin", requestUsageForHoverTarget);
 
 /**
  * Unsaved text is worth one question before it disappears.
@@ -2007,6 +2015,14 @@ document.addEventListener("click", (event) => {
       state.chanTree = false;
       render();
       return;
+    case "chan-sidebar-toggle":
+      state.chanSidebarOpen = state.chanSidebarOpen !== true;
+      render();
+      return;
+    case "chan-sidebar-close":
+      state.chanSidebarOpen = false;
+      render();
+      return;
     case "chan-tree-dir": {
       const open = state.chanTreeOpen ?? [];
       state.chanTreeOpen = open.includes(value)
@@ -2269,6 +2285,13 @@ document.addEventListener("click", (event) => {
       return;
 
     /* Code */
+    case "tree-toggle":
+      // At >900px `.tree-pane` is an ordinary grid column and this class has
+      // no visual effect there; below it, it is the only way to reach the
+      // file tree, which used to have no opener at all — see `renderCode`.
+      state.treeOpen = state.treeOpen !== true;
+      render();
+      return;
     case "tree-dir":
       toggleDirectory(value, render);
       return;

@@ -431,6 +431,15 @@ function chanHeader(repository, repositoryId) {
   const people = collaborators();
   const faces = roster.slice(0, 3).map((agent) => agentFace(agent, 24)).join("");
   return `<header class="chan-head">
+    <button type="button" class="icon-btn menu-btn" data-act="nav-toggle"
+      title="Menu" aria-label="Menu">${icon("menu")}</button>
+    <!-- Phone-only: the channel list and roster live in `.chan-sidebar`,
+         which goes off-canvas below the 600px breakpoint the same way the
+         outer app `.sidebar` already does at 900px. This is the only way
+         back to it once it is closed, so it is a real button rather than
+         something folded into a menu. -->
+    <button type="button" class="icon-btn chan-sidebar-btn" data-act="chan-sidebar-toggle"
+      title="Channels &amp; people" aria-label="Channels &amp; people">${icon("list")}</button>
     ${icon("chatBubble", 'class="ch-hash"')}
     <div class="ch-title">
       <div class="ch-name">${esc(repositoryId ?? "")}</div>
@@ -1297,8 +1306,16 @@ export function renderChats() {
   const repository = currentRepository();
   const repositoryId = activeChannelId();
 
-  return `<div class="chats-shell">
+  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}">
     ${chanSidebar(repositoryId)}
+    ${
+      // Phone-only off-canvas drawer for `.chan-sidebar` — see the toggle
+      // button in `chanHeader`. Tapping outside the drawer is how it closes,
+      // the same as the outer app sidebar's `.nav-scrim`.
+      state.chanSidebarOpen === true
+        ? `<div class="chan-sidebar-scrim" data-act="chan-sidebar-close"></div>`
+        : ""
+    }
     <div class="chan-main">
       ${chanHeader(repository, repositoryId)}
       ${chanSearchRow()}
@@ -1365,6 +1382,10 @@ export function openChannel(repositoryId, rerender) {
   state.repositoryId = repositoryId;
   persist("ag.repo", repositoryId);
   markChannelRead(repositoryId);
+  // Picking a channel from the phone drawer is how it closes — the drawer
+  // has no separate close button, matching the outer nav's scrim-only
+  // dismissal, and "you just navigated somewhere" is itself a close.
+  state.chanSidebarOpen = false;
   state.activeChannelThread = undefined;
   // A thread belongs to the channel it hangs in, so an aim taken in one
   // channel must not follow the reader into the next and post there.

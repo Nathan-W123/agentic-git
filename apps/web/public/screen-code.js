@@ -296,6 +296,15 @@ export async function openWorkspace(rerender) {
 function toolbar() {
   const stats = changeSetStats(state.changeSet);
   return `<div class="code-toolbar">
+    <button type="button" class="icon-btn menu-btn" data-act="nav-toggle"
+      title="Menu" aria-label="Menu">${icon("menu")}</button>
+    <!-- Below 900px `.tree-pane` is hidden until this is on — see the
+         `.code-shell.tree-open .tree-pane` rule in styles.css. Above that
+         width it is an ordinary always-visible grid column, so toggling this
+         there has no visual effect and the button is just inert chrome. -->
+    <button type="button" class="icon-btn tree-toggle-btn${state.treeOpen === true ? " on" : ""}"
+      data-act="tree-toggle" title="${state.treeOpen === true ? "Hide files" : "Show files"}"
+      aria-pressed="${state.treeOpen === true}">${icon("folder")}</button>
     <h2>Code</h2>
     ${
       stats.files === 0
@@ -427,6 +436,15 @@ export function renderCode(agent) {
   }
   return `<div class="${classes.join(" ")}">
     ${treePane()}
+    ${
+      // Only rendered while the tree is the overlay drawer version of itself
+      // (below 900px — see the media query in styles.css); at that width the
+      // tap target for "close" is otherwise nothing but the toggle button
+      // again, which is easy to miss once the drawer is covering it.
+      state.treeOpen === true
+        ? `<div class="tree-scrim" data-act="tree-toggle"></div>`
+        : ""
+    }
     <div class="code-main">
       ${toolbar()}
       ${tabStrip()}
@@ -576,6 +594,10 @@ export function openFile(path, rerender) {
     state.openTabs = [...state.openTabs, path];
   }
   state.activeTab = path;
+  // No effect above 900px, where `.tree-pane` is an ordinary grid column and
+  // this class is never read; below it, picking a file is how the overlay
+  // drawer closes, the same as picking a channel closes `.chan-sidebar`.
+  state.treeOpen = false;
   rerender();
   if (patchFor(path) === undefined && !state.fileCache.has(path)) {
     void loadFile(path, rerender);

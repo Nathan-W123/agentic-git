@@ -2599,6 +2599,13 @@ svg {
   font-size: 12.5px;
 }
 
+/* Was an inline `style="width:190px"` on the search box's wrapper — moved
+   to a class so the phone breakpoint can override it below. */
+.agent-search-wrap {
+  width: 190px;
+  flex: none;
+}
+
 .agent-rows {
   padding: 8px;
   display: grid;
@@ -3445,6 +3452,31 @@ svg {
   /* Nothing hovers on a touch screen, so the menu simply stays. */
   .chan-row .cr-more {
     opacity: 1;
+  }
+
+  /* The react/reply buttons over a message, and the usage card over a
+     roster avatar, were both hover-only reveals with no other way to reach
+     them on a touch device — see the comment on `.cmsg-row .cmsg-actions`
+     and `.rr-usage` below, both defined later in the file. `!important`
+     rather than relying on source order: those base rules and this query
+     both match `.cmsg-row .cmsg-actions` at equal specificity, and the one
+     later in the file otherwise wins regardless of which media query is
+     active. */
+  .cmsg-row .cmsg-actions {
+    position: static !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    align-self: center;
+    margin-left: 6px;
+  }
+
+  /* `.rr-avatar:hover`/`:focus-within` already reveals this — see
+     `rosterRow` in screen-chats.js, which gives the avatar a `tabindex` so a
+     tap can focus it. This only removes the width clamp that assumed the
+     card was opening beside a mouse pointer inside a 268px sidebar; the
+     sidebar can be much narrower than that once it is a phone drawer. */
+  .rr-usage {
+    max-width: calc(100vw - 32px);
   }
 }
 
@@ -4531,6 +4563,12 @@ dialog.modal::backdrop {
 .modal-card {
   width: 448px;
   max-width: 92vw;
+  /* A phone in landscape with the on-screen keyboard up can leave less than
+     half the viewport height for the page behind it. Capped and scrollable
+     rather than trusting the dialog to fit — the fixed-width case already
+     worked from `max-width: 92vw` alone, but nothing here bounded height. */
+  max-height: min(90vh, 760px);
+  overflow-y: auto;
   background: var(--bg-card);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);
@@ -4647,6 +4685,13 @@ dialog.modal::backdrop {
     display: inline-grid !important;
   }
 
+  /* Opens `.tree-pane` below — see the toggle button added to `toolbar()`
+     in screen-code.js. Above 900px the tree is an always-visible grid
+     column and this button has nothing to do, so it stays hidden there. */
+  .tree-toggle-btn {
+    display: inline-grid !important;
+  }
+
   .page {
     padding: 24px 18px 40px;
   }
@@ -4680,6 +4725,17 @@ dialog.modal::backdrop {
     width: 250px;
     z-index: 78;
     border-right: 1px solid var(--border);
+  }
+
+  /* Tapping outside the overlay tree closes it — see the `.tree-scrim` div
+     `renderCode` (screen-code.js) renders alongside it, the same pattern as
+     `.nav-scrim` and `.chat-scrim` above. */
+  .tree-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 77;
+    background: rgba(4, 5, 9, 0.45);
   }
 
   .coord-head,
@@ -4747,7 +4803,276 @@ dialog.modal::backdrop {
   }
 }
 
+/* ----------------------------------------------------------- phone ---- */
+/* Real phone widths — iPhone SE (375) through Pro Max (430), common Android
+   widths down to 360. The 900px tier above stays tablet-shaped (it already
+   does real work collapsing the outer nav, the Code chat drawer, and the
+   agent-row layout); this tier is additive rather than a lower number for
+   the same rules, because "channel list + roster fixed at 268px" and
+   "message composer with two inline mini-selects" are still fine at 820px
+   and are not fine at 380px. */
+@media (max-width: 600px) {
+  /* `.chan-sidebar` (channel list + roster) goes off-canvas the same way
+     the outer app `.sidebar` already does at 900px — toggled by the new
+     `.chan-sidebar-btn` in `chanHeader` (screen-chats.js), closed by the
+     scrim, by picking a channel, or by the outer nav's own Esc/back
+     affordances if the platform supplies them. */
+  .chan-sidebar-btn {
+    display: inline-grid !important;
+  }
+
+  .chan-sidebar {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 86vw;
+    max-width: 320px;
+    z-index: 76;
+    transform: translateX(-100%);
+    transition: transform 0.2s ease;
+    box-shadow: var(--shadow-pop);
+  }
+
+  .chats-shell.roster-open .chan-sidebar {
+    transform: none;
+  }
+
+  .chan-sidebar-scrim {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 75;
+    background: rgba(4, 5, 9, 0.5);
+  }
+
+  /* The header carries a lot on desktop — title, counts, an avatar stack,
+     five toggle buttons, and now the two navigation buttons above. Wrapping
+     rather than shrinking everything to illegibility: the title stays on
+     its own line and the toggle buttons get a second row. The avatar stack
+     is dropped rather than shrunk further — it is a decorative echo of the
+     roster, which the new channels button now opens directly. */
+  .chan-head {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    padding: 10px 12px;
+  }
+
+  .chan-head .spacer {
+    flex: 1 0 100%;
+    height: 0;
+  }
+
+  .chan-head .avatar-stack {
+    display: none;
+  }
+
+  /* Same shape of overflow as the header, and the same fix: the counts and
+     buttons on the right wrap to a row of their own instead of being
+     squeezed against "Code". */
+  .code-toolbar {
+    flex-wrap: wrap;
+    row-gap: 8px;
+    height: auto;
+    padding: 10px 12px;
+  }
+
+  .code-toolbar .spacer {
+    flex: 1 0 100%;
+    height: 0;
+  }
+
+  /* A long path plus the Unified/Split control can still be wider than a
+     phone screen; this keeps that inside its own bar instead of pushing the
+     editor or the whole page wider than the viewport. */
+  .code-crumb {
+    overflow-x: auto;
+  }
+
+  /* Two 50%-width code columns are unreadable under ~180px each. Stacked,
+     each keeps the full width instead. */
+  .code-body.split {
+    grid-template-columns: 1fr;
+  }
+
+  .code-body.split .side {
+    border-right: none;
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  /* Files / Threads / Thread / the file diff-or-edit panel — all four are
+     `.thread-panel` (or its `.file-panel` variant), a fixed-width column
+     beside the transcript on desktop and still fixed-width, just narrower,
+     down to 900px. Below 600px there is no honest "beside" left: it takes
+     over the screen instead, the same way the Code screen's chat pane
+     already does at 1180px. */
+  .thread-panel {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    max-width: 100vw;
+    min-width: 0;
+    z-index: 72;
+  }
+
+  /* Nothing to drag full-screen wider than the screen. */
+  .thread-panel .panel-grip {
+    display: none;
+  }
+
+  .code-shell .chat-pane {
+    width: 100vw;
+  }
+
+  /* Anchored popovers (`showPopover` in ui.js) are positioned in JS with an
+     inline `left`/`top`/`width`, computed against a desktop-shaped anchor
+     and a wide viewport — on a 360-390px screen that inline width alone
+     already overflows (see `channelInfoPopoverHtml`'s caller, which never
+     passes a narrower one). Rather than chase every call site, every
+     popover becomes a bottom sheet here: inset from the sides, anchored to
+     the bottom, `!important` because it is overriding an inline style. This
+     is also the "full-screen sheet" the channel info / roster panel needs —
+     it is the same component armed differently, not a second one. */
+  .popover {
+    left: 10px !important;
+    right: 10px !important;
+    top: auto !important;
+    bottom: 10px !important;
+    width: auto !important;
+  }
+
+  /* The message composer's mention button and send button always fit on one
+     row; the private-agent composer (`chatComposer` in chat.js) additionally
+     carries a context ring and two mini-selects for model and effort, which
+     do not. Wrapping lets those two drop to a row of their own rather than
+     overflowing the panel — no call site needs to change, `.composer-bar`
+     already has nothing after the last mini-select but the send button. */
+  .composer-bar {
+    flex-wrap: wrap;
+    row-gap: 6px;
+  }
+
+  /* Touch targets, per standard mobile guidance (44px minimum). These stay
+     inside their existing 26-30px envelope on desktop, where a mouse pointer
+     does not need the extra margin and the denser toolbars rely on the
+     smaller size to fit. */
+  .icon-btn {
+    width: 38px;
+    height: 38px;
+  }
+
+  .icon-btn svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  .icon-btn.sm {
+    width: 34px;
+    height: 34px;
+  }
+
+  .icon-btn.sm svg {
+    width: 15px;
+    height: 15px;
+  }
+
+  .composer-bar .icon-btn {
+    width: 34px;
+    height: 34px;
+  }
+
+  .send-btn {
+    width: 36px;
+    height: 36px;
+  }
+
+  .chan-row,
+  .roster-row-main,
+  .agent-row,
+  .tree-row,
+  .mention-item,
+  .menu-item {
+    min-height: 44px;
+  }
+
+  /* My Agents' list header: four filter tabs, a spacer, and a 190px-wide
+     search box, all on one row on desktop. The tabs alone can run past a
+     phone's width before the search box is even considered, so the whole
+     row wraps and the search box — the widest, least essential-to-see-first
+     item — drops to a full-width row of its own. */
+  .agent-list-head {
+    flex-wrap: wrap;
+    row-gap: 8px;
+  }
+
+  .agent-search-wrap {
+    flex: 1 0 100%;
+    width: auto;
+  }
+
+  /* Every screen's title row (`.page-head`) — icon, heading, and a trailing
+     primary action like "Add Agent" or "Create new repository" — is a
+     non-wrapping flex row with nothing to stop the action button running
+     past the viewport edge on a phone. Same fix as the other toolbars. */
+  .page-head {
+    flex-wrap: wrap;
+    row-gap: 10px;
+  }
+
+  .page-head .spacer {
+    flex-basis: 100%;
+    height: 0;
+  }
+}
+
+/* A smaller tier still, for the narrowest phones (iPhone SE and similar
+   ~360-375px devices) — trims chrome the 600px tier still has room for
+   rather than repeating its layout decisions. */
+@media (max-width: 400px) {
+  .page {
+    padding: 18px 14px 32px;
+  }
+
+  .chan-head .ch-desc {
+    display: none;
+  }
+
+  .chan-messages {
+    padding: 6px 12px 14px;
+  }
+
+  .chan-composer-wrap {
+    margin: 0 8px 8px;
+  }
+
+  .popover {
+    left: 8px !important;
+    right: 8px !important;
+    bottom: 8px !important;
+  }
+
+  .modal-card {
+    padding: 16px;
+  }
+}
+
 .menu-btn {
+  display: none;
+}
+
+/* Shown only inside the 900px breakpoint above — see the comment there. */
+.tree-toggle-btn {
+  display: none;
+}
+
+/* Shown only inside the 600px phone breakpoint below — see the comment
+   there. */
+.chan-sidebar-btn {
+  display: none;
+}
+
+.tree-scrim,
+.chan-sidebar-scrim {
   display: none;
 }
 

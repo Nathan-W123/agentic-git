@@ -292,7 +292,7 @@ export function renderAgents() {
             state.agentFilter,
           )}
           <span class="spacer" style="flex:1"></span>
-          <span style="width:190px">${searchBox(
+          <span class="agent-search-wrap">${searchBox(
             "Search agents...",
             state.agentQuery,
             "agent-search",

@@ -129,6 +129,10 @@ export const state = {
   // Whether the file tree is pulled out, and which folders are open in it.
   chanTree: false,
   chanTreeOpen: [],
+  // Whether the channel list + roster drawer is pulled out over the
+  // transcript. Only meaningful at phone widths, where `.chan-sidebar` is
+  // off-canvas the way the outer app `.sidebar` already is at `navOpen`.
+  chanSidebarOpen: false,
   // Per-provider usage reports, filled lazily by the roster's hover.
   providerUsage: {},
   // Who is typing, keyed `repositoryId|threadId` so the main channel and
