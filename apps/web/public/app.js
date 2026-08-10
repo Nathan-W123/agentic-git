@@ -1471,7 +1471,54 @@ function confirmDiscardEdit() {
   );
 }
 
+/**
+ * Guards the one `innerHTML` swap the whole screen goes through.
+ *
+ * Renders used to happen only because somebody clicked something. Typing
+ * indicators changed that: a frame from another browser, or the sweep that
+ * expires one, now redraws while a field is focused. Replacing the DOM under
+ * a focused input fires `focusout`, whose handler commits the edit and
+ * renders again — inside the render already running. The browser refuses
+ * that with "The node to be removed is no longer a child of this node".
+ *
+ * So a render that arrives during a render is remembered, not run, and
+ * happens once the first has finished unwinding.
+ */
+let rendering = false;
+let renderAgain = false;
+
+/**
+ * Whether an agent rename is open and focused.
+ *
+ * The guard below keeps a background redraw from crashing; this keeps it from
+ * being rude. Rebuilding the screen under a half-typed name throws the edit
+ * away, and a redraw nobody asked for — somebody else typing in the channel —
+ * has no business doing that. Only this form is protected: it is the one that
+ * holds unsaved text and commits on losing focus.
+ */
+function renameFieldFocused() {
+  const act = document.activeElement?.dataset?.act;
+  return act === "channel-rename-input" || act === "channel-role-input";
+}
+
 export function render() {
+  if (rendering) {
+    renderAgain = true;
+    return;
+  }
+  rendering = true;
+  try {
+    renderNow();
+  } finally {
+    rendering = false;
+    if (renderAgain) {
+      renderAgain = false;
+      render();
+    }
+  }
+}
+
+function renderNow() {
   const root = $("#app-root");
   if (state.principal === undefined) {
     return;
@@ -2735,7 +2782,7 @@ async function boot() {
     // person is still mid-word.
     if (frame?.type === "channel-typing") {
       noteTyping(frame);
-      if (state.route === "chats") {
+      if (state.route === "chats" && !renameFieldFocused()) {
         render();
         // `typingOn` only drops expired entries when something reads it, and
         // the last frame is by definition the last thing that would have. One
@@ -2744,6 +2791,11 @@ async function boot() {
         // re-render happened to come along, which is to say forever.
         clearTimeout(typingSweep);
         typingSweep = setTimeout(() => {
+          // Still mid-rename? Come back rather than taking the edit with it.
+          if (renameFieldFocused()) {
+            typingSweep = setTimeout(() => render(), TYPING_SWEEP_MS);
+            return;
+          }
           if (state.route === "chats") {
             render();
           }
