@@ -258,9 +258,20 @@ test("a fresh project does not inherit another project's edits", async () => {
     await withRoot(async (rootB) => {
       const first = await CoordinatorProject.init(rootA);
       first.config.agents = { leaked: { command: "node" } };
+      // Mutating in place as well as reassigning: a shared default object
+      // would carry this into the next project even though the line above
+      // replaced the reference.
+      Object.assign(first.config.agents, { alsoLeaked: { command: "node" } });
 
       const second = await CoordinatorProject.init(rootB);
-      assert.deepEqual(second.config.agents, {});
+      assert.equal(second.config.agents["leaked"], undefined);
+      assert.equal(second.config.agents["alsoLeaked"], undefined);
+      // And it still gets the defaults every fresh project gets, so this
+      // cannot pass by handing out an empty map instead.
+      assert.deepEqual(Object.keys(second.config.agents).sort(), [
+        "claude",
+        "codex",
+      ]);
     });
   });
 });
