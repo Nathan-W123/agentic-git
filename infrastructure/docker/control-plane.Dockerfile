@@ -34,6 +34,11 @@ RUN chmod +x /usr/local/bin/coord-control-plane \
   && mkdir -p /data \
   && chown node:node /data
 USER node
-VOLUME /data
+# No VOLUME instruction. It would declare the intent well enough for plain
+# Docker, but Railway rejects a Dockerfile containing one outright — the build
+# fails before it starts — and expects the mount to be attached to the service
+# instead. /data is still created and owned above, so a mount lands on a
+# directory that already exists; without one, canonical repositories live on
+# the container's own writable layer and do not survive a redeploy.
 EXPOSE 4317
 ENTRYPOINT ["coord-control-plane"]
