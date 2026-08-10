@@ -4064,3 +4064,76 @@ test("creating a repository ignores a mode field rather than importing", async (
   assert.equal(created.data.repository.provider, undefined);
   assert.equal(created.data.repository.remoteUrl, undefined);
 });
+
+test("auditor is a reserved role: owner-only, and one to a repository", async (t) => {
+  // Every other role is free text the agent only ever reads as a sentence.
+  // This one changes what the system does — the holder audits unprompted,
+  // spending tokens nobody asked for — so granting it needs more than the
+  // permission to type in a text box, and two holders in one repository would
+  // mean two of them doing that.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "audited");
+  const channel = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+
+  // An ordinary role is unrestricted, as before.
+  const ordinary = await owner.request(`${channel}/anthropic`, {
+    method: "POST",
+    body: { role: "Backend Engineer" },
+  });
+  assert.equal(ordinary.status, 200, JSON.stringify(ordinary.data));
+
+  // The owner may promote one agent to auditor.
+  const promoted = await owner.request(`${channel}/anthropic`, {
+    method: "POST",
+    body: { role: "auditor" },
+  });
+  assert.equal(promoted.status, 200, JSON.stringify(promoted.data));
+
+  // A second agent cannot also hold it.
+  const second = await owner.request(`${channel}/openai`, {
+    method: "POST",
+    body: { role: "auditor" },
+  });
+  assert.equal(second.status, 409, JSON.stringify(second.data));
+  assert.equal(second.data.error.code, "auditor_exists");
+
+  // Re-asserting it on the agent that already holds it is not a conflict:
+  // saving the same row again must not become an error.
+  const again = await owner.request(`${channel}/anthropic`, {
+    method: "POST",
+    body: { role: "auditor" },
+  });
+  assert.equal(again.status, 200, JSON.stringify(again.data));
+
+  // And the reservation cannot be walked around with a capital letter.
+  const shouted = await owner.request(`${channel}/openai`, {
+    method: "POST",
+    body: { role: "  Auditor " },
+  });
+  assert.equal(shouted.status, 409, JSON.stringify(shouted.data));
+});
+
+test("a collaborator cannot promote an auditor, but can still set a plain role", async (t) => {
+  // The permission line: naming an agent's role is ordinary collaboration,
+  // handing one the ability to spend on its own initiative is administration.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "guarded");
+  const guest = await joinRepository(runtime, owner, "guest@example.com", repo);
+  const channel = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`;
+
+  const plain = await guest.request(`${channel}/anthropic`, {
+    method: "POST",
+    body: { role: "Reviewer" },
+  });
+  assert.equal(plain.status, 200, JSON.stringify(plain.data));
+
+  const promotion = await guest.request(`${channel}/anthropic`, {
+    method: "POST",
+    body: { role: "auditor" },
+  });
+  assert.equal(promotion.status === 200, false, "a guest must not promote");
+});

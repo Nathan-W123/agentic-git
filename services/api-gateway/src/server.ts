@@ -190,6 +190,23 @@ export function summariseObjective(objective: string): string {
  * ordinary case for a freshly connected agent, not an edge case, and leaves
  * the objective untouched rather than prefixing an empty sentence.
  */
+/**
+ * The one role name the system treats as more than prose.
+ *
+ * Roles are otherwise free text that reaches the agent as a sentence and
+ * nothing else. `auditor` is reserved because holding it changes behaviour —
+ * the holder audits on its own initiative rather than waiting to be asked —
+ * so who may grant it, and how many may hold it, are enforced rather than
+ * conventions. Matched case-insensitively and trimmed: somebody typing
+ * "Auditor" means the role, and a reserved word that can be bypassed with a
+ * capital letter is not reserved.
+ */
+export const AUDITOR_ROLE = "auditor";
+
+export function isAuditorRole(role: string | undefined): boolean {
+  return role !== undefined && role.trim().toLowerCase() === AUDITOR_ROLE;
+}
+
 export function withRoleContext(role: string, objective: string): string {
   const trimmedRole = role.trim();
   if (trimmedRole === "") {
@@ -4340,6 +4357,35 @@ export class ApiGateway {
           "invalid_request",
           "At least one of name, role, model, or effort is required",
         );
+      }
+      // `auditor` is the one role the code knows the meaning of.
+      //
+      // Every other role is free text the agent only ever sees as a sentence
+      // in its objective. This one changes what the system does — it audits
+      // unprompted, on its own schedule, spending tokens nobody asked it to —
+      // so it is not something any collaborator should be able to hand out by
+      // typing a word into a text field, and not something two agents should
+      // hold at once in the same repository.
+      if (isAuditorRole(role)) {
+        await authorizeRepository(
+          this.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "manage_project",
+        );
+        const overrides =
+          await this.options.store.listChannelAgentOverrides(repositoryId);
+        const holder = Object.entries(overrides).find(
+          ([heldBy, entry]) => heldBy !== agentId && isAuditorRole(entry.role),
+        );
+        if (holder !== undefined) {
+          throw new HttpError(
+            409,
+            "auditor_exists",
+            `${holder[1].name ?? holder[0]} is already the auditor here. Demote it first.`,
+          );
+        }
       }
       const override = await this.options.store.setChannelAgentOverride(
         repositoryId,
