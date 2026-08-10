@@ -7,6 +7,8 @@
  * agents are mine" or "what counts as a conflict" instead of one per screen.
  */
 
+import { toast } from "./ui.js";
+
 export const API_ROOT = "/api/v1";
 
 const stored = (key, fallback = "") =>
@@ -38,7 +40,7 @@ export const state = {
   metrics: undefined,
 
   /* Navigation */
-  route: "repositories",
+  route: "chats",
   repositoryId: stored("ag.repo"),
 
   /* Per-user agent connections (chat providers) */
@@ -83,6 +85,56 @@ export const state = {
   agentFilter: "all",
   agentQuery: "",
   coordinatorTab: "overview",
+
+  /* Chats screen — one group channel per repository, backed by
+     `/channel/messages` on the server. `channelMessages` and
+     `channelAgentOverrides` are seeded locally so a freshly opened channel is
+     never blank, then overwritten once `ensureChannelMessages` reads the real
+     ones back. See the comment on `sendChannelMessage`. */
+  chatQuery: "",
+  channelMessages: {},
+  channelAgentOverrides: {},
+  channelRead: JSON.parse(window.localStorage.getItem("ag.chanread") ?? "{}"),
+  /** Repository ids whose channel has been read from the server at least once. */
+  channelLoaded: new Set(),
+  channelLoadingId: undefined,
+  /** Every repository collaborator's connected agents, keyed by repository id
+   *  and read from `/channel/agents` — see `ensureChannelRoster`. Starts empty
+   *  per repository until the first fetch resolves; `channelAgentsFor` always
+   *  layers this account's own agents on top from `myAgents`, so the roster
+   *  is never blank for the one person definitely in the room. */
+  channelRoster: {},
+  channelRosterLoaded: new Set(),
+  channelRosterLoadingId: undefined,
+  /** Repository-scoped grants, keyed by repository id — see `ensureRepositoryGrants`. */
+  repositoryGrants: {},
+  activeChannelThread: undefined,
+  // Paths whose inline diff is expanded in the transcript. Plural because a
+  // reader comparing two files should not have to close one to open the other.
+  chanOpenFiles: [],
+  /** The changed file open in the side panel, if any. */
+  chanFileView: undefined,
+  /** Whether the changed-file list is unfolded in the transcript. */
+  chanFilesOpen: false,
+  /** How the open file is being shown: its diff, or its editable text. */
+  chanFileMode: "diff",
+  /** The file's text as the workspace last gave it, and as it is being typed. */
+  chanFileBase: undefined,
+  chanFileDraft: undefined,
+  chanFileLoading: false,
+  chanFileSaving: false,
+  chanFileError: undefined,
+  /** Which repository `state.workspace` belongs to, so it is not reused wrongly. */
+  workspaceRepo: undefined,
+  chatRenamingId: undefined,
+  chatSettingsOpenId: undefined,
+  chatDraft: "",
+  threadDraft: "",
+  mentionActive: false,
+  mentionQuery: "",
+  mentionIndex: 0,
+  chanMsgQuery: "",
+  chanMsgSearchOpen: false,
 
   socket: undefined,
   timer: undefined,
@@ -301,7 +353,7 @@ export async function applyProviderSetting(providerId, field, value) {
  * into a log. What changes in the response is `ownCredential` appearing and
  * `requiresAdmin` clearing, which is what the screen re-renders from.
  */
-export async function connectProviderCredential(providerId, kind, secret, label) {
+export async function connectProviderCredential(providerId, kind, secret, label, visibility) {
   const response = await api(
     `/chat/providers/${encodeURIComponent(providerId)}/credential`,
     {
@@ -310,6 +362,12 @@ export async function connectProviderCredential(providerId, kind, secret, label)
         kind,
         secret,
         ...(label === undefined || label === "" ? {} : { label }),
+        // Omitted entirely rather than sent as "personal": the server
+        // defaults an absent visibility to "personal" itself, so this keeps
+        // the request identical to what an older client already sends.
+        ...(visibility === undefined || visibility === "personal"
+          ? {}
+          : { visibility }),
       },
     },
   );
@@ -607,6 +665,53 @@ export function activeChannelId() {
   return currentRepository()?.id ?? state.repositoryId ?? "";
 }
 
+/**
+ * Whether the signed-in user can administer this repository directly —
+ * delete it, or manage who holds a repository-scoped grant on it.
+ *
+ * Mirrors the server's `authorizeRepositoryOwnerAction`: the repository's
+ * own creator, or an organization role of admin/owner (where
+ * `manage_project`/`manage_members` come from — see `ROLE_PERMISSIONS` in
+ * `authorization.ts`). What this does *not* account for is a repository
+ * grant elevating someone who holds neither role nor creatorship — the
+ * server still enforces that correctly; this only decides which controls
+ * the interface offers, and that narrower case can still act through a
+ * direct API call even when a button here would not show.
+ */
+export function canManageRepository(repositoryId) {
+  const repository = state.repositories.find((repo) => repo.id === repositoryId);
+  if (repository === undefined) {
+    return false;
+  }
+  if (
+    repository.createdBy !== undefined &&
+    repository.createdBy === currentUserId()
+  ) {
+    return true;
+  }
+  const role = state.principal?.memberships?.find(
+    (membership) => membership.organizationId === state.project?.organizationId,
+  )?.role;
+  return role === "admin" || role === "owner";
+}
+
+/**
+ * Whether "leave this chat" means anything for the signed-in user on this
+ * repository.
+ *
+ * An organization role reaches every repository the organization owns, so
+ * there is nothing a per-repository "leave" could remove — the server
+ * refuses that case with `org_membership_reaches_repository` (see
+ * {@link leaveRepository}). Only the shape a grant-only guest has — no
+ * organization role reaching this project at all — can actually leave.
+ */
+export function canLeaveRepository() {
+  const role = state.principal?.memberships?.find(
+    (membership) => membership.organizationId === state.project?.organizationId,
+  )?.role;
+  return role === undefined;
+}
+
 export function currentUserName() {
   return (
     state.principal?.user?.displayName ??
@@ -763,13 +868,6 @@ export function systemHealth() {
 
 /* ------------------------------------------------------------- agents ---- */
 
-const ROLE_BY_PROVIDER = {
-  anthropic: "Lead Developer",
-  openai: "Code Generator",
-  google: "Researcher",
-  deepseek: "Backend Engineer",
-};
-
 /** People say "Claude", not "Anthropic", when they mean the agent. */
 const AGENT_LABEL = {
   anthropic: "Claude",
@@ -795,6 +893,9 @@ export function myAgents() {
         ACTIVE_TASK_STATUS.has(task.status) &&
         String(task.agentId ?? "").includes(provider.adapter ?? provider.id),
     );
+    // A credential the server has seen fail to authenticate. Stored is not
+    // the same as working, and only the first was ever visible here.
+    const expired = provider.ownCredential?.unusableReason;
     const presence = provider.connected
       ? running === undefined
         ? "idle"
@@ -804,17 +905,37 @@ export function myAgents() {
       id: provider.id,
       provider: provider.id,
       name: `${AGENT_LABEL[provider.id] ?? provider.name ?? provider.id} (${shortUser()})`,
-      role: ROLE_BY_PROVIDER[provider.id] ?? "Agent",
+      // No default label. An agent is unlabeled until someone in a given
+      // channel actually names its role there — see `withOverride` — rather
+      // than inheriting a vendor-guessed title like "Lead Developer" it never
+      // earned.
+      role: "",
       model: provider.model ?? "",
       effort: provider.effort ?? "",
-      connected: provider.connected === true,
-      presence,
-      status: provider.connected ? (running ? "working" : "idle") : "offline",
+      // An expired sign-in is not a connection. `provider.connected` is true
+      // whenever the *host machine's* CLI is logged in, so an agent whose own
+      // credential has stopped authenticating still read as connected here —
+      // which is what made the screen keep saying so while every task it was
+      // given failed to sign in.
+      connected: expired === undefined && provider.connected === true,
+      needsReconnect: expired !== undefined,
+      presence: expired === undefined ? presence : "offline",
+      status:
+        expired === undefined && provider.connected
+          ? running
+            ? "working"
+            : "idle"
+          : "offline",
       task: running,
       progress: running === undefined ? 0 : taskProgress(running),
       contextPercent: contextPercentFor(provider.id),
       color: myAgentColor(),
-      detail: provider.explanation ?? "",
+      detail: expired ?? provider.explanation ?? "",
+      // "personal" (only I can task it via @mention) or "org" (anyone with
+      // access to a repository this agent works in can). Chosen at connect
+      // time; absent on a provider this account has never connected reads as
+      // "personal", the same default the store itself falls back to.
+      visibility: provider.ownCredential?.visibility ?? "personal",
     };
   });
 }
@@ -1063,4 +1184,794 @@ export function integrations() {
     detail: "Coordination store",
   });
   return rows;
+}
+
+/* ---------------------------------------------------------- channels ---- */
+
+/**
+ * Chats — one group channel per repository, with that repository's agents
+ * sitting in the roster as participants alongside the people on the project.
+ *
+ * Messages, reactions, threads, renames, and per-agent model/effort read and
+ * write through `/channel/...` on the server (see `loadChannel` and
+ * `sendChannelMessage` below). The roster below is real too, as of the
+ * `/channel/agents` route: it is every user with access to this repository —
+ * the same access `authorizeRepository` checks server-side, organization role
+ * or per-repository grant — and the vendors each of them has actually
+ * connected, not a name invented from the repository id.
+ */
+
+function withOverride(agent, override) {
+  if (override === undefined) {
+    return agent;
+  }
+  return {
+    ...agent,
+    name: override.name ?? agent.name,
+    // No vendor-guessed default to fall back to: `agent.role` is "" unless
+    // this channel has actually named the role, so an agent reads as
+    // unlabeled until someone does. `??` rather than `||` — an override that
+    // explicitly sets role to "" (clearing a previously-set label) must win
+    // over `agent.role`, not fall through it, since both sides are already
+    // "no label" in that case and either reads the same.
+    role: override.role ?? agent.role,
+    model: override.model ?? agent.model,
+    effort: override.effort ?? agent.effort,
+  };
+}
+
+function firstWord(name) {
+  return String(name ?? "").trim().split(/\s+/u)[0] || "Teammate";
+}
+
+/**
+ * The roster for one channel: this account's own connected agents (from
+ * `myAgents`, which carries live task/progress data no cross-account read
+ * could), plus every *other* repository collaborator's connected agents, read
+ * from the real roster `ensureChannelRoster` fetches from `/channel/agents`.
+ * Renames and model/effort choices made in the channel are layered on top
+ * from `channelAgentOverrides`, which is why a rename shows up on every past
+ * message instead of only new ones — messages resolve the current name at
+ * render time rather than freezing one in.
+ *
+ * Synchronous by contract, the same as `channelMessagesFor`: `screen-chats.js`
+ * and `app.js` call this inline while rendering, so it reads whatever
+ * `state.channelRoster` already holds rather than fetching. A freshly opened
+ * channel therefore shows this account's own agents immediately and gains
+ * everyone else's the moment `ensureChannelRoster`'s request resolves and
+ * triggers a re-render — "paint something immediately, then reconcile with
+ * the network," the same shape `ensureChannelMessages` uses for messages.
+ */
+export function channelAgentsFor(repositoryId) {
+  if (!repositoryId) {
+    return [];
+  }
+  const overrides = state.channelAgentOverrides[repositoryId] ?? {};
+  const myId = currentUserId();
+  const roster = state.channelRoster[repositoryId] ?? [];
+  // Membership is opt-in and server-authoritative (`channelAgentConnections`
+  // in server.ts) — the roster GET route already filters by it, including
+  // this account's own entries, which is what lets this reuse the same
+  // fetch instead of a second membership-only request. Before that fetch has
+  // ever resolved for this repository there is nothing to filter *by* yet,
+  // so every connected agent shows provisionally, the same "paint
+  // immediately" floor `myAgents` already gave every caller of this function
+  // before membership existed; the first successful `ensureChannelRoster`
+  // narrows it down to the real membership set and never widens it back.
+  const myMemberProviders = state.channelRosterLoaded.has(repositoryId)
+    ? new Set(
+        roster
+          .filter((entry) => entry.userId === myId)
+          .map((entry) => entry.provider),
+      )
+    : undefined;
+  const mine = myAgents()
+    .filter(
+      (agent) =>
+        agent.connected &&
+        (myMemberProviders === undefined || myMemberProviders.has(agent.provider)),
+    )
+    .map((agent) => ({ ...agent, mine: true, userId: myId }));
+  const others = roster
+    .filter((entry) => entry.userId !== myId)
+    .map((entry) => {
+      const id = `${entry.userId}:${entry.provider}`;
+      return {
+        id,
+        userId: entry.userId,
+        provider: entry.provider,
+        name: `${AGENT_LABEL[entry.provider] ?? entry.provider} (${firstWord(entry.userName)})`,
+        // Unlabeled until this channel gives it a role — see `withOverride`.
+        role: "",
+        model: "",
+        effort: "",
+        connected: true,
+        // The server has no live presence signal to read yet (see the
+        // `channel/agents` route in api-gateway) — a real, connected
+        // teammate's agent reads as online rather than as an invented
+        // idle/offline, which is the honest floor until presence is real.
+        presence: "online",
+        // The same colour this person's avatar uses everywhere else
+        // (`agentColorFor` already treats a member's chosen colour as public
+        // within the organization); falls back to the same hash-based colour
+        // for someone with no explicit choice.
+        color: agentColorFor(entry.userId),
+        mine: false,
+        // Whether this teammate's agent is actually pingable here (@mention
+        // dispatches for real) or merely visible ("personal": only they can
+        // task it). Absent on an older server response reads as "personal",
+        // same default the store itself uses.
+        visibility: entry.visibility ?? "personal",
+      };
+    });
+  return [...mine, ...others].map((agent) => withOverride(agent, overrides[agent.id]));
+}
+
+/** Agents and people who can be @mentioned in this channel. */
+export function channelParticipants(repositoryId) {
+  const agents = channelAgentsFor(repositoryId).map((agent) => ({
+    id: agent.id,
+    name: agent.name,
+    kind: "agent",
+    agent,
+  }));
+  const humans =
+    state.members.length > 0
+      ? state.members.map((member) => ({
+          id: member.userId ?? member.id,
+          name: member.displayName ?? member.email,
+          kind: "human",
+        }))
+      : [{ id: currentUserId(), name: currentUserName(), kind: "human" }];
+  return [...agents, ...humans];
+}
+
+function seedMessages(repositoryId) {
+  const agents = channelAgentsFor(repositoryId);
+  const now = Date.now();
+  const rows = [
+    {
+      id: `${repositoryId}-seed-1`,
+      kind: "user",
+      authorId: currentUserId() || "you",
+      content: `Opened #${repositoryId} as a channel — everyone working this repository, human or agent, is in here now.`,
+      at: new Date(now - 1000 * 60 * 60 * 26).toISOString(),
+    },
+  ];
+  if (agents[0] !== undefined) {
+    rows.push({
+      id: `${repositoryId}-seed-2`,
+      kind: "agent",
+      authorId: agents[0].id,
+      content:
+        "Picked up the outstanding tasks on this repository and started on the highest-priority one. I'll post here once there's a changeset to review.",
+      at: new Date(now - 1000 * 60 * 60 * 20).toISOString(),
+    });
+  }
+  if (agents[1] !== undefined) {
+    rows.push({
+      id: `${repositoryId}-seed-3`,
+      kind: "agent",
+      authorId: agents[1].id,
+      content:
+        "Reviewed the last changeset — looks clean. Flagged one file that might need a second pass on error handling.",
+      at: new Date(now - 1000 * 60 * 60 * 3).toISOString(),
+      replies: [
+        {
+          id: `${repositoryId}-seed-3-r1`,
+          kind: "user",
+          authorId: currentUserId() || "you",
+          content: "Good catch, I'll take a look this afternoon.",
+          at: new Date(now - 1000 * 60 * 60 * 2).toISOString(),
+        },
+      ],
+    });
+  }
+  return rows;
+}
+
+/** This channel's timeline, seeded once on first visit so it is never blank. */
+export function channelMessagesFor(repositoryId) {
+  if (!repositoryId) {
+    return [];
+  }
+  if (state.channelMessages[repositoryId] === undefined) {
+    state.channelMessages[repositoryId] = seedMessages(repositoryId);
+  }
+  return state.channelMessages[repositoryId];
+}
+
+const channelPath = (repositoryId, suffix = "") =>
+  `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/channel${suffix}`;
+
+/**
+ * Reads one channel back from the server, replacing whatever local or seeded
+ * content was showing. Returns `false` without throwing when this deployment
+ * has no channel endpoint yet, so the seeded demo content keeps working.
+ */
+async function loadChannel(repositoryId) {
+  const response = await apiOptional(channelPath(repositoryId, "/messages"), undefined);
+  if (response === undefined) {
+    return false;
+  }
+  state.channelMessages[repositoryId] = response.messages ?? [];
+  state.channelAgentOverrides[repositoryId] = {
+    ...state.channelAgentOverrides[repositoryId],
+    ...response.agentOverrides,
+  };
+  if (response.readAt !== undefined) {
+    state.channelRead[repositoryId] = Date.parse(response.readAt);
+    window.localStorage.setItem("ag.chanread", JSON.stringify(state.channelRead));
+  }
+  return true;
+}
+
+/**
+ * Loads a channel's real messages once per repository visit.
+ *
+ * The channel already reads as non-empty on the very first render, from the
+ * local seed `channelMessagesFor` falls back to — this call is what replaces
+ * that seed with the server's actual history, the same "paint something
+ * immediately, then reconcile with the network" shape `ensureCodeData` and
+ * `ensureAgentOptions` use for the Code and My Agents screens.
+ */
+export async function ensureChannelMessages(repositoryId, rerender) {
+  if (
+    !repositoryId ||
+    !state.projectId ||
+    state.channelLoaded.has(repositoryId) ||
+    state.channelLoadingId === repositoryId
+  ) {
+    return;
+  }
+  state.channelLoadingId = repositoryId;
+  try {
+    if (await loadChannel(repositoryId)) {
+      state.channelLoaded.add(repositoryId);
+    }
+  } finally {
+    state.channelLoadingId = undefined;
+  }
+  rerender();
+}
+
+/**
+ * Reads one repository's real agent roster from the server, replacing
+ * whatever it held before.
+ */
+async function loadChannelRoster(repositoryId) {
+  const response = await apiOptional(channelPath(repositoryId, "/agents"), undefined);
+  if (response === undefined) {
+    return false;
+  }
+  state.channelRoster[repositoryId] = response.agents ?? [];
+  return true;
+}
+
+/**
+ * Loads a channel's real agent roster once per repository visit — the same
+ * "paint this account's own agents immediately, then reconcile everyone
+ * else's in from the network" shape `ensureChannelMessages` above uses for
+ * message history. `channelAgentsFor` already reads `state.channelRoster`
+ * synchronously, so this only ever needs to populate it and ask for a
+ * re-render.
+ */
+export async function ensureChannelRoster(repositoryId, rerender) {
+  if (
+    !repositoryId ||
+    !state.projectId ||
+    state.channelRosterLoaded.has(repositoryId) ||
+    state.channelRosterLoadingId === repositoryId
+  ) {
+    return;
+  }
+  state.channelRosterLoadingId = repositoryId;
+  try {
+    if (await loadChannelRoster(repositoryId)) {
+      state.channelRosterLoaded.add(repositoryId);
+    }
+  } finally {
+    state.channelRosterLoadingId = undefined;
+  }
+  rerender();
+}
+
+/**
+ * Loads the repository-scoped grants the co-owner panel shows, straight into
+ * `state.repositoryGrants` — unconditionally, unlike `ensureChannelRoster`'s
+ * once-per-repository cache, since the panel that reads them only opens
+ * when the channel info popover does and grants change rarely enough that a
+ * fresh read each time is simpler than inventing invalidation for it.
+ *
+ * Skipped for anyone who cannot manage the repository: the fetch would
+ * succeed (the route only requires `view`) but nothing would render it, so
+ * asking is wasted work for the common case of an ordinary collaborator
+ * opening channel info.
+ */
+export async function ensureRepositoryGrants(repositoryId, rerender) {
+  if (!repositoryId || !canManageRepository(repositoryId)) {
+    return;
+  }
+  state.repositoryGrants[repositoryId] = await loadRepositoryGrants(repositoryId);
+  rerender();
+}
+
+/**
+ * Re-reads a channel that has already loaded once.
+ *
+ * This is the reconcile half of every channel write below: `connectSocket`'s
+ * handler in app.js calls it whenever the event socket reports a
+ * `channel_*` audit event for the open repository, including the echo of
+ * this browser's own posts. The store stays the source of truth, so a
+ * fresh-and-correct read replaces local guesses rather than patching them.
+ */
+export async function refreshChannelMessages(repositoryId) {
+  if (!repositoryId || !state.channelLoaded.has(repositoryId)) {
+    return false;
+  }
+  return await loadChannel(repositoryId);
+}
+
+/**
+ * Appends one message to a channel's local timeline, then persists it.
+ *
+ * The push happens synchronously, before any network round trip, so the
+ * sender sees their own message the instant they hit enter — the same
+ * optimistic-then-reconcile shape `chat.js`'s `sendChat` uses for the
+ * private one-to-one panel. This function's signature has to stay
+ * synchronous, because `screen-chats.js` reads its return value immediately
+ * to clear the composer, so the POST below is fire-and-forget: reconciliation
+ * happens out of band, when this message's own broadcast comes back over the
+ * event socket and `refreshChannelMessages` re-reads the channel from the
+ * server (see `connectSocket` in app.js).
+ *
+ * Only ordinary human posts reach the server today. Agent- and
+ * system-authored entries stay local until a coordinator-side writer posts
+ * through the store directly — the HTTP route never lets a signed-in person
+ * author a message as somebody else's agent.
+ */
+export function sendChannelMessage(repositoryId, text, kind = "user", authorId) {
+  const trimmed = String(text ?? "").trim();
+  if (!repositoryId || trimmed === "") {
+    return undefined;
+  }
+  const message = {
+    id: `${repositoryId}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    kind,
+    authorId: authorId ?? currentUserId() ?? "you",
+    content: trimmed,
+    at: new Date().toISOString(),
+  };
+  channelMessagesFor(repositoryId).push(message);
+  if (kind === "user" && state.projectId) {
+    void api(channelPath(repositoryId, "/messages"), {
+      method: "POST",
+      body: { content: trimmed },
+    }).catch((error) => {
+      message.failed = true;
+      toast(`Message did not send: ${error.message}`, "error");
+    });
+  }
+  return message;
+}
+
+function findChannelMessage(repositoryId, messageId) {
+  for (const message of channelMessagesFor(repositoryId)) {
+    if (message.id === messageId) {
+      return message;
+    }
+    const reply = (message.replies ?? []).find((entry) => entry.id === messageId);
+    if (reply !== undefined) {
+      return reply;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A server-assigned message id never starts with its own repository id —
+ * `sendChannelMessage` mints local ones as `${repositoryId}-...` precisely so
+ * this is a cheap, reliable check. A local id belongs to the demo seed or to
+ * an optimistic post whose POST has not resolved yet; threading a reply or a
+ * reaction onto one would 404, so those wait for the next reconcile instead
+ * of racing the network.
+ */
+function isServerChannelId(repositoryId, id) {
+  return typeof id === "string" && !id.startsWith(`${repositoryId}-`);
+}
+
+/** A reply, appended to the thread hanging off one channel message. */
+export function postChannelReply(repositoryId, messageId, text) {
+  const trimmed = String(text ?? "").trim();
+  const message = findChannelMessage(repositoryId, messageId);
+  if (message === undefined || trimmed === "") {
+    return undefined;
+  }
+  message.replies ??= [];
+  const reply = {
+    id: `${messageId}-r${message.replies.length + 1}-${Date.now()}`,
+    kind: "user",
+    authorId: currentUserId() || "you",
+    content: trimmed,
+    at: new Date().toISOString(),
+  };
+  message.replies.push(reply);
+  if (state.projectId && isServerChannelId(repositoryId, messageId)) {
+    void api(channelPath(repositoryId, `/messages/${encodeURIComponent(messageId)}/replies`), {
+      method: "POST",
+      body: { content: trimmed },
+    }).catch((error) => {
+      reply.failed = true;
+      toast(`Reply did not send: ${error.message}`, "error");
+    });
+  }
+  return reply;
+}
+
+/** A single-emoji toggle, same idea as a Slack reaction — on, then off. */
+export function toggleChannelReaction(repositoryId, messageId, emoji = "👍") {
+  const message = findChannelMessage(repositoryId, messageId);
+  if (message === undefined) {
+    return;
+  }
+  message.reactions ??= {};
+  const current = message.reactions[emoji];
+  if (current?.mine === true) {
+    const count = current.count - 1;
+    if (count <= 0) {
+      delete message.reactions[emoji];
+    } else {
+      message.reactions[emoji] = { count, mine: false };
+    }
+  } else {
+    message.reactions[emoji] = { count: (current?.count ?? 0) + 1, mine: true };
+  }
+  if (state.projectId && isServerChannelId(repositoryId, messageId)) {
+    void api(channelPath(repositoryId, `/messages/${encodeURIComponent(messageId)}/reactions`), {
+      method: "POST",
+      body: { emoji },
+    }).catch((error) => toast(`Reaction did not save: ${error.message}`, "error"));
+  }
+}
+
+/**
+ * Renames an agent as it appears in one channel.
+ *
+ * Scoped to the channel rather than to the agent's account-wide connection:
+ * this is how the agent presents itself in this room, which two different
+ * channels are free to disagree about, the same way a person can pick a
+ * different display name per Slack workspace. Persisted server-side keyed by
+ * (repository, agent), not by the agent's global identity.
+ */
+export function renameChannelAgent(repositoryId, agentId, name) {
+  const trimmed = String(name ?? "").trim();
+  if (!repositoryId || !agentId || trimmed === "") {
+    return;
+  }
+  state.channelAgentOverrides[repositoryId] ??= {};
+  state.channelAgentOverrides[repositoryId][agentId] = {
+    ...state.channelAgentOverrides[repositoryId][agentId],
+    name: trimmed,
+  };
+  if (state.projectId) {
+    void api(channelPath(repositoryId, `/agents/${encodeURIComponent(agentId)}`), {
+      method: "POST",
+      body: { name: trimmed },
+    }).catch((error) => toast(`Rename did not save: ${error.message}`, "error"));
+  }
+}
+
+export function setChannelAgentSetting(repositoryId, agentId, field, value) {
+  if (!repositoryId || !agentId) {
+    return;
+  }
+  state.channelAgentOverrides[repositoryId] ??= {};
+  state.channelAgentOverrides[repositoryId][agentId] = {
+    ...state.channelAgentOverrides[repositoryId][agentId],
+    [field]: value,
+  };
+  if (state.projectId && (field === "model" || field === "effort" || field === "role")) {
+    void api(channelPath(repositoryId, `/agents/${encodeURIComponent(agentId)}`), {
+      method: "POST",
+      body: { [field]: value },
+    }).catch((error) => toast(`Setting did not save: ${error.message}`, "error"));
+  }
+}
+
+/**
+ * Adds one of this account's own connected agents to a channel's opt-in
+ * membership, so it starts appearing in `channelAgentsFor` and can be
+ * @mentioned there. `agentId` is the bare provider id (`myAgents`'s `id`),
+ * matching what the server's `.../channel/agents/:agentId/membership` route
+ * expects — membership is always managed for the caller's own agents, never
+ * a teammate's, so there is no `${userId}:${provider}` form to handle here.
+ *
+ * Updates `state.channelRoster` optimistically with a self entry shaped like
+ * the ones `loadChannelRoster` fetches, so `channelAgentsFor`'s membership
+ * check picks the addition up immediately rather than waiting on a refetch.
+ */
+export function addChannelAgent(repositoryId, agentId) {
+  if (!repositoryId || !agentId) {
+    return;
+  }
+  const myId = currentUserId();
+  const roster = state.channelRoster[repositoryId] ?? [];
+  if (!roster.some((entry) => entry.userId === myId && entry.provider === agentId)) {
+    const agent = myAgents().find((candidate) => candidate.id === agentId);
+    state.channelRoster[repositoryId] = [
+      ...roster,
+      {
+        userId: myId,
+        userName: currentUserName(),
+        provider: agentId,
+        visibility: agent?.visibility ?? "personal",
+        connected: true,
+      },
+    ];
+  }
+  if (state.projectId) {
+    void api(
+      channelPath(repositoryId, `/agents/${encodeURIComponent(agentId)}/membership`),
+      { method: "POST" },
+    ).catch((error) => toast(`Could not add agent to this chat: ${error.message}`, "error"));
+  }
+}
+
+/** The membership-removing counterpart to {@link addChannelAgent}. */
+export function removeChannelAgent(repositoryId, agentId) {
+  if (!repositoryId || !agentId) {
+    return;
+  }
+  const myId = currentUserId();
+  state.channelRoster[repositoryId] = (state.channelRoster[repositoryId] ?? []).filter(
+    (entry) => !(entry.userId === myId && entry.provider === agentId),
+  );
+  if (state.projectId) {
+    void api(
+      channelPath(repositoryId, `/agents/${encodeURIComponent(agentId)}/membership`),
+      { method: "DELETE" },
+    ).catch((error) => toast(`Could not remove agent from this chat: ${error.message}`, "error"));
+  }
+}
+
+/**
+ * Removes another member's agent from a channel — moderation, gated
+ * server-side on `manage_project` (loosened from `agent.mine`-only in
+ * `screen-chats.js`'s `rosterRow`), unlike {@link removeChannelAgent}'s
+ * self-service path which only ever needs `submit_task`.
+ */
+export function removeChannelAgentForUser(repositoryId, userId, provider) {
+  if (!repositoryId || !userId || !provider) {
+    return;
+  }
+  state.channelRoster[repositoryId] = (state.channelRoster[repositoryId] ?? []).filter(
+    (entry) => !(entry.userId === userId && entry.provider === provider),
+  );
+  if (state.projectId) {
+    void api(
+      `${channelPath(repositoryId, `/agents/${encodeURIComponent(provider)}/membership`)}` +
+        `?userId=${encodeURIComponent(userId)}`,
+      { method: "DELETE" },
+    ).catch((error) => toast(`Could not remove that agent: ${error.message}`, "error"));
+  }
+}
+
+const repositoryPath = (repositoryId, suffix = "") =>
+  `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}${suffix}`;
+
+/**
+ * Deletes a repository outright.
+ *
+ * Irreversible — cascades the repository's own channel and grants, and is
+ * refused server-side while a task or run still references it (see
+ * `removeRepository` in `@coord/persistence`). The caller is expected to
+ * have already confirmed with the user; see `deleteRepositoryAction` in
+ * app.js for the confirmation this always needs.
+ */
+export async function deleteRepository(repositoryId) {
+  await api(repositoryPath(repositoryId), { method: "DELETE" });
+  delete state.repositoryGrants[repositoryId];
+  await loadContext();
+}
+
+/**
+ * Removes the signed-in user's own access to a repository held through a
+ * grant. Throws with `error.code === "org_membership_reaches_repository"`
+ * when access instead comes from an organization role — see
+ * {@link canLeaveRepository}, which is what keeps the interface from
+ * offering this in that case in the first place.
+ */
+export async function leaveRepository(repositoryId) {
+  await api(
+    repositoryPath(repositoryId, `/grants/${encodeURIComponent(currentUserId())}`),
+    { method: "DELETE" },
+  );
+  await loadContext();
+}
+
+/** Every repository-scoped grant on this repository, for the co-owner panel. */
+export async function loadRepositoryGrants(repositoryId) {
+  const response = await apiOptional(repositoryPath(repositoryId, "/grants"), {
+    grants: [],
+  });
+  return response.grants ?? [];
+}
+
+/**
+ * Grants (or changes) a repository-scoped role for an existing organization
+ * member — "co-owner" when `role` is `"owner"`, the same capabilities the
+ * repository's creator has there.
+ */
+export async function setRepositoryGrant(repositoryId, userId, role) {
+  return await api(
+    repositoryPath(repositoryId, `/grants/${encodeURIComponent(userId)}`),
+    { method: "POST", body: { role } },
+  );
+}
+
+/**
+ * Revokes a repository-scoped grant on someone else's behalf — moderation;
+ * see {@link leaveRepository} for the self-service counterpart.
+ */
+export async function revokeRepositoryGrant(repositoryId, userId) {
+  await api(
+    repositoryPath(repositoryId, `/grants/${encodeURIComponent(userId)}`),
+    { method: "DELETE" },
+  );
+}
+
+export function markChannelRead(repositoryId) {
+  if (!repositoryId) {
+    return;
+  }
+  state.channelRead[repositoryId] = Date.now();
+  window.localStorage.setItem("ag.chanread", JSON.stringify(state.channelRead));
+  if (state.projectId) {
+    // Best-effort: the badge is already correct from the local write above,
+    // and the server's copy of "read" catches up next time this succeeds.
+    void api(channelPath(repositoryId, "/read"), { method: "POST" }).catch(() => undefined);
+  }
+}
+
+export function channelUnreadCount(repositoryId) {
+  const readAt = state.channelRead[repositoryId] ?? 0;
+  const mine = currentUserId() || "you";
+  return channelMessagesFor(repositoryId).filter(
+    (message) => message.authorId !== mine && new Date(message.at).getTime() > readAt,
+  ).length;
+}
+
+/** Resolves who sent a message right now, so a rename reaches old messages. */
+export function channelAuthor(repositoryId, entry) {
+  if (entry.kind === "system") {
+    // Coordinator-authored lines — @mention dispatch confirmations and
+    // refusals today — never a real member, so `memberName` must not be
+    // asked to explain an id it has never heard of.
+    return { name: "Coordinator", agent: undefined };
+  }
+  if (entry.kind === "agent") {
+    // The server names an agent author `<userId>:<provider>`, because that is
+    // the only form meaningful to everybody. The viewer's *own* agents are
+    // keyed by bare provider id in this list, so both spellings have to
+    // resolve or a person's own agent shows up in their channel as a raw
+    // composite id.
+    const roster = channelAgentsFor(repositoryId);
+    const [ownerId, provider] = String(entry.authorId ?? "").split(":");
+    const agent =
+      roster.find((candidate) => candidate.id === entry.authorId) ??
+      (provider !== undefined && ownerId === currentUserId()
+        ? roster.find((candidate) => candidate.id === provider)
+        : undefined);
+    return { name: agent?.name ?? entry.authorId, agent };
+  }
+  if (entry.authorId === currentUserId() || entry.authorId === "you") {
+    return { name: currentUserName(), agent: undefined };
+  }
+  return { name: memberName(entry.authorId), agent: undefined };
+}
+
+/* ------------------------------------------------------- channel files ---- */
+
+/**
+ * The overlay workspace backing the open channel.
+ *
+ * Cached against the repository it was opened for rather than globally: the
+ * Code screen keeps a workspace too, and handing the wrong repository's
+ * workspace to a read would quietly return somebody else's file.
+ */
+async function ensureChannelWorkspace() {
+  const repositoryId = activeChannelId();
+  if (repositoryId === undefined || state.projectId === "") {
+    throw new Error("No channel is open.");
+  }
+  const project = encodeURIComponent(state.projectId);
+  const repo = encodeURIComponent(repositoryId);
+  if (state.workspace === undefined || state.workspaceRepo !== repositoryId) {
+    const opened = await api(
+      `/projects/${project}/repositories/${repo}/workspace`,
+      { method: "POST", body: {} },
+    );
+    state.workspace = opened.workspace;
+    state.workspaceRepo = repositoryId;
+  }
+  return { project, repo };
+}
+
+/**
+ * Read a file into the side panel for editing.
+ *
+ * The diff already on screen is a record of what changed, which is not the
+ * same thing as what the file says now — so editing reads the working copy
+ * fresh rather than reconstructing it from the patch.
+ */
+export async function loadChannelFile(path, rerender) {
+  state.chanFileLoading = true;
+  state.chanFileError = undefined;
+  rerender();
+  try {
+    const { project, repo } = await ensureChannelWorkspace();
+    const result = await api(
+      `/projects/${project}/repositories/${repo}/workspace/file?path=${encodeURIComponent(
+        path,
+      )}`,
+    );
+    const file = result.file ?? {};
+    if (file.binary === true) {
+      throw new Error("This file is binary and has no text to edit.");
+    }
+    state.chanFileBase = file.content ?? "";
+    state.chanFileDraft = state.chanFileBase;
+  } catch (error) {
+    state.chanFileError = error.message;
+    state.chanFileBase = undefined;
+    state.chanFileDraft = undefined;
+  } finally {
+    state.chanFileLoading = false;
+    rerender();
+  }
+}
+
+/**
+ * Write the edited text back to the workspace.
+ *
+ * The saved text becomes the new baseline, so the panel stops calling itself
+ * unsaved without having to re-read the file to find that out.
+ */
+export async function saveChannelFile(rerender) {
+  const path = state.chanFileView;
+  const content = state.chanFileDraft;
+  if (path === undefined || content === undefined || state.chanFileSaving) {
+    return false;
+  }
+  let saved = false;
+  state.chanFileSaving = true;
+  state.chanFileError = undefined;
+  rerender();
+  try {
+    const { project, repo } = await ensureChannelWorkspace();
+    await api(`/projects/${project}/repositories/${repo}/workspace/file`, {
+      method: "POST",
+      body: { path, content },
+    });
+    state.chanFileBase = content;
+    saved = true;
+    toast(`Saved ${path}`, "ok");
+  } catch (error) {
+    state.chanFileError = error.message;
+    toast(error.message, "error");
+  } finally {
+    state.chanFileSaving = false;
+    rerender();
+  }
+  return saved;
+}
+
+/** Forget an open file, and the draft that went with it. */
+export function closeChannelFile() {
+  state.chanFileView = undefined;
+  state.chanFileMode = "diff";
+  state.chanFileBase = undefined;
+  state.chanFileDraft = undefined;
+  state.chanFileError = undefined;
+  state.chanFileLoading = false;
 }

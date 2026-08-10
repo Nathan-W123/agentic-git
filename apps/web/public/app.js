@@ -15,6 +15,7 @@ import {
   closeSocket,
   connectSocket,
   currentRepository,
+  currentUserId,
   currentUserName,
   loadContext,
   loadHealth,
@@ -26,7 +27,26 @@ import {
   notifications,
   persist,
   isFavourite,
+  channelAgentsFor,
+  activeChannelId,
+  closeChannelFile,
+  loadChannelFile,
+  saveChannelFile,
+  ensureChannelMessages,
+  ensureChannelRoster,
+  ensureRepositoryGrants,
+  refreshChannelMessages,
+  addChannelAgent,
+  removeChannelAgent,
+  removeChannelAgentForUser,
+  renameChannelAgent,
+  setChannelAgentSetting,
+  deleteRepository,
+  leaveRepository,
+  setRepositoryGrant,
+  revokeRepositoryGrant,
   state,
+  toggleChannelReaction,
   toggleFavourite,
   unreadCount,
 } from "./data.js";
@@ -54,7 +74,6 @@ import {
   connectRepository,
   createRepository,
   openRepository,
-  renderRepositories,
 } from "./screen-repos.js";
 import {
   closeFile,
@@ -63,7 +82,6 @@ import {
   invalidateCode,
   openFile,
   openWorkspace,
-  renderCode,
   runTests,
   setDiffMode,
   summaryPopoverHtml,
@@ -77,7 +95,6 @@ import {
   retryTask,
   selectAgent,
 } from "./screen-agents.js";
-import { renderCoordinator } from "./screen-coordinator.js";
 import {
   readAll,
   readOne,
@@ -94,6 +111,17 @@ import {
   revokeInvitation,
   saveAppearance,
 } from "./data.js";
+import {
+  channelInfoPopoverHtml,
+  handleComposerKeydown,
+  openChannel,
+  pickMention,
+  renderChats,
+  restoreChannelScroll,
+  submitComposerMessage,
+  submitThreadReply,
+  updateComposerInput,
+} from "./screen-chats.js";
 
 /* ---------------------------------------------------------- formatting ---- */
 
@@ -431,7 +459,7 @@ async function submitRegister(form) {
       },
     });
     authMode = "login";
-    window.location.hash = "#repositories";
+    window.location.hash = "#chats";
     await boot();
   } catch (error) {
     $("#auth-msg").textContent = error.message;
@@ -441,10 +469,10 @@ async function submitRegister(form) {
 /* -------------------------------------------------------------- shell ---- */
 
 const NAV = [
-  { route: "repositories", label: "Repositories", iconName: "folder" },
-  { route: "code", label: "Code", iconName: "code", needsRepo: true },
+  // Chats is the landing view now, so its icon — a chat bubble rather than a
+  // house — is the leftmost, primary item in the rail.
+  { route: "chats", label: "Chats", iconName: "chatBubble" },
   { route: "agents", label: "My Agents", iconName: "robot" },
-  { route: "coordinator", label: "Coordinator", iconName: "network" },
   { route: "notifications", label: "Notifications", iconName: "bell" },
   { route: "settings", label: "Settings", iconName: "gear" },
 ];
@@ -456,7 +484,7 @@ function sidebar() {
   const email = state.principal?.user?.email ?? "";
 
   return `<aside class="sidebar">
-    <a class="brand" href="#repositories">
+    <a class="brand" href="#chats">
       ${brandMark(34)}
       <span class="brand-text"><b>Lattice</b><span>Coordinator</span></span>
     </a>
@@ -681,22 +709,39 @@ function settingsScreen() {
                     // the machine's, and the subtitle says which is in use.
                     const mine = provider.ownCredential !== undefined;
                     const hostAccount = provider.connected && !mine;
+                    // Stored is not the same as working. A sign-in that has
+                    // stopped authenticating still sits in the vault, so
+                    // without this the row said "connected" while every task
+                    // the agent was given failed.
+                    const broken = provider.ownCredential?.unusableReason;
                     return `<div class="set-row">
                     <span class="sr-body">
                       <div class="sr-title">${esc(provider.name ?? provider.id)}</div>
                       <div class="sr-sub">${esc(
-                        mine
-                          ? (provider.model ?? "Connected as you")
-                          : hostAccount
-                            ? "Using this machine's account — connect your own"
-                            : "Not connected",
+                        broken !== undefined && broken !== ""
+                          ? broken
+                          : mine
+                            ? (provider.model ?? "Connected as you")
+                            : hostAccount
+                              ? "Using this machine's account — connect your own"
+                              : "Not connected",
                       )}</div>
                     </span>
                     <span class="sr-ctl">
                       <button class="btn btn-sm" data-act="${
-                        mine ? "agent-disconnect" : "agent-connect"
+                        mine && (broken === undefined || broken === "")
+                          ? "agent-disconnect"
+                          : "agent-connect"
                       }" data-value="${esc(provider.id)}">
-                        ${mine ? "Disconnect" : hostAccount ? "Connect yours" : "Connect"}
+                        ${
+                          broken !== undefined && broken !== ""
+                            ? "Reconnect"
+                            : mine
+                              ? "Disconnect"
+                              : hostAccount
+                                ? "Connect yours"
+                                : "Connect"
+                        }
                       </button>
                     </span>
                   </div>`;
@@ -887,6 +932,118 @@ async function showInviteLink(token, email, repositoryId) {
   });
 }
 
+/**
+ * Leaving a repository's chat — self-service, and only offered at all when
+ * access here is a per-repository grant (see `canLeaveRepository` in
+ * data.js). Destructive and hard to undo without someone re-granting access,
+ * so it goes through the same confirm-modal shape as deletion below rather
+ * than firing on a single click.
+ */
+async function leaveRepositoryAction(repositoryId) {
+  const confirmed = await showModal({
+    title: "Leave this chat?",
+    subtitle: `You will lose access to ${repositoryId} until someone grants it back.`,
+    confirm: "Leave",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    await leaveRepository(repositoryId);
+    closePopover();
+    toast(`Left ${repositoryId}`, "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Deleting a repository outright.
+ *
+ * Irreversible: cascades the repository's own channel and grants, and is
+ * refused server-side while a task or run still references it. The
+ * confirmation says so, rather than reading like an ordinary remove.
+ */
+async function deleteRepositoryAction(repositoryId) {
+  const confirmed = await showModal({
+    title: "Delete this repository?",
+    subtitle: `This permanently deletes ${repositoryId}, its chat history, and its repository-scoped grants. This cannot be undone.`,
+    confirm: "Delete repository",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    await deleteRepository(repositoryId);
+    closePopover();
+    toast(`Deleted ${repositoryId}`, "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Promoting an existing organization member to repository-scoped co-owner —
+ * the same capabilities the repository's creator has there, without
+ * touching the member's organization-wide role.
+ */
+async function promoteRepositoryOwnerAction(repositoryId) {
+  const candidates = state.members.filter(
+    (member) => member.userId !== currentUserId(),
+  );
+  if (candidates.length === 0) {
+    toast("There is no other organization member to promote.", "error");
+    return;
+  }
+  const values = await showModal({
+    title: "Promote a member to co-owner",
+    subtitle:
+      `Gives full capabilities on ${repositoryId} only — the same the ` +
+      `repository's creator has there — without changing their ` +
+      "organization-wide role.",
+    confirm: "Promote",
+    body: `<label class="field">
+        <span>Member</span>
+        <select class="input" name="userId">
+          ${candidates
+            .map(
+              (member) =>
+                `<option value="${esc(member.userId)}">${esc(
+                  member.user?.displayName ?? member.user?.email ?? member.userId,
+                )}</option>`,
+            )
+            .join("")}
+        </select>
+      </label>`,
+  });
+  if (values === undefined) {
+    return;
+  }
+  try {
+    await setRepositoryGrant(repositoryId, values.userId, "owner");
+    toast("Promoted to repository co-owner", "ok");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    void ensureRepositoryGrants(repositoryId, refreshChannelInfoPopover);
+    refreshChannelInfoPopover();
+  }
+}
+
+/** Revoking a repository-scoped grant on someone else's behalf. */
+async function revokeRepositoryGrantAction(repositoryId, userId) {
+  try {
+    await revokeRepositoryGrant(repositoryId, userId);
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    void ensureRepositoryGrants(repositoryId, refreshChannelInfoPopover);
+    refreshChannelInfoPopover();
+  }
+}
+
 /** Pending and spent invitations, for the Settings screen. */
 function invitationsCard() {
   const rows = state.invitations ?? [];
@@ -999,10 +1156,8 @@ function withAlpha(hex, alpha) {
 /* ------------------------------------------------------------- router ---- */
 
 const ROUTES = new Set([
-  "repositories",
-  "code",
+  "chats",
   "agents",
-  "coordinator",
   "notifications",
   "settings",
 ]);
@@ -1014,18 +1169,14 @@ function currentAgent() {
 
 function screen() {
   switch (state.route) {
-    case "code":
-      return renderCode(currentAgent());
     case "agents":
       return renderAgents();
-    case "coordinator":
-      return renderCoordinator();
     case "notifications":
       return renderNotifications();
     case "settings":
       return settingsScreen();
     default:
-      return renderRepositories();
+      return renderChats();
   }
 }
 
@@ -1054,7 +1205,234 @@ function banner() {
 }
 
 /** Screens that bring their own header do not also get the global topbar. */
-const BARE = new Set(["code", "coordinator"]);
+const BARE = new Set(["code", "coordinator", "chats"]);
+
+/* --------------------------------------------------------- panel width ---- */
+
+const PANEL_WIDTH_KEY = "ag.panelWidth";
+const PANEL_DEFAULT = 340;
+const PANEL_MIN = 280;
+/**
+ * What the conversation keeps no matter how far the panel is pulled open.
+ *
+ * Nothing. Reserving a strip for the transcript meant the panel stopped short
+ * of the window while there was visibly room left, which reads as a bug rather
+ * than a guard rail — and somebody reading a long file wants the whole width,
+ * not most of it. The channel list stays put, so there is always a way back,
+ * and double-clicking the edge restores the default.
+ */
+const MAIN_MIN = 0;
+
+/**
+ * How wide the side panel is allowed to get, right now.
+ *
+ * Measured rather than assumed, because the channel sidebar collapses on a
+ * narrow window and the panel should be allowed to claim the space that frees
+ * up rather than stay bounded by a number written for a wide one.
+ */
+function panelMax() {
+  const shell = $(".chats-shell");
+  const sidebar = $(".chan-sidebar");
+  const available =
+    (shell?.clientWidth ?? window.innerWidth) - (sidebar?.offsetWidth ?? 0);
+  return Math.max(PANEL_MIN, available - MAIN_MIN);
+}
+
+/**
+ * Set the panel width on the document element, not the panel.
+ *
+ * The panel is destroyed and rebuilt on every render — and a render happens on
+ * every keystroke, every arriving message, every poll. A width stored on it
+ * survives none of those; a custom property on `<html>` survives all of them,
+ * and costs no render to change.
+ */
+function setPanelWidth(px) {
+  const clamped = Math.round(Math.min(Math.max(px, PANEL_MIN), panelMax()));
+  document.documentElement.style.setProperty("--panel-w", `${clamped}px`);
+  return clamped;
+}
+
+function rememberPanelWidth(px) {
+  try {
+    window.localStorage.setItem(PANEL_WIDTH_KEY, String(px));
+  } catch {
+    /* A browser refusing storage should not break the drag. */
+  }
+}
+
+function restorePanelWidth() {
+  const saved = Number.parseInt(
+    window.localStorage.getItem(PANEL_WIDTH_KEY) ?? "",
+    10,
+  );
+  if (Number.isFinite(saved)) {
+    document.documentElement.style.setProperty("--panel-w", `${saved}px`);
+  }
+}
+
+restorePanelWidth();
+
+/**
+ * Dragging the panel edge.
+ *
+ * The move and release listeners go on the window rather than the grip: a
+ * render arriving mid-drag replaces the grip, and listeners bound to it would
+ * go with it — leaving the pointer captured, the body unselectable, and the
+ * drag dead. The window outlives every render this app does.
+ */
+document.addEventListener("pointerdown", (event) => {
+  const grip = event.target.closest?.(".panel-grip");
+  if (!grip) {
+    return;
+  }
+  const panel = grip.closest(".thread-panel");
+  if (panel === null) {
+    return;
+  }
+  event.preventDefault();
+  const startX = event.clientX;
+  const startWidth = panel.offsetWidth;
+  let latest = startWidth;
+  document.body.classList.add("resizing-panel");
+
+  const move = (moveEvent) => {
+    // The panel is on the right, so dragging left widens it.
+    latest = setPanelWidth(startWidth + (startX - moveEvent.clientX));
+  };
+  const done = () => {
+    window.removeEventListener("pointermove", move);
+    window.removeEventListener("pointerup", done);
+    window.removeEventListener("pointercancel", done);
+    document.body.classList.remove("resizing-panel");
+    rememberPanelWidth(latest);
+  };
+  window.addEventListener("pointermove", move);
+  window.addEventListener("pointerup", done);
+  window.addEventListener("pointercancel", done);
+});
+
+/** Double-clicking the edge puts it back, for when a drag went too far. */
+document.addEventListener("dblclick", (event) => {
+  if (event.target.closest?.(".panel-grip")) {
+    rememberPanelWidth(setPanelWidth(PANEL_DEFAULT));
+  }
+});
+
+/* The separator answers the keyboard too, since dragging is not available to
+   everyone who needs the panel wider. */
+document.addEventListener("keydown", (event) => {
+  const grip = event.target.closest?.(".panel-grip");
+  if (!grip) {
+    return;
+  }
+  const step = event.shiftKey ? 80 : 20;
+  const current = grip.closest(".thread-panel")?.offsetWidth ?? PANEL_DEFAULT;
+  if (event.key === "ArrowLeft") {
+    event.preventDefault();
+    rememberPanelWidth(setPanelWidth(current + step));
+  } else if (event.key === "ArrowRight") {
+    event.preventDefault();
+    rememberPanelWidth(setPanelWidth(current - step));
+  } else if (event.key === "Home") {
+    event.preventDefault();
+    rememberPanelWidth(setPanelWidth(PANEL_DEFAULT));
+  }
+});
+
+/**
+ * The editor's own keys: indent with Tab, save with Ctrl/Cmd-S.
+ *
+ * Tab inserting indentation traps the keyboard inside the textarea, so Escape
+ * lets it out again — the pair is what makes a code textarea usable without
+ * making it a dead end.
+ */
+document.addEventListener("keydown", (event) => {
+  const editor = event.target.closest?.("[data-act='chan-file-edit']");
+  if (!editor) {
+    return;
+  }
+  if (event.key === "Escape") {
+    editor.blur();
+    return;
+  }
+  if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "s") {
+    event.preventDefault();
+    void saveChannelFile(render).then((saved) => {
+      if (saved) {
+        invalidateCode();
+        render();
+      }
+    });
+    return;
+  }
+  if (event.key === "Tab") {
+    event.preventDefault();
+    const start = editor.selectionStart;
+    const end = editor.selectionEnd;
+    editor.value = `${editor.value.slice(0, start)}  ${editor.value.slice(end)}`;
+    editor.selectionStart = start + 2;
+    editor.selectionEnd = start + 2;
+    editor.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+});
+
+/* A window that got narrower can leave a stored width with nowhere to go. */
+window.addEventListener("resize", () => {
+  if (state.route === "chats" && $(".thread-panel") !== null) {
+    setPanelWidth($(".thread-panel").offsetWidth);
+  }
+});
+
+/**
+ * Unsaved text is worth one question before it disappears.
+ *
+ * Returns false when the reader decides to keep editing, and the caller then
+ * does nothing at all — closing the panel and switching to the diff both throw
+ * the draft away.
+ */
+/**
+ * Where the caret was in the editor, across a render it did not ask for.
+ *
+ * Typing does not re-render, but arriving messages do, and a message landing
+ * while somebody edits a file must not move their cursor to the end of it.
+ */
+function captureEditor() {
+  const editor = $("[data-act='chan-file-edit']");
+  if (editor === null || document.activeElement !== editor) {
+    return undefined;
+  }
+  return {
+    start: editor.selectionStart,
+    end: editor.selectionEnd,
+    top: editor.scrollTop,
+  };
+}
+
+function restoreEditor(saved) {
+  if (saved === undefined) {
+    return;
+  }
+  const editor = $("[data-act='chan-file-edit']");
+  if (editor === null) {
+    return;
+  }
+  editor.focus();
+  editor.setSelectionRange(saved.start, saved.end);
+  editor.scrollTop = saved.top;
+}
+
+function confirmDiscardEdit() {
+  if (
+    state.chanFileMode !== "edit" ||
+    state.chanFileDraft === undefined ||
+    state.chanFileDraft === state.chanFileBase
+  ) {
+    return true;
+  }
+  return window.confirm(
+    `Discard your unsaved changes to ${state.chanFileView}?`,
+  );
+}
 
 export function render() {
   const root = $("#app-root");
@@ -1085,6 +1463,7 @@ export function render() {
   if (state.navOpen) {
     classes.push("nav-open");
   }
+  const editorCaret = captureEditor();
   root.innerHTML = `<div class="${classes.join(" ")}">
     ${sidebar()}
     <div class="main${BARE.has(state.route) ? " bare" : ""}${
@@ -1097,7 +1476,14 @@ export function render() {
     ${state.navOpen ? '<div class="nav-scrim" data-act="nav-close"></div>' : ""}
   </div>`;
 
-  if (state.route === "code") {
+  // Chats owns this now: the inline file and diff blocks in the transcript are
+  // the only place code is read, so the channel has to load its own changeset
+  // rather than inherit one a separate Code screen happened to fetch first.
+  if (state.route === "chats") {
+    // The transcript is replaced on every render, which resets it to the top.
+    // Put it back where the reader had it before anything else runs.
+    restoreChannelScroll();
+    restoreEditor(editorCaret);
     void ensureCodeData(render);
     scrollThread();
   }
@@ -1106,14 +1492,40 @@ export function render() {
       render();
     }
   });
+  if (state.route === "chats") {
+    // `activeChannelId`, not the raw field: the screen falls back to the
+    // first repository when nothing has been picked, and loading against an
+    // empty id meant a channel that rendered fine and never read a single
+    // message back from the server.
+    void ensureChannelMessages(activeChannelId(), () => {
+      if (state.route === "chats") {
+        render();
+      }
+    });
+    void ensureChannelRoster(activeChannelId(), () => {
+      if (state.route === "chats") {
+        render();
+      }
+    });
+    // The roster's model/effort pickers read the same real options My Agents
+    // and Code load — loaded here too, rather than invented for this screen.
+    for (const agent of channelAgentsFor(state.repositoryId)) {
+      if (agent.mine) {
+        void ensureAgentOptions(agent.id, () => {
+          if (state.route === "chats") {
+            render();
+          }
+        });
+      }
+    }
+  }
 }
 
 function navigate(route) {
+  // A link or a stored route from before Code and Coordinator were folded into
+  // the channel lands here; chats is the landing view, so it is the fallback.
   if (!ROUTES.has(route)) {
-    route = "repositories";
-  }
-  if (route === "code" && currentRepository() === undefined) {
-    route = "repositories";
+    route = "chats";
   }
   state.route = route;
   state.navOpen = false;
@@ -1125,16 +1537,29 @@ function navigate(route) {
 }
 
 function applyHash() {
-  const route = window.location.hash.replace(/^#/u, "") || "repositories";
+  const route = window.location.hash.replace(/^#/u, "") || "chats";
   if (ROUTES.has(route) && route !== state.route) {
-    state.route = route === "code" && currentRepository() === undefined
-      ? "repositories"
-      : route;
+    state.route = route;
     render();
   }
 }
 
 /* -------------------------------------------------------------- events ---- */
+
+/**
+ * Re-renders the channel info popover in place, if it is the one currently
+ * open. `showPopover` injects static HTML outside the main app's render
+ * tree (see its comment in ui.js), so the whole-screen `render()` a
+ * membership change also triggers does not touch it — without this, adding
+ * or removing an agent would leave the popover showing a stale roster until
+ * it was closed and reopened.
+ */
+function refreshChannelInfoPopover() {
+  const pop = $(".popover");
+  if (pop !== null && state.repositoryId) {
+    pop.innerHTML = channelInfoPopoverHtml(state.repositoryId);
+  }
+}
 
 function actionOf(event) {
   const node = event.target.closest("[data-act]");
@@ -1193,7 +1618,7 @@ document.addEventListener("click", (event) => {
       openRepository(value, navigate);
       return;
     case "repo-switch":
-      navigate("repositories");
+      navigate("chats");
       return;
     case "repo-view":
       state.repoView = value;
@@ -1224,6 +1649,201 @@ document.addEventListener("click", (event) => {
         { act: "copy-id", value, label: "Copy repository id", iconName: "file" },
       ]);
       return;
+    /* Chats */
+    case "channel-new":
+      showMenu(node, [
+        { act: "repo-create", label: "Create new repository", iconName: "cloud" },
+        { act: "repo-connect", label: "Connect external repository", iconName: "link" },
+      ]);
+      return;
+    case "channel-open":
+      openChannel(value, render);
+      return;
+    case "channel-mention-key": {
+      const input = $("[data-act='channel-input']");
+      if (input === null) {
+        return;
+      }
+      const at = input.selectionStart ?? input.value.length;
+      state.chatDraft = `${input.value.slice(0, at)}@${input.value.slice(at)}`;
+      state.mentionActive = true;
+      state.mentionQuery = "";
+      state.mentionIndex = 0;
+      render();
+      const next = $("[data-act='channel-input']");
+      next?.focus();
+      next?.setSelectionRange(at + 1, at + 1);
+      return;
+    }
+    case "channel-mention-pick":
+      pickMention(value, render);
+      return;
+    case "channel-react":
+      toggleChannelReaction(state.repositoryId, value, "👍");
+      render();
+      return;
+    case "channel-thread-open":
+      // One panel, one owner: opening a thread puts away an open file.
+      if (!confirmDiscardEdit()) {
+        return;
+      }
+      state.activeChannelThread = value;
+      closeChannelFile();
+      render();
+      return;
+    case "channel-thread-close":
+      state.activeChannelThread = undefined;
+      render();
+      return;
+    // Expanding a file happens where it is read — in the transcript — so this
+    // only toggles which paths are open, with no route change to lose the
+    // reader's place in the conversation.
+    case "chan-file-open":
+      // Beside the conversation, not inside it. Opening a file used to expand
+      // it in the transcript, which pushed the messages explaining the change
+      // off the screen.
+      state.chanFileView = value;
+      state.activeChannelThread = undefined;
+      // Opening a file opens it editable. Making Edit a second click meant the
+      // answer to "can I fix this here" was no until you found a tab, which is
+      // the wrong default for a file you are already looking at. The diff is
+      // still one click away, and is where a file falls back to if it cannot
+      // be read from the workspace.
+      state.chanFileMode = "edit";
+      state.chanFileBase = undefined;
+      state.chanFileDraft = undefined;
+      state.chanFileError = undefined;
+      render();
+      void loadChannelFile(value, render);
+      return;
+    case "chan-file-close":
+      if (!confirmDiscardEdit()) {
+        return;
+      }
+      closeChannelFile();
+      render();
+      return;
+    case "chan-file-mode": {
+      const mode = node.dataset.mode ?? "diff";
+      if (mode === state.chanFileMode) {
+        return;
+      }
+      if (mode === "diff" && !confirmDiscardEdit()) {
+        return;
+      }
+      state.chanFileMode = mode;
+      if (mode === "diff") {
+        state.chanFileBase = undefined;
+        state.chanFileDraft = undefined;
+        state.chanFileError = undefined;
+        render();
+        return;
+      }
+      render();
+      void loadChannelFile(state.chanFileView, render);
+      return;
+    }
+    case "chan-file-reload":
+      void loadChannelFile(state.chanFileView, render);
+      return;
+    case "chan-file-revert":
+      state.chanFileDraft = state.chanFileBase;
+      render();
+      return;
+    case "chan-file-save":
+      void saveChannelFile(render).then((saved) => {
+        if (saved) {
+          // The changeset on screen is now out of date by exactly this edit.
+          invalidateCode();
+          render();
+        }
+      });
+      return;
+    case "chan-files-toggle":
+      state.chanFilesOpen = !state.chanFilesOpen;
+      return;
+    case "chan-file-toggle": {
+      const open = state.chanOpenFiles ?? [];
+      state.chanOpenFiles = open.includes(value)
+        ? open.filter((path) => path !== value)
+        : [...open, value];
+      render();
+      return;
+    }
+    case "channel-rename-toggle":
+      state.chatRenamingId = state.chatRenamingId === value ? undefined : value;
+      render();
+      if (state.chatRenamingId === value) {
+        const input = $("[data-act='channel-rename-input']");
+        input?.focus();
+        input?.select();
+      }
+      return;
+    case "channel-settings-toggle":
+      state.chatSettingsOpenId = state.chatSettingsOpenId === value ? undefined : value;
+      render();
+      return;
+    case "channel-info":
+      showPopover(node, channelInfoPopoverHtml(value));
+      // Grants are fetched lazily, unlike the roster: the panel that reads
+      // them only ever shows for someone who can already manage the
+      // repository, so most opens of this popover need nothing here.
+      void ensureRepositoryGrants(value, refreshChannelInfoPopover);
+      return;
+    case "channel-agent-add":
+      addChannelAgent(state.repositoryId, value);
+      render();
+      refreshChannelInfoPopover();
+      return;
+    case "channel-agent-remove":
+      removeChannelAgent(state.repositoryId, value);
+      render();
+      refreshChannelInfoPopover();
+      return;
+    case "channel-agent-remove-any": {
+      // `value` is `${userId}:${provider}` — see `rosterRow` in
+      // screen-chats.js, which mints it from the same pair
+      // `channelAgentsFor` already attaches to every non-mine entry.
+      const separatorIndex = value.indexOf(":");
+      removeChannelAgentForUser(
+        state.repositoryId,
+        value.slice(0, separatorIndex),
+        value.slice(separatorIndex + 1),
+      );
+      render();
+      refreshChannelInfoPopover();
+      return;
+    }
+    case "channel-leave":
+      void leaveRepositoryAction(value);
+      return;
+    case "channel-delete-repo":
+      void deleteRepositoryAction(value);
+      return;
+    case "channel-grant-promote":
+      void promoteRepositoryOwnerAction(value);
+      return;
+    case "channel-grant-revoke": {
+      // `value` is `${repositoryId}:${userId}` — see `coOwnerPanelHtml` in
+      // screen-chats.js.
+      const separatorIndex = value.indexOf(":");
+      void revokeRepositoryGrantAction(
+        value.slice(0, separatorIndex),
+        value.slice(separatorIndex + 1),
+      );
+      return;
+    }
+    case "channel-msg-search-toggle":
+      state.chanMsgSearchOpen = !state.chanMsgSearchOpen;
+      if (!state.chanMsgSearchOpen) {
+        state.chanMsgQuery = "";
+      }
+      render();
+      if (state.chanMsgSearchOpen) {
+        $("[data-act='channel-msg-search']")?.focus();
+      }
+      return;
+
     case "files-menu":
       showMenu(node, [
         { act: "files-refresh", label: "Refresh files", iconName: "refresh" },
@@ -1381,7 +2001,38 @@ document.addEventListener("click", (event) => {
         .catch((error) => toast(error.message, "error"));
       return;
     case "agent-switch":
-    case "agent-menu":
+    case "agent-menu": {
+      // Was folded in with the navigation cases below, so the three dots on
+      // an agent row did nothing except change screen — including on the
+      // Agents screen itself, where it changed nothing at all.
+      const agent = myAgents().find((entry) => entry.id === value);
+      const provider = state.providers.find((entry) => entry.id === value);
+      const mine = provider?.ownCredential !== undefined;
+      showMenu(node, [
+        ...(mine
+          ? [
+              {
+                act: "agent-disconnect",
+                value,
+                label: `Disconnect ${agentLabelOf(value)}`,
+                iconName: "logout",
+              },
+            ]
+          : []),
+        {
+          act: "agent-connect",
+          value,
+          label: agent?.needsReconnect === true
+            ? `Reconnect ${agentLabelOf(value)}`
+            : mine
+              ? `Reconnect ${agentLabelOf(value)}`
+              : `Connect ${agentLabelOf(value)}`,
+          iconName: "robot",
+        },
+        { act: "agent-usage", value, label: "Usage", iconName: "chart" },
+      ]);
+      return;
+    }
     case "agent-info":
     case "agent-usage":
     case "agent-all":
@@ -1501,7 +2152,7 @@ document.addEventListener("submit", (event) => {
         .then(async () => {
           state.invite = undefined;
           state.inviteToken = undefined;
-          window.location.hash = "#repositories";
+          window.location.hash = "#chats";
           await boot();
           toast("Welcome aboard", "ok");
         })
@@ -1522,6 +2173,25 @@ document.addEventListener("submit", (event) => {
       const text = input.value;
       input.value = "";
       void sendChat(agent.id, text, render);
+      return;
+    }
+    case "channel-submit":
+      submitComposerMessage(render);
+      return;
+    case "channel-thread-submit":
+      submitThreadReply(render);
+      return;
+    case "channel-rename-form": {
+      const input = $("[data-act='channel-rename-input']", form);
+      if (input !== null) {
+        renameChannelAgent(state.repositoryId, form.dataset.value, input.value);
+      }
+      const roleInput = $("[data-act='channel-role-input']", form);
+      if (roleInput !== null) {
+        setChannelAgentSetting(state.repositoryId, form.dataset.value, "role", roleInput.value.trim());
+      }
+      state.chatRenamingId = undefined;
+      render();
       return;
     }
     default:
@@ -1549,6 +2219,21 @@ document.addEventListener("change", (event) => {
       void applyProviderSetting(agent.id, field, node.value)
         .then(() => render())
         .catch((error) => toast(error.message, "error"));
+      return;
+    }
+    case "channel-agent-model":
+    case "channel-agent-effort": {
+      // Scoped to the channel rather than calling `applyProviderSetting`: see
+      // the comment on `renameChannelAgent` in data.js — this is how the
+      // agent presents itself in this room, which is allowed to differ from
+      // its account-wide connection settings.
+      const agentId = node.closest("[data-agent]")?.dataset.agent;
+      if (!agentId) {
+        return;
+      }
+      const field = act === "channel-agent-model" ? "model" : "effort";
+      setChannelAgentSetting(state.repositoryId, agentId, field, node.value);
+      render();
       return;
     }
     default:
@@ -1598,6 +2283,65 @@ document.addEventListener("input", (event) => {
     node.style.height = "auto";
     node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
   }
+  if (act === "channel-search") {
+    state.chatQuery = node.value;
+    const focused = document.activeElement === node;
+    render();
+    if (focused) {
+      const next = $("[data-act='channel-search']");
+      next?.focus();
+      next?.setSelectionRange(next.value.length, next.value.length);
+    }
+    return;
+  }
+  if (act === "channel-msg-search") {
+    state.chanMsgQuery = node.value;
+    const focused = document.activeElement === node;
+    render();
+    if (focused) {
+      const next = $("[data-act='channel-msg-search']");
+      next?.focus();
+      next?.setSelectionRange(next.value.length, next.value.length);
+    }
+    return;
+  }
+  if (act === "channel-input") {
+    updateComposerInput(node, render);
+    return;
+  }
+  if (act === "chan-file-edit") {
+    // Deliberately no render. Every other input on this screen rebuilds the
+    // whole screen and puts the caret back afterwards, which is affordable for
+    // a search box and not for a source file — a thousand-line textarea would
+    // be thrown away and re-parsed on each keystroke. The only thing a
+    // keystroke changes here is whether there is anything to save, so that is
+    // the only thing touched.
+    state.chanFileDraft = node.value;
+    const dirty = state.chanFileDraft !== state.chanFileBase;
+    const panel = node.closest(".file-panel");
+    panel?.classList.toggle("dirty", dirty);
+    const label = panel?.querySelector(".fp-state");
+    if (label !== null && label !== undefined) {
+      label.textContent = dirty ? "Unsaved changes" : "No changes";
+    }
+    for (const button of panel?.querySelectorAll(
+      "[data-act='chan-file-save'], [data-act='chan-file-revert']",
+    ) ?? []) {
+      button.disabled = !dirty;
+    }
+    return;
+  }
+  if (act === "channel-thread-input") {
+    state.threadDraft = node.value;
+    const focused = document.activeElement === node;
+    const selStart = node.selectionStart;
+    render();
+    if (focused) {
+      const next = $("[data-act='channel-thread-input']");
+      next?.focus();
+      next?.setSelectionRange(selStart, selStart);
+    }
+  }
 });
 
 /* Rows that are divs for markup reasons still have to answer the keyboard. */
@@ -1619,6 +2363,80 @@ document.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     node.closest("form")?.requestSubmit();
+  }
+});
+
+/* The channel composer additionally steers the @mention dropdown, so its
+   Enter/arrow handling lives with the rest of that feature in screen-chats.js
+   rather than duplicating a second "Enter sends" block here. */
+document.addEventListener("keydown", (event) => {
+  if (event.target?.dataset?.act === "channel-input") {
+    handleComposerKeydown(event, render);
+  }
+});
+
+/* Enter sends a thread reply the same way it sends a channel message. */
+document.addEventListener("keydown", (event) => {
+  const node = event.target;
+  if (node?.dataset?.act !== "channel-thread-input") {
+    return;
+  }
+  if (event.key === "Enter" && !event.shiftKey) {
+    event.preventDefault();
+    node.closest("form")?.requestSubmit();
+  }
+});
+
+/**
+ * Enter commits an in-progress agent rename or role edit, same as blurring
+ * the field — both live in the same form (see `rosterRow` in
+ * screen-chats.js), so both are handled here.
+ */
+document.addEventListener("keydown", (event) => {
+  const node = event.target;
+  const act = node?.dataset?.act;
+  if (
+    (act === "channel-rename-input" || act === "channel-role-input") &&
+    event.key === "Enter"
+  ) {
+    event.preventDefault();
+    node.closest("form")?.requestSubmit();
+  }
+});
+
+/**
+ * A rename or role edit also commits on blur, not only Enter — clicking away
+ * from the field should not discard what was typed. `focusout` bubbles where
+ * `blur` does not, so this is the one place delegation can catch it.
+ *
+ * Checked against `relatedTarget` (the element gaining focus) so tabbing
+ * from the name field to the role field within the same form does not itself
+ * read as "left the form" — without that check, moving focus from one field
+ * to the other inside a two-field form would close the form before the
+ * second field could ever be edited.
+ */
+document.addEventListener("focusout", (event) => {
+  const node = event.target;
+  const act = node?.dataset?.act;
+  if (act !== "channel-rename-input" && act !== "channel-role-input") {
+    return;
+  }
+  const form = node.closest("form");
+  if (form !== null && form.contains(event.relatedTarget)) {
+    return;
+  }
+  const agentId = node.dataset.value;
+  if (state.repositoryId && agentId && state.chatRenamingId === agentId) {
+    const nameInput = form === null ? null : $("[data-act='channel-rename-input']", form);
+    const roleInput = form === null ? null : $("[data-act='channel-role-input']", form);
+    if (nameInput !== null) {
+      renameChannelAgent(state.repositoryId, agentId, nameInput.value);
+    }
+    if (roleInput !== null) {
+      setChannelAgentSetting(state.repositoryId, agentId, "role", roleInput.value.trim());
+    }
+    state.chatRenamingId = undefined;
+    render();
   }
 });
 
@@ -1726,7 +2544,29 @@ async function boot() {
     }
   });
 
-  connectSocket(() => {
+  connectSocket((frame) => {
+    // A channel event for the repository currently open gets its own
+    // immediate reconcile, including the echo of this browser's own posts —
+    // see `refreshChannelMessages` in data.js. This is what makes a second
+    // tab watching the same channel see a message appear without a refresh.
+    const channelRepositoryId =
+      frame?.type === "audit" && String(frame.event?.type ?? "").startsWith("channel_")
+        ? frame.event?.data?.repositoryId
+        : undefined;
+    if (
+      channelRepositoryId !== undefined &&
+      // `activeChannelId`, for the third time and the same reason: the screen
+      // falls back to the first repository, so a channel can be open and
+      // addressed while this field is still empty. Comparing against the raw
+      // field meant an event for the channel on screen matched nothing, the
+      // reconcile never ran, and anything the server appended after the
+      // sender's own message — an agent's reply, or the system message
+      // explaining why it could not dispatch — simply never arrived.
+      channelRepositoryId === activeChannelId() &&
+      state.route === "chats"
+    ) {
+      void refreshChannelMessages(channelRepositoryId).then(() => render());
+    }
     // The stream tells us something changed; the store stays the source of
     // truth, so re-read rather than patching state from the frame.
     window.clearTimeout(state.timer);
