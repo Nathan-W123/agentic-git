@@ -20,6 +20,15 @@ FROM node:24-bookworm-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
+# Signing in to an agent from the browser is not an HTTP call this server can
+# make: it runs the vendor's own CLI (`claude auth login`, `codex login
+# --device-auth`) against an isolated home and reads the device code back out.
+# `resolveClaudeCommand` and `resolveCodexCommand` both fall through to a bare
+# PATH lookup off Windows, so without these installed the connect screen can
+# only offer a pasted token and reports "No usable ... CLI was found on this
+# host" — which is per-user sign-in working on a laptop but not on a deploy.
+RUN npm install -g @anthropic-ai/claude-code @openai/codex \
+  && npm cache clean --force
 # COORD_PORT is deliberately not set here. A platform that assigns a port
 # passes it as PORT, and pinning COORD_PORT in the image would outrank it —
 # leaving the container listening where the router is not looking. Unset, the
