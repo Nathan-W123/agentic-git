@@ -14,6 +14,7 @@
     "node": ">=24.0.0"
   },
   "scripts": {
+    "start": "node apps/web/dist/index.js",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",

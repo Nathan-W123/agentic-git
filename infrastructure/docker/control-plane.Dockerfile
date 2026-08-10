@@ -20,10 +20,13 @@ FROM node:24-bookworm-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends git ca-certificates \
   && rm -rf /var/lib/apt/lists/*
+# COORD_PORT is deliberately not set here. A platform that assigns a port
+# passes it as PORT, and pinning COORD_PORT in the image would outrank it —
+# leaving the container listening where the router is not looking. Unset, the
+# entrypoint falls through to PORT, and to 4317 when nothing assigns one.
 ENV NODE_ENV=production \
     COORD_PROJECT_ROOT=/data \
-    COORD_HOST=0.0.0.0 \
-    COORD_PORT=4317
+    COORD_HOST=0.0.0.0
 WORKDIR /app
 COPY --from=build /app /app
 COPY infrastructure/docker/control-plane-entrypoint.sh /usr/local/bin/coord-control-plane

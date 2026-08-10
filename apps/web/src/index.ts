@@ -42,7 +42,7 @@ function portNumber(value: string | undefined): number {
   const port = Number.parseInt(value ?? "4317", 10);
   if (!Number.isSafeInteger(port) || port < 1 || port > 65_535) {
     throw new Error(
-      "Port must be an integer between 1 and 65535 (--port or COORD_PORT)",
+      "Port must be an integer between 1 and 65535 (--port, COORD_PORT, or PORT)",
     );
   }
   return port;
@@ -298,8 +298,23 @@ async function serve(
     secureCookies: process.env["COORD_SECURE_COOKIES"] === "true",
     staticAssets: await loadStaticAssets(),
   });
-  const host = process.env["COORD_HOST"] ?? "127.0.0.1";
-  const port = portNumber(argument("port") ?? process.env["COORD_PORT"]);
+  // Loopback locally, every interface when a platform is hosting us. `PORT`
+  // is the signal: a platform that assigns a port also puts a router in front
+  // of the container, and that router cannot reach 127.0.0.1 — the deploy
+  // builds, starts, and then fails its health check with the server running
+  // perfectly well somewhere nothing can see it.
+  const platformPort = process.env["PORT"];
+  const host =
+    process.env["COORD_HOST"] ??
+    (platformPort === undefined || platformPort === "" ? "127.0.0.1" : "0.0.0.0");
+  // `PORT` last, and only as a fallback: it is what every container platform
+  // assigns, and a deployment that ignores it listens where nothing is
+  // looking. It stays behind the explicit flag and `COORD_PORT` so a local
+  // run is never redirected by a `PORT` that happens to be exported in the
+  // developer's shell for something else entirely.
+  const port = portNumber(
+    argument("port") ?? process.env["COORD_PORT"] ?? platformPort,
+  );
   try {
     await new Promise<void>((resolve, reject) => {
       runningGateway.server.once("error", reject);
