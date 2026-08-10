@@ -554,9 +554,10 @@ function sidebar() {
         </span>
         <span class="pc-star">${icon("star")}</span>
       </div>
-      <button class="nav-item" data-act="invite" style="margin-bottom:4px">
-        ${icon("users")}<span>Invite someone</span>
-      </button>
+      <!-- No "invite someone" here. An invitation names one repository, so
+           asking for one from under the project meant asking which repository
+           first; the channel's own header is where somebody already knows the
+           answer. -->
       <div class="sys-line">
         <span class="dot ${state.health === undefined ? "grey" : "green"}"></span>
         ${state.health === undefined ? "Control plane unreachable" : "All systems operational"}
@@ -2395,24 +2396,24 @@ document.addEventListener("click", (event) => {
       closePopover();
       void inviteSomebody(render, value);
       return;
-    // The menu on a channel row. Everything in it is already scoped to that
-    // channel, which is the point: inviting somebody from inside a room
-    // should not then ask which room.
+    /**
+     * The menu on a channel row: leaving, and nothing else.
+     *
+     * It used to also offer inviting somebody, adding an agent, and opening
+     * the channel. Opening duplicated clicking the row itself, and the other
+     * two are already in the channel's own header where somebody is looking
+     * when they think of them. A menu that repeats what is one click away
+     * costs a decision every time it is opened. Leaving is the one action
+     * with nowhere else to live.
+     */
     case "channel-menu":
       showMenu(node, [
         {
-          act: "invite-repo",
+          act: "channel-leave",
           value,
-          label: `Invite someone to #${value}`,
-          iconName: "users",
+          label: `Leave #${value}`,
+          iconName: "logout",
         },
-        {
-          act: "channel-agent-menu",
-          value,
-          label: `Add an agent to #${value}`,
-          iconName: "robot",
-        },
-        { act: "channel-open", value, label: "Open this channel", iconName: "chatBubble" },
       ]);
       return;
     /**

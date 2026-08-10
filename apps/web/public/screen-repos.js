@@ -276,12 +276,16 @@ export async function connectRepository(rerender) {
     return;
   }
   try {
+    // Importing has its own route. Posting to `/repositories` with a `mode`
+    // field looked like it worked — nothing reads `mode`, so the request fell
+    // through to plain creation and answered 201 with a brand new *empty*
+    // repository, one "Initial commit" on `main` and none of the remote's
+    // history. The symptom was a connected repository with no files in it.
     await api(
-      `/projects/${encodeURIComponent(state.projectId)}/repositories`,
+      `/projects/${encodeURIComponent(state.projectId)}/repositories/github`,
       {
         method: "POST",
         body: {
-          mode: "github",
           repository: values.remote.trim(),
           ...(values.id?.trim() ? { id: values.id.trim() } : {}),
           ...(values.branch?.trim() ? { branch: values.branch.trim() } : {}),

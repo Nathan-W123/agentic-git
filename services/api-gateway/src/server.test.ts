@@ -4033,3 +4033,34 @@ test("loosening agent-membership removal to manage_project+ does not let an unre
   );
   assert.equal(devSelfRemoval.status, 200, JSON.stringify(devSelfRemoval.data));
 });
+
+test("creating a repository ignores a mode field rather than importing", async (t) => {
+  // The bug this pins. The dashboard used to post `{mode: "github", …}` to
+  // the plain creation route, which reads no `mode` at all: the request
+  // succeeded, answered 201 with a repository, and produced an *empty* one —
+  // a single "Initial commit" and none of the remote's history. It looked
+  // exactly like a working import until somebody opened the files.
+  //
+  // Creation keeping its behaviour is correct; what was wrong was the caller.
+  // So this asserts the shape that misled, so the next person to add a `mode`
+  // sees that nothing consumes it.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const created = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+    {
+      method: "POST",
+      body: {
+        id: "looks-imported",
+        mode: "github",
+        repository: "octocat/Hello-World",
+      },
+    },
+  );
+  assert.equal(created.status, 201);
+  // No remote was recorded, because none was read: this is a local creation.
+  assert.equal(created.data.repository.provider, undefined);
+  assert.equal(created.data.repository.remoteUrl, undefined);
+});
