@@ -851,6 +851,7 @@ export interface ChatProviderOperations {
     provider: string;
     model?: string;
     effort?: string;
+    visibility?: "personal" | "org";
   }): Promise<unknown>;
   complete(input: {
     userId: string;
@@ -4595,6 +4596,24 @@ export class ApiGateway {
             max: 20,
             optional: true,
           });
+          // Only the two the credential store understands. A free string here
+          // would reach the connection file and decide, wrongly, whose
+          // credential a teammate's prompt spends.
+          const visibility = stringField(body["visibility"], "visibility", {
+            max: 10,
+            optional: true,
+          });
+          if (
+            visibility !== undefined &&
+            visibility !== "personal" &&
+            visibility !== "org"
+          ) {
+            throw new HttpError(
+              400,
+              "invalid_visibility",
+              "Visibility must be personal or org",
+            );
+          }
           this.sendJson(response, 200, {
             providers: await performChat(() =>
               chatOperations.setSettings({
@@ -4602,6 +4621,7 @@ export class ApiGateway {
                 provider,
                 ...(model === undefined ? {} : { model }),
                 ...(effort === undefined ? {} : { effort }),
+                ...(visibility === undefined ? {} : { visibility }),
               }),
             ),
           });

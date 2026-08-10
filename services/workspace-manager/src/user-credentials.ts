@@ -418,6 +418,33 @@ export class UserCredentialStore {
     await this.write(file);
   }
 
+  /**
+   * Changes who may spend a stored credential, and nothing else.
+   *
+   * Separate from {@link put} because that one needs the secret, which a
+   * later change of mind does not have: the stored copy is encrypted and the
+   * person deciding "everyone can use this" is not re-pasting a token to say
+   * so. Refuses when nothing is stored rather than inventing a record — there
+   * would be no credential for the new visibility to describe.
+   */
+  public async setVisibility(
+    userId: string,
+    vendor: VendorCliKind,
+    visibility: CredentialVisibility,
+  ): Promise<UserCredentialSummary> {
+    const file = await this.read();
+    const record = file.users[userId]?.[vendor];
+    if (record === undefined) {
+      throw new UserCredentialError(
+        "No credential of your own is stored for that vendor",
+        "not_connected",
+      );
+    }
+    record.visibility = visibility;
+    await this.write(file);
+    return summarize(vendor, record);
+  }
+
   public async markVerified(
     userId: string,
     vendor: VendorCliKind,

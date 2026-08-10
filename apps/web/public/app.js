@@ -2347,6 +2347,27 @@ document.addEventListener("change", (event) => {
       render();
       return;
     }
+    // Account-wide, unlike the two above: this is not how the agent presents
+    // itself in this room but who may spend the credential behind it, so it
+    // goes to the connection rather than the channel override.
+    case "channel-agent-visibility": {
+      const agentId = node.closest("[data-agent]")?.dataset.agent;
+      if (!agentId) {
+        return;
+      }
+      void applyProviderSetting(agentId, "visibility", node.value)
+        .then(() => {
+          toast(
+            node.value === "org"
+              ? "Everyone in the organization can use this agent"
+              : "Only you can use this agent",
+            "ok",
+          );
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
+    }
     default:
   }
 });
