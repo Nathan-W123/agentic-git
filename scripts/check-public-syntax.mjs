@@ -15,7 +15,13 @@
  * modules living under `.js`.
  */
 import { execFileSync } from "node:child_process";
-import { copyFileSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
+import {
+  copyFileSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -56,10 +62,58 @@ try {
   rmSync(scratch, { recursive: true, force: true });
 }
 
+/*
+ * An unescaped backtick inside an HTML comment inside a template literal.
+ *
+ * Parsing cannot catch this, which is why it gets its own pass. The backtick
+ * closes the template string, and the CSS selector the comment was quoting is
+ * then read as code: `<!-- see \`.chan-sidebar\` -->` becomes a property read
+ * named `chan`, a subtraction, and a bare identifier `sidebar`. That is
+ * perfectly valid JavaScript, so `node --check` is happy, every test passes,
+ * and the screen throws `ReferenceError: sidebar is not defined` the moment it
+ * renders. It shipped twice — in a chat header and a code toolbar — before
+ * anybody saw it, because neither is on the first screen you land on.
+ *
+ * Heuristic, deliberately: it flags any backtick between `<!--` and `-->` that
+ * is not backslash-escaped. Escaping is the fix when the selector is worth
+ * quoting; ordinary quotes are the fix when it is not.
+ */
+const commentBackticks = [];
+for (const entry of readdirSync(publicDir)) {
+  if (!entry.endsWith(".js")) {
+    continue;
+  }
+  const lines = readFileSync(path.join(publicDir, entry), "utf8").split(/\r?\n/u);
+  let open = false;
+  lines.forEach((line, index) => {
+    const started = line.includes("<!--");
+    if (started) {
+      open = true;
+    }
+    if (open && /(^|[^\\])`/u.test(line)) {
+      commentBackticks.push(`${entry}:${String(index + 1)}: ${line.trim()}`);
+    }
+    if (open && line.includes("-->")) {
+      open = false;
+    }
+  });
+}
+
 if (failures.length > 0) {
   console.error(`Browser modules that do not parse (${failures.length}):`);
   for (const failure of failures) {
     console.error(`  ${failure}`);
+  }
+  process.exit(1);
+}
+
+if (commentBackticks.length > 0) {
+  console.error(
+    `Unescaped backtick inside an HTML comment (${commentBackticks.length}) — ` +
+      `this closes the surrounding template literal and the rest parses as code:`,
+  );
+  for (const hit of commentBackticks) {
+    console.error(`  ${hit}`);
   }
   process.exit(1);
 }
