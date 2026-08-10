@@ -1205,9 +1205,13 @@ export class ProviderChatService {
       ["auth", "status"],
       { timeoutMs: 30_000, maxOutputBytes: 65_536 },
     );
-    if (result.exitCode !== 0) {
-      return { detected: false, loggedIn: false };
-    }
+    // Exit code is not the signal here. `claude auth status` exits non-zero
+    // purely because nobody is signed in, while still printing the status
+    // JSON, so reading it as "no CLI" made a working install look absent
+    // exactly when it was needed — browser sign-in is offered only for a
+    // detected CLI, so a host that had never signed in could never start.
+    // A genuinely missing binary never reaches here: `runProcess` rejects on
+    // spawn failure and `detect` turns that into `detected: false`.
     try {
       const status = JSON.parse(result.stdout) as {
         loggedIn?: boolean;
@@ -1228,7 +1232,11 @@ export class ProviderChatService {
           : { plan: status.subscriptionType }),
       };
     } catch {
-      return { detected: true, loggedIn: false };
+      // Ran, but said nothing this understands. A clean exit still means a
+      // working CLI; a non-zero one with no parseable status is the shape a
+      // half-installed binary has, and claiming detection there would offer a
+      // sign-in that cannot work.
+      return { detected: result.exitCode === 0, loggedIn: false };
     }
   }
 
