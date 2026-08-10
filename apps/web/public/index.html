@@ -2,7 +2,16 @@
 <html lang="en">
   <head>
     <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- `viewport-fit=cover` is what makes `env(safe-area-inset-*)` report
+         anything but zero on a notched phone. The app draws its own full-bleed
+         surfaces — a fixed sidebar, fixed panels, a header at the top of the
+         viewport — so it opts into the whole screen and pays back the insets
+         itself in styles.css. Without this the values are 0 and every
+         safe-area rule silently does nothing. -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    >
     <meta name="theme-color" content="#0a0b0f">
     <meta
       name="description"

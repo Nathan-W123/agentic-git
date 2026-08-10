@@ -1667,6 +1667,127 @@ document.addEventListener("mouseover", requestUsageForHoverTarget);
 // pointer.
 document.addEventListener("focusin", requestUsageForHoverTarget);
 
+/* -------------------------------------------------- phone swipe ---- */
+/*
+ * Swipe in from the right edge to bring up the side panel, swipe right to put
+ * it away.
+ *
+ * Phone only, and only on the chats screen. On a wide window the panel is an
+ * ordinary always-visible column and there is nothing to reveal; the header
+ * buttons keep working at every width and this is an addition to them, not a
+ * replacement — a gesture nobody can see is a poor sole route to a feature.
+ *
+ * The open gesture has to start near the right edge, because a leftward drag
+ * from the middle of a transcript is how someone scrolls a wide code block or
+ * swipes between browser tabs. The close gesture has no edge requirement: the
+ * panel is full width once open, so anywhere on it is the panel.
+ */
+const SWIPE_EDGE_PX = 28;
+const SWIPE_MIN_PX = 60;
+/* Vertical drift that means the finger was scrolling the transcript, not
+   swiping across it. Checked against the horizontal distance rather than a
+   fixed number so a long, slightly sloped swipe still counts. */
+const SWIPE_MAX_SLOPE = 0.6;
+
+let swipeStart;
+
+function phoneLayout() {
+  return window.matchMedia("(max-width: 600px)").matches;
+}
+
+/** Whichever side panel is showing, closed the way its own button closes it. */
+function closeSidePanel() {
+  if (state.chanFileView !== undefined) {
+    // The same question the close button asks. A swipe is easy to do by
+    // accident, which makes silently discarding an edit worse here, not
+    // better.
+    if (!confirmDiscardEdit()) {
+      return false;
+    }
+    closeChannelFile();
+    state.chanTree = false;
+    return true;
+  }
+  if (state.chanTree === true) {
+    state.chanTree = false;
+    return true;
+  }
+  if (state.activeChannelThread !== undefined) {
+    state.activeChannelThread = undefined;
+    return true;
+  }
+  if (state.chanThreadList === true) {
+    state.chanThreadList = false;
+    return true;
+  }
+  return false;
+}
+
+function sidePanelOpen() {
+  return (
+    state.chanFileView !== undefined ||
+    state.chanTree === true ||
+    state.activeChannelThread !== undefined ||
+    state.chanThreadList === true
+  );
+}
+
+document.addEventListener(
+  "touchstart",
+  (event) => {
+    // A second finger means a pinch or a scroll gesture, never this.
+    swipeStart =
+      event.touches.length === 1 && event.touches[0] !== undefined
+        ? { x: event.touches[0].clientX, y: event.touches[0].clientY }
+        : undefined;
+  },
+  { passive: true },
+);
+
+document.addEventListener(
+  "touchend",
+  (event) => {
+    const start = swipeStart;
+    swipeStart = undefined;
+    const touch = event.changedTouches[0];
+    if (
+      start === undefined ||
+      touch === undefined ||
+      !phoneLayout() ||
+      state.route !== "chats"
+    ) {
+      return;
+    }
+    // Never steal a swipe that began inside something horizontally
+    // scrollable — a wide code block or a diff is dragged, not swiped past.
+    if (event.target instanceof Element) {
+      const scroller = event.target.closest(".msg-code, pre, .diff, table");
+      if (scroller !== null && scroller.scrollWidth > scroller.clientWidth) {
+        return;
+      }
+    }
+    const dx = touch.clientX - start.x;
+    const dy = touch.clientY - start.y;
+    if (Math.abs(dx) < SWIPE_MIN_PX || Math.abs(dy) > Math.abs(dx) * SWIPE_MAX_SLOPE) {
+      return;
+    }
+    if (dx < 0) {
+      // Leftward, from the right edge: bring the panel in. The thread list is
+      // what it opens onto — the panel's own tabs move between that, the file
+      // tree and an open file once it is showing.
+      if (start.x >= window.innerWidth - SWIPE_EDGE_PX && !sidePanelOpen()) {
+        state.chanThreadList = true;
+        render();
+      }
+      return;
+    }
+    if (sidePanelOpen() && closeSidePanel()) {
+      render();
+    }
+  },
+  { passive: true },
+);
+
 /**
  * Unsaved text is worth one question before it disappears.
  *

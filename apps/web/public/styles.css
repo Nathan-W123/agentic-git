@@ -5786,3 +5786,102 @@ body.resizing-ns * {
   cursor: ns-resize !important;
   user-select: none !important;
 }
+
+/* ------------------------------------------------------- safe areas ---- */
+/* A phone's status bar, camera cutout and home indicator sit *over* the
+   viewport once `viewport-fit=cover` is set (see index.html). Everything this
+   app pins to `top: 0` — the outer sidebar, the channel drawer, the thread and
+   file panels — therefore lands underneath the clock and the Dynamic Island,
+   and so do the controls inside them. That is not only a cosmetic problem: iOS
+   takes the touches in that strip, so a button under the island is not merely
+   hard to see, it is unpressable. The channel header and every panel's own
+   close button were in exactly that strip, which is why the top row of icons
+   "did nothing".
+
+   Insets are additive to whatever padding a rule already had, so each value is
+   written as a `calc()` against the original rather than replacing it. They
+   resolve to 0px on every device without cutouts, including desktop, so these
+   rules are inert there rather than conditional. */
+:root {
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+}
+
+/* Header rows in normal flow at the top of the viewport. */
+.chan-head {
+  padding-top: calc(13px + var(--safe-top));
+}
+
+.code-toolbar {
+  height: calc(54px + var(--safe-top));
+  padding-top: var(--safe-top);
+}
+
+/* Fixed full-height surfaces. Each is its own stacking context pinned to the
+   viewport, so a container's padding cannot reach them. */
+.sidebar {
+  padding-top: var(--safe-top);
+  padding-left: calc(12px + var(--safe-left));
+}
+
+.chan-sidebar,
+.thread-panel,
+.file-panel {
+  padding-top: var(--safe-top);
+}
+
+/* The home indicator, and on iOS Safari the floating address bar, overlap the
+   bottom of the viewport — which is where the composer and its send button
+   live.
+
+   Applied to the wrapper rather than `.composer` itself: `.chan-composer-wrap
+   .composer` zeroes the inner margin at higher specificity, so a rule on the
+   bare class is outranked and silently does nothing. The wrapper is the
+   element that actually carries the gap. */
+.chan-composer-wrap {
+  margin-bottom: calc(12px + var(--safe-bottom));
+}
+
+/* The one-on-one chat panel and any other composer that is not inside the
+   channel wrapper. */
+.composer:not(.chan-composer-wrap .composer) {
+  margin-bottom: calc(12px + var(--safe-bottom));
+}
+
+/* Landscape puts the cutout on a side instead, where it would clip the
+   message column rather than the header. */
+@media (orientation: landscape) {
+  .chan-main,
+  .code-shell {
+    padding-left: var(--safe-left);
+    padding-right: var(--safe-right);
+  }
+}
+
+/* --------------------------------------------- phone form controls ---- */
+/* iOS Safari zooms the whole page in when a text field smaller than 16px
+   takes focus, and it does not zoom back out. That is what "the window goes
+   misaligned" is: tapping search, opening the terminal, or typing a message
+   all focus a field, and every one of them was under 16px — 13.5px for the
+   two search boxes, 12.5px for the composer, 12px for the terminal.
+
+   16px is the threshold Safari checks, so it is the fix. The alternative —
+   `maximum-scale=1` on the viewport — also stops the zoom, by disabling
+   pinch-zoom for everyone, and taking magnification away from people who
+   need it to read is a bad trade for a layout nicety.
+
+   `.app`/`#auth-root` prefixes are here to outrank the per-component sizes
+   (`.composer textarea`, `.tree-search input`, `.roster-rename input`), which
+   are all one class deep; a bare element selector loses to every one of them
+   and would silently do nothing. */
+@media (max-width: 600px) {
+  .app input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .app textarea,
+  .app select,
+  #auth-root input,
+  #auth-root textarea {
+    font-size: 16px;
+  }
+}
