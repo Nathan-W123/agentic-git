@@ -129,7 +129,30 @@ export const DEFAULT_CONFIG: ProjectConfig = {
       label: "patch integrity",
     },
   ],
-  agents: {},
+  /*
+   * An empty map here meant a fresh project could not run a task at all.
+   * `resolveAgentIdForVendor` (apps/web) looks for an agent whose adapter
+   * matches the vendor an @mention resolved to, finds none, and the dispatch
+   * fails with "No codex agent is configured on this deployment" — after the
+   * person had already connected the Codex CLI and had every reason to think
+   * they were done. Connecting a CLI supplies a *credential*; this map is
+   * what says the deployment can *run* that vendor, and nothing bridged the
+   * two.
+   *
+   * Both entries omit `command`, so each defaults to the vendor's own name on
+   * PATH (see OPTIONAL_COMMAND_ADAPTERS) and costs nothing when the CLI is
+   * absent — an agent nobody mentions is never spawned, and one that is
+   * mentioned without its CLI installed fails saying the command was not
+   * found, which is a far better answer than being told no agent exists.
+   *
+   * Gemini is left out deliberately: its CLI has no non-interactive login
+   * (see SIGN_IN_FLOWS in apps/web/src/providers.ts), so an entry would
+   * advertise something this deployment cannot actually sign in to.
+   */
+  agents: {
+    codex: { adapter: "codex" },
+    claude: { adapter: "claude" },
+  },
 };
 
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]*$/iu;
