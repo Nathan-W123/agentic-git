@@ -102,6 +102,18 @@ interface WatchedChannelTask {
   /** Last audit sequence already narrated, so nothing is said twice. */
   cursor: number;
   startedAtMs: number;
+  /**
+   * Narration held back until the run proves it has something worth a thread.
+   *
+   * The opening — the task's title and the agent's first reasoning — plus any
+   * line that is only ceremony ("Reading the repository…") waits here. A run
+   * that finishes without ever saying anything substantive never writes it,
+   * and answers in the channel instead of behind a thread nobody needs to
+   * open. Flushed in order the moment something substantive does arrive.
+   */
+  pending: string[];
+  /** Whether a thread has been opened, after which everything goes into it. */
+  threaded: boolean;
 }
 
 /**
@@ -194,6 +206,16 @@ export function withRoleContext(role: string, objective: string): string {
 const CHANNEL_PROGRESS_MAX_MS = 60 * 60 * 1000;
 
 /** Audit events that end a task, and the line each one closes the thread with. */
+/**
+ * Narrated, but true of every run that has ever started.
+ *
+ * A line that says nothing specific about *this* task is not reason enough to
+ * open a thread, so these are held back and only written once something
+ * substantive follows. Without this every task threaded, because every task
+ * says it started.
+ */
+const CHANNEL_CEREMONIAL_EVENTS = new Set(["task_started"]);
+
 const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
   canonical_promoted: "Done — the change is in canonical.",
   task_failed: "I could not finish this.",
@@ -5634,6 +5656,16 @@ export class ApiGateway {
      * for it by name.
      */
     claimMessage?: string;
+    /**
+     * An existing thread to hang this work off, instead of opening a new one.
+     *
+     * Asking for more work inside a thread is somebody saying "this belongs
+     * with that" — the one signal about relatedness that is never a guess,
+     * because a person made it. The acknowledgement then goes into that
+     * thread rather than starting another one beside it, so a follow-up
+     * fix stays with the work it follows.
+     */
+    threadMessageId?: string;
   }): Promise<void> {
     const {
       projectId,
@@ -5676,13 +5708,35 @@ export class ApiGateway {
     // inside a couple of seconds, not once the work has been queued. This
     // message is also the thread everything about the task hangs off, so the
     // channel keeps one line per request rather than a running commentary.
-    const acknowledgement = await this.appendChannelEntry({
-      projectId,
-      repositoryId,
-      kind: "agent",
-      authorId: `${candidate.userId}:${candidate.provider}`,
-      content: await this.composeAcknowledgement(candidate, content, claimMessage),
-    });
+    const acknowledgementText = await this.composeAcknowledgement(
+      candidate,
+      content,
+      claimMessage,
+    );
+    // Continuing an existing thread: the acknowledgement belongs inside it,
+    // and everything this run narrates hangs off the same root, so the two
+    // pieces of work read as one story rather than two.
+    const threadRootId =
+      input.threadMessageId ??
+      (
+        await this.appendChannelEntry({
+          projectId,
+          repositoryId,
+          kind: "agent",
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          content: acknowledgementText,
+        })
+      ).id;
+    if (input.threadMessageId !== undefined) {
+      await this.appendChannelThreadReply({
+        projectId,
+        repositoryId,
+        messageId: input.threadMessageId,
+        authorId: `${candidate.userId}:${candidate.provider}`,
+        content: acknowledgementText,
+      });
+    }
+    const acknowledgement = { id: threadRootId };
 
     try {
       const task = await this.options.operations.submitTask({
@@ -5747,22 +5801,12 @@ export class ApiGateway {
       // from one call so the wait is paid once. A task id says nothing to the
       // person who asked; "Task: architecture for chess" does.
       const opening = await this.planOpening(candidate, task.objective);
-      await this.appendChannelThreadReply({
-        repositoryId,
-        messageId: acknowledgement.id,
-        authorId: `${candidate.userId}:${candidate.provider}`,
-        content: `Task: ${opening.title}`,
-        projectId,
-      });
-      for (const thought of opening.thoughts) {
-        await this.appendChannelThreadReply({
-          repositoryId,
-          messageId: acknowledgement.id,
-          authorId: `${candidate.userId}:${candidate.provider}`,
-          content: thought,
-          projectId,
-        });
-      }
+      // Held rather than posted. Writing the title and reasoning here is what
+      // made every task a thread, including "change this 1 to a 2" — the
+      // reply existed before anyone knew whether there was anything to
+      // follow. It is written the moment the run says something substantive,
+      // and never if it does not.
+      const pending = [`Task: ${opening.title}`, ...opening.thoughts];
       // Nothing runs a queued task on its own — it sits `submitted` until
       // somebody calls this. That is why a dispatched task produced no
       // events, no thinking, and an indicator that never stopped: the work
@@ -5794,6 +5838,8 @@ export class ApiGateway {
         // From zero: the task is new, so nothing already in the log carries
         // its id, and the store filters by it rather than this scanning.
         cursor: 0,
+        pending,
+        threaded: false,
       });
     } catch (error) {
       await this.appendChannelThreadReply({
@@ -5927,10 +5973,61 @@ export class ApiGateway {
       input.projectId,
       input.repositoryId,
     );
-    const candidate = candidates.find(
+    const owner = candidates.find(
       (entry) => entry.userId === ownerId && entry.provider === provider,
     );
-    if (candidate === undefined) {
+    // A reply may name somebody other than the agent whose thread this is —
+    // that is how a second agent joins one. Matched exactly as the channel
+    // matches, so "@Icarus" means the same thing in both places, and every
+    // agent named gets to answer rather than only the first.
+    //
+    // Naming nobody still reaches the thread's own agent: a thread hangs off
+    // one agent's work, so a bare question in it is addressed to them by
+    // construction. That is the behaviour this method was written for and it
+    // stays the default.
+    const mentioned = question.includes("@")
+      ? candidates.filter((entry) => question.includes(`@${entry.name}`))
+      : [];
+    const answering = mentioned.length > 0 ? mentioned : owner === undefined ? [] : [owner];
+    // Asking for work inside a thread continues that thread rather than
+    // starting a new one. This is the explicit half of grouping related work:
+    // a person saying "and now do this too" has told us it belongs together,
+    // which no similarity score can claim to know. Only one agent is given
+    // the work even if several were named — two agents editing the same
+    // repository from one sentence is a collision, not collaboration.
+    if (looksLikeTaskRequest(question) && answering[0] !== undefined) {
+      const candidate = answering[0];
+      if (candidate.visibility !== "personal" || candidate.userId === input.viewerId) {
+        await this.dispatchOneMention({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          content: question,
+          senderId: input.viewerId,
+          candidate,
+          threadMessageId: input.messageId,
+        });
+        return;
+      }
+    }
+    for (const candidate of answering) {
+      // Same refusal the channel gives. Being inside a thread is not consent
+      // to spend somebody else's subscription.
+      if (candidate.visibility === "personal" && candidate.userId !== input.viewerId) {
+        await this.appendChannelThreadReply({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          messageId: input.messageId,
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          content:
+            `@${candidate.name} is personal to ${candidate.userName} — only ` +
+            `they can ask it here. Ask ${candidate.userName} to switch it to ` +
+            `org-wide, or mention an org-wide agent instead.`,
+        });
+        continue;
+      }
+      await this.answerAsAgent({ ...input, root, candidate, question });
+    }
+    if (answering.length === 0 && owner === undefined) {
       // The agent has since been disconnected. Saying so is better than the
       // silence this method exists to remove.
       await this.appendChannelThreadReply({
@@ -5944,6 +6041,24 @@ export class ApiGateway {
       });
       return;
     }
+  }
+
+  /**
+   * One agent's answer inside a thread, on the thread's own history.
+   *
+   * Split out so several agents can answer the same reply: the context is the
+   * thread, which is shared, so each one reads the same transcript and posts
+   * back into the same place.
+   */
+  private async answerAsAgent(input: {
+    projectId: string;
+    repositoryId: string;
+    messageId: string;
+    root: { content: string; replies: Array<{ content: string }> };
+    candidate: ChannelMentionCandidate;
+    question: string;
+  }): Promise<void> {
+    const { root, candidate, question } = input;
     // The reply just stored is the question being asked, so it is left off the
     // end of the transcript rather than repeated to the model twice.
     const history = [
@@ -5970,7 +6085,10 @@ export class ApiGateway {
       projectId: input.projectId,
       repositoryId: input.repositoryId,
       messageId: input.messageId,
-      authorId: root.authorId,
+      // The answering agent, not the thread's owner: with several agents in
+      // one thread, attributing every reply to whoever started it would put
+      // one agent's words under another's name.
+      authorId: `${candidate.userId}:${candidate.provider}`,
       content: answer.text ?? explainAnswerFailure(answer.error),
     });
   }
@@ -6163,6 +6281,44 @@ export class ApiGateway {
           if (line === undefined) {
             continue;
           }
+          const terminal = CHANNEL_TERMINAL_EVENTS[record.event.type] !== undefined;
+          if (!watched.threaded) {
+            if (CHANNEL_CEREMONIAL_EVENTS.has(record.event.type)) {
+              // True of every run, so it says nothing about this one. Held, so
+              // that a task whose whole story is "started, done" does not get
+              // a thread on the strength of it.
+              watched.pending.push(line);
+              continue;
+            }
+            if (terminal) {
+              // Finished without ever needing to explain itself. The outcome
+              // goes in the channel beside the acknowledgement — two lines,
+              // no thread to open — and the held ceremony is dropped rather
+              // than written to a thread that now exists only to hold it.
+              await this.appendChannelEntry({
+                projectId: watched.projectId,
+                repositoryId: watched.repositoryId,
+                kind: "agent",
+                authorId: watched.authorId,
+                content: line,
+              });
+              this.watchedChannelTasks.delete(watched.taskId);
+              break;
+            }
+            // Something worth following. Everything held so far goes in first,
+            // in the order it happened, so the thread reads from the start.
+            for (const held of watched.pending) {
+              await this.appendChannelThreadReply({
+                projectId: watched.projectId,
+                repositoryId: watched.repositoryId,
+                messageId: watched.messageId,
+                authorId: watched.authorId,
+                content: held,
+              });
+            }
+            watched.pending = [];
+            watched.threaded = true;
+          }
           await this.appendChannelThreadReply({
             projectId: watched.projectId,
             repositoryId: watched.repositoryId,
@@ -6170,7 +6326,7 @@ export class ApiGateway {
             authorId: watched.authorId,
             content: line,
           });
-          if (CHANNEL_TERMINAL_EVENTS[record.event.type] !== undefined) {
+          if (terminal) {
             this.watchedChannelTasks.delete(watched.taskId);
             break;
           }
@@ -6180,14 +6336,27 @@ export class ApiGateway {
           // and must not leave the thread looking permanently mid-sentence,
           // so giving up is said out loud rather than done quietly.
           this.watchedChannelTasks.delete(watched.taskId);
-          await this.appendChannelThreadReply({
-            projectId: watched.projectId,
-            repositoryId: watched.repositoryId,
-            messageId: watched.messageId,
-            authorId: watched.authorId,
-            content:
-              "I could not finish this — I stopped hearing back from the run.",
-          });
+          const abandoned =
+            "I could not finish this — I stopped hearing back from the run.";
+          // Same rule as a terminal event: a run that never said anything
+          // worth a thread should not open one purely to admit it gave up.
+          if (watched.threaded) {
+            await this.appendChannelThreadReply({
+              projectId: watched.projectId,
+              repositoryId: watched.repositoryId,
+              messageId: watched.messageId,
+              authorId: watched.authorId,
+              content: abandoned,
+            });
+          } else {
+            await this.appendChannelEntry({
+              projectId: watched.projectId,
+              repositoryId: watched.repositoryId,
+              kind: "agent",
+              authorId: watched.authorId,
+              content: abandoned,
+            });
+          }
         }
       } catch (error) {
         process.stderr.write(

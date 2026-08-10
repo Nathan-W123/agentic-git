@@ -3004,12 +3004,12 @@ test("an ambiguous task message is dispatched anyway, deterministically", async 
   );
   assert.ok(agentMessages.length >= 1, JSON.stringify(after.data.messages));
   assert.match(agentMessages[0].content, /On it/u);
-  assert.ok(
-    (agentMessages[0].replies ?? []).some((reply: any) =>
-      /^Task: |could not start/u.test(String(reply.content)),
-    ),
-    JSON.stringify(agentMessages[0].replies),
-  );
+  // No thread yet, deliberately. The title and opening reasoning are held
+  // until the run says something specific to this task, so a change small
+  // enough to finish without explaining itself stays two lines in the
+  // channel instead of a thread nobody needs to open. Nothing has been
+  // narrated here, so nothing has been written.
+  assert.deepEqual(agentMessages[0].replies ?? [], []);
 });
 
 test("a plain non-task message auto-claims nothing", async (t) => {
@@ -3223,12 +3223,12 @@ test("a request that names no verb this list knows is still work when an agent i
     (message) => message.kind === "agent",
   );
   assert.equal(agentMessages.length, 1);
-  // The thread is named, and named after the work rather than an identifier.
+  // The work was taken — but no thread is opened for it yet. The title and
+  // reasoning wait until the run narrates something specific to this task,
+  // so a one-line change never grows a thread to hold a title nobody reads.
   const replies = agentMessages[0].replies ?? [];
-  assert.ok(
-    replies.some((reply: any) => /^Task: /u.test(String(reply.content))),
-    JSON.stringify(replies),
-  );
+  assert.deepEqual(replies, []);
+  // Whenever it is written, it is named after the work rather than an id.
   assert.ok(
     !replies.some((reply: any) => /task_[0-9a-f-]{8}/u.test(String(reply.content))),
     "a task id is not a name anybody can read",
