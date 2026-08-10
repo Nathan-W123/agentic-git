@@ -109,6 +109,8 @@ export const state = {
   /** Repository-scoped grants, keyed by repository id — see `ensureRepositoryGrants`. */
   repositoryGrants: {},
   activeChannelThread: undefined,
+  // Per-provider usage reports, filled lazily by the roster's hover.
+  providerUsage: {},
   // Paths whose inline diff is expanded in the transcript. Plural because a
   // reader comparing two files should not have to close one to open the other.
   chanOpenFiles: [],
@@ -334,6 +336,33 @@ export async function loadProviderOptions(providerId) {
   );
   state.providerOptions[providerId] = response.options ?? null;
   return state.providerOptions[providerId];
+}
+
+/**
+ * What the vendor's CLI reports the signed-in account has consumed.
+ *
+ * Fetched once per provider and kept, because the roster asks for it on hover
+ * — a figure that costs a CLI invocation server-side must not be re-fetched
+ * every time a pointer crosses a row. `undefined` means "not asked yet";
+ * a stored `unavailableReason` is an answer and stops further asking.
+ */
+export async function ensureProviderUsage(providerId, rerender) {
+  if (!providerId || state.providerUsage[providerId] !== undefined) {
+    return state.providerUsage[providerId];
+  }
+  state.providerUsage[providerId] = { loading: true };
+  try {
+    const response = await api(
+      `/chat/providers/${encodeURIComponent(providerId)}/usage`,
+    );
+    state.providerUsage[providerId] = response.usage ?? {
+      unavailableReason: "This deployment reported no usage.",
+    };
+  } catch (error) {
+    state.providerUsage[providerId] = { unavailableReason: error.message };
+  }
+  rerender?.();
+  return state.providerUsage[providerId];
 }
 
 export async function applyProviderSetting(providerId, field, value) {
