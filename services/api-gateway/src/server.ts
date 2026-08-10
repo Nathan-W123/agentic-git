@@ -5927,10 +5927,41 @@ export class ApiGateway {
       input.projectId,
       input.repositoryId,
     );
-    const candidate = candidates.find(
+    const owner = candidates.find(
       (entry) => entry.userId === ownerId && entry.provider === provider,
     );
-    if (candidate === undefined) {
+    // A reply may name somebody other than the agent whose thread this is —
+    // that is how a second agent joins one. Matched exactly as the channel
+    // matches, so "@Icarus" means the same thing in both places, and every
+    // agent named gets to answer rather than only the first.
+    //
+    // Naming nobody still reaches the thread's own agent: a thread hangs off
+    // one agent's work, so a bare question in it is addressed to them by
+    // construction. That is the behaviour this method was written for and it
+    // stays the default.
+    const mentioned = question.includes("@")
+      ? candidates.filter((entry) => question.includes(`@${entry.name}`))
+      : [];
+    const answering = mentioned.length > 0 ? mentioned : owner === undefined ? [] : [owner];
+    for (const candidate of answering) {
+      // Same refusal the channel gives. Being inside a thread is not consent
+      // to spend somebody else's subscription.
+      if (candidate.visibility === "personal" && candidate.userId !== input.viewerId) {
+        await this.appendChannelThreadReply({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          messageId: input.messageId,
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          content:
+            `@${candidate.name} is personal to ${candidate.userName} — only ` +
+            `they can ask it here. Ask ${candidate.userName} to switch it to ` +
+            `org-wide, or mention an org-wide agent instead.`,
+        });
+        continue;
+      }
+      await this.answerAsAgent({ ...input, root, candidate, question });
+    }
+    if (answering.length === 0 && owner === undefined) {
       // The agent has since been disconnected. Saying so is better than the
       // silence this method exists to remove.
       await this.appendChannelThreadReply({
@@ -5944,6 +5975,24 @@ export class ApiGateway {
       });
       return;
     }
+  }
+
+  /**
+   * One agent's answer inside a thread, on the thread's own history.
+   *
+   * Split out so several agents can answer the same reply: the context is the
+   * thread, which is shared, so each one reads the same transcript and posts
+   * back into the same place.
+   */
+  private async answerAsAgent(input: {
+    projectId: string;
+    repositoryId: string;
+    messageId: string;
+    root: { content: string; replies: Array<{ content: string }> };
+    candidate: ChannelMentionCandidate;
+    question: string;
+  }): Promise<void> {
+    const { root, candidate, question } = input;
     // The reply just stored is the question being asked, so it is left off the
     // end of the transcript rather than repeated to the model twice.
     const history = [
@@ -5970,7 +6019,10 @@ export class ApiGateway {
       projectId: input.projectId,
       repositoryId: input.repositoryId,
       messageId: input.messageId,
-      authorId: root.authorId,
+      // The answering agent, not the thread's owner: with several agents in
+      // one thread, attributing every reply to whoever started it would put
+      // one agent's words under another's name.
+      authorId: `${candidate.userId}:${candidate.provider}`,
       content: answer.text ?? explainAnswerFailure(answer.error),
     });
   }
