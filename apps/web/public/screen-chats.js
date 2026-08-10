@@ -720,7 +720,19 @@ function chanTreePanel(repositoryId) {
     <div class="thread-body tree-body">
       ${
         paths.length === 0
-          ? `<div class="util-empty">No files loaded for this repository yet.</div>`
+          ? // A freshly imported repository has a canonical full of files and
+            // no workspace, and files are only ever listed from a workspace.
+            // Saying "no files" there is true of the workspace and a lie about
+            // the repository, and it left somebody who had just imported their
+            // code with nothing to do about it. So the state is named and the
+            // action that fixes it is offered here.
+            state.workspace?.exists === true
+            ? `<div class="util-empty">This repository has no files yet.</div>`
+            : `<div class="util-empty">
+                 <p>Open a workspace to browse this repository's files.</p>
+                 <button class="btn btn-primary" type="button"
+                   data-act="workspace-open">Open workspace</button>
+               </div>`
           : chanTreeNode(buildTree(paths), 0)
       }
     </div>
