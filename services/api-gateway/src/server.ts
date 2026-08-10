@@ -5718,6 +5718,26 @@ export class ApiGateway {
           objective: task.objective,
         },
       });
+      // Says which agent took this, which nothing else in the task can.
+      // `agentId` is whatever this deployment named its configured agent
+      // ("hud-agent"), and the record carries no vendor — so a browser
+      // watching the channel has no way to tell whose agent is working from
+      // the task alone. Here both halves are in hand.
+      //
+      // Transient, like typing: it is a fact about right now, not history —
+      // the audit chain already records the task itself. `taskId` travels so
+      // the client can retire the indicator against that task's real status
+      // rather than guessing from a timeout, and this one goes to everybody
+      // including the sender, who is the person most waiting to see it.
+      this.webSockets.broadcastTransient(projectId, {
+        type: "channel-agent-busy",
+        projectId,
+        repositoryId,
+        userId: candidate.userId,
+        provider: candidate.provider,
+        taskId: task.id,
+        occurredAt: new Date().toISOString(),
+      });
       // Inside the thread, not beside it: the channel already says who took
       // this, and the detail belongs where somebody following the work will
       // look for it.
