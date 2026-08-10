@@ -17,6 +17,7 @@
  */
 
 import {
+  api,
   canLeaveRepository,
   canManageRepository,
   channelAgentsFor,
@@ -420,6 +421,9 @@ function chanHeader(repository, repositoryId) {
     <button type="button" class="icon-btn${state.chanThreadList === true ? " on" : ""}"
       data-act="channel-threads-toggle" title="Threads"
       aria-pressed="${state.chanThreadList === true}">${icon("reply")}</button>
+    <button type="button" class="icon-btn${state.termOpen ? " on" : ""}"
+      data-act="chan-term-toggle" title="Terminal"
+      aria-pressed="${state.termOpen}">${icon("terminal")}</button>
     <button type="button" class="icon-btn${state.chanMsgSearchOpen ? " on" : ""}"
       data-act="channel-msg-search-toggle" title="Search messages"
       aria-pressed="${state.chanMsgSearchOpen}">${icon("search")}</button>
@@ -602,6 +606,50 @@ function mentionPopover(candidates) {
       </button>`,
     )
     .join("")}</div>`;
+}
+
+/**
+ * The sandbox terminal, as a drawer over the bottom of the channel.
+ *
+ * What it talks to is not a shell session: the server runs one process per
+ * request inside the project's Docker sandbox and hands back the output. So
+ * there is no prompt to echo and nothing persists between commands except the
+ * overlay's own files -- `cd` does not stick, and neither does an export. The
+ * header says so rather than letting the resemblance to a real terminal
+ * imply otherwise.
+ */
+function terminalDrawer() {
+  const log = state.termLog
+    .map((entry) => {
+      if (entry.kind === "command") {
+        return `<div class="term-cmd"><span class="term-caret">$</span>${esc(entry.text)}</div>`;
+      }
+      if (entry.kind === "note") {
+        return `<div class="term-note">${esc(entry.text)}</div>`;
+      }
+      return `<pre class="term-out${entry.bad === true ? " bad" : ""}">${esc(entry.text)}</pre>`;
+    })
+    .join("");
+  return `<section class="term-drawer" aria-label="Sandbox terminal">
+    <header class="term-head">
+      <span class="term-ico">${icon("terminal")}</span>
+      <strong>Terminal</strong>
+      <span class="term-sub">one command per run, in this repository's sandbox</span>
+      <span class="spacer"></span>
+      ${iconButton("close", { act: "chan-term-toggle", title: "Close terminal" })}
+    </header>
+    <div class="term-body" data-term-body>${
+      log === ""
+        ? `<div class="term-note">Commands run in your isolated overlay workspace. Each one is a fresh process, so a directory change or an exported variable does not carry to the next.</div>`
+        : log
+    }${state.termBusy ? `<div class="term-note">Running…</div>` : ""}</div>
+    <form class="term-form" data-act="chan-term-submit">
+      <span class="term-caret">$</span>
+      <input data-act="chan-term-input" autocomplete="off" spellcheck="false"
+        placeholder="${state.termBusy ? "Running…" : "Type a command"}"
+        value="${esc(state.termDraft)}"${state.termBusy ? " disabled" : ""} />
+    </form>
+  </section>`;
 }
 
 function composer(repositoryId) {
@@ -1204,6 +1252,7 @@ export function renderChats() {
       ${chanSearchRow()}
       ${messageList(repositoryId)}
       ${composer(repositoryId)}
+      ${state.termOpen ? terminalDrawer() : ""}
     </div>
     ${
       state.chanFileView !== undefined
@@ -1405,6 +1454,124 @@ export function pickMention(name, rerender) {
     next.focus();
     next.setSelectionRange(pos, pos);
   }
+}
+
+/** How many transcript entries the drawer keeps before dropping the oldest. */
+const TERM_LOG_LIMIT = 300;
+
+function termPush(entry) {
+  state.termLog.push(entry);
+  if (state.termLog.length > TERM_LOG_LIMIT) {
+    state.termLog.splice(0, state.termLog.length - TERM_LOG_LIMIT);
+  }
+}
+
+/**
+ * Runs whatever is in the terminal drafts against the repository's overlay.
+ *
+ * Every outcome is written into the transcript rather than raised as a toast:
+ * a terminal that reports failure somewhere other than the terminal is
+ * hard to read back afterwards, and the whole point of the log is that the
+ * command and its result sit together.
+ */
+export async function runTerminalCommand(rerender) {
+  const command = state.termDraft.trim();
+  const repository = currentRepository();
+  if (command === "" || state.termBusy) {
+    return;
+  }
+  if (repository === undefined) {
+    return;
+  }
+  if (command === "clear" || command === "cls") {
+    state.termLog = [];
+    state.termDraft = "";
+    rerender();
+    focusTerminalInput();
+    return;
+  }
+  termPush({ kind: "command", text: command });
+  state.termPast.push(command);
+  state.termSeek = undefined;
+  state.termDraft = "";
+  state.termBusy = true;
+  rerender();
+  try {
+    const project = encodeURIComponent(state.projectId);
+    const repo = encodeURIComponent(repository.id);
+    const response = await api(
+      `/projects/${project}/repositories/${repo}/workspace/exec`,
+      { method: "POST", body: { command } },
+    );
+    const result = response.result ?? {};
+    const text = [result.stdout ?? "", result.stderr ?? ""]
+      .filter((part) => part !== "")
+      .join("\n");
+    const failed = result.exitCode !== 0;
+    if (text.trim() !== "") {
+      termPush({ kind: "output", text: text.replace(/\n+$/u, ""), bad: failed });
+    }
+    if (result.timedOut === true) {
+      termPush({ kind: "note", text: "Timed out and was killed." });
+    } else if (failed) {
+      termPush({ kind: "note", text: `exited ${result.exitCode}` });
+    }
+  } catch (error) {
+    // 501 is the sandbox refusing rather than the command failing, and it is
+    // the one a person is most likely to hit first, so it says what to do.
+    termPush({
+      kind: "note",
+      text:
+        error.status === 501
+          ? "No Docker sandbox is configured for this project, so the terminal is disabled. Set sandbox.mode in .coordinator/config.json and restart the server."
+          : error.message,
+    });
+  } finally {
+    state.termBusy = false;
+    rerender();
+    focusTerminalInput();
+  }
+}
+
+function focusTerminalInput() {
+  const input = document.querySelector("[data-act='chan-term-input']");
+  if (input === null) {
+    return;
+  }
+  input.focus();
+  input.setSelectionRange(input.value.length, input.value.length);
+  const body = document.querySelector("[data-term-body]");
+  if (body !== null) {
+    body.scrollTop = body.scrollHeight;
+  }
+}
+
+/**
+ * Up and Down walk previously run commands, the way a shell does.
+ *
+ * Walking past the newest entry returns to whatever was being typed rather
+ * than sticking on the last command, so Down is always a way back out.
+ */
+export function handleTerminalKeydown(event, rerender) {
+  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") {
+    return;
+  }
+  const past = state.termPast;
+  if (past.length === 0) {
+    return;
+  }
+  event.preventDefault();
+  const seek = state.termSeek;
+  if (event.key === "ArrowUp") {
+    state.termSeek = seek === undefined ? past.length - 1 : Math.max(0, seek - 1);
+  } else if (seek === undefined || seek >= past.length - 1) {
+    state.termSeek = undefined;
+  } else {
+    state.termSeek = seek + 1;
+  }
+  state.termDraft = state.termSeek === undefined ? "" : past[state.termSeek];
+  rerender();
+  focusTerminalInput();
 }
 
 export function handleComposerKeydown(event, rerender) {

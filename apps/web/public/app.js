@@ -127,10 +127,12 @@ import {
 import {
   channelInfoPopoverHtml,
   handleComposerKeydown,
+  handleTerminalKeydown,
   openChannel,
   pickMention,
   renderChats,
   restoreChannelScroll,
+  runTerminalCommand,
   submitComposerMessage,
   submitThreadReply,
   updateComposerInput,
@@ -1956,6 +1958,13 @@ document.addEventListener("click", (event) => {
     case "channel-mention-pick":
       pickMention(value, render);
       return;
+    case "chan-term-toggle":
+      state.termOpen = !state.termOpen;
+      render();
+      if (state.termOpen) {
+        $("[data-act='chan-term-input']")?.focus();
+      }
+      return;
     case "channel-react":
       toggleChannelReaction(activeChannelId(), value, "👍");
       render();
@@ -2674,6 +2683,9 @@ document.addEventListener("submit", (event) => {
     case "channel-submit":
       submitComposerMessage(render);
       return;
+    case "chan-term-submit":
+      void runTerminalCommand(render);
+      return;
     case "channel-thread-submit":
       submitThreadReply(render);
       return;
@@ -2871,6 +2883,15 @@ document.addEventListener("input", (event) => {
     updateComposerInput(node, render);
     return;
   }
+  if (act === "chan-term-input") {
+    // Deliberately no render: the drawer's transcript does not depend on
+    // what is half-typed, and re-rendering would cost a caret restore on
+    // every keystroke for nothing. Typing also leaves command recall, so
+    // Up after editing starts from the newest entry again.
+    state.termDraft = node.value;
+    state.termSeek = undefined;
+    return;
+  }
   if (act === "chan-file-edit") {
     // Deliberately no render. Every other input on this screen rebuilds the
     // whole screen and puts the caret back afterwards, which is affordable for
@@ -2937,6 +2958,13 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.target?.dataset?.act === "channel-input") {
     handleComposerKeydown(event, render);
+  }
+});
+
+/* Up and Down recall previously run commands in the terminal drawer. */
+document.addEventListener("keydown", (event) => {
+  if (event.target?.dataset?.act === "chan-term-input") {
+    handleTerminalKeydown(event, render);
   }
 });
 
