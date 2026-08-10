@@ -133,7 +133,6 @@ import {
   openChannel,
   pickMention,
   renderChats,
-  chanSidebarSections,
   restoreChannelScroll,
   runTerminalCommand,
   startTerminalResize,
@@ -558,21 +557,6 @@ function sidebar() {
         )
         .join("")}
     </nav>
-    ${
-      // On a phone the nav and the channel column are both off-canvas panels.
-      // Kept apart they are two drawers to learn, each holding half of the
-      // left side; folded together they are one swipe that reveals all of it —
-      // the tabs, the channels, and everyone in the repository. The standalone
-      // `.chan-sidebar` is hidden at this width (styles.css) so this markup
-      // exists once, not twice.
-      //
-      // Width rather than a touch-capability check: this is about how much
-      // room there is to put two columns side by side, and a narrow window on
-      // a desktop has the same problem as a phone.
-      phoneLayout() && state.route === "chats" && activeChannelId() !== undefined
-        ? `<div class="sidebar-channels">${chanSidebarSections(activeChannelId())}</div>`
-        : ""
-    }
 
     <div class="sidebar-foot">
       <button class="user-card" data-act="user-menu">
@@ -1788,33 +1772,16 @@ document.addEventListener(
       return;
     }
     if (dx < 0) {
-      // Leftward. Closes the left drawer if it is open, since that is the
-      // direction it came from; otherwise, from the right edge, brings in the
-      // side panel. The thread list is what it opens onto — the panel's own
-      // tabs move between that, the file tree and an open file once showing.
-      if (state.navOpen === true) {
-        state.navOpen = false;
-        render();
-        return;
-      }
+      // Leftward, from the right edge: bring the panel in. The thread list is
+      // what it opens onto — the panel's own tabs move between that, the file
+      // tree and an open file once it is showing.
       if (start.x >= window.innerWidth - SWIPE_EDGE_PX && !sidePanelOpen()) {
         state.chanThreadList = true;
         render();
       }
       return;
     }
-    // Rightward. The right-hand panel is put away first when it is showing,
-    // because that is the thing most recently opened and the gesture that
-    // opened it was the mirror of this one. Only with the screen clear does a
-    // swipe from the left edge bring in the drawer.
-    if (sidePanelOpen()) {
-      if (closeSidePanel()) {
-        render();
-      }
-      return;
-    }
-    if (start.x <= SWIPE_EDGE_PX && state.navOpen !== true) {
-      state.navOpen = true;
+    if (sidePanelOpen() && closeSidePanel()) {
       render();
     }
   },
@@ -2184,12 +2151,7 @@ document.addEventListener("click", (event) => {
       render();
       return;
     case "chan-sidebar-toggle":
-      // Only rendered on phones, where the channel column now lives inside the
-      // nav drawer rather than in a drawer of its own — so this opens that one
-      // instead of a panel that is no longer there to open. Left pointing at
-      // `chanSidebarOpen` it would have been a button that visibly did
-      // nothing, which is the failure this screen already had once.
-      state.navOpen = state.navOpen !== true;
+      state.chanSidebarOpen = state.chanSidebarOpen !== true;
       render();
       return;
     case "chan-sidebar-close":
