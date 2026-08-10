@@ -298,10 +298,14 @@ function toolbar() {
   return `<div class="code-toolbar">
     <button type="button" class="icon-btn menu-btn" data-act="nav-toggle"
       title="Menu" aria-label="Menu">${icon("menu")}</button>
-    <!-- Below 900px `.tree-pane` is hidden until this is on — see the
-         `.code-shell.tree-open .tree-pane` rule in styles.css. Above that
+    <!-- Below 900px ".tree-pane" is hidden until this is on — see the
+         ".code-shell.tree-open .tree-pane" rule in styles.css. Above that
          width it is an ordinary always-visible grid column, so toggling this
-         there has no visual effect and the button is just inert chrome. -->
+         there has no visual effect and the button is just inert chrome.
+
+         Quoted rather than backticked: a backtick inside an HTML comment
+         that sits inside a template literal closes the string, and what
+         follows is then parsed as code. -->
     <button type="button" class="icon-btn tree-toggle-btn${state.treeOpen === true ? " on" : ""}"
       data-act="tree-toggle" title="${state.treeOpen === true ? "Hide files" : "Show files"}"
       aria-pressed="${state.treeOpen === true}">${icon("folder")}</button>

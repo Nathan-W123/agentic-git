@@ -433,11 +433,17 @@ function chanHeader(repository, repositoryId) {
   return `<header class="chan-head">
     <button type="button" class="icon-btn menu-btn" data-act="nav-toggle"
       title="Menu" aria-label="Menu">${icon("menu")}</button>
-    <!-- Phone-only: the channel list and roster live in `.chan-sidebar`,
+    <!-- Phone-only: the channel list and roster live in \`.chan-sidebar\`,
          which goes off-canvas below the 600px breakpoint the same way the
-         outer app `.sidebar` already does at 900px. This is the only way
+         outer app \`.sidebar\` already does at 900px. This is the only way
          back to it once it is closed, so it is a real button rather than
-         something folded into a menu. -->
+         something folded into a menu.
+
+         The backticks are escaped because this comment is inside a template
+         literal: a bare one closes the string, and the selector after it
+         then parses as real code — ".chan-sidebar" becomes a property read
+         minus an identifier named "sidebar", which is valid JavaScript and
+         throws only when this header renders. -->
     <button type="button" class="icon-btn chan-sidebar-btn" data-act="chan-sidebar-toggle"
       title="Channels &amp; people" aria-label="Channels &amp; people">${icon("list")}</button>
     ${icon("chatBubble", 'class="ch-hash"')}
