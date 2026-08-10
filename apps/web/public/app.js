@@ -849,20 +849,32 @@ async function saveAppearanceChoice(patch) {
  * from. Saying so in the dialog is the difference between a considered choice
  * and a surprise.
  */
+/**
+ * @param rerender Redraws once the invitation exists.
+ * @param repositoryId Named when the invite was started from inside a
+ *   channel. That channel *is* the answer to "which repository", so the
+ *   picker is replaced by a statement of fact — asking again is asking
+ *   somebody to repeat themselves.
+ */
 async function inviteSomebody(rerender, repositoryId) {
+  const fixed = typeof repositoryId === "string" && repositoryId.length > 0;
   const preselected = repositoryId ?? currentRepository()?.id ?? "";
   const values = await showModal({
-    title: "Invite someone to collaborate",
-    subtitle:
-      "Access is granted per repository. Pick the one to share, or share " +
-      "everything if they are joining the team properly.",
+    title: fixed ? `Invite someone to #${repositoryId}` : "Invite someone to collaborate",
+    subtitle: fixed
+      ? `They will get access to ${repositoryId}, and nothing else in this project.`
+      : "Access is granted per repository. Pick the one to share, or share " +
+        "everything if they are joining the team properly.",
     confirm: "Create invite link",
     body: `<label class="field">
         <span>Email address</span>
         <input class="input" name="email" type="email" required
           placeholder="colleague@company.com">
       </label>
-      <label class="field">
+      ${
+        fixed
+          ? `<input type="hidden" name="repositoryId" value="${esc(repositoryId)}">`
+          : `<label class="field">
         <span>Repository</span>
         <select class="input" name="repositoryId">
           ${state.repositories
@@ -876,7 +888,8 @@ async function inviteSomebody(rerender, repositoryId) {
             Every repository in ${esc(state.project?.name ?? "this project")}
           </option>
         </select>
-      </label>
+      </label>`
+      }
       <label class="field">
         <span>Role</span>
         <select class="input" name="role">
@@ -2080,6 +2093,20 @@ document.addEventListener("click", (event) => {
     case "invite-repo":
       closePopover();
       void inviteSomebody(render, value);
+      return;
+    // The menu on a channel row. Everything in it is already scoped to that
+    // channel, which is the point: inviting somebody from inside a room
+    // should not then ask which room.
+    case "channel-menu":
+      showMenu(node, [
+        {
+          act: "invite-repo",
+          value,
+          label: `Invite someone to #${value}`,
+          iconName: "users",
+        },
+        { act: "channel-open", value, label: "Open this channel", iconName: "chatBubble" },
+      ]);
       return;
     case "invite-revoke":
       void revokeInvitation(value)

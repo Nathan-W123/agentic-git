@@ -104,16 +104,30 @@ function optionsFor(agent) {
 
 /* ------------------------------------------------------------- sidebar ---- */
 
+/**
+ * A channel, and the things you can do to it.
+ *
+ * A div rather than a button because it now contains one: inviting somebody
+ * belongs to a channel, not to the account menu, and a button inside a button
+ * is not markup a browser will keep. The keyboard is served by `role=button`
+ * and the delegated handler in `app.js` that exists for exactly this.
+ */
 function chanRow(repo, activeRepositoryId) {
   const unread = channelUnreadCount(repo.id);
   const active = repo.id === activeRepositoryId;
-  return `<button type="button" class="chan-row${active ? " active" : ""}${
+  return `<div class="chan-row${active ? " active" : ""}${
     unread > 0 ? " unread" : ""
-  }" data-act="channel-open" data-value="${esc(repo.id)}">
+  }" role="button" tabindex="0" data-act="channel-open" data-value="${esc(repo.id)}">
     <span class="cr-hash">${icon("hash")}</span>
     <span class="cr-name">${esc(repo.id)}</span>
     ${unread > 0 ? `<span class="cr-badge">${unread > 99 ? "99+" : unread}</span>` : ""}
-  </button>`;
+    <span class="cr-more">${iconButton("dots", {
+      act: "channel-menu",
+      value: repo.id,
+      title: `More for #${repo.id}`,
+      small: true,
+    })}</span>
+  </div>`;
 }
 
 function rosterSettings(agent) {

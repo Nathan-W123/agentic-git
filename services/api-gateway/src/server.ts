@@ -3029,6 +3029,7 @@ export class ApiGateway {
             actorId: principal.user.id,
           }),
       );
+      await this.markChannelMembershipChosen(repository.id);
       await this.options.store.appendAudit(undefined, {
         type: "repository_created",
         data: {
@@ -3084,6 +3085,7 @@ export class ApiGateway {
             actorId: principal.user.id,
           }),
       );
+      await this.markChannelMembershipChosen(repository.id);
       await this.options.store.appendAudit(undefined, {
         type: "repository_imported",
         data: {
@@ -5337,6 +5339,24 @@ export class ApiGateway {
    * every subsequently created repository, starts with zero members and
    * requires an explicit add.
    */
+  /**
+   * A repository created here has already chosen its members: none.
+   *
+   * The grandfather backfill in `channelAgentConnections` is keyed per
+   * repository and runs on that repository's first channel read. A repository
+   * that has just been created has never been read either, so without this it
+   * takes the backfill path too and admits every agent anybody happened to
+   * have connected — the opposite of opt-in, on the one channel where there is
+   * no pre-existing roster to protect. Marking it at creation says what is
+   * true: nothing predates this repository, so there is nothing to
+   * grandfather, and its roster is empty until somebody chooses.
+   */
+  private async markChannelMembershipChosen(repositoryId: string): Promise<void> {
+    await this.options.store
+      .markChannelMembershipBackfilled(repositoryId)
+      .catch(() => undefined);
+  }
+
   private async channelAgentConnections(
     projectId: string,
     repositoryId: string,
