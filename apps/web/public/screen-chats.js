@@ -22,6 +22,7 @@ import {
   channelAgentsFor,
   channelAuthor,
   channelMessagesFor,
+  typingOn,
   channelParticipants,
   channelUnreadCount,
   activeChannelId,
@@ -424,6 +425,47 @@ function messageRow(entry, repositoryId, { isReply = false } = {}) {
   </div>`;
 }
 
+/**
+ * The three dots, for one surface.
+ *
+ * People and agents are shown by the same row because they mean the same
+ * thing to whoever is waiting — something is coming, hold on. `threadId`
+ * decides which surface this is: a reply being typed belongs to its thread,
+ * not to the room behind it.
+ */
+function typingIndicator(repositoryId, threadId) {
+  const names = typingOn(repositoryId, threadId);
+  // An agent is "thinking" while a task it owns is running. That is only
+  // meaningful in the room itself: a task belongs to the channel, and there
+  // is nothing tying one to a particular thread.
+  const busy =
+    threadId === undefined
+      ? channelAgentsFor(repositoryId).filter((agent) => agent.presence === "online")
+      : [];
+  if (names.length === 0 && busy.length === 0) {
+    return "";
+  }
+  const who = [
+    ...busy.map((agent) => `${agent.name} is thinking`),
+    ...(names.length === 0
+      ? []
+      : [
+          names.length === 1
+            ? `${names[0]} is typing`
+            : names.length === 2
+              ? `${names[0]} and ${names[1]} are typing`
+              : `${names.length} people are typing`,
+        ]),
+  ].join(" · ");
+  // Reuses `.chan-typing`/`.typing-dots`, the same dots `threadTyping`
+  // already animates for an agent mid-task, so a person typing and an agent
+  // working do not arrive as two different visual languages.
+  return `<div class="chan-typing" aria-live="polite">
+    <span class="typing-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span class="typing-who">${esc(who)}</span>
+  </div>`;
+}
+
 function messageList(repositoryId) {
   const query = state.chanMsgQuery.trim().toLowerCase();
   const entries = channelMessagesFor(repositoryId).filter(
@@ -451,7 +493,7 @@ function messageList(repositoryId) {
   });
   return `<div class="chan-messages" id="chan-messages">${rows.join(
     "",
-  )}${codeBlocks(repositoryId)}</div>`;
+  )}${codeBlocks(repositoryId)}${typingIndicator(repositoryId, undefined)}</div>`;
 }
 
 /**
@@ -539,6 +581,7 @@ function threadPanel(repositoryId) {
       <div class="thread-root">${messageRow(root, repositoryId, { isReply: true })}</div>
       ${threadReplies(root, repositoryId)}
       ${threadTyping(root)}
+      ${typingIndicator(repositoryId, root.id)}
     </div>
     <form class="composer" data-act="channel-thread-submit" style="margin:0 12px 12px">
       <textarea data-act="channel-thread-input" rows="1"

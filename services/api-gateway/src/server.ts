@@ -3914,6 +3914,52 @@ export class ApiGateway {
         "u",
       ),
     );
+    const channelTypingMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/typing$`,
+        "u",
+      ),
+    );
+    if (channelTypingMatch !== undefined) {
+      const [projectId = "", repositoryId = ""] = channelTypingMatch;
+      if (method !== "POST") {
+        throw new HttpError(405, "method_not_allowed", "Unsupported method");
+      }
+      // Gated on the same right as reading the channel: knowing somebody is
+      // typing tells you nothing you could not learn a second later by
+      // reading what they typed.
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
+      const body = objectBody(await this.readJson(request));
+      const threadId = stringField(body["threadId"], "threadId", {
+        max: 200,
+        optional: true,
+      });
+      // Straight to the open sockets. Nothing is stored: see
+      // `broadcastTransient` for why this must not reach the audit chain.
+      this.webSockets.broadcastTransient(
+        projectId,
+        {
+          type: "channel-typing",
+          projectId,
+          repositoryId,
+          ...(threadId === undefined ? {} : { threadId }),
+          userId: principal.user.id,
+          userName: principal.user.displayName,
+          occurredAt: new Date().toISOString(),
+        },
+        principal.user.id,
+      );
+      this.sendJson(response, 202, { accepted: true });
+      return;
+    }
+
     if (channelMessagesMatch !== undefined) {
       const [projectId = "", repositoryId = ""] = channelMessagesMatch;
       await authorizeRepository(
