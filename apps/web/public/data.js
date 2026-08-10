@@ -109,6 +109,19 @@ export const state = {
   /** Repository-scoped grants, keyed by repository id — see `ensureRepositoryGrants`. */
   repositoryGrants: {},
   activeChannelThread: undefined,
+  /**
+   * The thread the composer is aimed at, if the reader chose one.
+   *
+   * Item 4 of the threading work, explicit rather than automatic: guessing
+   * that two requests are the same task and merging them buries work where
+   * nobody looks for it, which is worse than leaving them apart.
+   */
+  composerThreadId: undefined,
+  // Whether the list of this channel's threads is pulled out.
+  chanThreadList: false,
+  // Whether the file tree is pulled out, and which folders are open in it.
+  chanTree: false,
+  chanTreeOpen: [],
   // Per-provider usage reports, filled lazily by the roster's hover.
   providerUsage: {},
   // Who is typing, keyed `repositoryId|threadId` so the main channel and
@@ -2266,6 +2279,37 @@ export async function saveChannelFile(rerender) {
   return saved;
 }
 
+/**
+ * Moves a file to another directory in the workspace overlay.
+ *
+ * The overlay is the same staging area an edit goes into, so this needs no
+ * separate review path: the move shows up in the changeset as a deletion and
+ * an addition and is submitted, validated and promoted like anything else.
+ *
+ * Returns the new path on success so the caller can follow the file if it was
+ * the one on screen; `undefined` means nothing moved and the toast has said
+ * why.
+ */
+export async function moveChannelFile(from, directory) {
+  const name = String(from).split("/").pop();
+  const to = directory === "" ? name : `${directory}/${name}`;
+  if (to === from) {
+    return undefined;
+  }
+  try {
+    const { project, repo } = await ensureChannelWorkspace();
+    await api(`/projects/${project}/repositories/${repo}/workspace/move`, {
+      method: "POST",
+      body: { from, to },
+    });
+    toast(`Moved to ${to}`, "ok");
+    return to;
+  } catch (error) {
+    toast(error.message, "error");
+    return undefined;
+  }
+}
+
 /** Forget an open file, and the draft that went with it. */
 export function closeChannelFile() {
   state.chanFileView = undefined;
@@ -2274,4 +2318,37 @@ export function closeChannelFile() {
   state.chanFileDraft = undefined;
   state.chanFileError = undefined;
   state.chanFileLoading = false;
+}
+
+/* -------------------------------------------------------- look and feel ---- */
+
+/**
+ * A profile picture, kept in this browser.
+ *
+ * The account has no field for one — `/auth/me/appearance` takes two hex
+ * colours and nothing else — so putting it on the server would mean a schema
+ * change, a size limit and an upload path. Held locally until that exists,
+ * which is at least honest about what it is rather than looking like it
+ * follows the account and then not doing so on another machine.
+ */
+export function myAvatar() {
+  const stored = localStorage.getItem("ag.avatar");
+  return stored === null || stored === "" ? undefined : stored;
+}
+
+export function setMyAvatar(dataUrl) {
+  if (dataUrl === undefined) {
+    localStorage.removeItem("ag.avatar");
+    return;
+  }
+  localStorage.setItem("ag.avatar", dataUrl);
+}
+
+/** "dark" or "light". Dark is what every colour here was chosen against. */
+export function myTheme() {
+  return localStorage.getItem("ag.theme") === "light" ? "light" : "dark";
+}
+
+export function setMyTheme(theme) {
+  localStorage.setItem("ag.theme", theme === "light" ? "light" : "dark");
 }

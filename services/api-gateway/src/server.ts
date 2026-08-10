@@ -661,6 +661,10 @@ export interface WorkspaceOperations {
   writeFile(
     input: WorkspaceScopeInput & { path: string; content: string },
   ): Promise<unknown>;
+  /** Moves or renames one path inside the overlay, atomically. */
+  moveFile(
+    input: WorkspaceScopeInput & { from: string; to: string },
+  ): Promise<unknown>;
   exec(input: WorkspaceScopeInput & { command: string }): Promise<unknown>;
   submit(input: WorkspaceScopeInput & { objective: string }): Promise<unknown>;
 }
@@ -3885,6 +3889,23 @@ export class ApiGateway {
           }),
         );
         this.sendJson(response, 200, { saved: true });
+        return;
+      }
+      if (action === "move" && method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        const from = stringField(body["from"], "from", { max: 1_000 }) ?? "";
+        const to = stringField(body["to"], "to", { max: 1_000 }) ?? "";
+        if (from === "" || to === "") {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "from and to are both required",
+          );
+        }
+        await perform(() => workspaceOperations.moveFile({ ...scope, from, to }));
+        // The same shape a save answers with: the caller's next move is to
+        // refresh the changeset either way.
+        this.sendJson(response, 200, { moved: true });
         return;
       }
       if (action === "exec" && method === "POST") {

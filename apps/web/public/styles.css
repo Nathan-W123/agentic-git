@@ -66,8 +66,8 @@
   --tree-w: 232px;
   --chat-w: 380px;
 
-  --shadow-pop: 0 18px 48px rgba(0, 0, 0, 0.55);
-  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-pop: 0 6px 16px rgba(0, 0, 0, 0.44);
+  --shadow-card: 0 1px 1px rgba(0, 0, 0, 0.28);
 
   --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
@@ -189,13 +189,7 @@ svg {
   place-items: center;
   min-height: 100vh;
   padding: 32px;
-  background:
-    radial-gradient(
-      900px 520px at 50% -10%,
-      rgba(139, 92, 246, 0.09),
-      transparent 70%
-    ),
-    var(--bg);
+  background: var(--bg);
 }
 
 .auth-box {
@@ -1458,11 +1452,7 @@ svg {
 }
 
 .repo-action.accent {
-  background: linear-gradient(
-    180deg,
-    rgba(139, 92, 246, 0.09),
-    rgba(139, 92, 246, 0.03)
-  );
+  background: var(--accent-wash);
   border-color: rgba(139, 92, 246, 0.32);
 }
 
@@ -3533,7 +3523,7 @@ svg {
   border: 1px solid var(--border-soft);
   border-radius: 9px;
   background: var(--bg-panel);
-  box-shadow: 0 8px 24px rgb(0 0 0 / 32%);
+  box-shadow: 0 4px 12px rgb(0 0 0 / 34%);
   opacity: 0;
   visibility: hidden;
   transition:
@@ -5026,4 +5016,186 @@ dialog.modal::backdrop {
   .cblocks > summary::before {
     transition: none;
   }
+}
+
+/* --------------------------------------------------- roster and threads ---- */
+
+/* Sits with the list it adds to, indented to the rows above it rather than to
+   the panel, so it reads as the next line of that list. */
+.roster-add {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: 100%;
+  margin: 2px 0 10px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 9px;
+  background: none;
+  color: var(--text-3);
+  font: inherit;
+  font-size: 12.5px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.roster-add:hover {
+  background: var(--bg-hover);
+  color: var(--text-2);
+}
+
+.roster-add svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+
+/* Counts in the channel header: figure beside glyph, not a sentence. */
+.ch-desc {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.ch-count {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ch-count svg {
+  width: 13px;
+  height: 13px;
+}
+
+.ch-sep {
+  opacity: 0.5;
+}
+
+/* One thread in the pullout. Three lines: who and when, what was said, and
+   how much is in it — enough to recognise a thread without opening it. */
+.thread-item {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 9px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  background: none;
+  color: var(--text);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.thread-item:hover {
+  background: var(--bg-hover);
+}
+
+.ti-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.ti-who {
+  font-weight: 600;
+}
+
+.ti-time {
+  color: var(--text-4);
+  font-size: 11px;
+}
+
+.ti-text {
+  font-size: 12.5px;
+  color: var(--text-2);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ti-count {
+  font-size: 11px;
+  color: var(--accent);
+}
+
+/* ------------------------------------------------------ avatar and theme ---- */
+
+.avatar.has-photo {
+  background: var(--bg-inset);
+  padding: 0;
+  overflow: hidden;
+}
+
+.avatar.has-photo img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.avatar-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Light keeps the accent and inverts everything around it; the shadows have
+   to come down with it, since a shadow tuned for near-black reads as dirt on
+   a white surface. */
+:root[data-theme="light"] {
+  color-scheme: light;
+  --shadow-pop: 0 6px 16px rgba(15, 18, 30, 0.14);
+  --shadow-card: 0 1px 1px rgba(15, 18, 30, 0.08);
+}
+
+/* The composer aimed at a thread rather than the channel. Loud on purpose:
+   a message going somewhere other than where it looks like it will go is
+   only acceptable when the person can see it about to happen. */
+.composer-thread {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 12px 6px;
+  padding: 6px 8px 6px 10px;
+  border: 1px solid var(--accent-line);
+  border-radius: 8px;
+  background: var(--accent-wash);
+  font-size: 0.78rem;
+  color: var(--text-2);
+}
+
+.composer-thread svg {
+  flex: none;
+  color: var(--accent-bright);
+}
+
+.composer-thread .ct-label {
+  flex: none;
+  color: var(--text-dim);
+}
+
+.composer-thread .ct-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+/* The directory a dragged file will land in. Outlined rather than filled: the
+   row is already a button with its own hover, and two filled states next to
+   each other read as a selection rather than a target. */
+.tree-row.drop-into {
+  outline: 1px dashed var(--accent);
+  outline-offset: -1px;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.tree-row[draggable="true"] {
+  cursor: grab;
 }

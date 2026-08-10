@@ -214,6 +214,7 @@ async function serve(
       readFile: (input) => overlays.readOverlayFile(input, input.path),
       writeFile: (input) =>
         overlays.writeOverlayFile(input, input.path, input.content),
+      moveFile: (input) => overlays.moveOverlayFile(input, input.from, input.to),
       exec: (input) => overlays.exec(input, input.command),
       submit: (input) => overlays.submit(input, input.objective),
     },

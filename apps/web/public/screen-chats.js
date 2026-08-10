@@ -38,6 +38,7 @@ import {
 } from "./data.js";
 import {
   FLAG_FOR_STATUS,
+  buildTree,
   changeSetStats,
   parsePatch,
   patchStats,
@@ -47,6 +48,7 @@ import {
   agentFace,
   avatar,
   avatarStack,
+  chime,
   clockTime,
   esc,
   icon,
@@ -120,7 +122,7 @@ function chanRow(repo, activeRepositoryId) {
   return `<div class="chan-row${active ? " active" : ""}${
     unread > 0 ? " unread" : ""
   }" role="button" tabindex="0" data-act="channel-open" data-value="${esc(repo.id)}">
-    <span class="cr-hash">${icon("hash")}</span>
+    <span class="cr-hash">${icon("chatBubble")}</span>
     <span class="cr-name">${esc(repo.id)}</span>
     ${unread > 0 ? `<span class="cr-badge">${unread > 99 ? "99+" : unread}</span>` : ""}
     <span class="cr-more">${iconButton("dots", {
@@ -228,6 +230,31 @@ function usageTip(agent) {
   return `<div class="rr-usage" role="tooltip">${body}</div>`;
 }
 
+/**
+ * One person in the roster, shaped like an agent row.
+ *
+ * Same markup deliberately: a channel's participants are people and agents
+ * side by side, and giving each its own layout would make the two lists read
+ * as unrelated things that happen to sit together. The role sits under the
+ * name exactly where an agent's does — theirs is what they were granted here,
+ * which is the same question being answered in both cases.
+ */
+function personRow(person) {
+  const name = person.user?.displayName ?? person.user?.email ?? "Someone";
+  const role = String(person.role ?? "").trim();
+  return `<div class="roster-row">
+    <div class="roster-row-main">
+      <span class="rr-avatar">${avatar(name, 30)}</span>
+      <span class="rr-body">
+        <div class="rr-name">${esc(name)}</div>
+        <div class="rr-role${role ? "" : " rr-role-empty"}">${
+          role === "" ? "No role set" : esc(role)
+        }</div>
+      </span>
+    </div>
+  </div>`;
+}
+
 function rosterRow(agent, canModerate) {
   const renaming = state.chatRenamingId === agent.id;
   const settingsOpen = state.chatSettingsOpenId === agent.id;
@@ -305,6 +332,9 @@ function chanSidebar(activeRepositoryId) {
     .sort((left, right) => left.id.localeCompare(right.id));
   const roster = channelAgentsFor(activeRepositoryId);
   const canModerate = canManageRepository(activeRepositoryId);
+  // The membership records rather than `collaborators()`, which flattens them
+  // to names — the role has to come from somewhere, and it is on the record.
+  const people = state.members ?? [];
 
   return `<aside class="chan-sidebar">
     <div class="chan-sidebar-head">
@@ -322,12 +352,34 @@ function chanSidebar(activeRepositoryId) {
       }
     </div>
     <div class="chan-roster">
-      <div class="chan-list-label">Agents in #${esc(activeRepositoryId ?? "")}</div>
+      <div class="chan-list-label">Users</div>
+      ${
+        // People first, then agents. The channel header already names the
+        // repository, so repeating it in the label said nothing the eye had
+        // not just read — and it grew with the name, which is why a long
+        // repository pushed the word "Agents" out of sight entirely.
+        people.length === 0
+          ? `<div class="util-empty">Nobody else has access to this repository yet.</div>`
+          : people.map((person) => personRow(person)).join("")
+      }
+      <!-- Adding somebody belongs under the list of who is already here,
+           where the question occurs to you, rather than only behind the
+           channel's menu. Each button adds the kind of participant it sits
+           beneath. -->
+      <button type="button" class="roster-add" data-act="invite-repo"
+        data-value="${esc(activeRepositoryId ?? "")}">
+        ${icon("plus")}<span>Invite someone</span>
+      </button>
+      <div class="chan-list-label">Agents</div>
       ${
         roster.length === 0
           ? `<div class="util-empty">No agents connected to this repository yet.</div>`
           : roster.map((agent) => rosterRow(agent, canModerate)).join("")
       }
+      <button type="button" class="roster-add" data-act="channel-agent-menu"
+        data-value="${esc(activeRepositoryId ?? "")}">
+        ${icon("plus")}<span>Add an agent</span>
+      </button>
     </div>
   </aside>`;
 }
@@ -339,17 +391,32 @@ function chanHeader(repository, repositoryId) {
   const people = collaborators();
   const faces = roster.slice(0, 3).map((agent) => agentFace(agent, 24)).join("");
   return `<header class="chan-head">
-    ${icon("hash", 'class="ch-hash"')}
+    ${icon("chatBubble", 'class="ch-hash"')}
     <div class="ch-title">
       <div class="ch-name">${esc(repositoryId ?? "")}</div>
-      <div class="ch-desc">${esc(repository?.branch ?? "main")} branch · ${
-        roster.length
-      } agent${roster.length === 1 ? "" : "s"}, ${people.length} teammate${
-        people.length === 1 ? "" : "s"
-      }</div>
+      <div class="ch-desc">
+        <span>${esc(repository?.branch ?? "main")} branch</span>
+        <span class="ch-sep">·</span>
+        <!-- Counted, not spelled out. "3 agents, 2 teammates" is six words
+             for two numbers, and it grew or shrank with the plural — the two
+             figures are easier to read as figures. The titles carry the
+             words for anyone hovering or using a screen reader. -->
+        <span class="ch-count" title="${people.length} ${
+          people.length === 1 ? "person" : "people"
+        }">${icon("personBust")}${people.length}</span>
+        <span class="ch-count" title="${roster.length} agent${
+          roster.length === 1 ? "" : "s"
+        }">${icon("robotBust")}${roster.length}</span>
+      </div>
     </div>
     <span class="spacer"></span>
     <span class="avatar-stack">${faces}${avatarStack(people, 3, 24)}</span>
+    <button type="button" class="icon-btn${state.chanThreadList === true ? " on" : ""}"
+      data-act="chan-tree-toggle" title="Files"
+      aria-pressed="${state.chanTree === true}">${icon("folder")}</button>
+    <button type="button" class="icon-btn${state.chanThreadList === true ? " on" : ""}"
+      data-act="channel-threads-toggle" title="Threads"
+      aria-pressed="${state.chanThreadList === true}">${icon("reply")}</button>
     <button type="button" class="icon-btn${state.chanMsgSearchOpen ? " on" : ""}"
       data-act="channel-msg-search-toggle" title="Search messages"
       aria-pressed="${state.chanMsgSearchOpen}">${icon("search")}</button>
@@ -538,9 +605,14 @@ function composer(repositoryId) {
   const candidates = state.mentionActive ? channelMentionCandidates(repositoryId) : [];
   return `<div class="chan-composer-wrap">
     ${state.mentionActive ? mentionPopover(candidates) : ""}
+    ${composerThreadChip(repositoryId)}
     <form class="composer" data-act="channel-submit">
       <textarea data-act="channel-input" rows="1" spellcheck="true"
-        placeholder="Message #${esc(repositoryId ?? "")}">${esc(state.chatDraft)}</textarea>
+        placeholder="${
+          state.composerThreadId === undefined
+            ? `Message #${esc(repositoryId ?? "")}`
+            : "Add to this thread..."
+        }">${esc(state.chatDraft)}</textarea>
       <div class="composer-bar">
         ${iconButton("at", { act: "channel-mention-key", title: "Mention someone" })}
         <span class="spacer"></span>
@@ -564,6 +636,133 @@ function panelGrip() {
     aria-label="Resize panel"></div>`;
 }
 
+/**
+ * Every thread in the channel, as a way back into one.
+ *
+ * Threads are where the work actually happens, and once a few messages have
+ * gone by the only way back to one was to scroll the channel until its root
+ * appeared. This lists them newest first — the root's own words, since that
+ * is what someone is looking for, rather than a task id.
+ */
+/**
+ * One level of the file tree, and everything opened beneath it.
+ *
+ * Directories carry their own open state in `state.chanTreeOpen` rather than
+ * all-or-nothing expansion: a repository is mostly directories somebody is
+ * not looking at, and opening the lot to reach one file buries it.
+ */
+function chanTreeNode(node, depth) {
+  const pad = (extra) => `padding-left:${8 + depth * 12 + extra}px`;
+  const rows = [];
+  for (const directory of [...node.dirs.values()].sort((a, b) =>
+    a.name.localeCompare(b.name),
+  )) {
+    const open = (state.chanTreeOpen ?? []).includes(directory.path);
+    rows.push(`<button type="button" class="tree-row" data-act="chan-tree-dir"
+      data-value="${esc(directory.path)}" data-drop-dir="${esc(directory.path)}"
+      style="${pad(0)}">
+      ${icon("chevronRight", `class="caret${open ? " open" : ""}"`)}
+      <span class="tw-icon">${icon("folder")}</span>
+      <span class="tw-name">${esc(directory.name)}</span>
+    </button>`);
+    if (open) {
+      rows.push(chanTreeNode(directory, depth + 1));
+    }
+  }
+  for (const file of [...node.files].sort((a, b) => a.name.localeCompare(b.name))) {
+    const flag = file.flag;
+    // Draggable onto a directory row, which is the only drop target: dropping
+    // a file onto another file has no meaning, and a tree that accepted it
+    // would have to invent one.
+    rows.push(`<button type="button" class="tree-row${
+      file.path === state.chanFileView ? " active" : ""
+    }" data-act="chan-file-open" data-value="${esc(file.path)}"
+      draggable="true" data-drag-path="${esc(file.path)}"
+      style="${pad(14)}" title="${esc(file.path)}">
+      <span class="tw-icon">${icon("file")}</span>
+      <span class="tw-name">${esc(file.name)}</span>
+      ${flag ? `<span class="tw-flag flag-${flag}">${flag}</span>` : ""}
+    </button>`);
+  }
+  return rows.join("");
+}
+
+/**
+ * The repository's files, as a way into the code from the conversation.
+ *
+ * Changed files are marked with the same flag the diff blocks use, so the
+ * tree answers "what has been touched" without being a second changes view.
+ *
+ * A file can be dragged onto a directory to move it. That became honest once
+ * the overlay gained a move: the rename lands in the same staging area an
+ * edit does, so it reaches review as a deletion and an addition and is
+ * revertible the same way. Directories are the only drop target — dropping a
+ * file onto another file has no meaning worth inventing.
+ */
+function chanTreePanel(repositoryId) {
+  const patches = state.changeSet?.patches ?? [];
+  const flags = new Map(
+    patches.map((patch) => [patch.path, FLAG_FOR_STATUS[patch.status] ?? "M"]),
+  );
+  const paths = [
+    ...new Set([
+      ...(state.files ?? []).map((file) => file.path),
+      ...patches.map((patch) => patch.path),
+    ]),
+  ].map((path) => ({ path, flag: flags.get(path) }));
+  return `<aside class="thread-panel">
+    ${panelGrip()}
+    <header class="thread-head">
+      <span>Files</span>
+      <span class="spacer"></span>
+      ${iconButton("close", { act: "chan-tree-close", title: "Close" })}
+    </header>
+    <div class="thread-body tree-body">
+      ${
+        paths.length === 0
+          ? `<div class="util-empty">No files loaded for this repository yet.</div>`
+          : chanTreeNode(buildTree(paths), 0)
+      }
+    </div>
+  </aside>`;
+}
+
+function threadListPanel(repositoryId) {
+  const threads = channelMessagesFor(repositoryId)
+    .filter((entry) => (entry.replies ?? []).length > 0)
+    .slice()
+    .reverse();
+  return `<aside class="thread-panel">
+    ${panelGrip()}
+    <header class="thread-head">
+      <span>Threads</span>
+      <span class="spacer"></span>
+      ${iconButton("close", { act: "channel-threads-close", title: "Close" })}
+    </header>
+    <div class="thread-body">
+      ${
+        threads.length === 0
+          ? `<div class="util-empty">No threads yet. A thread appears when an agent has more than one thing to say about a task.</div>`
+          : threads
+              .map((entry) => {
+                const count = (entry.replies ?? []).length;
+                const author = channelAuthor(repositoryId, entry);
+                return `<button type="button" class="thread-item"
+                  data-act="channel-thread-open" data-value="${esc(entry.id)}">
+                  <span class="ti-top">
+                    <span class="ti-who">${esc(author.name)}</span>
+                    <span class="ti-time">${esc(clockTime(entry.at))}</span>
+                  </span>
+                  <span class="ti-text">${esc(entry.content)}</span>
+                  <span class="ti-count">${count} repl${count === 1 ? "y" : "ies"}</span>
+                </button>`;
+              })
+              .join("")
+      }
+    </div>
+  </aside>`;
+}
+
 function threadPanel(repositoryId) {
   const messageId = state.activeChannelThread;
   if (messageId === undefined) {
@@ -578,6 +777,11 @@ function threadPanel(repositoryId) {
     <header class="thread-head">
       <span>Thread</span>
       <span class="spacer"></span>
+      ${iconButton("reply", {
+        act: "composer-thread-continue",
+        value: messageId,
+        title: "Send the next channel message into this thread",
+      })}
       ${iconButton("close", { act: "channel-thread-close", title: "Close thread" })}
     </header>
     <div class="thread-body">
@@ -979,7 +1183,14 @@ export function renderChats() {
       ${messageList(repositoryId)}
       ${composer(repositoryId)}
     </div>
-    ${state.chanFileView === undefined ? threadPanel(repositoryId) : filePanel()}
+    ${
+      state.chanFileView !== undefined
+        ? filePanel()
+        : state.chanTree === true
+          ? chanTreePanel(repositoryId)
+          : (threadPanel(repositoryId) ||
+           (state.chanThreadList === true ? threadListPanel(repositoryId) : ""))
+    }
   </div>`;
 }
 
@@ -1032,6 +1243,9 @@ export function openChannel(repositoryId, rerender) {
   persist("ag.repo", repositoryId);
   markChannelRead(repositoryId);
   state.activeChannelThread = undefined;
+  // A thread belongs to the channel it hangs in, so an aim taken in one
+  // channel must not follow the reader into the next and post there.
+  state.composerThreadId = undefined;
   // Another channel's expanded diffs are not this channel's; collapse them so
   // the transcript opens scannable rather than mid-review.
   state.chanOpenFiles = [];
@@ -1043,8 +1257,26 @@ export function openChannel(repositoryId, rerender) {
 }
 
 export function submitComposerMessage(rerender) {
+  chime("sent");
   const repositoryId = activeChannelId();
   if (!repositoryId) {
+    return;
+  }
+  // Aimed at an existing thread rather than the channel, because the person
+  // said so. Follow-up work that belongs to a task already being tracked
+  // should land in that task's thread instead of opening a second one about
+  // the same thing — and the reply path already dispatches work into the
+  // thread it arrived in, so this needs nothing further to route.
+  const continuing = state.composerThreadId;
+  if (continuing !== undefined) {
+    const posted = postChannelReply(repositoryId, continuing, state.chatDraft);
+    if (posted === undefined) {
+      return;
+    }
+    state.chatDraft = "";
+    state.mentionActive = false;
+    markChannelRead(repositoryId);
+    rerender();
     return;
   }
   const sent = sendChannelMessage(repositoryId, state.chatDraft, "user");
@@ -1058,7 +1290,46 @@ export function submitComposerMessage(rerender) {
   scrollChannel();
 }
 
+/**
+ * The line naming the thread the next message will join.
+ *
+ * Deliberately loud and dismissable: a composer that silently posts somewhere
+ * other than the channel it is sitting under would be a trap, and the whole
+ * value of merging by hand is that it is never a guess.
+ */
+function composerThreadChip(repositoryId) {
+  const messageId = state.composerThreadId;
+  if (messageId === undefined) {
+    return "";
+  }
+  const root = channelMessagesFor(repositoryId).find(
+    (entry) => entry.id === messageId,
+  );
+  if (root === undefined) {
+    return "";
+  }
+  const title = String(
+    (root.replies ?? []).find((reply) => /^Task: /u.test(String(reply.content ?? "")))
+      ?.content ?? root.content,
+  )
+    .replace(/^Task: /u, "")
+    .replace(/\s+/gu, " ")
+    .trim();
+  return `<div class="composer-thread">
+    ${icon("reply")}
+    <span class="ct-label">Continuing in</span>
+    <span class="ct-title" title="${esc(title)}">${esc(title.slice(0, 70))}</span>
+    <span class="spacer"></span>
+    ${iconButton("close", {
+      act: "composer-thread-clear",
+      title: "Post to the channel instead",
+      small: true,
+    })}
+  </div>`;
+}
+
 export function submitThreadReply(rerender) {
+  chime("sent");
   if (state.activeChannelThread === undefined) {
     return;
   }

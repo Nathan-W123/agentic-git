@@ -27,6 +27,10 @@ import {
   markRead,
   myAccent,
   myAgentColor,
+  myAvatar,
+  setMyAvatar,
+  myTheme,
+  setMyTheme,
   myAgents,
   notifications,
   persist,
@@ -35,6 +39,7 @@ import {
   activeChannelId,
   closeChannelFile,
   loadChannelFile,
+  moveChannelFile,
   saveChannelFile,
   ensureChannelMessages,
   ensureChannelRoster,
@@ -804,6 +809,41 @@ function appearanceCard() {
 
     <div class="set-row">
       <span class="sr-body">
+        <div class="sr-title">Theme</div>
+        <div class="sr-sub">Light inverts the surfaces and keeps your accent.
+          Stored in this browser.</div>
+      </span>
+      <span class="sr-action">
+        <button type="button" class="toggle${myTheme() === "light" ? " on" : ""}"
+          data-act="theme-toggle" role="switch"
+          aria-checked="${myTheme() === "light"}"
+          aria-label="Light theme"></button>
+      </span>
+    </div>
+
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">Profile picture</div>
+        <div class="sr-sub">Shown wherever your initials appear. Stored in this
+          browser only — the account has no field for a picture yet, so it will
+          not follow you to another machine.</div>
+      </span>
+      <span class="sr-action avatar-pick">
+        ${avatar(currentUserName(), 40, currentUserName(), myAvatar())}
+        <label class="btn btn-quiet">
+          Choose…
+          <input type="file" accept="image/*" data-act="avatar-pick" hidden>
+        </label>
+        ${
+          myAvatar() === undefined
+            ? ""
+            : `<button type="button" class="btn btn-quiet" data-act="avatar-clear">Remove</button>`
+        }
+      </span>
+    </div>
+
+    <div class="set-row">
+      <span class="sr-body">
         <div class="sr-title">Primary colour</div>
         <div class="sr-sub">Accents, highlights, and the active state across the
           interface. Only you see this.</div>
@@ -1181,6 +1221,58 @@ function applyTheme() {
   root.setProperty("--accent-wash", withAlpha(accent, 0.12));
   root.setProperty("--accent-wash-strong", withAlpha(accent, 0.2));
   root.setProperty("--accent-line", withAlpha(accent, 0.38));
+  // The surfaces move with the accent too, by a few percent. Held constant
+  // they read as one fixed grey-purple room that a chosen colour is only
+  // decorating; carried into the greys, the whole interface reads as being
+  // *in* that colour. Small on purpose — enough that switching accents is
+  // visible in the background, not so much that text contrast moves.
+  // Light swaps the base surfaces before the accent is mixed in, so the tint
+  // below applies to whichever set is in play rather than being written twice.
+  const light = myTheme() === "light";
+  document.documentElement.dataset.theme = light ? "light" : "dark";
+  for (const [name, base, amount] of light
+    ? [
+        ["--bg", "#f7f7fa", 0.05],
+        ["--bg-panel", "#ffffff", 0.04],
+        ["--bg-card", "#ffffff", 0.05],
+        ["--bg-card-2", "#f2f3f7", 0.05],
+        ["--bg-inset", "#eef0f4", 0.05],
+        ["--bg-hover", "#e9ebf1", 0.08],
+        ["--bg-active", "#e0e3ec", 0.1],
+        ["--border", "#d9dce5", 0.08],
+        ["--border-soft", "#e6e8ee", 0.06],
+        ["--border-strong", "#c3c7d4", 0.1],
+      ]
+    : [
+    ["--bg", "#0a0b0f", 0.05],
+    ["--bg-panel", "#0e1016", 0.05],
+    ["--bg-card", "#111320", 0.06],
+    ["--bg-card-2", "#14161f", 0.06],
+    ["--bg-inset", "#0c0e14", 0.05],
+    ["--bg-hover", "#171a25", 0.08],
+    ["--bg-active", "#1b1e2b", 0.1],
+    ["--border", "#1e2130", 0.08],
+    ["--border-soft", "#181b26", 0.06],
+    ["--border-strong", "#2a2e40", 0.1],
+      ]) {
+    root.setProperty(name, mix(base, accent, amount));
+  }
+  // Text has to invert with the surfaces or light mode is white on white.
+  for (const [name, value] of light
+    ? [
+        ["--text", "#14161c"],
+        ["--text-2", "#4b5163"],
+        ["--text-3", "#6d7386"],
+        ["--text-4", "#8f95a6"],
+      ]
+    : [
+        ["--text", "#e7e9f0"],
+        ["--text-2", "#9aa0b4"],
+        ["--text-3", "#676d82"],
+        ["--text-4", "#4b5063"],
+      ]) {
+    root.setProperty(name, value);
+  }
   document
     .querySelector('meta[name="theme-color"]')
     ?.setAttribute("content", accent);
@@ -1367,6 +1459,73 @@ document.addEventListener("dblclick", (event) => {
   if (event.target.closest?.(".panel-grip")) {
     rememberPanelWidth(setPanelWidth(PANEL_DEFAULT));
   }
+});
+
+/*
+ * Dragging a file in the tree onto a directory moves it.
+ *
+ * Delegated like every other handler here, because the tree is re-rendered
+ * whole on each change and per-node listeners would not survive it. The path
+ * travels in `dataTransfer` rather than in module state so an aborted drag
+ * leaves nothing behind to clear.
+ */
+document.addEventListener("dragstart", (event) => {
+  const row = event.target.closest?.("[data-drag-path]");
+  if (row === null || row === undefined) {
+    return;
+  }
+  event.dataTransfer.setData("text/plain", row.dataset.dragPath);
+  event.dataTransfer.effectAllowed = "move";
+});
+
+document.addEventListener("dragover", (event) => {
+  const directory = event.target.closest?.("[data-drop-dir]");
+  if (directory === null || directory === undefined) {
+    return;
+  }
+  // Only calling preventDefault marks a target as accepting a drop, so this
+  // is what makes directories droppable and everything else not.
+  event.preventDefault();
+  event.dataTransfer.dropEffect = "move";
+  directory.classList.add("drop-into");
+});
+
+document.addEventListener("dragleave", (event) => {
+  event.target.closest?.("[data-drop-dir]")?.classList.remove("drop-into");
+});
+
+document.addEventListener("drop", (event) => {
+  const directory = event.target.closest?.("[data-drop-dir]");
+  if (directory === null || directory === undefined) {
+    return;
+  }
+  event.preventDefault();
+  directory.classList.remove("drop-into");
+  const from = event.dataTransfer.getData("text/plain");
+  const into = directory.dataset.dropDir;
+  if (from === "" || into === undefined) {
+    return;
+  }
+  // Moving a file into the directory it already sits in is a no-op rather
+  // than an error: the drop is easy to make by accident.
+  if (from.slice(0, from.lastIndexOf("/")) === into) {
+    return;
+  }
+  void moveChannelFile(from, into).then((moved) => {
+    if (moved === undefined) {
+      return;
+    }
+    // Follow the file if it was the one being read, so the panel does not sit
+    // on a path that no longer exists.
+    if (state.chanFileView === from) {
+      state.chanFileView = moved;
+    }
+    // The changeset now contains a deletion and an addition that the copy on
+    // screen does not know about.
+    invalidateCode();
+    void ensureCodeData(render);
+    render();
+  });
 });
 
 /* The separator answers the keyboard too, since dragging is not available to
@@ -1625,7 +1784,7 @@ function renderNow() {
     });
     // The roster's model/effort pickers read the same real options My Agents
     // and Code load — loaded here too, rather than invented for this screen.
-    for (const agent of channelAgentsFor(state.repositoryId)) {
+    for (const agent of channelAgentsFor(activeChannelId())) {
       if (agent.mine) {
         void ensureAgentOptions(agent.id, () => {
           if (state.route === "chats") {
@@ -1672,8 +1831,8 @@ function applyHash() {
  */
 function refreshChannelInfoPopover() {
   const pop = $(".popover");
-  if (pop !== null && state.repositoryId) {
-    pop.innerHTML = channelInfoPopoverHtml(state.repositoryId);
+  if (pop !== null && activeChannelId()) {
+    pop.innerHTML = channelInfoPopoverHtml(activeChannelId());
   }
 }
 
@@ -1795,7 +1954,32 @@ document.addEventListener("click", (event) => {
       pickMention(value, render);
       return;
     case "channel-react":
-      toggleChannelReaction(state.repositoryId, value, "👍");
+      toggleChannelReaction(activeChannelId(), value, "👍");
+      render();
+      return;
+    case "chan-tree-toggle":
+      state.chanTree = state.chanTree !== true;
+      state.chanFileView = undefined;
+      render();
+      return;
+    case "chan-tree-close":
+      state.chanTree = false;
+      render();
+      return;
+    case "chan-tree-dir": {
+      const open = state.chanTreeOpen ?? [];
+      state.chanTreeOpen = open.includes(value)
+        ? open.filter((path) => path !== value)
+        : [...open, value];
+      render();
+      return;
+    }
+    case "channel-threads-toggle":
+      state.chanThreadList = state.chanThreadList !== true;
+      render();
+      return;
+    case "channel-threads-close":
+      state.chanThreadList = false;
       render();
       return;
     case "channel-thread-open":
@@ -1806,6 +1990,20 @@ document.addEventListener("click", (event) => {
       state.activeChannelThread = value;
       closeChannelFile();
       render();
+      return;
+    case "composer-thread-continue":
+      // Aimed, then the panel gets out of the way: the point is to type in
+      // the channel and have it land here, so leaving the thread open over
+      // the transcript would hide the conversation being added to.
+      state.composerThreadId = value;
+      state.activeChannelThread = undefined;
+      render();
+      $("[data-act='channel-input']")?.focus();
+      return;
+    case "composer-thread-clear":
+      state.composerThreadId = undefined;
+      render();
+      $("[data-act='channel-input']")?.focus();
       return;
     case "channel-thread-close":
       state.activeChannelThread = undefined;
@@ -1907,12 +2105,12 @@ document.addEventListener("click", (event) => {
       void ensureRepositoryGrants(value, refreshChannelInfoPopover);
       return;
     case "channel-agent-add":
-      addChannelAgent(state.repositoryId, value);
+      addChannelAgent(activeChannelId(), value);
       render();
       refreshChannelInfoPopover();
       return;
     case "channel-agent-remove":
-      removeChannelAgent(state.repositoryId, value);
+      removeChannelAgent(activeChannelId(), value);
       render();
       refreshChannelInfoPopover();
       return;
@@ -1922,7 +2120,7 @@ document.addEventListener("click", (event) => {
       // `channelAgentsFor` already attaches to every non-mine entry.
       const separatorIndex = value.indexOf(":");
       removeChannelAgentForUser(
-        state.repositoryId,
+        activeChannelId(),
         value.slice(0, separatorIndex),
         value.slice(separatorIndex + 1),
       );
@@ -2340,6 +2538,14 @@ document.addEventListener("click", (event) => {
       return;
 
     /* Settings */
+    case "theme-toggle":
+      setMyTheme(myTheme() === "light" ? "dark" : "light");
+      render();
+      return;
+    case "avatar-clear":
+      setMyAvatar(undefined);
+      render();
+      return;
     case "set-accent":
       void saveAppearanceChoice({ accent: value });
       return;
@@ -2433,11 +2639,11 @@ document.addEventListener("submit", (event) => {
     case "channel-rename-form": {
       const input = $("[data-act='channel-rename-input']", form);
       if (input !== null) {
-        renameChannelAgent(state.repositoryId, form.dataset.value, input.value);
+        renameChannelAgent(activeChannelId(), form.dataset.value, input.value);
       }
       const roleInput = $("[data-act='channel-role-input']", form);
       if (roleInput !== null) {
-        setChannelAgentSetting(state.repositoryId, form.dataset.value, "role", roleInput.value.trim());
+        setChannelAgentSetting(activeChannelId(), form.dataset.value, "role", roleInput.value.trim());
       }
       state.chatRenamingId = undefined;
       render();
@@ -2447,7 +2653,50 @@ document.addEventListener("submit", (event) => {
   }
 });
 
+/**
+ * Reads a chosen image, shrinks it, and keeps it.
+ *
+ * Downscaled through a canvas to 128px because localStorage holds a few
+ * megabytes for the whole origin and a phone photo is larger than that on its
+ * own — storing it raw would break every other thing the app remembers.
+ * Square-cropped from the centre, since every place it appears is a circle.
+ */
+async function pickAvatarFile(file) {
+  if (file === undefined || !file.type.startsWith("image/")) {
+    return;
+  }
+  try {
+    const bitmap = await createImageBitmap(file);
+    const side = Math.min(bitmap.width, bitmap.height);
+    const canvas = document.createElement("canvas");
+    canvas.width = 128;
+    canvas.height = 128;
+    canvas
+      .getContext("2d")
+      ?.drawImage(
+        bitmap,
+        (bitmap.width - side) / 2,
+        (bitmap.height - side) / 2,
+        side,
+        side,
+        0,
+        0,
+        128,
+        128,
+      );
+    setMyAvatar(canvas.toDataURL("image/jpeg", 0.82));
+    render();
+  } catch (error) {
+    toast(`That image could not be read: ${error.message}`, "error");
+  }
+}
+
 document.addEventListener("change", (event) => {
+  const picker = event.target;
+  if (picker?.dataset?.act === "avatar-pick") {
+    void pickAvatarFile(picker.files?.[0]);
+    return;
+  }
   const found = actionOf(event);
   if (found === undefined) {
     return;
@@ -2481,7 +2730,7 @@ document.addEventListener("change", (event) => {
         return;
       }
       const field = act === "channel-agent-model" ? "model" : "effort";
-      setChannelAgentSetting(state.repositoryId, agentId, field, node.value);
+      setChannelAgentSetting(activeChannelId(), agentId, field, node.value);
       render();
       return;
     }
@@ -2701,14 +2950,14 @@ document.addEventListener("focusout", (event) => {
     return;
   }
   const agentId = node.dataset.value;
-  if (state.repositoryId && agentId && state.chatRenamingId === agentId) {
+  if (activeChannelId() && agentId && state.chatRenamingId === agentId) {
     const nameInput = form === null ? null : $("[data-act='channel-rename-input']", form);
     const roleInput = form === null ? null : $("[data-act='channel-role-input']", form);
     if (nameInput !== null) {
-      renameChannelAgent(state.repositoryId, agentId, nameInput.value);
+      renameChannelAgent(activeChannelId(), agentId, nameInput.value);
     }
     if (roleInput !== null) {
-      setChannelAgentSetting(state.repositoryId, agentId, "role", roleInput.value.trim());
+      setChannelAgentSetting(activeChannelId(), agentId, "role", roleInput.value.trim());
     }
     state.chatRenamingId = undefined;
     render();

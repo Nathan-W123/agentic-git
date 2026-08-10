@@ -3,6 +3,12 @@
 Working notes for in-flight work on the Chats screen. Everything below was
 read out of the code, not remembered; file references are the places to start.
 
+**Status: every code item here is now built.** Items 1–4, the agent code
+names, the device-auth rotation fix, and all three stages of the folder
+pullout including the move route. Each section below says which. The one thing
+still genuinely outstanding is infrastructure and not code: **no `/data`
+volume is attached**, so every redeploy still wipes `.coordinator`.
+
 ## Where things are
 
 - Channel/thread server logic: `services/api-gateway/src/server.ts`
@@ -223,19 +229,36 @@ expand/collapse state, and set `state.chanFileView` on click. Mirror the
 threads pullout added alongside it — same `.thread-panel` slot, same
 toggle-button-in-the-header pattern, same `chanThreadList`-style boolean.
 
-### Moving files has no backend, and must not look like it does
+### Moving files — **done**
 
-Checked: there is **no move or rename route**, and nothing in
-`services/workspace-manager` exposes one. The workspace API is listing and
-reading. Drag-to-reorganise is therefore not a UI task — it needs a server
-capability that moves a path inside the overlay and then flows through the
-same admission → validation → promotion pipeline as any other change, so that
-a move is reviewable and revertible like an edit. Until that exists the tree
-should be read-and-open only; a draggable tree that silently does nothing is
-worse than one that does not offer it.
+The note below was right that a move needed a server capability first, and
+slightly wrong about the starting point: the workspace API was not read-only,
+it already had `writeFile`, which is what made the rest small.
+
+`moveOverlayFile` (`apps/web/src/overlay.ts`) renames inside the overlay under
+the overlay lock, so the pair is atomic against every other overlay operation
+— a browser doing write-then-delete could leave a copy at both paths and show
+a reviewer an unexplained duplicate instead of a rename. It refuses to
+overwrite an existing target and refuses a missing source, and `rename` does
+the work rather than copy-then-delete so there is no window where the file is
+at both paths or neither.
+
+**It needs no pipeline of its own**, which was the open question. The overlay
+*is* the staging area every edit already goes through: `submit` turns whatever
+the overlay holds into a changeset, so a move arrives at review as a deletion
+and an addition of the same content and is revertible by the same means.
+
+Exposed as `POST …/workspace/move` with `{from, to}`, and the tree is
+draggable: files carry `data-drag-path`, directories `data-drop-dir`, and only
+directories accept a drop. Dropping a file into the directory it already sits
+in is a no-op rather than an error.
+
+Three tests in `overlay.test.ts`: a move lands and leaves the overlay dirty, a
+move refuses to overwrite or to invent a source, and a move cannot escape the
+overlay.
 
 ### Order suggested
 
-1. Tree panel, read-only, opening into the existing `filePanel()`.
-2. Then the move route, server-side, with the pipeline wired through.
-3. Only then make the tree draggable.
+1. ~~Tree panel, read-only, opening into the existing `filePanel()`.~~ done
+2. ~~Then the move route, server-side, with the pipeline wired through.~~ done
+3. ~~Only then make the tree draggable.~~ done

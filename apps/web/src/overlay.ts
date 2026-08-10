@@ -702,6 +702,60 @@ export class OverlayWorkspaceService {
     });
   }
 
+  /**
+   * Moves or renames a file inside the overlay.
+   *
+   * Done here rather than as a write-then-delete from the browser because a
+   * move is one intention: two calls could leave a copy at both paths if the
+   * second failed, and a reviewer would see an unexplained duplicate rather
+   * than a rename. Holding the overlay lock for both halves makes the pair
+   * atomic with respect to every other overlay operation.
+   *
+   * It needs no pipeline of its own. The overlay *is* the staging area every
+   * edit already goes through: `submit` turns whatever the overlay holds into
+   * a changeset, which is then admitted, validated and promoted like any
+   * other. A move therefore arrives at review as a deletion and an addition
+   * of the same content, which is exactly what it is, and is revertible by
+   * the same means.
+   */
+  public async moveOverlayFile(
+    scope: OverlayScope,
+    from: string,
+    to: string,
+  ): Promise<void> {
+    await this.withOverlayLock(scope, async () => {
+      const { directory } = await this.requireOverlay(scope);
+      const source = resolveOverlayPath(directory, from);
+      const target = resolveOverlayPath(directory, to);
+      if (source === target) {
+        return;
+      }
+      await assertNoOverlaySymlink(directory, source);
+      await assertNoOverlaySymlink(directory, target);
+      // Refusing rather than overwriting: a move that silently replaces
+      // somebody else's file destroys work with no record that it existed.
+      const occupied = await lstat(target).then(
+        () => true,
+        () => false,
+      );
+      if (occupied) {
+        throw new OverlayError(409, "target_exists", `${to} already exists`);
+      }
+      const present = await lstat(source).then(
+        () => true,
+        () => false,
+      );
+      if (!present) {
+        throw new OverlayError(404, "file_not_found", `${from} was not found`);
+      }
+      await mkdir(path.dirname(target), { recursive: true });
+      // `rename` rather than copy-then-delete: within one overlay directory
+      // it is a single filesystem operation, so there is no window in which
+      // the file exists at both paths or at neither.
+      await rename(source, target);
+    });
+  }
+
   private async writeOverlayFileUnlocked(
     scope: OverlayScope,
     relative: string,
