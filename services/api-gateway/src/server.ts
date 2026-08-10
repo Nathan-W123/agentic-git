@@ -5656,6 +5656,16 @@ export class ApiGateway {
      * for it by name.
      */
     claimMessage?: string;
+    /**
+     * An existing thread to hang this work off, instead of opening a new one.
+     *
+     * Asking for more work inside a thread is somebody saying "this belongs
+     * with that" — the one signal about relatedness that is never a guess,
+     * because a person made it. The acknowledgement then goes into that
+     * thread rather than starting another one beside it, so a follow-up
+     * fix stays with the work it follows.
+     */
+    threadMessageId?: string;
   }): Promise<void> {
     const {
       projectId,
@@ -5698,13 +5708,35 @@ export class ApiGateway {
     // inside a couple of seconds, not once the work has been queued. This
     // message is also the thread everything about the task hangs off, so the
     // channel keeps one line per request rather than a running commentary.
-    const acknowledgement = await this.appendChannelEntry({
-      projectId,
-      repositoryId,
-      kind: "agent",
-      authorId: `${candidate.userId}:${candidate.provider}`,
-      content: await this.composeAcknowledgement(candidate, content, claimMessage),
-    });
+    const acknowledgementText = await this.composeAcknowledgement(
+      candidate,
+      content,
+      claimMessage,
+    );
+    // Continuing an existing thread: the acknowledgement belongs inside it,
+    // and everything this run narrates hangs off the same root, so the two
+    // pieces of work read as one story rather than two.
+    const threadRootId =
+      input.threadMessageId ??
+      (
+        await this.appendChannelEntry({
+          projectId,
+          repositoryId,
+          kind: "agent",
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          content: acknowledgementText,
+        })
+      ).id;
+    if (input.threadMessageId !== undefined) {
+      await this.appendChannelThreadReply({
+        projectId,
+        repositoryId,
+        messageId: input.threadMessageId,
+        authorId: `${candidate.userId}:${candidate.provider}`,
+        content: acknowledgementText,
+      });
+    }
+    const acknowledgement = { id: threadRootId };
 
     try {
       const task = await this.options.operations.submitTask({
@@ -5957,6 +5989,26 @@ export class ApiGateway {
       ? candidates.filter((entry) => question.includes(`@${entry.name}`))
       : [];
     const answering = mentioned.length > 0 ? mentioned : owner === undefined ? [] : [owner];
+    // Asking for work inside a thread continues that thread rather than
+    // starting a new one. This is the explicit half of grouping related work:
+    // a person saying "and now do this too" has told us it belongs together,
+    // which no similarity score can claim to know. Only one agent is given
+    // the work even if several were named — two agents editing the same
+    // repository from one sentence is a collision, not collaboration.
+    if (looksLikeTaskRequest(question) && answering[0] !== undefined) {
+      const candidate = answering[0];
+      if (candidate.visibility !== "personal" || candidate.userId === input.viewerId) {
+        await this.dispatchOneMention({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          content: question,
+          senderId: input.viewerId,
+          candidate,
+          threadMessageId: input.messageId,
+        });
+        return;
+      }
+    }
     for (const candidate of answering) {
       // Same refusal the channel gives. Being inside a thread is not consent
       // to spend somebody else's subscription.
