@@ -2105,9 +2105,74 @@ document.addEventListener("click", (event) => {
           label: `Invite someone to #${value}`,
           iconName: "users",
         },
+        {
+          act: "channel-agent-menu",
+          value,
+          label: `Add an agent to #${value}`,
+          iconName: "robot",
+        },
         { act: "channel-open", value, label: "Open this channel", iconName: "chatBubble" },
       ]);
       return;
+    /**
+     * Agents join a channel the same way people do — from the channel's own
+     * menu — rather than only from wherever they were connected. Only this
+     * account's agents are offerable: membership is managed per caller, and
+     * the server's membership route refuses a teammate's agent anyway.
+     */
+    case "channel-agent-menu": {
+      // Only trust membership once the roster for *this* repository has
+      // actually been fetched. Before that `channelAgentsFor` shows every
+      // connected agent provisionally, which would read as "already here" and
+      // grey out the whole list — worst exactly where this is needed, on a
+      // channel that has no agent yet. Kick the fetch off so a second open
+      // is accurate.
+      const known = state.channelRosterLoaded.has(value);
+      if (!known) {
+        void ensureChannelRoster(value, render);
+      }
+      const inChannel = new Set(
+        known
+          ? channelAgentsFor(value)
+              .filter((agent) => agent.mine === true)
+              .map((agent) => agent.id)
+          : [],
+      );
+      const connected = myAgents().filter((agent) => agent.connected === true);
+      showMenu(
+        node,
+        connected.length === 0
+          ? [
+              {
+                act: "nav",
+                value: "agents",
+                label: "Connect an agent first",
+                iconName: "robot",
+              },
+            ]
+          : connected.map((agent) => ({
+              // Carries the repository too: this menu can be opened from a
+              // channel that is not the one currently on screen, and adding
+              // to whichever happens to be open would be silently wrong.
+              act: "channel-agent-add-to",
+              value: `${value}|${agent.id}`,
+              label: inChannel.has(agent.id)
+                ? `${agent.name} · already here`
+                : agent.name,
+              iconName: "robot",
+              disabled: inChannel.has(agent.id),
+            })),
+      );
+      return;
+    }
+    case "channel-agent-add-to": {
+      const split = value.indexOf("|");
+      addChannelAgent(value.slice(0, split), value.slice(split + 1));
+      closePopover();
+      render();
+      refreshChannelInfoPopover();
+      return;
+    }
     case "invite-revoke":
       void revokeInvitation(value)
         .then(() => {
