@@ -539,6 +539,68 @@ export function sendTyping(repositoryId, threadId, draft) {
 /** How long after the last frame a surface should be swept for expiry. */
 export const TYPING_SWEEP_MS = TYPING_TTL_MS + 250;
 
+/* ---------------------------------------------------------- code names ---- */
+
+/**
+ * Call signs for agents in a channel.
+ *
+ * "Claude (Nathan)" says which vendor and whose account, which is exactly
+ * what nobody needs while reading a conversation — and it collides the moment
+ * one person brings two agents. A call sign is short, distinct, and
+ * pronounceable, which is what a name in a chat is actually for. Deliberately
+ * a flat list rather than generated syllables: every one of these reads as a
+ * name, and none of them will ever come out unpronounceable or unfortunate.
+ */
+export const AGENT_CODE_NAMES = [
+  "Icarus", "Bravo", "Vesper", "Atlas", "Cobalt", "Nimbus", "Orion", "Quill",
+  "Saber", "Tundra", "Vector", "Zephyr", "Onyx", "Peregrine", "Rialto",
+  "Solstice", "Talon", "Umbra", "Verdant", "Wren", "Xenon", "Yarrow", "Zenith",
+  "Aster", "Basalt", "Cinder", "Dunlin", "Ember", "Fathom", "Gallant",
+  "Harrier", "Indigo", "Juniper", "Kestrel", "Lumen", "Marlin", "Nocturne",
+  "Obsidian", "Pallas", "Quarry", "Ridge", "Sable", "Thistle", "Ursa",
+  "Vantage", "Willow", "Ardent", "Beacon", "Citrine", "Delta", "Echo",
+  "Foxglove", "Granite", "Halcyon", "Ivory", "Jetty", "Kilo", "Lyra",
+  "Meridian", "Nova", "Osprey", "Petrel", "Quasar", "Rowan", "Sierra",
+  "Tempest", "Ulysses", "Vigil", "Whistler", "Yonder",
+];
+
+/** Names already spoken for in this channel, however they were set. */
+function takenChannelNames(repositoryId) {
+  return new Set(channelAgentsFor(repositoryId).map((agent) => agent.name));
+}
+
+/**
+ * A call sign nobody in this channel is using.
+ *
+ * Uniqueness is per channel because that is the scope a name has to be
+ * unambiguous in: `@Vesper` is resolved against this channel's roster, so two
+ * Vespers here would make a mention ambiguous, while a Vesper in another
+ * channel is no trouble at all. `undefined` when the list is exhausted, which
+ * is the caller's cue to ask rather than to invent something.
+ */
+export function freeAgentCodeName(repositoryId, avoid = []) {
+  const taken = takenChannelNames(repositoryId);
+  for (const name of avoid) {
+    taken.add(name);
+  }
+  const free = AGENT_CODE_NAMES.filter((name) => !taken.has(name));
+  if (free.length === 0) {
+    return undefined;
+  }
+  return free[Math.floor(Math.random() * free.length)];
+}
+
+/** Whether this name would collide with somebody already in the channel. */
+export function agentNameTaken(repositoryId, name, exceptAgentId) {
+  const trimmed = String(name ?? "").trim();
+  if (trimmed === "") {
+    return false;
+  }
+  return channelAgentsFor(repositoryId).some(
+    (agent) => agent.id !== exceptAgentId && agent.name === trimmed,
+  );
+}
+
 /* ------------------------------------------------------- agents working ---- */
 
 /**
@@ -1868,6 +1930,17 @@ export function toggleChannelReaction(repositoryId, messageId, emoji = "👍") {
 export function renameChannelAgent(repositoryId, agentId, name) {
   const trimmed = String(name ?? "").trim();
   if (!repositoryId || !agentId || trimmed === "") {
+    return;
+  }
+  // Guarded here rather than at each caller because a rename commits from two
+  // places — the form and losing focus — and a duplicate from either would
+  // make `@name` ambiguous for everyone in the channel. Refused out loud, so
+  // the person can pick another or take a fresh call sign.
+  if (agentNameTaken(repositoryId, trimmed, agentId)) {
+    toast(
+      `${trimmed} is already taken in this channel — pick another name.`,
+      "error",
+    );
     return;
   }
   state.channelAgentOverrides[repositoryId] ??= {};
