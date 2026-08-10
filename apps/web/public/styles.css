@@ -17,22 +17,25 @@
 :root {
   color-scheme: dark;
 
-  --bg: #0a0b0f;
-  --bg-panel: #0e1016;
-  --bg-card: #111320;
-  --bg-card-2: #14161f;
-  --bg-inset: #0c0e14;
-  --bg-hover: #171a25;
-  --bg-active: #1b1e2b;
+  /* Neutral grey, not blue-black. The surfaces were tinted toward navy, which
+     read as a colour choice competing with the accent rather than as a
+     background behind it. */
+  --bg: #191919;
+  --bg-panel: #1f1f1f;
+  --bg-card: #242424;
+  --bg-card-2: #292929;
+  --bg-inset: #151515;
+  --bg-hover: #2f2f2f;
+  --bg-active: #383838;
 
-  --border: #1e2130;
-  --border-soft: #181b26;
-  --border-strong: #2a2e40;
+  --border: #333333;
+  --border-soft: #2a2a2a;
+  --border-strong: #454545;
 
-  --text: #e7e9f0;
-  --text-2: #9aa0b4;
-  --text-3: #676d82;
-  --text-4: #4b5063;
+  --text: #ededed;
+  --text-2: #a6a6a6;
+  --text-3: #7a7a7a;
+  --text-4: #5c5c5c;
 
   --accent: #8b5cf6;
   --accent-bright: #a78bfa;
@@ -3373,10 +3376,13 @@ svg {
 .chan-list-label {
   padding: 12px 9px 6px;
   font-size: 10.5px;
-  font-weight: 600;
+  /* These name the two halves of the roster, so they are headings rather than
+     captions. At `--text-4` they read as the faintest thing in the panel,
+     which is the wrong end of the hierarchy for the only labels in it. */
+  font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--text-4);
+  color: var(--text);
 }
 
 .chan-row {
@@ -4065,7 +4071,7 @@ body.resizing-panel {
   cursor: pointer;
   text-align: left;
   font: inherit;
-  color: var(--text-1);
+  color: var(--text);
 }
 
 .cblock-head:hover {
@@ -5147,8 +5153,38 @@ dialog.modal::backdrop {
 /* Light keeps the accent and inverts everything around it; the shadows have
    to come down with it, since a shadow tuned for near-black reads as dirt on
    a white surface. */
+/*
+ * Light theme — a creamy off-white, not a white.
+ *
+ * This block used to set only shadows and `color-scheme`, so switching the
+ * toggle changed almost nothing visible and the setting looked broken. Every
+ * surface, border and text tone the dark palette defines is overridden here,
+ * because those are what a theme *is*; the accent deliberately carries over
+ * unchanged, which is what the setting's own description promises.
+ *
+ * Warm rather than neutral: a pure #fff next to a purple accent reads as
+ * clinical, and off-white is easier to sit in front of for a long session.
+ */
 :root[data-theme="light"] {
   color-scheme: light;
+
+  --bg: #f4f0e6;
+  --bg-panel: #faf7ef;
+  --bg-card: #fffdf7;
+  --bg-card-2: #f6f2e8;
+  --bg-inset: #ece7db;
+  --bg-hover: #ebe5d7;
+  --bg-active: #e3dccb;
+
+  --border: #ddd5c4;
+  --border-soft: #e9e2d4;
+  --border-strong: #c6bda8;
+
+  --text: #26231e;
+  --text-2: #57524a;
+  --text-3: #837c70;
+  --text-4: #a49c8c;
+
   --shadow-pop: 0 6px 16px rgba(15, 18, 30, 0.14);
   --shadow-card: 0 1px 1px rgba(15, 18, 30, 0.08);
 }

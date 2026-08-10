@@ -2033,11 +2033,27 @@ document.addEventListener("click", (event) => {
       render();
       void loadChannelFile(value, render);
       return;
+    // Two ways out of a file, because they mean different things. Back goes
+    // up to the folder it was opened from — reading one file usually means
+    // reading the next — and the tree is opened explicitly rather than relying
+    // on it happening to still be toggled on underneath.
+    case "chan-file-back":
+      if (!confirmDiscardEdit()) {
+        return;
+      }
+      closeChannelFile();
+      state.chanTree = true;
+      render();
+      return;
+    // The X leaves the code behind entirely: file and folder both, back to the
+    // conversation. Closing the file and landing on a file tree somebody did
+    // not ask to see again is not "close".
     case "chan-file-close":
       if (!confirmDiscardEdit()) {
         return;
       }
       closeChannelFile();
+      state.chanTree = false;
       render();
       return;
     case "chan-file-mode": {

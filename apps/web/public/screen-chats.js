@@ -372,8 +372,11 @@ function chanSidebar(activeRepositoryId) {
       </button>
       <div class="chan-list-label">Agents</div>
       ${
+        // No empty state. The "Add an agent" button sits directly beneath and
+        // already says what the absence means; a sentence saying the same
+        // thing above it is a line to read before reaching the thing to click.
         roster.length === 0
-          ? `<div class="util-empty">No agents connected to this repository yet.</div>`
+          ? ""
           : roster.map((agent) => rosterRow(agent, canModerate)).join("")
       }
       <button type="button" class="roster-add" data-act="channel-agent-menu"
@@ -952,7 +955,14 @@ function filePanel() {
           aria-selected="${editing ? "true" : "false"}"
           data-act="chan-file-mode" data-mode="edit">Edit</button>
       </div>
-      ${iconButton("close", { act: "chan-file-close", title: "Close file" })}
+      ${iconButton("folder", {
+        act: "chan-file-back",
+        title: "Back to files",
+      })}
+      ${iconButton("close", {
+        act: "chan-file-close",
+        title: "Close files",
+      })}
     </header>
     ${
       editing
