@@ -78,6 +78,7 @@ export const ICONS = {
   chevronRight: S('<path d="m9 6 6 6-6 6"/>'),
   chevronUp: S('<path d="m6 15 6-6 6 6"/>'),
   arrowRight: S('<path d="M5 12h14"/><path d="m13 6 6 6-6 6"/>'),
+  arrowLeft: S('<path d="M19 12H5"/><path d="m11 6-6 6 6 6"/>'),
   branch: S(
     '<circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><circle cx="18" cy="8" r="2.4"/><path d="M6 8.4v7.2"/><path d="M18 10.4c0 4-4.2 3.4-6.6 4.6"/>',
   ),

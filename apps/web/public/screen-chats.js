@@ -414,7 +414,7 @@ function chanHeader(repository, repositoryId) {
     </div>
     <span class="spacer"></span>
     <span class="avatar-stack">${faces}${avatarStack(people, 3, 24)}</span>
-    <button type="button" class="icon-btn${state.chanThreadList === true ? " on" : ""}"
+    <button type="button" class="icon-btn${state.chanTree === true ? " on" : ""}"
       data-act="chan-tree-toggle" title="Files"
       aria-pressed="${state.chanTree === true}">${icon("folder")}</button>
     <button type="button" class="icon-btn${state.chanThreadList === true ? " on" : ""}"
@@ -955,7 +955,7 @@ function filePanel() {
           aria-selected="${editing ? "true" : "false"}"
           data-act="chan-file-mode" data-mode="edit">Edit</button>
       </div>
-      ${iconButton("folder", {
+      ${iconButton("arrowLeft", {
         act: "chan-file-back",
         title: "Back to files",
       })}

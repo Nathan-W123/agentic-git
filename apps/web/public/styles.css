@@ -988,6 +988,21 @@ svg {
   margin-right: -7px;
 }
 
+/* The overlap is between faces, not past the end of the stack. Leaving the
+   negative margin on the last one makes the container's box narrower than
+   the faces drawn in it, so a flex gap after the stack measures from the
+   wrong edge and whatever follows sits closer than the gap says. */
+.avatar-stack .avatar:last-child {
+  margin-right: 0;
+}
+
+/* With no one to show, the stack is still a flex item and still collects a
+   gap on each side -- a double gap of empty space in the middle of a row of
+   evenly spaced icons. */
+.avatar-stack:empty {
+  display: none;
+}
+
 .avatar-stack .more {
   margin-left: 13px;
   font-size: 11px;
