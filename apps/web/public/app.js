@@ -14,6 +14,8 @@ import {
   api,
   closeSocket,
   connectSocket,
+  noteTyping,
+  sendTyping,
   currentRepository,
   currentUserId,
   currentUserName,
@@ -2438,6 +2440,8 @@ document.addEventListener("input", (event) => {
     return;
   }
   if (act === "channel-input") {
+    // No thread id: this is the room itself, and the dots belong there only.
+    sendTyping(activeChannelId(), undefined);
     updateComposerInput(node, render);
     return;
   }
@@ -2464,6 +2468,9 @@ document.addEventListener("input", (event) => {
     return;
   }
   if (act === "channel-thread-input") {
+    // Scoped to the open thread, so typing a reply raises dots inside that
+    // thread and leaves the channel behind it quiet.
+    sendTyping(activeChannelId(), state.activeChannelThread);
     state.threadDraft = node.value;
     const focused = document.activeElement === node;
     const selStart = node.selectionStart;
@@ -2677,6 +2684,16 @@ async function boot() {
   });
 
   connectSocket((frame) => {
+    // Transient, and never part of the audit replay — see `broadcastTransient`
+    // on the hub. Re-rendered immediately so the dots appear while the other
+    // person is still mid-word.
+    if (frame?.type === "channel-typing") {
+      noteTyping(frame);
+      if (state.route === "chats") {
+        render();
+      }
+      return;
+    }
     // A channel event for the repository currently open gets its own
     // immediate reconcile, including the echo of this browser's own posts —
     // see `refreshChannelMessages` in data.js. This is what makes a second

@@ -111,6 +111,10 @@ export const state = {
   activeChannelThread: undefined,
   // Per-provider usage reports, filled lazily by the roster's hover.
   providerUsage: {},
+  // Who is typing, keyed `repositoryId|threadId` so the main channel and
+  // each thread are separate surfaces — typing in a thread must not raise
+  // dots in the room behind it. Values are `{ [userId]: {name, expiresAt} }`.
+  typing: {},
   // Paths whose inline diff is expanded in the transcript. Plural because a
   // reader comparing two files should not have to close one to open the other.
   chanOpenFiles: [],
@@ -486,6 +490,78 @@ export function connectSocket(onEvent) {
     });
   } catch {
     state.socket = undefined;
+  }
+}
+
+/* ------------------------------------------------------------- typing ---- */
+
+const TYPING_TTL_MS = 4_000;
+const TYPING_SEND_EVERY_MS = 2_000;
+const typingLastSent = new Map();
+
+/** One surface: the channel itself, or one thread inside it. */
+const typingKey = (repositoryId, threadId) =>
+  `${repositoryId}|${threadId ?? ""}`;
+
+/**
+ * Tells the server this account is typing, at most every couple of seconds.
+ *
+ * Throttled rather than sent per keystroke: the signal only has to outlive
+ * its own TTL to read as continuous, and a frame per character would be a
+ * fan-out per character to every other subscriber.
+ */
+export function sendTyping(repositoryId, threadId) {
+  if (!repositoryId || !state.projectId) {
+    return;
+  }
+  const key = typingKey(repositoryId, threadId);
+  const now = Date.now();
+  if (now - (typingLastSent.get(key) ?? 0) < TYPING_SEND_EVERY_MS) {
+    return;
+  }
+  typingLastSent.set(key, now);
+  void api(channelPath(repositoryId, "/typing"), {
+    method: "POST",
+    body: { ...(threadId === undefined ? {} : { threadId }) },
+  }).catch(() => {
+    /* A dropped typing frame is not worth a toast. */
+  });
+}
+
+/** Records a `channel-typing` frame from somebody else. */
+export function noteTyping(frame) {
+  const key = typingKey(frame.repositoryId, frame.threadId);
+  const surface = state.typing[key] ?? {};
+  surface[frame.userId] = {
+    name: frame.userName ?? "Someone",
+    expiresAt: Date.now() + TYPING_TTL_MS,
+  };
+  state.typing[key] = surface;
+}
+
+/** Whoever is still within their TTL on one surface, newest state only. */
+export function typingOn(repositoryId, threadId) {
+  const surface = state.typing[typingKey(repositoryId, threadId)];
+  if (surface === undefined) {
+    return [];
+  }
+  const now = Date.now();
+  const live = [];
+  for (const [userId, entry] of Object.entries(surface)) {
+    if (entry.expiresAt > now) {
+      live.push(entry.name);
+    } else {
+      delete surface[userId];
+    }
+  }
+  return live;
+}
+
+/** A message of theirs arriving means they are done typing, not still at it. */
+export function clearTyping(repositoryId, threadId, userId) {
+  const surface = state.typing[typingKey(repositoryId, threadId)];
+  if (surface !== undefined && userId !== undefined) {
+    delete surface[userId];
   }
 }
 

@@ -412,6 +412,36 @@ export class AuditWebSocketHub {
     return projectId === client.project.id;
   }
 
+  /**
+   * Pushes something transient to a project's subscribers, bypassing the audit
+   * cursor entirely.
+   *
+   * Typing is not a fact about the codebase. The audit stream this hub exists
+   * to replay is durable and hash-chained, and a keystroke burst has no
+   * business becoming permanent, verifiable history — so this writes to the
+   * open sockets and stores nothing. Nothing is replayed on reconnect either:
+   * a stale "still typing" from before a disconnect would be a lie, and the
+   * sender's own expiry already makes the live case self-healing.
+   *
+   * `exceptPrincipalId` keeps a sender from being shown their own typing.
+   */
+  public broadcastTransient(
+    projectId: string,
+    value: unknown,
+    exceptPrincipalId?: string,
+  ): void {
+    for (const client of this.clients) {
+      if (
+        client.project.id !== projectId ||
+        (exceptPrincipalId !== undefined &&
+          client.principal.user.id === exceptPrincipalId)
+      ) {
+        continue;
+      }
+      this.send(client, value);
+    }
+  }
+
   private send(client: WebSocketClient, value: unknown): void {
     if (
       client.closed ||
