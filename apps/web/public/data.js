@@ -115,6 +115,8 @@ export const state = {
   // each thread are separate surfaces — typing in a thread must not raise
   // dots in the room behind it. Values are `{ [userId]: {name, expiresAt} }`.
   typing: {},
+  // Agents the server says are mid-task, keyed by task id.
+  agentBusy: {},
   // Paths whose inline diff is expanded in the transcript. Plural because a
   // reader comparing two files should not have to close one to open the other.
   chanOpenFiles: [],
@@ -573,6 +575,88 @@ export function agentsThinkingIn(repositoryId) {
 
 /** How long after the last frame a surface should be swept for expiry. */
 export const TYPING_SWEEP_MS = TYPING_TTL_MS + 250;
+
+/* ------------------------------------------------------- agents working ---- */
+
+/**
+ * Statuses that still mean the agent has the work.
+ *
+ * Deliberately excludes `submitted`, `queued`, `approved` and
+ * `awaiting_approval`, which appear in `ACTIVE_TASK_STATUS` but mean waiting
+ * for a runner or a person. A task parked awaiting review is not thinking,
+ * and treating it as such left the dots up long after a prompt finished.
+ */
+const WORKING_STATUS = new Set([
+  "submitted",
+  "planning",
+  "running",
+  "replanning",
+  "validating",
+]);
+
+/** Backstop only — the task's own status is what really retires an entry. */
+const BUSY_TTL_MS = 10 * 60_000;
+
+/**
+ * Records that an agent picked up work in a channel.
+ *
+ * The server sends this because the browser cannot work it out: a task's
+ * `agentId` is this deployment's own name for a configured agent, and the
+ * record carries no vendor, so there is nothing in it to match a roster entry
+ * against. The frame names the owner and the provider outright.
+ */
+export function noteAgentBusy(frame) {
+  if (!frame?.repositoryId || !frame?.taskId) {
+    return;
+  }
+  state.agentBusy[frame.taskId] = {
+    repositoryId: frame.repositoryId,
+    userId: frame.userId,
+    provider: frame.provider,
+    expiresAt: Date.now() + BUSY_TTL_MS,
+  };
+}
+
+/**
+ * Agents mid-task in one repository, by the name this channel shows them as.
+ *
+ * An entry retires when its task is no longer in a working state — the task
+ * list is re-read on every audit frame, so that arrives on its own. The TTL
+ * is only for a task that vanishes without ever reaching a status, which
+ * would otherwise leave dots up forever.
+ */
+export function agentsThinkingIn(repositoryId) {
+  if (!repositoryId) {
+    return [];
+  }
+  const now = Date.now();
+  const names = [];
+  for (const [taskId, entry] of Object.entries(state.agentBusy)) {
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    const finished = task !== undefined && !WORKING_STATUS.has(task.status);
+    if (finished || entry.expiresAt <= now) {
+      delete state.agentBusy[taskId];
+      continue;
+    }
+    if (entry.repositoryId !== repositoryId) {
+      continue;
+    }
+    // Roster ids are two shapes: one's own agents are the bare provider id,
+    // a teammate's are `${userId}:${provider}` (see `channelAgentsFor`). Both
+    // have to be matched, or a teammate's agent working would either go
+    // unnamed or be shown as your own.
+    const agent = channelAgentsFor(repositoryId).find((candidate) => {
+      if ((candidate.provider ?? candidate.id) !== entry.provider) {
+        return false;
+      }
+      return candidate.mine === true
+        ? true
+        : String(candidate.id) === `${entry.userId}:${entry.provider}`;
+    });
+    names.push(agent?.name ?? "An agent");
+  }
+  return [...new Set(names)];
+}
 
 /** Records a `channel-typing` frame from somebody else. */
 export function noteTyping(frame) {

@@ -15,6 +15,7 @@ import {
   closeSocket,
   connectSocket,
   TYPING_SWEEP_MS,
+  noteAgentBusy,
   noteTyping,
   sendTyping,
   currentRepository,
@@ -2780,6 +2781,15 @@ async function boot() {
     // Transient, and never part of the audit replay — see `broadcastTransient`
     // on the hub. Re-rendered immediately so the dots appear while the other
     // person is still mid-word.
+    // Transient too, and for the same reason — but unlike typing this one is
+    // sent to the asker as well: they are the person waiting on it.
+    if (frame?.type === "channel-agent-busy") {
+      noteAgentBusy(frame);
+      if (state.route === "chats" && !renameFieldFocused()) {
+        render();
+      }
+      return;
+    }
     if (frame?.type === "channel-typing") {
       noteTyping(frame);
       if (state.route === "chats" && !renameFieldFocused()) {
