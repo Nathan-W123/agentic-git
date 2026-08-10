@@ -102,6 +102,18 @@ interface WatchedChannelTask {
   /** Last audit sequence already narrated, so nothing is said twice. */
   cursor: number;
   startedAtMs: number;
+  /**
+   * Narration held back until the run proves it has something worth a thread.
+   *
+   * The opening — the task's title and the agent's first reasoning — plus any
+   * line that is only ceremony ("Reading the repository…") waits here. A run
+   * that finishes without ever saying anything substantive never writes it,
+   * and answers in the channel instead of behind a thread nobody needs to
+   * open. Flushed in order the moment something substantive does arrive.
+   */
+  pending: string[];
+  /** Whether a thread has been opened, after which everything goes into it. */
+  threaded: boolean;
 }
 
 /**
@@ -194,6 +206,16 @@ export function withRoleContext(role: string, objective: string): string {
 const CHANNEL_PROGRESS_MAX_MS = 60 * 60 * 1000;
 
 /** Audit events that end a task, and the line each one closes the thread with. */
+/**
+ * Narrated, but true of every run that has ever started.
+ *
+ * A line that says nothing specific about *this* task is not reason enough to
+ * open a thread, so these are held back and only written once something
+ * substantive follows. Without this every task threaded, because every task
+ * says it started.
+ */
+const CHANNEL_CEREMONIAL_EVENTS = new Set(["task_started"]);
+
 const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
   canonical_promoted: "Done — the change is in canonical.",
   task_failed: "I could not finish this.",
@@ -5747,22 +5769,12 @@ export class ApiGateway {
       // from one call so the wait is paid once. A task id says nothing to the
       // person who asked; "Task: architecture for chess" does.
       const opening = await this.planOpening(candidate, task.objective);
-      await this.appendChannelThreadReply({
-        repositoryId,
-        messageId: acknowledgement.id,
-        authorId: `${candidate.userId}:${candidate.provider}`,
-        content: `Task: ${opening.title}`,
-        projectId,
-      });
-      for (const thought of opening.thoughts) {
-        await this.appendChannelThreadReply({
-          repositoryId,
-          messageId: acknowledgement.id,
-          authorId: `${candidate.userId}:${candidate.provider}`,
-          content: thought,
-          projectId,
-        });
-      }
+      // Held rather than posted. Writing the title and reasoning here is what
+      // made every task a thread, including "change this 1 to a 2" — the
+      // reply existed before anyone knew whether there was anything to
+      // follow. It is written the moment the run says something substantive,
+      // and never if it does not.
+      const pending = [`Task: ${opening.title}`, ...opening.thoughts];
       // Nothing runs a queued task on its own — it sits `submitted` until
       // somebody calls this. That is why a dispatched task produced no
       // events, no thinking, and an indicator that never stopped: the work
@@ -5794,6 +5806,8 @@ export class ApiGateway {
         // From zero: the task is new, so nothing already in the log carries
         // its id, and the store filters by it rather than this scanning.
         cursor: 0,
+        pending,
+        threaded: false,
       });
     } catch (error) {
       await this.appendChannelThreadReply({
@@ -6215,6 +6229,44 @@ export class ApiGateway {
           if (line === undefined) {
             continue;
           }
+          const terminal = CHANNEL_TERMINAL_EVENTS[record.event.type] !== undefined;
+          if (!watched.threaded) {
+            if (CHANNEL_CEREMONIAL_EVENTS.has(record.event.type)) {
+              // True of every run, so it says nothing about this one. Held, so
+              // that a task whose whole story is "started, done" does not get
+              // a thread on the strength of it.
+              watched.pending.push(line);
+              continue;
+            }
+            if (terminal) {
+              // Finished without ever needing to explain itself. The outcome
+              // goes in the channel beside the acknowledgement — two lines,
+              // no thread to open — and the held ceremony is dropped rather
+              // than written to a thread that now exists only to hold it.
+              await this.appendChannelEntry({
+                projectId: watched.projectId,
+                repositoryId: watched.repositoryId,
+                kind: "agent",
+                authorId: watched.authorId,
+                content: line,
+              });
+              this.watchedChannelTasks.delete(watched.taskId);
+              break;
+            }
+            // Something worth following. Everything held so far goes in first,
+            // in the order it happened, so the thread reads from the start.
+            for (const held of watched.pending) {
+              await this.appendChannelThreadReply({
+                projectId: watched.projectId,
+                repositoryId: watched.repositoryId,
+                messageId: watched.messageId,
+                authorId: watched.authorId,
+                content: held,
+              });
+            }
+            watched.pending = [];
+            watched.threaded = true;
+          }
           await this.appendChannelThreadReply({
             projectId: watched.projectId,
             repositoryId: watched.repositoryId,
@@ -6222,7 +6274,7 @@ export class ApiGateway {
             authorId: watched.authorId,
             content: line,
           });
-          if (CHANNEL_TERMINAL_EVENTS[record.event.type] !== undefined) {
+          if (terminal) {
             this.watchedChannelTasks.delete(watched.taskId);
             break;
           }
@@ -6232,14 +6284,27 @@ export class ApiGateway {
           // and must not leave the thread looking permanently mid-sentence,
           // so giving up is said out loud rather than done quietly.
           this.watchedChannelTasks.delete(watched.taskId);
-          await this.appendChannelThreadReply({
-            projectId: watched.projectId,
-            repositoryId: watched.repositoryId,
-            messageId: watched.messageId,
-            authorId: watched.authorId,
-            content:
-              "I could not finish this — I stopped hearing back from the run.",
-          });
+          const abandoned =
+            "I could not finish this — I stopped hearing back from the run.";
+          // Same rule as a terminal event: a run that never said anything
+          // worth a thread should not open one purely to admit it gave up.
+          if (watched.threaded) {
+            await this.appendChannelThreadReply({
+              projectId: watched.projectId,
+              repositoryId: watched.repositoryId,
+              messageId: watched.messageId,
+              authorId: watched.authorId,
+              content: abandoned,
+            });
+          } else {
+            await this.appendChannelEntry({
+              projectId: watched.projectId,
+              repositoryId: watched.repositoryId,
+              kind: "agent",
+              authorId: watched.authorId,
+              content: abandoned,
+            });
+          }
         }
       } catch (error) {
         process.stderr.write(
