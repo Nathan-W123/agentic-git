@@ -142,6 +142,13 @@ const THREAD_CONTEXT_LINES = 24;
 /** How often the thread is brought up to date while a task is running. */
 const CHANNEL_PROGRESS_INTERVAL_MS = 2000;
 /**
+ * How many of an agent's tasks, and how many recent channel lines, travel
+ * with a question it is asked in the channel. Enough to answer "what are you
+ * working on" and "what did you make of that", short enough that the context
+ * is not itself the cost of answering.
+ */
+const CHANNEL_ANSWER_CONTEXT = 8;
+/**
  * How often the auditor looks for new canonical promotions.
  *
  * Far slower than the progress poller above, which is keeping a person
@@ -231,6 +238,35 @@ export function summariseObjective(objective: string): string {
  * re-exported here, where callers have always found it.
  */
 export { AUDITOR_ROLE, isAuditorRole } from "./auditor.js";
+
+/**
+ * Who the agent is, said to the agent, before anything else.
+ *
+ * Without this an agent reads its own name in a message as a third party.
+ * Asked "@Apollo can you audit the codebase", Codex — which *is* Apollo —
+ * answered that "the Apollo integration isn't installed" and that it had
+ * requested installation, because to a model with no other context Apollo is
+ * a product you install. Every call sign this system hands out has the same
+ * problem: Icarus, Atlas and Apollo are all things before they are anybody.
+ *
+ * The owner's name is included because a channel holds several people's
+ * agents, and "you belong to Nathan" is what makes "what are you working on"
+ * answerable about the right person's work.
+ */
+export function agentIdentity(candidate: {
+  name: string;
+  role: string;
+  userName: string;
+}): string {
+  const role = candidate.role.trim();
+  return (
+    `You are "${candidate.name}", an AI agent in a team chat for a software ` +
+    `project. People address you by that name — a message beginning ` +
+    `"@${candidate.name}" is addressed to you, and is not a reference to some ` +
+    `product or integration of that name. You belong to ${candidate.userName}.` +
+    (role === "" ? "" : ` Your role in this channel is: ${role}.`)
+  );
+}
 
 export function withRoleContext(role: string, objective: string): string {
   const trimmedRole = role.trim();
@@ -441,9 +477,16 @@ const ACK_ONLY_RE =
  * and the inflections a channel message actually uses ("fix", "fixed",
  * "fixing", …). Deliberately concrete build/change/fix vocabulary — see
  * {@link looksLikeTaskRequest} for why this stays a word list.
+ *
+ * The examine family — audit, analyse, inspect, scan, assess — was missing,
+ * so "can you audit the codebase" was not a request for work at all. It fell
+ * through to being *answered*: a model with no repository in front of it
+ * discussed the idea of an audit instead of one being run. Reading code is
+ * work in this product even when it changes nothing, and the auditor exists
+ * precisely to do it.
  */
 const TASK_VERB_RE =
-  /\b(make|makes|made|making|fix|fixe[sd]|fixing|add|adds|added|adding|update|updates|updated|updating|change|changes|changed|changing|remove|removes|removed|removing|delete|deletes|deleted|deleting|implement|implements|implemented|implementing|build|builds|built|building|create|creates|created|creating|refactor|refactors|refactored|refactoring|investigate|investigates|investigated|investigating|debug|debugs|debugged|debugging|patch|patches|patched|patching|migrate|migrates|migrated|migrating|rename|renames|renamed|renaming|adjust|adjusts|adjusted|adjusting|tweak|tweaks|tweaked|tweaking|write|writes|wrote|writing|move|moves|moved|moving|deploy|deploys|deployed|deploying|revert|reverts|reverted|reverting|upgrade|upgrades|upgraded|upgrading|optimi[sz]e[sd]?|optimi[sz]ing|clean ?up|handle|handles|handled|handling|support|supports|supported|supporting|enable|enables|enabled|enabling|disable|disables|disabled|disabling|hook ?up|wire ?up|set ?up|review|reviews|reviewed|reviewing|swap|swaps|swapped|swapping|replace|replaces|replaced|replacing|bump|bumps|bumped|bumping|revise|revises|revised|revising|look into|check into)\b/iu;
+  /\b(make|makes|made|making|fix|fixe[sd]|fixing|add|adds|added|adding|update|updates|updated|updating|change|changes|changed|changing|remove|removes|removed|removing|delete|deletes|deleted|deleting|implement|implements|implemented|implementing|build|builds|built|building|create|creates|created|creating|refactor|refactors|refactored|refactoring|investigate|investigates|investigated|investigating|debug|debugs|debugged|debugging|patch|patches|patched|patching|migrate|migrates|migrated|migrating|rename|renames|renamed|renaming|adjust|adjusts|adjusted|adjusting|tweak|tweaks|tweaked|tweaking|write|writes|wrote|writing|move|moves|moved|moving|deploy|deploys|deployed|deploying|revert|reverts|reverted|reverting|upgrade|upgrades|upgraded|upgrading|optimi[sz]e[sd]?|optimi[sz]ing|clean ?up|handle|handles|handled|handling|support|supports|supported|supporting|enable|enables|enabled|enabling|disable|disables|disabled|disabling|hook ?up|wire ?up|set ?up|review|reviews|reviewed|reviewing|swap|swaps|swapped|swapping|replace|replaces|replaced|replacing|bump|bumps|bumped|bumping|revise|revises|revised|revising|look into|check into|audit|audits|audited|auditing|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|inspect|inspects|inspected|inspecting|scan|scans|scanned|scanning|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing)\b/iu;
 
 /**
  * A question about the status of existing work — asked *with* a task verb
@@ -6197,10 +6240,14 @@ export class ApiGateway {
   ): Promise<void> {
     const answer = await this.askAgent(
       candidate,
-      "You are in a team chat for a software project. Answer this message " +
-        "directly and briefly — two or three sentences at most, no markdown " +
-        "headings, no preamble.\n\n" +
-        question,
+      `${agentIdentity(candidate)}\n\n` +
+        "Answer this message directly and briefly — two or three sentences " +
+        "at most, no markdown headings, no preamble. You cannot read the " +
+        "repository from here, so answer from what is below; if the answer " +
+        "is not there, say so plainly rather than guessing, and never claim " +
+        "to have started or requested anything.\n\n" +
+        (await this.agentWorkContext(repositoryId, candidate)) +
+        `\n\nThe message: ${question}`,
       QUESTION_TIMEOUT_MS,
     );
     await this.appendChannelEntry({
@@ -6210,6 +6257,59 @@ export class ApiGateway {
       authorId: `${candidate.userId}:${candidate.provider}`,
       content: answer.text ?? explainAnswerFailure(answer.error),
     });
+  }
+
+  /**
+   * What this agent is actually doing here, for a question that asks.
+   *
+   * "What are you working on" was unanswerable — not because the answer was
+   * unknown but because nobody passed it. The channel sent the model the bare
+   * question with no history, no repository and no task list, so it mirrored
+   * the question back, which reads as a broken agent rather than an empty
+   * prompt. The store has known the answer the whole time.
+   *
+   * Its owner's tasks rather than all of them: several people's agents share
+   * a channel, and `dispatchOneMention` submits every task under the
+   * mentioned agent's owner, so that is the column that says whose work this
+   * is. Recent channel lines come too, because half of what gets asked in a
+   * channel is about what was just said in it.
+   */
+  private async agentWorkContext(
+    repositoryId: string,
+    candidate: ChannelMentionCandidate,
+  ): Promise<string> {
+    const [tasks, messages] = await Promise.all([
+      this.options.store
+        .listSubmittedTasks({ repositoryId })
+        .catch(() => [] as SubmittedTask[]),
+      this.options.store
+        .listChannelMessages(repositoryId, candidate.userId, {
+          limit: CHANNEL_ANSWER_CONTEXT,
+        })
+        .catch(() => []),
+    ]);
+    const mine = tasks
+      .filter((task) => task.submittedBy === candidate.userId)
+      .slice(0, CHANNEL_ANSWER_CONTEXT);
+    const work =
+      mine.length === 0
+        ? "You have no tasks in this repository yet."
+        : mine
+            .map(
+              (task) =>
+                `- [${task.status}] ${task.objective.replace(/\s+/gu, " ").slice(0, 160)}`,
+            )
+            .join("\n");
+    const recent = messages
+      .map((message) => message.content.replace(/\s+/gu, " ").trim())
+      .filter((line) => line.length > 0)
+      .slice(-CHANNEL_ANSWER_CONTEXT)
+      .map((line) => `- ${line.slice(0, 200)}`)
+      .join("\n");
+    return (
+      `Your tasks in this repository (newest first):\n${work}` +
+      (recent === "" ? "" : `\n\nRecent messages in this channel:\n${recent}`)
+    );
   }
 
   /**
@@ -6373,7 +6473,8 @@ export class ApiGateway {
       .slice(-THREAD_CONTEXT_LINES);
     const answer = await this.askAgent(
       candidate,
-      "You are in a team chat for a software project, answering a follow-up " +
+      `${agentIdentity(candidate)}\n\n` +
+        "You are answering a follow-up " +
         "question inside the thread for a task you worked on. Below is that " +
         "thread so far, oldest first. Answer the question directly and " +
         "briefly — three sentences at most, no markdown headings, no " +

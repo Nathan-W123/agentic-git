@@ -11,6 +11,7 @@ import {
 } from "@coord/persistence";
 
 import {
+  agentIdentity,
   ApiGateway,
   narrateTaskEvent,
   summariseObjective,
@@ -4341,6 +4342,106 @@ test("a token short enough to guess is refused at startup", async (t) => {
       }),
     /at least 24 characters/u,
   );
+});
+
+test("an agent is told its own name, so a mention of it is not a product", async (t) => {
+  // Asked "@Apollo can you audit the codebase", Codex — which *is* Apollo —
+  // replied that "the Apollo integration isn't installed" and that it had
+  // requested installation. With no other context, a call sign is a product.
+  const identity = agentIdentity({
+    name: "Apollo",
+    role: "auditor",
+    userName: "Nathan",
+  });
+  assert.match(identity, /You are "Apollo"/u);
+  assert.match(identity, /@Apollo" is addressed to you/u);
+  assert.match(identity, /not a reference to some product or integration/u);
+  assert.match(identity, /You belong to Nathan/u);
+  assert.match(identity, /Your role in this channel is: auditor/u);
+
+  // An unlabelled agent still gets a name, just no role sentence.
+  const bare = agentIdentity({ name: "Icarus", role: "  ", userName: "Sam" });
+  assert.match(bare, /You are "Icarus"/u);
+  assert.doesNotMatch(bare, /Your role in this channel/u);
+});
+
+test("asking an agent to audit dispatches work instead of discussing it", async (t) => {
+  // `audit` was not among the task verbs, so "can you audit the codebase" was
+  // classified as a question and answered by a model with no repository in
+  // front of it — which produced a chat about auditing rather than an audit.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "examined");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+
+  const roster = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`,
+  );
+  const agent = roster.data.agents[0];
+  const mention = `Codex (${String(session.user.displayName).split(" ")[0]})`;
+  assert.notEqual(agent, undefined);
+
+  const posted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages`,
+    { method: "POST", body: { content: `@${mention} can you audit the codebase` } },
+  );
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "asking for an audit never became work",
+  );
+  assert.match(runtime.submittedTasks[0]?.objective ?? "", /audit/iu);
+});
+
+test("a question in the channel carries the agent's own work with it", async (t) => {
+  // "@Apollo what are you working on" was answered with the question echoed
+  // back, because the prompt held the question and nothing else. The store
+  // knew the answer the whole time.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "asked");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "Still on the retry loop.";
+  const mention = `Codex (${String(session.user.displayName).split(" ")[0]})`;
+
+  // Give the agent a task to be working on.
+  await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    objective: "Fix the retry loop in worker.ts",
+    agentId: "test-agent",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages`,
+    { method: "POST", body: { content: `@${mention} what are you working on?` } },
+  );
+
+  await waitFor(
+    async () => runtime.chatPrompts.length > 0,
+    "the question never reached the agent",
+  );
+  const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
+  // Who it is, and what it is doing — the two things the bare prompt lacked.
+  assert.match(prompt, new RegExp(`You are "${mention.replace(/[()]/gu, "\\$&")}"`, "u"));
+  assert.match(prompt, /Fix the retry loop in worker\.ts/u);
+  assert.match(prompt, /Your tasks in this repository/u);
+  // And it is told not to invent, since it cannot read the repository here.
+  assert.match(prompt, /never claim to have started or requested anything/u);
 });
 
 test("a personal agent cannot be made auditor, an org-wide one can", async (t) => {
