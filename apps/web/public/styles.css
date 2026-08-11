@@ -19,14 +19,26 @@
 
   /* Neutral grey, not blue-black. The surfaces were tinted toward navy, which
      read as a colour choice competing with the accent rather than as a
-     background behind it. */
-  --bg: #191919;
-  --bg-panel: #1f1f1f;
-  --bg-card: #242424;
-  --bg-card-2: #292929;
-  --bg-inset: #151515;
-  --bg-hover: #2f2f2f;
-  --bg-active: #383838;
+     background behind it. Every value below is a true grey — equal parts, no
+     hue at all — so nothing competes with the accent or the status dots.
+
+     The conversation is the lightest surface and everything else steps down
+     away from it. This is the inverse of what the ramp used to do: the panels
+     were lighter than the room they framed, which put the eye on the chrome
+     and left the thing being read sitting in the darkest part of the screen.
+     Lightness is the cheapest way to say "look here", and there is only one
+     place worth spending it. */
+  --bg: #141414;
+  --bg-panel: #1a1a1a;
+  --bg-card: #202020;
+  --bg-card-2: #252525;
+  --bg-inset: #101010;
+  --bg-hover: #2c2c2c;
+  --bg-active: #343434;
+  /* The conversation column itself. Named separately rather than reusing
+     `--bg-card`, because a card is a thing drawn on a surface and this is the
+     surface — they move in opposite directions when either is adjusted. */
+  --bg-chat: #262626;
 
   --border: #333333;
   --border-soft: #2a2a2a;
@@ -3285,6 +3297,14 @@ svg {
   margin-top: 2px;
 }
 
+/* A stored credential that has stopped authenticating. Amber rather than red:
+   nothing is broken and nothing was lost, but every task given to this agent
+   will fail until somebody signs in again, so it cannot read as ordinary
+   secondary text. */
+.set-row .sr-sub.sr-warn {
+  color: var(--orange);
+}
+
 .set-row .sr-ctl {
   margin-left: auto;
   flex: none;
@@ -3326,20 +3346,20 @@ svg {
 /* -------------------------------------------------------------- chats ---- */
 
 /*
- * The Chats screen scopes its own accent rather than touching `--accent` at
- * the root: every other screen's purple stays exactly as it was, and every
- * component here — buttons, badges, the composer, mini-selects — re-themes
- * for free because they all already read the accent tokens by name. Status
- * colour keeps its separate meaning: green/red are untouched.
+ * No scoped accent here.
+ *
+ * This screen used to redefine `--accent` and its whole family to a fixed
+ * orange, which is why the roster tab, the button that adds a repository and
+ * the outline on the active channel stayed orange no matter what accent was
+ * chosen in Appearance — the picker worked everywhere except the screen people
+ * spend all their time on. A per-screen colour is a decision the product makes
+ * on the user's behalf, and there is already a control that says otherwise.
+ *
+ * Inheriting the root accent instead. Every component here reads the accent
+ * tokens by name, so they all follow the chosen colour for free. Status colour
+ * is unaffected either way: green, amber and red mean what they mean.
  */
 .chats-shell {
-  --accent: #c2622a;
-  --accent-bright: #e2925a;
-  --accent-dim: #9c4d1f;
-  --accent-wash: rgba(194, 98, 42, 0.14);
-  --accent-wash-strong: rgba(194, 98, 42, 0.22);
-  --accent-line: rgba(194, 98, 42, 0.4);
-
   display: flex;
   height: 100%;
   min-height: 0;
@@ -3879,6 +3899,11 @@ svg {
   display: flex;
   flex-direction: column;
   min-height: 0;
+  /* The one lit surface — see `--bg-chat`. On the column rather than on
+     `.chan-messages` so the header, search row and composer belong to the
+     conversation too, instead of the transcript reading as a panel floating
+     inside a darker frame. */
+  background: var(--bg-chat);
   /* The terminal drawer anchors to the bottom of the conversation column,
      not the viewport -- the roster and file panels sit alongside and should
      stay reachable while it is open. */
@@ -4836,6 +4861,52 @@ dialog.modal::backdrop {
     inset: 0;
     z-index: 69;
     background: rgba(4, 5, 9, 0.45);
+  }
+}
+
+/* Folding the two left columns away, wide screens only.
+ *
+ * Above the breakpoints below, both are real grid/flex columns and hiding one
+ * gives its width to the conversation. Below them they are off-canvas drawers
+ * already, and `display: none` here would fight the transform that slides them
+ * in — so the whole idea is scoped to the sizes where a column exists to fold.
+ *
+ * `.desk-only` is the pair of buttons that do it, hidden on phones for the
+ * same reason: there is nothing there to collapse. */
+@media (min-width: 901px) {
+  .app.nav-collapsed {
+    grid-template-columns: 1fr;
+  }
+
+  .app.nav-collapsed > .sidebar {
+    display: none;
+  }
+}
+
+@media (min-width: 601px) {
+  .chats-shell.chan-collapsed > .chan-sidebar {
+    display: none;
+  }
+}
+
+/* Two classes because the two panels stop being panels at different sizes:
+   the nav rail becomes a drawer at 900px, the channel list at 600px. A button
+   offering to fold away something that is already a drawer does nothing, and
+   looks broken for it. */
+.desk-only,
+.wide-only {
+  display: none;
+}
+
+@media (min-width: 601px) {
+  .desk-only {
+    display: inline-grid;
+  }
+}
+
+@media (min-width: 901px) {
+  .wide-only {
+    display: inline-grid;
   }
 }
 

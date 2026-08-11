@@ -133,6 +133,20 @@ export const state = {
   // transcript. Only meaningful at phone widths, where `.chan-sidebar` is
   // off-canvas the way the outer app `.sidebar` already is at `navOpen`.
   chanSidebarOpen: false,
+  /*
+   * The two left columns, folded away on wide screens.
+   *
+   * Separate from `navOpen`/`chanSidebarOpen`, which are the phone's
+   * off-canvas drawers: those answer "show me the thing that does not fit",
+   * and these answer "I know what is there, give the conversation the room".
+   * One pair of flags serving both would mean opening the drawer on a phone
+   * un-collapsing the desktop layout on the next resize.
+   *
+   * Remembered in this browser, because a collapsed panel that reappears on
+   * every reload is not collapsed, it is flickering.
+   */
+  navCollapsed: stored("ag.navCollapsed", "false") === "true",
+  chanCollapsed: stored("ag.chanCollapsed", "false") === "true",
   // Per-provider usage reports, filled lazily by the roster's hover.
   providerUsage: {},
   // Who is typing, keyed `repositoryId|threadId` so the main channel and
@@ -157,6 +171,8 @@ export const state = {
   dmThreads: {},
   /** The conversation open in the side panel, if any. */
   activeDm: undefined,
+  /** Your own agent, open in that same panel. */
+  activeAgentPanel: undefined,
   /** What is half-typed to them. */
   dmDraft: "",
   /** The project whose inbox has been fetched, so it is fetched once. */
@@ -940,12 +956,19 @@ export function agentColorFor(userId) {
   if (chosen !== undefined) {
     return chosen;
   }
-  const text = String(userId ?? "");
-  let hash = 0;
-  for (let index = 0; index < text.length; index += 1) {
-    hash = (hash * 31 + text.charCodeAt(index)) >>> 0;
-  }
-  return PALETTE[hash % PALETTE.length].value;
+  // Their accent before a hash of their id. Both are "a colour for this
+  // person", and one of them they actually picked — falling to the hash first
+  // meant somebody whose interface was purple had an orange agent, and the two
+  // colours sat next to each other in the same list looking like a mistake.
+  //
+  // And the shared default when they have chosen neither, rather than a hash
+  // of their id. The hash gave everybody a different colour for free, which
+  // sounds useful and reads as decoration: nothing in the interface means
+  // "orange", so an orange agent beside a purple highlight is just two colours
+  // disagreeing. Distinct colours are still available — they are one click in
+  // Appearance — but they are now something somebody chose rather than
+  // something their user id happened to hash to.
+  return validColor(appearance?.accent) ?? DEFAULT_ACCENT;
 }
 
 function appearanceFor(userId) {
