@@ -1878,6 +1878,18 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     message.changedFiles = [...files];
   }
 
+  public async setChannelMessageTask(
+    repositoryId: string,
+    messageId: string,
+    taskId: TaskId,
+  ): Promise<void> {
+    const message = this.channelMessages.get(messageId);
+    if (message === undefined || message.repositoryId !== repositoryId) {
+      return;
+    }
+    message.taskId = taskId;
+  }
+
   private channelAgentKey(repositoryId: string, agentId: string): string {
     return `${repositoryId}\0${agentId}`;
   }

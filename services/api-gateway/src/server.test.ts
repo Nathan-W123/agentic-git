@@ -3993,6 +3993,87 @@ test("a channel's role override reaches the roster and the objective a dispatche
   assert.equal(second.objective, "one more thing please");
 });
 
+test("a thread carries what its task changed, and keeps it", async (t) => {
+  // What the thread could not previously answer. The narration said "wrote
+  // changes to a.ts, b.ts and 2 more" once, in passing, and scrolled away;
+  // there was nothing a reader could come back to.
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "thread-changes");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please fix the retry loop" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 1);
+  const taskId = (await runtime.store.listSubmittedTasks({ repositoryId }))[0]?.id;
+  assert.ok(taskId !== undefined);
+
+  // The thread is joined to the work, so the summary stays attributable once
+  // the process that watched the run is gone.
+  const threadRoot = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.kind === "agent");
+  assert.equal(threadRoot?.taskId, taskId);
+
+  // What the run reports while it works.
+  await runtime.store.appendAudit(undefined, {
+    type: "workspace_changed",
+    taskId,
+    data: {
+      files: [
+        { path: "src/retry.ts", status: "modified" },
+        { path: "src/retry.test.ts", status: "added" },
+      ],
+      changed: ["src/retry.ts"],
+    },
+  });
+
+  await waitFor(async () => {
+    const message = (await runtime.store.listChannelMessages(repositoryId, ownerId)).find(
+      (entry) => entry.kind === "agent",
+    );
+    return (message?.changedFiles?.length ?? 0) > 0;
+  }, "the thread never picked up what the run was changing");
+
+  const listed = await owner.request(`${base}/messages`);
+  const thread = (listed.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+  assert.deepEqual(thread.changedFiles, [
+    { path: "src/retry.ts", status: "modified" },
+    { path: "src/retry.test.ts", status: "added" },
+  ]);
+
+  // The final set replaces the live one rather than merging into it: an agent
+  // that reverts itself leaves a file no longer changed, and a summary built
+  // by accumulating deltas would keep claiming an edit that is gone.
+  await runtime.store.appendAudit(undefined, {
+    type: "changeset_collected",
+    taskId,
+    data: {
+      changeSetId: "changeset_1",
+      files: ["src/retry.ts"],
+      changedFiles: [{ path: "src/retry.ts", status: "modified" }],
+    },
+  });
+  await waitFor(async () => {
+    const message = (await runtime.store.listChannelMessages(repositoryId, ownerId)).find(
+      (entry) => entry.kind === "agent",
+    );
+    return message?.changedFiles?.length === 1;
+  }, "the final changeset never replaced the live summary");
+});
+
 test("asking to install a system package is answered, not queued for ten minutes", async (t) => {
   // What happened instead: the task planned no files, negotiated scope it
   // could never use, and was cancelled ten minutes later with "session

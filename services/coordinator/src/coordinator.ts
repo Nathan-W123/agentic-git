@@ -1094,6 +1094,15 @@ export class Coordinator {
         {
           changeSetId: changeSet.id,
           files: changeSet.patches.map((patch) => patch.path),
+          // The same list with what happened to each file. `files` stays as
+          // it is because the narration reads it; this is the authoritative
+          // final set for the summary that hangs off the thread, which the
+          // live poll can only approximate — it stops when the agent does,
+          // and the last edits land between its final tick and this.
+          changedFiles: changeSet.patches.map((patch) => ({
+            path: patch.path,
+            status: patch.status,
+          })),
         },
       );
 

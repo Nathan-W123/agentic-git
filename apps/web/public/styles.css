@@ -3560,6 +3560,106 @@ svg {
   flex: none;
 }
 
+/* One dot, four meanings, all of them stated here rather than computed in the
+   two rosters that draw it — people and agents must not drift apart on what a
+   colour means. The ring is the panel background, so the dot reads as sitting
+   on the avatar rather than punched out of it. */
+.status-dot {
+  position: absolute;
+  right: -1px;
+  bottom: -1px;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 2px solid var(--panel);
+  box-sizing: content-box;
+}
+
+/* Green: a person is here, or an agent is mid-task. */
+.status-working {
+  background: var(--ok, #22c55e);
+}
+
+/* Amber: an agent that could be working and is not. */
+.status-idle {
+  background: var(--warn, #f59e0b);
+}
+
+/* Red, twice over: a person who is not here, and an agent only its owner can
+   task. Both are "do not expect an answer from this one right now". */
+.status-personal,
+.status-away {
+  background: var(--danger, #ef4444);
+}
+
+.rr-badge {
+  flex: none;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  border-radius: 9px;
+  background: var(--accent, #6366f1);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
+
+.dm-head-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+}
+
+.dm-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.dm-empty {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* Mine to the right, theirs to the left — the one convention every messaging
+   app shares, and the only thing telling the two apart at a glance. */
+.dm-msg {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  max-width: 85%;
+}
+
+.dm-mine {
+  align-self: flex-end;
+  align-items: flex-end;
+}
+
+.dm-bubble {
+  padding: 7px 11px;
+  border-radius: 14px;
+  background: var(--panel-2, rgba(127, 127, 127, 0.14));
+  font-size: 14px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.dm-mine .dm-bubble {
+  background: var(--accent, #6366f1);
+  color: #fff;
+}
+
+.dm-time {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
 .rr-usage {
   position: absolute;
   /* Width is stated, not inherited. Anchoring moved to the avatar so the card
@@ -3957,6 +4057,91 @@ svg {
   background: var(--accent-wash);
   border-color: var(--accent-line);
   color: var(--accent-bright);
+}
+
+/* What the work under a thread changed. Closed by default: the answer most
+   people want is the count, and the list is one click under it. */
+.cmsg-changes {
+  margin-top: 7px;
+  font-size: 12px;
+}
+
+.cmsg-changes > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
+  border-radius: 11px;
+  background: var(--bg-card-2);
+  border: 1px solid var(--border);
+  color: var(--text-2);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+/* Safari draws its own triangle through `::-webkit-details-marker`, which
+   `list-style: none` alone does not remove. */
+.cmsg-changes > summary::-webkit-details-marker {
+  display: none;
+}
+
+.cmsg-changes > summary:hover {
+  color: var(--text-1);
+  border-color: var(--accent-line);
+}
+
+.cmsg-files {
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  /* A large changeset must not stretch the message row without bound; the
+     list scrolls inside itself instead. */
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.cmsg-file {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 1px 0;
+  /* Paths are read by their tail — the filename — so a long one truncates at
+     the front rather than hiding the part that identifies it. */
+  direction: rtl;
+  text-align: left;
+}
+
+.cmsg-file-path {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  color: var(--text-2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  /* Back to normal reading order for the text itself; only the truncation
+     wants the other direction. */
+  direction: ltr;
+}
+
+.cmsg-file-mark {
+  flex: none;
+  width: 1ch;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11.5px;
+  direction: ltr;
+}
+
+.cmsg-file.added .cmsg-file-mark {
+  color: var(--ok, #3fb950);
+}
+
+.cmsg-file.modified .cmsg-file-mark {
+  color: var(--accent-bright);
+}
+
+.cmsg-file.deleted .cmsg-file-mark {
+  color: var(--danger, #f85149);
 }
 
 .cmsg-thread-link {

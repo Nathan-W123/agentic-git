@@ -42,6 +42,7 @@ import {
   projectBudgets,
   ROLE_CONTEXT_PREFIX,
   type ApprovalStatus,
+  type FilePatchStatus,
 } from "@coord/shared-types";
 
 import {
@@ -139,6 +140,37 @@ interface WatchedChannelTask {
  * about.
  */
 const THREAD_CONTEXT_LINES = 24;
+
+/**
+ * The changed-file list out of a run's audit event, in either shape it takes.
+ *
+ * `workspace_changed` reports under `files` while the agent is still working;
+ * `changeset_collected` reports the final set under `changedFiles`, keeping
+ * its own `files` as bare paths because the narration already reads that.
+ * Both are validated rather than trusted: this decorates a thread, and an
+ * event written by a newer version must cost the reader a dropdown at worst.
+ */
+function changedFilesFrom(
+  data: Record<string, unknown>,
+): Array<{ path: string; status: FilePatchStatus }> {
+  const candidate = Array.isArray(data["changedFiles"])
+    ? data["changedFiles"]
+    : Array.isArray(data["files"])
+      ? data["files"]
+      : [];
+  return (candidate as unknown[]).flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) {
+      return [];
+    }
+    const { path, status } = entry as { path?: unknown; status?: unknown };
+    if (typeof path !== "string" || path.length === 0) {
+      return [];
+    }
+    return status === "added" || status === "modified" || status === "deleted"
+      ? [{ path, status }]
+      : [];
+  });
+}
 
 /**
  * One channel line as a single line, for the two places a thread is read back
@@ -6823,6 +6855,12 @@ export class ApiGateway {
       // The thread gets a name and the agent's own opening reasoning, both
       // from one call so the wait is paid once. A task id says nothing to the
       // person who asked; "Task: architecture for chess" does.
+      // Which work this thread is the story of. Recorded rather than only
+      // remembered, so the file summary hanging off it stays attributable
+      // after the process that watched the run has gone.
+      await this.options.store
+        .setChannelMessageTask(repositoryId, acknowledgement.id, task.id)
+        .catch(() => undefined);
       const opening = await this.planOpening(candidate, task.objective);
       // Held rather than posted. Writing the title and reasoning here is what
       // made every task a thread, including "change this 1 to a 2" — the
@@ -8074,6 +8112,32 @@ export class ApiGateway {
               provider: watched.provider,
               reason: "The sign-in has expired. Reconnect this agent.",
             }).catch(() => undefined);
+          }
+          // The summary that hangs off the thread, kept up to date as the run
+          // reports. Written before the narration decision below, because it
+          // is worth having whether or not this particular event produces a
+          // line — a task whose only change is one already reported still has
+          // a file list worth showing.
+          //
+          // The whole set is stored each time rather than merged, because the
+          // run reports the whole set: a file can go from added to modified,
+          // or stop being changed at all when an agent reverts itself, and
+          // accumulating deltas here would leave the thread claiming edits
+          // that no longer exist.
+          if (
+            record.event.type === "workspace_changed" ||
+            record.event.type === "changeset_collected"
+          ) {
+            const files = changedFilesFrom(data);
+            if (files.length > 0) {
+              await this.options.store
+                .setChannelMessageChangedFiles(
+                  watched.repositoryId,
+                  watched.messageId,
+                  files,
+                )
+                .catch(() => undefined);
+            }
           }
           const line = narrateTaskEvent(record.event.type, data);
           if (line === undefined) {

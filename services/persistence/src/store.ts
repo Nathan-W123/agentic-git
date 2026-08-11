@@ -1298,6 +1298,20 @@ export interface CoordinationStore {
     messageId: string,
     files: readonly ChannelChangedFile[],
   ): Promise<void>;
+  /**
+   * Records which task a thread is the story of.
+   *
+   * Set after the fact rather than when the thread opens, because the thread
+   * opens first: the agent acknowledges in its own voice before anything slow
+   * runs, and the task does not exist until the submission that follows
+   * returns. Attaching it here is what lets the thread and the work be joined
+   * without the run still being in memory.
+   */
+  setChannelMessageTask(
+    repositoryId: string,
+    messageId: string,
+    taskId: TaskId,
+  ): Promise<void>;
   addChannelReply(input: AddChannelReplyInput): Promise<ChannelReply>;
   getChannelMessage(
     repositoryId: string,
