@@ -42,16 +42,28 @@ RUN npm install -g --allow-scripts=@anthropic-ai/claude-code \
 # passes it as PORT, and pinning COORD_PORT in the image would outrank it —
 # leaving the container listening where the router is not looking. Unset, the
 # entrypoint falls through to PORT, and to 4317 when nothing assigns one.
+# `HOME` is set explicitly because the entrypoint now starts as root and drops
+# to `node` itself. `USER node` used to imply /home/node; without it the
+# process would inherit root's home, and the vendor CLIs — which stage their
+# sign-in state under $HOME — would be writing somewhere `node` cannot.
 ENV NODE_ENV=production \
     COORD_PROJECT_ROOT=/data \
-    COORD_HOST=0.0.0.0
+    COORD_HOST=0.0.0.0 \
+    HOME=/home/node
 WORKDIR /app
 COPY --from=build /app /app
 COPY infrastructure/docker/control-plane-entrypoint.sh /usr/local/bin/coord-control-plane
 RUN chmod +x /usr/local/bin/coord-control-plane \
   && mkdir -p /data \
   && chown node:node /data
-USER node
+# No `USER node` here, and the entrypoint is why.
+#
+# A mounted volume replaces the directory created above with a fresh
+# filesystem owned by root, so a container that has already dropped privilege
+# cannot take ownership of it and dies on its first write. The entrypoint
+# starts as root for exactly long enough to hand the project root to `node`,
+# then runs the server as `node` through setpriv — so the process that serves
+# traffic is still unprivileged, and attaching a volume no longer breaks it.
 # No VOLUME instruction. It would declare the intent well enough for plain
 # Docker, but Railway rejects a Dockerfile containing one outright — the build
 # fails before it starts — and expects the mount to be attached to the service
