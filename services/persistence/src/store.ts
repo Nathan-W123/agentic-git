@@ -781,6 +781,15 @@ export interface AppendChannelMessageInput {
 export interface ChannelChangedFile {
   path: string;
   status: FilePatchStatus;
+  /**
+   * Lines added and removed, when the run reported enough to count them.
+   *
+   * Optional because the shape predates them and older rows have none — a
+   * thread from before this stays a list of paths rather than becoming a list
+   * of paths claiming every file changed nothing.
+   */
+  added?: number;
+  removed?: number;
 }
 
 const CHANGED_FILE_STATUSES: readonly FilePatchStatus[] = [

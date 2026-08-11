@@ -644,6 +644,19 @@ function changedFilesBlock(entry) {
   if (files.length === 0) {
     return "";
   }
+  // Counts are per file and summed for the header. Absent on rows written
+  // before they were reported, and shown as nothing rather than as zero: a
+  // file that changed no lines is a different claim from one nobody counted.
+  const num = (value) => (typeof value === "number" ? value : undefined);
+  const tally = (key) =>
+    files.reduce((total, file) => total + (num(file[key]) ?? 0), 0);
+  const totalAdded = tally("added");
+  const totalRemoved = tally("removed");
+  const counts = (added, removed) =>
+    added === undefined && removed === undefined
+      ? ""
+      : `<span class="cf-stat"><span class="cf-add">+${added ?? 0}</span><span
+           class="cf-del">−${removed ?? 0}</span></span>`;
   const rows = [...files]
     .sort(
       (left, right) =>
@@ -655,11 +668,22 @@ function changedFilesBlock(entry) {
       (file) =>
         `<li class="cmsg-file ${esc(file.status)}"><span class="cmsg-file-mark">${
           CHANGED_FILE_MARK[file.status] ?? "~"
-        }</span><span class="cmsg-file-path">${esc(file.path)}</span></li>`,
+        }</span><span class="cmsg-file-path">${esc(file.path)}</span>${counts(
+          num(file.added),
+          num(file.removed),
+        )}</li>`,
     )
     .join("");
   return `<details class="cmsg-changes">
-    <summary>${files.length} file${files.length === 1 ? "" : "s"} changed</summary>
+    <summary><span class="cf-caret">${icon("chevronRight")}</span>
+      <span class="cf-title">${files.length} file${
+        files.length === 1 ? "" : "s"
+      } changed</span>
+      ${
+        totalAdded === 0 && totalRemoved === 0
+          ? ""
+          : counts(totalAdded, totalRemoved)
+      }</summary>
     <ul class="cmsg-files">${rows}</ul>
   </details>`;
 }

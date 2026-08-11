@@ -4091,18 +4091,69 @@ svg {
   font-size: 12px;
 }
 
-.cmsg-changes > summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 2px 8px;
-  border-radius: 11px;
-  background: var(--bg-card-2);
+/* A panel rather than a pill. The list underneath is the point — a header
+   that reads as a small button made the files feel like an aside, when they
+   are the most concrete thing a thread has to say about its work. */
+.cmsg-changes {
   border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+  overflow: hidden;
+}
+
+.cmsg-changes > summary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  background: var(--bg-card);
   color: var(--text-2);
   cursor: pointer;
   list-style: none;
   user-select: none;
+}
+
+/* Points down once open, the direction the list is about to appear in. */
+.cf-caret {
+  display: inline-flex;
+  flex: none;
+  color: var(--text-3);
+  transition: transform 0.12s ease;
+}
+
+.cmsg-changes[open] .cf-caret {
+  transform: rotate(90deg);
+}
+
+.cf-caret svg {
+  width: 13px;
+  height: 13px;
+}
+
+.cf-title {
+  font-weight: 500;
+}
+
+/* Additions then deletions, in that order everywhere: the header, every row,
+   and the diff itself. Tabular figures so the columns line up down the list
+   instead of shifting with the digits. */
+.cf-stat {
+  margin-left: auto;
+  display: inline-flex;
+  gap: 8px;
+  flex: none;
+  direction: ltr;
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.cf-add {
+  color: var(--ok, #3fb950);
+}
+
+.cf-del {
+  color: var(--danger, #f85149);
 }
 
 /* Safari draws its own triangle through `::-webkit-details-marker`, which
@@ -4117,8 +4168,8 @@ svg {
 }
 
 .cmsg-files {
-  margin: 6px 0 0;
-  padding: 0;
+  margin: 0;
+  padding: 4px 0;
   list-style: none;
   /* A large changeset must not stretch the message row without bound; the
      list scrolls inside itself instead. */
@@ -4128,25 +4179,32 @@ svg {
 
 .cmsg-file {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
-  padding: 1px 0;
-  /* Paths are read by their tail — the filename — so a long one truncates at
-     the front rather than hiding the part that identifies it. */
-  direction: rtl;
-  text-align: left;
+  padding: 3px 10px;
+  /* Explicitly left-to-right. The front-truncation trick below needs `rtl`,
+     and it used to sit here on the row — which also reverses a flex row, so
+     adding a third child put the line counts on the wrong side. Scoped to the
+     path, it truncates the same way and lays out predictably. */
+  direction: ltr;
 }
 
 .cmsg-file-path {
+  flex: 1;
+  min-width: 0;
   font-family: var(--mono, ui-monospace, monospace);
   font-size: 11.5px;
   color: var(--text-2);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  /* Back to normal reading order for the text itself; only the truncation
-     wants the other direction. */
-  direction: ltr;
+  /* Paths are read by their tail — the filename — so a long one loses its
+     front rather than the part that identifies it. `rtl` puts the ellipsis at
+     the start; `plaintext` keeps the characters themselves in reading order,
+     so the path is not rendered backwards to get it. */
+  direction: rtl;
+  unicode-bidi: plaintext;
+  text-align: left;
 }
 
 .cmsg-file-mark {
