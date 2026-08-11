@@ -2516,6 +2516,19 @@ export async function acceptWorkResult(
       leaseId: leaseAtStart.id,
       changeSetId: promoted.id,
       files: promoted.patches.map((patch) => patch.path),
+      // The same set with each file's status, which is what a thread hangs its
+      // "N files changed" summary off. `files` stays bare paths because the
+      // channel narration reads it that way and says them in a sentence.
+      //
+      // The gateway has documented this field as the authoritative final list
+      // since the summary was written, and nothing ever emitted it — so the
+      // only shape that ever reached a thread was the live one the coordinator
+      // polls out mid-run, which exists only while the run is being watched.
+      // That is why a finished task could end up with no list at all.
+      changedFiles: promoted.patches.map((patch) => ({
+        path: patch.path,
+        status: patch.status,
+      })),
       ...(split.deferred.length === 0
         ? {}
         : {
