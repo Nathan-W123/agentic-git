@@ -19,6 +19,40 @@ set -eu
 # `docker run` with no volume still works.
 : "${COORD_PROJECT_ROOT:=${RAILWAY_VOLUME_MOUNT_PATH:-/data}}"
 mkdir -p "$COORD_PROJECT_ROOT"
+
+# A mounted volume arrives owned by root, and this server runs as `node`.
+#
+# The image creates `/data` and gives it to `node` at build time, which is
+# enough while the directory is part of the image. Attaching a volume replaces
+# it: the mount is a fresh filesystem owned by root:root, the build-time
+# ownership is no longer in the picture, and the first write — `coord init`
+# creating `.coordinator/` — fails with EACCES. `set -e` then ends the
+# process, the platform restarts it, and it fails the same way. Attaching the
+# volume is what breaks the container, which is the opposite of the intent.
+#
+# So the entrypoint starts as root, hands the project root to `node`, and
+# drops privilege for everything after. The chown is guarded on the ownership
+# actually being wrong: it is one recursive pass the first time a volume is
+# attached, and a stat on every boot after that, rather than a walk of every
+# canonical repository on every restart.
+RUN_AS=""
+if [ "$(id -u)" = "0" ]; then
+  node_uid="$(id -u node)"
+  node_gid="$(id -g node)"
+  if [ "$(stat -c %u "$COORD_PROJECT_ROOT")" != "$node_uid" ]; then
+    chown -R "$node_uid:$node_gid" "$COORD_PROJECT_ROOT"
+  fi
+  if command -v setpriv >/dev/null 2>&1; then
+    RUN_AS="setpriv --reuid=$node_uid --regid=$node_gid --init-groups"
+  else
+    # Rather than fail to start. Running as root is worse than running as
+    # `node`, and both are better than a container that cannot boot — the
+    # vendor CLIs inside already run with their own sandbox disabled, so the
+    # boundary this gives up is thinner than it looks.
+    echo "coord: setpriv unavailable; continuing as root" >&2
+  fi
+fi
+
 cd "$COORD_PROJECT_ROOT"
 
 # Codex's scoped-write sandbox needs a platform helper this image does not
@@ -37,7 +71,9 @@ cd "$COORD_PROJECT_ROOT"
 export COORD_CODEX_SANDBOX
 
 if [ ! -f "$COORD_PROJECT_ROOT/.coordinator/config.json" ]; then
-  node /app/apps/cli/dist/index.js init
+  # Unprivileged, so the files it creates belong to the user that will be
+  # reading and rewriting them for the life of the volume.
+  $RUN_AS node /app/apps/cli/dist/index.js init
 fi
 
-exec node /app/apps/web/dist/index.js
+exec $RUN_AS node /app/apps/web/dist/index.js
