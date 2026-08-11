@@ -4496,6 +4496,69 @@ test("a run that cannot start says so, instead of an hour of silence", async (t)
   assert.match(said, /already mapped to a different canonical repository/u);
 });
 
+test("a mention nobody answers to says so, instead of vanishing", async (t) => {
+  // The browser roster layers this account's own agents on top of the
+  // server's, so an agent connected in a way that stored no per-user
+  // credential is offered by the composer's autocomplete while
+  // `connectionsFor` has never heard of it. Every mention then disappeared,
+  // in every channel, with nothing to distinguish "thinking" from "was never
+  // there".
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "nobodyhome");
+  // Deliberately no connections: this is the state being reproduced.
+  runtime.chatConnections.set(ownerId, []);
+
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages`,
+    { method: "POST", body: { content: "@Notus can you run an audit" } },
+  );
+
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(repo, ownerId);
+    return messages.some((message) =>
+      message.content.includes("Nobody here answers to that"),
+    );
+  }, "the channel stayed silent about an unresolvable mention");
+
+  const said = (await runtime.store.listChannelMessages(repo, ownerId))
+    .map((message) => message.content)
+    .join("\n");
+  // It names the way out, not just the problem.
+  assert.match(said, /this channel has no agents the server can reach/u);
+  assert.match(said, /add it to this channel/u);
+  assert.equal(runtime.submittedTasks.length, 0);
+});
+
+test("an ordinary @ in a message is not treated as addressing anyone", async (t) => {
+  // The silence was right for these, which is why it was there. An email
+  // address or a scoped package must not draw an answer about the roster.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "atsign");
+  runtime.chatConnections.set(ownerId, []);
+
+  for (const content of [
+    "mail me at nathan@example.com when it lands",
+    "run npm i @scope/package first",
+  ]) {
+    await owner.request(
+      `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages`,
+      { method: "POST", body: { content } },
+    );
+  }
+  await new Promise((resolve) => setTimeout(resolve, 250));
+
+  const said = (await runtime.store.listChannelMessages(repo, ownerId))
+    .map((message) => message.content)
+    .join("\n");
+  assert.doesNotMatch(said, /Nobody here answers to that/u);
+});
+
 test("a personal agent cannot be made auditor, an org-wide one can", async (t) => {
   // An auditor spends its owner's account continuously and unprompted, and
   // promotion needs only `manage_project` — so without this rule an admin
