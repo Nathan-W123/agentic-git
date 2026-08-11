@@ -399,6 +399,34 @@ export async function taskCancel(
   return await store.cancelSubmittedTask(taskId);
 }
 
+/**
+ * Which sandbox Codex's edit phase runs under, with the deployment allowed
+ * the last word.
+ *
+ * `COORD_CODEX_SANDBOX` exists because the answer is a property of the host,
+ * not of the project: the same repository is correct with `workspace-write`
+ * on a laptop and unrunnable with it inside a container. Codex's scoped-write
+ * sandbox needs a platform helper, and where that helper is missing it does
+ * not degrade gracefully — it refuses filesystem access outright, so the run
+ * reports that its "repository access request was rejected" and reads
+ * nothing. A container is already the isolation the sandbox would provide,
+ * which is the one case the adapter documents `danger-full-access` for.
+ *
+ * The environment wins over the config file so an image can set it once for
+ * every project it will ever run, and an unrecognised value is ignored rather
+ * than failing the run — a typo in a deployment variable should not take the
+ * coordinator down.
+ */
+export function codexExecutionSandbox(
+  configured: "workspace-write" | "danger-full-access" | undefined,
+): "workspace-write" | "danger-full-access" | undefined {
+  const fromEnv = process.env["COORD_CODEX_SANDBOX"]?.trim();
+  if (fromEnv === "workspace-write" || fromEnv === "danger-full-access") {
+    return fromEnv;
+  }
+  return configured;
+}
+
 function createAdapter(
   agent: AgentConfig,
   agentId: string,
@@ -433,6 +461,7 @@ function createAdapter(
           "docs/architecture/vendor-cli-sandboxing.md",
       );
     }
+    const executionSandbox = codexExecutionSandbox(agent.executionSandbox);
     return new CodexAdapter({
       agentId,
       repository,
@@ -449,6 +478,7 @@ function createAdapter(
       ...(agent.windowsSandbox === undefined
         ? {}
         : { windowsSandbox: agent.windowsSandbox }),
+      ...(executionSandbox === undefined ? {} : { executionSandbox }),
       ...(launchEnv === undefined ? {} : { env: launchEnv }),
     });
   }

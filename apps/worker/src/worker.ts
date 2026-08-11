@@ -20,6 +20,7 @@ import {
   WORKER_PROTOCOL_VERSION,
   type WorkAssignment,
 } from "@coord/cli/worker-operations";
+import { codexExecutionSandbox } from "@coord/cli/commands";
 import type { AgentConfig, CoordinatorProject } from "@coord/cli/project";
 import { DEFAULT_PROJECT_ID } from "@coord/persistence";
 import { GitClient } from "@coord/repository-service";
@@ -868,6 +869,9 @@ export class Worker {
             "remove the sandbox from this project.",
         );
       }
+      const workerExecutionSandbox = codexExecutionSandbox(
+        agent.executionSandbox,
+      );
       return new CodexAdapter({
         agentId,
         repository: {
@@ -889,6 +893,12 @@ export class Worker {
         ...(agent.windowsSandbox === undefined
           ? {}
           : { windowsSandbox: agent.windowsSandbox }),
+        // Same host-decides-the-sandbox rule the in-process runner applies —
+        // a remote worker is a different machine again, and the one that runs
+        // Codex is the only one that knows whether its sandbox helper exists.
+        ...(workerExecutionSandbox === undefined
+          ? {}
+          : { executionSandbox: workerExecutionSandbox }),
         ...(agent.env === undefined ? {} : { env: { ...process.env, ...agent.env } }),
         ...(this.options.codexRunner === undefined
           ? {}

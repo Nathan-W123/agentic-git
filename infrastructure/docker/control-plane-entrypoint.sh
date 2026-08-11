@@ -21,6 +21,21 @@ set -eu
 mkdir -p "$COORD_PROJECT_ROOT"
 cd "$COORD_PROJECT_ROOT"
 
+# Codex's scoped-write sandbox needs a platform helper this image does not
+# have, and it does not degrade when the helper is missing — it refuses
+# filesystem access outright, so a run reports that its "repository access
+# request was rejected", inspects nothing, and returns an empty changeset that
+# the pipeline then records as a failed task.
+#
+# The confinement it would provide is already here: this is a container, with
+# one task's worktree in it and nothing else worth reaching. Turning Codex's
+# own sandbox off inside another sandbox is the case the adapter documents
+# `danger-full-access` for, and it is set here — in the image — rather than in
+# a project's config, because it is a fact about this host and would be wrong
+# on the laptop that shares the repository.
+: "${COORD_CODEX_SANDBOX:=danger-full-access}"
+export COORD_CODEX_SANDBOX
+
 if [ ! -f "$COORD_PROJECT_ROOT/.coordinator/config.json" ]; then
   node /app/apps/cli/dist/index.js init
 fi

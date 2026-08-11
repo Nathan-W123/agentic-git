@@ -57,6 +57,19 @@ export interface CodexAgentConfig extends AgentConfigBase {
   command?: string;
   /** Native Windows sandbox backend. Defaults to the stronger `elevated` mode. */
   windowsSandbox?: "elevated" | "unelevated";
+  /**
+   * Sandbox the edit phase runs under. Defaults to `workspace-write`, which
+   * confines Codex's writes to the task workspace and is the right answer on
+   * a developer machine.
+   *
+   * `workspace-write` needs a platform sandbox helper, and where that helper
+   * is missing Codex does not fall back — it refuses filesystem access
+   * outright, so a run reports that its "repository access request was
+   * rejected" and inspects nothing. A container is already the isolation the
+   * sandbox would be providing, so `danger-full-access` is the correct
+   * setting there and wrong nearly everywhere else.
+   */
+  executionSandbox?: "workspace-write" | "danger-full-access";
 }
 
 /**
@@ -318,12 +331,24 @@ function assertAgent(name: string, value: unknown): AgentConfig {
         `agent "${name}" needs "windowsSandbox" to be "elevated" or "unelevated"`,
       );
     }
+    if (
+      codexAgent.executionSandbox !== undefined &&
+      codexAgent.executionSandbox !== "workspace-write" &&
+      codexAgent.executionSandbox !== "danger-full-access"
+    ) {
+      fail(
+        `agent "${name}" needs "executionSandbox" to be "workspace-write" or "danger-full-access"`,
+      );
+    }
     return {
       adapter: "codex",
       ...(agent.command === undefined ? {} : { command: agent.command }),
       ...(codexAgent.windowsSandbox === undefined
         ? {}
         : { windowsSandbox: codexAgent.windowsSandbox }),
+      ...(codexAgent.executionSandbox === undefined
+        ? {}
+        : { executionSandbox: codexAgent.executionSandbox }),
       ...common,
     };
   }
