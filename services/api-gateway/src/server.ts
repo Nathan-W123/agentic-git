@@ -338,7 +338,19 @@ const CHANNEL_PROGRESS_MAX_MS = 60 * 60 * 1000;
  */
 const CHANNEL_CEREMONIAL_EVENTS = new Set(["task_started", "agent_progress"]);
 
+/**
+ * How much of an agent's own account of its work the ending may carry.
+ *
+ * Long enough for the two or three sentences the prompt asks for, short
+ * enough that a model which writes an essay does not paste it into a channel
+ * everybody is reading.
+ */
+const TERMINAL_SUMMARY_MAX = 400;
+
 const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
+  // The fallback, for a run whose agent explained nothing — see the
+  // `canonical_promoted` case in `narrateTaskEvent`, which prefers the
+  // agent's own words and only lands here when there are none worth reading.
   canonical_promoted: "Done — the change is in canonical.",
   // Work that finished by reporting rather than by changing anything. An
   // ending, and not a failure — see `readsAsReportRequest`.
@@ -467,6 +479,43 @@ export function narrateTaskEvent(
         : `Validation came back ${String(data["status"] ?? "unresolved")}.`;
     case "approval_requested":
       return "Waiting on a human review before this can land.";
+    case "canonical_promoted": {
+      // What the agent says it did, rather than the one sentence that was
+      // true of every task this system has ever finished.
+      //
+      // "Done — the change is in canonical." says the pipeline worked. It
+      // does not say what changed, and it was identical under every request,
+      // so a reader following two tasks saw the same ending twice and learned
+      // nothing from either. The agent wrote an account of its own work at
+      // `collectChanges` and it travelled all the way to promotion unread.
+      const written =
+        typeof data["agentExplanation"] === "string"
+          ? collapseWhitespace(data["agentExplanation"])
+          : "";
+      // The adapters' own fallback for a model that explained nothing is the
+      // vendor name and the objective handed back. The objective is already
+      // the thread's title, so that is the canned line with extra steps —
+      // better to say the plain thing than to dress it up as a summary.
+      const isAdapterFallback = /^(?:claude|codex|gemini)\s+completed\s/iu.test(
+        written,
+      );
+      if (written.length === 0 || isAdapterFallback) {
+        return CHANNEL_TERMINAL_EVENTS[type];
+      }
+      // Bounded, like every other line this writes: a model that ignores
+      // "one sentence" must not turn the ending into an essay.
+      const summary =
+        written.length > TERMINAL_SUMMARY_MAX
+          ? `${written.slice(0, TERMINAL_SUMMARY_MAX).trimEnd()}…`
+          : written;
+      // The count, not the names — the reader who wants those is one click
+      // away, and an ending that lists a dozen paths stops being an ending.
+      return files.length === 0
+        ? summary
+        : `${summary} (${String(files.length)} file${
+            files.length === 1 ? "" : "s"
+          } changed)`;
+    }
     case "task_reported": {
       // The agent's own words are the deliverable here — the report *is* the
       // outcome, where for a change the outcome is the diff.
