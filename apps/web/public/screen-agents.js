@@ -554,13 +554,36 @@ export async function connectAgent(providerId, rerender) {
     (entry) => entry.id === providerId,
   )?.signInFlow;
   if (signInFlow !== undefined) {
-    const outcome = await signInAgent(providerId, signInFlow, rerender);
-    if (outcome === true || outcome === null) {
-      return;
+    // A failed sign-in used to fall through to the paste box, which answered
+    // "that did not work" by asking somebody to go and find an OAuth token on
+    // another machine. That is a harder job than the one that just failed, and
+    // it arrived unasked — so the commonest reason a connection failed (a
+    // mistimed tab, a closed window, a slow vendor) turned into a research
+    // task instead of a second press of the button.
+    //
+    // Offering the retry in a loop, because retrying is what actually fixes
+    // it. Closing the dialog is how somebody says they are done.
+    for (;;) {
+      const outcome = await signInAgent(providerId, signInFlow, rerender);
+      if (outcome === true || outcome === null) {
+        return;
+      }
+      const again = await showModal({
+        title: "Connection failed",
+        subtitle: `${agentLabelOf(providerId)} did not finish signing in.`,
+        confirm: "Try again",
+        cancel: "Not now",
+        body: `<p class="modal-hint">Nothing was saved, and nothing on your
+          account changed. This is usually the sign-in tab being closed or
+          taking too long — starting it again is normally all it needs.</p>`,
+      });
+      if (again === undefined) {
+        return;
+      }
     }
-    // Falling through on failure rather than dead-ending: a credential still
-    // works, and the reason the sign-in failed has already been shown.
   }
+  // Only providers with no sign-in flow of their own reach here. For those a
+  // pasted credential is the only way in, so it stays.
 
   const help = CREDENTIAL_HELP[providerId] ?? {
     hint: "Paste a credential for this provider.",

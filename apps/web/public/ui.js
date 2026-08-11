@@ -203,24 +203,40 @@ export function icon(name, extra = "") {
 }
 
 /**
- * The product mark: a small character rather than a geometric logo.
+ * The product mark: two loops woven through each other.
  *
- * Lattice's whole subject is agents working alongside people, so the mark is
- * one of the same doodles the agents are drawn with — the lattice it sits in
- * is the coordination, and the face is what is being coordinated.
+ * A lattice is the interlocking, so the mark is the interlocking and nothing
+ * else — no face, no badge, no enclosing shape. Two identical rounded loops
+ * crossed at a right angle read as four lobes and a weave, which is the whole
+ * idea in the fewest possible strokes.
+ *
+ * The weave is cut with a mask rather than drawn with a background-coloured
+ * halo under the crossing strand. A halo has to know what colour it is sitting
+ * on, and this mark sits on four different surfaces — the sidebar, the sign-in
+ * card, the mobile header, a favicon — so it would be wrong on three of them.
+ * The mask removes the pixels instead, which is true against anything.
+ *
+ * `currentColor` for the same reason: the mark takes the colour of the text
+ * beside it, so it is white on dark and near-black on light without a second
+ * definition, and carries no hue of its own.
  */
 export function brandMark(size = 34) {
-  return `<svg class="brand-mark" width="${size}" height="${size}" viewBox="0 0 40 40" fill="none" aria-hidden="true">
-    <path d="M20 3.2 34 11v18l-14 7.8L6 29V11z" fill="var(--accent-wash)"
-      stroke="var(--accent)" stroke-width="1.5" stroke-linejoin="round"/>
-    <path d="M13.5 15.5h13a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-13a2 2 0 0 1-2-2v-6a2 2 0 0 1 2-2z"
-      fill="none" stroke="var(--accent)" stroke-width="1.6"/>
-    <path d="M20 11.4v4.1" stroke="var(--accent)" stroke-width="1.5" stroke-linecap="round"/>
-    <circle cx="20" cy="10.4" r="1.5" fill="var(--accent-bright)"/>
-    <circle cx="16.6" cy="19.9" r="1.5" fill="var(--accent-bright)"/>
-    <circle cx="23.4" cy="19.9" r="1.5" fill="var(--accent-bright)"/>
-    <path d="M17.4 23.2c1.6 1 3.6 1 5.2 0" stroke="var(--accent-bright)"
-      stroke-width="1.5" stroke-linecap="round"/>
+  return `<svg class="brand-mark" width="${size}" height="${size}"
+    viewBox="0 0 48 48" fill="none" aria-hidden="true">
+    <defs>
+      <mask id="brand-weave" maskUnits="userSpaceOnUse"
+        x="0" y="0" width="48" height="48">
+        <rect width="48" height="48" fill="#fff"/>
+        <rect x="6" y="15.5" width="36" height="17" rx="8.5"
+          transform="rotate(-45 24 24)" fill="none" stroke="#000"
+          stroke-width="7.6"/>
+      </mask>
+    </defs>
+    <rect x="6" y="15.5" width="36" height="17" rx="8.5"
+      transform="rotate(45 24 24)" mask="url(#brand-weave)"
+      stroke="currentColor" stroke-width="3.4"/>
+    <rect x="6" y="15.5" width="36" height="17" rx="8.5"
+      transform="rotate(-45 24 24)" stroke="currentColor" stroke-width="3.4"/>
   </svg>`;
 }
 

@@ -505,6 +505,16 @@ function chanHeader(repository, repositoryId) {
          throws only when this header renders. -->
     <button type="button" class="icon-btn chan-sidebar-btn" data-act="chan-sidebar-toggle"
       title="Channels &amp; people" aria-label="Channels &amp; people">${icon("list")}</button>
+    <!-- The desktop counterpart of the button above: on a wide screen the
+         channel list is a column rather than a drawer, so folding it away is
+         a different act from opening it and gets its own control. Hidden
+         below the breakpoint where the drawer takes over. -->
+    <button type="button" class="icon-btn desk-only" data-act="chan-collapse-toggle"
+      title="${state.chanCollapsed ? "Show channels &amp; people" : "Hide channels &amp; people"}"
+      aria-pressed="${state.chanCollapsed === true}"
+      aria-label="${state.chanCollapsed ? "Show channels and people" : "Hide channels and people"}">${icon(
+        "columns",
+      )}</button>
     ${icon("chatBubble", 'class="ch-hash"')}
     <div class="ch-title">
       <div class="ch-name">${esc(repositoryId ?? "")}</div>
@@ -1643,7 +1653,7 @@ export function renderChats() {
   const repository = currentRepository();
   const repositoryId = activeChannelId();
 
-  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}">
+  return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}">
     ${chanSidebar(repositoryId)}
     ${
       // Phone-only off-canvas drawer for `.chan-sidebar` — see the toggle

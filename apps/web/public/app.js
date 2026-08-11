@@ -513,7 +513,14 @@ const NAV = [
   // Chats is the landing view now, so its icon — a chat bubble rather than a
   // house — is the leftmost, primary item in the rail.
   { route: "chats", label: "Chats", iconName: "chatBubble" },
-  { route: "agents", label: "My Agents", iconName: "robot" },
+  // No "My Agents" here. Connecting an agent is an account-level act, not a
+  // place to spend time, and it now sits in Settings beside the other things
+  // that belong to the account. Talking to your own agent moved to the channel
+  // panel, which is where it was wanted.
+  //
+  // The route is deliberately still reachable by URL — the Task, Files and
+  // Metrics views live there and nothing has replaced them yet, so this drops
+  // the item without deleting the screen behind it.
   { route: "notifications", label: "Notifications", iconName: "bell" },
   { route: "settings", label: "Settings", iconName: "gear" },
 ];
@@ -527,7 +534,7 @@ function sidebar() {
   return `<aside class="sidebar">
     <a class="brand" href="#chats">
       ${brandMark(34)}
-      <span class="brand-text"><b>Lattice</b><span>Coordinator</span></span>
+      <span class="brand-text"><b>Lattice</b></span>
     </a>
 
     ${
@@ -586,10 +593,21 @@ function sidebar() {
            asking for one from under the project meant asking which repository
            first; the channel's own header is where somebody already knows the
            answer. -->
-      <div class="sys-line">
-        <span class="dot ${state.health === undefined ? "grey" : "green"}"></span>
-        ${state.health === undefined ? "Control plane unreachable" : "All systems operational"}
-      </div>
+      ${
+        // Silent while everything works. "All systems operational" was a line
+        // that never changed, which is a line nobody reads — and it cost a
+        // permanent row at the bottom of the sidebar to say nothing.
+        //
+        // The failure half stays. Losing the control plane is the one thing
+        // this corner knew that the rest of the screen cannot show, and a
+        // deployment that has gone unreachable failing silently would be worse
+        // than the noise this removes.
+        state.health === undefined
+          ? `<div class="sys-line">
+              <span class="dot grey"></span>Control plane unreachable
+            </div>`
+          : ""
+      }
     </div>
   </aside>`;
 }
@@ -600,8 +618,23 @@ function topbar() {
   return `<header class="topbar">
     <button class="icon-btn menu-btn" data-act="nav-toggle" title="Menu"
       aria-label="Menu">${icon("menu")}</button>
+    <!-- Folds the nav rail away on a wide screen. The button above is the
+         phone's drawer handle and stays that; this one is the only way back
+         once the rail is hidden, so it lives outside the thing it hides. -->
+    <button class="icon-btn wide-only" data-act="nav-collapse-toggle"
+      title="${state.navCollapsed ? "Show the sidebar" : "Hide the sidebar"}"
+      aria-pressed="${state.navCollapsed === true}"
+      aria-label="${state.navCollapsed ? "Show the sidebar" : "Hide the sidebar"}">${icon(
+        "columns",
+      )}</button>
     <span class="spacer"></span>
-    <span class="health"><span class="dot green pulse"></span>All systems operational</span>
+    ${
+      // Same reasoning as the sidebar's line: a status that is always the same
+      // is not a status. Only the failure is worth the space.
+      state.health === undefined
+        ? `<span class="health"><span class="dot grey"></span>Control plane unreachable</span>`
+        : ""
+    }
     <button class="icon-btn bell" data-act="nav" data-value="notifications"
       title="Notifications" aria-label="Notifications">
       ${icon("bell")}${unread > 0 ? `<span class="dot-badge">${unread}</span>` : ""}
@@ -625,6 +658,8 @@ function settingsScreen() {
     </div>
 
     <div class="settings-grid">
+      ${agentsCard()}
+
       ${invitationsCard()}
 
       ${appearanceCard()}
@@ -819,6 +854,65 @@ function settingsScreen() {
  * shared views — so the copy has to say so, or people will assume it is
  * decoration and pick the same colour as everyone else.
  */
+/**
+ * Connecting agents, in Settings rather than on a screen of its own.
+ *
+ * A connection belongs to the account, not to a repository: the credential is
+ * stored against the user (`/chat/providers/{id}/credential` names no project
+ * or repository), and putting an agent into a particular channel is a separate
+ * act done from that channel. Keeping the two apart here is the point — sign
+ * in once, then tick the agent into whichever channels want it, rather than
+ * connecting the same vendor over and over.
+ */
+function agentsCard() {
+  const agents = myAgents();
+  return `<section class="card">
+    <div class="panel-head"><div><h3>Agents</h3>
+      <p>Signed in to your account, and usable in every channel you join them
+        to</p></div></div>
+    ${
+      agents.length === 0
+        ? `<div class="set-row"><span class="sr-body">
+             <div class="sr-sub">No agent providers are configured on this
+               deployment.</div></span></div>`
+        : agents
+            .map((agent) => {
+              const label = agent.name.replace(/\s*\(.*\)$/u, "");
+              // Three states, not two: a credential that has stopped
+              // authenticating is stored but useless, and saying "connected"
+              // about it is what let every task it was given fail in silence.
+              const state_ = agent.needsReconnect
+                ? { text: "Sign-in expired", cls: " sr-warn" }
+                : agent.connected
+                  ? { text: "Connected", cls: "" }
+                  : { text: "Not connected", cls: "" };
+              return `<div class="set-row">
+                <span class="sr-body">
+                  <div class="sr-title">${esc(label)}</div>
+                  <div class="sr-sub${state_.cls}">${esc(state_.text)}${
+                    agent.detail ? ` — ${esc(agent.detail)}` : ""
+                  }</div>
+                </span>
+                <span class="sr-ctl">
+                  ${
+                    agent.connected
+                      ? `<button type="button" class="btn btn-sm"
+                          data-act="agent-disconnect"
+                          data-value="${esc(agent.id)}">Disconnect</button>`
+                      : `<button type="button" class="btn btn-sm btn-primary"
+                          data-act="agent-connect"
+                          data-value="${esc(agent.id)}">${
+                            agent.needsReconnect ? "Reconnect" : "Connect"
+                          }</button>`
+                  }
+                </span>
+              </div>`;
+            })
+            .join("")
+    }
+  </section>`;
+}
+
 function appearanceCard() {
   const accent = myAccent();
   const agentColor = myAgentColor();
@@ -842,11 +936,18 @@ function appearanceCard() {
         <div class="sr-sub">Light inverts the surfaces and keeps your accent.
           Stored in this browser.</div>
       </span>
-      <span class="sr-action">
-        <button type="button" class="toggle${myTheme() === "light" ? " on" : ""}"
-          data-act="theme-toggle" role="switch"
-          aria-checked="${myTheme() === "light"}"
-          aria-label="Light theme"></button>
+      <span class="sr-ctl">
+        ${
+          // `switch`, not `toggle`. There has never been a `.toggle` rule in
+          // the stylesheet, so this button had no size, no track and no knob —
+          // it rendered as an empty inline element and the only way to reach
+          // light mode was to guess where to click. Every other switch on this
+          // screen already used the styled class.
+          `<button type="button" class="switch${myTheme() === "light" ? " on" : ""}"
+            data-act="theme-toggle" role="switch"
+            aria-checked="${myTheme() === "light"}"
+            aria-label="Light theme"></button>`
+        }
       </span>
     </div>
 
@@ -1254,10 +1355,11 @@ function invitationsCard() {
       <div><h3>People</h3><p>Invitations into ${esc(
         state.project?.name ?? "this project",
       )}</p></div>
-      <span class="spacer"></span>
-      <button class="btn btn-sm btn-primary" data-act="invite">
-        ${icon("users")} Invite
-      </button>
+      <!-- No invite button here. An invitation names one repository, so
+           starting one from a project-wide screen meant being asked which
+           repository first — and the channel header, where somebody already
+           knows the answer, is where the button belongs. This card is the
+           record of what has been sent, which is a different question. -->
     </div>
     ${
       rows.length === 0
@@ -1332,58 +1434,25 @@ function applyTheme() {
   root.setProperty("--accent-wash", withAlpha(accent, 0.12));
   root.setProperty("--accent-wash-strong", withAlpha(accent, 0.2));
   root.setProperty("--accent-line", withAlpha(accent, 0.38));
-  // The surfaces move with the accent too, by a few percent. Held constant
-  // they read as one fixed grey-purple room that a chosen colour is only
-  // decorating; carried into the greys, the whole interface reads as being
-  // *in* that colour. Small on purpose — enough that switching accents is
-  // visible in the background, not so much that text contrast moves.
-  // Light swaps the base surfaces before the accent is mixed in, so the tint
-  // below applies to whichever set is in play rather than being written twice.
-  const light = myTheme() === "light";
-  document.documentElement.dataset.theme = light ? "light" : "dark";
-  for (const [name, base, amount] of light
-    ? [
-        ["--bg", "#f7f7fa", 0.05],
-        ["--bg-panel", "#ffffff", 0.04],
-        ["--bg-card", "#ffffff", 0.05],
-        ["--bg-card-2", "#f2f3f7", 0.05],
-        ["--bg-inset", "#eef0f4", 0.05],
-        ["--bg-hover", "#e9ebf1", 0.08],
-        ["--bg-active", "#e0e3ec", 0.1],
-        ["--border", "#d9dce5", 0.08],
-        ["--border-soft", "#e6e8ee", 0.06],
-        ["--border-strong", "#c3c7d4", 0.1],
-      ]
-    : [
-    ["--bg", "#0a0b0f", 0.05],
-    ["--bg-panel", "#0e1016", 0.05],
-    ["--bg-card", "#111320", 0.06],
-    ["--bg-card-2", "#14161f", 0.06],
-    ["--bg-inset", "#0c0e14", 0.05],
-    ["--bg-hover", "#171a25", 0.08],
-    ["--bg-active", "#1b1e2b", 0.1],
-    ["--border", "#1e2130", 0.08],
-    ["--border-soft", "#181b26", 0.06],
-    ["--border-strong", "#2a2e40", 0.1],
-      ]) {
-    root.setProperty(name, mix(base, accent, amount));
-  }
-  // Text has to invert with the surfaces or light mode is white on white.
-  for (const [name, value] of light
-    ? [
-        ["--text", "#14161c"],
-        ["--text-2", "#4b5163"],
-        ["--text-3", "#6d7386"],
-        ["--text-4", "#8f95a6"],
-      ]
-    : [
-        ["--text", "#e7e9f0"],
-        ["--text-2", "#9aa0b4"],
-        ["--text-3", "#676d82"],
-        ["--text-4", "#4b5063"],
-      ]) {
-    root.setProperty(name, value);
-  }
+  // Surfaces are the stylesheet's business, and only the stylesheet's.
+  //
+  // This used to overwrite every background, border and text colour from here,
+  // mixing a few percent of the accent into each so the whole interface read
+  // as being *in* the chosen colour. Two things were wrong with it. The dark
+  // bases written here were blue-black (#0a0b0f, #111320) while the stylesheet
+  // had already been moved to true grey, so the JS quietly undid the CSS on
+  // every render and the greys nobody could find in the file were the ones
+  // actually on screen. And the accent mix is a hue by definition: a grey with
+  // 5% purple in it is a purple-grey, which is exactly what a neutral surface
+  // is not.
+  //
+  // Setting only the theme attribute now, and letting `:root` and
+  // `:root[data-theme="light"]` supply the ramps. Both are complete — surfaces,
+  // borders, text and shadows — so nothing here needs restating, and changing
+  // a colour means editing the colour rather than hunting for the assignment
+  // that overrides it.
+  document.documentElement.dataset.theme =
+    myTheme() === "light" ? "light" : "dark";
   document
     .querySelector('meta[name="theme-color"]')
     ?.setAttribute("content", accent);
@@ -1978,6 +2047,9 @@ function renderNow() {
   if (state.navOpen) {
     classes.push("nav-open");
   }
+  if (state.navCollapsed) {
+    classes.push("nav-collapsed");
+  }
   const editorCaret = captureEditor();
   root.innerHTML = `<div class="${classes.join(" ")}">
     ${sidebar()}
@@ -2223,6 +2295,16 @@ document.addEventListener("click", (event) => {
       return;
     case "chan-sidebar-toggle":
       state.chanSidebarOpen = state.chanSidebarOpen !== true;
+      render();
+      return;
+    case "nav-collapse-toggle":
+      state.navCollapsed = state.navCollapsed !== true;
+      persist("ag.navCollapsed", state.navCollapsed);
+      render();
+      return;
+    case "chan-collapse-toggle":
+      state.chanCollapsed = state.chanCollapsed !== true;
+      persist("ag.chanCollapsed", state.chanCollapsed);
       render();
       return;
     case "chan-sidebar-close":
