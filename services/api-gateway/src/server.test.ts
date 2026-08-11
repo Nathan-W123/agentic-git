@@ -5439,7 +5439,9 @@ test("the auditor audits a canonical advance and posts what it finds", async (t)
     async () =>
       (
         await runtime.store.listChannelMessages(repo, ownerId)
-      ).some((message) => message.content.includes("Audited")),
+      ).some((message) =>
+        message.replies.some((reply) => reply.content.includes("Audited")),
+      ),
     "the auditor never posted its findings",
   );
 
@@ -5451,11 +5453,17 @@ test("the auditor audits a canonical advance and posts what it finds", async (t)
   assert.equal(runtime.chatPrompts[0]?.userId, ownerId);
   assert.match(runtime.chatPrompts[0]?.prompt ?? "", /const ok = a \|\| b;/u);
 
-  const [message] = await runtime.store.listChannelMessages(repo, ownerId);
+  // One thread for every audit this repository will ever have, with the run's
+  // summary and each finding inside it — not a thread per merge.
+  const posted = await runtime.store.listChannelMessages(repo, ownerId);
+  assert.equal(posted.length, 1);
+  const [message] = posted;
   assert.equal(message?.authorId, `${ownerId}:openai`);
-  assert.equal(message?.replies.length, 1);
+  assert.match(String(message?.content), /^Audit log/u);
+  assert.equal(message?.replies.length, 2);
+  assert.match(String(message?.replies[0]?.content), /Audited/u);
   assert.match(
-    message?.replies[0]?.content ?? "",
+    message?.replies[1]?.content ?? "",
     /1\. Inverted condition admits unauthorized callers/u,
   );
 
@@ -5464,9 +5472,11 @@ test("the auditor audits a canonical advance and posts what it finds", async (t)
   assert.equal(cursor?.revision, "b".repeat(40));
 });
 
-test("a clean audit says nothing at all", async (t) => {
-  // An auditor that posts "all clear" after every merge is one everybody
-  // mutes, and a muted auditor is worse than none.
+test("a clean audit reports that it ran, inside the audit thread", async (t) => {
+  // Silence and "not running" look identical from outside, and until an
+  // auditor has been watched working once, the difference is the only thing
+  // anybody wants to know. It goes in the thread rather than the room, so the
+  // channel is not the thing paying for it.
   const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
   const owner = new TestClient(runtime.origin);
   const session = await bootstrap(owner);
@@ -5501,7 +5511,12 @@ test("a clean audit says nothing at all", async (t) => {
     async () => (await runtime.store.getAuditorCursor(repo)) !== undefined,
     "the auditor never recorded that it had looked",
   );
-  assert.deepEqual(await runtime.store.listChannelMessages(repo, ownerId), []);
+  const posted = await runtime.store.listChannelMessages(repo, ownerId);
+  // One message in the channel — the thread root — and the outcome inside it.
+  assert.equal(posted.length, 1);
+  assert.match(String(posted[0]?.content), /^Audit log/u);
+  assert.equal(posted[0]?.replies.length, 1);
+  assert.match(String(posted[0]?.replies[0]?.content), /nothing to report/u);
 });
 
 test("a repository with no auditor is never audited", async (t) => {

@@ -441,6 +441,16 @@ const TERMINAL_STATUS_LINE: Record<string, string> = {
 /* Slow on purpose: this only catches threads a restart orphaned, which is a
    once-per-deploy event, and every pass reads the recent messages of every
    repository. */
+/**
+ * The opening line of the auditor's thread, and how it is found again.
+ *
+ * A marker in the content rather than a stored id: an id would need a column,
+ * and everything this feature has kept only in memory has been lost to a
+ * restart. The thread is bumped on every audit, so it stays inside the window
+ * the lookup reads.
+ */
+const AUDIT_THREAD_TITLE = "Audit log";
+
 const THREAD_RECONCILE_INTERVAL_MS = 60_000;
 
 /**
@@ -7907,35 +7917,93 @@ export class ApiGateway {
       throw new Error(answer.error ?? "the auditor did not answer");
     }
     const findings = parseAuditFindings(answer.text);
-    if (findings.length === 0) {
-      // Nothing found, so nothing said. An auditor that posts "all clear"
-      // after every merge is an auditor everybody mutes, and a muted auditor
-      // is worse than none: the one time it does find something, it is in a
-      // channel people have already learned to skip.
-      return;
-    }
-    const root = await this.appendChannelEntry({
+    const authorId = `${auditor.userId}:${auditor.provider}`;
+    // One thread for the life of the repository, not one per audit.
+    //
+    // A thread per merge buried the channel and, worse, gave each audit no
+    // memory of the last: the point of an auditor is that it is reading the
+    // same codebase repeatedly, and every finding it has already raised is
+    // context for the next one. One thread is where that accumulates.
+    const root = await this.auditThreadRoot({
       projectId,
       repositoryId,
-      kind: "agent",
-      authorId: `${auditor.userId}:${auditor.provider}`,
-      content: formatAuditSummary({
-        findings,
-        fromRevision: input.fromRevision,
-        toRevision: input.toRevision,
-        fileCount: diff.files.length,
-        truncated: diff.truncated,
-      }),
+      authorId,
+    });
+    // Said even when there is nothing to say, for now.
+    //
+    // The argument against is real — an auditor that posts "all clear" after
+    // every merge is one everybody mutes, and a muted auditor is worse than
+    // none. But it is inside a thread rather than in the room, and until
+    // somebody has watched it work at least once, silence and "not running"
+    // look exactly alike. Worth revisiting once it has earned trust.
+    await this.appendChannelThreadReply({
+      projectId,
+      repositoryId,
+      messageId: root.id,
+      authorId,
+      content:
+        findings.length === 0
+          ? `Audited ${String(diff.files.length)} file${
+              diff.files.length === 1 ? "" : "s"
+            } at ${input.toRevision.slice(0, 8)} — nothing to report.`
+          : formatAuditSummary({
+              findings,
+              fromRevision: input.fromRevision,
+              toRevision: input.toRevision,
+              fileCount: diff.files.length,
+              truncated: diff.truncated,
+            }),
     });
     for (const finding of findings) {
       await this.appendChannelThreadReply({
         projectId,
         repositoryId,
         messageId: root.id,
-        authorId: `${auditor.userId}:${auditor.provider}`,
+        authorId,
         content: formatFinding(finding),
       });
     }
+    // Back to the foot of the channel, which is also what keeps it findable:
+    // `auditThreadRoot` looks through recent messages, and a thread bumped on
+    // every audit never falls out of that window.
+    await this.options.store
+      .bumpChannelMessage(repositoryId, root.id, new Date().toISOString())
+      .catch(() => undefined);
+  }
+
+  /**
+   * The one thread this repository's audits are written into.
+   *
+   * Found by looking rather than remembered, because anything remembered here
+   * is remembered in this process and lost on the next deploy — which is the
+   * fault that has already cost this channel a summary, an ending and a file
+   * list. The root carries a fixed opening line, and that line is the marker.
+   */
+  private async auditThreadRoot(input: {
+    projectId: string;
+    repositoryId: string;
+    authorId: string;
+  }): Promise<{ id: string }> {
+    const recent = await this.options.store.listChannelMessages(
+      input.repositoryId,
+      input.authorId,
+      { limit: 60 },
+    );
+    const existing = recent.find(
+      (message) =>
+        message.authorId === input.authorId &&
+        message.content.startsWith(AUDIT_THREAD_TITLE),
+    );
+    if (existing !== undefined) {
+      return existing;
+    }
+    return await this.appendChannelEntry({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      kind: "agent",
+      authorId: input.authorId,
+      content: `${AUDIT_THREAD_TITLE} — every audit of this repository lands here.`,
+    });
   }
 
   /**
