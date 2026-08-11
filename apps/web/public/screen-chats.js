@@ -1505,7 +1505,28 @@ function updateMentionState(node) {
 
 export function updateComposerInput(node, rerender) {
   state.chatDraft = node.value;
+  // What the screen actually shows about a draft is the mention popup and
+  // nothing else: the send button is always enabled, and the textarea already
+  // holds the character that was just typed. So a render is only owed when
+  // that popup would change.
+  //
+  // It used to happen on every keystroke, and a render here is not cheap — it
+  // rebuilds the whole app, destroying the textarea being typed into, then
+  // finds its replacement, refocuses it and restores the selection. With a
+  // long transcript behind it that is the latency between pressing a key and
+  // seeing the letter, on the one screen where responsiveness is the entire
+  // experience.
+  const before = `${String(state.mentionActive)} ${state.mentionQuery}`;
   updateMentionState(node);
+  const changed =
+    `${String(state.mentionActive)} ${state.mentionQuery}` !== before;
+  // The height is a property of this element, not of the app, so it is set
+  // directly whether or not anything else is rebuilt.
+  node.style.height = "auto";
+  node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+  if (!changed) {
+    return;
+  }
   const selStart = node.selectionStart;
   const selEnd = node.selectionEnd;
   rerender();
