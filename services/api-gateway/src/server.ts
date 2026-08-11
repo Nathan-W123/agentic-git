@@ -8159,13 +8159,46 @@ export class ApiGateway {
       messageId,
       input.viewerId,
     );
-    const findings = (root?.replies ?? [])
-      .map((entry) => parseFindingReply(entry.content))
-      .filter((finding): finding is AuditFinding => finding !== undefined);
-    if (findings.length === 0) {
+    // Findings are numbered per audit, and every audit of this repository now
+    // lands in one thread — so the replies hold 1, 2, 3, then 1, 2 again, and
+    // reading them as one list makes "fix 3" match two different findings and
+    // dispatch both. Numbering is only unique inside an audit, so that is the
+    // unit this reads.
+    const replies = root?.replies ?? [];
+    // Each audit opens with its summary; findings follow it. The last summary
+    // is therefore where the newest audit's findings begin.
+    const latestStart = replies.reduce(
+      (found, entry, index) =>
+        parseFindingReply(entry.content) === undefined &&
+        /^Audited\b/u.test(entry.content.trim())
+          ? index
+          : found,
+      -1,
+    );
+    const parse = (entries: typeof replies): AuditFinding[] =>
+      entries
+        .map((entry) => parseFindingReply(entry.content))
+        .filter((finding): finding is AuditFinding => finding !== undefined);
+    const latest = parse(
+      latestStart === -1 ? replies : replies.slice(latestStart),
+    );
+    const everything = parse(replies);
+    if (everything.length === 0) {
       return false;
     }
-    const approved = findingsReferencedBy(reply, findings);
+    // The newest audit first, because that is what somebody replying to it
+    // means. Older findings stay reachable — scrolling up and approving one is
+    // a real thing to do — but only once the newest audit has had its say.
+    const fromLatest = findingsReferencedBy(reply, latest);
+    const widened =
+      fromLatest.length > 0 ? fromLatest : findingsReferencedBy(reply, everything);
+    // A number that means two different findings from two different audits.
+    // Neither is more likely than the other, and dispatching both would spend
+    // somebody's account twice on a request that named one thing.
+    const ambiguous =
+      fromLatest.length === 0 &&
+      new Set(widened.map((finding) => finding.index)).size < widened.length;
+    const approved = ambiguous ? [] : widened;
     if (approved.length === 0) {
       // An approval that could mean any of several findings. Asking is the
       // only honest response: picking one would be a guess that spends
@@ -8176,9 +8209,12 @@ export class ApiGateway {
         repositoryId,
         messageId,
         authorId: `${auditor.userId}:${auditor.provider}`,
-        content:
-          `Which one? Reply with its number — "yes, fix 2" — or "all" for ` +
-          `every finding above.`,
+        content: ambiguous
+          ? `That number matches findings from more than one audit in this ` +
+            `thread. Quote a few words from the one you mean, or say "all" ` +
+            `for every finding in the latest audit.`
+          : `Which one? Reply with its number — "yes, fix 2" — or "all" for ` +
+            `every finding above.`,
       });
       return true;
     }

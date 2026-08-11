@@ -5614,6 +5614,86 @@ test('approving a finding with "yes, do it" dispatches the fix', async (t) => {
   assert.equal(task?.repositoryId, repo);
 });
 
+test("a number is read against the newest audit, not the whole thread", async (t) => {
+  // Every audit of a repository lands in one thread and findings are numbered
+  // per audit, so the replies hold 1, 2, then 1 again. Read as one list, "fix
+  // 1" matched two different findings and dispatched both.
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "renumbered");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents/${ownerId}:openai`,
+    { method: "POST", body: { role: "auditor" } },
+  );
+
+  const finding = (title: string) =>
+    [
+      "FINDING",
+      "severity: medium",
+      "files: src/one.ts",
+      "selffix: yes",
+      `title: ${title}`,
+      "detail: Something worth fixing.",
+      "END",
+    ].join("\n");
+
+  // Two audits into the same thread, each with its own finding numbered 1.
+  const audits = [
+    { title: "First audit finding", from: "a", to: "b" },
+    { title: "Second audit finding", from: "b", to: "c" },
+  ];
+  for (const [index, entry] of audits.entries()) {
+    runtime.chatAnswer.text = finding(entry.title);
+    await runtime.store.appendAudit(undefined, {
+      type: "canonical_promoted",
+      taskId: `task-${String(index + 1)}`,
+      data: {
+        projectId: DEFAULT_PROJECT_ID,
+        repositoryId: repo,
+        previousRevision: entry.from.repeat(40),
+        revision: entry.to.repeat(40),
+      },
+    });
+    await waitFor(
+      async () =>
+        (await runtime.store.listChannelMessages(repo, ownerId)).some(
+          (message) =>
+            message.replies.some((r) => r.content.includes(entry.title)),
+        ),
+      `audit ${String(index + 1)} never posted`,
+    );
+  }
+
+  // One thread holding both audits, which is the condition being tested.
+  const posted = await runtime.store.listChannelMessages(repo, ownerId);
+  assert.equal(posted.length, 1);
+  const audit = posted[0];
+
+  const reply = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages/${audit?.id}/replies`,
+    { method: "POST", body: { content: "yes, fix 1" } },
+  );
+  assert.equal(reply.status, 201, JSON.stringify(reply.data));
+
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "approving finding 1 never dispatched anything",
+  );
+  // Exactly one task, and it is the newest audit's finding — not both, and
+  // not the older one that also happens to be numbered 1.
+  assert.equal(runtime.submittedTasks.length, 1);
+  assert.match(
+    runtime.submittedTasks[0]?.objective ?? "",
+    /Second audit finding/u,
+  );
+});
+
 test("a rejection in an auditor thread dispatches nothing", async (t) => {
   const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
   const owner = new TestClient(runtime.origin);
