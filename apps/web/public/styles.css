@@ -5905,3 +5905,60 @@ body.resizing-ns * {
 .auth-shell {
   min-height: 100dvh;
 }
+
+/* ------------------------------------------------- thread summary ---- */
+/* The line under a message that stands for its thread: who is in it, what it
+   is called, and how much was actually said. It replaced a bare reply count
+   that counted a run's own narration, so a one-line edit advertised itself as
+   an eight-message conversation. */
+.cmsg-thread-link .ctl-faces {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* Overlapped, the way a stack of participants reads everywhere else — this is
+   a glance at who is here, not a list to be read left to right. */
+.cmsg-thread-link .ctl-faces > * {
+  margin-right: -6px;
+  border-radius: 50%;
+  box-shadow: 0 0 0 2px var(--bg-panel);
+}
+
+.cmsg-thread-link .ctl-faces > *:last-child {
+  margin-right: 2px;
+}
+
+/* The name the agent gave the task carries the line; the count is secondary
+   and reads as metadata rather than as the point. */
+.cmsg-thread-link .ctl-name {
+  font-weight: 600;
+  max-width: 30ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmsg-thread-link .ctl-count {
+  color: var(--text-3);
+}
+
+/* Thinking, as one passage rather than as a stack of messages from somebody
+   who will not stop talking. Each held line becomes a paragraph inside one
+   block, which is how it arrived in the agent's head before it arrived as
+   events in ours. */
+.thread-thinking .tt-body {
+  padding: 2px 0 4px 10px;
+  border-left: 2px solid var(--border-soft);
+  margin-left: 4px;
+}
+
+.thread-thinking .tt-body p {
+  margin: 0 0 6px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--text-2);
+}
+
+.thread-thinking .tt-body p:last-child {
+  margin-bottom: 0;
+}

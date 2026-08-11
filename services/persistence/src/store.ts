@@ -637,7 +637,20 @@ export interface CreateApprovalInput {
   expiresAt: string;
 }
 
-export type ChannelEntryKind = "user" | "agent" | "system";
+/**
+ * `progress` is an agent narrating its own run — thinking, steps taken, files
+ * touched — rather than saying something to the room.
+ *
+ * Separate from `agent` because the difference is invisible to a reader
+ * otherwise, and everything downstream needs it: a thread's reply count
+ * should mean "how much was said", not "how long the run was", and a wall of
+ * step-by-step commentary reads better as one block that grows than as thirty
+ * messages from somebody who will not stop talking.
+ *
+ * Stored as text like the others, so nothing migrates: rows written before
+ * this existed are `agent`, which is what they were.
+ */
+export type ChannelEntryKind = "user" | "agent" | "system" | "progress";
 
 /** One emoji's reaction summary from one viewer's point of view. */
 export interface ChannelReaction {

@@ -7359,15 +7359,19 @@ export class ApiGateway {
               this.watchedChannelTasks.delete(watched.taskId);
               break;
             }
-            // Something worth following. Everything held so far goes in first,
-            // in the order it happened, so the thread reads from the start.
-            for (const held of watched.pending) {
+            // Something worth following. Everything held so far goes in
+            // first, in the order it happened, so the thread reads from the
+            // start — as one entry rather than one per thought, because it is
+            // one train of reasoning and arrived as a paragraph in the
+            // agent's head before it arrived as lines in ours.
+            if (watched.pending.length > 0) {
               await this.appendChannelThreadReply({
                 projectId: watched.projectId,
                 repositoryId: watched.repositoryId,
                 messageId: watched.messageId,
                 authorId: watched.authorId,
-                content: held,
+                content: watched.pending.join("\n"),
+                kind: "progress",
               });
             }
             watched.pending = [];
@@ -7379,6 +7383,9 @@ export class ApiGateway {
             messageId: watched.messageId,
             authorId: watched.authorId,
             content: line,
+            // An ending is addressed to the reader; everything before it is
+            // the run talking about itself.
+            ...(terminal ? {} : { kind: "progress" as const }),
           });
           if (terminal) {
             this.watchedChannelTasks.delete(watched.taskId);
@@ -7461,11 +7468,16 @@ export class ApiGateway {
     messageId: string;
     authorId: string;
     content: string;
+    /**
+     * `progress` for a run narrating itself. It reads differently and it
+     * counts differently — see `ChannelEntryKind`.
+     */
+    kind?: "agent" | "progress";
   }): Promise<void> {
     await this.options.store.addChannelReply({
       repositoryId: input.repositoryId,
       messageId: input.messageId,
-      kind: "agent",
+      kind: input.kind ?? "agent",
       authorId: input.authorId,
       content: input.content,
     });
