@@ -307,6 +307,9 @@ const CHANNEL_CEREMONIAL_EVENTS = new Set(["task_started"]);
 
 const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
   canonical_promoted: "Done — the change is in canonical.",
+  // Work that finished by reporting rather than by changing anything. An
+  // ending, and not a failure — see `readsAsReportRequest`.
+  task_reported: "Done — nothing needed changing, so here is what I found.",
   task_failed: "I could not finish this.",
   task_cancelled: "This was cancelled.",
 };
@@ -431,6 +434,14 @@ export function narrateTaskEvent(
         : `Validation came back ${String(data["status"] ?? "unresolved")}.`;
     case "approval_requested":
       return "Waiting on a human review before this can land.";
+    case "task_reported": {
+      // The agent's own words are the deliverable here — the report *is* the
+      // outcome, where for a change the outcome is the diff.
+      const explanation = data["explanation"];
+      return typeof explanation === "string" && explanation.trim().length > 0
+        ? explanation.trim()
+        : "Finished without needing to change anything.";
+    }
     case "task_failed": {
       // Two shapes reach here. Most emitters record `error`; the integration
       // path records `explanation` and a `status`. Reading only the first left

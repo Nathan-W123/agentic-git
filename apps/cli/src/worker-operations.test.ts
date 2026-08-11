@@ -42,6 +42,7 @@ import {
   admitWorkPlan,
   leaseBundle,
   blockedAdmissionHistory,
+  readsAsReportRequest,
   leaseWork,
   type WorkAssignment,
 } from "./worker-operations.js";
@@ -4127,5 +4128,35 @@ test("the strict rebase switch restores the unconditional requeue", async () => 
       process.env["COORD_STRICT_PLAN_REBASE"] = previous;
     }
     await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("only a request to look excuses a changeset that changed nothing", () => {
+  // The distinction the pipeline could not previously draw. An empty result
+  // is the answer to one of these and the absence of an answer to the other.
+  for (const objective of [
+    "audit the codebase",
+    "give me a summary of the connected repo",
+    "analyse the retry loop",
+    "inspect the auth middleware for problems",
+    "explain how canonical promotion works",
+    "Conduct an audit of the changes since Friday",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), true, objective);
+  }
+
+  // These must keep failing when they change nothing — an empty changeset
+  // here is the symptom of a sandbox silently refusing every edit, which is
+  // exactly what `CodexWriteDeniedError` exists to catch.
+  for (const objective of [
+    "edit the readme, add a hello at the bottom",
+    "fix the retry loop in worker.ts",
+    "add a health endpoint",
+    "rename the auth module",
+    // "review" is deliberately absent from the vocabulary: this is a change
+    // request wearing a reading verb, and excusing it would blunt the alarm.
+    "review the retry loop and fix what you find",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), false, objective);
   }
 });

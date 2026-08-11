@@ -3362,6 +3362,23 @@ test("an unaddressed task is taken even when it matches no agent's role", async 
  * real thread: a failed task, no reason given, and the question that followed
  * it went unanswered.
  */
+test("a task that reported rather than changed reads as an ending, not a failure", () => {
+  // "Changed no files" is failure for "fix the retry loop" and success for
+  // "audit the codebase". The channel used to say the second was the first.
+  assert.equal(
+    narrateTaskEvent("task_reported", {
+      explanation: "No logic errors in the diff; two naming nits, both safe.",
+    }),
+    "No logic errors in the diff; two naming nits, both safe.",
+  );
+  // The agent's own words are the deliverable, but their absence is not a
+  // reason to say nothing.
+  assert.equal(
+    narrateTaskEvent("task_reported", {}),
+    "Finished without needing to change anything.",
+  );
+});
+
 test("a failed task says why, whichever shape the failure was recorded in", () => {
   const integration = narrateTaskEvent("task_failed", {
     status: "policy_failed",

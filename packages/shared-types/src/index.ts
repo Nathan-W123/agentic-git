@@ -679,6 +679,17 @@ export type AuditEventType =
   | "approval_requested"
   | "approval_decided"
   | "validation_completed"
+  /**
+   * A task that was asked to look rather than to change, finishing with a
+   * report and no patches.
+   *
+   * Distinct from `canonical_promoted` because nothing was promoted, and
+   * distinct from `task_failed` because nothing went wrong. Without it, an
+   * audit or a summary — work that succeeds precisely by changing nothing —
+   * came back as "complete but changed no files", which the pipeline recorded
+   * as a failure and the channel reported as one.
+   */
+  | "task_reported"
   | "canonical_promoted"
   | "canonical_changed"
   | "task_failed"
