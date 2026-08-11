@@ -860,6 +860,38 @@ function channelMentionCandidates(repositoryId) {
     .slice(0, 6);
 }
 
+/**
+ * The commands offered for what has been typed.
+ *
+ * Prefix rather than substring, matching the server's own `slashCommandsMatching`:
+ * offering `/cancel` while somebody types `/can` is helping, offering it for
+ * `/el` is guessing. The list comes from the server with the messages, so the
+ * picker cannot offer something the channel would not recognise.
+ */
+function channelSlashCandidates(repositoryId) {
+  const query = state.slashQuery.trim().toLowerCase();
+  return (state.channelSlashCommands[repositoryId] ?? [])
+    .filter((entry) => String(entry.name ?? "").startsWith(query))
+    .slice(0, 6);
+}
+
+function slashPopover(candidates) {
+  if (candidates.length === 0) {
+    return `<div class="mention-pop"><div class="mention-item" style="color:var(--text-4)">No commands</div></div>`;
+  }
+  const index = state.slashIndex % candidates.length;
+  return `<div class="mention-pop">${candidates
+    .map(
+      (entry, position) => `<button type="button" class="mention-item slash-item${
+        position === index ? " active" : ""
+      }" data-act="channel-slash-pick" data-value="${esc(entry.name)}">
+        <span class="slash-name">/${esc(entry.name)}</span>
+        <span class="slash-summary">${esc(entry.summary ?? "")}</span>
+      </button>`,
+    )
+    .join("")}</div>`;
+}
+
 function mentionPopover(candidates) {
   if (candidates.length === 0) {
     return `<div class="mention-pop"><div class="mention-item" style="color:var(--text-4)">No matches</div></div>`;
@@ -929,6 +961,7 @@ function terminalDrawer() {
 function composer(repositoryId) {
   const candidates = state.mentionActive ? channelMentionCandidates(repositoryId) : [];
   return `<div class="chan-composer-wrap">
+    ${state.slashActive ? slashPopover(channelSlashCandidates(repositoryId)) : ""}
     ${state.mentionActive ? mentionPopover(candidates) : ""}
     ${composerThreadChip(repositoryId)}
     <form class="composer" data-act="channel-submit">
@@ -1892,6 +1925,20 @@ function updateMentionState(node) {
   const value = node.value;
   const cursor = node.selectionStart ?? value.length;
   const before = value.slice(0, cursor);
+  // A command is only ever the first thing in a message — the same rule the
+  // server parses by — so the picker only offers one there. Anchoring it
+  // here as well is what stops a path typed mid-sentence from opening a
+  // menu over the composer.
+  const slash = /^\s*\/([a-z0-9-]*)$/iu.exec(before);
+  state.slashActive = slash !== null;
+  if (slash !== null) {
+    state.slashQuery = slash[1] ?? "";
+    state.slashIndex = 0;
+    // One picker at a time: a bare "/" is never also a mention.
+    state.mentionActive = false;
+    state.mentionQuery = "";
+    return;
+  }
   const match = /(^|\s)@([\w.-]*)$/u.exec(before);
   if (match === null) {
     state.mentionActive = false;
@@ -1916,10 +1963,15 @@ export function updateComposerInput(node, rerender) {
   // long transcript behind it that is the latency between pressing a key and
   // seeing the letter, on the one screen where responsiveness is the entire
   // experience.
-  const before = `${String(state.mentionActive)} ${state.mentionQuery}`;
+  // Both pickers, not just the mention one: a render is owed whenever either
+  // popup would change, and tracking only the first would leave the command
+  // list frozen — or absent — while somebody types into it.
+  const popupState = () =>
+    `${String(state.mentionActive)} ${state.mentionQuery} ` +
+    `${String(state.slashActive)} ${state.slashQuery}`;
+  const before = popupState();
   updateMentionState(node);
-  const changed =
-    `${String(state.mentionActive)} ${state.mentionQuery}` !== before;
+  const changed = popupState() !== before;
   // The height is a property of this element, not of the app, so it is set
   // directly whether or not anything else is rebuilt.
   node.style.height = "auto";
@@ -1936,6 +1988,31 @@ export function updateComposerInput(node, rerender) {
     next.setSelectionRange(selStart, selEnd);
     next.style.height = "auto";
     next.style.height = `${Math.min(next.scrollHeight, 148)}px`;
+  }
+}
+
+/**
+ * Puts the chosen command in, and leaves the cursor where the request goes.
+ *
+ * A trailing space rather than a newline: the command is the start of a
+ * sentence that usually continues with an "@" and an objective, and the
+ * mention picker is what should open next.
+ */
+export function pickSlashCommand(name, rerender) {
+  const node = document.querySelector("[data-act='channel-input']");
+  const cursor = node?.selectionStart ?? state.chatDraft.length;
+  const before = state.chatDraft.slice(0, cursor);
+  const after = state.chatDraft.slice(cursor);
+  const replaced = before.replace(/^\s*\/([a-z0-9-]*)$/iu, `/${name} `);
+  state.chatDraft = replaced + after;
+  state.slashActive = false;
+  state.slashQuery = "";
+  rerender();
+  const next = document.querySelector("[data-act='channel-input']");
+  if (next !== null) {
+    const pos = replaced.length;
+    next.focus();
+    next.setSelectionRange(pos, pos);
   }
 }
 
@@ -2137,6 +2214,38 @@ export function handleTerminalKeydown(event, rerender) {
 }
 
 export function handleComposerKeydown(event, rerender) {
+  // The same four keys as the mention picker, because they are the same
+  // gesture — a list under the cursor that Up/Down move through, Enter or Tab
+  // accepts, and Escape dismisses. Handled first, and only one picker is ever
+  // open at a time (see `updateMentionState`), so the two cannot both claim
+  // an Enter.
+  if (state.slashActive) {
+    const list = channelSlashCandidates(activeChannelId());
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      state.slashIndex = list.length === 0 ? 0 : (state.slashIndex + 1) % list.length;
+      rerender();
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      state.slashIndex =
+        list.length === 0 ? 0 : (state.slashIndex - 1 + list.length) % list.length;
+      rerender();
+      return;
+    }
+    if ((event.key === "Enter" || event.key === "Tab") && list.length > 0) {
+      event.preventDefault();
+      pickSlashCommand(list[state.slashIndex % list.length].name, rerender);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      state.slashActive = false;
+      rerender();
+      return;
+    }
+  }
   if (state.mentionActive) {
     const list = channelMentionCandidates(activeChannelId());
     if (event.key === "ArrowDown") {

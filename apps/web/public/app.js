@@ -139,6 +139,7 @@ import {
   nudgeTerminalHeight,
   openChannel,
   pickMention,
+  pickSlashCommand,
   renderChats,
   restoreChannelScroll,
   runTerminalCommand,
@@ -2272,6 +2273,9 @@ document.addEventListener("click", (event) => {
     }
     case "channel-mention-pick":
       pickMention(value, render);
+      return;
+    case "channel-slash-pick":
+      pickSlashCommand(value, render);
       return;
     case "chan-term-toggle":
       state.termOpen = !state.termOpen;

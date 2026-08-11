@@ -619,14 +619,23 @@ test("an agent colour is stored on the account, not in the browser", async () =>
   assert.equal(/localStorage/u.test(body), false);
 });
 
-test("a user with no chosen colour still reads as themselves", async () => {
+test("a user's agent colour is one they chose, not one they were dealt", async () => {
   const data = await publicFile("data.js");
   const start = data.indexOf("export function agentColorFor");
   const body = data.slice(start, data.indexOf("\n}", start));
-  // Falling back to one shared default would draw every unconfigured team
-  // member's agents identically, which is the confusion the feature removes.
-  assert.match(body, /charCodeAt/u);
-  assert.match(body, /PALETTE\[/u);
+  // Their explicit choice first, then their accent — both are "a colour for
+  // this person", and falling to the accent second is what stopped somebody
+  // whose interface was purple from having an orange agent beside it.
+  assert.match(body, /agentColor/u);
+  assert.match(body, /accent/u);
+  // Then one shared default, deliberately, rather than a hash of the user id.
+  // The hash gave everybody a different colour for free, which sounds useful
+  // and reads as decoration: nothing in the interface means "orange", so an
+  // orange agent next to a purple highlight is two colours disagreeing.
+  // Distinct colours are still one click away in Appearance — the difference
+  // is that somebody chose them.
+  assert.match(body, /DEFAULT_ACCENT/u);
+  assert.equal(/charCodeAt/u.test(body), false);
 });
 
 test("the theme is driven by custom properties rather than per-component colour", async () => {
