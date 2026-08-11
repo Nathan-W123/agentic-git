@@ -317,7 +317,20 @@ function rosterRow(agent, canModerate) {
       data-act="channel-settings-toggle" data-value="${esc(agent.id)}">
       <span class="rr-avatar" data-hover="agent-usage"
         data-hover-value="${esc(agent.id)}" tabindex="0"
-        aria-label="Usage for ${esc(agent.name)}">
+        ${
+          // Your own agent is talked to one to one, not by mentioning it in
+          // the room — the group channel is for work everyone should see. The
+          // act sits on the avatar rather than the row so it wins over the
+          // row's settings toggle without taking the rest of the row with it.
+          agent.mine
+            ? `data-act="agent-chat-open" data-value="${esc(agent.id)}"`
+            : ""
+        }
+        aria-label="${
+          agent.mine
+            ? `Message ${esc(agent.name)}`
+            : `Usage for ${esc(agent.name)}`
+        }">
         ${usageTip(agent)}
         ${agentFace(agent, 30)}
         ${statusDot(status, AGENT_STATUS_TITLE[status])}

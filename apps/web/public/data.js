@@ -141,6 +141,26 @@ export const state = {
   typing: {},
   // Agents the server says are mid-task, keyed by task id.
   agentBusy: {},
+  /**
+   * Who currently has this project open, as user ids.
+   *
+   * Read off the server's open sockets rather than stored, so it is a fact
+   * about now and goes stale the moment the tab is backgrounded — which is
+   * why it is refreshed with the inbox rather than cached against a person.
+   */
+  presence: [],
+  /** Everyone in the organization who could be written to, with their state. */
+  dmPeople: [],
+  /** Conversations that already exist, most recently active first. */
+  dmConversations: [],
+  /** Loaded threads, keyed by the other person's user id. */
+  dmThreads: {},
+  /** The conversation open in the side panel, if any. */
+  activeDm: undefined,
+  /** What is half-typed to them. */
+  dmDraft: "",
+  /** The project whose inbox has been fetched, so it is fetched once. */
+  dmLoadedProject: undefined,
   // Paths whose inline diff is expanded in the transcript. Plural because a
   // reader comparing two files should not have to close one to open the other.
   chanOpenFiles: [],
@@ -1767,6 +1787,155 @@ export function channelMessagesFor(repositoryId) {
 const channelPath = (repositoryId, suffix = "") =>
   `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/channel${suffix}`;
 
+const directPath = (suffix = "") =>
+  `/projects/${encodeURIComponent(state.projectId)}/direct-messages${suffix}`;
+
+/**
+ * The inbox and the roster, which arrive together because the screen that
+ * shows one always shows the other: a list of conversations is no use without
+ * the people you have not written to yet.
+ *
+ * Also where presence comes from. It is deliberately not pushed: a dot that
+ * says somebody is here is only ever approximately true, and refreshing it
+ * alongside something the screen already needed is cheaper than maintaining a
+ * second live signal to keep it honest.
+ */
+export async function loadDirectMessages() {
+  if (!state.projectId) {
+    return;
+  }
+  const response = await apiOptional(directPath(), undefined);
+  if (response === undefined) {
+    return;
+  }
+  state.dmConversations = response.conversations ?? [];
+  state.dmPeople = response.people ?? [];
+  state.presence = (response.people ?? [])
+    .filter((person) => person.online === true)
+    .map((person) => person.id);
+}
+
+/** One conversation, and marking it read because it is now on screen. */
+export async function loadDmThread(userId) {
+  if (!state.projectId || !userId) {
+    return;
+  }
+  const path = directPath(`/${encodeURIComponent(userId)}`);
+  const response = await apiOptional(path, undefined);
+  if (response === undefined) {
+    return;
+  }
+  state.dmThreads[userId] = response.messages ?? [];
+  // Opening a conversation is reading it. Done after the fetch rather than
+  // before, so a failed load does not clear a badge for messages that are
+  // still unseen.
+  await api(`${path}/read`, { method: "POST" }).catch(() => undefined);
+  await loadDirectMessages();
+}
+
+export async function sendDirectMessage(userId, content) {
+  const body = String(content ?? "").trim();
+  if (body.length === 0 || !userId) {
+    return;
+  }
+  const response = await api(directPath(`/${encodeURIComponent(userId)}`), {
+    method: "POST",
+    body: { content: body },
+  });
+  // The socket frame echoes to the sender too, so this only has to cover the
+  // case where it does not arrive — appending twice is prevented by id.
+  noteDirectMessage({ message: response.message });
+}
+
+/**
+ * A message that arrived over the socket, for either side of a conversation.
+ *
+ * Keyed on whoever is not the reader, which is what makes one handler serve
+ * both the copy sent to the recipient and the copy echoed back to the sender.
+ */
+export function noteDirectMessage(frame) {
+  const message = frame?.message;
+  if (message === undefined) {
+    return;
+  }
+  const me = currentUserId();
+  const other = message.authorId === me ? message.recipientId : message.authorId;
+  const thread = state.dmThreads[other] ?? [];
+  if (thread.some((existing) => existing.id === message.id)) {
+    return;
+  }
+  state.dmThreads[other] = [...thread, message];
+  // The badge would otherwise wait for the next inbox refresh. Not counted
+  // when the conversation is already open, because it is being read.
+  const unreadHere = message.recipientId === me && state.activeDm !== other;
+  const existing = state.dmConversations.find(
+    (conversation) => conversation.userId === other,
+  );
+  const updated = {
+    userId: other,
+    lastMessage: message,
+    unread: (existing?.unread ?? 0) + (unreadHere ? 1 : 0),
+  };
+  state.dmConversations = [
+    updated,
+    ...state.dmConversations.filter(
+      (conversation) => conversation.userId !== other,
+    ),
+  ];
+}
+
+/** Whether somebody has this project open right now. */
+export function personOnline(userId) {
+  return state.presence.includes(userId);
+}
+
+/** Unread messages waiting from one person. */
+export function dmUnreadFrom(userId) {
+  return (
+    state.dmConversations.find(
+      (conversation) => conversation.userId === userId,
+    )?.unread ?? 0
+  );
+}
+
+/**
+ * What an agent's dot should say: working, idle, or personal.
+ *
+ * Working wins over personal. Both are true of a personal agent that is
+ * mid-task, and which one to show is a question of what the reader is looking
+ * for — "is anything happening" is the more urgent of the two, and the one
+ * they cannot find out any other way. Personal is visible in the role line
+ * regardless.
+ */
+export function agentStatus(agent, repositoryId) {
+  if (agentIsWorking(agent, repositoryId)) {
+    return "working";
+  }
+  return agent.visibility === "personal" ? "personal" : "idle";
+}
+
+function agentIsWorking(agent, repositoryId) {
+  const now = Date.now();
+  for (const [taskId, entry] of Object.entries(state.agentBusy)) {
+    if (entry.repositoryId !== repositoryId || entry.expiresAt <= now) {
+      continue;
+    }
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    if (task !== undefined && !WORKING_STATUS.has(task.status)) {
+      continue;
+    }
+    // Matched the way `agentsThinkingIn` matches, so the dot and the typing
+    // line can never disagree about who is working.
+    if (
+      entry.provider === (agent.provider ?? agent.id) &&
+      (agent.mine === true || String(agent.id) === `${entry.userId}:${entry.provider}`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
 /**
  * Reads one channel back from the server, replacing whatever local or seeded
  * content was showing. Returns `false` without throwing when this deployment
@@ -1866,6 +2035,23 @@ async function loadChannelRoster(repositoryId) {
  * synchronously, so this only ever needs to populate it and ask for a
  * re-render.
  */
+/**
+ * The inbox, fetched once per project rather than on every render.
+ *
+ * `renderNow` calls this, so it has to be idempotent and quiet: an
+ * unconditional fetch that re-renders on completion is an infinite loop.
+ * Presence does go stale under this, which is the trade — a socket frame or
+ * reopening a conversation refreshes it, and neither is worth a poll.
+ */
+export async function ensureDirectMessages(rerender) {
+  if (!state.projectId || state.dmLoadedProject === state.projectId) {
+    return;
+  }
+  state.dmLoadedProject = state.projectId;
+  await loadDirectMessages();
+  rerender();
+}
+
 export async function ensureChannelRoster(repositoryId, rerender) {
   if (
     !repositoryId ||
