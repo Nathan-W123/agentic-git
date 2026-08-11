@@ -164,13 +164,27 @@ function changedFilesFrom(
     if (typeof entry !== "object" || entry === null) {
       return [];
     }
-    const { path, status } = entry as { path?: unknown; status?: unknown };
+    const { path, status, added, removed } = entry as {
+      path?: unknown;
+      status?: unknown;
+      added?: unknown;
+      removed?: unknown;
+    };
     if (typeof path !== "string" || path.length === 0) {
       return [];
     }
-    return status === "added" || status === "modified" || status === "deleted"
-      ? [{ path, status }]
-      : [];
+    if (status !== "added" && status !== "modified" && status !== "deleted") {
+      return [];
+    }
+    // Counts carried through only when both are real numbers. A half-counted
+    // file would render as "+8 −0" and read as a fact rather than as the
+    // absence of one.
+    const counted =
+      typeof added === "number" &&
+      Number.isFinite(added) &&
+      typeof removed === "number" &&
+      Number.isFinite(removed);
+    return [{ path, status, ...(counted ? { added, removed } : {}) }];
   });
 }
 

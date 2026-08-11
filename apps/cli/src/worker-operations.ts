@@ -2525,10 +2525,23 @@ export async function acceptWorkResult(
       // only shape that ever reached a thread was the live one the coordinator
       // polls out mid-run, which exists only while the run is being watched.
       // That is why a finished task could end up with no list at all.
-      changedFiles: promoted.patches.map((patch) => ({
-        path: patch.path,
-        status: patch.status,
-      })),
+      changedFiles: promoted.patches.map((patch) => {
+        // Counted from the diff itself rather than carried alongside it: the
+        // patch is the only place the number exists, and a count computed
+        // anywhere else could disagree with the text it claims to describe.
+        // `+++`/`---` are the file headers, not content.
+        const lines = String(patch.patch ?? "").split("\n");
+        return {
+          path: patch.path,
+          status: patch.status,
+          added: lines.filter(
+            (line) => line.startsWith("+") && !line.startsWith("+++"),
+          ).length,
+          removed: lines.filter(
+            (line) => line.startsWith("-") && !line.startsWith("---"),
+          ).length,
+        };
+      }),
       ...(split.deferred.length === 0
         ? {}
         : {
