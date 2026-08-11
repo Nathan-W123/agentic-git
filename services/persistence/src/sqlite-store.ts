@@ -2876,13 +2876,16 @@ export class SqliteCoordinationStore implements CoordinationStore {
     const clauses = ["repository_id = ?"];
     const values: (string | number)[] = [repositoryId];
     if (filter.before !== undefined) {
-      clauses.push("created_at < ?");
+      clauses.push("COALESCE(bumped_at, created_at) < ?");
       values.push(filter.before);
     }
+    // Ordered by where the message sits, which is its bump when it has one
+    // and otherwise when it was written. `before` still pages on the same
+    // expression, so a cursor and the order it pages through agree.
     const rows = this.db
       .prepare(
         `SELECT * FROM channel_messages WHERE ${clauses.join(" AND ")}
-         ORDER BY created_at DESC, rowid DESC LIMIT ?`,
+         ORDER BY COALESCE(bumped_at, created_at) DESC, rowid DESC LIMIT ?`,
       )
       .all(...values, limit) as Row[];
     const bases = rows.reverse().map((row) => this.toChannelMessageBase(row));
@@ -3024,6 +3027,83 @@ export class SqliteCoordinationStore implements CoordinationStore {
       throw new Error(`Unknown channel message: ${messageId}`);
     }
     return message;
+  }
+
+  public async bumpChannelMessage(
+    repositoryId: string,
+    messageId: string,
+    at: string,
+  ): Promise<void> {
+    this.db
+      .prepare(
+        `UPDATE channel_messages SET bumped_at = ?
+          WHERE repository_id = ? AND id = ?`,
+      )
+      .run(at, repositoryId, messageId);
+  }
+
+  public async deleteChannelMessage(
+    repositoryId: string,
+    messageId: string,
+  ): Promise<void> {
+    this.db.exec("BEGIN");
+    try {
+      // Reactions hang off replies as well as off the message, and both
+      // reference it, so they go first or the delete violates the foreign
+      // key it was meant to clean up after.
+      this.db
+        .prepare(
+          `DELETE FROM channel_message_reactions WHERE message_id = ?
+             OR message_id IN (
+               SELECT id FROM channel_message_replies WHERE message_id = ?
+             )`,
+        )
+        .run(messageId, messageId);
+      this.db
+        .prepare("DELETE FROM channel_message_replies WHERE message_id = ?")
+        .run(messageId);
+      this.db
+        .prepare(
+          "DELETE FROM channel_messages WHERE repository_id = ? AND id = ?",
+        )
+        .run(repositoryId, messageId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  public async deleteChannelMessages(repositoryId: string): Promise<number> {
+    this.db.exec("BEGIN");
+    try {
+      const ids = (
+        this.db
+          .prepare("SELECT id FROM channel_messages WHERE repository_id = ?")
+          .all(repositoryId) as Row[]
+      ).map((row) => text(row, "id"));
+      for (const id of ids) {
+        this.db
+          .prepare(
+            `DELETE FROM channel_message_reactions WHERE message_id = ?
+               OR message_id IN (
+                 SELECT id FROM channel_message_replies WHERE message_id = ?
+               )`,
+          )
+          .run(id, id);
+        this.db
+          .prepare("DELETE FROM channel_message_replies WHERE message_id = ?")
+          .run(id);
+      }
+      this.db
+        .prepare("DELETE FROM channel_messages WHERE repository_id = ?")
+        .run(repositoryId);
+      this.db.exec("COMMIT");
+      return ids.length;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   public async listChannelAgentOverrides(

@@ -303,10 +303,30 @@ const CHANNEL_PROGRESS_MAX_MS = 60 * 60 * 1000;
  * substantive follows. Without this every task threaded, because every task
  * says it started.
  */
-const CHANNEL_CEREMONIAL_EVENTS = new Set(["task_started"]);
+/**
+ * Narration that is true of the run rather than about its outcome, and so is
+ * never on its own a reason to open a thread.
+ *
+ * `agent_progress` is here because thinking is not an answer. It was the
+ * reason every task got a thread: the first thought the agent had was
+ * "substantive", so a thread opened around it, and a request to add one line
+ * to a README arrived as a thread with a title, an opening, and a running
+ * commentary nobody asked to read. A simple task should look like the agent
+ * typing and then saying it is done.
+ *
+ * Nothing is lost when it is held. The moment a run says something that is
+ * genuinely about this task — it needs a review, it hit a conflict, it has a
+ * report — the thread opens and everything held is written into it first, in
+ * order, so the reasoning is there for the one run in ten that needs
+ * explaining.
+ */
+const CHANNEL_CEREMONIAL_EVENTS = new Set(["task_started", "agent_progress"]);
 
 const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
   canonical_promoted: "Done — the change is in canonical.",
+  // Work that finished by reporting rather than by changing anything. An
+  // ending, and not a failure — see `readsAsReportRequest`.
+  task_reported: "Done — nothing needed changing, so here is what I found.",
   task_failed: "I could not finish this.",
   task_cancelled: "This was cancelled.",
 };
@@ -431,6 +451,14 @@ export function narrateTaskEvent(
         : `Validation came back ${String(data["status"] ?? "unresolved")}.`;
     case "approval_requested":
       return "Waiting on a human review before this can land.";
+    case "task_reported": {
+      // The agent's own words are the deliverable here — the report *is* the
+      // outcome, where for a change the outcome is the diff.
+      const explanation = data["explanation"];
+      return typeof explanation === "string" && explanation.trim().length > 0
+        ? explanation.trim()
+        : "Finished without needing to change anything.";
+    }
     case "task_failed": {
       // Two shapes reach here. Most emitters record `error`; the integration
       // path records `explanation` and a `status`. Reading only the first left
@@ -569,6 +597,70 @@ function readsAsQuestion(content: string): boolean {
  * marker, and a status question about existing work is excluded even when
  * it contains a verb.
  */
+/**
+ * Whether answering this honestly means opening the repository.
+ *
+ * The chat path has no checkout, so a message that needs one can only be met
+ * with an apology. Routing it to a task instead gets it answered by an agent
+ * with the files in front of it.
+ *
+ * Deliberately generous about what counts — a false positive costs a task
+ * that reads a repository and reports, which is the behaviour being asked
+ * for; a false negative is the apology this exists to remove. It stays
+ * anchored on concrete nouns rather than any mention of work, so "how are you
+ * getting on?" is still conversation.
+ */
+export function needsTheRepository(content: string): boolean {
+  return (
+    /\b(repo|repos|repository|repositories|codebase|code ?base|source code|the code|this code|file|files|folder|directory|readme|test|tests|function|functions|class|classes|module|modules|endpoint|schema|migration|dependency|dependencies|commit|commits|branch|diff|changeset)\b/iu.test(
+      content,
+    ) ||
+    // A path or a filename, which is a reference to the repository whether or
+    // not the sentence around it says so.
+    /[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|css|html|yml|yaml|toml|sql|py|go|rs|java|rb|sh)\b/iu.test(
+      content,
+    ) ||
+    /(^|\s)(?:\.\/|src\/|apps\/|packages\/|services\/)/u.test(content)
+  );
+}
+
+/**
+ * How alike two pieces of channel text are, 0 to 1.
+ *
+ * Jaccard over the same stopword-stripped tokens agent matching uses, so
+ * "similar" means one thing in this system rather than two. Symmetric on
+ * purpose: a short follow-up about a long thread should not score highly just
+ * because the thread contains every word it used.
+ */
+export function textOverlap(left: string, right: string): number {
+  const a = relevanceTokens(left);
+  const b = relevanceTokens(right);
+  if (a.size === 0 || b.size === 0) {
+    return 0;
+  }
+  let shared = 0;
+  for (const token of a) {
+    if (b.has(token)) {
+      shared += 1;
+    }
+  }
+  return shared / (a.size + b.size - shared);
+}
+
+/**
+ * How alike a request and an existing thread must be before new work joins it
+ * rather than starting its own.
+ *
+ * Deliberately high. Merging wrongly buries work in a thread nobody is
+ * reading, which is worse than the duplicate thread it was trying to avoid —
+ * the same reasoning that kept this explicit-only until now. Two requests
+ * about the same file, in the same words, clear it; two requests that merely
+ * mention the repository do not.
+ */
+const THREAD_MERGE_MIN_OVERLAP = 0.42;
+/** Threads older than this are finished business, however well they match. */
+const THREAD_MERGE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
 function looksLikeTaskRequest(content: string): boolean {
   const text = content.trim();
   if (text.length < 6) {
@@ -4490,6 +4582,53 @@ export class ApiGateway {
       return;
     }
 
+    // Removing a thread, or clearing the channel.
+    //
+    // `manage_project` for both, and deliberately not "whoever posted it": a
+    // thread is a record of work an agent did, read by everybody in the
+    // repository, and deleting one throws away the only account of what
+    // happened. That is an administrative act, not tidying after yourself.
+    const channelMessageMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/messages(?:/([^/]+))?$`,
+        "u",
+      ),
+    );
+    if (channelMessageMatch !== undefined && method === "DELETE") {
+      const [projectId = "", repositoryId = "", messageId] =
+        channelMessageMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "manage_project",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      if (messageId === undefined || messageId.length === 0) {
+        const removed =
+          await this.options.store.deleteChannelMessages(repositoryId);
+        await this.options.store.appendAudit(undefined, {
+          type: "channel_message_deleted",
+          data: { projectId, repositoryId, removed, all: true },
+        });
+        this.sendJson(response, 200, { removed });
+        return;
+      }
+      await this.options.store.deleteChannelMessage(repositoryId, messageId);
+      await this.options.store.appendAudit(undefined, {
+        type: "channel_message_deleted",
+        data: { projectId, repositoryId, messageId },
+      });
+      this.sendJson(response, 200, { removed: 1 });
+      return;
+    }
+
     // Auditing switched off and on for a repository, without demoting the
     // agent that holds the role. `manage_project`, matching promotion: this
     // decides whether an account is spent unprompted, which is the same
@@ -6004,6 +6143,59 @@ export class ApiGateway {
     });
   }
 
+  /**
+   * An existing thread this request belongs in, if one clearly does.
+   *
+   * Continuing a thread is how related work stays together — and until now
+   * only a person could say so, by asking inside the thread. This is the
+   * automatic half, held to a high bar because the failure is asymmetric:
+   * a duplicate thread is untidy, while a wrong merge hides work in a
+   * conversation nobody is reading.
+   *
+   * Only the same agent's own threads are considered. A thread is one
+   * agent's work on one task — dropping a second agent's task into it would
+   * make the thread's own narration ambiguous about who is doing what.
+   */
+  private async findThreadToContinue(input: {
+    repositoryId: string;
+    viewerId: string;
+    content: string;
+    candidate: ChannelMentionCandidate;
+  }): Promise<{ id: string; title: string } | undefined> {
+    const authorId = `${input.candidate.userId}:${input.candidate.provider}`;
+    const messages = await this.options.store
+      .listChannelMessages(input.repositoryId, input.viewerId, { limit: 40 })
+      .catch(() => []);
+    const now = Date.now();
+    let best: { id: string; title: string; score: number } | undefined;
+    for (const message of messages) {
+      if (message.kind !== "agent" || message.authorId !== authorId) {
+        continue;
+      }
+      const age = now - new Date(message.createdAt).getTime();
+      if (!Number.isFinite(age) || age > THREAD_MERGE_MAX_AGE_MS) {
+        continue;
+      }
+      // The thread's own subject, which is what the request has to match:
+      // its title if the agent named one, and the request it came from.
+      const titleReply = message.replies.find((reply) =>
+        /^Task: /u.test(reply.content),
+      );
+      const title =
+        titleReply === undefined
+          ? ""
+          : (titleReply.content.replace(/^Task:\s*/u, "").split("\n")[0] ?? "").trim();
+      const subject = `${message.content} ${title}`;
+      const score = textOverlap(withoutMentions(input.content), subject);
+      if (score >= THREAD_MERGE_MIN_OVERLAP && (best === undefined || score > best.score)) {
+        best = { id: message.id, title, score };
+      }
+    }
+    return best === undefined
+      ? undefined
+      : { id: best.id, title: best.title };
+  }
+
   private async dispatchOneMention(input: {
     projectId: string;
     repositoryId: string;
@@ -6064,7 +6256,19 @@ export class ApiGateway {
     // appeared to type forever because there was nothing to finish. Anything
     // that does not read as a request for work is simply answered, in the
     // channel, like a message from a colleague.
-    if (readsAsQuestion(content)) {
+    // …unless answering it means looking at the repository, which the chat
+    // path cannot do: provider chat runs the CLI in an empty scratch
+    // directory, so a question about a file could only ever be answered with
+    // "I can't see the repository from here". That sentence was true and
+    // useless, and it was the commonest thing an agent said.
+    //
+    // A task is the path that has a checkout. Sending these there is now
+    // cheap in the two ways it previously was not: a task asked to look can
+    // finish by reporting rather than failing for changing nothing, and a
+    // task that says nothing substantive no longer opens a thread. So the
+    // question is answered by an agent that actually read the file, and it
+    // still arrives as one line in the channel.
+    if (readsAsQuestion(content) && !needsTheRepository(content)) {
       await this.answerInChannel(candidate, content, projectId, repositoryId);
       return;
     }
@@ -6080,11 +6284,27 @@ export class ApiGateway {
       content,
       claimMessage,
     );
+    // Asked inside a thread, or close enough to one that it belongs there.
+    // The explicit half is a person saying "and now this too"; the automatic
+    // half is `findThreadToContinue`, held to a high bar because a wrong
+    // merge hides work where nobody is reading.
+    const continuing =
+      input.threadMessageId ??
+      (trigger === "mention"
+        ? (
+            await this.findThreadToContinue({
+              repositoryId,
+              viewerId: senderId,
+              content,
+              candidate,
+            })
+          )?.id
+        : undefined);
     // Continuing an existing thread: the acknowledgement belongs inside it,
     // and everything this run narrates hangs off the same root, so the two
     // pieces of work read as one story rather than two.
     const threadRootId =
-      input.threadMessageId ??
+      continuing ??
       (
         await this.appendChannelEntry({
           projectId,
@@ -6094,13 +6314,29 @@ export class ApiGateway {
           content: acknowledgementText,
         })
       ).id;
-    if (input.threadMessageId !== undefined) {
+    if (continuing !== undefined) {
+      // Back to the foot of the channel. Work joining an old thread would
+      // otherwise land wherever that thread has scrolled to, which is the
+      // failure mode that kept merging explicit-only — so the merge is made
+      // visible rather than merely correct. The timestamp is untouched; only
+      // the position moves (`bumpChannelMessage`).
+      await this.options.store
+        .bumpChannelMessage(repositoryId, continuing, new Date().toISOString())
+        .catch(() => undefined);
+    }
+    if (continuing !== undefined) {
       await this.appendChannelThreadReply({
         projectId,
         repositoryId,
-        messageId: input.threadMessageId,
+        messageId: continuing,
         authorId: `${candidate.userId}:${candidate.provider}`,
-        content: acknowledgementText,
+        content:
+          input.threadMessageId === undefined
+            ? // Auto-merged. Said out loud, because the reader did not ask
+              // for this thread and needs to know why their request landed
+              // in it rather than somewhere new.
+              `${acknowledgementText}\n\n(Adding this to the thread above — it looks like the same piece of work.)`
+            : acknowledgementText,
       });
     }
     const acknowledgement = { id: threadRootId };
@@ -6305,10 +6541,15 @@ export class ApiGateway {
       candidate,
       `${agentIdentity(candidate)}\n\n` +
         "Answer this message directly and briefly — two or three sentences " +
-        "at most, no markdown headings, no preamble. You cannot read the " +
-        "repository from here, so answer from what is below; if the answer " +
-        "is not there, say so plainly rather than guessing, and never claim " +
-        "to have started or requested anything.\n\n" +
+        "at most, no markdown headings, no preamble.\n\n" +
+        "This chat has no checkout, so answer from what is below rather than " +
+        "from the code; if the answer is not there, say so plainly rather " +
+        "than guessing, and never claim to have started or requested " +
+        "anything. Your tasks are a different matter: each one runs with the " +
+        "repository checked out. So describe what your work is doing from " +
+        "the list below, and never say the work cannot continue, is blocked, " +
+        "or cannot be completed merely because this conversation cannot see " +
+        "the files — that is true of the chat and false of the task.\n\n" +
         (await this.agentWorkContext(repositoryId, candidate)) +
         `\n\nThe message: ${question}`,
       QUESTION_TIMEOUT_MS,
@@ -6537,8 +6778,11 @@ export class ApiGateway {
     const answer = await this.askAgent(
       candidate,
       `${agentIdentity(candidate)}\n\n` +
-        "You are answering a follow-up " +
-        "question inside the thread for a task you worked on. Below is that " +
+        "You are answering a follow-up question inside the thread for a task " +
+        "you worked on. This chat has no checkout, but the task itself ran " +
+        "with the repository — so answer from the thread below, and never say " +
+        "the work is blocked or cannot continue merely because this " +
+        "conversation cannot see the files. Below is that " +
         "thread so far, oldest first. Answer the question directly and " +
         "briefly — three sentences at most, no markdown headings, no " +
         "preamble. If the thread shows the work did not finish, say plainly " +
@@ -6661,10 +6905,16 @@ export class ApiGateway {
             {
               role: "user",
               content:
-                "You are about to start this task in a team chat. Reply with " +
-                "one short sentence — under 20 words — confirming you are " +
-                "picking it up and naming what you will do first. No preamble, " +
-                "no markdown, no quotes.\n\nTask: " +
+                `${agentIdentity(candidate)}\n\n` +
+                "You are about to start this task. It runs with the " +
+                "repository checked out and you can read, create and edit " +
+                "files in it — this message is only the acknowledgement, so " +
+                "do not say you are unable to reach the repository or that " +
+                "you can only draft something here. If the request is " +
+                "unclear, say what you will assume rather than asking.\n\n" +
+                "Reply with one short sentence — under 20 words — confirming " +
+                "you are picking it up and naming what you will do first. No " +
+                "preamble, no markdown, no quotes.\n\nTask: " +
                 request,
             },
           ],
@@ -7317,15 +7567,19 @@ export class ApiGateway {
               this.watchedChannelTasks.delete(watched.taskId);
               break;
             }
-            // Something worth following. Everything held so far goes in first,
-            // in the order it happened, so the thread reads from the start.
-            for (const held of watched.pending) {
+            // Something worth following. Everything held so far goes in
+            // first, in the order it happened, so the thread reads from the
+            // start — as one entry rather than one per thought, because it is
+            // one train of reasoning and arrived as a paragraph in the
+            // agent's head before it arrived as lines in ours.
+            if (watched.pending.length > 0) {
               await this.appendChannelThreadReply({
                 projectId: watched.projectId,
                 repositoryId: watched.repositoryId,
                 messageId: watched.messageId,
                 authorId: watched.authorId,
-                content: held,
+                content: watched.pending.join("\n"),
+                kind: "progress",
               });
             }
             watched.pending = [];
@@ -7337,6 +7591,9 @@ export class ApiGateway {
             messageId: watched.messageId,
             authorId: watched.authorId,
             content: line,
+            // An ending is addressed to the reader; everything before it is
+            // the run talking about itself.
+            ...(terminal ? {} : { kind: "progress" as const }),
           });
           if (terminal) {
             this.watchedChannelTasks.delete(watched.taskId);
@@ -7419,11 +7676,16 @@ export class ApiGateway {
     messageId: string;
     authorId: string;
     content: string;
+    /**
+     * `progress` for a run narrating itself. It reads differently and it
+     * counts differently — see `ChannelEntryKind`.
+     */
+    kind?: "agent" | "progress";
   }): Promise<void> {
     await this.options.store.addChannelReply({
       repositoryId: input.repositoryId,
       messageId: input.messageId,
-      kind: "agent",
+      kind: input.kind ?? "agent",
       authorId: input.authorId,
       content: input.content,
     });

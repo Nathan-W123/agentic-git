@@ -493,6 +493,65 @@ function chanSearchRow() {
   )}</div>`;
 }
 
+/**
+ * The one line under a message that stands for its whole thread.
+ *
+ * It used to read "8 replies", counting every step the run narrated to
+ * itself — so a one-line edit looked like a long conversation, and the number
+ * told you how long the work took rather than how much was said. It also
+ * never said what the thread was *about*, though the agent names every task
+ * it picks up and that name is sitting in the first reply.
+ *
+ * So: the name, the faces of whoever is in it, and a count of things actually
+ * said. Thinking is excluded — it is the run talking to itself, and it has
+ * its own collapsed block inside the thread.
+ */
+function threadSummaryLink(entry, replies, repositoryId) {
+  const isThinking = (reply) =>
+    reply.kind === "progress" ||
+    (reply.kind === "agent" &&
+      !THREAD_FINISHED_RE.test(String(reply.content ?? "").trim()));
+  const titled = replies.find((reply) =>
+    /^Task: /u.test(String(reply.content ?? "")),
+  );
+  const name =
+    titled === undefined
+      ? ""
+      : String(titled.content).replace(/^Task:\s*/u, "").split("\n")[0].trim();
+  const said = replies.filter(
+    (reply) => reply !== titled && !isThinking(reply),
+  );
+  // One face per participant, in the order they first appear, so a thread
+  // shows who is in it before it is opened. Deduplicated by author: three
+  // messages from one agent is one agent.
+  const seen = new Set();
+  const faces = replies
+    .map((reply) => channelAuthor(repositoryId, reply))
+    .filter((author) => {
+      const key = author?.name ?? "";
+      if (key === "" || seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 4)
+    .map((author) =>
+      author.agent !== undefined ? agentFace(author.agent, 18) : avatar(author.name, 18),
+    )
+    .join("");
+  const count =
+    said.length === 0
+      ? "Thread"
+      : `${said.length} repl${said.length === 1 ? "y" : "ies"}`;
+  return `<button type="button" class="cmsg-thread-link" data-act="channel-thread-open"
+      data-value="${esc(entry.id)}">
+      <span class="ctl-faces">${faces}</span>
+      ${name === "" ? "" : `<span class="ctl-name">${esc(name)}</span>`}
+      <span class="ctl-count">${esc(count)}</span>
+    </button>`;
+}
+
 function messageRow(entry, repositoryId, { isReply = false } = {}) {
   const author = channelAuthor(repositoryId, entry);
   // System messages are the coordinator narrating, not a participant in the
@@ -531,10 +590,7 @@ function messageRow(entry, repositoryId, { isReply = false } = {}) {
       ${
         replies.length === 0
           ? ""
-          : `<button type="button" class="cmsg-thread-link" data-act="channel-thread-open"
-              data-value="${esc(entry.id)}">${icon("reply")} ${replies.length} repl${
-                replies.length === 1 ? "y" : "ies"
-              }</button>`
+          : threadSummaryLink(entry, replies, repositoryId)
       }
     </div>
     <span class="cmsg-actions">
@@ -858,15 +914,34 @@ function chanTreePanel(repositoryId) {
 }
 
 function threadListPanel(repositoryId) {
+  // Newest first, and "newest" means the last thing to happen in the thread
+  // rather than when it started — a thread somebody added to five minutes ago
+  // is the live one, however long ago it opened. The server orders the
+  // channel the same way once a thread is continued (`bumpChannelMessage`),
+  // so the two views agree about which conversation is current.
+  const lastActivity = (entry) => {
+    const replies = entry.replies ?? [];
+    const last = replies[replies.length - 1];
+    return String(last?.at ?? last?.createdAt ?? entry.at ?? "");
+  };
   const threads = channelMessagesFor(repositoryId)
     .filter((entry) => (entry.replies ?? []).length > 0)
     .slice()
-    .reverse();
+    .sort((left, right) => lastActivity(right).localeCompare(lastActivity(left)));
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
       <span>Threads</span>
       <span class="spacer"></span>
+      ${
+        threads.length === 0 || !canManageRepository(repositoryId)
+          ? ""
+          : iconButton("trash", {
+              act: "channel-threads-clear",
+              title: "Delete every thread in this channel",
+              small: true,
+            })
+      }
       ${iconButton("close", { act: "channel-threads-close", title: "Close" })}
     </header>
     <div class="thread-body">
@@ -875,17 +950,52 @@ function threadListPanel(repositoryId) {
           ? `<div class="util-empty">No threads yet. A thread appears when an agent has more than one thing to say about a task.</div>`
           : threads
               .map((entry) => {
-                const count = (entry.replies ?? []).length;
+                const replies = entry.replies ?? [];
+                // Thinking is the run talking to itself; it has never been a
+                // reply and should not be counted as one here either.
+                const count = replies.filter(
+                  (reply) =>
+                    reply.kind !== "progress" &&
+                    !/^Task: /u.test(String(reply.content ?? "")),
+                ).length;
+                const titled = replies.find((reply) =>
+                  /^Task: /u.test(String(reply.content ?? "")),
+                );
+                const name =
+                  titled === undefined
+                    ? ""
+                    : (String(titled.content).replace(/^Task:\s*/u, "").split("\n")[0] ?? "").trim();
                 const author = channelAuthor(repositoryId, entry);
-                return `<button type="button" class="thread-item"
-                  data-act="channel-thread-open" data-value="${esc(entry.id)}">
-                  <span class="ti-top">
-                    <span class="ti-who">${esc(author.name)}</span>
-                    <span class="ti-time">${esc(clockTime(entry.at))}</span>
-                  </span>
-                  <span class="ti-text">${esc(entry.content)}</span>
-                  <span class="ti-count">${count} repl${count === 1 ? "y" : "ies"}</span>
-                </button>`;
+                return `<div class="thread-item-row">
+                  <button type="button" class="thread-item"
+                    data-act="channel-thread-open" data-value="${esc(entry.id)}">
+                    <span class="ti-top">
+                      <span class="ti-face">${
+                        author.agent !== undefined
+                          ? agentFace(author.agent, 18)
+                          : avatar(author.name, 18)
+                      }</span>
+                      <span class="ti-who">${esc(author.name)}</span>
+                      <span class="ti-time">${esc(clockTime(entry.at))}</span>
+                    </span>
+                    <span class="ti-text">${esc(name === "" ? entry.content : name)}</span>
+                    <span class="ti-count">${
+                      count === 0
+                        ? "No replies yet"
+                        : `${count} repl${count === 1 ? "y" : "ies"}`
+                    }</span>
+                  </button>
+                  ${
+                    canManageRepository(repositoryId)
+                      ? iconButton("trash", {
+                          act: "channel-thread-delete",
+                          value: entry.id,
+                          title: "Delete this thread",
+                          small: true,
+                        })
+                      : ""
+                  }
+                </div>`;
               })
               .join("")
       }
@@ -948,8 +1058,13 @@ function threadReplies(root, repositoryId) {
   if (replies.length === 0) {
     return `<div class="thread-count">No replies yet</div>`;
   }
+  // `progress` is the run narrating itself; the server marks it (see
+  // `ChannelEntryKind`). The content test behind it is for replies written
+  // before that mark existed, which are indistinguishable otherwise.
   const isThinking = (reply) =>
-    reply.kind === "agent" && !THREAD_FINISHED_RE.test(String(reply.content ?? "").trim());
+    reply.kind === "progress" ||
+    (reply.kind === "agent" &&
+      !THREAD_FINISHED_RE.test(String(reply.content ?? "").trim()));
   const finishedAt = replies.findIndex((reply) =>
     THREAD_FINISHED_RE.test(String(reply.content ?? "").trim()),
   );
@@ -970,7 +1085,13 @@ function threadReplies(root, repositoryId) {
         : `<details class="thread-thinking"${done ? "" : " open"}>
              <summary><span class="tt-label">Thinking</span>
                <span class="tt-count">${esc(count)}</span></summary>
-             ${steps.map((reply) => messageRow(reply, repositoryId, { isReply: true })).join("")}
+             <div class="tt-body">${steps
+               .map((reply) => String(reply.content ?? "").trim())
+               .filter((text) => text.length > 0)
+               .join("\n")
+               .split(/\n+/u)
+               .map((line) => `<p>${esc(line)}</p>`)
+               .join("")}</div>
            </details>`
     }
     ${outcome.map((reply) => messageRow(reply, repositoryId, { isReply: true })).join("")}`;
@@ -1516,10 +1637,10 @@ export function updateComposerInput(node, rerender) {
   // long transcript behind it that is the latency between pressing a key and
   // seeing the letter, on the one screen where responsiveness is the entire
   // experience.
-  const before = `${String(state.mentionActive)} ${state.mentionQuery}`;
+  const before = `${String(state.mentionActive)} ${state.mentionQuery}`;
   updateMentionState(node);
   const changed =
-    `${String(state.mentionActive)} ${state.mentionQuery}` !== before;
+    `${String(state.mentionActive)} ${state.mentionQuery}` !== before;
   // The height is a property of this element, not of the app, so it is set
   // directly whether or not anything else is rebuilt.
   node.style.height = "auto";

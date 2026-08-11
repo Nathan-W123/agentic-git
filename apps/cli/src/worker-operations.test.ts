@@ -42,6 +42,7 @@ import {
   admitWorkPlan,
   leaseBundle,
   blockedAdmissionHistory,
+  readsAsReportRequest,
   leaseWork,
   type WorkAssignment,
 } from "./worker-operations.js";
@@ -4127,5 +4128,59 @@ test("the strict rebase switch restores the unconditional requeue", async () => 
       process.env["COORD_STRICT_PLAN_REBASE"] = previous;
     }
     await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("only a request to look excuses a changeset that changed nothing", () => {
+  // The distinction the pipeline could not previously draw. An empty result
+  // is the answer to one of these and the absence of an answer to the other.
+  for (const objective of [
+    "audit the codebase",
+    "give me a summary of the connected repo",
+    "analyse the retry loop",
+    "inspect the auth middleware for problems",
+    "explain how canonical promotion works",
+    "Conduct an audit of the changes since Friday",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), true, objective);
+  }
+
+  // These must keep failing when they change nothing — an empty changeset
+  // here is the symptom of a sandbox silently refusing every edit, which is
+  // exactly what `CodexWriteDeniedError` exists to catch.
+  for (const objective of [
+    "edit the readme, add a hello at the bottom",
+    "fix the retry loop in worker.ts",
+    "add a health endpoint",
+    "rename the auth module",
+    // "review" is deliberately absent from the vocabulary: this is a change
+    // request wearing a reading verb, and excusing it would blunt the alarm.
+    "review the retry loop and fix what you find",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), false, objective);
+  }
+});
+
+test("a question about the repository is answered by reporting, unless it asks for an edit", () => {
+  // These reach a task because the chat path has no checkout — see
+  // `needsTheRepository`. Having got there, changing nothing is the answer.
+  for (const objective of [
+    "what is in the README?",
+    "How does canonical promotion work",
+    "which files handle auth?",
+    "can you tell me what the retry loop does?",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), true, objective);
+  }
+
+  // A question mark does not turn a change request into a report. An empty
+  // result here is still the symptom of a sandbox refusing every write.
+  for (const objective of [
+    "can you fix the retry loop?",
+    "could you add a hello to the readme?",
+    "would you rename the auth module?",
+    "why not just delete that file?",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), false, objective);
   }
 });

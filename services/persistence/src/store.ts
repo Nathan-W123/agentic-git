@@ -637,7 +637,20 @@ export interface CreateApprovalInput {
   expiresAt: string;
 }
 
-export type ChannelEntryKind = "user" | "agent" | "system";
+/**
+ * `progress` is an agent narrating its own run — thinking, steps taken, files
+ * touched — rather than saying something to the room.
+ *
+ * Separate from `agent` because the difference is invisible to a reader
+ * otherwise, and everything downstream needs it: a thread's reply count
+ * should mean "how much was said", not "how long the run was", and a wall of
+ * step-by-step commentary reads better as one block that grows than as thirty
+ * messages from somebody who will not stop talking.
+ *
+ * Stored as text like the others, so nothing migrates: rows written before
+ * this existed are `agent`, which is what they were.
+ */
+export type ChannelEntryKind = "user" | "agent" | "system" | "progress";
 
 /** One emoji's reaction summary from one viewer's point of view. */
 export interface ChannelReaction {
@@ -1143,6 +1156,24 @@ export interface CoordinationStore {
     userId: UserId,
     emoji: string,
   ): Promise<ChannelMessage>;
+  /**
+   * Moves a message to the foot of the channel without changing when it was
+   * said.
+   *
+   * Continuing an existing thread has to bring it back into view, or work
+   * lands where nobody is looking. Rewriting `createdAt` would buy that by
+   * lying about history, and every reply's ordering hangs off it — so
+   * position and time are separate facts, and only position moves.
+   */
+  bumpChannelMessage(
+    repositoryId: string,
+    messageId: string,
+    at: string,
+  ): Promise<void>;
+  /** Removes a message with its replies and reactions. */
+  deleteChannelMessage(repositoryId: string, messageId: string): Promise<void>;
+  /** Removes every message in one channel. Returns how many went. */
+  deleteChannelMessages(repositoryId: string): Promise<number>;
   listChannelAgentOverrides(
     repositoryId: string,
   ): Promise<Record<string, ChannelAgentOverride>>;

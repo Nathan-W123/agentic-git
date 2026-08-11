@@ -226,6 +226,47 @@ async function canonicalAdvance(
  * repository for as long as the lease lived — longer, if the process died
  * before deleting one.
  */
+/**
+ * Whether a task was asked to look at the repository rather than change it.
+ *
+ * Read-only work is real work here — the auditor exists to do it — but the
+ * pipeline measures success in patches, so an audit that finds nothing to
+ * change is indistinguishable from an edit that silently failed. This is what
+ * tells them apart, and it deliberately reads the *request* rather than the
+ * result: what was asked for is the only thing that says whether an empty
+ * changeset is the answer or the absence of one.
+ *
+ * Kept to verbs that cannot be confused with editing. "review" is left out on
+ * purpose — "review the retry loop and fix it" is a change request, and a
+ * word that appears in both kinds of sentence would quietly excuse the very
+ * failure `CodexWriteDeniedError` was written to catch.
+ */
+export function readsAsReportRequest(objective: string): boolean {
+  // An editing verb settles it, whatever else the sentence does. "Can you fix
+  // the retry loop?" is a question and a change request, and letting the
+  // question mark excuse an empty result is exactly how a sandbox silently
+  // refusing every write would pass for success.
+  if (
+    /\b(fix|add|change|edit|write|create|remove|delete|rename|update|implement|refactor|patch|revert|bump|replace|move|migrate|upgrade|install|wire|hook)\b/iu.test(
+      objective,
+    )
+  ) {
+    return false;
+  }
+  return (
+    /\b(audit|audits|audited|auditing|summar(?:y|ise|ize|ised|ized|ising|izing|ies)|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|analysis|inspect|inspects|inspected|inspecting|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|explain|explains|explained|explaining)\b/iu.test(
+      objective,
+    ) ||
+    // A question about the repository is answered by reporting on it. These
+    // reach a task at all because the chat path has no checkout and could
+    // only apologise — see `needsTheRepository` in the gateway.
+    /\?\s*$/u.test(objective.trim()) ||
+    /^\s*(?:what|which|where|when|why|how|who|is|are|does|do|did|can|could|should|would)\b/iu.test(
+      objective,
+    )
+  );
+}
+
 export function bundleRefFor(leaseId: string): string {
   return `${LEASE_REF_PREFIX}${leaseId.replaceAll(/[^A-Za-z0-9_-]/gu, "")}`;
 }
@@ -2819,6 +2860,34 @@ export async function acceptWorkResult(
         assessedAgainst,
         run.id,
       );
+    } else if (
+      integration.status === "empty" &&
+      readsAsReportRequest(task.objective)
+    ) {
+      // Asked to look, not to change — and it looked.
+      //
+      // "Changed no files" is failure for "fix the retry loop" and success
+      // for "audit the codebase". The pipeline could only express the first,
+      // so an audit, a summary or a review came back as "complete but changed
+      // no files" and was recorded as a failed task. The work had been done;
+      // only the definition of done was wrong.
+      //
+      // Judged against the request rather than by relaxing `empty` generally,
+      // because an empty changeset from a task that *was* meant to write is
+      // the exact symptom `CodexWriteDeniedError` exists to catch — a sandbox
+      // silently refusing every edit while the agent reports success. Reading
+      // the objective keeps that alarm intact and lets the report through.
+      const explanation =
+        changeSet.agentExplanation.trim().length > 0
+          ? changeSet.agentExplanation.trim()
+          : "Reported without changing any files.";
+      await store.saveTaskStatus(run.id, task.id, "integrated", explanation);
+      await store.completeSubmittedTask(task.id, "integrated", run.id);
+      await trace(store, run.id, "task_reported", task.id, {
+        projectId: task.projectId,
+        repositoryId: task.repositoryId,
+        explanation,
+      });
     } else {
       await store.saveTaskStatus(
         run.id,

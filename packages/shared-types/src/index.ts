@@ -679,6 +679,17 @@ export type AuditEventType =
   | "approval_requested"
   | "approval_decided"
   | "validation_completed"
+  /**
+   * A task that was asked to look rather than to change, finishing with a
+   * report and no patches.
+   *
+   * Distinct from `canonical_promoted` because nothing was promoted, and
+   * distinct from `task_failed` because nothing went wrong. Without it, an
+   * audit or a summary — work that succeeds precisely by changing nothing —
+   * came back as "complete but changed no files", which the pipeline recorded
+   * as a failure and the channel reported as one.
+   */
+  | "task_reported"
   | "canonical_promoted"
   | "canonical_changed"
   | "task_failed"
@@ -708,6 +719,12 @@ export type AuditEventType =
   | "channel_agent_overridden"
   /** A (user, provider) agent was added to or removed from a channel's opt-in roster. */
   | "channel_agent_membership_changed"
+  /**
+   * A thread removed, or a channel cleared. Recorded because the messages
+   * themselves are gone afterwards — this is the only remaining trace that
+   * an account of somebody's work once existed and who removed it.
+   */
+  | "channel_message_deleted"
   /**
    * A repository (and its cascaded channel state and grants) was removed.
    * Runs and submitted tasks are never cascaded — see `removeRepository`'s

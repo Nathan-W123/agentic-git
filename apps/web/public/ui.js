@@ -74,6 +74,12 @@ export const ICONS = {
   search: S('<circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/>'),
   plus: S('<path d="M12 5v14M5 12h14"/>'),
   close: S('<path d="M18 6 6 18M6 6l12 12"/>'),
+  // Deleting is the one action here that destroys something, so it gets its
+  // own mark rather than borrowing the close cross — the two must not be a
+  // slip apart.
+  trash: S(
+    '<path d="M4 7h16M10 11v6M14 11v6M5 7l1 13h12l1-13M9 7V4h6v3"/>',
+  ),
   chevronDown: S('<path d="m6 9 6 6 6-6"/>'),
   chevronRight: S('<path d="m9 6 6 6-6 6"/>'),
   chevronUp: S('<path d="m6 15 6-6 6 6"/>'),
