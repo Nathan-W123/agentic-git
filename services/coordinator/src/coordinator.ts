@@ -528,7 +528,7 @@ export class Coordinator {
           //
           // Never allowed to stop a run: seeding is an advantage, and a task
           // that cannot read old notes should still do the work.
-          const priorContext =
+          const seeded =
             this.store === undefined
               ? ""
               : await seedContextForTask(this.store, {
@@ -537,6 +537,16 @@ export class Coordinator {
                     ? {}
                     : { projectId: input.projectId }),
                 }).catch(() => "");
+          // The conversation this request was asked inside, ahead of what
+          // earlier tasks left behind. Both are background rather than fact,
+          // but they are not equally close to the work: the thread is about
+          // *this* request — it is where "now do the same for the other file"
+          // gets its meaning — while a handoff is about the repository in
+          // general. Nearest first, so the thing being asked for survives any
+          // truncation the model does at the far end.
+          const priorContext = [entry.task.context?.trim() ?? "", seeded]
+            .filter((part) => part !== "")
+            .join("\n\n");
           session = await entry.adapter.startTask({
             task: entry.task,
             canonicalVersion: version,

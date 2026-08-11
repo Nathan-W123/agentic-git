@@ -634,15 +634,23 @@ export class Worker {
       workspaces,
       agentSandbox,
     );
+    // Whatever conversation this request was asked inside travels with it —
+    // the hosted path has the same problem the local one does: a follow-up
+    // that says "now do the same for the other file" is unanswerable without
+    // the messages before it. Handoff seeding is the coordinator's, and the
+    // worker does not run one; this is the part the assignment carries.
+    const context = assignment.task.context?.trim() ?? "";
     const session = await adapter.startTask({
       task: {
         id: assignment.task.id,
         objective: assignment.task.objective,
         agentId: assignment.task.agentId,
         validationCommands: assignment.task.validationCommands,
+        ...(context === "" ? {} : { context }),
       },
       canonicalVersion: assignment.canonicalVersion,
       repositoryId: assignment.repository.id,
+      ...(context === "" ? {} : { priorContext: context }),
     });
     this.activeSession = { adapter, sessionId: session.id };
     if (this.cancellationRequested) {

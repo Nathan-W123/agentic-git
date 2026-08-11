@@ -51,6 +51,8 @@ interface TestRuntime {
     agentId?: string;
     vendor?: string;
     actorId: string;
+    /** The thread the request was asked inside, when it was asked inside one. */
+    context?: string;
   }>;
   /**
    * Every prompt the fake `complete` was asked, and what it should answer —
@@ -191,6 +193,12 @@ async function startRuntime(
     webSocketPollIntervalMs?: number;
     webSocketReauthorizeIntervalMs?: number;
     auditorPollIntervalMs?: number;
+    /**
+     * Drops the optional `listAgents` operation, as a deployment that does
+     * not implement it does — the fallback path for anything that joins
+     * tasks to configured agents.
+     */
+    withoutListAgents?: boolean;
   } = {},
 ): Promise<TestRuntime> {
   const store = new InMemoryCoordinationStore();
@@ -260,8 +268,17 @@ async function startRuntime(
       },
     },
     async listAgents() {
+      // One per vendor, as a deployment with several CLIs connected has, and
+      // named to match what `submitTask` below resolves a vendor to — the
+      // pairing a real deployment makes through `resolveAgentIdForVendor`.
+      // Recent-activity attribution joins tasks to agents on exactly these
+      // ids, so a fixture reporting only one agent could not tell two
+      // vendors' work apart at all.
       return [
         { id: "test-agent", adapter: "generic-cli", default: true },
+        { id: "test-agent-claude", adapter: "claude", default: false },
+        { id: "test-agent-codex", adapter: "codex", default: false },
+        { id: "test-agent-gemini", adapter: "gemini", default: false },
       ];
     },
     async createRepository(input) {
@@ -296,11 +313,13 @@ async function startRuntime(
         actorId: input.actorId,
         ...(input.agentId === undefined ? {} : { agentId: input.agentId }),
         ...(input.vendor === undefined ? {} : { vendor: input.vendor }),
+        ...(input.context === undefined ? {} : { context: input.context }),
       });
       return await store.submitTask({
         projectId: input.projectId,
         repositoryId: input.repositoryId,
         objective: input.objective,
+        ...(input.context === undefined ? {} : { context: input.context }),
         // A real deployment resolves `vendor` to one of its own configured
         // agent ids (see `resolveAgentIdForVendor` in apps/web/src/index.ts);
         // the fixture only needs a stable, distinguishable id back.
@@ -377,6 +396,9 @@ async function startRuntime(
       return { accepted: true };
     },
   };
+  if (options.withoutListAgents === true) {
+    delete operations.listAgents;
+  }
   const gateway = new ApiGateway({
     store,
     operations,
@@ -2872,6 +2894,73 @@ test("an org-wide agent accepts a stranger's @mention and dispatches under the o
   assert.match(systemMessages[0].content, /On it/u);
 });
 
+test("the acknowledgement is the agent's own sentence, not the same line every time", async (t) => {
+  // The line is asked of the model precisely so it is about the thing being
+  // requested. It was read out of `content` — the shape of the *request*,
+  // which the provider never fills — so every dispatch bought a sentence and
+  // then posted the fixed fallback anyway, and every agent in the channel
+  // said exactly the same thing under every request. `askAgent` had already
+  // hit this and left a comment about it.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "ack-own-voice");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.chatAnswer.text = "Sure — starting with the token refresh in src/auth.ts.";
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please fix the token refresh" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  const after = await owner.request(`${base}/messages`);
+  const agentMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
+  assert.equal(
+    agentMessages[0].content,
+    "Sure — starting with the token refresh in src/auth.ts.",
+  );
+});
+
+test("an agent that answers nothing still acknowledges", async (t) => {
+  // The other half: the fallback exists because this line has to land inside
+  // a couple of seconds whatever the model does, and a request met with
+  // silence reads as a request that was not heard.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "ack-fallback");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // `chatAnswer.text` left unset: the fake `complete` answers with an empty
+  // reply, as a model that returns nothing does.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please fix the token refresh" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  const after = await owner.request(`${base}/messages`);
+  const agentMessages = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
+  assert.equal(agentMessages[0].content, "On it.");
+});
+
 test("an agent's own owner can always @mention it, personal or org-wide", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -3355,6 +3444,122 @@ test("an unaddressed task is taken even when it matches no agent's role", async 
   assert.match(agentMessages[0].content, /Nobody was @mentioned/u);
 });
 
+test("recent activity is one agent's, not its owner's whole roster", async (t) => {
+  // Every task a channel dispatches is submitted under the *agent's owner*,
+  // deliberately, so work somebody else's agent takes never spends the
+  // sender's account. Grouping the activity signal on that alone merged every
+  // agent one person owns into a single history — connect an org-wide Claude
+  // and an org-wide Codex and both score identically, with the signal unable
+  // to say which of them did what. With org agents that is the ordinary case.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "per-agent-activity");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // Two agents, one owner — the case the grouping key could not tell apart.
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Both names share the one word the message will match, so neither leads on
+  // role and the activity signal is what decides. The idle one is named
+  // longer on purpose: candidates sort by name length, so it is first in line
+  // and would take the work on the tie that owner-grouping produces.
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Deploy Alpha" },
+    })).status,
+    200,
+  );
+  assert.equal(
+    (await owner.request(`${base}/agents/${ownerId}:openai`, {
+      method: "POST",
+      body: { name: "Deploy Beta Nightly Runner" },
+    })).status,
+    200,
+  );
+
+  // History under the Claude agent alone. `test-agent-claude` is what the
+  // fixture's `submitTask` resolves the claude vendor to, and what
+  // `listAgents` reports for that adapter — the join the grouping makes.
+  for (const objective of [
+    "migrate the postgres schema for sessions",
+    "fix the postgres migration ordering",
+  ]) {
+    await runtime.store.submitTask({
+      repositoryId,
+      objective,
+      agentId: "test-agent-claude",
+      validationCommands: [],
+      submittedBy: ownerId,
+    });
+  }
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "please deploy the postgres migration" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+  // The agent that has actually been doing postgres migrations here, not the
+  // one that happens to share its owner.
+  assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
+});
+
+test("with no configured agents to join on, activity falls back to its owner", async (t) => {
+  // `listAgents` is optional on `ApiOperations`. Where it is absent there is
+  // nothing to key a per-agent history on, and the scorer must still work —
+  // grouping by owner, which is wrong only in the way the test above
+  // describes and no worse than before.
+  const runtime = await startRuntime(t, { withoutListAgents: true });
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "owner-fallback");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Deploy Alpha" },
+    })).status,
+    200,
+  );
+  await runtime.store.submitTask({
+    repositoryId,
+    objective: "migrate the postgres schema for sessions",
+    agentId: "test-agent-claude",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "please deploy the postgres migration" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+  assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
+});
+
 /**
  * A task that ends at integration records `explanation` and a `status`, not
  * `error` — so reading only `error` turned the most common ending into a bare
@@ -3482,6 +3687,141 @@ test("a reply in an agent's thread is answered by that agent, with the thread as
     ?.replies?.at(-1);
   assert.equal(answer.kind, "agent");
   assert.equal(answer.authorId, `${ownerId}:anthropic`);
+});
+
+test("work asked for inside a thread travels with the thread, beside the objective", async (t) => {
+  // Threads have had shared context for talking since agents began answering
+  // follow-ups. Working was the gap: "now update the other file the same way"
+  // reached the agent as an objective and nothing else, with no record of
+  // what "the same way" referred to.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "thread-context-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it — renaming the config loader.",
+  });
+  await runtime.store.addChannelReply({
+    repositoryId,
+    messageId: root.id,
+    kind: "progress",
+    authorId: `${ownerId}:anthropic`,
+    content: "Editing src/config.ts",
+  });
+  await runtime.store.addChannelReply({
+    repositoryId,
+    messageId: root.id,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "Renamed loadConfig to readConfig in src/config.ts.",
+  });
+
+  runtime.chatAnswer.text = "On it — the endpoint file next.";
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "now update the endpoint file the same way" } },
+  );
+  assert.equal(replied.status, 201);
+
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "asking for work inside a thread never dispatched anything",
+  );
+  const [task] = runtime.submittedTasks;
+  assert.ok(task !== undefined);
+  const context = task.context ?? "";
+  assert.match(context, /renaming the config loader/u);
+  assert.match(context, /Renamed loadConfig to readConfig/u);
+  // Progress replies are the run narrating itself. Feeding an agent its own
+  // commentary back is noise somebody has already paid for once.
+  assert.doesNotMatch(context, /Editing src\/config\.ts/u);
+  // The request itself is already the objective; sending it twice only tells
+  // the model the same thing twice.
+  assert.doesNotMatch(context, /now update the endpoint file the same way/u);
+
+  // The whole reason this is a field of its own: the objective is rendered in
+  // the channel, in task lists and in thread titles, and a transcript folded
+  // into it would make every request unreadable in all three.
+  assert.match(task.objective, /update the endpoint file/u);
+  assert.doesNotMatch(task.objective, /config loader/u);
+});
+
+test("a request that merely opens a thread carries nothing; the follow-up in it does", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "thread-context-e2e");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Rewriter" },
+    })).status,
+    200,
+  );
+
+  runtime.chatAnswer.text = "On it — rewriting the retry helper.";
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Rewriter please rewrite the retry helper in src/retry.ts" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never dispatched a task",
+  );
+  // A brand-new request has no history worth carrying — it merely happens to
+  // open a thread.
+  assert.equal(runtime.submittedTasks[0]?.context, undefined);
+
+  const threadRoot = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.kind === "agent");
+  assert.ok(threadRoot !== undefined, "the dispatch never opened a thread");
+
+  // What the run narrates back into its own thread while it works, which is
+  // the part a follow-up is usually about.
+  await runtime.store.addChannelReply({
+    repositoryId,
+    messageId: threadRoot.id,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "Rewrote src/retry.ts to back off exponentially.",
+  });
+
+  const followUp = await owner.request(
+    `${base}/messages/${encodeURIComponent(threadRoot.id)}/replies`,
+    { method: "POST", body: { content: "now update the config loader the same way" } },
+  );
+  assert.equal(followUp.status, 201);
+  await waitFor(
+    async () => runtime.submittedTasks.length > 1,
+    "the follow-up inside the thread never dispatched a task",
+  );
+
+  const context = runtime.submittedTasks[1]?.context ?? "";
+  assert.match(context, /Rewrote src\/retry\.ts/u);
+  // The request being dispatched is the objective, not part of its own
+  // background.
+  assert.doesNotMatch(context, /now update the config loader the same way/u);
+  assert.match(
+    runtime.submittedTasks[1]?.objective ?? "",
+    /update the config loader/u,
+  );
 });
 
 /** A thread on a person's message is a conversation between people. */

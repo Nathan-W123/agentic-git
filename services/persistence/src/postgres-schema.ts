@@ -705,4 +705,12 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE channel_messages ADD COLUMN bumped_at TEXT`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 25,
+    name: "submitted-task-context",
+    statements: [
+      `ALTER TABLE submitted_tasks ADD COLUMN context TEXT`,
+    ],
+  },
 ];

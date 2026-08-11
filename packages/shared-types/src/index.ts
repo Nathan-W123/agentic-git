@@ -40,6 +40,17 @@ export interface TaskDefinition {
   agentId: AgentId;
   validationCommands: ValidationCommand[];
   projectId?: ProjectId;
+  /**
+   * What this request was asked inside — today, the channel thread it was
+   * dispatched from.
+   *
+   * Separate from `objective` because the objective is what somebody asked
+   * for and is rendered wherever the request is shown; a transcript folded
+   * into it would make every request unreadable in those places. The
+   * coordinator merges this with the handoff seed into the planning prompt's
+   * prior context.
+   */
+  context?: string;
 }
 
 export type PlanGroundingConfidence = "verified" | "grounded" | "ungrounded";

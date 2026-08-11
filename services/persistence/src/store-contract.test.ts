@@ -462,6 +462,60 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a task's context survives being claimed`, async () => {
+    // The whole point of the column is that the agent reads it, and the agent
+    // only ever sees a *claimed* task — a context that round-trips on submit
+    // and is dropped by the claim would look right everywhere except where it
+    // is used.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const withContext = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "Do the same for the other file",
+        agentId: TASK.agentId,
+        validationCommands: [],
+        context: "Earlier in the thread:\n- rename the config loader",
+      });
+      assert.equal(
+        withContext.context,
+        "Earlier in the thread:\n- rename the config loader",
+      );
+
+      const listed = (await store.listSubmittedTasks({ repositoryId: REPOSITORY.id }))
+        .find((task) => task.id === withContext.id);
+      assert.equal(listed?.context, withContext.context);
+
+      const [claimed] = await store.claimSubmittedTasks(REPOSITORY.id);
+      assert.equal(claimed?.id, withContext.id);
+      assert.equal(claimed?.context, withContext.context);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a task submitted with no context has none`, async () => {
+    // Every task submitted before this column existed is in exactly this
+    // state, and reading one must not produce an empty heading downstream.
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const plain = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: TASK.objective,
+        agentId: TASK.agentId,
+        validationCommands: [],
+      });
+      assert.equal(plain.context, undefined);
+      const [claimed] = await store.claimSubmittedTasks(REPOSITORY.id);
+      assert.equal(claimed?.context, undefined);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: concurrent claims never return the same task twice`, async () => {
     const { store, cleanup } = await backend.open();
     try {

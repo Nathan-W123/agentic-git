@@ -717,6 +717,9 @@ async function queueDeferredScope(
     agentId: task.agentId,
     validationCommands: task.validationCommands,
     ...(task.submittedBy === undefined ? {} : { submittedBy: task.submittedBy }),
+    // The rest of the same request: whatever conversation the original was
+    // asked inside is as much the follow-up's background as it was its own.
+    ...(task.context === undefined ? {} : { context: task.context }),
   });
   await trace(store, runId, "task_submitted", followUp.id, {
     projectId: task.projectId,
@@ -791,6 +794,7 @@ async function queueSalvagedConflict(
     agentId: task.agentId,
     validationCommands: task.validationCommands,
     ...(task.submittedBy === undefined ? {} : { submittedBy: task.submittedBy }),
+    ...(task.context === undefined ? {} : { context: task.context }),
   });
   await trace(store, runId, "task_submitted", followUp.id, {
     projectId: task.projectId,
@@ -2460,6 +2464,7 @@ export async function acceptWorkResult(
     agentId: task.agentId,
     validationCommands: task.validationCommands,
     ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
+    ...(task.context === undefined ? {} : { context: task.context }),
   };
   // A plan gated at admission time already has a run: the approval it waited
   // on had to belong to one. Reusing it keeps the reviewer's decision and the
