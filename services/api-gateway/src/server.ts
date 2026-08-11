@@ -6305,10 +6305,15 @@ export class ApiGateway {
       candidate,
       `${agentIdentity(candidate)}\n\n` +
         "Answer this message directly and briefly — two or three sentences " +
-        "at most, no markdown headings, no preamble. You cannot read the " +
-        "repository from here, so answer from what is below; if the answer " +
-        "is not there, say so plainly rather than guessing, and never claim " +
-        "to have started or requested anything.\n\n" +
+        "at most, no markdown headings, no preamble.\n\n" +
+        "This chat has no checkout, so answer from what is below rather than " +
+        "from the code; if the answer is not there, say so plainly rather " +
+        "than guessing, and never claim to have started or requested " +
+        "anything. Your tasks are a different matter: each one runs with the " +
+        "repository checked out. So describe what your work is doing from " +
+        "the list below, and never say the work cannot continue, is blocked, " +
+        "or cannot be completed merely because this conversation cannot see " +
+        "the files — that is true of the chat and false of the task.\n\n" +
         (await this.agentWorkContext(repositoryId, candidate)) +
         `\n\nThe message: ${question}`,
       QUESTION_TIMEOUT_MS,
@@ -6537,8 +6542,11 @@ export class ApiGateway {
     const answer = await this.askAgent(
       candidate,
       `${agentIdentity(candidate)}\n\n` +
-        "You are answering a follow-up " +
-        "question inside the thread for a task you worked on. Below is that " +
+        "You are answering a follow-up question inside the thread for a task " +
+        "you worked on. This chat has no checkout, but the task itself ran " +
+        "with the repository — so answer from the thread below, and never say " +
+        "the work is blocked or cannot continue merely because this " +
+        "conversation cannot see the files. Below is that " +
         "thread so far, oldest first. Answer the question directly and " +
         "briefly — three sentences at most, no markdown headings, no " +
         "preamble. If the thread shows the work did not finish, say plainly " +
