@@ -654,6 +654,41 @@ export interface IntegrationResult {
 }
 
 /**
+ * The preamble a channel dispatch puts in front of an objective to say what
+ * the agent's role in that repository is.
+ *
+ * Lives here rather than only at the gateway that writes it, because
+ * {@link readsAsReportRequest} has to take it back off again — see there.
+ * Two spellings of one prefix would mean the reader silently stopped
+ * recognising what the writer emits.
+ */
+export const ROLE_CONTEXT_PREFIX = "Your role in this repository:";
+
+/**
+ * An objective with any role preamble removed — what was actually asked for.
+ */
+export function withoutRoleContext(objective: string): string {
+  const trimmed = objective.trimStart();
+  if (!trimmed.startsWith(ROLE_CONTEXT_PREFIX)) {
+    return objective;
+  }
+  // The preamble is one line; the request is *everything* after the blank
+  // line that follows it, not merely the next paragraph. Splitting on the
+  // separator with a limit would drop every paragraph after the first, and a
+  // request whose second paragraph said "and fix what you find" would then be
+  // judged only on its first — passing an empty changeset off as a report
+  // when it is the symptom of a sandbox refusing every write.
+  const separator = /\n[^\S\n]*\n/u.exec(trimmed);
+  if (separator === null) {
+    return objective;
+  }
+  const request = trimmed.slice(separator.index + separator[0].length);
+  // A preamble with nothing behind it is left alone rather than reduced to
+  // nothing, so the caller still has something to read.
+  return request.trim() === "" ? objective : request;
+}
+
+/**
  * Whether a task was asked to look at the repository rather than change it.
  *
  * Read-only work is real work — an audit, a summary, an explanation succeeds
@@ -673,22 +708,32 @@ export interface IntegrationResult {
  * fix the retry loop?" is a question and a change request, and letting the
  * question mark excuse an empty result is exactly how a sandbox refusing every
  * write would pass for success.
+ *
+ * Read against the request alone, with any role preamble stripped first. A
+ * channel dispatch prepends "Your role in this repository: …" to every
+ * objective it submits, and that sentence is the operator describing the
+ * agent, not anybody asking for work — so an agent whose declared role
+ * happened to contain a word like "fixer" or "implementation" failed the
+ * editing-verb check on every task it was ever given, and every audit it ran
+ * came back as a failure. The veto has to read what was asked, not who was
+ * asked.
  */
 export function readsAsReportRequest(objective: string): boolean {
+  const request = withoutRoleContext(objective);
   if (
     /\b(fix|add|change|edit|write|create|remove|delete|rename|update|implement|refactor|patch|revert|bump|replace|move|migrate|upgrade|install|wire|hook)\b/iu.test(
-      objective,
+      request,
     )
   ) {
     return false;
   }
   return (
     /\b(audit|audits|audited|auditing|summar(?:y|ise|ize|ised|ized|ising|izing|ies)|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|analysis|inspect|inspects|inspected|inspecting|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|explain|explains|explained|explaining)\b/iu.test(
-      objective,
+      request,
     ) ||
-    /\?\s*$/u.test(objective.trim()) ||
+    /\?\s*$/u.test(request.trim()) ||
     /^\s*(?:what|which|where|when|why|how|who|is|are|does|do|did|can|could|should|would)\b/iu.test(
-      objective,
+      request,
     )
   );
 }

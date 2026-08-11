@@ -24,6 +24,7 @@ import {
   mergePlanScope,
   normalizeRepositoryPath,
   planGroundingConfidence,
+  readsAsReportRequest,
   uniqueStrings,
   type AgentPlan,
   type ApprovalKind,
@@ -1552,19 +1553,46 @@ export class Coordinator {
         }
       }
       await recorder?.integration(integration);
-      await this.trace(
-        recorder,
-        runAudit,
-        "validation_completed",
-        result.task.id,
-        {
-          status: integration.status,
-          commands: integration.validation.map((entry) => ({
-            label: entry.command.label,
-            exitCode: entry.exitCode,
-          })),
-        },
-      );
+      // Asked to look, not to change — and it looked. Decided here rather
+      // than at the status line below because the narration in between reads
+      // differently for a report: see the two uses.
+      //
+      // "Changed no files" is failure for "fix the retry loop" and success
+      // for "audit the codebase". Only the remote-worker path could express
+      // the second, and every task the control plane runs in process comes
+      // through here — so an audit, a review or a summary asked for in a
+      // channel was done, carried all the way to this method, and then
+      // recorded as failed with the integration service's "produced no
+      // repository changes" in place of the findings the agent had written.
+      //
+      // Judged against the request rather than by relaxing `empty` generally,
+      // because an empty changeset from a task that *was* meant to write is
+      // the exact symptom a sandbox silently refusing every edit produces.
+      // Reading the objective keeps that alarm intact and lets the report
+      // through. Same reading the adapters and the worker path use, so no two
+      // layers can disagree about what one empty changeset meant.
+      const reported =
+        integration.status === "empty" &&
+        readsAsReportRequest(result.task.objective);
+      // Nothing was validated because nothing was changed, and there is no
+      // gate here to have passed or failed. Saying "validation came back
+      // empty" in front of a finished report is the same false alarm this
+      // whole branch exists to remove, one line earlier.
+      if (!reported) {
+        await this.trace(
+          recorder,
+          runAudit,
+          "validation_completed",
+          result.task.id,
+          {
+            status: integration.status,
+            commands: integration.validation.map((entry) => ({
+              label: entry.command.label,
+              exitCode: entry.exitCode,
+            })),
+          },
+        );
+      }
       if ((integration.cleanupWarnings?.length ?? 0) > 0) {
         await this.trace(
           recorder,
@@ -1577,6 +1605,14 @@ export class Coordinator {
           },
         );
       }
+      const explanation = reported
+        ? // The agent's own words are the deliverable here — there is no diff
+          // to read instead, and the generic line says nothing a reader can
+          // use.
+          result.changeSet.agentExplanation.trim().length > 0
+          ? result.changeSet.agentExplanation.trim()
+          : "Reported without changing any files."
+        : integration.explanation;
       if (integration.status === "integrated") {
         await this.trace(
           recorder,
@@ -1588,6 +1624,14 @@ export class Coordinator {
             revision: integration.canonicalVersion.revision,
             changeSetId: integration.changeSetId,
           },
+        );
+      } else if (reported) {
+        await this.trace(
+          recorder,
+          runAudit,
+          "task_reported",
+          result.task.id,
+          { explanation },
         );
       } else {
         await this.trace(
@@ -1602,15 +1646,17 @@ export class Coordinator {
         );
       }
       const status =
-        integration.status === "integrated" ? "integrated" : "failed";
-      await recorder?.status(result.task.id, status, integration.explanation);
+        integration.status === "integrated" || reported
+          ? "integrated"
+          : "failed";
+      await recorder?.status(result.task.id, status, explanation);
       taskResult = {
         task: result.task,
         plan: result.plan,
         decision: result.decision,
         integration,
         status,
-        explanation: integration.explanation,
+        explanation,
       };
     } catch (error) {
       await recorder?.status(result.task.id, "failed", errorMessage(error));

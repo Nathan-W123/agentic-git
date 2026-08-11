@@ -40,6 +40,7 @@ import {
   assertProjectPolicy,
   createId,
   projectBudgets,
+  ROLE_CONTEXT_PREFIX,
   type ApprovalStatus,
 } from "@coord/shared-types";
 
@@ -294,7 +295,12 @@ export function withRoleContext(role: string, objective: string): string {
   if (trimmedRole === "") {
     return objective;
   }
-  return `Your role in this repository: ${trimmedRole}.\n\n${objective}`;
+  // `ROLE_CONTEXT_PREFIX` rather than the literal, because
+  // `readsAsReportRequest` takes this preamble back off before deciding
+  // whether an empty changeset is a report or a failure. If the two spellings
+  // drifted the reader would silently stop recognising what this writes, and
+  // every read-only task would go back to being recorded as failed.
+  return `${ROLE_CONTEXT_PREFIX} ${trimmedRole}.\n\n${objective}`;
 }
 
 /**
