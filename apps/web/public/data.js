@@ -2234,7 +2234,12 @@ export function channelAuthor(repositoryId, entry) {
     // asked to explain an id it has never heard of.
     return { name: "Coordinator", agent: undefined };
   }
-  if (entry.kind === "agent") {
+  // `progress` is an agent too — it is one narrating its own run rather than
+  // speaking to the room, and it is authored the same way. Left out, the
+  // thread's opening line resolved through `memberName`, which has never
+  // heard of `<userId>:<provider>`, so the agent's first words appeared under
+  // a raw composite id instead of its call sign.
+  if (entry.kind === "agent" || entry.kind === "progress") {
     // The server names an agent author `<userId>:<provider>`, because that is
     // the only form meaningful to everybody. The viewer's *own* agents are
     // keyed by bare provider id in this list, so both spellings have to

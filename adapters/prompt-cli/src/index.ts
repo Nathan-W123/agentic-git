@@ -13,6 +13,7 @@ import {
 import {
   assertAgentPlan,
   createId,
+  readsAsReportRequest,
   scopeChangeGranted,
   type AgentPlan,
   type ChangeSet,
@@ -997,10 +998,18 @@ export class PromptCliAdapter implements AgentAdapter {
           `${this.profile.name} completed ${record.input.task.objective}`,
       },
     );
-    // The model reported success but touched nothing. Every known cause is a
-    // defect (an unauthenticated CLI answering conversationally is the common
-    // one), and an empty changeset must not enter the pipeline as a success.
-    if (changeSet.patches.length === 0) {
+    // The model reported success but touched nothing. For work meant to write,
+    // every known cause is a defect — an unauthenticated CLI answering
+    // conversationally is the common one — and an empty changeset must not
+    // enter the pipeline as a success.
+    //
+    // Asked to look rather than to change, that same result is the answer:
+    // an audit or a summary finishes by changing nothing. Decided from the
+    // request, on the same reading the integration path uses.
+    if (
+      changeSet.patches.length === 0 &&
+      !readsAsReportRequest(record.input.task.objective)
+    ) {
       throw new Error(
         `${this.profile.name} reported ${record.input.task.id} complete but changed no files. ` +
           `Check that the ${this.command} CLI is authenticated and actually edited the workspace.`,

@@ -14,6 +14,7 @@ import {
 import {
   assertAgentPlan,
   createId,
+  readsAsReportRequest,
   scopeChangeGranted,
   substituteGroundedNames,
   type AgentPlan,
@@ -828,11 +829,22 @@ export class CodexAdapter implements AgentAdapter {
         `Codex completed ${record.input.task.objective}`,
     });
 
-    // Codex reported the task done, yet the workspace is untouched. Every known
-    // cause is a defect — a denied write, a sandbox that dropped the edits, or
-    // a model that answered without acting — and reporting it as an empty
-    // changeset would let a no-op enter the pipeline as a successful task.
-    if (changeSet.patches.length === 0) {
+    // Codex reported the task done, yet the workspace is untouched. For work
+    // that was meant to write, every known cause is a defect — a denied write,
+    // a sandbox that dropped the edits, or a model that answered without
+    // acting — and letting it through would put a no-op into the pipeline as a
+    // successful task.
+    //
+    // Asked to look rather than to change, the same result is the answer. An
+    // audit, a summary or a question about the code succeeds precisely by
+    // changing nothing, and this refusal was what turned each of those into
+    // "complete but changed no files" — a failure reported for work that had
+    // been done. The request decides which it is, on the same reading the
+    // integration path uses, so the two ends cannot disagree.
+    if (
+      changeSet.patches.length === 0 &&
+      !readsAsReportRequest(record.input.task.objective)
+    ) {
       throw new Error(
         `Codex reported ${record.input.task.id} complete but changed no files. ` +
           "The edit phase produced nothing; check that the execution sandbox " +

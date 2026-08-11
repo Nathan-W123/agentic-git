@@ -57,6 +57,7 @@ import {
   type CanonicalVersion,
   type ChangeSet,
   type FilePatch,
+  readsAsReportRequest,
   type CoordinatorDecision,
   type DeferredResource,
   type IntegrationResult,
@@ -241,31 +242,9 @@ async function canonicalAdvance(
  * word that appears in both kinds of sentence would quietly excuse the very
  * failure `CodexWriteDeniedError` was written to catch.
  */
-export function readsAsReportRequest(objective: string): boolean {
-  // An editing verb settles it, whatever else the sentence does. "Can you fix
-  // the retry loop?" is a question and a change request, and letting the
-  // question mark excuse an empty result is exactly how a sandbox silently
-  // refusing every write would pass for success.
-  if (
-    /\b(fix|add|change|edit|write|create|remove|delete|rename|update|implement|refactor|patch|revert|bump|replace|move|migrate|upgrade|install|wire|hook)\b/iu.test(
-      objective,
-    )
-  ) {
-    return false;
-  }
-  return (
-    /\b(audit|audits|audited|auditing|summar(?:y|ise|ize|ised|ized|ising|izing|ies)|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|analysis|inspect|inspects|inspected|inspecting|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|explain|explains|explained|explaining)\b/iu.test(
-      objective,
-    ) ||
-    // A question about the repository is answered by reporting on it. These
-    // reach a task at all because the chat path has no checkout and could
-    // only apologise — see `needsTheRepository` in the gateway.
-    /\?\s*$/u.test(objective.trim()) ||
-    /^\s*(?:what|which|where|when|why|how|who|is|are|does|do|did|can|could|should|would)\b/iu.test(
-      objective,
-    )
-  );
-}
+// Re-exported for callers and tests that have always imported it from here;
+// it lives in shared-types now so the adapters can apply the same reading.
+export { readsAsReportRequest };
 
 export function bundleRefFor(leaseId: string): string {
   return `${LEASE_REF_PREFIX}${leaseId.replaceAll(/[^A-Za-z0-9_-]/gu, "")}`;
