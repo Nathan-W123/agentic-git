@@ -706,6 +706,26 @@ function relevanceTokens(text: string): Set<string> {
 
 /** How many of an owner's most recent submitted tasks feed the activity signal. */
 const RECENT_ACTIVITY_LOOKBACK = 25;
+
+/**
+ * Submitted tasks newest first.
+ *
+ * The store returns them oldest first, and both callers take the first
+ * {@link RECENT_ACTIVITY_LOOKBACK} they see per owner — so "recent activity"
+ * was in fact each owner's *earliest* work. Under twenty-five tasks nothing
+ * looked wrong; past that the signal froze on whatever somebody did first in
+ * a repository and never moved again, which is the opposite of what it is
+ * for.
+ *
+ * Sorted here rather than in the query because two callers want the same
+ * ordering and the store's own order is meaningful to everything else that
+ * reads it.
+ */
+function recentFirst(tasks: readonly SubmittedTask[]): SubmittedTask[] {
+  return [...tasks].sort((left, right) =>
+    right.submittedAt.localeCompare(left.submittedAt),
+  );
+}
 /** Caps the recent-activity contribution so the declared role/name always leads it. */
 const MAX_ACTIVITY_SCORE = 2;
 /** Weight of one overlapping role/name token — see the constants below for how this is used. */
@@ -7457,9 +7477,11 @@ export class ApiGateway {
       return undefined;
     }
     const tokens = relevanceTokens(input.text);
-    const submittedTasks = await this.options.store.listSubmittedTasks({
-      repositoryId: input.repositoryId,
-    });
+    const submittedTasks = recentFirst(
+      await this.options.store.listSubmittedTasks({
+        repositoryId: input.repositoryId,
+      }),
+    );
     const recentByOwner = new Map<string, string[]>();
     for (const task of submittedTasks) {
       if (task.submittedBy === undefined) {
@@ -7747,9 +7769,9 @@ export class ApiGateway {
     // The only reasonably cheap "recent activity" signal that already
     // exists — see `scoreCandidate`'s doc comment for why nothing richer
     // (e.g. real recent-files-per-agent) is used here.
-    const submittedTasks = await this.options.store.listSubmittedTasks({
-      repositoryId,
-    });
+    const submittedTasks = recentFirst(
+      await this.options.store.listSubmittedTasks({ repositoryId }),
+    );
     const recentObjectivesByOwner = new Map<string, string[]>();
     for (const task of submittedTasks) {
       if (task.submittedBy === undefined) {
