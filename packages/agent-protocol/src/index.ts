@@ -22,6 +22,25 @@ export interface StartTaskInput {
   task: TaskDefinition;
   canonicalVersion: CanonicalVersion;
   repositoryId: string;
+  /**
+   * What earlier work in this repository already established, rendered from
+   * the handoffs those tasks left behind.
+   *
+   * Every task runs in a fresh process with an empty context window, so
+   * without this each one rediscovers the repository from nothing — including
+   * the things the last agent learned the hard way and wrote down. The
+   * handoffs were being recorded at every task boundary and never read back;
+   * this is the path that reads them.
+   *
+   * Kept out of `task.objective` deliberately. The objective is what somebody
+   * asked for: it is shown in the channel, in task lists and in thread
+   * titles, and prepending a wall of prior context to it would make every
+   * request unreadable in the places people actually look at it.
+   *
+   * Advisory, never authoritative. It describes what was true at some earlier
+   * revision; the workspace in front of the agent is what is true now.
+   */
+  priorContext?: string;
 }
 
 export interface AgentSession {

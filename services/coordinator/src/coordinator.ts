@@ -54,6 +54,7 @@ import {
 } from "./approval-service.js";
 import { InMemoryAuditLog } from "./audit-log.js";
 import { ConflictDetector, relatedObjectives } from "./conflict-detector.js";
+import { seedContextForTask } from "./handoff-store.js";
 import { OwnershipService } from "./ownership-service.js";
 import {
   approvedSchemaResources,
@@ -518,10 +519,29 @@ export class Coordinator {
               `Agent ${entry.task.agentId} cannot satisfy the coordination protocol`,
             );
           }
+          // What earlier tasks in this repository worked out, from the
+          // handoffs they left. Every run starts with an empty context
+          // window, so without this each one rediscovers the repository from
+          // nothing — including whatever the last agent learned the hard way
+          // and wrote down. The handoffs have been recorded at every task
+          // boundary all along; this is the first thing to read them back.
+          //
+          // Never allowed to stop a run: seeding is an advantage, and a task
+          // that cannot read old notes should still do the work.
+          const priorContext =
+            this.store === undefined
+              ? ""
+              : await seedContextForTask(this.store, {
+                  repositoryId: input.repository.id,
+                  ...(input.projectId === undefined
+                    ? {}
+                    : { projectId: input.projectId }),
+                }).catch(() => "");
           session = await entry.adapter.startTask({
             task: entry.task,
             canonicalVersion: version,
             repositoryId: input.repository.id,
+            ...(priorContext === "" ? {} : { priorContext }),
           });
           await recorder?.session(session);
           const submitted = await entry.adapter.requestPlan(session.id);

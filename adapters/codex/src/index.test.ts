@@ -892,3 +892,43 @@ test("COORD_UNGROUNDED_REPLAN restores the prompt substitution replaced", async 
   assert.match(prompt, /Coordinator verification of your previous declarations/u);
   assert.doesNotMatch(prompt, /The real file is/u);
 });
+
+test("earlier work reaches the planning prompt as background, not as fact", async () => {
+  // Handoffs were written at every task boundary and never read back, so each
+  // task rediscovered the repository from an empty context window. This is the
+  // path that reads them — and it has to arrive labelled, because a handoff
+  // describes an earlier revision while the workspace is what is true now.
+  const fixture = await createFixture();
+  const prompts: string[] = [];
+  const adapter = new CodexAdapter({
+    agentId: "codex",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    runner: async (_executable, _args, options) => {
+      prompts.push(String(options?.input ?? ""));
+      return {
+        stdout: JSON.stringify({ type: "item.completed", item: { text: JSON.stringify(PLAN) } }),
+        stderr: "",
+        exitCode: 0,
+        durationMs: 0,
+      };
+    },
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+    priorContext:
+      "Handoff from earlier work\nGotcha: the retry counter is off by one.",
+  });
+  await adapter.requestPlan(session.id).catch(() => undefined);
+  const planning = prompts[0] ?? "";
+  assert.match(planning, /Gotcha: the retry counter is off by one\./u);
+  assert.match(planning, /Treat as background/u);
+  // The objective stays the thing somebody actually asked for.
+  assert.match(planning, /Objective: /u);
+  await rm(fixture.root, { recursive: true, force: true });
+});

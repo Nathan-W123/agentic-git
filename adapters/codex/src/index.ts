@@ -1019,6 +1019,16 @@ export class CodexAdapter implements AgentAdapter {
       "Return only the JSON object required by the output schema.",
       `Task id: ${input.task.id}`,
       `Objective: ${input.task.objective}`,
+      // What earlier tasks in this repository already worked out. Advisory:
+      // it was true at an earlier revision, and the workspace is what is true
+      // now — so it is labelled as notes rather than as fact.
+      ...(input.priorContext === undefined || input.priorContext.trim() === ""
+        ? []
+        : [
+            "Notes left by earlier work in this repository. Treat as background,",
+            "not as fact — verify anything you rely on against the workspace:",
+            input.priorContext.trim(),
+          ]),
       `Canonical revision: ${input.canonicalVersion.revision}`,
       `Required validation commands: ${JSON.stringify(input.task.validationCommands)}`,
       "List every repository-relative file you expect to change.",

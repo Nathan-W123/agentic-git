@@ -1261,6 +1261,15 @@ export class PromptCliAdapter implements AgentAdapter {
       `Planning deadline: ${this.planningTimeoutMs} ms.`,
       `Task id: ${input.task.id}`,
       `Objective: ${input.task.objective}`,
+      // See the codex adapter's equivalent: notes from earlier tasks, offered
+      // as background rather than as fact.
+      ...(input.priorContext === undefined || input.priorContext.trim() === ""
+        ? []
+        : [
+            "Notes left by earlier work in this repository. Treat as background,",
+            "not as fact — verify anything you rely on against the workspace:",
+            input.priorContext.trim(),
+          ]),
       `Canonical revision: ${input.canonicalVersion.revision}`,
       `Required validation commands: ${JSON.stringify(input.task.validationCommands)}`,
       "List every repository-relative file you expect to change.",
