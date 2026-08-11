@@ -449,6 +449,60 @@ const TERMINAL_STATUS_LINE: Record<string, string> = {
  * restart. The thread is bumped on every audit, so it stays inside the window
  * the lookup reads.
  */
+/**
+ * How well a spoken thread name must match before it is believed.
+ *
+ * Higher than the accidental-merge bar: naming a thread is deliberate, and
+ * attaching the wrong one to a deliberate reference is worse than attaching
+ * none — the agent would answer confidently about work nobody asked about.
+ */
+const THREAD_NAME_MIN_OVERLAP = 0.55;
+
+/* The words that carry no subject: an address, a verb, an article. Stripped
+   from the front of a spoken thread name so "look at the codebase improvement
+   review thread" is scored on "codebase improvement review" rather than on a
+   phrase three quarters of which is instruction. */
+const THREAD_NAME_FILLER = new Set([
+  "a", "about", "an", "and", "at", "check", "explore", "for", "from", "go",
+  "in", "inspect", "into", "look", "on", "open", "please", "read", "review",
+  "see", "the", "then", "to", "up",
+]);
+
+/**
+ * The thread a sentence names, if it names one.
+ *
+ * Bounded to the six words before "thread" rather than everything before it:
+ * the name sits directly in front of the word, and taking the whole preamble
+ * meant scoring the instruction along with the subject and diluting both.
+ * "review" is filler at the front and meaningful in the middle — "codebase
+ * improvement review" keeps it, "review the X thread" does not — which is why
+ * stripping runs from the left and stops at the first real word.
+ */
+function threadNameIn(content: string): string | undefined {
+  const text = withoutMentions(content);
+  const trailing = /([\w'-]+(?:\s+[\w'-]+){0,5})\s+thread/iu.exec(text);
+  const leading = /thread\s+(?:about|on|for|called|named)\s+([\w][\w\s'-]{2,60})/iu.exec(
+    text,
+  );
+  for (const candidate of [trailing?.[1], leading?.[1]]) {
+    if (candidate === undefined) {
+      continue;
+    }
+    const words = candidate.trim().split(/\s+/u);
+    while (
+      words.length > 0 &&
+      THREAD_NAME_FILLER.has((words[0] ?? "").toLowerCase())
+    ) {
+      words.shift();
+    }
+    const phrase = words.join(" ");
+    if (phrase.length >= 3) {
+      return phrase;
+    }
+  }
+  return undefined;
+}
+
 const AUDIT_THREAD_TITLE = "Audit log";
 
 const THREAD_RECONCILE_INTERVAL_MS = 60_000;
@@ -6681,6 +6735,64 @@ export class ApiGateway {
       : { id: best.id, title: best.title };
   }
 
+  /**
+   * The thread a request names out loud, as against one it merely resembles.
+   *
+   * "look at the codebase improvement review thread and implement number 3" is
+   * a reference, not a coincidence of vocabulary — and it used to reach an
+   * agent as a bare sentence with no thread attached, so the agent went
+   * looking for something it had no way to see and "number 3" referred to
+   * nothing. `findThreadToContinue` could not help: it scores the whole
+   * request against a thread's subject, and most of that sentence is the
+   * instruction rather than the name.
+   *
+   * So the name is cut out first — the words before "thread" — and only that
+   * is scored. Held to a higher bar than the accidental merge, because naming
+   * a thread is deliberate and matching the wrong one on a deliberate
+   * reference is worse than not matching at all.
+   *
+   * Any thread qualifies, not only this agent's: a person can perfectly well
+   * ask one agent to act on what another one wrote.
+   */
+  private async findThreadByName(input: {
+    repositoryId: string;
+    viewerId: string;
+    content: string;
+  }): Promise<{ id: string; title: string } | undefined> {
+    const phrase = threadNameIn(input.content);
+    if (phrase === undefined) {
+      return undefined;
+    }
+    const messages = await this.options.store.listChannelMessages(
+      input.repositoryId,
+      input.viewerId,
+      { limit: 60 },
+    );
+    let best: { id: string; title: string; score: number } | undefined;
+    for (const message of messages) {
+      if (message.kind !== "agent" || message.replies.length === 0) {
+        continue;
+      }
+      const titleReply = message.replies.find((reply) =>
+        /^Task: /u.test(reply.content),
+      );
+      const title =
+        titleReply === undefined
+          ? ""
+          : (
+              titleReply.content.replace(/^Task:\s*/u, "").split("\n")[0] ?? ""
+            ).trim();
+      const score = textOverlap(phrase, `${message.content} ${title}`);
+      if (
+        score >= THREAD_NAME_MIN_OVERLAP &&
+        (best === undefined || score > best.score)
+      ) {
+        best = { id: message.id, title, score };
+      }
+    }
+    return best === undefined ? undefined : { id: best.id, title: best.title };
+  }
+
   private async dispatchOneMention(input: {
     projectId: string;
     repositoryId: string;
@@ -6826,7 +6938,18 @@ export class ApiGateway {
     const continuing =
       input.threadMessageId ??
       (trigger === "mention"
-        ? (
+        ? // A thread named outright wins over one merely resembled: the first
+          // is what somebody asked for, the second is a guess that happened to
+          // score well. Only if no name was given does the resemblance test
+          // get a say.
+          (
+            await this.findThreadByName({
+              repositoryId,
+              viewerId: senderId,
+              content,
+            })
+          )?.id ??
+          (
             await this.findThreadToContinue({
               repositoryId,
               viewerId: senderId,
