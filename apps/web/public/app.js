@@ -2261,6 +2261,7 @@ document.addEventListener("click", (event) => {
       // the one panel, and a direct message left on top of a thread the reader
       // just asked for would look like the thread failed to open.
       state.activeDm = undefined;
+      state.activeAgentPanel = undefined;
       closeChannelFile();
       render();
       return;
@@ -2288,6 +2289,7 @@ document.addEventListener("click", (event) => {
     // anything reads as the message having gone nowhere.
     case "dm-open":
       state.activeDm = value;
+      state.activeAgentPanel = undefined;
       state.dmDraft = "";
       render();
       void loadDmThread(value).then(() => render());
@@ -2297,14 +2299,27 @@ document.addEventListener("click", (event) => {
       state.dmDraft = "";
       render();
       return;
-    // Your own agent, one to one. The agents screen opens on its chat tab, so
-    // selecting it there is the whole of "talk to this agent" — and it is
-    // deliberately not the group channel, which is for work the team sees.
+    // Your own agent, one to one, without leaving the room.
+    //
+    // This used to navigate to the agents screen. That answered "where is the
+    // conversation" by taking the channel away, so talking to your own agent
+    // meant losing sight of the work everyone else was doing — and coming
+    // back meant finding your place again. It opens beside the channel now,
+    // in the panel a thread or a direct message would use.
+    //
+    // `state.selectedAgent` is what `currentAgent` reads, so the composer
+    // below is the same one the agents screen has: same `chat-submit`, same
+    // `sendChat`, same ability to be given work rather than just talked to.
     case "agent-chat-open":
       state.selectedAgent = value;
-      state.agentTab = "chat";
+      state.activeAgentPanel = value;
       state.activeDm = undefined;
-      navigate("agents");
+      state.activeChannelThread = undefined;
+      render();
+      return;
+    case "agent-panel-close":
+      state.activeAgentPanel = undefined;
+      render();
       return;
     case "dm-submit": {
       const other = state.activeDm;
@@ -2328,6 +2343,8 @@ document.addEventListener("click", (event) => {
       // off the screen.
       state.chanFileView = value;
       state.activeChannelThread = undefined;
+      state.activeAgentPanel = undefined;
+      state.activeDm = undefined;
       // Opening a file opens it editable. Making Edit a second click meant the
       // answer to "can I fix this here" was no until you found a tab, which is
       // the wrong default for a file you are already looking at. The diff is

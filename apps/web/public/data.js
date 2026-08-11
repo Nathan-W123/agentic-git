@@ -157,6 +157,8 @@ export const state = {
   dmThreads: {},
   /** The conversation open in the side panel, if any. */
   activeDm: undefined,
+  /** Your own agent, open in that same panel. */
+  activeAgentPanel: undefined,
   /** What is half-typed to them. */
   dmDraft: "",
   /** The project whose inbox has been fetched, so it is fetched once. */

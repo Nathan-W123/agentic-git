@@ -42,6 +42,7 @@ import {
   sendChannelMessage,
   state,
 } from "./data.js";
+import { chatComposer, chatProgress, chatThread } from "./chat.js";
 import {
   FLAG_FOR_STATUS,
   buildTree,
@@ -1106,6 +1107,58 @@ function threadListPanel(repositoryId) {
 }
 
 /**
+ * Your own agent, in the panel beside the channel.
+ *
+ * Built from the same pieces the agents screen uses rather than a chat surface
+ * of its own — `chatThread` and `chatComposer` carry the model and effort
+ * pickers, the context ring, and the `chat-submit` handler that dispatches
+ * real work. Rebuilding any of that here would have produced a box that looks
+ * like the agent chat and can only talk.
+ *
+ * The header is this screen's own: `chatHeader` offers switch and settings
+ * buttons that belong to a screen built around one agent at a time, and its
+ * close button toggles the Code screen's pane rather than this panel.
+ */
+function agentPanel() {
+  const agentId = state.activeAgentPanel;
+  if (agentId === undefined) {
+    return "";
+  }
+  const agent = myAgents().find((candidate) => candidate.id === agentId);
+  if (agent === undefined) {
+    return "";
+  }
+  const status = agentStatus(agent, activeChannelId());
+  return `<aside class="thread-panel">
+    ${panelGrip()}
+    <header class="thread-head">
+      <span class="dm-head-name">
+        ${agentFace(agent, 20)}
+        ${esc(agent.name)}
+        ${statusDot(status, AGENT_STATUS_TITLE[status])}
+      </span>
+      <span class="spacer"></span>
+      ${iconButton("close", {
+        act: "agent-panel-close",
+        title: "Close this conversation",
+      })}
+    </header>
+    ${
+      // Progress and transcript share one row, as they do in `chatPanel`.
+      // `.thread-panel` is a three-row grid and the middle row is the one that
+      // stretches: left as siblings, a visible progress bar would take the
+      // stretch and the transcript would stop scrolling — but only while a
+      // task was running, which is exactly when it is being read.
+      `<div style="display:grid;grid-template-rows:auto 1fr;min-height:0">
+        ${chatProgress(agent)}
+        ${chatThread(agent)}
+      </div>`
+    }
+    ${chatComposer(agent, `Ask ${agent.name.split(" ")[0]} to do anything...`)}
+  </aside>`;
+}
+
+/**
  * A conversation with one person, in the panel a thread would otherwise use.
  *
  * The same slot on purpose. A direct message and a thread are both "the thing
@@ -1611,7 +1664,9 @@ export function renderChats() {
       // A conversation opened by tapping somebody takes the panel: it is the
       // most recent thing the reader asked for, and the thread they were in
       // is still where they left it when they close this.
-      state.activeDm !== undefined
+      state.activeAgentPanel !== undefined
+        ? agentPanel()
+        : state.activeDm !== undefined
         ? dmPanel()
         : state.chanFileView !== undefined
         ? filePanel()
