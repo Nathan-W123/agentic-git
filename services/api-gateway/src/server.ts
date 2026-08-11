@@ -443,6 +443,28 @@ const TERMINAL_STATUS_LINE: Record<string, string> = {
    repository. */
 const THREAD_RECONCILE_INTERVAL_MS = 60_000;
 
+/**
+ * Whether a terminal event is itself the thing the reader asked for.
+ *
+ * The no-thread ending exists for work whose whole story is "started, done":
+ * a one-line outcome beside the acknowledgement, rather than a thread that
+ * exists only to hold it. A report is the opposite case. Asking an agent to
+ * audit the codebase produces no diff and no intermediate commentary, so it
+ * reached that branch and the entire findings were flattened into one channel
+ * message with nothing to open — the deliverable posted as though it were a
+ * receipt.
+ *
+ * Length is the second test because the same is true of any ending long
+ * enough to be read rather than glanced at, whatever event carried it.
+ */
+function READS_AS_DELIVERABLE(type: string, line: string): boolean {
+  return (
+    type === "task_reported" ||
+    /\n/u.test(line) ||
+    line.length > 240
+  );
+}
+
 const THREAD_ENDED_RE = /^(?:Done\b|I could not finish|This was cancelled)/u;
 
 /**
@@ -8360,7 +8382,7 @@ export class ApiGateway {
               watched.pending.push(line);
               continue;
             }
-            if (terminal) {
+            if (terminal && !READS_AS_DELIVERABLE(record.event.type, line)) {
               // Finished without ever needing to explain itself. The outcome
               // goes in the channel beside the acknowledgement — two lines,
               // no thread to open — and the held ceremony is dropped rather
