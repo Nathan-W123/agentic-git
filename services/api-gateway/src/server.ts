@@ -597,6 +597,33 @@ function readsAsQuestion(content: string): boolean {
  * marker, and a status question about existing work is excluded even when
  * it contains a verb.
  */
+/**
+ * Whether answering this honestly means opening the repository.
+ *
+ * The chat path has no checkout, so a message that needs one can only be met
+ * with an apology. Routing it to a task instead gets it answered by an agent
+ * with the files in front of it.
+ *
+ * Deliberately generous about what counts — a false positive costs a task
+ * that reads a repository and reports, which is the behaviour being asked
+ * for; a false negative is the apology this exists to remove. It stays
+ * anchored on concrete nouns rather than any mention of work, so "how are you
+ * getting on?" is still conversation.
+ */
+export function needsTheRepository(content: string): boolean {
+  return (
+    /\b(repo|repos|repository|repositories|codebase|code ?base|source code|the code|this code|file|files|folder|directory|readme|test|tests|function|functions|class|classes|module|modules|endpoint|schema|migration|dependency|dependencies|commit|commits|branch|diff|changeset)\b/iu.test(
+      content,
+    ) ||
+    // A path or a filename, which is a reference to the repository whether or
+    // not the sentence around it says so.
+    /[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|css|html|yml|yaml|toml|sql|py|go|rs|java|rb|sh)\b/iu.test(
+      content,
+    ) ||
+    /(^|\s)(?:\.\/|src\/|apps\/|packages\/|services\/)/u.test(content)
+  );
+}
+
 function looksLikeTaskRequest(content: string): boolean {
   const text = content.trim();
   if (text.length < 6) {
@@ -6092,7 +6119,19 @@ export class ApiGateway {
     // appeared to type forever because there was nothing to finish. Anything
     // that does not read as a request for work is simply answered, in the
     // channel, like a message from a colleague.
-    if (readsAsQuestion(content)) {
+    // …unless answering it means looking at the repository, which the chat
+    // path cannot do: provider chat runs the CLI in an empty scratch
+    // directory, so a question about a file could only ever be answered with
+    // "I can't see the repository from here". That sentence was true and
+    // useless, and it was the commonest thing an agent said.
+    //
+    // A task is the path that has a checkout. Sending these there is now
+    // cheap in the two ways it previously was not: a task asked to look can
+    // finish by reporting rather than failing for changing nothing, and a
+    // task that says nothing substantive no longer opens a thread. So the
+    // question is answered by an agent that actually read the file, and it
+    // still arrives as one line in the channel.
+    if (readsAsQuestion(content) && !needsTheRepository(content)) {
       await this.answerInChannel(candidate, content, projectId, repositoryId);
       return;
     }

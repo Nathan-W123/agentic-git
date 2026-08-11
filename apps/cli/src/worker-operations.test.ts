@@ -4160,3 +4160,27 @@ test("only a request to look excuses a changeset that changed nothing", () => {
     assert.equal(readsAsReportRequest(objective), false, objective);
   }
 });
+
+test("a question about the repository is answered by reporting, unless it asks for an edit", () => {
+  // These reach a task because the chat path has no checkout — see
+  // `needsTheRepository`. Having got there, changing nothing is the answer.
+  for (const objective of [
+    "what is in the README?",
+    "How does canonical promotion work",
+    "which files handle auth?",
+    "can you tell me what the retry loop does?",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), true, objective);
+  }
+
+  // A question mark does not turn a change request into a report. An empty
+  // result here is still the symptom of a sandbox refusing every write.
+  for (const objective of [
+    "can you fix the retry loop?",
+    "could you add a hello to the readme?",
+    "would you rename the auth module?",
+    "why not just delete that file?",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), false, objective);
+  }
+});
