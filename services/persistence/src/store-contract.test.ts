@@ -296,6 +296,50 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a save that omits provenance is not a remapping`, async () => {
+    // Every run on a GitHub-imported repository used to fail here.
+    // `canonical()` in worker-operations narrows a stored repository to
+    // `{id, path, branch}` for Git, that narrowed record reaches `createRun`
+    // → `saveRepository`, and an absent provider read as "local" — so the
+    // same repository looked like a different one and the run never started.
+    const { store, cleanup } = await backend.open();
+    try {
+      const imported = {
+        ...REPOSITORY,
+        provider: "github" as const,
+        remoteUrl: "https://github.com/acme/widgets.git",
+      };
+      await store.saveRepository(imported);
+
+      // The shape a run actually re-saves: same repository, no provenance.
+      await store.saveRepository({
+        id: imported.id,
+        path: imported.path,
+        branch: imported.branch,
+      });
+
+      // And the provenance survives it — the row is not quietly relocalised.
+      const after = await store.getRepository(imported.id);
+      assert.equal(after?.provider, "github");
+      assert.equal(after?.remoteUrl, "https://github.com/acme/widgets.git");
+
+      // A record that genuinely states a different provenance is still a
+      // remapping, so the guard is narrowed rather than removed.
+      await assert.rejects(
+        store.saveRepository({
+          id: imported.id,
+          path: imported.path,
+          branch: imported.branch,
+          provider: "local",
+        }),
+        /already mapped/u,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: history reads are detached snapshots`, async () => {
     const { store, cleanup } = await backend.open();
     try {

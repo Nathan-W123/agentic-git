@@ -70,6 +70,8 @@ interface TestRuntime {
   canonicalDiff: { files: string[]; patch: string; truncated: boolean };
   /** Where `canonicalHead` says canonical stands; mutated in place. */
   canonicalState: { head: string | undefined };
+  /** Set `reason` to make `runRepository` reject, as a run that cannot start does. */
+  runFailure: { reason?: string };
 }
 
 class TestClient {
@@ -203,6 +205,7 @@ async function startRuntime(
   const canonicalState: TestRuntime["canonicalState"] = {
     head: "b".repeat(40),
   };
+  const runFailure: TestRuntime["runFailure"] = {};
   const canonicalDiff: TestRuntime["canonicalDiff"] = {
     files: ["src/server.ts"],
     patch: "@@ -1 +1 @@\n-const ok = a && b;\n+const ok = a || b;",
@@ -306,7 +309,11 @@ async function startRuntime(
         submittedBy: input.actorId,
       });
     },
-    async runRepository() {},
+    async runRepository() {
+      if (runFailure.reason !== undefined) {
+        throw new Error(runFailure.reason);
+      }
+    },
     async canonicalDiff(input) {
       canonicalDiffs.push(input);
       return canonicalDiff;
@@ -420,6 +427,7 @@ async function startRuntime(
     canonicalDiffs,
     canonicalDiff,
     canonicalState,
+    runFailure,
   };
 }
 
@@ -4442,6 +4450,50 @@ test("a question in the channel carries the agent's own work with it", async (t)
   assert.match(prompt, /Your tasks in this repository/u);
   // And it is told not to invent, since it cannot read the repository here.
   assert.match(prompt, /never claim to have started or requested anything/u);
+});
+
+test("a run that cannot start says so, instead of an hour of silence", async (t) => {
+  // The channel said "On it." and then nothing. The run rejected before it
+  // wrote a single audit event, so the progress watcher had nothing to follow
+  // and held its opening line until the one-hour watchdog gave up — and the
+  // reason, which the failing call had in hand, went to stderr where nobody
+  // reading the channel can see it.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "cannotstart");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+  runtime.runFailure.reason =
+    "Repository id cannotstart is already mapped to a different canonical repository";
+  const mention = `Codex (${String(session.user.displayName).split(" ")[0]})`;
+
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages`,
+    { method: "POST", body: { content: `@${mention} please fix the retry loop` } },
+  );
+
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(repo, ownerId);
+    return messages.some((message) =>
+      message.replies.some((reply) =>
+        reply.content.includes("I could not start this"),
+      ),
+    );
+  }, "the channel never said why the run did not start");
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const said = messages
+    .flatMap((message) => message.replies)
+    .map((reply) => reply.content)
+    .join("\n");
+  // The actual reason, not a generic apology — it is the only thing that
+  // tells the reader what to do next.
+  assert.match(said, /already mapped to a different canonical repository/u);
 });
 
 test("a personal agent cannot be made auditor, an org-wide one can", async (t) => {

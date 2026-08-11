@@ -43,6 +43,41 @@ export interface SessionRecord {
   startedAt: string;
 }
 
+/**
+ * Whether a save would point an existing repository id at a different
+ * canonical repository.
+ *
+ * Identity is the path and the branch — those say *which* repository this is.
+ * Provider and remote URL are provenance, and are only compared when the
+ * incoming record actually states them.
+ *
+ * That distinction is the fix for a real failure: `canonical()` in
+ * worker-operations narrows a stored repository to `{id, path, branch}` for
+ * Git, and that narrowed record reaches `createRun` → `saveRepository`.
+ * Reading an absent provider as `"local"` then made every run on a
+ * GitHub-imported repository fail with "already mapped to a different
+ * canonical repository" — the repository was the same one, the caller simply
+ * had no reason to carry its provenance. A locally-created repository was
+ * unaffected, so the failure looked like GitHub import being broken.
+ *
+ * Omission is not assertion. The row itself keeps its provenance regardless:
+ * every store's insert is `ON CONFLICT DO NOTHING`, so a narrowed save cannot
+ * overwrite `github` with `local` either.
+ */
+export function repositoryConflicts(
+  existing: StoredRepository,
+  incoming: StoredRepository,
+): boolean {
+  return (
+    existing.path !== incoming.path ||
+    existing.branch !== incoming.branch ||
+    (incoming.provider !== undefined &&
+      (existing.provider ?? "local") !== incoming.provider) ||
+    (incoming.remoteUrl !== undefined &&
+      existing.remoteUrl !== incoming.remoteUrl)
+  );
+}
+
 export interface StoredRepository {
   id: string;
   path: string;

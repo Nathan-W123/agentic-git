@@ -6143,13 +6143,34 @@ export class ApiGateway {
           repositoryId,
           actorId: candidate.userId,
         }),
-      ).catch((error: unknown) => {
+      ).catch(async (error: unknown) => {
+        const reason =
+          error instanceof Error ? error.message : String(error);
         process.stderr.write(
-          `[channel] run failed for ${repositoryId}: ${
-            error instanceof Error ? error.message : String(error)
-          }
+          `[channel] run failed for ${repositoryId}: ${reason}
 `,
         );
+        // Said in the channel, not only to stderr.
+        //
+        // This rejects when the run could not even start — the repository is
+        // unreadable, no agent is configured for the vendor, a stored record
+        // disagrees with itself. In every one of those cases the task writes
+        // no audit events at all, so the watcher below has nothing to follow
+        // and holds its opening line waiting for a run that will never
+        // report. The person saw "On it." and then an hour of silence before
+        // the watchdog admitted defeat, and the one component that knew why
+        // had written the reason to a log nobody reading the channel can see.
+        //
+        // Dropping the watch as well, so the hour of silence does not happen
+        // after the explanation either.
+        this.watchedChannelTasks.delete(task.id);
+        await this.appendChannelThreadReply({
+          projectId,
+          repositoryId,
+          messageId: acknowledgement.id,
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          content: `I could not start this: ${reason}`,
+        }).catch(() => undefined);
       });
       // From here the thread narrates itself until the task ends.
       this.watchChannelTask({
