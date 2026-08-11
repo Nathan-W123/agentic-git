@@ -32,7 +32,12 @@ import {
   fixObjectiveFor,
   formatAuditSummary,
   formatFinding,
+  buildInvestigationPrompt,
+  formatFailureVerdict,
+  type FailureClass,
   isAuditorRole as roleIsAuditor,
+  isInvestigatorRole as roleIsInvestigator,
+  parseFailureVerdict,
   parseAuditFindings,
   parseFindingReply,
   readsAsApproval,
@@ -142,6 +147,28 @@ interface WatchedChannelTask {
  * about.
  */
 const THREAD_CONTEXT_LINES = 24;
+
+/**
+ * One audit event's data as a short line for a prompt.
+ *
+ * The trail is read for its shape — planned, admitted, asked for scope, died
+ * — so each entry needs enough to be recognised and no more. Sending whole
+ * payloads would spend most of the context on plan JSON and patch text.
+ */
+function summariseAuditData(data: Record<string, unknown>): string {
+  const parts: string[] = [];
+  for (const key of ["status", "explanation", "error", "reason", "message"]) {
+    const value = data[key];
+    if (typeof value === "string" && value.trim().length > 0) {
+      parts.push(`${key}=${collapseWhitespace(value).slice(0, 200)}`);
+    }
+  }
+  const files = Array.isArray(data["files"]) ? data["files"].length : 0;
+  if (files > 0) {
+    parts.push(`files=${String(files)}`);
+  }
+  return parts.join(" ");
+}
 
 /**
  * The changed-file list out of a run's audit event, in either shape it takes.
@@ -5286,15 +5313,25 @@ export class ApiGateway {
           "At least one of name, role, model, or effort is required",
         );
       }
-      // `auditor` is the one role the code knows the meaning of.
+      // `auditor` and `investigator` are the roles the code knows the meaning
+      // of.
       //
       // Every other role is free text the agent only ever sees as a sentence
-      // in its objective. This one changes what the system does — it audits
-      // unprompted, on its own schedule, spending tokens nobody asked it to —
-      // so it is not something any collaborator should be able to hand out by
-      // typing a word into a text field, and not something two agents should
-      // hold at once in the same repository.
-      if (roleIsAuditor(role)) {
+      // in its objective. These change what the system does — they act
+      // unprompted, on their own trigger, spending tokens nobody asked them
+      // to — so neither is something any collaborator should be able to hand
+      // out by typing a word into a text field, and neither is something two
+      // agents should hold at once in the same repository.
+      const reserved = roleIsAuditor(role)
+        ? { holds: roleIsAuditor, noun: "auditor", conflict: "auditor_exists" }
+        : roleIsInvestigator(role)
+          ? {
+              holds: roleIsInvestigator,
+              noun: "investigator",
+              conflict: "investigator_exists",
+            }
+          : undefined;
+      if (reserved !== undefined) {
         await authorizeRepository(
           this.options.store,
           principal,
@@ -5305,13 +5342,13 @@ export class ApiGateway {
         const overrides =
           await this.options.store.listChannelAgentOverrides(repositoryId);
         const holder = Object.entries(overrides).find(
-          ([heldBy, entry]) => heldBy !== agentId && roleIsAuditor(entry.role),
+          ([heldBy, entry]) => heldBy !== agentId && reserved.holds(entry.role),
         );
         if (holder !== undefined) {
           throw new HttpError(
             409,
-            "auditor_exists",
-            `${holder[1].name ?? holder[0]} is already the auditor here. Demote it first.`,
+            reserved.conflict,
+            `${holder[1].name ?? holder[0]} is already the ${reserved.noun} here. Demote it first.`,
           );
         }
         // An audit runs on its holder's own account — `dispatchOneMention`
@@ -5338,9 +5375,10 @@ export class ApiGateway {
         if (candidate !== undefined && candidate.visibility !== "org") {
           throw new HttpError(
             409,
-            "auditor_must_be_org_wide",
-            `${candidate.name} is a personal agent, and an auditor spends its ` +
-              `owner's account continuously without being asked. Ask ` +
+            `${reserved.noun}_must_be_org_wide`,
+            `${candidate.name} is a personal agent, and ${
+              reserved.noun === "auditor" ? "an auditor" : "an investigator"
+            } spends its owner's account without being asked. Ask ` +
               `${candidate.userName} to make it org-wide first, or promote an ` +
               `org-wide agent instead.`,
           );
@@ -7416,6 +7454,27 @@ export class ApiGateway {
       ? candidates.filter((entry) => question.includes(`@${entry.name}`))
       : [];
     const answering = mentioned.length > 0 ? mentioned : owner === undefined ? [] : [owner];
+    // "yes, retry" against a thread whose task failed. Read before the
+    // general split for the same reason an auditor's approval is: it carries
+    // no task verb, so it would otherwise fall through to the agent
+    // *answering a question* about the failure — which looks exactly like it
+    // did something.
+    //
+    // The retry is the person's, never the investigator's. A failing task
+    // that retries itself is a spend loop.
+    if (
+      readsAsApproval(question) &&
+      /\bretry|again|re-?run\b/iu.test(question) &&
+      (await this.retryFailedTaskFor({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        messageId: input.messageId,
+        viewerId: input.viewerId,
+        responder: owner,
+      }))
+    ) {
+      return;
+    }
     // An auditor's thread is the one place a bare "yes" is an instruction.
     // Handled before the general answer-versus-work split below, because
     // that split reads for task *verbs* and an approval has none: "yes, do
@@ -7944,15 +8003,209 @@ export class ApiGateway {
   }
 
   /** This repository's auditor, if it has one that can still be reached. */
+  /**
+   * Says why a task failed, in the thread where somebody is waiting.
+   *
+   * A failure ends with one line and nobody reads it. The reason is in the
+   * trail — what was planned, what was admitted, which scope requests were
+   * made, what validation said — and that is the one input here a query
+   * cannot summarise, because it is unstructured and its meaning is in the
+   * sequence.
+   *
+   * Never retries anything. A failing task that retries itself is a spend
+   * loop; the verdict recommends and a person says yes, exactly as an
+   * auditor's finding is approved before anybody acts on it.
+   *
+   * Silent whenever it cannot help — no investigator here, no trail, an
+   * unreadable verdict. A thread with no extra line is the honest outcome;
+   * an invented classification is worse than none.
+   */
+  private async investigateFailure(input: {
+    projectId: string;
+    repositoryId: string;
+    taskId: string;
+    messageId: string;
+    failure: Record<string, unknown>;
+  }): Promise<void> {
+    const investigator = await this.investigatorFor(
+      input.projectId,
+      input.repositoryId,
+    );
+    if (investigator === undefined) {
+      return;
+    }
+    const detail =
+      typeof input.failure["error"] === "string"
+        ? input.failure["error"]
+        : typeof input.failure["explanation"] === "string"
+          ? input.failure["explanation"]
+          : "";
+    const status =
+      typeof input.failure["status"] === "string"
+        ? input.failure["status"]
+        : undefined;
+    // What the deterministic reading already believes. Offered to the model
+    // rather than withheld, so it can agree cheaply and spend its attention
+    // on what a regex cannot read.
+    const suspected: FailureClass | undefined = IS_AUTH_FAILURE_RE.test(detail)
+      ? "credential"
+      : status === "conflict" || status === "stale"
+        ? "conflict"
+        : status === "validation_failed"
+          ? "flaky_gate"
+          : undefined;
+    const [trail, priorFailures] = await Promise.all([
+      this.options.store.listAuditEvents({ taskId: input.taskId }),
+      this.options.store.listAuditEvents({ types: ["task_failed"] }),
+    ]);
+    if (trail.length === 0) {
+      return;
+    }
+    const task = (
+      await this.options.store.listSubmittedTasks({
+        repositoryId: input.repositoryId,
+      })
+    ).find((entry) => entry.id === input.taskId);
+    // A failure that keeps happening the same way is rarely this task's
+    // fault, and the count is the whole of that signal — matched on the
+    // recorded status rather than on the message, which carries ids and
+    // paths that differ every time.
+    const priorSimilar = priorFailures.filter(
+      (entry) =>
+        entry.event.taskId !== input.taskId &&
+        (entry.event.data as Record<string, unknown> | undefined)?.["status"] ===
+          status,
+    ).length;
+    const answer = await this.askAgent(
+      investigator,
+      buildInvestigationPrompt({
+        objective: task?.objective ?? "(the objective was not recorded)",
+        trail: trail.map((entry) => ({
+          type: entry.event.type,
+          detail: summariseAuditData(
+            (entry.event.data as Record<string, unknown> | undefined) ?? {},
+          ),
+        })),
+        suspected,
+        priorSimilar,
+      }),
+      QUESTION_TIMEOUT_MS,
+    );
+    const verdict =
+      answer.text === undefined ? undefined : parseFailureVerdict(answer.text);
+    if (verdict === undefined) {
+      return;
+    }
+    await this.appendChannelThreadReply({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      messageId: input.messageId,
+      authorId: `${investigator.userId}:${investigator.provider}`,
+      content: formatFailureVerdict(verdict),
+    }).catch(() => undefined);
+  }
+
+  /**
+   * Puts a failed task back in the queue, because a person said to.
+   *
+   * The thread knows which task it narrates (`taskId` on the message), so
+   * this needs no memory of the run — it works long after the process that
+   * watched it has gone, which is exactly when somebody comes back to a
+   * failure and decides to try again.
+   *
+   * Returns false when there is nothing to retry, so the caller falls through
+   * to answering the reply normally rather than swallowing it.
+   */
+  private async retryFailedTaskFor(input: {
+    projectId: string;
+    repositoryId: string;
+    messageId: string;
+    viewerId: string;
+    responder: ChannelMentionCandidate | undefined;
+  }): Promise<boolean> {
+    const root = await this.options.store.getChannelMessage(
+      input.repositoryId,
+      input.messageId,
+      input.viewerId,
+    );
+    if (root?.taskId === undefined || input.responder === undefined) {
+      return false;
+    }
+    const task = (
+      await this.options.store.listSubmittedTasks({
+        repositoryId: input.repositoryId,
+      })
+    ).find((entry) => entry.id === root.taskId);
+    if (task === undefined || task.status !== "failed") {
+      return false;
+    }
+    const authorId = `${input.responder.userId}:${input.responder.provider}`;
+    try {
+      await this.options.store.retrySubmittedTask(task.id);
+    } catch (error) {
+      await this.appendChannelThreadReply({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        messageId: input.messageId,
+        authorId,
+        content: `I could not queue that again: ${
+          error instanceof Error ? error.message : "the task refused to retry"
+        }`,
+      }).catch(() => undefined);
+      return true;
+    }
+    await this.appendChannelThreadReply({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      messageId: input.messageId,
+      authorId,
+      content: "Queued again — I'll report back here.",
+    }).catch(() => undefined);
+    // Queued is not started: nothing runs a submitted task until somebody
+    // asks the repository to run, the same as any other dispatch.
+    void Promise.resolve(
+      this.options.operations.runRepository?.({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        actorId: task.submittedBy ?? input.responder.userId,
+      }),
+    ).catch(() => undefined);
+    return true;
+  }
+
   private async auditorFor(
     projectId: string,
     repositoryId: string,
   ): Promise<ChannelMentionCandidate | undefined> {
+    return await this.roleHolderFor(projectId, repositoryId, roleIsAuditor);
+  }
+
+  private async investigatorFor(
+    projectId: string,
+    repositoryId: string,
+  ): Promise<ChannelMentionCandidate | undefined> {
+    return await this.roleHolderFor(projectId, repositoryId, roleIsInvestigator);
+  }
+
+  /**
+   * The org-wide agent holding one reserved role here, if anybody does.
+   *
+   * Shared by every role the system acts on by itself, because the two
+   * conditions are the same for all of them: exactly one holder, and a
+   * credential its owner has published as spendable by other people's
+   * requests. A role that runs unprompted must not be able to commit
+   * somebody's personal subscription.
+   */
+  private async roleHolderFor(
+    projectId: string,
+    repositoryId: string,
+    holdsRole: (role: string | undefined) => boolean,
+  ): Promise<ChannelMentionCandidate | undefined> {
     const overrides =
       await this.options.store.listChannelAgentOverrides(repositoryId);
-    if (!Object.values(overrides).some((entry) => roleIsAuditor(entry.role))) {
-      // The common case, and the cheap one: no auditor here, so the roster is
-      // never resolved at all.
+    if (!Object.values(overrides).some((entry) => holdsRole(entry.role))) {
+      // The common case, and the cheap one: nobody holds it here, so the
+      // roster is never resolved at all.
       return undefined;
     }
     const candidates = await this.resolveChannelMentionCandidates(
@@ -7961,7 +8214,7 @@ export class ApiGateway {
     );
     return candidates.find(
       (candidate) =>
-        roleIsAuditor(candidate.role) &&
+        holdsRole(candidate.role) &&
         // Enforced at promotion, re-checked here: a credential can be made
         // personal again after the fact, and the moment it is, the standing
         // permission to spend it unprompted is gone.
@@ -8568,6 +8821,26 @@ export class ApiGateway {
               userId: watched.ownerId,
               provider: watched.provider,
               reason: "The sign-in has expired. Reconnect this agent.",
+            }).catch(() => undefined);
+          }
+          // Somebody has just been told the work failed. If this repository
+          // has an investigator, the next thing they read should be why —
+          // not left for whoever thinks to go and open the audit log.
+          //
+          // Placed above the threading decision rather than beside either
+          // ending, because a task whose whole story is "started, failed"
+          // never becomes threaded and takes the other branch — which is
+          // exactly the failure most in need of explaining.
+          //
+          // Not awaited: the verdict costs a model call, and the ending
+          // itself must not wait behind it.
+          if (record.event.type === "task_failed") {
+            void this.investigateFailure({
+              projectId: watched.projectId,
+              repositoryId: watched.repositoryId,
+              taskId: watched.taskId,
+              messageId: watched.messageId,
+              failure: data,
             }).catch(() => undefined);
           }
           // The summary that hangs off the thread, kept up to date as the run

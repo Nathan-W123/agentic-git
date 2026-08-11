@@ -3,7 +3,10 @@ import test from "node:test";
 
 import {
   buildAuditPrompt,
+  buildInvestigationPrompt,
   findingsReferencedBy,
+  isInvestigatorRole,
+  parseFailureVerdict,
   fixObjectiveFor,
   formatAuditSummary,
   formatFinding,
@@ -268,4 +271,85 @@ test("the fix objective is self-contained, since another agent receives it", () 
   assert.match(objective, /approved by/u);
   // It must not invite the receiving agent to tidy up while it is in there.
   assert.match(objective, /do not reformat, rename, or/u);
+});
+
+test("a verdict is read back, or refused rather than guessed", () => {
+  const verdict = parseFailureVerdict(
+    [
+      "VERDICT",
+      "class: flaky_gate",
+      "retry: yes",
+      "detail: The gate failed on a wall-clock assertion that passed on the",
+      "previous two runs.",
+      "END",
+    ].join("\n"),
+  );
+  assert.equal(verdict?.failureClass, "flaky_gate");
+  assert.equal(verdict?.retryWorthwhile, true);
+  assert.match(verdict?.detail ?? "", /wall-clock/u);
+
+  // Anything that is not a clear yes is a no. A retry spends somebody's
+  // account, so an unreadable answer must not read as encouragement.
+  for (const retry of ["maybe", "possibly, if the gate settles", "no", ""]) {
+    assert.equal(
+      parseFailureVerdict(
+        `VERDICT\nclass: conflict\nretry: ${retry}\ndetail: two tasks want the same file\nEND`,
+      )?.retryWorthwhile,
+      false,
+      retry,
+    );
+  }
+
+  // An unclassifiable class is "unknown", not a crash and not a guess.
+  assert.equal(
+    parseFailureVerdict(
+      "VERDICT\nclass: gremlins\nretry: no\ndetail: something odd\nEND",
+    )?.failureClass,
+    "unknown",
+  );
+
+  // A reply with no detail says nothing worth posting. Undefined rather than
+  // an empty verdict: a thread with no extra line is honest, an invented
+  // classification is not.
+  for (const reply of ["", "I am not sure what happened", "VERDICT\nclass: conflict\nEND"]) {
+    assert.equal(parseFailureVerdict(reply), undefined, reply);
+  }
+});
+
+test("the investigation asks about the trail it was given", () => {
+  const prompt = buildInvestigationPrompt({
+    objective: "raise the retry ceiling",
+    trail: [
+      { type: "plan_received", detail: "files=2" },
+      { type: "task_failed", detail: "status=validation_failed" },
+    ],
+    suspected: "flaky_gate",
+    priorSimilar: 3,
+  });
+  assert.match(prompt, /raise the retry ceiling/u);
+  assert.match(prompt, /plan_received/u);
+  // The deterministic reading is offered rather than withheld, so the model
+  // can agree cheaply and spend its attention on what a regex cannot read.
+  assert.match(prompt, /"flaky_gate"/u);
+  // A failure that keeps happening the same way is rarely this task's fault.
+  assert.match(prompt, /3 other failure/u);
+
+  // With nothing suspected and nothing prior, neither claim is invented.
+  const bare = buildInvestigationPrompt({
+    objective: "x",
+    trail: [{ type: "task_failed", detail: "" }],
+    suspected: undefined,
+    priorSimilar: 0,
+  });
+  assert.doesNotMatch(bare, /An automatic check/u);
+  assert.doesNotMatch(bare, /other failure/u);
+});
+
+test("investigator is a reserved role name, matched like auditor", () => {
+  assert.equal(isInvestigatorRole("investigator"), true);
+  assert.equal(isInvestigatorRole("  Investigator  "), true);
+  assert.equal(isInvestigatorRole("investigations"), false);
+  assert.equal(isInvestigatorRole(undefined), false);
+  // The two reserved roles are distinct; holding one is not holding the other.
+  assert.equal(isInvestigatorRole("auditor"), false);
 });

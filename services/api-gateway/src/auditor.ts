@@ -394,3 +394,155 @@ export function fixObjectiveFor(finding: AuditFinding): string {
     `restructure anything else while you are in there.`
   );
 }
+
+/* ------------------------------------------------------ the investigator --
+ *
+ * The second reserved role, and the mirror image of the auditor: the auditor
+ * reads a change that landed, the investigator reads work that did not.
+ *
+ * A failed task ends with one line and nobody reads it. The reason is in the
+ * audit trail — the plan, what was admitted, which scope requests were made,
+ * what validation said, how it ended — and that trail is the one input here
+ * a query cannot summarise for you, because it is unstructured and its
+ * meaning is in the sequence.
+ */
+
+/** The second reserved role name. Compared trimmed and lower-cased. */
+export const INVESTIGATOR_ROLE = "investigator";
+
+export function isInvestigatorRole(role: string | undefined): boolean {
+  return role !== undefined && role.trim().toLowerCase() === INVESTIGATOR_ROLE;
+}
+
+/**
+ * What went wrong, in the few kinds that lead to different actions.
+ *
+ * Deliberately small, and chosen so each one implies something different for
+ * the reader: a credential is fixed by signing in, a flaky gate by retrying,
+ * a conflict by rebasing or re-planning, an agent error by rewording the
+ * request, infrastructure by nobody in this channel. A longer taxonomy would
+ * read as precision without changing what anybody does next.
+ */
+export type FailureClass =
+  | "credential"
+  | "flaky_gate"
+  | "conflict"
+  | "agent_error"
+  | "infrastructure"
+  | "unknown";
+
+const FAILURE_CLASSES: readonly FailureClass[] = [
+  "credential",
+  "flaky_gate",
+  "conflict",
+  "agent_error",
+  "infrastructure",
+  "unknown",
+];
+
+export interface FailureVerdict {
+  failureClass: FailureClass;
+  /** Whether running the same task again is likely to get further. */
+  retryWorthwhile: boolean;
+  /** One or two sentences, in the investigator's own words. */
+  detail: string;
+}
+
+/**
+ * The investigation request.
+ *
+ * The trail goes in as it was recorded, oldest first, rather than
+ * pre-summarised: the sequence is the evidence, and a run that planned, was
+ * admitted, requested scope twice and then died reads differently from one
+ * that never got a plan at all.
+ *
+ * `suspected` is what the deterministic classifier already believes from the
+ * error text. It is offered rather than hidden so the model can agree
+ * cheaply and spend its attention on the cases a regex cannot read — and so
+ * a model that disagrees has to say so explicitly.
+ */
+export function buildInvestigationPrompt(input: {
+  objective: string;
+  trail: ReadonlyArray<{ type: string; detail: string }>;
+  suspected: FailureClass | undefined;
+  /** Prior failures in this repository that look the same, if any. */
+  priorSimilar: number;
+}): string {
+  const trail = input.trail
+    .map((entry) => `- ${entry.type}${entry.detail === "" ? "" : `: ${entry.detail}`}`)
+    .join("\n");
+  return (
+    "A task in this repository failed. Below is what the run recorded, " +
+    "oldest first. Say what kind of failure it was and whether running it " +
+    "again would get any further.\n\n" +
+    `The task was asked to: ${input.objective}\n\n` +
+    (input.suspected === undefined
+      ? ""
+      : `An automatic check reads this as "${input.suspected}". Say so if ` +
+        `you agree; disagree only if the trail below shows otherwise.\n\n`) +
+    (input.priorSimilar > 0
+      ? `This repository has had ${String(input.priorSimilar)} other failure(s) ` +
+        `that look the same. A failure that keeps happening the same way is ` +
+        `rarely this task's fault.\n\n`
+      : "") +
+    `What the run recorded:\n${trail}\n\n` +
+    "Reply in exactly this form and nothing else:\n" +
+    "VERDICT\n" +
+    `class: one of ${FAILURE_CLASSES.join(" | ")}\n` +
+    "retry: yes or no\n" +
+    "detail: one or two sentences saying what happened and what would " +
+    "change it. Name the evidence you used.\n" +
+    "END"
+  );
+}
+
+/**
+ * Reads the verdict back, or nothing.
+ *
+ * `undefined` rather than a guess when the reply cannot be read: an
+ * investigation that says nothing is a thread with no extra line in it,
+ * where an invented one is a reader acting on a classification no model
+ * actually made.
+ */
+export function parseFailureVerdict(reply: string): FailureVerdict | undefined {
+  const block = reply.split(/^\s*VERDICT\s*$/imu)[1] ?? reply;
+  const body = block.split(/^\s*END\s*$/imu)[0] ?? block;
+  const lines = body.split(/\r?\n/u);
+  const read = (key: string): string | undefined => {
+    const line = lines.find((entry) =>
+      entry.trim().toLowerCase().startsWith(`${key}:`),
+    );
+    return line === undefined
+      ? undefined
+      : line.slice(line.indexOf(":") + 1).trim();
+  };
+  const detail = read("detail");
+  if (detail === undefined || detail.length === 0) {
+    return undefined;
+  }
+  const classText = (read("class") ?? "").toLowerCase();
+  const failureClass =
+    FAILURE_CLASSES.find((entry) => classText.includes(entry)) ?? "unknown";
+  // Anything that is not a clear yes is a no. A retry spends somebody's
+  // account, so an unreadable answer must not read as encouragement.
+  const retryWorthwhile = /^\s*(yes|y|true)\b/iu.test(read("retry") ?? "");
+  return { failureClass, retryWorthwhile, detail: detail.slice(0, 600) };
+}
+
+/** How the verdict reads in the thread. */
+export function formatFailureVerdict(verdict: FailureVerdict): string {
+  const label: Record<FailureClass, string> = {
+    credential: "a sign-in that has expired",
+    flaky_gate: "a gate that fails intermittently",
+    conflict: "a genuine conflict with other work",
+    agent_error: "the agent getting it wrong",
+    infrastructure: "the machine, not the work",
+    unknown: "something I could not classify",
+  };
+  return (
+    `This looks like ${label[verdict.failureClass]}. ${verdict.detail}` +
+    (verdict.retryWorthwhile
+      ? "\n\nRunning it again may well get further — reply \"yes, retry\" and I will."
+      : "\n\nRunning it again unchanged would fail the same way.")
+  );
+}

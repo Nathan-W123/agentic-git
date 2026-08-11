@@ -4074,6 +4074,109 @@ test("a thread carries what its task changed, and keeps it", async (t) => {
   }, "the final changeset never replaced the live summary");
 });
 
+test("an investigator says why a task failed, and retries when told to", async (t) => {
+  // A failure ended with one line and nobody read it. The reason was in the
+  // audit trail, which nobody goes and reads either.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "investigator-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const promoted = await owner.request(`${base}/agents/${ownerId}:anthropic`, {
+    method: "POST",
+    body: { role: "investigator" },
+  });
+  assert.equal(promoted.status, 200, JSON.stringify(promoted.data));
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please fix the retry loop" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const taskId = (await runtime.store.listSubmittedTasks({ repositoryId }))[0]?.id;
+  assert.ok(taskId !== undefined);
+
+  runtime.chatAnswer.text = [
+    "VERDICT",
+    "class: flaky_gate",
+    "retry: yes",
+    "detail: The gate failed on a timing assertion that passed twice before.",
+    "END",
+  ].join("\n");
+
+  // A real failure is both: the row settles and the run traces it. The
+  // investigator reads the trail; the retry reads the row.
+  await runtime.store.claimSubmittedTasks(repositoryId);
+  await runtime.store.completeSubmittedTask(taskId, "failed");
+  await runtime.store.appendAudit(undefined, {
+    type: "task_failed",
+    taskId,
+    data: { status: "validation_failed", explanation: "tests timed out" },
+  });
+
+  const thread = () =>
+    runtime.store.listChannelMessages(repositoryId, ownerId).then((messages) =>
+      messages.find((message) => message.kind === "agent"),
+    );
+  await waitFor(async () => {
+    const root = await thread();
+    return (root?.replies ?? []).some((reply) =>
+      /timing assertion/u.test(reply.content),
+    );
+  }, "the investigator never said why the task failed");
+
+  const root = await thread();
+  const verdict = (root?.replies ?? []).find((reply) =>
+    /timing assertion/u.test(reply.content),
+  );
+  // Named as a kind of failure, not just restated.
+  assert.match(verdict?.content ?? "", /fails intermittently/u);
+  assert.match(verdict?.content ?? "", /yes, retry/u);
+
+  // It must not have retried on its own — that is a spend loop.
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId }))[0]?.status,
+    "failed",
+  );
+
+  // The person says so, and only then does it go back in the queue.
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root?.id ?? "")}/replies`,
+    { method: "POST", body: { content: "yes, retry it" } },
+  );
+  assert.equal(replied.status, 201);
+  await waitFor(async () => {
+    const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+    return task?.status === "submitted";
+  }, "the approved retry never re-queued the task");
+});
+
+test("a personal agent cannot be made investigator either", async (t) => {
+  // Same rule as the auditor, for the same reason: nobody names it, so it
+  // spends its owner's account unprompted.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "investigator-personal");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const refused = await owner.request(`${base}/agents/${ownerId}:anthropic`, {
+    method: "POST",
+    body: { role: "investigator" },
+  });
+  assert.equal(refused.status, 409, JSON.stringify(refused.data));
+  assert.equal(refused.data.error.code, "investigator_must_be_org_wide");
+});
+
 test("asking to install a system package is answered, not queued for ten minutes", async (t) => {
   // What happened instead: the task planned no files, negotiated scope it
   // could never use, and was cancelled ten minutes later with "session
