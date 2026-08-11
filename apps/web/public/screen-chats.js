@@ -1302,8 +1302,22 @@ function threadReplies(root, repositoryId) {
     ${
       steps.length === 0
         ? ""
-        : `<details class="thread-thinking"${done ? "" : " open"}>
-             <summary><span class="tt-label">Thinking</span>
+        : `<details class="thread-thinking"${
+            // Open while it runs, unless the reader has said otherwise.
+            //
+            // `open` was written from `done` alone, so every arriving step
+            // re-rendered the element with the attribute back on: closing it
+            // lasted until the agent's next thought, which on a working task
+            // is a second or two. Thinking is the noisiest thing in a thread
+            // and the most reasonable thing to want folded away.
+            //
+            // The reader's choice is remembered per thread and outranks the
+            // default in both directions — a closed one stays closed as steps
+            // arrive, and one opened after the task finished stays open.
+            (state.thinkingOpen[root.id] ?? !done) ? " open" : ""
+          }>
+             <summary data-act="thinking-toggle" data-value="${esc(root.id)}">
+               <span class="tt-label">Thinking</span>
                <span class="tt-count">${esc(count)}</span></summary>
              <div class="tt-body">${steps
                .map((reply) => String(reply.content ?? "").trim())

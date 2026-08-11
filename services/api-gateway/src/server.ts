@@ -14,6 +14,8 @@ import type { Duplex } from "node:stream";
 
 import type {
   AuditorCursor,
+  ChannelChangedFile,
+  ChannelMessage,
   CoordinationStore,
   Organization,
   OrganizationRole,
@@ -4685,7 +4687,11 @@ export class ApiGateway {
           this.options.store.listChannelAgentOverrides(repositoryId),
           this.options.store.getChannelReadCursor(repositoryId, principal.user.id),
         ]);
-        this.sendJson(response, 200, { messages, agentOverrides, readAt });
+        this.sendJson(response, 200, {
+          messages: await this.withChangedFiles(repositoryId, messages),
+          agentOverrides,
+          readAt,
+        });
         return;
       }
       if (method === "POST") {
@@ -8004,7 +8010,7 @@ export class ApiGateway {
         continue;
       }
       const key = perAgent
-        ? `${task.submittedBy} ${task.agentId}`
+        ? `${task.submittedBy}\0${task.agentId}`
         : task.submittedBy;
       const list = recent.get(key) ?? [];
       if (list.length < RECENT_ACTIVITY_LOOKBACK) {
@@ -8021,7 +8027,7 @@ export class ApiGateway {
       // here — a submission naming it fails before a task exists.
       return agentId === undefined
         ? []
-        : (recent.get(`${candidate.userId} ${agentId}`) ?? []);
+        : (recent.get(`${candidate.userId}\0${agentId}`) ?? []);
     };
   }
 
@@ -8080,6 +8086,82 @@ export class ApiGateway {
     }, CHANNEL_PROGRESS_INTERVAL_MS);
     // Never a reason to hold the process open on its own.
     this.channelProgressTimer.unref?.();
+  }
+
+  /**
+   * Fills in the changed-file summary for threads that never got one.
+   *
+   * The summary is normally written by the live watcher as a run reports. That
+   * watcher is a Map in this process, cleared on start, and this deployment
+   * restarts on every deploy — so a run in flight across a restart lost the
+   * thing recording what it changed, and the thread it belonged to said
+   * nothing about its own work for the rest of its life. Every thread from
+   * before the column existed is in the same position.
+   *
+   * The task id is on the message for exactly this reason, and until now was
+   * written and never read back. Reading it here turns the summary from
+   * "whatever the process happened to witness" into a property of the thread:
+   * the audit log still holds what the run changed, so it can always be
+   * recovered.
+   *
+   * Computed once and stored, including when the answer is "nothing" — an
+   * empty list is a fact worth keeping, and without storing it a task that
+   * genuinely changed no files would be re-queried on every read forever.
+   */
+  private async withChangedFiles(
+    repositoryId: string,
+    messages: ChannelMessage[],
+  ): Promise<ChannelMessage[]> {
+    const pending = messages.filter(
+      (message) =>
+        message.taskId !== undefined && message.changedFiles === undefined,
+    );
+    if (pending.length === 0) {
+      return messages;
+    }
+    const filled = new Map<string, ChannelChangedFile[]>();
+    await Promise.all(
+      pending.map(async (message) => {
+        // Hoisted so it narrows: the filter above already guarantees this,
+        // but a `.filter()` does not carry that through to the callback.
+        const taskId = message.taskId;
+        if (taskId === undefined) {
+          return;
+        }
+        try {
+          const events = await this.options.store.listAuditEvents({
+            taskId,
+            types: ["workspace_changed", "changeset_collected"],
+          });
+          // Last writer wins, matching the watcher: a run reports the whole
+          // set each time, so the newest report is the state of the work — a
+          // file can stop being changed when an agent reverts itself, and
+          // accumulating across reports would claim edits that no longer
+          // exist.
+          const files = events.reduce<ChannelChangedFile[]>(
+            (latest, record) => {
+              const found = changedFilesFrom(
+                (record.event.data ?? {}) as Record<string, unknown>,
+              );
+              return found.length > 0 ? found : latest;
+            },
+            [],
+          );
+          filled.set(message.id, files);
+          await this.options.store.setChannelMessageChangedFiles(
+            repositoryId,
+            message.id,
+            files,
+          );
+        } catch {
+          // A thread that cannot be summarised still has to render.
+        }
+      }),
+    );
+    return messages.map((message) => {
+      const files = filled.get(message.id);
+      return files === undefined ? message : { ...message, changedFiles: files };
+    });
   }
 
   /** Brings every watched thread up to date, then drops finished ones. */
