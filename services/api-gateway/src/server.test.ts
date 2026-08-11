@@ -4898,6 +4898,134 @@ test("an agent is told its own name, so a mention of it is not a product", async
   assert.doesNotMatch(bare, /Your role in this channel/u);
 });
 
+test("a direct message reaches its recipient and nobody else", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const organizationId = (await owner.request("/api/v1/organizations")).data
+    .organizations[0].id as string;
+
+  // Two more people in the same organization: one to write to, one who must
+  // not be able to read what was written.
+  const people: Record<string, string> = {};
+  for (const name of ["bystander", "friend"]) {
+    const user = await runtime.store.createUser({
+      email: `${name}@example.com`,
+      displayName: name,
+      passwordDigest: await hashPassword(PASSWORD),
+    });
+    await runtime.store.saveMembership({
+      organizationId,
+      userId: user.id,
+      role: "developer",
+    });
+    people[name] = user.id;
+  }
+  const sign = async (name: string): Promise<TestClient> => {
+    const client = new TestClient(runtime.origin);
+    const login = await client.request("/api/v1/auth/login", {
+      method: "POST",
+      body: { email: `${name}@example.com`, password: PASSWORD },
+    });
+    assert.equal(login.status, 200);
+    return client;
+  };
+  const friend = await sign("friend");
+  const bystander = await sign("bystander");
+  const friendId = people["friend"] ?? "";
+  const bystanderId = people["bystander"] ?? "";
+
+  const sent = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${friendId}`,
+    { method: "POST", body: { content: "  Just between us.  " } },
+  );
+  assert.equal(sent.status, 201, JSON.stringify(sent.data));
+  assert.equal(sent.data.message.content, "Just between us.");
+
+  // The conversation reads the same from either side.
+  for (const [client, other] of [
+    [owner, friendId],
+    [friend, session.user.id],
+  ] as const) {
+    const thread = await client.request(
+      `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${other}`,
+    );
+    assert.equal(thread.status, 200);
+    assert.deepEqual(
+      thread.data.messages.map((message: { content: string }) => message.content),
+      ["Just between us."],
+    );
+  }
+
+  // The bystander is in the same organization and can reach the route, but
+  // asking for either participant returns their own (empty) conversation
+  // rather than anyone else's.
+  for (const other of [friendId, session.user.id]) {
+    const peek = await bystander.request(
+      `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${other}`,
+    );
+    assert.equal(peek.status, 200);
+    assert.deepEqual(peek.data.messages, []);
+  }
+
+  // Unread is counted for the recipient only, and clears when they read it.
+  const inbox = await friend.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages`,
+  );
+  assert.equal(inbox.status, 200);
+  assert.equal(inbox.data.conversations[0].unread, 1);
+  assert.equal(
+    (await owner.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages`))
+      .data.conversations[0].unread,
+    0,
+  );
+  // The roster names everyone else, and never the person asking.
+  assert.deepEqual(
+    (inbox.data.people as { id: string }[]).map((person) => person.id).sort(),
+    [session.user.id, bystanderId].sort(),
+  );
+
+  const read = await friend.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${session.user.id}/read`,
+    { method: "POST" },
+  );
+  assert.equal(read.data.marked, 1);
+  assert.equal(
+    (await friend.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages`))
+      .data.conversations[0].unread,
+    0,
+  );
+
+  // Writing to yourself, to a stranger, or saying nothing are all refused.
+  assert.equal(
+    (
+      await owner.request(
+        `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${session.user.id}`,
+        { method: "POST", body: { content: "hello me" } },
+      )
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await owner.request(
+        `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/user_nobody`,
+        { method: "POST", body: { content: "hello?" } },
+      )
+    ).status,
+    404,
+  );
+  assert.equal(
+    (
+      await owner.request(
+        `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${friendId}`,
+        { method: "POST", body: { content: "   " } },
+      )
+    ).status,
+    400,
+  );
+});
+
 test("asking an agent to audit dispatches work instead of discussing it", async (t) => {
   // `audit` was not among the task verbs, so "can you audit the codebase" was
   // classified as a question and answered by a model with no repository in

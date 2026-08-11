@@ -442,6 +442,56 @@ export class AuditWebSocketHub {
     }
   }
 
+  /**
+   * Pushes something to named people only, rather than to a whole project.
+   *
+   * A direct message has an audience of two, and `broadcastTransient` has an
+   * audience of everyone subscribed to the project. Delivering one through the
+   * other would hand a private conversation to every open browser and rely on
+   * the client to decline to render it, which is not a privacy boundary — so
+   * the filter is here, on the way out, where the recipient list is known.
+   *
+   * Still transient, and for the same reason as typing: the audit stream is
+   * hash-chained and replayed on reconnect, and private mail does not belong
+   * in a log the whole project can read. A browser that was offline gets the
+   * conversation by asking for it, not by replay.
+   */
+  public sendToUsers(
+    projectId: string,
+    userIds: readonly string[],
+    value: unknown,
+  ): void {
+    const audience = new Set(userIds);
+    for (const client of this.clients) {
+      if (
+        client.project.id !== projectId ||
+        !audience.has(client.principal.user.id)
+      ) {
+        continue;
+      }
+      this.send(client, value);
+    }
+  }
+
+  /**
+   * Who currently has this project open, as distinct people.
+   *
+   * This is the whole of presence. One person can hold several sockets — two
+   * tabs, a phone — so the set is deduplicated, and a person is "here" exactly
+   * while at least one of them is connected. Nothing is stored: a presence
+   * table would have to be reconciled against sockets that die without saying
+   * goodbye, and the sockets are already the truth.
+   */
+  public connectedUserIds(projectId: string): string[] {
+    const present = new Set<string>();
+    for (const client of this.clients) {
+      if (client.project.id === projectId && !client.closed) {
+        present.add(client.principal.user.id);
+      }
+    }
+    return [...present];
+  }
+
   private send(client: WebSocketClient, value: unknown): void {
     if (
       client.closed ||

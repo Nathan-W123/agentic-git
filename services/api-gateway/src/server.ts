@@ -4422,6 +4422,151 @@ export class ApiGateway {
         "u",
       ),
     );
+    // Private mail, and so scoped to the project rather than a repository:
+    // people write to each other, not to a checkout.
+    const directInboxMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/direct-messages$`, "u"),
+    );
+    const directThreadMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/direct-messages/([^/]+)$`,
+        "u",
+      ),
+    );
+    const directReadMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/direct-messages/([^/]+)/read$`,
+        "u",
+      ),
+    );
+
+    if (directInboxMatch !== undefined) {
+      const [projectId = ""] = directInboxMatch;
+      if (method !== "GET") {
+        throw new HttpError(405, "method_not_allowed", "Unsupported method");
+      }
+      const project = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "view",
+      );
+      // The inbox and the roster in one call, because the screen that shows
+      // one always shows the other: a list of conversations is useless without
+      // the people you have not written to yet.
+      const [conversations, memberships, users] = await Promise.all([
+        this.options.store.listDirectConversations(projectId, principal.user.id),
+        this.options.store.listMemberships(project.project.organizationId),
+        this.options.store.listUsers(),
+      ]);
+      const byId = new Map(users.map((user) => [user.id, user]));
+      const present = new Set(this.webSockets.connectedUserIds(projectId));
+      this.sendJson(response, 200, {
+        conversations,
+        // Everyone who could be written to, with whether they are here now.
+        // Presence is read off the open sockets rather than a stored flag:
+        // see `connectedUserIds`.
+        people: memberships
+          .filter((membership) => membership.userId !== principal.user.id)
+          .map((membership) => {
+            const user = byId.get(membership.userId);
+            return {
+              id: membership.userId,
+              name: user?.displayName ?? "Someone",
+              role: membership.role,
+              online: present.has(membership.userId),
+            };
+          }),
+      });
+      return;
+    }
+
+    if (directReadMatch !== undefined) {
+      const [projectId = "", otherId = ""] = directReadMatch;
+      if (method !== "POST") {
+        throw new HttpError(405, "method_not_allowed", "Unsupported method");
+      }
+      await authorizeProject(this.options.store, principal, projectId, "view");
+      const marked = await this.options.store.markDirectMessagesRead(
+        projectId,
+        principal.user.id,
+        otherId,
+        new Date().toISOString(),
+      );
+      this.sendJson(response, 200, { marked });
+      return;
+    }
+
+    if (directThreadMatch !== undefined) {
+      const [projectId = "", otherId = ""] = directThreadMatch;
+      const project = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "view",
+      );
+      // Both ends have to be real people in this organization. Without this a
+      // signed-in person could open a conversation against any id at all —
+      // writing to somebody in another organization, or filling the table with
+      // messages addressed to nobody.
+      if (otherId === principal.user.id) {
+        throw new HttpError(
+          400,
+          "invalid_recipient",
+          "A direct message needs two people",
+        );
+      }
+      const membership = await this.options.store.getMembership(
+        project.project.organizationId,
+        otherId,
+      );
+      if (membership === undefined) {
+        throw new HttpError(404, "not_found", "That person was not found");
+      }
+      if (method === "GET") {
+        const limit = Math.min(
+          200,
+          Math.max(1, Number.parseInt(url.searchParams.get("limit") ?? "50", 10)),
+        );
+        const before = url.searchParams.get("before") ?? undefined;
+        const messages = await this.options.store.listDirectMessages(
+          projectId,
+          principal.user.id,
+          otherId,
+          { limit, ...(before === undefined ? {} : { before }) },
+        );
+        this.sendJson(response, 200, { messages });
+        return;
+      }
+      if (method !== "POST") {
+        throw new HttpError(405, "method_not_allowed", "Unsupported method");
+      }
+      const body = objectBody(await this.readJson(request));
+      // min:1 so an empty message is a 400 here rather than a throw from the
+      // store, which would surface as a 500.
+      const content =
+        stringField(body["content"], "content", { min: 1, max: 8000 }) ?? "";
+      const message = await this.options.store.appendDirectMessage({
+        projectId,
+        authorId: principal.user.id,
+        recipientId: otherId,
+        content,
+      });
+      // To the two of them and nobody else, and not through the audit stream:
+      // that log is replayed to every subscriber of the project, which is the
+      // one place a private message must never be written.
+      this.webSockets.sendToUsers(projectId, [principal.user.id, otherId], {
+        type: "direct-message",
+        projectId,
+        message,
+        authorName: principal.user.displayName,
+      });
+      this.sendJson(response, 201, { message });
+      return;
+    }
     if (channelTypingMatch !== undefined) {
       const [projectId = "", repositoryId = ""] = channelTypingMatch;
       if (method !== "POST") {
