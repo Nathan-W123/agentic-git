@@ -810,6 +810,69 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE submitted_tasks ADD COLUMN context TEXT`,
     ],
   },
+  {
+    // What a thread's work actually changed, kept with the thread.
+    //
+    // The link from a thread to its task lived only in the watcher's memory,
+    // so a restart lost it — and this deployment restarts on every deploy.
+    // Recording it makes the thread able to answer "what did this change?"
+    // for as long as the thread exists, rather than for as long as the
+    // process does.
+    //
+    // The summary is stored beside it rather than recomputed from the audit
+    // log on every read: the log is archived and pruned, and a thread that
+    // silently lost its file list once the archiver ran would be worse than
+    // one that never had it.
+    version: 26,
+    name: "channel-message-task-changes",
+    statements: [
+      `ALTER TABLE channel_messages ADD COLUMN task_id TEXT`,
+      `ALTER TABLE channel_messages ADD COLUMN changed_files_json TEXT`,
+    ],
+  },
+  {
+    // One person to one person, off the shared channel.
+    //
+    // Not a channel with two members. A channel belongs to a repository and is
+    // readable by everyone who can read that repository, which is the whole
+    // point of it and exactly wrong here — the authorization question for a
+    // direct message is "are you one of the two", and answering it from
+    // repository access would mean either widening who can read a private
+    // message or bolting an exception onto the surface that grants it.
+    //
+    // `pair_key` is the two ids sorted and joined, so a conversation has one
+    // identity no matter who is looking at it: without it, reading a thread
+    // means matching (author, recipient) OR (recipient, author) and no index
+    // covers both halves. The separator is a character no id contains.
+    //
+    // Project-scoped, like every other route here. A direct message is
+    // arguably a fact about two people rather than about a project, but all
+    // navigation and every authorization helper in the gateway is
+    // project-scoped, and inventing a second scope for one table would be a
+    // larger change than the feature.
+    //
+    // `read_at` is per message rather than a high-water mark per conversation,
+    // because the unread count is the thing the badge needs and a mark would
+    // make it a subtraction against a position that moves.
+    version: 27,
+    name: "direct-messages",
+    statements: [
+      `CREATE TABLE direct_messages (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        pair_key TEXT NOT NULL,
+        author_id TEXT NOT NULL REFERENCES users(id),
+        recipient_id TEXT NOT NULL REFERENCES users(id),
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        read_at TEXT
+      )`,
+      `CREATE INDEX direct_messages_thread
+        ON direct_messages (project_id, pair_key, created_at)`,
+      `CREATE INDEX direct_messages_unread
+        ON direct_messages (project_id, recipient_id, read_at)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

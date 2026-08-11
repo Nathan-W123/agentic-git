@@ -10,6 +10,7 @@ import type {
   ChangeSet,
   ConflictAssessment,
   CoordinatorDecision,
+  FilePatchStatus,
   IntegrationResult,
   PlanAdmission,
   ProjectId,
@@ -701,6 +702,17 @@ export interface ChannelMessage {
   replies: ChannelReply[];
   /** Keyed by emoji; `mine` is relative to whichever viewer asked. */
   reactions: Record<string, ChannelReaction>;
+  /** The task this thread narrates, when it narrates one. */
+  taskId: TaskId | undefined;
+  /**
+   * What that task has changed so far — added, modified or deleted — kept
+   * with the thread so it survives the audit log being archived, and so a
+   * reader can see it without the run still being in memory.
+   *
+   * Undefined until the task touches something. An empty array would claim a
+   * task changed nothing, which is a different statement.
+   */
+  changedFiles: ChannelChangedFile[] | undefined;
 }
 
 /**
@@ -754,6 +766,64 @@ export interface AppendChannelMessageInput {
   kind?: ChannelEntryKind;
   authorId: string;
   content: string;
+  /**
+   * The task this thread is the story of, when it is one.
+   *
+   * Recorded rather than remembered: the link lived only in the channel
+   * watcher's memory, so a restart lost it — and a thread has to be able to
+   * say what its work changed for as long as it exists, not for as long as
+   * the process that started it.
+   */
+  taskId?: TaskId;
+}
+
+/** One file a thread's task changed, for the summary hanging off the thread. */
+export interface ChannelChangedFile {
+  path: string;
+  status: FilePatchStatus;
+}
+
+const CHANGED_FILE_STATUSES: readonly FilePatchStatus[] = [
+  "added",
+  "modified",
+  "deleted",
+];
+
+/**
+ * Reads a stored changed-file summary back.
+ *
+ * Deliberately forgiving: this decorates a thread, and a row that cannot be
+ * parsed — written by a future version, truncated, hand-edited — must cost
+ * the reader a dropdown, never the conversation it hangs off.
+ */
+export function parseChangedFiles(
+  json: string | undefined,
+): ChannelChangedFile[] | undefined {
+  if (json === undefined || json.trim() === "") {
+    return undefined;
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    return undefined;
+  }
+  if (!Array.isArray(parsed)) {
+    return undefined;
+  }
+  const files = parsed.flatMap((entry): ChannelChangedFile[] => {
+    if (typeof entry !== "object" || entry === null) {
+      return [];
+    }
+    const { path, status } = entry as { path?: unknown; status?: unknown };
+    if (typeof path !== "string" || path.length === 0) {
+      return [];
+    }
+    return CHANGED_FILE_STATUSES.includes(status as FilePatchStatus)
+      ? [{ path, status: status as FilePatchStatus }]
+      : [];
+  });
+  return files.length === 0 ? undefined : files;
 }
 
 export interface AddChannelReplyInput {
@@ -768,6 +838,60 @@ export interface ChannelMessageFilter {
   /** Exclusive cursor: only messages created strictly before this ISO time. */
   before?: string;
   limit?: number;
+}
+
+/**
+ * One message from one person to one other person, private to the two of them.
+ *
+ * The counterpart to `ChannelMessage`, and deliberately not a variant of it: a
+ * channel message is readable by anyone with access to its repository, which
+ * is the property this type exists to not have. Nothing here is addressed to
+ * an agent — an agent is talked to through its own conversation, and a request
+ * for work goes to the channel where the rest of the team can see it.
+ */
+export interface DirectMessage {
+  id: string;
+  projectId: ProjectId;
+  authorId: string;
+  recipientId: string;
+  content: string;
+  createdAt: string;
+  /** When the recipient read it. Absent while it is still unread. */
+  readAt?: string;
+}
+
+export interface AppendDirectMessageInput {
+  projectId: ProjectId;
+  authorId: string;
+  recipientId: string;
+  content: string;
+}
+
+/** One correspondent and the state of that conversation, for the inbox. */
+export interface DirectConversation {
+  /** The other person, from the asking viewer's side. */
+  userId: string;
+  lastMessage: DirectMessage;
+  /** Messages the viewer has not read yet. */
+  unread: number;
+}
+
+export interface DirectMessageFilter {
+  /** Exclusive cursor: only messages created strictly before this ISO time. */
+  before?: string;
+  limit?: number;
+}
+
+/**
+ * The identity of a conversation, independent of who is asking.
+ *
+ * Sorted, so the pair reads the same from either side and a thread can be
+ * fetched with one indexed equality rather than an OR across two columns. The
+ * separator is a character no generated id contains; it is a plain one on
+ * purpose, so that a file holding these keys stays text.
+ */
+export function directPairKey(one: string, other: string): string {
+  return [one, other].sort().join("|");
 }
 
 /**
@@ -1158,6 +1282,22 @@ export interface CoordinationStore {
   appendChannelMessage(
     input: AppendChannelMessageInput,
   ): Promise<ChannelMessage>;
+  /**
+   * Replaces the changed-file summary on one thread.
+   *
+   * The whole set each time rather than an append, because the run reports
+   * the whole set: a file can go from added to modified, or stop being
+   * changed at all when an agent reverts itself, and merging deltas here
+   * would leave the thread claiming edits that no longer exist.
+   *
+   * A message that has since been deleted is not an error — the run
+   * outlives nothing, but the thread it was narrating can be gone.
+   */
+  setChannelMessageChangedFiles(
+    repositoryId: string,
+    messageId: string,
+    files: readonly ChannelChangedFile[],
+  ): Promise<void>;
   addChannelReply(input: AddChannelReplyInput): Promise<ChannelReply>;
   getChannelMessage(
     repositoryId: string,
@@ -1189,6 +1329,45 @@ export interface CoordinationStore {
   deleteChannelMessage(repositoryId: string, messageId: string): Promise<void>;
   /** Removes every message in one channel. Returns how many went. */
   deleteChannelMessages(repositoryId: string): Promise<number>;
+
+  appendDirectMessage(input: AppendDirectMessageInput): Promise<DirectMessage>;
+  /**
+   * One conversation, oldest first, between the viewer and one other person.
+   *
+   * Both directions: the viewer's own messages and the other's are one
+   * thread, so this is not filtered by author. `viewerId` is here to say which
+   * side is asking, not to narrow the result.
+   */
+  listDirectMessages(
+    projectId: ProjectId,
+    viewerId: string,
+    otherId: string,
+    filter?: DirectMessageFilter,
+  ): Promise<DirectMessage[]>;
+  /**
+   * Everyone the viewer has a conversation with, most recently active first.
+   *
+   * Only correspondents with at least one message: a roster of people who
+   * *could* be written to is a different question, answered from membership,
+   * and mixing the two would make an empty inbox look like a contact list.
+   */
+  listDirectConversations(
+    projectId: ProjectId,
+    viewerId: string,
+  ): Promise<DirectConversation[]>;
+  /**
+   * Marks what the viewer has now seen, returning how many rows changed.
+   *
+   * Only messages addressed *to* the viewer can be marked: reading your own
+   * message is not an event, and letting a sender mark their own would zero
+   * the recipient's badge from the wrong side.
+   */
+  markDirectMessagesRead(
+    projectId: ProjectId,
+    viewerId: string,
+    otherId: string,
+    at: string,
+  ): Promise<number>;
   listChannelAgentOverrides(
     repositoryId: string,
   ): Promise<Record<string, ChannelAgentOverride>>;

@@ -199,9 +199,21 @@ const backends: Backend[] = [
     name: "sqlite",
     open: async () => {
       const root = await mkdtemp(path.join(os.tmpdir(), "coord-store-"));
+      const store = SqliteCoordinationStore.open(
+        path.join(root, "coordination.db"),
+      );
       return {
-        store: SqliteCoordinationStore.open(path.join(root, "coordination.db")),
+        store,
         cleanup: async () => {
+          // Closed before the file is removed. Windows refuses to unlink a
+          // file that is still open, so leaving this to garbage collection
+          // made every SQLite contract test an EBUSY away from failing for a
+          // reason that has nothing to do with what it asserts.
+          //
+          // Tolerant of being closed already: several tests close the store
+          // themselves as part of what they are checking, and "already shut"
+          // is the state this wants rather than an error.
+          await store.close().catch(() => undefined);
           await rm(root, { recursive: true, force: true });
         },
       };
@@ -2586,6 +2598,186 @@ for (const backend of backends) {
       await assert.rejects(store.removeRepository("repo_with_run"));
     } finally {
       await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: direct messages are private to the two people in them`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const alice = await store.createUser({
+        email: "dm-alice@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+      const bob = await store.createUser({
+        email: "dm-bob@example.invalid",
+        displayName: "Bob",
+        passwordDigest: "unused",
+      });
+      const carol = await store.createUser({
+        email: "dm-carol@example.invalid",
+        displayName: "Carol",
+        passwordDigest: "unused",
+      });
+
+      const first = await store.appendDirectMessage({
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        recipientId: bob.id,
+        content: "  Can you look at the deploy?  ",
+      });
+      assert.equal(first.content, "Can you look at the deploy?");
+      assert.equal(first.readAt, undefined);
+      await assert.rejects(
+        store.appendDirectMessage({
+          projectId: DEFAULT_PROJECT_ID,
+          authorId: alice.id,
+          recipientId: bob.id,
+          content: "   ",
+        }),
+        /must have content/u,
+      );
+      // Writing to yourself is not a conversation, and allowing it would put a
+      // row in the table whose pair key names one person twice.
+      await assert.rejects(
+        store.appendDirectMessage({
+          projectId: DEFAULT_PROJECT_ID,
+          authorId: alice.id,
+          recipientId: alice.id,
+          content: "Note to self",
+        }),
+        /two people/u,
+      );
+
+      // Timestamps are milliseconds, so messages sent inside one tick order
+      // only by the id tiebreak, which is random. Every assertion below that
+      // depends on order gets a real millisecond between the sends.
+      const tick = async (): Promise<void> => {
+        await new Promise((resolve) => setTimeout(resolve, 2));
+      };
+      await tick();
+      await store.appendDirectMessage({
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: bob.id,
+        recipientId: alice.id,
+        content: "Looking now.",
+      });
+      await tick();
+      await store.appendDirectMessage({
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: carol.id,
+        recipientId: alice.id,
+        content: "Unrelated.",
+      });
+
+      // One thread from either side, both directions, oldest first.
+      const asAlice = await store.listDirectMessages(
+        DEFAULT_PROJECT_ID,
+        alice.id,
+        bob.id,
+      );
+      assert.deepEqual(
+        asAlice.map((message) => message.content),
+        ["Can you look at the deploy?", "Looking now."],
+      );
+      const asBob = await store.listDirectMessages(
+        DEFAULT_PROJECT_ID,
+        bob.id,
+        alice.id,
+      );
+      assert.deepEqual(
+        asBob.map((message) => message.id),
+        asAlice.map((message) => message.id),
+      );
+      // Carol's message to Alice is a different conversation, and does not
+      // leak into the one Bob can read.
+      assert.equal(
+        asBob.some((message) => message.content === "Unrelated."),
+        false,
+      );
+
+      // The inbox: both correspondents, most recent first, with Alice's two
+      // unread — Bob's reply and Carol's message — counted against her.
+      const inbox = await store.listDirectConversations(
+        DEFAULT_PROJECT_ID,
+        alice.id,
+      );
+      assert.deepEqual(
+        inbox.map((conversation) => conversation.userId),
+        [carol.id, bob.id],
+      );
+      assert.deepEqual(
+        inbox.map((conversation) => conversation.unread),
+        [1, 1],
+      );
+      // Alice's own message to Bob is not unread for Alice.
+      const bobsInbox = await store.listDirectConversations(
+        DEFAULT_PROJECT_ID,
+        bob.id,
+      );
+      assert.deepEqual(
+        bobsInbox.map((conversation) => conversation.unread),
+        [1],
+      );
+
+      // Reading marks only what was addressed to the reader: Alice reading
+      // Bob's thread must not mark her own message as read on his behalf.
+      const at = new Date().toISOString();
+      assert.equal(
+        await store.markDirectMessagesRead(
+          DEFAULT_PROJECT_ID,
+          alice.id,
+          bob.id,
+          at,
+        ),
+        1,
+      );
+      assert.equal(
+        (await store.listDirectConversations(DEFAULT_PROJECT_ID, alice.id)).find(
+          (conversation) => conversation.userId === bob.id,
+        )?.unread,
+        0,
+      );
+      assert.deepEqual(
+        (await store.listDirectConversations(DEFAULT_PROJECT_ID, bob.id)).map(
+          (conversation) => conversation.unread,
+        ),
+        [1],
+      );
+      // Idempotent: a second read has nothing left to mark.
+      assert.equal(
+        await store.markDirectMessagesRead(
+          DEFAULT_PROJECT_ID,
+          alice.id,
+          bob.id,
+          at,
+        ),
+        0,
+      );
+
+      // Paging takes the newest, and hands them back in reading order.
+      const latest = await store.listDirectMessages(
+        DEFAULT_PROJECT_ID,
+        alice.id,
+        bob.id,
+        { limit: 1 },
+      );
+      assert.deepEqual(
+        latest.map((message) => message.content),
+        ["Looking now."],
+      );
+      const before = await store.listDirectMessages(
+        DEFAULT_PROJECT_ID,
+        alice.id,
+        bob.id,
+        { before: latest[0]!.createdAt },
+      );
+      assert.deepEqual(
+        before.map((message) => message.content),
+        ["Can you look at the deploy?"],
+      );
+    } finally {
       await cleanup();
     }
   });
