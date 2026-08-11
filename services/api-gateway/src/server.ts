@@ -7531,6 +7531,21 @@ export class ApiGateway {
     if (question.length === 0) {
       return;
     }
+    // `/retry` and `/cancel` are the thread's own commands: they act on the
+    // task it follows, which is why they are refused out in the channel. Read
+    // before anything else, because they are instructions rather than
+    // questions and the reader below is looking for questions.
+    const command = parseSlashCommand(question);
+    if (command?.command.name === "retry" || command?.command.name === "cancel") {
+      await this.runThreadCommand({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        messageId: input.messageId,
+        viewerId: input.viewerId,
+        name: command.command.name,
+      });
+      return;
+    }
     const root = await this.options.store.getChannelMessage(
       input.repositoryId,
       input.messageId,
@@ -8230,6 +8245,84 @@ export class ApiGateway {
       authorId: `${investigator.userId}:${investigator.provider}`,
       content: formatFailureVerdict(verdict),
     }).catch(() => undefined);
+  }
+
+  /**
+   * `/retry` and `/cancel`, acting on the task this thread follows.
+   *
+   * Both answer in the thread whatever happens, including when there is
+   * nothing to act on. A command that silently does nothing is the failure
+   * this channel keeps having: the person typed something deliberate and is
+   * owed a reply about it.
+   */
+  private async runThreadCommand(input: {
+    projectId: string;
+    repositoryId: string;
+    messageId: string;
+    viewerId: string;
+    name: "retry" | "cancel";
+  }): Promise<void> {
+    const root = await this.options.store.getChannelMessage(
+      input.repositoryId,
+      input.messageId,
+      input.viewerId,
+    );
+    const [ownerId = "", provider = ""] = (root?.authorId ?? "").split(":");
+    const authorId = ownerId === "" ? undefined : `${ownerId}:${provider}`;
+    const say = async (content: string): Promise<void> => {
+      if (authorId === undefined) {
+        return;
+      }
+      await this.appendChannelThreadReply({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        messageId: input.messageId,
+        authorId,
+        content,
+      }).catch(() => undefined);
+    };
+    if (root?.taskId === undefined) {
+      await say("This thread isn't following a task, so there's nothing to " +
+        `${input.name}.`);
+      return;
+    }
+    const task = (
+      await this.options.store.listSubmittedTasks({
+        repositoryId: input.repositoryId,
+      })
+    ).find((entry) => entry.id === root.taskId);
+    if (task === undefined) {
+      await say("I can't find that task any more.");
+      return;
+    }
+    try {
+      if (input.name === "cancel") {
+        await this.options.store.cancelSubmittedTask(task.id);
+        await say("Cancelled.");
+        // Stop narrating a run nobody is waiting for.
+        this.watchedChannelTasks.delete(task.id);
+        return;
+      }
+      await this.options.store.retrySubmittedTask(task.id);
+    } catch (error) {
+      // The store refuses a transition that makes no sense — retrying work
+      // that already landed, cancelling what has finished. Its reason is
+      // better than anything invented here.
+      await say(
+        `I couldn't ${input.name} that: ${
+          error instanceof Error ? error.message : "the task refused"
+        }`,
+      );
+      return;
+    }
+    await say("Queued again — I'll report back here.");
+    void Promise.resolve(
+      this.options.operations.runRepository?.({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        actorId: task.submittedBy ?? ownerId,
+      }),
+    ).catch(() => undefined);
   }
 
   /**

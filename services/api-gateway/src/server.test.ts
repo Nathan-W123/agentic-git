@@ -4074,6 +4074,99 @@ test("a thread carries what its task changed, and keeps it", async (t) => {
   }, "the final changeset never replaced the live summary");
 });
 
+test("a command and a mention work together, and /plan holds the run", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "slash-commands");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // The command says how to treat the request; the "@" says who for. The
+  // objective must survive both being taken off.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/plan @Claude (Owner) rework the retry loop" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.match(runtime.submittedTasks[0]?.objective ?? "", /rework the retry loop/u);
+  assert.doesNotMatch(runtime.submittedTasks[0]?.objective ?? "", /\/plan/u);
+
+  // Filed, and deliberately not started: the queue does the waiting, so a
+  // held plan costs no lease, no workspace and no clock.
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.equal(task?.status, "submitted");
+  const root = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.kind === "agent");
+  assert.match(
+    (root?.replies ?? []).map((reply) => reply.content).join("\n"),
+    /nothing is running yet/u,
+  );
+
+  // And "go ahead" is what starts it.
+  const go = await owner.request(
+    `${base}/messages/${encodeURIComponent(root?.id ?? "")}/replies`,
+    { method: "POST", body: { content: "go ahead" } },
+  );
+  assert.equal(go.status, 201);
+  await waitFor(async () => {
+    const thread = (
+      await runtime.store.listChannelMessages(repositoryId, ownerId)
+    ).find((message) => message.kind === "agent");
+    return (thread?.replies ?? []).some((reply) =>
+      /Starting now/u.test(reply.content),
+    );
+  }, "the approved plan never started");
+});
+
+test("a slash inside a sentence is left alone, and /help answers", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "slash-prose");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const help = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/help" },
+  });
+  assert.equal(help.status, 201);
+  const listed = await owner.request(`${base}/messages`);
+  assert.match(
+    (listed.data.messages as any[]).map((m) => m.content).join("\n"),
+    /\/plan/u,
+  );
+  // The picker reads the same table the channel parses by, so they cannot
+  // offer and accept different things.
+  assert.ok(
+    (listed.data.slashCommands as any[]).some((entry) => entry.name === "plan"),
+    JSON.stringify(listed.data.slashCommands),
+  );
+  // /help answers the channel; it does not become work for an agent.
+  assert.equal(runtime.submittedTasks.length, 0);
+
+  // A path is a sentence, not syntax.
+  const prose = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please fix /usr/bin/env handling" },
+  });
+  assert.equal(prose.status, 201);
+  assert.equal(runtime.submittedTasks.length, 1);
+  assert.match(runtime.submittedTasks[0]?.objective ?? "", /usr\/bin\/env/u);
+});
+
 test("an investigator says why a task failed, and retries when told to", async (t) => {
   // A failure ended with one line and nobody read it. The reason was in the
   // audit trail, which nobody goes and reads either.
