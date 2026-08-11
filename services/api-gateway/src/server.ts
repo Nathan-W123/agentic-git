@@ -303,7 +303,24 @@ const CHANNEL_PROGRESS_MAX_MS = 60 * 60 * 1000;
  * substantive follows. Without this every task threaded, because every task
  * says it started.
  */
-const CHANNEL_CEREMONIAL_EVENTS = new Set(["task_started"]);
+/**
+ * Narration that is true of the run rather than about its outcome, and so is
+ * never on its own a reason to open a thread.
+ *
+ * `agent_progress` is here because thinking is not an answer. It was the
+ * reason every task got a thread: the first thought the agent had was
+ * "substantive", so a thread opened around it, and a request to add one line
+ * to a README arrived as a thread with a title, an opening, and a running
+ * commentary nobody asked to read. A simple task should look like the agent
+ * typing and then saying it is done.
+ *
+ * Nothing is lost when it is held. The moment a run says something that is
+ * genuinely about this task — it needs a review, it hit a conflict, it has a
+ * report — the thread opens and everything held is written into it first, in
+ * order, so the reasoning is there for the one run in ten that needs
+ * explaining.
+ */
+const CHANNEL_CEREMONIAL_EVENTS = new Set(["task_started", "agent_progress"]);
 
 const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
   canonical_promoted: "Done — the change is in canonical.",
