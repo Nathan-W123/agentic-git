@@ -418,6 +418,34 @@ const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
 };
 
 /**
+ * The closing line a finished task deserves, by the status it finished in.
+ *
+ * Keyed on the task's own status rather than on an audit event, because this
+ * is for threads whose run ended while nothing was listening — the event has
+ * been and gone, and the status is what survives it.
+ */
+const TERMINAL_STATUS_LINE: Record<string, string> = {
+  integrated: CHANNEL_TERMINAL_EVENTS["canonical_promoted"] ?? "Done.",
+  failed: CHANNEL_TERMINAL_EVENTS["task_failed"] ?? "I could not finish this.",
+  cancelled:
+    CHANNEL_TERMINAL_EVENTS["task_cancelled"] ?? "This was cancelled.",
+};
+
+/**
+ * Whether a thread has already been given an ending.
+ *
+ * Matches the fixed closing sentences above. An agent's own summary will not
+ * match, which is why the sweep also requires the last reply to still be a
+ * progress line before it writes anything.
+ */
+/* Slow on purpose: this only catches threads a restart orphaned, which is a
+   once-per-deploy event, and every pass reads the recent messages of every
+   repository. */
+const THREAD_RECONCILE_INTERVAL_MS = 60_000;
+
+const THREAD_ENDED_RE = /^(?:Done\b|I could not finish|This was cancelled)/u;
+
+/**
  * Turns a run's failure into something the reader can act on.
  *
  * "I could not finish this" is true and useless. The reason is already in the
@@ -1666,6 +1694,7 @@ export class ApiGateway {
   private readonly watchedChannelTasks = new Map<string, WatchedChannelTask>();
   private channelProgressTimer: NodeJS.Timeout | undefined;
   private auditorTimer: NodeJS.Timeout | undefined;
+  private threadReconcileTimer: NodeJS.Timeout | undefined;
   /**
    * The audit-log position the auditor has consumed, in memory.
    *
@@ -1816,6 +1845,26 @@ export class ApiGateway {
     this.webSockets.startPolling();
     this.collaboration.start();
     this.startAuditorWatch();
+    this.startThreadReconcile();
+  }
+
+  /**
+   * Closes threads whose watcher did not survive the last restart.
+   *
+   * Its own timer rather than the auditor's: that one only runs where a
+   * canonical diff is available, and a thread left mid-sentence is worth
+   * finishing on every deployment. Once immediately, because the restart that
+   * orphaned those threads is the one that just happened.
+   */
+  private startThreadReconcile(): void {
+    if (this.threadReconcileTimer !== undefined) {
+      return;
+    }
+    void this.reconcileFinishedThreads().catch(() => undefined);
+    this.threadReconcileTimer = setInterval(() => {
+      void this.reconcileFinishedThreads().catch(() => undefined);
+    }, THREAD_RECONCILE_INTERVAL_MS);
+    this.threadReconcileTimer.unref?.();
   }
 
   private async routeUpgrade(
@@ -1852,6 +1901,10 @@ export class ApiGateway {
     if (this.auditorTimer !== undefined) {
       clearInterval(this.auditorTimer);
       this.auditorTimer = undefined;
+    }
+    if (this.threadReconcileTimer !== undefined) {
+      clearInterval(this.threadReconcileTimer);
+      this.threadReconcileTimer = undefined;
     }
     this.watchedChannelTasks.clear();
     this.webSockets.close();
@@ -8179,6 +8232,65 @@ export class ApiGateway {
   }
 
   /** Brings every watched thread up to date, then drops finished ones. */
+  /**
+   * Gives an ending to threads whose watcher died before the work did.
+   *
+   * `watchedChannelTasks` is a Map in this process. It is what posts the
+   * closing line, and it is cleared on start — so a run in flight across a
+   * restart, which this deployment performs on every deploy, finished with
+   * nobody left to say so. The thread's last word stayed a progress line, the
+   * typing indicator had nothing to retire it, and the agent appeared to think
+   * about it forever. Three separate complaints, one cause.
+   *
+   * A sweep rather than a rehydrated watcher, deliberately. Resuming a watch
+   * means resuming its audit cursor, and the cursor is only in memory too — so
+   * a rebuilt watcher would either re-narrate the whole run or need a column
+   * to remember where it got to. Only the ending is missing, and the ending
+   * can be derived from the task's own status, so that is all this writes.
+   *
+   * Idempotent by two tests, because it runs on every poll: a thread that
+   * already carries a closing line is left alone, and so is one whose last
+   * word came from the agent rather than the narration — `canonical_promoted`
+   * prefers the agent's own summary, which will not match the fixed sentences.
+   */
+  private async reconcileFinishedThreads(): Promise<void> {
+    const repositories = await this.options.store.listRepositories();
+    for (const repository of repositories) {
+      const [messages, tasks] = await Promise.all([
+        this.options.store.listChannelMessages(repository.id, "", { limit: 40 }),
+        this.options.store.listSubmittedTasks({ repositoryId: repository.id }),
+      ]);
+      const byId = new Map(tasks.map((task) => [task.id, task]));
+      for (const message of messages) {
+        const taskId = message.taskId;
+        if (taskId === undefined || this.watchedChannelTasks.has(taskId)) {
+          // A live watcher still owns this one and will close it itself.
+          continue;
+        }
+        const ending = TERMINAL_STATUS_LINE[byId.get(taskId)?.status ?? ""];
+        if (ending === undefined) {
+          continue;
+        }
+        const replies = message.replies ?? [];
+        const last = replies[replies.length - 1];
+        if (
+          last === undefined ||
+          last.kind !== "progress" ||
+          replies.some((reply) => THREAD_ENDED_RE.test(reply.content.trim()))
+        ) {
+          continue;
+        }
+        await this.appendChannelThreadReply({
+          projectId: message.projectId,
+          repositoryId: repository.id,
+          messageId: message.id,
+          authorId: message.authorId,
+          content: ending,
+        }).catch(() => undefined);
+      }
+    }
+  }
+
   private async pumpChannelProgress(): Promise<void> {
     if (this.watchedChannelTasks.size === 0) {
       if (this.channelProgressTimer !== undefined) {
