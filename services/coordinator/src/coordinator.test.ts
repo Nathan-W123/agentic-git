@@ -14,6 +14,7 @@ import {
 } from "@coord/agent-protocol";
 import {
   createId,
+  ROLE_CONTEXT_PREFIX,
   type AgentPlan,
   type ChangeSet,
   type ReplanRequest,
@@ -58,9 +59,12 @@ class TestAgent implements AgentAdapter {
     private readonly plan: AgentPlan,
     private readonly repository: CanonicalRepository,
     private readonly workspaces: WorkspaceManager,
+    /** Empty writes nothing, which is what a task asked only to look does. */
     private readonly outputPath: string,
     private readonly planningFailure: boolean | Error = false,
     private readonly scopePath?: string,
+    /** What the agent says it found, when the finding is the deliverable. */
+    private readonly reportText?: string,
   ) {}
 
   public async getCapabilities(): Promise<AgentCapabilities> {
@@ -133,11 +137,13 @@ class TestAgent implements AgentAdapter {
         );
       }
     }
-    await writeFile(
-      path.join(context.workspacePath, this.outputPath),
-      `${this.plan.taskId}\n`,
-      "utf8",
-    );
+    if (this.outputPath !== "") {
+      await writeFile(
+        path.join(context.workspacePath, this.outputPath),
+        `${this.plan.taskId}\n`,
+        "utf8",
+      );
+    }
   }
 
   public async pause(): Promise<void> {
@@ -185,7 +191,7 @@ class TestAgent implements AgentAdapter {
     return await this.workspaces.collectChangeSet(workspace, {
       symbolsChanged: [],
       riskAssessment: { level: this.plan.riskLevel, reasons: [] },
-      agentExplanation: "Coordinator lifecycle test",
+      agentExplanation: this.reportText ?? "Coordinator lifecycle test",
     });
   }
 
@@ -675,6 +681,155 @@ test("a task with no context is seeded with the handoffs alone", async () => {
     // Nothing on either side: the adapter must be given no field at all
     // rather than a heading with nothing under it.
     assert.equal(agent.startInputs[0]?.priorContext, undefined);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a task asked to look finishes by reporting, not by failing", async () => {
+  // The failure this removes, in full: an audit asked for in a channel ran,
+  // wrote its findings into the changeset, reached integration with no
+  // patches, and was recorded as failed with "The agent produced no
+  // repository changes" in place of what it found. Only the remote-worker
+  // path could tell a report from a silently-refused edit; every task the
+  // control plane runs in process comes through the coordinator.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
+    const findings = "Three things worth fixing: the retry bound is inclusive.";
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", []),
+      fixture.repository,
+      fixture.workspaces,
+      // Writes nothing, which is what an audit does.
+      "",
+      false,
+      undefined,
+      findings,
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        {
+          task: { ...task("task_a"), objective: "audit the codebase" },
+          adapter: agent,
+        },
+      ],
+    });
+
+    assert.equal(result.tasks[0]?.status, "integrated");
+    // The agent's own words are the deliverable — there is no diff to read
+    // instead, and the generic line says nothing a reader can use.
+    assert.equal(result.tasks[0]?.explanation, findings);
+    const types = result.audit.map((event) => event.type);
+    assert.ok(types.includes("task_reported"), JSON.stringify(types));
+    assert.ok(!types.includes("task_failed"), JSON.stringify(types));
+    // Nothing was validated because nothing was changed; saying validation
+    // "came back empty" in front of a finished report is the same false alarm
+    // one line earlier.
+    assert.ok(!types.includes("validation_completed"), JSON.stringify(types));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a task asked to change still fails when it changes nothing", async () => {
+  // The alarm this must not blunt: an empty changeset from a task that was
+  // meant to write is exactly what a sandbox silently refusing every edit
+  // produces, and it has to stay a failure.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", []),
+      fixture.repository,
+      fixture.workspaces,
+      "",
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        {
+          task: { ...task("task_a"), objective: "fix the retry loop" },
+          adapter: agent,
+        },
+      ],
+    });
+
+    assert.equal(result.tasks[0]?.status, "failed");
+    assert.match(
+      result.tasks[0]?.explanation ?? "",
+      /produced no repository changes/u,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a role preamble does not turn an audit into a failure", async () => {
+  // The second half of the same bug. A channel dispatch submits
+  // `withRoleContext(role, message)`, so the objective the coordinator reads
+  // begins with the agent's declared role — and a role naming an editing verb
+  // vetoed the report check before it ever looked at the request.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", []),
+      fixture.repository,
+      fixture.workspaces,
+      "",
+      false,
+      undefined,
+      "Nothing structural is wrong; two naming nits.",
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        {
+          task: {
+            ...task("task_a"),
+            objective:
+              `${ROLE_CONTEXT_PREFIX} Codebase auditor and fixer.\n\n` +
+              "audit the codebase",
+          },
+          adapter: agent,
+        },
+      ],
+    });
+
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(
+      result.tasks[0]?.explanation,
+      "Nothing structural is wrong; two naming nits.",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

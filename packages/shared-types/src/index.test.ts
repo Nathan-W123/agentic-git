@@ -14,8 +14,11 @@ import {
   planAdmissionPartial,
   planGroundingConfidence,
   projectBudgets,
+  readsAsReportRequest,
   reducePlanScope,
+  ROLE_CONTEXT_PREFIX,
   uniqueRepositoryPaths,
+  withoutRoleContext,
   type AgentPlan,
   type PlanAdmission,
 } from "./index.js";
@@ -447,4 +450,67 @@ test("a plan with no grounding record is returned exactly as it came", () => {
   assert.equal(view.plan, bare);
   assert.deepEqual(view.substitutions, []);
   assert.deepEqual(view.inventedFiles, []);
+});
+
+test("a role preamble does not decide whether a request was a report", () => {
+  // A channel dispatch prepends the agent's declared role to every objective
+  // it submits. That sentence is the operator describing the agent, not
+  // anybody asking for work — but the editing-verb veto read it anyway, so an
+  // agent whose role happened to say "fixer" or "implementation" failed the
+  // check on every task it was ever given, and every audit it ran came back
+  // recorded as a failure.
+  const roles = [
+    "Codebase auditor and fixer",
+    "Implementation engineer",
+    "Reviewer who writes patches",
+  ];
+  for (const role of roles) {
+    assert.equal(
+      readsAsReportRequest(
+        `${ROLE_CONTEXT_PREFIX} ${role}.\n\naudit the codebase`,
+      ),
+      true,
+      role,
+    );
+  }
+
+  // The veto still has to work on the request itself, which is the alarm
+  // that catches a sandbox silently refusing every edit.
+  assert.equal(
+    readsAsReportRequest(
+      `${ROLE_CONTEXT_PREFIX} Codebase auditor.\n\nfix the retry loop`,
+    ),
+    false,
+  );
+
+  // Every paragraph of the request is read, not just the first. Keeping only
+  // the paragraph after the preamble would let "and fix what you find" hide
+  // behind an opening "audit", and an empty changeset from a task that was
+  // meant to write would pass for a report.
+  assert.equal(
+    readsAsReportRequest(
+      `${ROLE_CONTEXT_PREFIX} Auditor.\n\naudit the codebase\n\n` +
+        "and fix anything you find",
+    ),
+    false,
+  );
+  assert.equal(
+    withoutRoleContext(
+      `${ROLE_CONTEXT_PREFIX} Auditor.\n\nfirst para\n\nsecond para`,
+    ),
+    "first para\n\nsecond para",
+  );
+
+  // An objective with no preamble is untouched, and a preamble with no
+  // request behind it is left alone rather than reduced to nothing.
+  assert.equal(readsAsReportRequest("audit the codebase"), true);
+  assert.equal(withoutRoleContext("audit the codebase"), "audit the codebase");
+  assert.equal(
+    withoutRoleContext(`${ROLE_CONTEXT_PREFIX} Auditor.`),
+    `${ROLE_CONTEXT_PREFIX} Auditor.`,
+  );
+  assert.equal(
+    withoutRoleContext(`${ROLE_CONTEXT_PREFIX} Auditor.\n\naudit the codebase`),
+    "audit the codebase",
+  );
 });
