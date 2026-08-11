@@ -2462,7 +2462,7 @@ test("anybody can create an account, and it comes with somewhere to work", async
 test("the repository channel round-trips messages, replies, reactions, reads, and agent overrides", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
-  await bootstrap(owner);
+  const bootstrapped = await bootstrap(owner);
   const repositoryId = await invitableRepository(owner, "channel-repo");
   const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
 
@@ -2524,7 +2524,16 @@ test("the repository channel round-trips messages, replies, reactions, reads, an
   const after = await owner.request(`${base}/messages`);
   assert.equal(after.data.messages.length, 1);
   assert.equal(after.data.messages[0].replies.length, 1);
-  assert.equal(after.data.agentOverrides["agent_1"].name, "Scout");
+  // Stored against the agent, not the vendor. A bare id reaching the write
+  // can only be the caller's own agent, so it is resolved against them —
+  // otherwise the row names every agent on that provider and one person's
+  // rename lands on their colleague's agent too.
+  assert.equal(
+    after.data.agentOverrides[`${bootstrapped.user.id}:agent_1`].name,
+    "Scout",
+    JSON.stringify(after.data.agentOverrides),
+  );
+  assert.equal(after.data.agentOverrides["agent_1"], undefined);
   assert.equal(after.data.readAt, read.data.readAt);
 
   // Replying to, or reacting on, a message that does not exist is a 404, not
@@ -3982,6 +3991,99 @@ test("a channel's role override reaches the roster and the objective a dispatche
   const [, second] = runtime.submittedTasks;
   assert.ok(second !== undefined);
   assert.equal(second.objective, "one more thing please");
+});
+
+test("renaming your own agent does not rename everybody else's on that vendor", async (t) => {
+  // A bare provider id names a *vendor*, not an agent, and the reader applied
+  // it to every agent on that vendor. One person renaming their own Claude
+  // renamed their colleague's too — and their role label travelled with it,
+  // which for the auditor role is a permanent spend commitment.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "rename-isolation");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const colleague = await addColleague(runtime, "rename-colleague@example.com");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  runtime.chatConnections.set(colleague.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Renamed the way the owner's own agent card does it: a bare provider id.
+  const renamed = await owner.request(`${base}/agents/anthropic`, {
+    method: "POST",
+    body: { name: "Eos" },
+  });
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+
+  const roster = await owner.request(`${base}/agents`);
+  assert.equal(roster.status, 200);
+  const byUser = new Map(
+    (roster.data.agents as any[]).map((entry) => [entry.userId, entry]),
+  );
+  assert.equal(byUser.get(ownerId)?.name, "Eos");
+  // The colleague's agent keeps its own name.
+  assert.notEqual(byUser.get(colleague.id)?.name, "Eos");
+});
+
+test("a renamed agent answers to its new name, and the roster says that name", async (t) => {
+  // The bug in full: the server resolved overrides one way and the browser
+  // another, so a rename showed on screen while the server still matched the
+  // older per-agent name. Mentioning what you could see did nothing.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "rename-answers");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // An older per-agent override, the shape a teammate's rename writes.
+  assert.equal(
+    (await owner.request(`${base}/agents/${ownerId}:anthropic`, {
+      method: "POST",
+      body: { name: "Icarus" },
+    })).status,
+    200,
+  );
+  // Then the owner renames from their own agent card, which sends a bare id.
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Daedalus" },
+    })).status,
+    200,
+  );
+
+  // The roster reports the name the server will actually match, so the screen
+  // and the matcher cannot disagree.
+  const roster = await owner.request(`${base}/agents`);
+  assert.equal(
+    (roster.data.agents as any[])[0]?.name,
+    "Daedalus",
+    JSON.stringify(roster.data.agents),
+  );
+
+  // And mentioning that name dispatches.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Daedalus please fix the retry loop" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
 });
 
 /*

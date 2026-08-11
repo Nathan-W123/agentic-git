@@ -665,6 +665,10 @@ const WORKING_STATUS = new Set([
 
 /** Backstop only — the task's own status is what really retires an entry. */
 const BUSY_TTL_MS = 10 * 60_000;
+/** Matches `PENDING_BUSY_PREFIX` on the server; see `noteAgentBusy`. */
+const PENDING_BUSY_PREFIX = "pending:";
+/** How long a placeholder holds the dots up on its own. */
+const PENDING_BUSY_TTL_MS = 30_000;
 
 /**
  * Records that an agent picked up work in a channel.
@@ -678,11 +682,28 @@ export function noteAgentBusy(frame) {
   if (!frame?.repositoryId || !frame?.taskId) {
     return;
   }
+  // The first frame of a request arrives before its task exists: it is what
+  // makes an agent start typing the moment it is mentioned, instead of once
+  // the acknowledgement and the coordinator have both answered. It is keyed on
+  // the agent, so the frame that follows with a real task id replaces it here
+  // — otherwise both would sit in the table, and the placeholder, matching no
+  // task and so never retired by status, would hold the dots up for its whole
+  // TTL after the work had finished.
+  const pending = String(frame.taskId).startsWith(PENDING_BUSY_PREFIX);
+  if (!pending) {
+    delete state.agentBusy[
+      `${PENDING_BUSY_PREFIX}${frame.userId}:${frame.provider}`
+    ];
+  }
   state.agentBusy[frame.taskId] = {
     repositoryId: frame.repositoryId,
     userId: frame.userId,
     provider: frame.provider,
-    expiresAt: Date.now() + BUSY_TTL_MS,
+    // A placeholder has nothing but this to retire it. A question is answered
+    // without ever becoming a task, and a dispatch can fail before it submits;
+    // in both cases no status arrives to take the dots down. Long enough to
+    // cover the model calls it is bridging, and no longer.
+    expiresAt: Date.now() + (pending ? PENDING_BUSY_TTL_MS : BUSY_TTL_MS),
   };
 }
 
@@ -1505,6 +1526,35 @@ export function integrations() {
  * connected, not a name invented from the repository id.
  */
 
+/**
+ * This agent's override, under the one key that identifies it — falling back
+ * to the legacy bare-provider key that names every agent on the vendor.
+ *
+ * The order mirrors `resolveChannelAgentPresentation` in server.ts, and has
+ * to: the name drawn here is the name somebody types after "@", and the
+ * server matches that against its own resolution. Reading only the bare key
+ * meant your own rename showed on screen while the server still answered to
+ * the older per-agent name — so mentioning what you could see did nothing,
+ * and mentioning a name nobody could see worked.
+ *
+ * Only for the moments before the roster has resolved. Once it has, the
+ * server's own resolved name is used instead (see `channelAgentsFor`), which
+ * is the single authority.
+ */
+function overrideFor(overrides, agent) {
+  const specific = overrides[`${agent.userId}:${agent.provider}`];
+  const legacy = overrides[agent.provider];
+  if (specific === undefined && legacy === undefined) {
+    return undefined;
+  }
+  return {
+    name: specific?.name ?? legacy?.name,
+    role: specific?.role ?? legacy?.role,
+    model: specific?.model ?? legacy?.model,
+    effort: specific?.effort ?? legacy?.effort,
+  };
+}
+
 function withOverride(agent, override) {
   if (override === undefined) {
     return agent;
@@ -1608,7 +1658,36 @@ export function channelAgentsFor(repositoryId) {
         visibility: entry.visibility ?? "personal",
       };
     });
-  return [...mine, ...others].map((agent) => withOverride(agent, overrides[agent.id]));
+  // What the server resolved, keyed the one way that identifies an agent.
+  // Its answer wins wherever it has given one, because it is the same
+  // resolution a mention is matched against — the screen and the matcher must
+  // not be able to disagree.
+  const resolved = new Map(
+    roster
+      .filter((entry) => typeof entry.name === "string" && entry.name.length > 0)
+      .map((entry) => [
+        `${entry.userId}:${entry.provider}`,
+        { name: entry.name, role: entry.role ?? "" },
+      ]),
+  );
+  return [...mine, ...others].map((agent) => {
+    const server = resolved.get(`${agent.userId}:${agent.provider}`);
+    if (server !== undefined) {
+      // Model and effort are not part of the roster's answer, so they still
+      // come from the local override.
+      const local = overrideFor(overrides, agent);
+      return {
+        ...agent,
+        name: server.name,
+        role: server.role,
+        model: local?.model ?? agent.model,
+        effort: local?.effort ?? agent.effort,
+      };
+    }
+    // Before the roster resolves — the "paint immediately" floor — and for an
+    // older server that sends no resolved name.
+    return withOverride(agent, overrideFor(overrides, agent));
+  });
 }
 
 /** Agents and people who can be @mentioned in this channel. */
