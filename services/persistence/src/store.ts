@@ -1156,6 +1156,24 @@ export interface CoordinationStore {
     userId: UserId,
     emoji: string,
   ): Promise<ChannelMessage>;
+  /**
+   * Moves a message to the foot of the channel without changing when it was
+   * said.
+   *
+   * Continuing an existing thread has to bring it back into view, or work
+   * lands where nobody is looking. Rewriting `createdAt` would buy that by
+   * lying about history, and every reply's ordering hangs off it — so
+   * position and time are separate facts, and only position moves.
+   */
+  bumpChannelMessage(
+    repositoryId: string,
+    messageId: string,
+    at: string,
+  ): Promise<void>;
+  /** Removes a message with its replies and reactions. */
+  deleteChannelMessage(repositoryId: string, messageId: string): Promise<void>;
+  /** Removes every message in one channel. Returns how many went. */
+  deleteChannelMessages(repositoryId: string): Promise<number>;
   listChannelAgentOverrides(
     repositoryId: string,
   ): Promise<Record<string, ChannelAgentOverride>>;

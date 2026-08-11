@@ -56,6 +56,9 @@ import {
   setChannelAgentSetting,
   deleteRepository,
   leaveRepository,
+  channelMessagesFor,
+  deleteAllChannelThreads,
+  deleteChannelThread,
   setAuditorPaused,
   setRepositoryGrant,
   revokeRepositoryGrant,
@@ -1065,6 +1068,62 @@ async function leaveRepositoryAction(repositoryId) {
     await leaveRepository(repositoryId);
     closePopover();
     toast(`Left ${repositoryId}`, "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Deleting a thread, and clearing a channel.
+ *
+ * Both ask first. A thread is the only account of what an agent did — its
+ * reasoning, what it changed, what a person approved — and none of that is
+ * recoverable afterwards. Clearing the channel asks harder, and says how many
+ * threads it is about to take, because "delete all" is easy to reach for and
+ * impossible to walk back.
+ */
+async function deleteThreadAction(repositoryId, messageId) {
+  const confirmed = await showModal({
+    title: "Delete this thread?",
+    subtitle:
+      "Everything in it goes — the agent's reasoning, what it changed, and " +
+      "any approvals. This cannot be undone.",
+    confirm: "Delete",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    await deleteChannelThread(repositoryId, messageId);
+    if (state.activeChannelThread === messageId) {
+      state.activeChannelThread = undefined;
+    }
+    toast("Thread deleted", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+async function clearThreadsAction(repositoryId) {
+  const threads = channelMessagesFor(repositoryId).filter(
+    (entry) => (entry.replies ?? []).length > 0,
+  ).length;
+  const confirmed = await showModal({
+    title: `Delete all ${String(threads)} thread${threads === 1 ? "" : "s"}?`,
+    subtitle:
+      "This clears the whole channel — every message and every thread in it. " +
+      "There is no undo.",
+    confirm: "Delete everything",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    const removed = await deleteAllChannelThreads(repositoryId);
+    state.activeChannelThread = undefined;
+    toast(`Deleted ${String(removed)} message${removed === 1 ? "" : "s"}`, "ok");
     render();
   } catch (error) {
     toast(error.message, "error");
@@ -2169,6 +2228,12 @@ document.addEventListener("click", (event) => {
     case "channel-threads-toggle":
       state.chanThreadList = state.chanThreadList !== true;
       render();
+      return;
+    case "channel-thread-delete":
+      void deleteThreadAction(activeChannelId(), value);
+      return;
+    case "channel-threads-clear":
+      void clearThreadsAction(activeChannelId());
       return;
     case "channel-threads-close":
       state.chanThreadList = false;

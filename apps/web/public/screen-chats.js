@@ -914,15 +914,34 @@ function chanTreePanel(repositoryId) {
 }
 
 function threadListPanel(repositoryId) {
+  // Newest first, and "newest" means the last thing to happen in the thread
+  // rather than when it started — a thread somebody added to five minutes ago
+  // is the live one, however long ago it opened. The server orders the
+  // channel the same way once a thread is continued (`bumpChannelMessage`),
+  // so the two views agree about which conversation is current.
+  const lastActivity = (entry) => {
+    const replies = entry.replies ?? [];
+    const last = replies[replies.length - 1];
+    return String(last?.at ?? last?.createdAt ?? entry.at ?? "");
+  };
   const threads = channelMessagesFor(repositoryId)
     .filter((entry) => (entry.replies ?? []).length > 0)
     .slice()
-    .reverse();
+    .sort((left, right) => lastActivity(right).localeCompare(lastActivity(left)));
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
       <span>Threads</span>
       <span class="spacer"></span>
+      ${
+        threads.length === 0 || !canManageRepository(repositoryId)
+          ? ""
+          : iconButton("trash", {
+              act: "channel-threads-clear",
+              title: "Delete every thread in this channel",
+              small: true,
+            })
+      }
       ${iconButton("close", { act: "channel-threads-close", title: "Close" })}
     </header>
     <div class="thread-body">
@@ -931,17 +950,52 @@ function threadListPanel(repositoryId) {
           ? `<div class="util-empty">No threads yet. A thread appears when an agent has more than one thing to say about a task.</div>`
           : threads
               .map((entry) => {
-                const count = (entry.replies ?? []).length;
+                const replies = entry.replies ?? [];
+                // Thinking is the run talking to itself; it has never been a
+                // reply and should not be counted as one here either.
+                const count = replies.filter(
+                  (reply) =>
+                    reply.kind !== "progress" &&
+                    !/^Task: /u.test(String(reply.content ?? "")),
+                ).length;
+                const titled = replies.find((reply) =>
+                  /^Task: /u.test(String(reply.content ?? "")),
+                );
+                const name =
+                  titled === undefined
+                    ? ""
+                    : (String(titled.content).replace(/^Task:\s*/u, "").split("\n")[0] ?? "").trim();
                 const author = channelAuthor(repositoryId, entry);
-                return `<button type="button" class="thread-item"
-                  data-act="channel-thread-open" data-value="${esc(entry.id)}">
-                  <span class="ti-top">
-                    <span class="ti-who">${esc(author.name)}</span>
-                    <span class="ti-time">${esc(clockTime(entry.at))}</span>
-                  </span>
-                  <span class="ti-text">${esc(entry.content)}</span>
-                  <span class="ti-count">${count} repl${count === 1 ? "y" : "ies"}</span>
-                </button>`;
+                return `<div class="thread-item-row">
+                  <button type="button" class="thread-item"
+                    data-act="channel-thread-open" data-value="${esc(entry.id)}">
+                    <span class="ti-top">
+                      <span class="ti-face">${
+                        author.agent !== undefined
+                          ? agentFace(author.agent, 18)
+                          : avatar(author.name, 18)
+                      }</span>
+                      <span class="ti-who">${esc(author.name)}</span>
+                      <span class="ti-time">${esc(clockTime(entry.at))}</span>
+                    </span>
+                    <span class="ti-text">${esc(name === "" ? entry.content : name)}</span>
+                    <span class="ti-count">${
+                      count === 0
+                        ? "No replies yet"
+                        : `${count} repl${count === 1 ? "y" : "ies"}`
+                    }</span>
+                  </button>
+                  ${
+                    canManageRepository(repositoryId)
+                      ? iconButton("trash", {
+                          act: "channel-thread-delete",
+                          value: entry.id,
+                          title: "Delete this thread",
+                          small: true,
+                        })
+                      : ""
+                  }
+                </div>`;
               })
               .join("")
       }

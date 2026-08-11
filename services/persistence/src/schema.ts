@@ -780,6 +780,20 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE auditor_cursors ADD COLUMN paused INTEGER NOT NULL DEFAULT 0`,
     ],
   },
+  {
+    // Where a thread sits in the channel, as against when it was first said.
+    //
+    // Continuing an existing thread has to bring it back into view or the
+    // work lands somewhere nobody is looking. Reordering by rewriting
+    //  would buy that by lying about when the message was
+    // posted, and every reply hangs off that ordering. A second column keeps
+    // both facts: history stays true, position follows the conversation.
+    version: 24,
+    name: "channel-message-bumped-at",
+    statements: [
+      `ALTER TABLE channel_messages ADD COLUMN bumped_at TEXT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

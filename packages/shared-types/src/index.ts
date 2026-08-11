@@ -720,6 +720,12 @@ export type AuditEventType =
   /** A (user, provider) agent was added to or removed from a channel's opt-in roster. */
   | "channel_agent_membership_changed"
   /**
+   * A thread removed, or a channel cleared. Recorded because the messages
+   * themselves are gone afterwards — this is the only remaining trace that
+   * an account of somebody's work once existed and who removed it.
+   */
+  | "channel_message_deleted"
+  /**
    * A repository (and its cascaded channel state and grants) was removed.
    * Runs and submitted tasks are never cascaded — see `removeRepository`'s
    * doc comment in `@coord/persistence` — so this event marks the one

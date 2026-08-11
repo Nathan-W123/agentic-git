@@ -624,6 +624,43 @@ export function needsTheRepository(content: string): boolean {
   );
 }
 
+/**
+ * How alike two pieces of channel text are, 0 to 1.
+ *
+ * Jaccard over the same stopword-stripped tokens agent matching uses, so
+ * "similar" means one thing in this system rather than two. Symmetric on
+ * purpose: a short follow-up about a long thread should not score highly just
+ * because the thread contains every word it used.
+ */
+export function textOverlap(left: string, right: string): number {
+  const a = relevanceTokens(left);
+  const b = relevanceTokens(right);
+  if (a.size === 0 || b.size === 0) {
+    return 0;
+  }
+  let shared = 0;
+  for (const token of a) {
+    if (b.has(token)) {
+      shared += 1;
+    }
+  }
+  return shared / (a.size + b.size - shared);
+}
+
+/**
+ * How alike a request and an existing thread must be before new work joins it
+ * rather than starting its own.
+ *
+ * Deliberately high. Merging wrongly buries work in a thread nobody is
+ * reading, which is worse than the duplicate thread it was trying to avoid —
+ * the same reasoning that kept this explicit-only until now. Two requests
+ * about the same file, in the same words, clear it; two requests that merely
+ * mention the repository do not.
+ */
+const THREAD_MERGE_MIN_OVERLAP = 0.42;
+/** Threads older than this are finished business, however well they match. */
+const THREAD_MERGE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
 function looksLikeTaskRequest(content: string): boolean {
   const text = content.trim();
   if (text.length < 6) {
@@ -4545,6 +4582,53 @@ export class ApiGateway {
       return;
     }
 
+    // Removing a thread, or clearing the channel.
+    //
+    // `manage_project` for both, and deliberately not "whoever posted it": a
+    // thread is a record of work an agent did, read by everybody in the
+    // repository, and deleting one throws away the only account of what
+    // happened. That is an administrative act, not tidying after yourself.
+    const channelMessageMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/messages(?:/([^/]+))?$`,
+        "u",
+      ),
+    );
+    if (channelMessageMatch !== undefined && method === "DELETE") {
+      const [projectId = "", repositoryId = "", messageId] =
+        channelMessageMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "manage_project",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      if (messageId === undefined || messageId.length === 0) {
+        const removed =
+          await this.options.store.deleteChannelMessages(repositoryId);
+        await this.options.store.appendAudit(undefined, {
+          type: "channel_message_deleted",
+          data: { projectId, repositoryId, removed, all: true },
+        });
+        this.sendJson(response, 200, { removed });
+        return;
+      }
+      await this.options.store.deleteChannelMessage(repositoryId, messageId);
+      await this.options.store.appendAudit(undefined, {
+        type: "channel_message_deleted",
+        data: { projectId, repositoryId, messageId },
+      });
+      this.sendJson(response, 200, { removed: 1 });
+      return;
+    }
+
     // Auditing switched off and on for a repository, without demoting the
     // agent that holds the role. `manage_project`, matching promotion: this
     // decides whether an account is spent unprompted, which is the same
@@ -6059,6 +6143,59 @@ export class ApiGateway {
     });
   }
 
+  /**
+   * An existing thread this request belongs in, if one clearly does.
+   *
+   * Continuing a thread is how related work stays together — and until now
+   * only a person could say so, by asking inside the thread. This is the
+   * automatic half, held to a high bar because the failure is asymmetric:
+   * a duplicate thread is untidy, while a wrong merge hides work in a
+   * conversation nobody is reading.
+   *
+   * Only the same agent's own threads are considered. A thread is one
+   * agent's work on one task — dropping a second agent's task into it would
+   * make the thread's own narration ambiguous about who is doing what.
+   */
+  private async findThreadToContinue(input: {
+    repositoryId: string;
+    viewerId: string;
+    content: string;
+    candidate: ChannelMentionCandidate;
+  }): Promise<{ id: string; title: string } | undefined> {
+    const authorId = `${input.candidate.userId}:${input.candidate.provider}`;
+    const messages = await this.options.store
+      .listChannelMessages(input.repositoryId, input.viewerId, { limit: 40 })
+      .catch(() => []);
+    const now = Date.now();
+    let best: { id: string; title: string; score: number } | undefined;
+    for (const message of messages) {
+      if (message.kind !== "agent" || message.authorId !== authorId) {
+        continue;
+      }
+      const age = now - new Date(message.createdAt).getTime();
+      if (!Number.isFinite(age) || age > THREAD_MERGE_MAX_AGE_MS) {
+        continue;
+      }
+      // The thread's own subject, which is what the request has to match:
+      // its title if the agent named one, and the request it came from.
+      const titleReply = message.replies.find((reply) =>
+        /^Task: /u.test(reply.content),
+      );
+      const title =
+        titleReply === undefined
+          ? ""
+          : (titleReply.content.replace(/^Task:\s*/u, "").split("\n")[0] ?? "").trim();
+      const subject = `${message.content} ${title}`;
+      const score = textOverlap(withoutMentions(input.content), subject);
+      if (score >= THREAD_MERGE_MIN_OVERLAP && (best === undefined || score > best.score)) {
+        best = { id: message.id, title, score };
+      }
+    }
+    return best === undefined
+      ? undefined
+      : { id: best.id, title: best.title };
+  }
+
   private async dispatchOneMention(input: {
     projectId: string;
     repositoryId: string;
@@ -6147,11 +6284,27 @@ export class ApiGateway {
       content,
       claimMessage,
     );
+    // Asked inside a thread, or close enough to one that it belongs there.
+    // The explicit half is a person saying "and now this too"; the automatic
+    // half is `findThreadToContinue`, held to a high bar because a wrong
+    // merge hides work where nobody is reading.
+    const continuing =
+      input.threadMessageId ??
+      (trigger === "mention"
+        ? (
+            await this.findThreadToContinue({
+              repositoryId,
+              viewerId: senderId,
+              content,
+              candidate,
+            })
+          )?.id
+        : undefined);
     // Continuing an existing thread: the acknowledgement belongs inside it,
     // and everything this run narrates hangs off the same root, so the two
     // pieces of work read as one story rather than two.
     const threadRootId =
-      input.threadMessageId ??
+      continuing ??
       (
         await this.appendChannelEntry({
           projectId,
@@ -6161,13 +6314,29 @@ export class ApiGateway {
           content: acknowledgementText,
         })
       ).id;
-    if (input.threadMessageId !== undefined) {
+    if (continuing !== undefined) {
+      // Back to the foot of the channel. Work joining an old thread would
+      // otherwise land wherever that thread has scrolled to, which is the
+      // failure mode that kept merging explicit-only — so the merge is made
+      // visible rather than merely correct. The timestamp is untouched; only
+      // the position moves (`bumpChannelMessage`).
+      await this.options.store
+        .bumpChannelMessage(repositoryId, continuing, new Date().toISOString())
+        .catch(() => undefined);
+    }
+    if (continuing !== undefined) {
       await this.appendChannelThreadReply({
         projectId,
         repositoryId,
-        messageId: input.threadMessageId,
+        messageId: continuing,
         authorId: `${candidate.userId}:${candidate.provider}`,
-        content: acknowledgementText,
+        content:
+          input.threadMessageId === undefined
+            ? // Auto-merged. Said out loud, because the reader did not ask
+              // for this thread and needs to know why their request landed
+              // in it rather than somewhere new.
+              `${acknowledgementText}\n\n(Adding this to the thread above — it looks like the same piece of work.)`
+            : acknowledgementText,
       });
     }
     const acknowledgement = { id: threadRootId };

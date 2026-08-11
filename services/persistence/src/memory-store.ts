@@ -126,6 +126,8 @@ interface StoredChannelMessage {
   authorId: string;
   content: string;
   createdAt: string;
+  /** Where it sits, once continuing a thread has moved it. */
+  bumpedAt?: string;
   replies: StoredChannelReply[];
   /** Emoji to the set of user ids who reacted with it. */
   reactions: Map<string, Set<string>>;
@@ -1873,16 +1875,52 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     filter: ChannelMessageFilter = {},
   ): Promise<ChannelMessage[]> {
     const limit = Math.min(Math.max(filter.limit ?? 50, 1), 200);
+    // Where the message sits, not when it was said — the two differ once a
+    // thread has been continued. Matches the SQL backends' COALESCE.
+    const at = (message: { createdAt: string; bumpedAt?: string }): string =>
+      message.bumpedAt ?? message.createdAt;
     const rows = [...this.channelMessages.values()]
       .filter((message) => message.repositoryId === repositoryId)
       .filter(
-        (message) =>
-          filter.before === undefined || message.createdAt < filter.before,
+        (message) => filter.before === undefined || at(message) < filter.before,
       )
-      .sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+      .sort((left, right) => at(left).localeCompare(at(right)));
     return rows
       .slice(-limit)
       .map((message) => this.toPublicChannelMessage(message, viewerId));
+  }
+
+  public async bumpChannelMessage(
+    repositoryId: string,
+    messageId: string,
+    at: string,
+  ): Promise<void> {
+    const message = this.channelMessages.get(messageId);
+    if (message !== undefined && message.repositoryId === repositoryId) {
+      message.bumpedAt = at;
+    }
+  }
+
+  public async deleteChannelMessage(
+    repositoryId: string,
+    messageId: string,
+  ): Promise<void> {
+    const message = this.channelMessages.get(messageId);
+    if (message === undefined || message.repositoryId !== repositoryId) {
+      return;
+    }
+    this.channelMessages.delete(messageId);
+  }
+
+  public async deleteChannelMessages(repositoryId: string): Promise<number> {
+    let removed = 0;
+    for (const [id, message] of [...this.channelMessages]) {
+      if (message.repositoryId === repositoryId) {
+        this.channelMessages.delete(id);
+        removed += 1;
+      }
+    }
+    return removed;
   }
 
   public async appendChannelMessage(

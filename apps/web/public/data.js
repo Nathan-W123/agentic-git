@@ -2148,6 +2148,32 @@ export async function setAuditorPaused(repositoryId, paused) {
   return response?.resumed;
 }
 
+/**
+ * Removes one thread, or every thread in the channel.
+ *
+ * Local state is updated only once the server has agreed. An optimistic
+ * delete that failed would leave the reader believing something is gone while
+ * it is still there for everybody else — the wrong way round for an action
+ * that cannot be undone.
+ */
+export async function deleteChannelThread(repositoryId, messageId) {
+  await api(
+    channelPath(repositoryId, `/messages/${encodeURIComponent(messageId)}`),
+    { method: "DELETE" },
+  );
+  state.channelMessages[repositoryId] = (
+    state.channelMessages[repositoryId] ?? []
+  ).filter((entry) => entry.id !== messageId);
+}
+
+export async function deleteAllChannelThreads(repositoryId) {
+  const response = await api(channelPath(repositoryId, "/messages"), {
+    method: "DELETE",
+  });
+  state.channelMessages[repositoryId] = [];
+  return response?.removed ?? 0;
+}
+
 /** Every repository-scoped grant on this repository, for the co-owner panel. */
 export async function loadRepositoryGrants(repositoryId) {
   const response = await apiOptional(repositoryPath(repositoryId, "/grants"), {

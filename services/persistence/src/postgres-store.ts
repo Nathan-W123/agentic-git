@@ -2846,15 +2846,88 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const values: unknown[] = [];
     const clauses = [`repository_id = ${bind(values, repositoryId)}`];
     if (filter.before !== undefined) {
-      clauses.push(`created_at < ${bind(values, filter.before)}`);
+      clauses.push(
+        `COALESCE(bumped_at, created_at) < ${bind(values, filter.before)}`,
+      );
     }
+    // Position, not time — see `bumpChannelMessage`. The cursor above pages
+    // on the same expression so it agrees with the order it is paging.
     const rows = await this.rows(
       `SELECT * FROM channel_messages WHERE ${clauses.join(" AND ")}
-       ORDER BY created_at DESC, id DESC LIMIT ${bind(values, limit)}`,
+       ORDER BY COALESCE(bumped_at, created_at) DESC, id DESC
+       LIMIT ${bind(values, limit)}`,
       values,
     );
     const bases = rows.reverse().map((row) => this.toChannelMessageBase(row));
     return await this.hydrateChannelMessages(bases, viewerId);
+  }
+
+  public async bumpChannelMessage(
+    repositoryId: string,
+    messageId: string,
+    at: string,
+  ): Promise<void> {
+    await this.query(
+      `UPDATE channel_messages SET bumped_at = $1
+        WHERE repository_id = $2 AND id = $3`,
+      [at, repositoryId, messageId],
+    );
+  }
+
+  public async deleteChannelMessage(
+    repositoryId: string,
+    messageId: string,
+  ): Promise<void> {
+    await this.transaction(async (client) => {
+      // Reactions reference replies as well as the message itself, so they
+      // go before the rows they point at.
+      await client.query(
+        `DELETE FROM channel_message_reactions
+          WHERE message_id = $1
+             OR message_id IN (
+               SELECT id FROM channel_message_replies WHERE message_id = $1
+             )`,
+        [messageId],
+      );
+      await client.query(
+        "DELETE FROM channel_message_replies WHERE message_id = $1",
+        [messageId],
+      );
+      await client.query(
+        "DELETE FROM channel_messages WHERE repository_id = $1 AND id = $2",
+        [repositoryId, messageId],
+      );
+    });
+  }
+
+  public async deleteChannelMessages(repositoryId: string): Promise<number> {
+    return await this.transaction(async (client) => {
+      const ids = (
+        await client.query(
+          "SELECT id FROM channel_messages WHERE repository_id = $1",
+          [repositoryId],
+        )
+      ).rows.map((row) => String((row as Row)["id"]));
+      for (const id of ids) {
+        await client.query(
+          `DELETE FROM channel_message_reactions
+            WHERE message_id = $1
+               OR message_id IN (
+                 SELECT id FROM channel_message_replies WHERE message_id = $1
+               )`,
+          [id],
+        );
+        await client.query(
+          "DELETE FROM channel_message_replies WHERE message_id = $1",
+          [id],
+        );
+      }
+      await client.query(
+        "DELETE FROM channel_messages WHERE repository_id = $1",
+        [repositoryId],
+      );
+      return ids.length;
+    });
   }
 
   public async appendChannelMessage(
