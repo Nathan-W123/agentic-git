@@ -765,6 +765,13 @@ export type AuditEventType =
   | "ownership_granted"
   | "task_started"
   | "agent_progress"
+  /**
+   * What the agent has touched so far, read from the worktree while it is
+   * still editing — the one stretch of a run that previously reported
+   * nothing. Carries the whole current set, so a reader arriving late does
+   * not have to accumulate a diff of its own.
+   */
+  | "workspace_changed"
   | "scope_change_requested"
   | "scope_change_decided"
   | "changeset_collected"

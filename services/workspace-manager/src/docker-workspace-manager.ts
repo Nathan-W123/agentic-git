@@ -6,7 +6,7 @@ import {
   type ProcessOptions,
   type ProcessOutput,
 } from "@coord/repository-service";
-import type { ChangeSet } from "@coord/shared-types";
+import type { ChangeSet, FilePatchStatus } from "@coord/shared-types";
 
 import type { EgressBinding } from "./egress-gateway.js";
 import type { CredentialMount } from "./vendor-credentials.js";
@@ -342,6 +342,17 @@ export class DockerWorkspaceManager
     metadata: ChangeSetMetadata,
   ): Promise<ChangeSet> {
     return await this.worktrees.collectChangeSet(workspace, metadata);
+  }
+
+  /**
+   * Delegated like the changeset it precedes: the container mounts the very
+   * worktree the wrapped manager reads, so the host sees the agent's edits
+   * without entering the sandbox to ask.
+   */
+  public async listWorkingChanges(
+    workspace: TaskWorkspace,
+  ): Promise<Array<{ path: string; status: FilePatchStatus }>> {
+    return (await this.worktrees.listWorkingChanges?.(workspace)) ?? [];
   }
 
   public resolveWorkspacePath(_workspace: TaskWorkspace): string {

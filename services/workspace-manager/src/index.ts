@@ -99,6 +99,24 @@ export interface WorkspaceManager {
     workspace: TaskWorkspace,
     metadata: ChangeSetMetadata,
   ): Promise<ChangeSet>;
+  /**
+   * What the agent has changed so far, while it is still working.
+   *
+   * Read-only, and deliberately not {@link collectChangeSet}: that one stages
+   * untracked files with `git add --intent-to-add` to get them into the diff,
+   * which writes to the index of a worktree an agent is actively editing.
+   * Doing that on a timer, underneath a running process, is a good way to
+   * corrupt somebody's work to draw a progress indicator. This only reads.
+   *
+   * It also returns no patches — a poll wants names and statuses, not the
+   * content of every file on every tick.
+   *
+   * Optional: a manager with no cheap way to answer simply says nothing, and
+   * the run narrates as it did before rather than failing.
+   */
+  listWorkingChanges?(
+    workspace: TaskWorkspace,
+  ): Promise<Array<{ path: string; status: FilePatchStatus }>>;
 }
 
 export type WorkspaceCommandOptions = Pick<
@@ -522,6 +540,54 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
       ...(spec.env === undefined ? {} : { env: spec.env }),
       ...options,
     });
+  }
+
+  /**
+   * A read-only snapshot of what has changed so far. See the interface for
+   * why this cannot simply call {@link collectChangeSet}.
+   */
+  public async listWorkingChanges(
+    workspace: TaskWorkspace,
+  ): Promise<Array<{ path: string; status: FilePatchStatus }>> {
+    // Tracked edits against the base the task started from, and untracked
+    // files separately — the latter are invisible to `git diff` until they
+    // are staged, and staging is exactly what this must not do.
+    const [tracked, untracked] = await Promise.all([
+      this.git.run([
+        "-C",
+        workspace.path,
+        "diff",
+        "--name-status",
+        "-z",
+        "--no-renames",
+        workspace.baseVersion.revision,
+      ]),
+      this.git.run([
+        "-C",
+        workspace.path,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+      ]),
+    ]);
+    const changes = new Map<string, FilePatchStatus>();
+    for (const entry of parseNameStatusZ(tracked.stdout)) {
+      changes.set(entry.path, toPatchStatus(entry.code));
+    }
+    for (const untrackedPath of parsePathListZ(untracked.stdout)) {
+      const normalized = normalizeRepositoryPath(untrackedPath);
+      // The same build output and scratch files `collectChangeSet` refuses to
+      // carry into a changeset. Narrating them would bury the real edits
+      // under whatever the agent's toolchain happened to write.
+      if (isEphemeralWorkspacePath(normalized, new Set())) {
+        continue;
+      }
+      changes.set(normalized, "added");
+    }
+    return [...changes]
+      .map(([path, status]) => ({ path, status }))
+      .sort((left, right) => left.path.localeCompare(right.path));
   }
 
   public async collectChangeSet(

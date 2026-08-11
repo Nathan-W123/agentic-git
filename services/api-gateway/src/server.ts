@@ -477,6 +477,27 @@ export function narrateTaskEvent(
       return typeof data["message"] === "string" && data["message"].length > 0
         ? String(data["message"]).slice(0, 300)
         : undefined;
+    case "workspace_changed": {
+      // Read off the worktree while the agent is still editing. This is the
+      // stretch that used to say nothing at all — a thread went quiet after
+      // "execution started" and stayed quiet for up to an hour, with no way
+      // to tell work from a hang.
+      //
+      // Only what moved since the last report, because that is what is new to
+      // the reader; the full set travels in the same event for the summary
+      // that hangs off the thread.
+      const changed = Array.isArray(data["changed"])
+        ? (data["changed"] as unknown[]).filter(
+            (entry): entry is string => typeof entry === "string",
+          )
+        : [];
+      if (changed.length === 0) {
+        return undefined;
+      }
+      return `Working on ${changed.slice(0, 3).join(", ")}${
+        changed.length > 3 ? ` and ${String(changed.length - 3)} more` : ""
+      }…`;
+    }
     case "changeset_collected":
       return files.length > 0
         ? `Wrote changes to ${files.slice(0, 4).join(", ")}${
