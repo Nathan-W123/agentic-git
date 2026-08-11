@@ -620,6 +620,25 @@ export function resolveChannelAgentPresentation(
   };
 }
 
+/**
+ * A request to change the machine rather than the repository.
+ *
+ * Narrow on purpose. It matches a system package manager being invoked —
+ * `apt-get install`, `brew install`, `yum install` — and nothing else,
+ * because that is the class that provably cannot work: the control plane
+ * runs unprivileged (the entrypoint drops to `node` before serving), so
+ * there is no root to install with, and a container is rebuilt from its image
+ * every deploy, so anything installed would not outlive the run that did it.
+ *
+ * Everything adjacent is left alone. "install the eslint plugin" edits
+ * package.json and is an ordinary change; guessing at intent from the word
+ * "install" would refuse real work, which is worse than the ten minutes this
+ * saves. A word list that refuses tasks has to be much more certain than one
+ * that merely routes them.
+ */
+const SYSTEM_PACKAGE_INSTALL_RE =
+  /\b(?:apt(?:-get)?|apk|yum|dnf|pacman|brew|choco)\s+(?:-\w+\s+)*install\b|\bsudo\s+(?:apt|apt-get|yum|dnf|apk)\b/iu;
+
 /** One connected agent an @mention (or an auto-claim) could resolve to. */
 type ChannelMentionCandidate = {
   userId: string;
@@ -6623,6 +6642,32 @@ export class ApiGateway {
     // still arrives as one line in the channel.
     if (readsAsQuestion(content) && !needsTheRepository(content)) {
       await this.answerInChannel(candidate, content, projectId, repositoryId);
+      return;
+    }
+
+    // Asked to change the machine rather than the repository.
+    //
+    // Said in seconds, because the alternative is what actually happened: a
+    // task planned no files, negotiated scope it could never use, and was
+    // cancelled ten minutes later with "session cancelled" — which describes
+    // the mechanism and not one thing the reader could do about it.
+    //
+    // It names the file, because that is the real answer. The runtime is
+    // declared in the image, the image is in this repository, and changing it
+    // is an ordinary task this agent can take.
+    if (SYSTEM_PACKAGE_INSTALL_RE.test(content)) {
+      await this.appendChannelEntry({
+        projectId,
+        repositoryId,
+        kind: "agent",
+        authorId: `${candidate.userId}:${candidate.provider}`,
+        content:
+          `I can't install system packages here — I run unprivileged, and ` +
+          `this container is rebuilt from its image on every deploy, so ` +
+          `anything I installed would be gone by the next task. The runtime ` +
+          `is declared in \`infrastructure/docker/control-plane.Dockerfile\`, ` +
+          `which is in this repository — ask me to add it there and it sticks.`,
+      });
       return;
     }
 

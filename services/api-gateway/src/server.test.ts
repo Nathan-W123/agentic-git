@@ -3993,6 +3993,69 @@ test("a channel's role override reaches the roster and the objective a dispatche
   assert.equal(second.objective, "one more thing please");
 });
 
+test("asking to install a system package is answered, not queued for ten minutes", async (t) => {
+  // What happened instead: the task planned no files, negotiated scope it
+  // could never use, and was cancelled ten minutes later with "session
+  // cancelled" — a sentence about the mechanism, with nothing in it the
+  // reader could act on.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "system-install");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) apt-get install python3 and run the tests" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(
+    runtime.submittedTasks.length,
+    0,
+    JSON.stringify(runtime.submittedTasks),
+  );
+  const after = await owner.request(`${base}/messages`);
+  const answer = (after.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+  assert.ok(answer !== undefined, JSON.stringify(after.data.messages));
+  // It names the file, because that is the real answer rather than a refusal.
+  assert.match(answer.content, /control-plane\.Dockerfile/u);
+});
+
+test("an ordinary install of a dependency is still real work", async (t) => {
+  // The refusal above has to be narrow. "install the eslint plugin" edits
+  // package.json and is an ordinary change; guessing at intent from the word
+  // "install" would refuse real work, which is worse than the wait it saves.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dependency-install");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) install the eslint plugin we discussed" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+});
+
 test("renaming your own agent does not rename everybody else's on that vendor", async (t) => {
   // A bare provider id names a *vendor*, not an agent, and the reader applied
   // it to every agent on that vendor. One person renaming their own Claude

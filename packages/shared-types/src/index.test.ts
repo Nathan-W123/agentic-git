@@ -452,6 +452,34 @@ test("a plan with no grounding record is returned exactly as it came", () => {
   assert.deepEqual(view.inventedFiles, []);
 });
 
+test("running something and reporting the result is not a failed change", () => {
+  // Asked to run, not to edit. The result is the output; an empty changeset is
+  // what success looks like, and it was being recorded as a failure.
+  for (const objective of [
+    "run the test suite",
+    "run the tests and tell me what fails",
+    "execute the repository's tests",
+    "verify the retry logic behaves",
+    "reproduce the bug in the parser",
+    "benchmark the hot path",
+    "lint the codebase",
+    "typecheck the project",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), true, objective);
+  }
+
+  // The editing-verb veto still decides first, which is what lets the list
+  // above be as permissive as it is. Asked to run *and* change, an empty
+  // changeset is still the symptom of a sandbox refusing every write.
+  for (const objective of [
+    "run the tests and fix what fails",
+    "run the formatter and commit the result",
+    "lint the codebase and update the offending files",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), false, objective);
+  }
+});
+
 test("a role preamble does not decide whether a request was a report", () => {
   // A channel dispatch prepends the agent's declared role to every objective
   // it submits. That sentence is the operator describing the agent, not
