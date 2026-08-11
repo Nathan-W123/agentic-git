@@ -173,6 +173,14 @@ export const state = {
   activeDm: undefined,
   /** Your own agent, open in that same panel. */
   activeAgentPanel: undefined,
+  /*
+   * Whether a thread's thinking block is unfolded, keyed by thread id.
+   *
+   * Only holds threads the reader has actually clicked. An absent entry means
+   * "no opinion", which is what lets the default (open while running, folded
+   * once finished) still apply to every thread they have not touched.
+   */
+  thinkingOpen: {},
   /** What is half-typed to them. */
   dmDraft: "",
   /** The project whose inbox has been fetched, so it is fetched once. */

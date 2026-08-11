@@ -2302,6 +2302,17 @@ document.addEventListener("click", (event) => {
       persist("ag.navCollapsed", state.navCollapsed);
       render();
       return;
+    // Records which way the reader just flipped it, and lets the browser do
+    // the flipping. No re-render: `<details>` has already toggled itself by
+    // the time this runs, so the stored value and the DOM agree — and
+    // re-rendering here would fight the animation for no gain.
+    case "thinking-toggle": {
+      const details = node?.closest?.("details");
+      state.thinkingOpen[value] = details === null || details === undefined
+        ? true
+        : !details.open;
+      return;
+    }
     case "chan-collapse-toggle":
       state.chanCollapsed = state.chanCollapsed !== true;
       persist("ag.chanCollapsed", state.chanCollapsed);
