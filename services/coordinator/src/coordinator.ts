@@ -1623,6 +1623,18 @@ export class Coordinator {
             previousRevision: integration.previousVersion.revision,
             revision: integration.canonicalVersion.revision,
             changeSetId: integration.changeSetId,
+            // What the agent says it did, carried so the ending can say it.
+            // The account was written at `collectChanges` and travelled this
+            // far unread: every successful task in the system ended with one
+            // fixed sentence about canonical, which is true of all of them
+            // and says nothing about any of them. The files are here for the
+            // same reason — an ending that names them is worth more than one
+            // that names a revision nobody will look up.
+            //
+            // The reader decides what to do with an empty or useless one; it
+            // is reported as it stands rather than dressed up here.
+            agentExplanation: result.changeSet.agentExplanation,
+            files: result.changeSet.patches.map((patch) => patch.path),
           },
         );
       } else if (reported) {

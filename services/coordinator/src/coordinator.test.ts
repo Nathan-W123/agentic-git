@@ -834,3 +834,52 @@ test("a role preamble does not turn an audit into a failure", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("a promoted change carries the agent's own account of it", async () => {
+  // The ending a reader actually sees is built from this event. Recording
+  // only the revisions is why every successful task in the system finished
+  // with one fixed sentence about canonical: the agent had written an account
+  // of its work at `collectChanges`, and it travelled this far unread.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
+    const account = "Repointed six test imports at their new modules.";
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      false,
+      undefined,
+      account,
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "integrated");
+    const promoted = result.audit.find(
+      (event) => event.type === "canonical_promoted",
+    );
+    assert.ok(promoted !== undefined, "nothing was promoted");
+    const data = promoted.data as Record<string, unknown>;
+    assert.equal(data["agentExplanation"], account);
+    // The files travel too, so the ending can say how much changed without
+    // the reader opening anything.
+    assert.deepEqual(data["files"], ["src/a.txt"]);
+    // The revisions stay: they are what makes the claim checkable later.
+    assert.equal(typeof data["revision"], "string");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

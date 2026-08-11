@@ -3584,6 +3584,72 @@ test("a task that reported rather than changed reads as an ending, not a failure
   );
 });
 
+test("a finished task says what it did, not that the pipeline worked", () => {
+  // "Done — the change is in canonical." was the ending of every successful
+  // task this system had ever run. It is true of all of them and says nothing
+  // about any of them, so watching two tasks finish taught the reader
+  // nothing — while the agent's own account of the work sat in the changeset,
+  // carried all the way to promotion and never read.
+  assert.equal(
+    narrateTaskEvent("canonical_promoted", {
+      agentExplanation:
+        "Repointed six test imports at their new modules; collection passes.",
+      files: ["a.py", "b.py"],
+    }),
+    "Repointed six test imports at their new modules; collection passes. " +
+      "(2 files changed)",
+  );
+  // Singular reads as English, not as "1 files".
+  assert.match(
+    narrateTaskEvent("canonical_promoted", {
+      agentExplanation: "Raised the retry ceiling to five.",
+      files: ["retry.ts"],
+    }) ?? "",
+    /\(1 file changed\)$/u,
+  );
+  // No files recorded is not a reason to withhold the summary.
+  assert.equal(
+    narrateTaskEvent("canonical_promoted", {
+      agentExplanation: "Raised the retry ceiling to five.",
+    }),
+    "Raised the retry ceiling to five.",
+  );
+
+  // The adapters' fallback for a model that explained nothing is the vendor
+  // name and the objective handed back — and the objective is already the
+  // thread's title, so that is the canned line with extra steps. Say the
+  // plain thing instead of dressing it up as a summary.
+  for (const written of [
+    "claude completed Repair stale test imports",
+    "Codex completed the objective",
+    "",
+    "   ",
+  ]) {
+    assert.equal(
+      narrateTaskEvent("canonical_promoted", { agentExplanation: written }),
+      "Done — the change is in canonical.",
+      written,
+    );
+  }
+
+  // Bounded: a model that ignores "one sentence" must not paste an essay into
+  // a channel everybody is reading.
+  const essay = narrateTaskEvent("canonical_promoted", {
+    agentExplanation: `${"word ".repeat(400)}end`,
+  });
+  assert.ok((essay ?? "").length < 450, String(essay?.length));
+  assert.match(essay ?? "", /…$/u);
+
+  // Newlines collapse: the ending is one line in a channel, and a multi-line
+  // explanation would otherwise read as several messages.
+  assert.equal(
+    narrateTaskEvent("canonical_promoted", {
+      agentExplanation: "Fixed the loop.\n\nAlso tidied the imports.",
+    }),
+    "Fixed the loop. Also tidied the imports.",
+  );
+});
+
 test("a failed task says why, whichever shape the failure was recorded in", () => {
   const integration = narrateTaskEvent("task_failed", {
     status: "policy_failed",
