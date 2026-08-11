@@ -4182,6 +4182,7 @@ svg {
   align-items: center;
   gap: 8px;
   padding: 3px 10px;
+  border-radius: 4px;
   /* Explicitly left-to-right. The front-truncation trick below needs `rtl`,
      and it used to sit here on the row — which also reverses a flex row, so
      adding a third child put the line counts on the wrong side. Scoped to the
@@ -4205,6 +4206,22 @@ svg {
   direction: rtl;
   unicode-bidi: plaintext;
   text-align: left;
+}
+
+/* Only the rows that go somewhere look like they do. A deleted file has no
+   contents left to open, so it stays plain text rather than advertising a
+   click that would land in an empty editor. */
+.cmsg-file[data-act] {
+  cursor: pointer;
+}
+
+.cmsg-file[data-act]:hover,
+.cmsg-file[data-act]:focus-visible {
+  background: var(--bg-hover);
+}
+
+.cmsg-file[data-act]:hover .cmsg-file-path {
+  color: var(--text);
 }
 
 .cmsg-file-mark {
