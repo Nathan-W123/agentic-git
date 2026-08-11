@@ -149,6 +149,17 @@ const CHANNEL_PROGRESS_INTERVAL_MS = 2000;
  */
 const CHANNEL_ANSWER_CONTEXT = 8;
 /**
+ * An "@" that is addressing somebody, rather than one inside a word.
+ *
+ * Anchored to the start of the message or to whitespace, so
+ * `nathan@example.com` is not read as one. The token must also reach a space
+ * or the end without a slash in it, which is what separates `@Notus` from
+ * `npm i @scope/package` — a name is a word, a scoped package is a path.
+ * Names containing spaces are still caught: this only has to notice that
+ * somebody was addressed, not capture who.
+ */
+const ADDRESSED_RE = /(?:^|\s)@[A-Za-z][^\s/]*(?=\s|$)/u;
+/**
  * How often the auditor looks for new canonical promotions.
  *
  * Far slower than the progress poller above, which is keeping a person
@@ -5942,6 +5953,37 @@ export class ApiGateway {
       const mentioned = candidates.filter((candidate) =>
         content.includes(`@${candidate.name}`),
       );
+      if (mentioned.length === 0 && ADDRESSED_RE.test(content)) {
+        // Somebody addressed a name and nothing happened.
+        //
+        // The silence above was reasoned as conservative, and for a stray
+        // email address it is. For a name the composer's own autocomplete
+        // inserted it is the worst answer available: the roster shows the
+        // agent, the picker offers it, the message posts, and nothing comes
+        // back — with no way to tell whether the agent is thinking, broken,
+        // or was never there.
+        //
+        // It is reachable in the ordinary case, not a corner. The browser
+        // roster layers this account's own agents on top of whatever the
+        // server returned, so an agent connected in a way that stored no
+        // per-user credential — the host sign-in flows, which cannot work on
+        // a container — appears mentionable while `connectionsFor` has never
+        // heard of it. Every mention then vanishes, in every channel, and the
+        // same missing credential makes the CLI answer 401 if it ever does
+        // run.
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          candidates.length === 0
+            ? `Nobody here answers to that yet — this channel has no agents ` +
+                `the server can reach. Connect one from Agents (the device ` +
+                `sign-in, not the host one, if this is a hosted deployment), ` +
+                `then add it to this channel from the roster.`
+            : `Nobody here answers to that. In this channel you can mention: ` +
+                `${candidates.map((candidate) => `@${candidate.name}`).join(", ")}.`,
+        );
+        return;
+      }
       for (const candidate of mentioned) {
         await this.dispatchOneMention({
           projectId,
