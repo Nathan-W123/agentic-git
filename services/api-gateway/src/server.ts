@@ -42,6 +42,7 @@ import {
   projectBudgets,
   ROLE_CONTEXT_PREFIX,
   type ApprovalStatus,
+  type FilePatchStatus,
 } from "@coord/shared-types";
 
 import {
@@ -141,6 +142,37 @@ interface WatchedChannelTask {
 const THREAD_CONTEXT_LINES = 24;
 
 /**
+ * The changed-file list out of a run's audit event, in either shape it takes.
+ *
+ * `workspace_changed` reports under `files` while the agent is still working;
+ * `changeset_collected` reports the final set under `changedFiles`, keeping
+ * its own `files` as bare paths because the narration already reads that.
+ * Both are validated rather than trusted: this decorates a thread, and an
+ * event written by a newer version must cost the reader a dropdown at worst.
+ */
+function changedFilesFrom(
+  data: Record<string, unknown>,
+): Array<{ path: string; status: FilePatchStatus }> {
+  const candidate = Array.isArray(data["changedFiles"])
+    ? data["changedFiles"]
+    : Array.isArray(data["files"])
+      ? data["files"]
+      : [];
+  return (candidate as unknown[]).flatMap((entry) => {
+    if (typeof entry !== "object" || entry === null) {
+      return [];
+    }
+    const { path, status } = entry as { path?: unknown; status?: unknown };
+    if (typeof path !== "string" || path.length === 0) {
+      return [];
+    }
+    return status === "added" || status === "modified" || status === "deleted"
+      ? [{ path, status }]
+      : [];
+  });
+}
+
+/**
  * One channel line as a single line, for the two places a thread is read back
  * to a model — answering a follow-up, and carrying the thread into a task.
  * Both send one entry per bullet, so an entry that wraps over several lines
@@ -189,6 +221,16 @@ const AUDITOR_EVENT_BATCH = 25;
 const AUDIT_TIMEOUT_MS = 180_000;
 /** How long the opening line may take before a fixed one is used instead. */
 const ACKNOWLEDGEMENT_TIMEOUT_MS = 6000;
+/**
+ * Marks a busy frame sent before its task exists, so the agent starts typing
+ * when it is mentioned rather than when the coordinator answers.
+ *
+ * The id is the agent rather than a task because there is no task yet. The
+ * browser reads the same prefix (`noteAgentBusy`) to know that the real frame
+ * that follows replaces this one, and that this one has nothing but its own
+ * timeout to retire it — no task will ever carry the id.
+ */
+const PENDING_BUSY_PREFIX = "pending:";
 /**
  * A plain question deserves a real answer, so it waits properly.
  *
@@ -467,6 +509,27 @@ export function narrateTaskEvent(
       return typeof data["message"] === "string" && data["message"].length > 0
         ? String(data["message"]).slice(0, 300)
         : undefined;
+    case "workspace_changed": {
+      // Read off the worktree while the agent is still editing. This is the
+      // stretch that used to say nothing at all — a thread went quiet after
+      // "execution started" and stayed quiet for up to an hour, with no way
+      // to tell work from a hang.
+      //
+      // Only what moved since the last report, because that is what is new to
+      // the reader; the full set travels in the same event for the summary
+      // that hangs off the thread.
+      const changed = Array.isArray(data["changed"])
+        ? (data["changed"] as unknown[]).filter(
+            (entry): entry is string => typeof entry === "string",
+          )
+        : [];
+      if (changed.length === 0) {
+        return undefined;
+      }
+      return `Working on ${changed.slice(0, 3).join(", ")}${
+        changed.length > 3 ? ` and ${String(changed.length - 3)} more` : ""
+      }…`;
+    }
     case "changeset_collected":
       return files.length > 0
         ? `Wrote changes to ${files.slice(0, 4).join(", ")}${
@@ -546,6 +609,67 @@ export function narrateTaskEvent(
       return CHANNEL_TERMINAL_EVENTS[type];
   }
 }
+
+/**
+ * The single key one agent's channel override is stored under.
+ *
+ * `${userId}:${provider}` identifies an agent; a bare provider id identifies
+ * only a vendor, and every agent on that vendor answered to it. A bare id
+ * reaching a write can only be the caller's own agent — that is the sole
+ * shape `myAgents` in data.js mints, and a person manages nobody else's
+ * agents through that route — so it is resolved against them rather than
+ * left ambiguous.
+ */
+export function normalizeChannelAgentId(agentId: string, viewerId: string): string {
+  return agentId.includes(":") ? agentId : `${viewerId}:${agentId}`;
+}
+
+/**
+ * One agent's channel presentation, resolved from the overrides table.
+ *
+ * The precedence is the contract between this server and the browser: the
+ * name shown on screen has to be the name a mention is matched against, or
+ * people @mention what they can see and nothing answers. It lives here, is
+ * sent out resolved on the roster, and `channelAgentsFor` in data.js reads
+ * that rather than resolving a second time — two implementations of one
+ * order was exactly how the two came to disagree.
+ *
+ * Specific beats general: an override naming this one agent wins over a
+ * legacy bare-provider row that names every agent on the vendor.
+ */
+export function resolveChannelAgentPresentation(
+  overrides: Record<string, { name?: string; role?: string } | undefined>,
+  agent: { userId: string; provider: string },
+  defaultName: string,
+): { name: string; role: string } {
+  const specific = overrides[`${agent.userId}:${agent.provider}`];
+  const legacy = overrides[agent.provider];
+  return {
+    name: specific?.name ?? legacy?.name ?? defaultName,
+    // No vendor-guessed default: an agent is unlabeled until this channel
+    // actually names its role.
+    role: specific?.role ?? legacy?.role ?? "",
+  };
+}
+
+/**
+ * A request to change the machine rather than the repository.
+ *
+ * Narrow on purpose. It matches a system package manager being invoked —
+ * `apt-get install`, `brew install`, `yum install` — and nothing else,
+ * because that is the class that provably cannot work: the control plane
+ * runs unprivileged (the entrypoint drops to `node` before serving), so
+ * there is no root to install with, and a container is rebuilt from its image
+ * every deploy, so anything installed would not outlive the run that did it.
+ *
+ * Everything adjacent is left alone. "install the eslint plugin" edits
+ * package.json and is an ordinary change; guessing at intent from the word
+ * "install" would refuse real work, which is worse than the ten minutes this
+ * saves. A word list that refuses tasks has to be much more certain than one
+ * that merely routes them.
+ */
+const SYSTEM_PACKAGE_INSTALL_RE =
+  /\b(?:apt(?:-get)?|apk|yum|dnf|pacman|brew|choco)\s+(?:-\w+\s+)*install\b|\bsudo\s+(?:apt|apt-get|yum|dnf|apk)\b/iu;
 
 /** One connected agent an @mention (or an auto-claim) could resolve to. */
 type ChannelMentionCandidate = {
@@ -4349,6 +4473,151 @@ export class ApiGateway {
         "u",
       ),
     );
+    // Private mail, and so scoped to the project rather than a repository:
+    // people write to each other, not to a checkout.
+    const directInboxMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/projects/([^/]+)/direct-messages$`, "u"),
+    );
+    const directThreadMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/direct-messages/([^/]+)$`,
+        "u",
+      ),
+    );
+    const directReadMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/direct-messages/([^/]+)/read$`,
+        "u",
+      ),
+    );
+
+    if (directInboxMatch !== undefined) {
+      const [projectId = ""] = directInboxMatch;
+      if (method !== "GET") {
+        throw new HttpError(405, "method_not_allowed", "Unsupported method");
+      }
+      const project = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "view",
+      );
+      // The inbox and the roster in one call, because the screen that shows
+      // one always shows the other: a list of conversations is useless without
+      // the people you have not written to yet.
+      const [conversations, memberships, users] = await Promise.all([
+        this.options.store.listDirectConversations(projectId, principal.user.id),
+        this.options.store.listMemberships(project.project.organizationId),
+        this.options.store.listUsers(),
+      ]);
+      const byId = new Map(users.map((user) => [user.id, user]));
+      const present = new Set(this.webSockets.connectedUserIds(projectId));
+      this.sendJson(response, 200, {
+        conversations,
+        // Everyone who could be written to, with whether they are here now.
+        // Presence is read off the open sockets rather than a stored flag:
+        // see `connectedUserIds`.
+        people: memberships
+          .filter((membership) => membership.userId !== principal.user.id)
+          .map((membership) => {
+            const user = byId.get(membership.userId);
+            return {
+              id: membership.userId,
+              name: user?.displayName ?? "Someone",
+              role: membership.role,
+              online: present.has(membership.userId),
+            };
+          }),
+      });
+      return;
+    }
+
+    if (directReadMatch !== undefined) {
+      const [projectId = "", otherId = ""] = directReadMatch;
+      if (method !== "POST") {
+        throw new HttpError(405, "method_not_allowed", "Unsupported method");
+      }
+      await authorizeProject(this.options.store, principal, projectId, "view");
+      const marked = await this.options.store.markDirectMessagesRead(
+        projectId,
+        principal.user.id,
+        otherId,
+        new Date().toISOString(),
+      );
+      this.sendJson(response, 200, { marked });
+      return;
+    }
+
+    if (directThreadMatch !== undefined) {
+      const [projectId = "", otherId = ""] = directThreadMatch;
+      const project = await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "view",
+      );
+      // Both ends have to be real people in this organization. Without this a
+      // signed-in person could open a conversation against any id at all —
+      // writing to somebody in another organization, or filling the table with
+      // messages addressed to nobody.
+      if (otherId === principal.user.id) {
+        throw new HttpError(
+          400,
+          "invalid_recipient",
+          "A direct message needs two people",
+        );
+      }
+      const membership = await this.options.store.getMembership(
+        project.project.organizationId,
+        otherId,
+      );
+      if (membership === undefined) {
+        throw new HttpError(404, "not_found", "That person was not found");
+      }
+      if (method === "GET") {
+        const limit = Math.min(
+          200,
+          Math.max(1, Number.parseInt(url.searchParams.get("limit") ?? "50", 10)),
+        );
+        const before = url.searchParams.get("before") ?? undefined;
+        const messages = await this.options.store.listDirectMessages(
+          projectId,
+          principal.user.id,
+          otherId,
+          { limit, ...(before === undefined ? {} : { before }) },
+        );
+        this.sendJson(response, 200, { messages });
+        return;
+      }
+      if (method !== "POST") {
+        throw new HttpError(405, "method_not_allowed", "Unsupported method");
+      }
+      const body = objectBody(await this.readJson(request));
+      // min:1 so an empty message is a 400 here rather than a throw from the
+      // store, which would surface as a 500.
+      const content =
+        stringField(body["content"], "content", { min: 1, max: 8000 }) ?? "";
+      const message = await this.options.store.appendDirectMessage({
+        projectId,
+        authorId: principal.user.id,
+        recipientId: otherId,
+        content,
+      });
+      // To the two of them and nobody else, and not through the audit stream:
+      // that log is replayed to every subscriber of the project, which is the
+      // one place a private message must never be written.
+      this.webSockets.sendToUsers(projectId, [principal.user.id, otherId], {
+        type: "direct-message",
+        projectId,
+        message,
+        authorName: principal.user.displayName,
+      });
+      this.sendJson(response, 201, { message });
+      return;
+    }
     if (channelTypingMatch !== undefined) {
       const [projectId = "", repositoryId = ""] = channelTypingMatch;
       if (method !== "POST") {
@@ -4653,6 +4922,8 @@ export class ApiGateway {
         projectId,
         repositoryId,
       );
+      const rosterOverrides =
+        await this.options.store.listChannelAgentOverrides(repositoryId);
       const agents = connections.map((connection) => ({
         userId: connection.userId,
         // The display name only — never the email `publicUser` would also
@@ -4660,6 +4931,18 @@ export class ApiGateway {
         // agent, not a contact address for the person behind it.
         userName: connection.userName,
         provider: connection.provider,
+        // Resolved here rather than left to the browser. The name on screen
+        // has to be the name a mention is matched against — resolving the
+        // same overrides twice, in two places, is how the screen came to show
+        // one name while the server answered to another, so that a rename
+        // produced silence and an old name still worked.
+        ...resolveChannelAgentPresentation(
+          rosterOverrides,
+          connection,
+          `${AGENT_LABEL[connection.provider] ?? connection.provider} (${firstWord(
+            connection.userName,
+          )})`,
+        ),
         // Whether anyone besides its owner may @mention it into real work —
         // see `CredentialVisibility`. Metadata, not a secret; safe for every
         // repository collaborator to see, same as the vendor name itself.
@@ -4786,7 +5069,20 @@ export class ApiGateway {
       ),
     );
     if (channelAgentMatch !== undefined && method === "POST") {
-      const [projectId = "", repositoryId = "", agentId = ""] = channelAgentMatch;
+      const [projectId = "", repositoryId = "", rawAgentId = ""] =
+        channelAgentMatch;
+      // Stored under the one key that identifies a single agent.
+      //
+      // A bare provider id ("anthropic") is what `myAgents` in data.js mints
+      // for *this account's own* agents, so it names a provider and not an
+      // agent — and the reader applied it to every agent on that provider.
+      // One person renaming their own Claude therefore renamed everybody's
+      // Claude in that channel, and their role label travelled with it.
+      //
+      // The bare form still resolves on read, because rows written before
+      // this exist and would otherwise silently lose their names. It is
+      // simply never written again.
+      const agentId = normalizeChannelAgentId(rawAgentId, principal.user.id);
       await authorizeRepository(
         this.options.store,
         principal,
@@ -6118,23 +6414,11 @@ export class ApiGateway {
       }
       const label = AGENT_LABEL[connection.provider] ?? connection.provider;
       const defaultName = `${label} (${firstWord(connection.userName)})`;
-      // Two possible override keys, matching the two shapes `data.js` mints
-      // an `agent.id` with: the bare provider id when the credential's own
-      // owner is renaming their own agent (`myAgents`'s `id: provider.id`),
-      // or `${userId}:${provider}` when anyone else is renaming a teammate's
-      // (`channelAgentsFor`'s `others`). Both are checked because either can
-      // be the one actually stored, depending on who renamed it.
-      const name =
-        overrides[`${connection.userId}:${connection.provider}`]?.name ??
-        overrides[connection.provider]?.name ??
-        defaultName;
-      // Same two-key lookup as `name` just above. No vendor-wide default: an
-      // agent is unlabeled ("") until this channel actually names its role,
-      // mirroring `withOverride` in data.js.
-      const role =
-        overrides[`${connection.userId}:${connection.provider}`]?.role ??
-        overrides[connection.provider]?.role ??
-        "";
+      const { name, role } = resolveChannelAgentPresentation(
+        overrides,
+        connection,
+        defaultName,
+      );
       return [{ ...connection, vendor, name, role }];
     });
     return candidates.sort((a, b) => b.name.length - a.name.length);
@@ -6346,6 +6630,30 @@ export class ApiGateway {
       );
       return;
     }
+    // Typing starts here, at the moment the agent is chosen, rather than once
+    // there is a task to hang it on.
+    //
+    // Everything below this line is slow in a way the channel used to hide.
+    // Composing the acknowledgement is a model call with a six-second timeout,
+    // and answering a question is another one; until the first of them lands
+    // there is no message, no thread and no indicator. A person who has just
+    // asked for something watches an empty room for several seconds and
+    // reasonably concludes they were ignored — which is the one thing the
+    // acknowledgement was written to prevent, and it cannot, because it is
+    // itself the thing being waited on.
+    //
+    // No task exists yet, so this is keyed on the agent instead. The frame
+    // below carries the real id and supersedes it; the question path never
+    // submits anything, and lets it lapse.
+    this.webSockets.broadcastTransient(projectId, {
+      type: "channel-agent-busy",
+      projectId,
+      repositoryId,
+      userId: candidate.userId,
+      provider: candidate.provider,
+      taskId: `${PENDING_BUSY_PREFIX}${candidate.userId}:${candidate.provider}`,
+      occurredAt: new Date().toISOString(),
+    });
     // A question is not a task. "What are you working on?" was being turned
     // into a submitted task named after the question, with a thread and a
     // progress indicator attached to work that would never exist — the agent
@@ -6366,6 +6674,32 @@ export class ApiGateway {
     // still arrives as one line in the channel.
     if (readsAsQuestion(content) && !needsTheRepository(content)) {
       await this.answerInChannel(candidate, content, projectId, repositoryId);
+      return;
+    }
+
+    // Asked to change the machine rather than the repository.
+    //
+    // Said in seconds, because the alternative is what actually happened: a
+    // task planned no files, negotiated scope it could never use, and was
+    // cancelled ten minutes later with "session cancelled" — which describes
+    // the mechanism and not one thing the reader could do about it.
+    //
+    // It names the file, because that is the real answer. The runtime is
+    // declared in the image, the image is in this repository, and changing it
+    // is an ordinary task this agent can take.
+    if (SYSTEM_PACKAGE_INSTALL_RE.test(content)) {
+      await this.appendChannelEntry({
+        projectId,
+        repositoryId,
+        kind: "agent",
+        authorId: `${candidate.userId}:${candidate.provider}`,
+        content:
+          `I can't install system packages here — I run unprivileged, and ` +
+          `this container is rebuilt from its image on every deploy, so ` +
+          `anything I installed would be gone by the next task. The runtime ` +
+          `is declared in \`infrastructure/docker/control-plane.Dockerfile\`, ` +
+          `which is in this repository — ask me to add it there and it sticks.`,
+      });
       return;
     }
 
@@ -6521,6 +6855,12 @@ export class ApiGateway {
       // The thread gets a name and the agent's own opening reasoning, both
       // from one call so the wait is paid once. A task id says nothing to the
       // person who asked; "Task: architecture for chess" does.
+      // Which work this thread is the story of. Recorded rather than only
+      // remembered, so the file summary hanging off it stays attributable
+      // after the process that watched the run has gone.
+      await this.options.store
+        .setChannelMessageTask(repositoryId, acknowledgement.id, task.id)
+        .catch(() => undefined);
       const opening = await this.planOpening(candidate, task.objective);
       // Held rather than posted. Writing the title and reasoning here is what
       // made every task a thread, including "change this 1 to a 2" — the
@@ -7772,6 +8112,32 @@ export class ApiGateway {
               provider: watched.provider,
               reason: "The sign-in has expired. Reconnect this agent.",
             }).catch(() => undefined);
+          }
+          // The summary that hangs off the thread, kept up to date as the run
+          // reports. Written before the narration decision below, because it
+          // is worth having whether or not this particular event produces a
+          // line — a task whose only change is one already reported still has
+          // a file list worth showing.
+          //
+          // The whole set is stored each time rather than merged, because the
+          // run reports the whole set: a file can go from added to modified,
+          // or stop being changed at all when an agent reverts itself, and
+          // accumulating deltas here would leave the thread claiming edits
+          // that no longer exist.
+          if (
+            record.event.type === "workspace_changed" ||
+            record.event.type === "changeset_collected"
+          ) {
+            const files = changedFilesFrom(data);
+            if (files.length > 0) {
+              await this.options.store
+                .setChannelMessageChangedFiles(
+                  watched.repositoryId,
+                  watched.messageId,
+                  files,
+                )
+                .catch(() => undefined);
+            }
           }
           const line = narrateTaskEvent(record.event.type, data);
           if (line === undefined) {

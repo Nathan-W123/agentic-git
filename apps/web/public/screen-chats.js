@@ -25,6 +25,11 @@ import {
   channelMessagesFor,
   typingOn,
   agentsThinkingIn,
+  agentStatus,
+  personOnline,
+  dmUnreadFrom,
+  currentUserId,
+  memberName,
   channelParticipants,
   channelUnreadCount,
   activeChannelId,
@@ -240,18 +245,50 @@ function usageTip(agent) {
  * name exactly where an agent's does — theirs is what they were granted here,
  * which is the same question being answered in both cases.
  */
+/**
+ * The coloured dot on an avatar.
+ *
+ * One element and one class rather than a colour computed here, so the meaning
+ * of each colour lives in the stylesheet with the rest of the palette and the
+ * two rosters cannot drift apart on what green means.
+ */
+function statusDot(status, title) {
+  return `<span class="status-dot status-${status}" title="${esc(title)}"></span>`;
+}
+
 function personRow(person) {
   const name = person.user?.displayName ?? person.user?.email ?? "Someone";
   const role = String(person.role ?? "").trim();
+  const userId = person.user?.id ?? person.userId ?? "";
+  const me = userId === currentUserId();
+  const online = personOnline(userId);
+  const unread = dmUnreadFrom(userId);
+  // Writing to yourself is not a conversation, so your own row is a label
+  // rather than a button — everyone else's opens the thread with them.
   return `<div class="roster-row">
-    <div class="roster-row-main">
-      <span class="rr-avatar">${avatar(name, 30)}</span>
+    <div class="roster-row-main"${
+      me
+        ? ""
+        : ` role="button" tabindex="0" data-act="dm-open" data-value="${esc(userId)}"`
+    }>
+      <span class="rr-avatar">
+        ${avatar(name, 30)}
+        ${
+          me
+            ? ""
+            : statusDot(
+                online ? "working" : "away",
+                online ? `${name} is here` : `${name} is away`,
+              )
+        }
+      </span>
       <span class="rr-body">
-        <div class="rr-name">${esc(name)}</div>
+        <div class="rr-name">${esc(name)}${me ? " (you)" : ""}</div>
         <div class="rr-role${role ? "" : " rr-role-empty"}">${
           role === "" ? "No role set" : esc(role)
         }</div>
       </span>
+      ${unread > 0 ? `<span class="rr-badge">${unread}</span>` : ""}
     </div>
   </div>`;
 }
@@ -263,19 +300,40 @@ function isAuditor(agent) {
   return (agent.role ?? "").trim().toLowerCase() === AUDITOR_ROLE;
 }
 
+const AGENT_STATUS_TITLE = {
+  working: "Working now",
+  idle: "Idle",
+  personal: "Personal agent — only its owner can task it here",
+};
+
 function rosterRow(agent, canModerate) {
   const renaming = state.chatRenamingId === agent.id;
   const settingsOpen = state.chatSettingsOpenId === agent.id;
   const auditor = isAuditor(agent);
   const paused = state.auditorPaused[activeChannelId()] === true;
+  const status = agentStatus(agent, activeChannelId());
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
       data-act="channel-settings-toggle" data-value="${esc(agent.id)}">
       <span class="rr-avatar" data-hover="agent-usage"
         data-hover-value="${esc(agent.id)}" tabindex="0"
-        aria-label="Usage for ${esc(agent.name)}">
+        ${
+          // Your own agent is talked to one to one, not by mentioning it in
+          // the room — the group channel is for work everyone should see. The
+          // act sits on the avatar rather than the row so it wins over the
+          // row's settings toggle without taking the rest of the row with it.
+          agent.mine
+            ? `data-act="agent-chat-open" data-value="${esc(agent.id)}"`
+            : ""
+        }
+        aria-label="${
+          agent.mine
+            ? `Message ${esc(agent.name)}`
+            : `Usage for ${esc(agent.name)}`
+        }">
         ${usageTip(agent)}
         ${agentFace(agent, 30)}
+        ${statusDot(status, AGENT_STATUS_TITLE[status])}
       </span>
       <span class="rr-body">
         <div class="rr-name">${esc(agent.name)}</div>
@@ -552,6 +610,49 @@ function threadSummaryLink(entry, replies, repositoryId) {
     </button>`;
 }
 
+/**
+ * What the work under this thread changed, collapsed.
+ *
+ * The narration says "wrote changes to a.ts, b.ts and 2 more" once, in
+ * passing, and it scrolls away — so a thread could describe work in detail
+ * and still leave nobody able to answer "what did it actually touch?".
+ *
+ * A `<details>` rather than anything scripted: it remembers nothing, needs no
+ * state, and a reader who does not care never sees the list. Closed by
+ * default, because the answer most people want is the count.
+ *
+ * Ordered by what happened rather than alphabetically — new files first, then
+ * edits, then deletions — since that is the order somebody reviewing a change
+ * reads it in.
+ */
+const CHANGED_FILE_MARK = { added: "+", modified: "~", deleted: "−" };
+const CHANGED_FILE_ORDER = { added: 0, modified: 1, deleted: 2 };
+
+function changedFilesBlock(entry) {
+  const files = Array.isArray(entry.changedFiles) ? entry.changedFiles : [];
+  if (files.length === 0) {
+    return "";
+  }
+  const rows = [...files]
+    .sort(
+      (left, right) =>
+        (CHANGED_FILE_ORDER[left.status] ?? 3) -
+          (CHANGED_FILE_ORDER[right.status] ?? 3) ||
+        String(left.path).localeCompare(String(right.path)),
+    )
+    .map(
+      (file) =>
+        `<li class="cmsg-file ${esc(file.status)}"><span class="cmsg-file-mark">${
+          CHANGED_FILE_MARK[file.status] ?? "~"
+        }</span><span class="cmsg-file-path">${esc(file.path)}</span></li>`,
+    )
+    .join("");
+  return `<details class="cmsg-changes">
+    <summary>${files.length} file${files.length === 1 ? "" : "s"} changed</summary>
+    <ul class="cmsg-files">${rows}</ul>
+  </details>`;
+}
+
 function messageRow(entry, repositoryId, { isReply = false } = {}) {
   const author = channelAuthor(repositoryId, entry);
   // System messages are the coordinator narrating, not a participant in the
@@ -576,6 +677,7 @@ function messageRow(entry, repositoryId, { isReply = false } = {}) {
         <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
       </div>
       <div class="cmsg-text">${esc(entry.content)}</div>
+      ${changedFilesBlock(entry)}
       ${
         reactions.length === 0
           ? ""
@@ -1000,6 +1102,61 @@ function threadListPanel(repositoryId) {
               .join("")
       }
     </div>
+  </aside>`;
+}
+
+/**
+ * A conversation with one person, in the panel a thread would otherwise use.
+ *
+ * The same slot on purpose. A direct message and a thread are both "the thing
+ * you stepped aside into", and giving each its own region would mean two
+ * panels competing for the same space and a reader having to work out which
+ * one they are looking at.
+ */
+function dmPanel() {
+  const userId = state.activeDm;
+  if (userId === undefined) {
+    return "";
+  }
+  const person = state.dmPeople.find((candidate) => candidate.id === userId);
+  const name = person?.name ?? memberName(userId) ?? "Someone";
+  const messages = state.dmThreads[userId] ?? [];
+  const online = personOnline(userId);
+  return `<aside class="thread-panel">
+    ${panelGrip()}
+    <header class="thread-head">
+      <span class="dm-head-name">
+        ${avatar(name, 20)}
+        ${esc(name)}
+        ${statusDot(online ? "working" : "away", online ? "Here" : "Away")}
+      </span>
+      <span class="spacer"></span>
+      ${iconButton("close", { act: "dm-close", title: "Close conversation" })}
+    </header>
+    <div class="thread-body dm-body">
+      ${
+        messages.length === 0
+          ? `<p class="dm-empty">No messages yet. This conversation is just
+             between you and ${esc(name)} — it is not in the channel.</p>`
+          : messages
+              .map((message) => {
+                const mine = message.authorId === currentUserId();
+                return `<div class="dm-msg${mine ? " dm-mine" : ""}">
+                  <div class="dm-bubble">${esc(message.content)}</div>
+                  <time class="dm-time">${esc(clockTime(message.createdAt))}</time>
+                </div>`;
+              })
+              .join("")
+      }
+    </div>
+    <form class="composer" data-act="dm-submit" style="margin:0 12px 12px">
+      <textarea data-act="dm-input" rows="1"
+        placeholder="Message ${esc(name)}...">${esc(state.dmDraft)}</textarea>
+      <div class="composer-bar">
+        <span class="spacer"></span>
+        <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
+      </div>
+    </form>
   </aside>`;
 }
 
@@ -1451,7 +1608,12 @@ export function renderChats() {
       ${state.termOpen ? terminalDrawer() : ""}
     </div>
     ${
-      state.chanFileView !== undefined
+      // A conversation opened by tapping somebody takes the panel: it is the
+      // most recent thing the reader asked for, and the thread they were in
+      // is still where they left it when they close this.
+      state.activeDm !== undefined
+        ? dmPanel()
+        : state.chanFileView !== undefined
         ? filePanel()
         : state.chanTree === true
           ? chanTreePanel(repositoryId)

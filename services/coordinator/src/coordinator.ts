@@ -36,6 +36,7 @@ import {
   type ConflictAssessment,
   type CoordinationRunResult,
   type CoordinatorDecision,
+  type FilePatchStatus,
   type ReplanRequest,
   type ScopeChangeDecision,
   type ScopeChangeRequest,
@@ -146,7 +147,20 @@ export interface CoordinatorDependencies {
    * behaviour, in which any collision cost a full replan.
    */
   repairConflicts?: boolean;
+  /**
+   * How often the worktree is read while an agent edits, to report what it
+   * has touched (see `watchWorkingChanges`).
+   *
+   * Each tick is two read-only git calls against one worktree. Ten seconds
+   * is responsive enough that a thread looks alive without making the poll
+   * itself a noticeable share of a run's work; a test that wants determinism
+   * sets its own.
+   */
+  workingChangePollMs?: number;
 }
+
+/** See {@link CoordinatorDependencies.workingChangePollMs}. */
+const DEFAULT_WORKING_CHANGE_POLL_MS = 10_000;
 
 export class Coordinator {
   private readonly repositories: RepositoryService;
@@ -160,6 +174,7 @@ export class Coordinator {
   private readonly audit: InMemoryAuditLog;
   private readonly store: CoordinationStore | undefined;
   private readonly repairConflicts: boolean;
+  private readonly workingChangePollMs: number;
 
   public constructor(dependencies: CoordinatorDependencies = {}) {
     this.repositories = dependencies.repositories ?? new RepositoryService();
@@ -176,6 +191,8 @@ export class Coordinator {
       new CodeIntelligenceService(this.repositories);
     this.approvalPolicy = dependencies.approvalPolicy ?? new ApprovalPolicy();
     this.repairConflicts = dependencies.repairConflicts ?? true;
+    this.workingChangePollMs =
+      dependencies.workingChangePollMs ?? DEFAULT_WORKING_CHANGE_POLL_MS;
     this.store = dependencies.store;
     this.approvals =
       dependencies.approvals ??
@@ -1021,12 +1038,34 @@ export class Coordinator {
             }
           });
       });
-      await entry.adapter.sendContext(entry.session.id, {
-        decision: entry.decision,
-        canonicalVersion: waveVersion,
-        workspacePath: workspace.path,
-        planRevision: entry.planRevision,
-      });
+      // The one stretch of a run that says nothing.
+      //
+      // Everything either side of this reports: planning, admission,
+      // collection, validation. `sendContext` is a single await around the
+      // agent's whole edit phase — up to an hour — and the adapters emit
+      // nothing inside it, so a thread went quiet after "execution started"
+      // and stayed quiet until the run ended. There was no way to tell work
+      // from a hang.
+      //
+      // Read from the worktree rather than from the agent: it is what is
+      // actually true on disk, it needs no cooperation from any vendor CLI,
+      // and it works the same for every adapter.
+      const watching = this.watchWorkingChanges(
+        workspace,
+        entry.task.id,
+        recorder,
+        runAudit,
+      );
+      try {
+        await entry.adapter.sendContext(entry.session.id, {
+          decision: entry.decision,
+          canonicalVersion: waveVersion,
+          workspacePath: workspace.path,
+          planRevision: entry.planRevision,
+        });
+      } finally {
+        await watching.stop();
+      }
       await eventChain;
       if (eventErrors.length > 0) {
         throw new AggregateError(
@@ -1055,6 +1094,15 @@ export class Coordinator {
         {
           changeSetId: changeSet.id,
           files: changeSet.patches.map((patch) => patch.path),
+          // The same list with what happened to each file. `files` stays as
+          // it is because the narration reads it; this is the authoritative
+          // final set for the summary that hangs off the thread, which the
+          // live poll can only approximate — it stops when the agent does,
+          // and the last edits land between its final tick and this.
+          changedFiles: changeSet.patches.map((patch) => ({
+            path: patch.path,
+            status: patch.status,
+          })),
         },
       );
 
@@ -1700,6 +1748,82 @@ export class Coordinator {
       );
     }
     return taskResult;
+  }
+
+  /**
+   * Reports what the agent is touching, on a timer, while it edits.
+   *
+   * Only differences are written. A run that spends twenty minutes reading
+   * before its first edit would otherwise post the same empty list a hundred
+   * times, and a thread of identical lines is no more informative than
+   * silence — it is just louder. The first tick with anything in it reports
+   * everything; each one after that reports only what is new or has changed
+   * status.
+   *
+   * Never allowed to disturb the run. A workspace that cannot be read (a
+   * manager with no cheap answer, a git call that fails under load, a
+   * worktree already destroyed) simply skips that tick: this exists to
+   * describe the work, and describing it must not be able to stop it.
+   */
+  private watchWorkingChanges(
+    workspace: TaskWorkspace,
+    taskId: string,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): { stop: () => Promise<void> } {
+    const list = this.workspaces.listWorkingChanges?.bind(this.workspaces);
+    if (list === undefined) {
+      return { stop: async () => undefined };
+    }
+    const reported = new Map<string, FilePatchStatus>();
+    let inFlight: Promise<void> = Promise.resolve();
+    let stopped = false;
+
+    const tick = async (): Promise<void> => {
+      if (stopped) {
+        return;
+      }
+      let changes: Array<{ path: string; status: FilePatchStatus }>;
+      try {
+        changes = await list(workspace);
+      } catch {
+        return;
+      }
+      const fresh = changes.filter(
+        (change) => reported.get(change.path) !== change.status,
+      );
+      if (fresh.length === 0) {
+        return;
+      }
+      for (const change of fresh) {
+        reported.set(change.path, change.status);
+      }
+      // The whole set, not just what moved: a reader arriving late, and the
+      // channel summary this feeds, both want the current state of the work
+      // rather than a diff they would have to accumulate themselves.
+      await this.trace(recorder, runAudit, "workspace_changed", taskId, {
+        files: changes.map((change) => ({
+          path: change.path,
+          status: change.status,
+        })),
+        changed: fresh.map((change) => change.path),
+      }).catch(() => undefined);
+    };
+
+    const timer = setInterval(() => {
+      inFlight = inFlight.then(tick);
+    }, this.workingChangePollMs);
+    timer.unref?.();
+
+    return {
+      stop: async () => {
+        stopped = true;
+        clearInterval(timer);
+        // Whatever the last tick was mid-way through, so a stop cannot leave
+        // a trace being written into a run that has already moved on.
+        await inFlight.catch(() => undefined);
+      },
+    };
   }
 
   private async trace(

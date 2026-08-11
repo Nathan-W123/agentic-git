@@ -51,7 +51,12 @@ import type {
   ChannelAgentOverride,
   ChannelEntryKind,
   ChannelMessage,
+  ChannelChangedFile,
   ChannelMessageFilter,
+  AppendDirectMessageInput,
+  DirectConversation,
+  DirectMessage,
+  DirectMessageFilter,
   ChannelReaction,
   ChannelReply,
   AuditArchiveResult,
@@ -86,7 +91,7 @@ import type {
   UserAccount,
   UserAppearance,
 } from "./store.js";
-import { repositoryConflicts } from "./store.js";
+import { directPairKey, repositoryConflicts } from "./store.js";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
@@ -128,6 +133,10 @@ interface StoredChannelMessage {
   createdAt: string;
   /** Where it sits, once continuing a thread has moved it. */
   bumpedAt?: string;
+  /** The task this thread is the story of, when it is one. */
+  taskId?: TaskId;
+  /** What that task changed, kept with the thread. */
+  changedFiles?: ChannelChangedFile[];
   replies: StoredChannelReply[];
   /** Emoji to the set of user ids who reacted with it. */
   reactions: Map<string, Set<string>>;
@@ -195,6 +204,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly approvals = new Map<string, ApprovalRequest>();
   private readonly comments = new Map<string, ChangesetComment>();
   private readonly channelMessages = new Map<string, StoredChannelMessage>();
+  private readonly directMessages = new Map<string, DirectMessage>();
   /** Keyed by `repositoryId\0agentId`. */
   private readonly channelAgentOverrides = new Map<string, ChannelAgentOverride>();
   /** Keyed by `repositoryId\0userId\0provider`. */
@@ -1851,7 +1861,33 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       createdAt: message.createdAt,
       replies: copy(message.replies),
       reactions,
+      taskId: message.taskId,
+      changedFiles: message.changedFiles,
     };
+  }
+
+  public async setChannelMessageChangedFiles(
+    repositoryId: string,
+    messageId: string,
+    files: readonly ChannelChangedFile[],
+  ): Promise<void> {
+    const message = this.channelMessages.get(messageId);
+    if (message === undefined || message.repositoryId !== repositoryId) {
+      return;
+    }
+    message.changedFiles = [...files];
+  }
+
+  public async setChannelMessageTask(
+    repositoryId: string,
+    messageId: string,
+    taskId: TaskId,
+  ): Promise<void> {
+    const message = this.channelMessages.get(messageId);
+    if (message === undefined || message.repositoryId !== repositoryId) {
+      return;
+    }
+    message.taskId = taskId;
   }
 
   private channelAgentKey(repositoryId: string, agentId: string): string {
@@ -1941,9 +1977,122 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       createdAt: new Date().toISOString(),
       replies: [],
       reactions: new Map(),
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
     };
     this.channelMessages.set(message.id, message);
     return this.toPublicChannelMessage(message, input.authorId);
+  }
+
+  public async appendDirectMessage(
+    input: AppendDirectMessageInput,
+  ): Promise<DirectMessage> {
+    const content = input.content.trim();
+    if (content.length === 0) {
+      throw new Error("A direct message must have content");
+    }
+    if (input.authorId === input.recipientId) {
+      throw new Error("A direct message needs two people");
+    }
+    const message: DirectMessage = {
+      id: createId("dm"),
+      projectId: input.projectId,
+      authorId: input.authorId,
+      recipientId: input.recipientId,
+      content,
+      createdAt: new Date().toISOString(),
+    };
+    this.directMessages.set(message.id, message);
+    return { ...message };
+  }
+
+  public async listDirectMessages(
+    projectId: ProjectId,
+    viewerId: string,
+    otherId: string,
+    filter: DirectMessageFilter = {},
+  ): Promise<DirectMessage[]> {
+    const pair = directPairKey(viewerId, otherId);
+    const thread = [...this.directMessages.values()]
+      .filter(
+        (message) =>
+          message.projectId === projectId &&
+          directPairKey(message.authorId, message.recipientId) === pair &&
+          (filter.before === undefined || message.createdAt < filter.before),
+      )
+      // Timestamps are milliseconds and ids are random, so two messages sent
+      // in the same millisecond have no natural order. The id is not a
+      // meaningful tiebreak, but it is a stable one, and the SQL stores order
+      // the same way — a conversation that reads differently depending on
+      // which backend served it would be worse than an arbitrary order.
+      .sort(
+        (left, right) =>
+          left.createdAt.localeCompare(right.createdAt) ||
+          left.id.localeCompare(right.id),
+      );
+    // The page is the newest `limit`, returned oldest-first: a conversation is
+    // read from the bottom, so paging backwards has to take from the end and
+    // then restore reading order, not take the first rows it finds.
+    const page =
+      filter.limit === undefined ? thread : thread.slice(-filter.limit);
+    return page.map((message) => ({ ...message }));
+  }
+
+  public async listDirectConversations(
+    projectId: ProjectId,
+    viewerId: string,
+  ): Promise<DirectConversation[]> {
+    const byCorrespondent = new Map<string, DirectConversation>();
+    const mine = [...this.directMessages.values()]
+      .filter(
+        (message) =>
+          message.projectId === projectId &&
+          (message.authorId === viewerId || message.recipientId === viewerId),
+      )
+      .sort(
+        (left, right) =>
+          left.createdAt.localeCompare(right.createdAt) ||
+          left.id.localeCompare(right.id),
+      );
+    for (const message of mine) {
+      const other =
+        message.authorId === viewerId ? message.recipientId : message.authorId;
+      const existing = byCorrespondent.get(other);
+      const unread =
+        (existing?.unread ?? 0) +
+        (message.recipientId === viewerId && message.readAt === undefined
+          ? 1
+          : 0);
+      // Ascending, so the last one seen for a correspondent is the latest.
+      byCorrespondent.set(other, {
+        userId: other,
+        lastMessage: { ...message },
+        unread,
+      });
+    }
+    return [...byCorrespondent.values()].sort((left, right) =>
+      right.lastMessage.createdAt.localeCompare(left.lastMessage.createdAt),
+    );
+  }
+
+  public async markDirectMessagesRead(
+    projectId: ProjectId,
+    viewerId: string,
+    otherId: string,
+    at: string,
+  ): Promise<number> {
+    let marked = 0;
+    for (const message of this.directMessages.values()) {
+      if (
+        message.projectId === projectId &&
+        message.recipientId === viewerId &&
+        message.authorId === otherId &&
+        message.readAt === undefined
+      ) {
+        message.readAt = at;
+        marked += 1;
+      }
+    }
+    return marked;
   }
 
   public async addChannelReply(

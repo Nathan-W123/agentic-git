@@ -65,6 +65,11 @@ class TestAgent implements AgentAdapter {
     private readonly scopePath?: string,
     /** What the agent says it found, when the finding is the deliverable. */
     private readonly reportText?: string,
+    /**
+     * How long the edit phase lingers after writing, so a test can observe
+     * what is reported *while* an agent works rather than only afterwards.
+     */
+    private readonly editLingerMs = 0,
   ) {}
 
   public async getCapabilities(): Promise<AgentCapabilities> {
@@ -143,6 +148,11 @@ class TestAgent implements AgentAdapter {
         `${this.plan.taskId}\n`,
         "utf8",
       );
+    }
+    if (this.editLingerMs > 0) {
+      // Standing in for the long edit phase a real CLI spends here — the one
+      // stretch of a run that reported nothing.
+      await new Promise((resolve) => setTimeout(resolve, this.editLingerMs));
     }
   }
 
@@ -879,6 +889,106 @@ test("a promoted change carries the agent's own account of it", async () => {
     assert.deepEqual(data["files"], ["src/a.txt"]);
     // The revisions stay: they are what makes the claim checkable later.
     assert.equal(typeof data["revision"], "string");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a run reports what it is touching while it is still touching it", async () => {
+  // The one stretch of a run that said nothing. `sendContext` is a single
+  // await around the agent's whole edit phase — up to an hour — and no
+  // adapter emits inside it, so a thread went quiet after "execution started"
+  // and stayed quiet until the run ended. Work and a hang looked identical.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      false,
+      undefined,
+      undefined,
+      // Long enough for several polls at the interval set below.
+      400,
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+      workingChangePollMs: 25,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "integrated");
+    const live = result.audit.filter(
+      (event) => event.type === "workspace_changed",
+    );
+    assert.ok(live.length > 0, "the edit phase reported nothing");
+    const data = live[0]?.data as Record<string, unknown>;
+    // The whole current set, so a reader arriving late does not have to
+    // accumulate a diff of its own...
+    assert.deepEqual(data["files"], [{ path: "src/a.txt", status: "modified" }]);
+    // ...and what moved since the last report, which is what the channel says
+    // out loud.
+    assert.deepEqual(data["changed"], ["src/a.txt"]);
+
+    // Reported once, not on every tick: a file that has not moved since the
+    // last report is not news, and a thread of identical lines is no more
+    // informative than silence.
+    assert.equal(live.length, 1, JSON.stringify(live.map((e) => e.data)));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an untracked file the agent creates is reported as added", async () => {
+  // Untracked files are invisible to `git diff` until they are staged, and
+  // staging is precisely what a poll must not do — `collectChangeSet` stages
+  // with `--intent-to-add`, and running that on a timer underneath a live
+  // agent writes to the index of a worktree somebody is editing.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/new-file.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/new-file.txt",
+      false,
+      undefined,
+      undefined,
+      400,
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store: new InMemoryCoordinationStore(),
+      workingChangePollMs: 25,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    const live = result.audit.filter(
+      (event) => event.type === "workspace_changed",
+    );
+    assert.ok(live.length > 0, "a new file was never reported");
+    assert.deepEqual((live[0]?.data as Record<string, unknown>)["files"], [
+      { path: "src/new-file.txt", status: "added" },
+    ]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

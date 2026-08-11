@@ -56,7 +56,12 @@ import type {
   ChannelAgentOverride,
   ChannelEntryKind,
   ChannelMessage,
+  ChannelChangedFile,
   ChannelMessageFilter,
+  AppendDirectMessageInput,
+  DirectConversation,
+  DirectMessage,
+  DirectMessageFilter,
   ChannelReaction,
   ChannelReply,
   AuditArchiveResult,
@@ -101,7 +106,11 @@ import type {
   WorkLeaseStatus,
   WorkerRecord,
 } from "./store.js";
-import { repositoryConflicts } from "./store.js";
+import {
+  directPairKey,
+  parseChangedFiles,
+  repositoryConflicts,
+} from "./store.js";
 import { DEFAULT_PROJECT_ID, sameLeaseIdSet } from "./store.js";
 
 const { Pool } = pg;
@@ -2952,8 +2961,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
     };
     await this.query(
       `INSERT INTO channel_messages
-         (id, repository_id, project_id, kind, author_id, content, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+         (id, repository_id, project_id, kind, author_id, content, created_at,
+          task_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
       [
         message.id,
         message.repositoryId,
@@ -2962,9 +2972,136 @@ export class PostgresCoordinationStore implements CoordinationStore {
         message.authorId,
         message.content,
         message.createdAt,
+        input.taskId ?? null,
       ],
     );
-    return { ...message, replies: [], reactions: {} };
+    return {
+      ...message,
+      replies: [],
+      reactions: {},
+      taskId: input.taskId,
+      changedFiles: undefined,
+    };
+  }
+
+  public async appendDirectMessage(
+    input: AppendDirectMessageInput,
+  ): Promise<DirectMessage> {
+    const content = input.content.trim();
+    if (content.length === 0) {
+      throw new Error("A direct message must have content");
+    }
+    if (input.authorId === input.recipientId) {
+      throw new Error("A direct message needs two people");
+    }
+    const message: DirectMessage = {
+      id: createId("dm"),
+      projectId: input.projectId,
+      authorId: input.authorId,
+      recipientId: input.recipientId,
+      content,
+      createdAt: new Date().toISOString(),
+    };
+    await this.query(
+      `INSERT INTO direct_messages
+         (id, project_id, pair_key, author_id, recipient_id, content,
+          created_at, read_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NULL)`,
+      [
+        message.id,
+        message.projectId,
+        directPairKey(message.authorId, message.recipientId),
+        message.authorId,
+        message.recipientId,
+        message.content,
+        message.createdAt,
+      ],
+    );
+    return message;
+  }
+
+  public async listDirectMessages(
+    projectId: ProjectId,
+    viewerId: string,
+    otherId: string,
+    filter: DirectMessageFilter = {},
+  ): Promise<DirectMessage[]> {
+    const conditions = ["project_id = $1", "pair_key = $2"];
+    const values: unknown[] = [projectId, directPairKey(viewerId, otherId)];
+    if (filter.before !== undefined) {
+      values.push(filter.before);
+      conditions.push(`created_at < $${values.length}`);
+    }
+    // Newest first with a limit, then reversed — see the SQLite store: the
+    // page a conversation wants is the most recent N.
+    values.push(filter.limit ?? null);
+    const result = await this.query(
+      `SELECT * FROM direct_messages
+       WHERE ${conditions.join(" AND ")}
+       ORDER BY created_at DESC, id DESC
+       LIMIT $${values.length}`,
+      values,
+    );
+    return result.rows.reverse().map((row) => this.toDirectMessage(row));
+  }
+
+  public async listDirectConversations(
+    projectId: ProjectId,
+    viewerId: string,
+  ): Promise<DirectConversation[]> {
+    const result = await this.query(
+      `SELECT * FROM direct_messages
+       WHERE project_id = $1 AND (author_id = $2 OR recipient_id = $2)
+       ORDER BY created_at ASC, id ASC`,
+      [projectId, viewerId],
+    );
+    const byCorrespondent = new Map<string, DirectConversation>();
+    for (const row of result.rows) {
+      const message = this.toDirectMessage(row);
+      const other =
+        message.authorId === viewerId ? message.recipientId : message.authorId;
+      const unread =
+        (byCorrespondent.get(other)?.unread ?? 0) +
+        (message.recipientId === viewerId && message.readAt === undefined
+          ? 1
+          : 0);
+      byCorrespondent.set(other, {
+        userId: other,
+        lastMessage: message,
+        unread,
+      });
+    }
+    return [...byCorrespondent.values()].sort((left, right) =>
+      right.lastMessage.createdAt.localeCompare(left.lastMessage.createdAt),
+    );
+  }
+
+  public async markDirectMessagesRead(
+    projectId: ProjectId,
+    viewerId: string,
+    otherId: string,
+    at: string,
+  ): Promise<number> {
+    const result = await this.query(
+      `UPDATE direct_messages SET read_at = $1
+       WHERE project_id = $2 AND recipient_id = $3 AND author_id = $4
+         AND read_at IS NULL`,
+      [at, projectId, viewerId, otherId],
+    );
+    return result.rowCount ?? 0;
+  }
+
+  private toDirectMessage(row: Row): DirectMessage {
+    const readAt = optionalText(row, "read_at");
+    return {
+      id: text(row, "id"),
+      projectId: text(row, "project_id"),
+      authorId: text(row, "author_id"),
+      recipientId: text(row, "recipient_id"),
+      content: text(row, "content"),
+      createdAt: text(row, "created_at"),
+      ...(readAt === undefined ? {} : { readAt }),
+    };
   }
 
   public async addChannelReply(
@@ -3262,7 +3399,33 @@ export class PostgresCoordinationStore implements CoordinationStore {
       authorId: text(row, "author_id"),
       content: text(row, "content"),
       createdAt: text(row, "created_at"),
+      taskId: optionalText(row, "task_id") as TaskId | undefined,
+      changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
     };
+  }
+
+  public async setChannelMessageChangedFiles(
+    repositoryId: string,
+    messageId: string,
+    files: readonly ChannelChangedFile[],
+  ): Promise<void> {
+    await this.query(
+      `UPDATE channel_messages SET changed_files_json = $1
+       WHERE id = $2 AND repository_id = $3`,
+      [JSON.stringify(files), messageId, repositoryId],
+    );
+  }
+
+  public async setChannelMessageTask(
+    repositoryId: string,
+    messageId: string,
+    taskId: TaskId,
+  ): Promise<void> {
+    await this.query(
+      `UPDATE channel_messages SET task_id = $1
+       WHERE id = $2 AND repository_id = $3`,
+      [taskId, messageId, repositoryId],
+    );
   }
 
   private toChannelReply(row: Row): ChannelReply {

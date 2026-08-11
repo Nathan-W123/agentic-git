@@ -713,4 +713,34 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE submitted_tasks ADD COLUMN context TEXT`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 26,
+    name: "channel-message-task-changes",
+    statements: [
+      `ALTER TABLE channel_messages ADD COLUMN task_id TEXT`,
+      `ALTER TABLE channel_messages ADD COLUMN changed_files_json TEXT`,
+    ],
+  },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 27,
+    name: "direct-messages",
+    statements: [
+      `CREATE TABLE direct_messages (
+        id TEXT PRIMARY KEY,
+        project_id TEXT NOT NULL REFERENCES projects(id),
+        pair_key TEXT NOT NULL,
+        author_id TEXT NOT NULL REFERENCES users(id),
+        recipient_id TEXT NOT NULL REFERENCES users(id),
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        read_at TEXT
+      )`,
+      `CREATE INDEX direct_messages_thread
+        ON direct_messages (project_id, pair_key, created_at)`,
+      `CREATE INDEX direct_messages_unread
+        ON direct_messages (project_id, recipient_id, read_at)`,
+    ],
+  },
 ];

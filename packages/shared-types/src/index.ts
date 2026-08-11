@@ -731,6 +731,21 @@ export function readsAsReportRequest(objective: string): boolean {
     /\b(audit|audits|audited|auditing|summar(?:y|ise|ize|ised|ized|ising|izing|ies)|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|analysis|inspect|inspects|inspected|inspecting|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|explain|explains|explained|explaining)\b/iu.test(
       request,
     ) ||
+    // Running something and saying what happened. The result is the output,
+    // not a diff — "run the test suite" that changed no files did exactly what
+    // was asked, and was recorded as a failure for it.
+    //
+    // Safe beside the editing-verb veto above, which has already returned:
+    // "run the tests" is a report, "run the tests and fix what fails" is a
+    // change request, and the veto is what tells them apart. That ordering is
+    // why these can be this permissive.
+    /\b(test|tests|tested|testing|verify|verifies|verified|verifying|validate|validates|validated|validating|reproduce|reproduces|reproduced|reproducing|benchmark|benchmarks|benchmarked|benchmarking|profile|profiles|profiled|profiling|lint|lints|linted|linting|typecheck|typechecks|typechecked|typechecking)\b/iu.test(
+      request,
+    ) ||
+    // The phrase, for the common request that names no verb of its own.
+    /\brun(?:s|ning)?\s+(?:the\s+)?(?:unit\s+|integration\s+|e2e\s+)?(?:test|tests|test\s+suite|suite|checks|linter|benchmarks?)\b/iu.test(
+      request,
+    ) ||
     /\?\s*$/u.test(request.trim()) ||
     /^\s*(?:what|which|where|when|why|how|who|is|are|does|do|did|can|could|should|would)\b/iu.test(
       request,
@@ -765,6 +780,13 @@ export type AuditEventType =
   | "ownership_granted"
   | "task_started"
   | "agent_progress"
+  /**
+   * What the agent has touched so far, read from the worktree while it is
+   * still editing — the one stretch of a run that previously reported
+   * nothing. Carries the whole current set, so a reader arriving late does
+   * not have to accumulate a diff of its own.
+   */
+  | "workspace_changed"
   | "scope_change_requested"
   | "scope_change_decided"
   | "changeset_collected"

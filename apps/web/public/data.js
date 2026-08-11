@@ -141,6 +141,26 @@ export const state = {
   typing: {},
   // Agents the server says are mid-task, keyed by task id.
   agentBusy: {},
+  /**
+   * Who currently has this project open, as user ids.
+   *
+   * Read off the server's open sockets rather than stored, so it is a fact
+   * about now and goes stale the moment the tab is backgrounded — which is
+   * why it is refreshed with the inbox rather than cached against a person.
+   */
+  presence: [],
+  /** Everyone in the organization who could be written to, with their state. */
+  dmPeople: [],
+  /** Conversations that already exist, most recently active first. */
+  dmConversations: [],
+  /** Loaded threads, keyed by the other person's user id. */
+  dmThreads: {},
+  /** The conversation open in the side panel, if any. */
+  activeDm: undefined,
+  /** What is half-typed to them. */
+  dmDraft: "",
+  /** The project whose inbox has been fetched, so it is fetched once. */
+  dmLoadedProject: undefined,
   // Paths whose inline diff is expanded in the transcript. Plural because a
   // reader comparing two files should not have to close one to open the other.
   chanOpenFiles: [],
@@ -665,6 +685,10 @@ const WORKING_STATUS = new Set([
 
 /** Backstop only — the task's own status is what really retires an entry. */
 const BUSY_TTL_MS = 10 * 60_000;
+/** Matches `PENDING_BUSY_PREFIX` on the server; see `noteAgentBusy`. */
+const PENDING_BUSY_PREFIX = "pending:";
+/** How long a placeholder holds the dots up on its own. */
+const PENDING_BUSY_TTL_MS = 30_000;
 
 /**
  * Records that an agent picked up work in a channel.
@@ -678,11 +702,28 @@ export function noteAgentBusy(frame) {
   if (!frame?.repositoryId || !frame?.taskId) {
     return;
   }
+  // The first frame of a request arrives before its task exists: it is what
+  // makes an agent start typing the moment it is mentioned, instead of once
+  // the acknowledgement and the coordinator have both answered. It is keyed on
+  // the agent, so the frame that follows with a real task id replaces it here
+  // — otherwise both would sit in the table, and the placeholder, matching no
+  // task and so never retired by status, would hold the dots up for its whole
+  // TTL after the work had finished.
+  const pending = String(frame.taskId).startsWith(PENDING_BUSY_PREFIX);
+  if (!pending) {
+    delete state.agentBusy[
+      `${PENDING_BUSY_PREFIX}${frame.userId}:${frame.provider}`
+    ];
+  }
   state.agentBusy[frame.taskId] = {
     repositoryId: frame.repositoryId,
     userId: frame.userId,
     provider: frame.provider,
-    expiresAt: Date.now() + BUSY_TTL_MS,
+    // A placeholder has nothing but this to retire it. A question is answered
+    // without ever becoming a task, and a dispatch can fail before it submits;
+    // in both cases no status arrives to take the dots down. Long enough to
+    // cover the model calls it is bridging, and no longer.
+    expiresAt: Date.now() + (pending ? PENDING_BUSY_TTL_MS : BUSY_TTL_MS),
   };
 }
 
@@ -1505,6 +1546,35 @@ export function integrations() {
  * connected, not a name invented from the repository id.
  */
 
+/**
+ * This agent's override, under the one key that identifies it — falling back
+ * to the legacy bare-provider key that names every agent on the vendor.
+ *
+ * The order mirrors `resolveChannelAgentPresentation` in server.ts, and has
+ * to: the name drawn here is the name somebody types after "@", and the
+ * server matches that against its own resolution. Reading only the bare key
+ * meant your own rename showed on screen while the server still answered to
+ * the older per-agent name — so mentioning what you could see did nothing,
+ * and mentioning a name nobody could see worked.
+ *
+ * Only for the moments before the roster has resolved. Once it has, the
+ * server's own resolved name is used instead (see `channelAgentsFor`), which
+ * is the single authority.
+ */
+function overrideFor(overrides, agent) {
+  const specific = overrides[`${agent.userId}:${agent.provider}`];
+  const legacy = overrides[agent.provider];
+  if (specific === undefined && legacy === undefined) {
+    return undefined;
+  }
+  return {
+    name: specific?.name ?? legacy?.name,
+    role: specific?.role ?? legacy?.role,
+    model: specific?.model ?? legacy?.model,
+    effort: specific?.effort ?? legacy?.effort,
+  };
+}
+
 function withOverride(agent, override) {
   if (override === undefined) {
     return agent;
@@ -1608,7 +1678,36 @@ export function channelAgentsFor(repositoryId) {
         visibility: entry.visibility ?? "personal",
       };
     });
-  return [...mine, ...others].map((agent) => withOverride(agent, overrides[agent.id]));
+  // What the server resolved, keyed the one way that identifies an agent.
+  // Its answer wins wherever it has given one, because it is the same
+  // resolution a mention is matched against — the screen and the matcher must
+  // not be able to disagree.
+  const resolved = new Map(
+    roster
+      .filter((entry) => typeof entry.name === "string" && entry.name.length > 0)
+      .map((entry) => [
+        `${entry.userId}:${entry.provider}`,
+        { name: entry.name, role: entry.role ?? "" },
+      ]),
+  );
+  return [...mine, ...others].map((agent) => {
+    const server = resolved.get(`${agent.userId}:${agent.provider}`);
+    if (server !== undefined) {
+      // Model and effort are not part of the roster's answer, so they still
+      // come from the local override.
+      const local = overrideFor(overrides, agent);
+      return {
+        ...agent,
+        name: server.name,
+        role: server.role,
+        model: local?.model ?? agent.model,
+        effort: local?.effort ?? agent.effort,
+      };
+    }
+    // Before the roster resolves — the "paint immediately" floor — and for an
+    // older server that sends no resolved name.
+    return withOverride(agent, overrideFor(overrides, agent));
+  });
 }
 
 /** Agents and people who can be @mentioned in this channel. */
@@ -1687,6 +1786,155 @@ export function channelMessagesFor(repositoryId) {
 
 const channelPath = (repositoryId, suffix = "") =>
   `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/channel${suffix}`;
+
+const directPath = (suffix = "") =>
+  `/projects/${encodeURIComponent(state.projectId)}/direct-messages${suffix}`;
+
+/**
+ * The inbox and the roster, which arrive together because the screen that
+ * shows one always shows the other: a list of conversations is no use without
+ * the people you have not written to yet.
+ *
+ * Also where presence comes from. It is deliberately not pushed: a dot that
+ * says somebody is here is only ever approximately true, and refreshing it
+ * alongside something the screen already needed is cheaper than maintaining a
+ * second live signal to keep it honest.
+ */
+export async function loadDirectMessages() {
+  if (!state.projectId) {
+    return;
+  }
+  const response = await apiOptional(directPath(), undefined);
+  if (response === undefined) {
+    return;
+  }
+  state.dmConversations = response.conversations ?? [];
+  state.dmPeople = response.people ?? [];
+  state.presence = (response.people ?? [])
+    .filter((person) => person.online === true)
+    .map((person) => person.id);
+}
+
+/** One conversation, and marking it read because it is now on screen. */
+export async function loadDmThread(userId) {
+  if (!state.projectId || !userId) {
+    return;
+  }
+  const path = directPath(`/${encodeURIComponent(userId)}`);
+  const response = await apiOptional(path, undefined);
+  if (response === undefined) {
+    return;
+  }
+  state.dmThreads[userId] = response.messages ?? [];
+  // Opening a conversation is reading it. Done after the fetch rather than
+  // before, so a failed load does not clear a badge for messages that are
+  // still unseen.
+  await api(`${path}/read`, { method: "POST" }).catch(() => undefined);
+  await loadDirectMessages();
+}
+
+export async function sendDirectMessage(userId, content) {
+  const body = String(content ?? "").trim();
+  if (body.length === 0 || !userId) {
+    return;
+  }
+  const response = await api(directPath(`/${encodeURIComponent(userId)}`), {
+    method: "POST",
+    body: { content: body },
+  });
+  // The socket frame echoes to the sender too, so this only has to cover the
+  // case where it does not arrive — appending twice is prevented by id.
+  noteDirectMessage({ message: response.message });
+}
+
+/**
+ * A message that arrived over the socket, for either side of a conversation.
+ *
+ * Keyed on whoever is not the reader, which is what makes one handler serve
+ * both the copy sent to the recipient and the copy echoed back to the sender.
+ */
+export function noteDirectMessage(frame) {
+  const message = frame?.message;
+  if (message === undefined) {
+    return;
+  }
+  const me = currentUserId();
+  const other = message.authorId === me ? message.recipientId : message.authorId;
+  const thread = state.dmThreads[other] ?? [];
+  if (thread.some((existing) => existing.id === message.id)) {
+    return;
+  }
+  state.dmThreads[other] = [...thread, message];
+  // The badge would otherwise wait for the next inbox refresh. Not counted
+  // when the conversation is already open, because it is being read.
+  const unreadHere = message.recipientId === me && state.activeDm !== other;
+  const existing = state.dmConversations.find(
+    (conversation) => conversation.userId === other,
+  );
+  const updated = {
+    userId: other,
+    lastMessage: message,
+    unread: (existing?.unread ?? 0) + (unreadHere ? 1 : 0),
+  };
+  state.dmConversations = [
+    updated,
+    ...state.dmConversations.filter(
+      (conversation) => conversation.userId !== other,
+    ),
+  ];
+}
+
+/** Whether somebody has this project open right now. */
+export function personOnline(userId) {
+  return state.presence.includes(userId);
+}
+
+/** Unread messages waiting from one person. */
+export function dmUnreadFrom(userId) {
+  return (
+    state.dmConversations.find(
+      (conversation) => conversation.userId === userId,
+    )?.unread ?? 0
+  );
+}
+
+/**
+ * What an agent's dot should say: working, idle, or personal.
+ *
+ * Working wins over personal. Both are true of a personal agent that is
+ * mid-task, and which one to show is a question of what the reader is looking
+ * for — "is anything happening" is the more urgent of the two, and the one
+ * they cannot find out any other way. Personal is visible in the role line
+ * regardless.
+ */
+export function agentStatus(agent, repositoryId) {
+  if (agentIsWorking(agent, repositoryId)) {
+    return "working";
+  }
+  return agent.visibility === "personal" ? "personal" : "idle";
+}
+
+function agentIsWorking(agent, repositoryId) {
+  const now = Date.now();
+  for (const [taskId, entry] of Object.entries(state.agentBusy)) {
+    if (entry.repositoryId !== repositoryId || entry.expiresAt <= now) {
+      continue;
+    }
+    const task = state.tasks.find((candidate) => candidate.id === taskId);
+    if (task !== undefined && !WORKING_STATUS.has(task.status)) {
+      continue;
+    }
+    // Matched the way `agentsThinkingIn` matches, so the dot and the typing
+    // line can never disagree about who is working.
+    if (
+      entry.provider === (agent.provider ?? agent.id) &&
+      (agent.mine === true || String(agent.id) === `${entry.userId}:${entry.provider}`)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
 
 /**
  * Reads one channel back from the server, replacing whatever local or seeded
@@ -1787,6 +2035,23 @@ async function loadChannelRoster(repositoryId) {
  * synchronously, so this only ever needs to populate it and ask for a
  * re-render.
  */
+/**
+ * The inbox, fetched once per project rather than on every render.
+ *
+ * `renderNow` calls this, so it has to be idempotent and quiet: an
+ * unconditional fetch that re-renders on completion is an infinite loop.
+ * Presence does go stale under this, which is the trade — a socket frame or
+ * reopening a conversation refreshes it, and neither is worth a poll.
+ */
+export async function ensureDirectMessages(rerender) {
+  if (!state.projectId || state.dmLoadedProject === state.projectId) {
+    return;
+  }
+  state.dmLoadedProject = state.projectId;
+  await loadDirectMessages();
+  rerender();
+}
+
 export async function ensureChannelRoster(repositoryId, rerender) {
   if (
     !repositoryId ||

@@ -16,6 +16,10 @@ import {
   connectSocket,
   TYPING_SWEEP_MS,
   noteAgentBusy,
+  noteDirectMessage,
+  ensureDirectMessages,
+  loadDmThread,
+  sendDirectMessage,
   noteTyping,
   sendTyping,
   currentRepository,
@@ -2018,6 +2022,14 @@ function renderNow() {
         render();
       }
     });
+    // Unread counts and presence, for the dots and badges beside the roster
+    // this screen is already drawing. Unconditional rather than cached: both
+    // are answers about right now, and a stale one is worse than none.
+    void ensureDirectMessages(() => {
+      if (state.route === "chats") {
+        render();
+      }
+    });
     // The roster's model/effort pickers read the same real options My Agents
     // and Code load — loaded here too, rather than invented for this screen.
     for (const agent of channelAgentsFor(activeChannelId())) {
@@ -2245,6 +2257,10 @@ document.addEventListener("click", (event) => {
         return;
       }
       state.activeChannelThread = value;
+      // …and puts away an open conversation, for the same reason: they share
+      // the one panel, and a direct message left on top of a thread the reader
+      // just asked for would look like the thread failed to open.
+      state.activeDm = undefined;
       closeChannelFile();
       render();
       return;
@@ -2266,6 +2282,43 @@ document.addEventListener("click", (event) => {
       state.activeChannelThread = undefined;
       render();
       return;
+    // Tapping somebody opens the conversation with them. Rendered before the
+    // fetch so the panel is there immediately, with whatever was already
+    // loaded — a private message is the one surface where waiting to see
+    // anything reads as the message having gone nowhere.
+    case "dm-open":
+      state.activeDm = value;
+      state.dmDraft = "";
+      render();
+      void loadDmThread(value).then(() => render());
+      return;
+    case "dm-close":
+      state.activeDm = undefined;
+      state.dmDraft = "";
+      render();
+      return;
+    // Your own agent, one to one. The agents screen opens on its chat tab, so
+    // selecting it there is the whole of "talk to this agent" — and it is
+    // deliberately not the group channel, which is for work the team sees.
+    case "agent-chat-open":
+      state.selectedAgent = value;
+      state.agentTab = "chat";
+      state.activeDm = undefined;
+      navigate("agents");
+      return;
+    case "dm-submit": {
+      const other = state.activeDm;
+      const draft = state.dmDraft.trim();
+      if (other === undefined || draft.length === 0) {
+        return;
+      }
+      state.dmDraft = "";
+      render();
+      void sendDirectMessage(other, draft)
+        .then(() => render())
+        .catch((error) => toast(`Could not send: ${error.message}`, "error"));
+      return;
+    }
     // Expanding a file happens where it is read — in the transcript — so this
     // only toggles which paths are open, with no route change to lose the
     // reader's place in the conversation.
@@ -3172,6 +3225,13 @@ document.addEventListener("input", (event) => {
     }
     return;
   }
+  if (act === "dm-input") {
+    // Held without re-rendering. The draft is only read when the form is
+    // submitted, and re-rendering the panel on every keystroke is what made
+    // typing lag in the channel composer.
+    state.dmDraft = node.value;
+    return;
+  }
   if (act === "channel-thread-input") {
     // Scoped to the open thread, so typing a reply raises dots inside that
     // thread and leaves the channel behind it quiet.
@@ -3416,6 +3476,23 @@ async function boot() {
     if (frame?.type === "channel-agent-busy") {
       noteAgentBusy(frame);
       if (state.route === "chats" && !renameFieldFocused()) {
+        render();
+      }
+      return;
+    }
+    // Private mail, delivered to the two people in it rather than to the
+    // project (`sendToUsers`), and so never arriving here for anyone else.
+    if (frame?.type === "direct-message") {
+      noteDirectMessage(frame);
+      if (state.activeDm !== undefined && !renameFieldFocused()) {
+        // Reading it as it arrives, so the badge does not appear and clear.
+        void api(
+          `/projects/${encodeURIComponent(state.projectId)}/direct-messages/` +
+            `${encodeURIComponent(state.activeDm)}/read`,
+          { method: "POST" },
+        ).catch(() => undefined);
+      }
+      if (!renameFieldFocused()) {
         render();
       }
       return;

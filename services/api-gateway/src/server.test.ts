@@ -2462,7 +2462,7 @@ test("anybody can create an account, and it comes with somewhere to work", async
 test("the repository channel round-trips messages, replies, reactions, reads, and agent overrides", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
-  await bootstrap(owner);
+  const bootstrapped = await bootstrap(owner);
   const repositoryId = await invitableRepository(owner, "channel-repo");
   const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
 
@@ -2524,7 +2524,16 @@ test("the repository channel round-trips messages, replies, reactions, reads, an
   const after = await owner.request(`${base}/messages`);
   assert.equal(after.data.messages.length, 1);
   assert.equal(after.data.messages[0].replies.length, 1);
-  assert.equal(after.data.agentOverrides["agent_1"].name, "Scout");
+  // Stored against the agent, not the vendor. A bare id reaching the write
+  // can only be the caller's own agent, so it is resolved against them —
+  // otherwise the row names every agent on that provider and one person's
+  // rename lands on their colleague's agent too.
+  assert.equal(
+    after.data.agentOverrides[`${bootstrapped.user.id}:agent_1`].name,
+    "Scout",
+    JSON.stringify(after.data.agentOverrides),
+  );
+  assert.equal(after.data.agentOverrides["agent_1"], undefined);
   assert.equal(after.data.readAt, read.data.readAt);
 
   // Replying to, or reacting on, a message that does not exist is a 404, not
@@ -3984,6 +3993,243 @@ test("a channel's role override reaches the roster and the objective a dispatche
   assert.equal(second.objective, "one more thing please");
 });
 
+test("a thread carries what its task changed, and keeps it", async (t) => {
+  // What the thread could not previously answer. The narration said "wrote
+  // changes to a.ts, b.ts and 2 more" once, in passing, and scrolled away;
+  // there was nothing a reader could come back to.
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "thread-changes");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) please fix the retry loop" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 1);
+  const taskId = (await runtime.store.listSubmittedTasks({ repositoryId }))[0]?.id;
+  assert.ok(taskId !== undefined);
+
+  // The thread is joined to the work, so the summary stays attributable once
+  // the process that watched the run is gone.
+  const threadRoot = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.kind === "agent");
+  assert.equal(threadRoot?.taskId, taskId);
+
+  // What the run reports while it works.
+  await runtime.store.appendAudit(undefined, {
+    type: "workspace_changed",
+    taskId,
+    data: {
+      files: [
+        { path: "src/retry.ts", status: "modified" },
+        { path: "src/retry.test.ts", status: "added" },
+      ],
+      changed: ["src/retry.ts"],
+    },
+  });
+
+  await waitFor(async () => {
+    const message = (await runtime.store.listChannelMessages(repositoryId, ownerId)).find(
+      (entry) => entry.kind === "agent",
+    );
+    return (message?.changedFiles?.length ?? 0) > 0;
+  }, "the thread never picked up what the run was changing");
+
+  const listed = await owner.request(`${base}/messages`);
+  const thread = (listed.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+  assert.deepEqual(thread.changedFiles, [
+    { path: "src/retry.ts", status: "modified" },
+    { path: "src/retry.test.ts", status: "added" },
+  ]);
+
+  // The final set replaces the live one rather than merging into it: an agent
+  // that reverts itself leaves a file no longer changed, and a summary built
+  // by accumulating deltas would keep claiming an edit that is gone.
+  await runtime.store.appendAudit(undefined, {
+    type: "changeset_collected",
+    taskId,
+    data: {
+      changeSetId: "changeset_1",
+      files: ["src/retry.ts"],
+      changedFiles: [{ path: "src/retry.ts", status: "modified" }],
+    },
+  });
+  await waitFor(async () => {
+    const message = (await runtime.store.listChannelMessages(repositoryId, ownerId)).find(
+      (entry) => entry.kind === "agent",
+    );
+    return message?.changedFiles?.length === 1;
+  }, "the final changeset never replaced the live summary");
+});
+
+test("asking to install a system package is answered, not queued for ten minutes", async (t) => {
+  // What happened instead: the task planned no files, negotiated scope it
+  // could never use, and was cancelled ten minutes later with "session
+  // cancelled" — a sentence about the mechanism, with nothing in it the
+  // reader could act on.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "system-install");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) apt-get install python3 and run the tests" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(
+    runtime.submittedTasks.length,
+    0,
+    JSON.stringify(runtime.submittedTasks),
+  );
+  const after = await owner.request(`${base}/messages`);
+  const answer = (after.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+  assert.ok(answer !== undefined, JSON.stringify(after.data.messages));
+  // It names the file, because that is the real answer rather than a refusal.
+  assert.match(answer.content, /control-plane\.Dockerfile/u);
+});
+
+test("an ordinary install of a dependency is still real work", async (t) => {
+  // The refusal above has to be narrow. "install the eslint plugin" edits
+  // package.json and is an ordinary change; guessing at intent from the word
+  // "install" would refuse real work, which is worse than the wait it saves.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dependency-install");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) install the eslint plugin we discussed" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+});
+
+test("renaming your own agent does not rename everybody else's on that vendor", async (t) => {
+  // A bare provider id names a *vendor*, not an agent, and the reader applied
+  // it to every agent on that vendor. One person renaming their own Claude
+  // renamed their colleague's too — and their role label travelled with it,
+  // which for the auditor role is a permanent spend commitment.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "rename-isolation");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const colleague = await addColleague(runtime, "rename-colleague@example.com");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  runtime.chatConnections.set(colleague.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Renamed the way the owner's own agent card does it: a bare provider id.
+  const renamed = await owner.request(`${base}/agents/anthropic`, {
+    method: "POST",
+    body: { name: "Eos" },
+  });
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+
+  const roster = await owner.request(`${base}/agents`);
+  assert.equal(roster.status, 200);
+  const byUser = new Map(
+    (roster.data.agents as any[]).map((entry) => [entry.userId, entry]),
+  );
+  assert.equal(byUser.get(ownerId)?.name, "Eos");
+  // The colleague's agent keeps its own name.
+  assert.notEqual(byUser.get(colleague.id)?.name, "Eos");
+});
+
+test("a renamed agent answers to its new name, and the roster says that name", async (t) => {
+  // The bug in full: the server resolved overrides one way and the browser
+  // another, so a rename showed on screen while the server still matched the
+  // older per-agent name. Mentioning what you could see did nothing.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "rename-answers");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // An older per-agent override, the shape a teammate's rename writes.
+  assert.equal(
+    (await owner.request(`${base}/agents/${ownerId}:anthropic`, {
+      method: "POST",
+      body: { name: "Icarus" },
+    })).status,
+    200,
+  );
+  // Then the owner renames from their own agent card, which sends a bare id.
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Daedalus" },
+    })).status,
+    200,
+  );
+
+  // The roster reports the name the server will actually match, so the screen
+  // and the matcher cannot disagree.
+  const roster = await owner.request(`${base}/agents`);
+  assert.equal(
+    (roster.data.agents as any[])[0]?.name,
+    "Daedalus",
+    JSON.stringify(roster.data.agents),
+  );
+
+  // And mentioning that name dispatches.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Daedalus please fix the retry loop" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+});
+
 /*
  * Opt-in channel membership: connecting a vendor CLI makes an agent usable,
  * not automatically present in every repository's channel. A repository that
@@ -4794,6 +5040,134 @@ test("an agent is told its own name, so a mention of it is not a product", async
   const bare = agentIdentity({ name: "Icarus", role: "  ", userName: "Sam" });
   assert.match(bare, /You are "Icarus"/u);
   assert.doesNotMatch(bare, /Your role in this channel/u);
+});
+
+test("a direct message reaches its recipient and nobody else", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const organizationId = (await owner.request("/api/v1/organizations")).data
+    .organizations[0].id as string;
+
+  // Two more people in the same organization: one to write to, one who must
+  // not be able to read what was written.
+  const people: Record<string, string> = {};
+  for (const name of ["bystander", "friend"]) {
+    const user = await runtime.store.createUser({
+      email: `${name}@example.com`,
+      displayName: name,
+      passwordDigest: await hashPassword(PASSWORD),
+    });
+    await runtime.store.saveMembership({
+      organizationId,
+      userId: user.id,
+      role: "developer",
+    });
+    people[name] = user.id;
+  }
+  const sign = async (name: string): Promise<TestClient> => {
+    const client = new TestClient(runtime.origin);
+    const login = await client.request("/api/v1/auth/login", {
+      method: "POST",
+      body: { email: `${name}@example.com`, password: PASSWORD },
+    });
+    assert.equal(login.status, 200);
+    return client;
+  };
+  const friend = await sign("friend");
+  const bystander = await sign("bystander");
+  const friendId = people["friend"] ?? "";
+  const bystanderId = people["bystander"] ?? "";
+
+  const sent = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${friendId}`,
+    { method: "POST", body: { content: "  Just between us.  " } },
+  );
+  assert.equal(sent.status, 201, JSON.stringify(sent.data));
+  assert.equal(sent.data.message.content, "Just between us.");
+
+  // The conversation reads the same from either side.
+  for (const [client, other] of [
+    [owner, friendId],
+    [friend, session.user.id],
+  ] as const) {
+    const thread = await client.request(
+      `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${other}`,
+    );
+    assert.equal(thread.status, 200);
+    assert.deepEqual(
+      thread.data.messages.map((message: { content: string }) => message.content),
+      ["Just between us."],
+    );
+  }
+
+  // The bystander is in the same organization and can reach the route, but
+  // asking for either participant returns their own (empty) conversation
+  // rather than anyone else's.
+  for (const other of [friendId, session.user.id]) {
+    const peek = await bystander.request(
+      `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${other}`,
+    );
+    assert.equal(peek.status, 200);
+    assert.deepEqual(peek.data.messages, []);
+  }
+
+  // Unread is counted for the recipient only, and clears when they read it.
+  const inbox = await friend.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages`,
+  );
+  assert.equal(inbox.status, 200);
+  assert.equal(inbox.data.conversations[0].unread, 1);
+  assert.equal(
+    (await owner.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages`))
+      .data.conversations[0].unread,
+    0,
+  );
+  // The roster names everyone else, and never the person asking.
+  assert.deepEqual(
+    (inbox.data.people as { id: string }[]).map((person) => person.id).sort(),
+    [session.user.id, bystanderId].sort(),
+  );
+
+  const read = await friend.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${session.user.id}/read`,
+    { method: "POST" },
+  );
+  assert.equal(read.data.marked, 1);
+  assert.equal(
+    (await friend.request(`/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages`))
+      .data.conversations[0].unread,
+    0,
+  );
+
+  // Writing to yourself, to a stranger, or saying nothing are all refused.
+  assert.equal(
+    (
+      await owner.request(
+        `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${session.user.id}`,
+        { method: "POST", body: { content: "hello me" } },
+      )
+    ).status,
+    400,
+  );
+  assert.equal(
+    (
+      await owner.request(
+        `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/user_nobody`,
+        { method: "POST", body: { content: "hello?" } },
+      )
+    ).status,
+    404,
+  );
+  assert.equal(
+    (
+      await owner.request(
+        `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${friendId}`,
+        { method: "POST", body: { content: "   " } },
+      )
+    ).status,
+    400,
+  );
 });
 
 test("asking an agent to audit dispatches work instead of discussing it", async (t) => {
