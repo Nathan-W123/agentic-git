@@ -6661,10 +6661,16 @@ export class ApiGateway {
             {
               role: "user",
               content:
-                "You are about to start this task in a team chat. Reply with " +
-                "one short sentence — under 20 words — confirming you are " +
-                "picking it up and naming what you will do first. No preamble, " +
-                "no markdown, no quotes.\n\nTask: " +
+                `${agentIdentity(candidate)}\n\n` +
+                "You are about to start this task. It runs with the " +
+                "repository checked out and you can read, create and edit " +
+                "files in it — this message is only the acknowledgement, so " +
+                "do not say you are unable to reach the repository or that " +
+                "you can only draft something here. If the request is " +
+                "unclear, say what you will assume rather than asking.\n\n" +
+                "Reply with one short sentence — under 20 words — confirming " +
+                "you are picking it up and naming what you will do first. No " +
+                "preamble, no markdown, no quotes.\n\nTask: " +
                 request,
             },
           ],

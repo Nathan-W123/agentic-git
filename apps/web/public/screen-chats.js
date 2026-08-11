@@ -1516,10 +1516,10 @@ export function updateComposerInput(node, rerender) {
   // long transcript behind it that is the latency between pressing a key and
   // seeing the letter, on the one screen where responsiveness is the entire
   // experience.
-  const before = `${String(state.mentionActive)} ${state.mentionQuery}`;
+  const before = `${String(state.mentionActive)} ${state.mentionQuery}`;
   updateMentionState(node);
   const changed =
-    `${String(state.mentionActive)} ${state.mentionQuery}` !== before;
+    `${String(state.mentionActive)} ${state.mentionQuery}` !== before;
   // The height is a property of this element, not of the app, so it is set
   // directly whether or not anything else is rebuilt.
   node.style.height = "auto";
