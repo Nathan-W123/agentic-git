@@ -72,6 +72,12 @@ import {
   permissionsForRole,
   type Permission,
 } from "./authorization.js";
+import {
+  formatSlashHelp,
+  parseSlashCommand,
+  SLASH_COMMANDS,
+  type SlashCommand,
+} from "./slash.js";
 import { RateLimiter } from "./rate-limiter.js";
 import { CollabWebSocketHub } from "./collab-websocket.js";
 import { AuditWebSocketHub, type WebSocketAuthorization } from "./websocket.js";
@@ -4867,10 +4873,15 @@ export class ApiGateway {
           this.options.store.listChannelAgentOverrides(repositoryId),
           this.options.store.getChannelReadCursor(repositoryId, principal.user.id),
         ]);
+        // Sent with the messages rather than on a route of its own: the
+        // picker is drawn on this screen, and a second round trip to learn
+        // what to offer is a second chance for the two to disagree — the
+        // same reasoning `auditorPaused` rides the roster for.
         this.sendJson(response, 200, {
           messages: await this.withChangedFiles(repositoryId, messages),
           agentOverrides,
           readAt,
+          slashCommands: SLASH_COMMANDS,
         });
         return;
       }
@@ -6646,13 +6657,70 @@ export class ApiGateway {
    * synchronous CLI call within the same request; a channel task is queued
    * work with no such request to hang a stream off of.
    */
+  /**
+   * Acts on a command that the channel itself answers.
+   *
+   * Returns true when the message is finished with — `/help` and the
+   * thread-scoped ones are answered here and go no further. Returns false
+   * for commands that only change how the rest of the message is treated
+   * (`/plan`, `/ask`), which still need the mention resolution below.
+   */
+  private async runSlashCommand(input: {
+    projectId: string;
+    repositoryId: string;
+    senderId: string;
+    command: SlashCommand;
+    rest: string;
+  }): Promise<boolean> {
+    const { projectId, repositoryId } = input;
+    if (input.command.name === "help") {
+      await this.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        formatSlashHelp(),
+      );
+      return true;
+    }
+    // `/retry` and `/cancel` act on the task a thread is following, and a
+    // message in the channel is not in a thread. Said plainly rather than
+    // ignored, because typing it in the wrong place is the obvious mistake.
+    if (input.command.name === "retry" || input.command.name === "cancel") {
+      await this.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        `\`/${input.command.name}\` works inside a task's thread — open the ` +
+          `thread for the run you mean and say it there.`,
+      );
+      return true;
+    }
+    return false;
+  }
+
   private async dispatchChannelMentions(input: {
     projectId: string;
     repositoryId: string;
     content: string;
     senderId: string;
   }): Promise<void> {
-    const { projectId, repositoryId, content, senderId } = input;
+    const { projectId, repositoryId, senderId } = input;
+    // A command says *how* to treat the request; an "@" says who it is for.
+    // Different questions, so they compose: the command word is taken off
+    // here and everything after it — mentions and all — goes on to be read
+    // exactly as it would have been without one.
+    const parsed = parseSlashCommand(input.content);
+    const content = parsed === undefined ? input.content : parsed.rest;
+    if (parsed !== undefined) {
+      const handled = await this.runSlashCommand({
+        projectId,
+        repositoryId,
+        senderId,
+        command: parsed.command,
+        rest: parsed.rest,
+      });
+      if (handled) {
+        return;
+      }
+    }
     const candidates = await this.resolveChannelMentionCandidates(
       projectId,
       repositoryId,
@@ -6701,12 +6769,21 @@ export class ApiGateway {
         return;
       }
       for (const candidate of mentioned) {
+        // `/ask` removes a guess rather than adding a feature. Without it the
+        // channel infers question-versus-work from the wording, and the
+        // inference is occasionally wrong in the expensive direction — a
+        // question read as a task opens a thread and spends a run.
+        if (parsed?.command.name === "ask") {
+          await this.answerInChannel(candidate, content, projectId, repositoryId);
+          continue;
+        }
         await this.dispatchOneMention({
           projectId,
           repositoryId,
           content,
           senderId,
           candidate,
+          ...(parsed?.command.name === "plan" ? { planOnly: true } : {}),
         });
       }
       return;
@@ -6860,6 +6937,17 @@ export class ApiGateway {
      * fix stays with the work it follows.
      */
     threadMessageId?: string;
+    /**
+     * Plan it and stop, until a person says go.
+     *
+     * The adapters already separate planning from editing — `requestPlan`
+     * returns the agent's intent without touching the workspace, and nothing
+     * is written until `sendContext`. This is a human gate in that seam, and
+     * it is the only approval in the system that happens before the run has
+     * been paid for: every other one reviews a changeset, by which point the
+     * execution is already bought.
+     */
+    planOnly?: boolean;
   }): Promise<void> {
     const {
       projectId,
@@ -7134,6 +7222,29 @@ export class ApiGateway {
       // follow. It is written the moment the run says something substantive,
       // and never if it does not.
       const pending = [`Task: ${opening.title}`, ...opening.thoughts];
+      // Planned, and stopped there.
+      //
+      // The intent is written into the thread and nothing else happens until
+      // somebody says go. It is the only review in this system that comes
+      // before the run is paid for — every other approval reads a changeset,
+      // by which point the execution has already been bought.
+      //
+      // The queue does the waiting for free: a submitted task sits still
+      // until something asks the repository to run, so holding it costs no
+      // lease, no workspace and no clock.
+      if (input.planOnly === true) {
+        await this.appendChannelThreadReply({
+          projectId,
+          repositoryId,
+          messageId: acknowledgement.id,
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          content:
+            `${pending.join("\n")}\n\nThat's the plan — nothing is running ` +
+            `yet. Reply "go ahead" and I'll start; say what to change and ` +
+            `I'll take it from there.`,
+        }).catch(() => undefined);
+        return;
+      }
       // Nothing runs a queued task on its own — it sits `submitted` until
       // somebody calls this. That is why a dispatched task produced no
       // events, no thinking, and an indicator that never stopped: the work
@@ -7454,6 +7565,22 @@ export class ApiGateway {
       ? candidates.filter((entry) => question.includes(`@${entry.name}`))
       : [];
     const answering = mentioned.length > 0 ? mentioned : owner === undefined ? [] : [owner];
+    // "go ahead" against a thread holding a plan nobody has started. Read
+    // before the general split for the same reason the others are: it
+    // carries no task verb, so it would otherwise be answered as a question
+    // about the plan rather than acted on.
+    if (
+      readsAsApproval(question) &&
+      (await this.startPlannedTaskFor({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        messageId: input.messageId,
+        viewerId: input.viewerId,
+        responder: owner,
+      }))
+    ) {
+      return;
+    }
     // "yes, retry" against a thread whose task failed. Read before the
     // general split for the same reason an auditor's approval is: it carries
     // no task verb, so it would otherwise fall through to the agent
@@ -8103,6 +8230,73 @@ export class ApiGateway {
       authorId: `${investigator.userId}:${investigator.provider}`,
       content: formatFailureVerdict(verdict),
     }).catch(() => undefined);
+  }
+
+  /**
+   * Starts a task that has been planned and held, because a person said go.
+   *
+   * Recognised by the task still sitting `submitted`: `/plan` deliberately
+   * files the work and does not ask the repository to run, so a queued task
+   * under a thread is one waiting on exactly this. Anything already claimed,
+   * failed or integrated is not waiting for permission, and falls through to
+   * being answered as an ordinary reply.
+   *
+   * Returns false when there is nothing held, so a "yes" in a thread that
+   * has nothing to start still reads as conversation.
+   */
+  private async startPlannedTaskFor(input: {
+    projectId: string;
+    repositoryId: string;
+    messageId: string;
+    viewerId: string;
+    responder: ChannelMentionCandidate | undefined;
+  }): Promise<boolean> {
+    const root = await this.options.store.getChannelMessage(
+      input.repositoryId,
+      input.messageId,
+      input.viewerId,
+    );
+    if (root?.taskId === undefined || input.responder === undefined) {
+      return false;
+    }
+    const task = (
+      await this.options.store.listSubmittedTasks({
+        repositoryId: input.repositoryId,
+      })
+    ).find((entry) => entry.id === root.taskId);
+    if (task === undefined || task.status !== "submitted") {
+      return false;
+    }
+    const authorId = `${input.responder.userId}:${input.responder.provider}`;
+    await this.appendChannelThreadReply({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      messageId: input.messageId,
+      authorId,
+      content: "Starting now.",
+    }).catch(() => undefined);
+    this.watchChannelTask({
+      taskId: task.id,
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      messageId: input.messageId,
+      authorId,
+      ownerId: input.responder.userId,
+      provider: input.responder.provider,
+      cursor: 0,
+      pending: [],
+      // The thread already exists and already holds the plan, so narration
+      // goes straight into it rather than waiting for something substantive.
+      threaded: true,
+    });
+    void Promise.resolve(
+      this.options.operations.runRepository?.({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        actorId: task.submittedBy ?? input.responder.userId,
+      }),
+    ).catch(() => undefined);
+    return true;
   }
 
   /**
