@@ -209,6 +209,13 @@ export const state = {
   mentionActive: false,
   mentionQuery: "",
   mentionIndex: 0,
+  // The command picker, mirroring the three above. Its candidates come from
+  // the server with the messages, so it can never offer something the
+  // channel would not recognise.
+  slashActive: false,
+  slashQuery: "",
+  slashIndex: 0,
+  channelSlashCommands: {},
   chanMsgQuery: "",
   chanMsgSearchOpen: false,
 
@@ -2006,6 +2013,12 @@ async function loadChannel(repositoryId) {
     ...state.channelAgentOverrides[repositoryId],
     ...response.agentOverrides,
   };
+  // Only replaced when the server actually sent a list: an older server, or
+  // a response that failed to include it, should leave the picker with what
+  // it had rather than emptying it.
+  if (Array.isArray(response.slashCommands)) {
+    state.channelSlashCommands[repositoryId] = response.slashCommands;
+  }
   if (response.readAt !== undefined) {
     state.channelRead[repositoryId] = Date.parse(response.readAt);
     window.localStorage.setItem("ag.chanread", JSON.stringify(state.channelRead));
