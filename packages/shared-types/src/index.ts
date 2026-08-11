@@ -40,6 +40,17 @@ export interface TaskDefinition {
   agentId: AgentId;
   validationCommands: ValidationCommand[];
   projectId?: ProjectId;
+  /**
+   * What this request was asked inside — today, the channel thread it was
+   * dispatched from.
+   *
+   * Separate from `objective` because the objective is what somebody asked
+   * for and is rendered wherever the request is shown; a transcript folded
+   * into it would make every request unreadable in those places. The
+   * coordinator merges this with the handoff seed into the planning prompt's
+   * prior context.
+   */
+  context?: string;
 }
 
 export type PlanGroundingConfidence = "verified" | "grounded" | "ungrounded";
@@ -640,6 +651,46 @@ export interface IntegrationResult {
   /** Files that landed in part, having been split at the conflicting hunks. */
   salvagedDividedFiles?: string[];
   explanation: string;
+}
+
+/**
+ * Whether a task was asked to look at the repository rather than change it.
+ *
+ * Read-only work is real work — an audit, a summary, an explanation succeeds
+ * precisely by changing nothing — but every layer here measures success in
+ * patches, so an empty result is indistinguishable from an edit that silently
+ * failed. This tells them apart, and it reads the *request*, because what was
+ * asked for is the only thing that says whether an empty changeset is the
+ * answer or the absence of one.
+ *
+ * Lives here because both ends need the same answer: the adapters, which
+ * refuse to hand back an empty changeset, and the integration path, which
+ * decides what an empty one means. Two copies would drift, and the drift would
+ * show up as a task that one layer calls a success and the other calls a
+ * failure.
+ *
+ * An editing verb settles it first, whatever else the sentence does. "Can you
+ * fix the retry loop?" is a question and a change request, and letting the
+ * question mark excuse an empty result is exactly how a sandbox refusing every
+ * write would pass for success.
+ */
+export function readsAsReportRequest(objective: string): boolean {
+  if (
+    /\b(fix|add|change|edit|write|create|remove|delete|rename|update|implement|refactor|patch|revert|bump|replace|move|migrate|upgrade|install|wire|hook)\b/iu.test(
+      objective,
+    )
+  ) {
+    return false;
+  }
+  return (
+    /\b(audit|audits|audited|auditing|summar(?:y|ise|ize|ised|ized|ising|izing|ies)|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|analysis|inspect|inspects|inspected|inspecting|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|explain|explains|explained|explaining)\b/iu.test(
+      objective,
+    ) ||
+    /\?\s*$/u.test(objective.trim()) ||
+    /^\s*(?:what|which|where|when|why|how|who|is|are|does|do|did|can|could|should|would)\b/iu.test(
+      objective,
+    )
+  );
 }
 
 export type AuditEventType =

@@ -13,6 +13,7 @@ import {
 import {
   assertAgentPlan,
   createId,
+  readsAsReportRequest,
   scopeChangeGranted,
   type AgentPlan,
   type ChangeSet,
@@ -997,10 +998,18 @@ export class PromptCliAdapter implements AgentAdapter {
           `${this.profile.name} completed ${record.input.task.objective}`,
       },
     );
-    // The model reported success but touched nothing. Every known cause is a
-    // defect (an unauthenticated CLI answering conversationally is the common
-    // one), and an empty changeset must not enter the pipeline as a success.
-    if (changeSet.patches.length === 0) {
+    // The model reported success but touched nothing. For work meant to write,
+    // every known cause is a defect — an unauthenticated CLI answering
+    // conversationally is the common one — and an empty changeset must not
+    // enter the pipeline as a success.
+    //
+    // Asked to look rather than to change, that same result is the answer:
+    // an audit or a summary finishes by changing nothing. Decided from the
+    // request, on the same reading the integration path uses.
+    if (
+      changeSet.patches.length === 0 &&
+      !readsAsReportRequest(record.input.task.objective)
+    ) {
       throw new Error(
         `${this.profile.name} reported ${record.input.task.id} complete but changed no files. ` +
           `Check that the ${this.command} CLI is authenticated and actually edited the workspace.`,
@@ -1252,6 +1261,15 @@ export class PromptCliAdapter implements AgentAdapter {
       `Planning deadline: ${this.planningTimeoutMs} ms.`,
       `Task id: ${input.task.id}`,
       `Objective: ${input.task.objective}`,
+      // See the codex adapter's equivalent: notes from earlier tasks, offered
+      // as background rather than as fact.
+      ...(input.priorContext === undefined || input.priorContext.trim() === ""
+        ? []
+        : [
+            "Notes left by earlier work in this repository. Treat as background,",
+            "not as fact — verify anything you rely on against the workspace:",
+            input.priorContext.trim(),
+          ]),
       `Canonical revision: ${input.canonicalVersion.revision}`,
       `Required validation commands: ${JSON.stringify(input.task.validationCommands)}`,
       "List every repository-relative file you expect to change.",

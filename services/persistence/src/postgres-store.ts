@@ -1605,6 +1605,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       agentId: input.agentId,
       validationCommands: input.validationCommands,
       submittedBy: input.submittedBy,
+      context: input.context,
       status: "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,
@@ -1615,8 +1616,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
     await this.query(
       `INSERT INTO submitted_tasks
          (id, repository_id, project_id, objective, agent_id,
-          validation_commands_json, submitted_by, status, submitted_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+          validation_commands_json, submitted_by, status, submitted_at,
+          context)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
       [
         task.id,
         task.repositoryId,
@@ -1627,6 +1629,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         task.submittedBy ?? null,
         task.status,
         task.submittedAt,
+        task.context ?? null,
       ],
     );
     return task;
@@ -1791,6 +1794,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         "validation_commands_json",
       ),
       submittedBy: optionalText(row, "submitted_by"),
+      context: optionalText(row, "context"),
       status: text(row, "status") as SubmittedTaskStatus,
       submittedAt: text(row, "submitted_at"),
       claimedAt: optionalText(row, "claimed_at"),

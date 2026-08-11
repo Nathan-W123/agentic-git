@@ -34,6 +34,8 @@ import {
 
 import { ApprovalPolicy } from "./approval-service.js";
 import { Coordinator } from "./coordinator.js";
+import { buildTaskHandoff } from "./handoff.js";
+import { recordTaskHandoff } from "./handoff-store.js";
 
 interface TestSession {
   input: StartTaskInput;
@@ -45,6 +47,8 @@ interface TestSession {
 
 class TestAgent implements AgentAdapter {
   private readonly sessions = new Map<string, TestSession>();
+  /** Every `startTask` call, for asserting what the agent was told up front. */
+  public readonly startInputs: StartTaskInput[] = [];
   public readonly executionVersions: number[] = [];
   public readonly scopeDecisions: ScopeChangeDecision[] = [];
   public cancelCount = 0;
@@ -77,6 +81,7 @@ class TestAgent implements AgentAdapter {
       taskId: input.task.id,
       startedAt: new Date().toISOString(),
     };
+    this.startInputs.push(input);
     this.sessions.set(session.id, { input });
     return session;
   }
@@ -577,6 +582,99 @@ test("cancels execution promptly when a scope event cannot be persisted", async 
     assert.ok(agent.cancelCount >= 1);
     assert.equal(result.canonicalVersion.sequence, 1);
     assert.equal((await store.listRuns())[0]?.status, "failed");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a task's own context leads the handoffs it is seeded with", async () => {
+  // Two kinds of background reach one planning prompt, and they are not
+  // equally close to the work. The thread is about *this* request — it is
+  // where "now do the same for the other file" gets its meaning — while a
+  // handoff is about the repository in general. Nearest first, so the thing
+  // being asked for survives any truncation at the far end.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
+    await recordTaskHandoff(
+      store,
+      buildTaskHandoff({
+        taskId: "task_earlier",
+        objective: "Rename the config loader",
+        repositoryId: fixture.repository.id,
+        canonicalRevision: "b".repeat(40),
+        reason: "completed",
+        now: () => new Date("2026-07-29T12:00:00.000Z"),
+      }),
+    );
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+    await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        {
+          task: {
+            ...task("task_a"),
+            context: "In the thread so far:\n- update the endpoint file too",
+          },
+          adapter: agent,
+        },
+      ],
+    });
+
+    const prior = agent.startInputs[0]?.priorContext ?? "";
+    assert.match(prior, /update the endpoint file too/u);
+    assert.match(prior, /Handoff from earlier work/u);
+    assert.ok(
+      prior.indexOf("update the endpoint file too") <
+        prior.indexOf("Handoff from earlier work"),
+      `the thread should lead the handoffs, got: ${prior}`,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a task with no context is seeded with the handoffs alone", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+    await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    // Nothing on either side: the adapter must be given no field at all
+    // rather than a heading with nothing under it.
+    assert.equal(agent.startInputs[0]?.priorContext, undefined);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

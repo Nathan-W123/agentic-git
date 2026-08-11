@@ -794,6 +794,22 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE channel_messages ADD COLUMN bumped_at TEXT`,
     ],
   },
+  {
+    // What the request was asked inside, as against what it asked for.
+    //
+    // A task dispatched from a thread arrives with an objective and nothing
+    // else, so "now do the same for the other file" reaches the agent with no
+    // idea what "the same" refers to. The transcript cannot go in the
+    // objective — that text is rendered in the channel, in task lists and in
+    // thread titles — so it gets a column of its own.
+    //
+    // Nullable: every existing row predates this and has nothing to say.
+    version: 25,
+    name: "submitted-task-context",
+    statements: [
+      `ALTER TABLE submitted_tasks ADD COLUMN context TEXT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

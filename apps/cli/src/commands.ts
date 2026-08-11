@@ -349,6 +349,13 @@ export interface TaskSubmitOptions {
   projectId?: string;
   agentId?: string;
   submittedBy?: string;
+  /**
+   * Background for the agent that will run this, kept out of the objective
+   * (which is rendered wherever the request is shown). Set by the channel
+   * dispatcher with the thread the request was asked inside; see
+   * `SubmitTaskInput.context` in the persistence store.
+   */
+  context?: string;
 }
 
 export async function taskSubmit(
@@ -376,6 +383,9 @@ export async function taskSubmit(
     ...(options.submittedBy === undefined
       ? {}
       : { submittedBy: options.submittedBy }),
+    ...(options.context === undefined || options.context.trim() === ""
+      ? {}
+      : { context: options.context.trim() }),
   });
 }
 
@@ -712,6 +722,7 @@ export async function runPendingTasks(
         agentId: task.agentId,
         validationCommands: task.validationCommands,
         ...(task.projectId === undefined ? {} : { projectId: task.projectId }),
+        ...(task.context === undefined ? {} : { context: task.context }),
       };
       const [agentId, agent] = project.requireAgent(task.agentId);
       const agentSandbox =

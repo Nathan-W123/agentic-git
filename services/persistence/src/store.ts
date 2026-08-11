@@ -395,6 +395,19 @@ export interface SubmitTaskInput {
   agentId: string;
   validationCommands: ValidationCommand[];
   submittedBy?: UserId;
+  /**
+   * What this request was asked inside, for the agent that will run it.
+   *
+   * Today that is the thread a channel dispatch came from: "now do the same
+   * for the other file" is unanswerable without the messages before it. Kept
+   * out of `objective` deliberately — the objective is what somebody asked
+   * for, and it is rendered in the channel, in task lists and in thread
+   * titles, where a pasted transcript would make every request unreadable.
+   *
+   * Advisory, never authoritative: it is what was said, not what is true of
+   * the workspace now.
+   */
+  context?: string;
 }
 
 export interface SubmittedTask {
@@ -405,6 +418,8 @@ export interface SubmittedTask {
   agentId: string;
   validationCommands: ValidationCommand[];
   submittedBy: UserId | undefined;
+  /** See {@link SubmitTaskInput.context}. Absent on everything submitted outside a thread. */
+  context: string | undefined;
   status: SubmittedTaskStatus;
   submittedAt: string;
   claimedAt: string | undefined;

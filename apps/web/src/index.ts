@@ -269,6 +269,7 @@ async function serve(
         objective: input.objective,
         submittedBy: input.actorId,
         ...(agentId === undefined ? {} : { agentId }),
+        ...(input.context === undefined ? {} : { context: input.context }),
       });
     },
     async runRepository(input) {

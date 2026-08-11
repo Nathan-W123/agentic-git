@@ -1112,6 +1112,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       agentId: input.agentId,
       validationCommands: copy(input.validationCommands),
       submittedBy: input.submittedBy,
+      context: input.context,
       status: "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,

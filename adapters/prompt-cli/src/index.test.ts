@@ -435,3 +435,48 @@ test("the claude profile carries a usage reader and gemini does not", () => {
   assert.equal(typeof CLAUDE_PROFILE.usage, "function");
   assert.equal(GEMINI_PROFILE.usage, undefined);
 });
+
+test("a task asked to look finishes with an empty changeset instead of failing", async () => {
+  // The other half of the rule above. An audit or a summary succeeds by
+  // changing nothing, and refusing that turned work that had been done into
+  // "complete but changed no files" — a failure reported for a finished job.
+  const fixture = await createFixture();
+  const reportTask: TaskDefinition = {
+    ...TASK,
+    objective: "Give me a summary of the repository",
+  };
+  const runner: PromptCliProcessRunner = async (_executable, args) => {
+    if (!args.includes("--yolo")) {
+      return output(geminiEnvelope(JSON.stringify(PLAN)));
+    }
+    return output(geminiEnvelope(JSON.stringify(COMPLETION)));
+  };
+  const adapter = createGeminiAdapter({
+    agentId: "gemini",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: reportTask,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+  await adapter.sendContext(session.id, contextFor(workspace));
+  const changeSet = await adapter.collectChanges(session.id);
+  assert.equal(changeSet.patches.length, 0);
+  // And it carries the model's own words, which are the deliverable here.
+  assert.ok(changeSet.agentExplanation.length > 0);
+});
