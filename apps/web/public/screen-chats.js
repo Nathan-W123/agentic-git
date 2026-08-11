@@ -666,7 +666,21 @@ function changedFilesBlock(entry) {
     )
     .map(
       (file) =>
-        `<li class="cmsg-file ${esc(file.status)}"><span class="cmsg-file-mark">${
+        // A row opens the file, editable, in the side panel — the same action
+        // and the same panel the transcript's inline file links use. A list of
+        // what changed is the most natural place to want to look at one of
+        // them, and it was the only place naming a file that could not be
+        // opened from.
+        //
+        // A deleted file is not opened: there is nothing at that path to read
+        // any more, and offering it would end in an empty editor.
+        `<li class="cmsg-file ${esc(file.status)}"${
+          file.status === "deleted"
+            ? ""
+            : ` role="button" tabindex="0" data-act="chan-file-open"
+                data-value="${esc(file.path)}"
+                title="Open ${esc(file.path)}"`
+        }><span class="cmsg-file-mark">${
           CHANGED_FILE_MARK[file.status] ?? "~"
         }</span><span class="cmsg-file-path">${esc(file.path)}</span>${counts(
           num(file.added),
