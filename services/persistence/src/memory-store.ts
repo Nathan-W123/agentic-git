@@ -86,6 +86,7 @@ import type {
   UserAccount,
   UserAppearance,
 } from "./store.js";
+import { repositoryConflicts } from "./store.js";
 import {
   DEFAULT_ORGANIZATION_ID,
   DEFAULT_PROJECT_ID,
@@ -1014,10 +1015,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     const existing = this.repositories.get(repository.id);
     if (
       existing !== undefined &&
-      (existing.path !== repository.path ||
-        existing.branch !== repository.branch ||
-        existing.provider !== repository.provider ||
-        existing.remoteUrl !== repository.remoteUrl)
+      repositoryConflicts(existing, repository)
     ) {
       throw new Error(
         `Repository id ${repository.id} is already mapped to a different canonical repository`,

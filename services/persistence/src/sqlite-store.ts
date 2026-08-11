@@ -102,6 +102,7 @@ import type {
   WorkLeaseStatus,
   WorkerRecord,
 } from "./store.js";
+import { repositoryConflicts } from "./store.js";
 import {
   DEFAULT_PROJECT_ID,
   sameLeaseIdSet,
@@ -238,13 +239,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         repository.createdBy ?? null,
       );
     const existing = await this.getRepository(repository.id);
-    if (
-      existing === undefined ||
-      existing.path !== repository.path ||
-      existing.branch !== repository.branch ||
-      (existing.provider ?? "local") !== (repository.provider ?? "local") ||
-      existing.remoteUrl !== repository.remoteUrl
-    ) {
+    if (existing === undefined || repositoryConflicts(existing, repository)) {
       throw new Error(
         `Repository id ${repository.id} is already mapped to a different canonical repository`,
       );
