@@ -8235,6 +8235,15 @@ export class ApiGateway {
         ) {
           // Written before this event carried a repository, or by something
           // that does not fill it in. Nothing to audit against.
+          //
+          // Said out loud, on stderr, because this skip is indistinguishable
+          // from "no auditor here" and from "the auditor found nothing" to
+          // anyone watching the room — and one writer omitting the stamp took
+          // hours to find precisely because all three look like silence.
+          process.stderr.write(
+            `[auditor] skipped promotion at sequence ${String(record.sequence)}: ` +
+              `event carries no repositoryId/projectId to audit against\n`,
+          );
           continue;
         }
         await this.auditCanonicalAdvance({

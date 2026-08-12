@@ -241,6 +241,11 @@ async function resumeStrandedResults(
           taskId: task.id,
           data: {
             stage: "crash_recovery",
+            // Same reason the coordinator stamps it: an advance without a
+            // repository is one the auditor cannot place, and it skips those
+            // silently. Work recovered after a crash is exactly the work most
+            // worth a second pair of eyes.
+            repositoryId: repository.id,
             previousRevision: integration.previousVersion.revision,
             revision: integration.canonicalVersion.revision,
             changeSetId: integration.changeSetId,
