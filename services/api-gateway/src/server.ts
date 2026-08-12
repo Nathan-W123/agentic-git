@@ -13,6 +13,7 @@ import {
 import type { Duplex } from "node:stream";
 
 import type {
+  AuditEventFilter,
   AuditorCursor,
   ChannelChangedFile,
   ChannelMessage,
@@ -9243,9 +9244,16 @@ export class ApiGateway {
    * the audit log still holds what the run changed, so it can always be
    * recovered.
    *
-   * Computed once and stored, including when the answer is "nothing" — an
-   * empty list is a fact worth keeping, and without storing it a task that
-   * genuinely changed no files would be re-queried on every read forever.
+   * Nothing is written when the answer comes back empty, and the claim that
+   * it was — "an empty list is a fact worth keeping" — was never true of any
+   * deployment: the SQL stores read an empty array back as no summary at all,
+   * so the row was written and immediately meant nothing. Left as it is, on
+   * purpose. "No events for this task" is overwhelmingly a run that has not
+   * reported yet rather than a run that changed nothing, and this is read
+   * every time somebody opens the channel — so the first read during a live
+   * run would otherwise decide, permanently, that the work touched no files.
+   * The cost of not caching it is one indexed lookup per unsummarised thread
+   * per channel load, which is the cheaper of the two mistakes by a distance.
    */
   private async withChangedFiles(
     repositoryId: string,
@@ -9268,10 +9276,27 @@ export class ApiGateway {
           return;
         }
         try {
-          const events = await this.options.store.listAuditEvents({
+          const filter: AuditEventFilter = {
             taskId,
             types: ["workspace_changed", "changeset_collected"],
-          });
+          };
+          // Both halves of the log, because archiving moves rows out of the
+          // live table and the CLI's `audit archive` is a thing somebody
+          // runs. Reading only the live table meant the recovery this method
+          // exists for stopped working on exactly the old threads it was
+          // written to rescue — and it fails the same way an absent task id
+          // does, silently and with an empty list. `handoff-store` already
+          // reads both for the same reason.
+          //
+          // Ordered live-last so the reduce below still ends on the newest
+          // report: archived events are always older than live ones.
+          const [archived, live] = await Promise.all([
+            this.options.store
+              .listArchivedAuditEvents(filter)
+              .catch(() => []),
+            this.options.store.listAuditEvents(filter),
+          ]);
+          const events = [...archived, ...live];
           // Last writer wins, matching the watcher: a run reports the whole
           // set each time, so the newest report is the state of the work — a
           // file can stop being changed when an agent reverts itself, and
@@ -9286,6 +9311,9 @@ export class ApiGateway {
             },
             [],
           );
+          if (files.length === 0) {
+            return;
+          }
           filled.set(message.id, files);
           await this.options.store.setChannelMessageChangedFiles(
             repositoryId,

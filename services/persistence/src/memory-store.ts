@@ -1875,6 +1875,16 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     if (message === undefined || message.repositoryId !== repositoryId) {
       return;
     }
+    // An empty list reads back as "nothing recorded", not as "recorded, and it
+    // was nothing". That is what the SQL stores do — `parseChangedFiles`
+    // returns undefined for an empty array — and the difference is not
+    // cosmetic: the gateway decides whether to look a summary up again by
+    // testing this field for undefined, so the two backends would otherwise
+    // disagree about whether a thread ever gets a second chance.
+    if (files.length === 0) {
+      delete message.changedFiles;
+      return;
+    }
     message.changedFiles = [...files];
   }
 

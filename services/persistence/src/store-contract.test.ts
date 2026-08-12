@@ -2998,6 +2998,47 @@ for (const backend of backends) {
         true,
       );
 
+      // What a thread's work changed, kept with the thread.
+      //
+      // The line counts are the part worth a contract test: they were written
+      // into the row and dropped on the way back out, so the thread rendered
+      // them once from whatever the collector had returned and showed paths
+      // alone from the next read onward. Only the SQL stores had the bug —
+      // the in-memory one hands back the objects it was given — which is why
+      // it needs asserting here, against every backend, rather than wherever
+      // the summary is produced.
+      await store.setChannelMessageTask("repo_channel", posted.id, "task_files");
+      await store.setChannelMessageChangedFiles("repo_channel", posted.id, [
+        { path: "src/engine.ts", status: "modified", added: 12, removed: 3 },
+        // No counts at all: written before a run reported them, and it must
+        // stay countless rather than become "+0 −0".
+        { path: "src/old.ts", status: "deleted" },
+      ]);
+      const summarised = await store.getChannelMessage(
+        "repo_channel",
+        posted.id,
+        alice.id,
+      );
+      assert.equal(summarised?.taskId, "task_files");
+      assert.deepEqual(summarised?.changedFiles, [
+        { path: "src/engine.ts", status: "modified", added: 12, removed: 3 },
+        { path: "src/old.ts", status: "deleted" },
+      ]);
+      // And through the list route, which is how the channel actually reads.
+      const listedSummary = (
+        await store.listChannelMessages("repo_channel", alice.id, { limit: 50 })
+      ).find((message) => message.id === posted.id);
+      assert.equal(listedSummary?.changedFiles?.[0]?.added, 12);
+      assert.equal(listedSummary?.changedFiles?.[0]?.removed, 3);
+      // An empty summary is not a summary: a thread with nothing recorded
+      // reads as "not computed yet" so the gateway's backfill can try again.
+      await store.setChannelMessageChangedFiles("repo_channel", posted.id, []);
+      assert.equal(
+        (await store.getChannelMessage("repo_channel", posted.id, alice.id))
+          ?.changedFiles,
+        undefined,
+      );
+
       // Read cursors are per (repository, user).
       assert.equal(
         await store.getChannelReadCursor("repo_channel", alice.id),
