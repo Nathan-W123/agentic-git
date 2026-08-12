@@ -53,6 +53,7 @@ import {
   ROLE_CONTEXT_PREFIX,
   type ApprovalStatus,
   type FilePatchStatus,
+  type SequencedAuditEvent,
 } from "@coord/shared-types";
 
 import {
@@ -9259,9 +9260,22 @@ export class ApiGateway {
     repositoryId: string,
     messages: ChannelMessage[],
   ): Promise<ChannelMessage[]> {
+    // A list with files and no line counts is also pending: the counts were
+    // not recorded before the emitter carried them, but the changeset the run
+    // produced still holds every patch, and patches can be counted at any
+    // time. Only files-with-no-counts qualifies — an empty stored list means
+    // "checked, nothing changed" and is final.
+    const countless = (files: ChannelChangedFile[] | undefined): boolean =>
+      Array.isArray(files) &&
+      files.length > 0 &&
+      files.every(
+        (file) => file.added === undefined && file.removed === undefined,
+      );
     const pending = messages.filter(
       (message) =>
-        message.taskId !== undefined && message.changedFiles === undefined,
+        message.taskId !== undefined &&
+        (message.changedFiles === undefined ||
+          countless(message.changedFiles)),
     );
     if (pending.length === 0) {
       return messages;
@@ -9311,14 +9325,23 @@ export class ApiGateway {
             },
             [],
           );
-          if (files.length === 0) {
+          // Prefer what is already stored when the log has nothing newer —
+          // this pass may be running only to add counts to it.
+          const bare =
+            files.length > 0 ? files : (message.changedFiles ?? []);
+          if (bare.length === 0) {
             return;
           }
-          filled.set(message.id, files);
+          const counted = await this.countChangedLines(
+            taskId,
+            events,
+            bare,
+          );
+          filled.set(message.id, counted);
           await this.options.store.setChannelMessageChangedFiles(
             repositoryId,
             message.id,
-            files,
+            counted,
           );
         } catch {
           // A thread that cannot be summarised still has to render.
@@ -9328,6 +9351,69 @@ export class ApiGateway {
     return messages.map((message) => {
       const files = filled.get(message.id);
       return files === undefined ? message : { ...message, changedFiles: files };
+    });
+  }
+
+  /**
+   * Adds line counts to a file list recorded before the emitter carried them.
+   *
+   * Nothing here invents a number. The audit event that reported the change
+   * names its run, the run still holds the changeset, and the changeset holds
+   * every patch — so the counts are read off the same diff text the new
+   * emitter counts at collection time, just later. A file whose patch cannot
+   * be found keeps no counts rather than gaining zeros: "+0 −0" is a claim
+   * that nothing changed, and the truthful state is "nobody counted".
+   */
+  private async countChangedLines(
+    taskId: string,
+    events: SequencedAuditEvent[],
+    files: ChannelChangedFile[],
+  ): Promise<ChannelChangedFile[]> {
+    if (
+      files.every(
+        (file) => file.added !== undefined || file.removed !== undefined,
+      )
+    ) {
+      return files;
+    }
+    // The newest event naming a run wins, same as the file list itself.
+    const runId = [...events]
+      .reverse()
+      .find((record) => record.runId !== undefined)?.runId;
+    if (runId === undefined) {
+      return files;
+    }
+    const run = await this.options.store.getRun(runId).catch(() => undefined);
+    const changeSet = run?.changeSets.find(
+      (candidate) => candidate.taskId === taskId,
+    );
+    if (changeSet === undefined) {
+      return files;
+    }
+    const byPath = new Map(
+      changeSet.patches.map((patch) => [patch.path, patch]),
+    );
+    return files.map((file) => {
+      if (file.added !== undefined || file.removed !== undefined) {
+        return file;
+      }
+      const patch = byPath.get(file.path);
+      if (patch === undefined) {
+        return file;
+      }
+      // `+++`/`---` are the file headers, not content — the same counting the
+      // emitter does, so old and new threads cannot disagree about the same
+      // diff.
+      const lines = String(patch.patch ?? "").split("\n");
+      return {
+        ...file,
+        added: lines.filter(
+          (line) => line.startsWith("+") && !line.startsWith("+++"),
+        ).length,
+        removed: lines.filter(
+          (line) => line.startsWith("-") && !line.startsWith("---"),
+        ).length,
+      };
     });
   }
 
@@ -9384,11 +9470,19 @@ export class ApiGateway {
         // thread whose final line happened to be an agent message that was not
         // yet a conclusion.
         //
-        // The cost of relaxing it is a thread that ends twice when the agent
-        // already summarised in words that do not match the fixed sentences.
-        // A duplicate ending is a much smaller failure than an agent that
-        // appears to still be working days later.
-        if (replies.some((reply) => THREAD_ENDED_RE.test(reply.content.trim()))) {
+        // The `outcome` mark first, and the text only as the fallback for
+        // threads written before that mark existed. Matching on text alone was
+        // what made this sweep end a thread twice: the ending it was looking
+        // for became the agent's own summary, which begins however the agent
+        // began it, so a thread that had finished properly read as unfinished
+        // and was given a second, fixed ending underneath the real one.
+        if (
+          replies.some(
+            (reply) =>
+              reply.kind === "outcome" ||
+              THREAD_ENDED_RE.test(reply.content.trim()),
+          )
+        ) {
           continue;
         }
         await this.appendChannelThreadReply({
@@ -9397,6 +9491,7 @@ export class ApiGateway {
           messageId: message.id,
           authorId: message.authorId,
           content: ending,
+          kind: "outcome",
         }).catch(() => undefined);
       }
     }
@@ -9531,8 +9626,11 @@ export class ApiGateway {
             authorId: watched.authorId,
             content: line,
             // An ending is addressed to the reader; everything before it is
-            // the run talking about itself.
-            ...(terminal ? {} : { kind: "progress" as const }),
+            // the run talking about itself. Both are marked, because the
+            // browser cannot tell them apart from the text: since the ending
+            // became the agent's own summary rather than a fixed sentence,
+            // anything that guessed from the words got it wrong.
+            kind: terminal ? ("outcome" as const) : ("progress" as const),
           });
           if (terminal) {
             this.watchedChannelTasks.delete(watched.taskId);
@@ -9555,6 +9653,9 @@ export class ApiGateway {
               messageId: watched.messageId,
               authorId: watched.authorId,
               content: abandoned,
+              // Giving up is still an ending, and the thread has to stop
+              // looking mid-sentence.
+              kind: "outcome",
             });
           } else {
             await this.appendChannelEntry({
@@ -9616,11 +9717,12 @@ export class ApiGateway {
     authorId: string;
     content: string;
     /**
-     * `progress` for a run narrating itself, `system` for the coordinator
-     * speaking in its own name rather than an agent's. Both read differently
-     * and count differently — see `ChannelEntryKind`.
+     * `progress` for a run narrating itself, `outcome` for the reply that ends
+     * the thread, `system` for the coordinator speaking in its own name rather
+     * than an agent's. Each reads differently and counts differently — see
+     * `ChannelEntryKind`.
      */
-    kind?: "agent" | "progress" | "system";
+    kind?: "agent" | "progress" | "system" | "outcome";
   }): Promise<void> {
     await this.options.store.addChannelReply({
       repositoryId: input.repositoryId,
