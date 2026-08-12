@@ -22,7 +22,6 @@ const PUBLIC_FILES = [
   ["screen-code.js", "text/javascript; charset=utf-8"],
   ["screen-chats.js", "text/javascript; charset=utf-8"],
   ["screen-agents.js", "text/javascript; charset=utf-8"],
-  ["screen-coordinator.js", "text/javascript; charset=utf-8"],
   ["screen-notifications.js", "text/javascript; charset=utf-8"],
   ["mark.svg", "image/svg+xml"],
   ["manifest.webmanifest", "application/manifest+json"],

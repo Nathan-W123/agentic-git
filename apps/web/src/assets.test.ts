@@ -22,7 +22,6 @@ test("loads every control-room asset with an explicit content type", async () =>
     "/screen-repos.js",
     "/screen-code.js",
     "/screen-agents.js",
-    "/screen-coordinator.js",
     "/screen-notifications.js",
   ]) {
     assert.equal(
@@ -602,11 +601,6 @@ test("a doodle is tinted by its owner, never by its vendor", async () => {
   // per-vendor tint would spend the only channel that can carry ownership.
   assert.match(body, /agent\?\.color/u);
   assert.equal(/tint/u.test(body), false);
-
-  const coordinator = await publicFile("screen-coordinator.js");
-  // The shared view is the whole reason the colour is an identity, so it must
-  // colour by who submitted the work rather than by the signed-in user.
-  assert.match(coordinator, /agentColorFor\(task\.submittedBy\)/u);
 });
 
 test("an agent colour is stored on the account, not in the browser", async () => {
