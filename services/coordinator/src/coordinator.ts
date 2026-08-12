@@ -170,7 +170,75 @@ export interface CoordinatorDependencies {
   questions?: QuestionController;
   /** How long a person has, before the task is cancelled. See `answerAgentQuestion`. */
   questionDeadlineMs?: number;
+  /**
+   * Who arbitrates this run's plans against work running *outside* it.
+   *
+   * The wave loop below already sequences the tasks of one run against each
+   * other, which is the whole story when a run is the only thing executing in
+   * its repository. It stops being the whole story the moment a second
+   * invocation exists: each run holds its own conflict detector and its own
+   * in-memory ownership table, so two runs started by two dispatches see
+   * nothing of one another and both admit a plan for the same file.
+   *
+   * Absent by default, which keeps a lone run — a benchmark, a CLI invocation,
+   * a test — behaving exactly as before. A deployment that can execute two
+   * runs at once supplies one backed by durable state.
+   */
+  planAuthority?: PlanAuthority;
 }
+
+/** One planned task, offered for arbitration before it is allowed to edit. */
+export interface PlanAdmissionRequest {
+  task: TaskDefinition;
+  plan: AgentPlan;
+  planRevision: number;
+  /** Canonical revision the plan was written against. */
+  baseVersion: CanonicalVersion;
+  repository: CanonicalRepository;
+  projectId?: string;
+}
+
+export type PlanAuthorityDecision =
+  /**
+   * The task may execute. `plan` is what it may execute — the same plan, or a
+   * narrower one where only part of it was free.
+   */
+  | { outcome: "admitted"; plan: AgentPlan }
+  /**
+   * Something else holds what this plan wants. The coordinator waits
+   * `retryAfterMs`, then reconsiders the task from the top of the wave loop —
+   * which replans it first if canonical moved in the meantime, so the retry is
+   * made against the winner's result rather than against a stale base.
+   */
+  | {
+      outcome: "deferred";
+      retryAfterMs: number;
+      blockedBy: readonly string[];
+      explanation: string;
+    };
+
+/**
+ * The authority on whether a plan may start, given everything else running.
+ *
+ * Deliberately not the same object as {@link ConflictDetector}: that one
+ * compares plans held in memory by one run, this one answers for a whole
+ * repository across every run in the deployment. The coordinator treats the
+ * answer as binding and does not second-guess it.
+ */
+export interface PlanAuthority {
+  admit(request: PlanAdmissionRequest): Promise<PlanAuthorityDecision>;
+}
+
+/**
+ * How many waves may pass with nothing admitted before the run gives up.
+ *
+ * A deferral is only useful if something can change while we wait: a lease
+ * lapses, a holder promotes, canonical moves. An authority that defers this
+ * many times in a row is not describing a queue, it is failing to make
+ * progress, and spinning on it forever would strand the run silently — the
+ * failure mode this whole mechanism exists to end.
+ */
+const MAX_CONSECUTIVE_DEFERRED_WAVES = 240;
 
 /**
  * Somewhere to put a question, and somewhere for the answer to come back.
@@ -219,6 +287,7 @@ export class Coordinator {
   private readonly workingChangePollMs: number;
   private readonly questions: QuestionController | undefined;
   private readonly questionDeadlineMs: number;
+  private readonly planAuthority: PlanAuthority | undefined;
 
   public constructor(dependencies: CoordinatorDependencies = {}) {
     this.repositories = dependencies.repositories ?? new RepositoryService();
@@ -240,6 +309,7 @@ export class Coordinator {
     this.questions = dependencies.questions;
     this.questionDeadlineMs =
       dependencies.questionDeadlineMs ?? DEFAULT_QUESTION_DEADLINE_MS;
+    this.planAuthority = dependencies.planAuthority;
     this.store = dependencies.store;
     this.approvals =
       dependencies.approvals ??
@@ -339,6 +409,8 @@ export class Coordinator {
     const taskResults: TaskExecutionResult[] = [];
     const latestAssessments = new Map<string, ConflictAssessment>();
     const recordedConflictFingerprints = new Set<string>();
+    /** Consecutive waves in which the plan authority admitted nothing. */
+    let deferredWaves = 0;
 
     try {
       while (pending.length > 0) {
@@ -485,16 +557,80 @@ export class Coordinator {
           );
         }
 
-        for (const selected of wave) {
+        // Everything above sequenced this run's tasks against each other.
+        // This asks the one question that view cannot answer: is anything
+        // *outside* this run already holding what these plans want?
+        const admittedWave: PlannedTask[] = [];
+        let shortestRetryMs = Number.POSITIVE_INFINITY;
+        for (const entry of wave) {
+          const answer: PlanAuthorityDecision =
+            this.planAuthority === undefined
+              ? { outcome: "admitted", plan: entry.plan }
+              : await this.planAuthority.admit({
+                  task: entry.task,
+                  plan: entry.plan,
+                  planRevision: entry.planRevision,
+                  baseVersion: waveVersion,
+                  repository: input.repository,
+                  ...(input.projectId === undefined
+                    ? {}
+                    : { projectId: input.projectId }),
+                });
+          if (answer.outcome === "admitted") {
+            // Partial admission answers with a narrower plan than was asked
+            // for. Executing what was granted rather than what was submitted
+            // is what keeps scope enforcement, the ownership grants and the
+            // change set all describing the same piece of work.
+            entry.plan = answer.plan;
+            admittedWave.push(entry);
+            continue;
+          }
+          shortestRetryMs = Math.min(shortestRetryMs, answer.retryAfterMs);
+          entry.decision = {
+            ...entry.decision,
+            decision: "queued",
+            blockedBy: uniqueStrings([
+              ...entry.decision.blockedBy,
+              ...answer.blockedBy,
+            ]),
+            explanation: answer.explanation,
+          };
+          await recorder?.decision(entry.decision);
+          await recorder?.status(entry.task.id, "queued", answer.explanation);
+        }
+
+        if (admittedWave.length === 0) {
+          // Nothing may start yet. Waiting beats spinning: the next pass
+          // re-reads canonical and replans anything the holder moved
+          // underneath, so the retry is made against the winner's result
+          // rather than against a base that no longer exists.
+          deferredWaves += 1;
+          if (deferredWaves > MAX_CONSECUTIVE_DEFERRED_WAVES) {
+            throw new Error(
+              `No task could be admitted after ${MAX_CONSECUTIVE_DEFERRED_WAVES} ` +
+                "consecutive waves; the plan authority is not making progress",
+            );
+          }
+          await new Promise((resolve) =>
+            setTimeout(
+              resolve,
+              Number.isFinite(shortestRetryMs) ? shortestRetryMs : 1_000,
+            ),
+          );
+          continue;
+        }
+        deferredWaves = 0;
+
+        for (const selected of admittedWave) {
           pending.splice(pending.indexOf(selected), 1);
         }
 
         const prepared = await Promise.all(
-          wave.map(async (entry) =>
+          admittedWave.map(async (entry) =>
             await this.prepareTask(
               input,
               entry,
-              wave,
+              admittedWave,
               waveVersion,
               recorder,
               runAudit,
@@ -507,7 +643,7 @@ export class Coordinator {
           if (!("changeSet" in result)) {
             taskResults.push(result);
             if (result.status !== "integrated") {
-              const plannedTask = wave.find(
+              const plannedTask = admittedWave.find(
                 (entry) => entry.task.id === result.task.id,
               );
               if (plannedTask !== undefined) {

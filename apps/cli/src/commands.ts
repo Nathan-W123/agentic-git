@@ -12,14 +12,16 @@ import type { AgentAdapter } from "@coord/agent-protocol";
 import {
   Coordinator,
   approvalPolicyForProject,
+  type PlanAuthority,
   type QuestionController,
 } from "@coord/coordinator";
 import type {
   CoordinationStore,
   StoredRepository,
   SubmittedTask,
+  WorkLease,
 } from "@coord/persistence";
-import { DEFAULT_PROJECT_ID } from "@coord/persistence";
+import { DEFAULT_ORGANIZATION_ID, DEFAULT_PROJECT_ID } from "@coord/persistence";
 import {
   normalizeGitHubRepository,
   RepositoryService,
@@ -38,7 +40,99 @@ import {
   type WorkspaceSandbox,
 } from "@coord/workspace-manager";
 
+import { LeasePlanAuthority } from "./lease-admission.js";
 import type { AgentConfig, CoordinatorProject } from "./project.js";
+import {
+  configuredRepositoryParallelism,
+  WORK_LEASE_TTL_MS,
+} from "./worker-operations.js";
+
+/** Name the in-process runner registers itself under, and finds itself by. */
+const LOCAL_RUNNER_WORKER_NAME = "in-process-runner";
+
+/**
+ * Heartbeat interval for the leases a local run holds.
+ *
+ * A fifth of the TTL, so four consecutive missed beats are survivable before
+ * a lease that is genuinely still being worked on is reaped out from under it.
+ */
+const LOCAL_LEASE_HEARTBEAT_MS = WORK_LEASE_TTL_MS / 5;
+
+/**
+ * The worker record this process leases work under, if one can be had.
+ *
+ * A lease belongs to a worker, a worker belongs to a user, and a deployment
+ * that has never had a user has nobody to attribute one to. That is a real
+ * configuration — a bare CLI project, a benchmark fixture — and it must keep
+ * running, so this answers `undefined` rather than throwing and the caller
+ * degrades to the unarbitrated path with a warning.
+ */
+async function localRunnerWorkerId(
+  store: CoordinationStore,
+): Promise<string | undefined> {
+  const existing = (
+    await store.listWorkers({ organizationId: DEFAULT_ORGANIZATION_ID })
+  ).find((worker) => worker.name === LOCAL_RUNNER_WORKER_NAME);
+  if (existing !== undefined) {
+    return existing.id;
+  }
+  const [owner] = await store.listUsers();
+  if (owner === undefined) {
+    return undefined;
+  }
+  const worker = await store.registerWorker({
+    userId: owner.id,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    name: LOCAL_RUNNER_WORKER_NAME,
+    // Leases are taken by explicit task id rather than by polling for
+    // compatible work, so this list is a description of the process rather
+    // than a filter anything matches against.
+    adapters: ["generic-cli", "claude", "codex", "gemini"],
+    version: "in-process",
+  });
+  return worker.id;
+}
+
+/**
+ * Claims this repository's queued work, holding a durable lease per task.
+ *
+ * The lease is what makes a task visible to everything else running in the
+ * same repository: plan admission arbitrates against the plans recorded on
+ * active leases, so a runner that claims work without leasing it is invisible
+ * to arbitration and blind to it. That was true of this path until now, and it
+ * is why two dispatches could both be admitted for the same file.
+ *
+ * Returns `undefined` when no worker identity is available, which tells the
+ * caller to fall back to claiming without leases.
+ */
+async function leaseQueuedWork(
+  store: CoordinationStore,
+  input: {
+    workerId: string;
+    repositoryId: string;
+    projectId: string;
+    baseRevision: string;
+  },
+): Promise<Array<{ task: SubmittedTask; lease: WorkLease }>> {
+  const leased: Array<{ task: SubmittedTask; lease: WorkLease }> = [];
+  // One at a time, because each lease changes what the next call may take:
+  // the repository parallelism bound is counted across active leases, so
+  // asking for everything at once would ignore it.
+  for (;;) {
+    const next = await store.leaseNextTask({
+      workerId: input.workerId,
+      repositoryId: input.repositoryId,
+      projectId: input.projectId,
+      baseRevision: input.baseRevision,
+      ttlMs: WORK_LEASE_TTL_MS,
+      repositoryParallelism: configuredRepositoryParallelism(),
+    });
+    if (next === undefined) {
+      return leased;
+    }
+    leased.push({ task: next.task, lease: next.lease });
+  }
+}
 
 /** Registered repositories are addressed by a short, filesystem-safe id. */
 function assertRepositoryId(id: string): string {
@@ -689,10 +783,37 @@ export async function runPendingTasks(
   const canonical = toCanonical(repository);
   const projectId = options.projectId ?? DEFAULT_PROJECT_ID;
 
-  const claimed = await store.claimSubmittedTasks(
-    repository.id,
-    projectId,
-  );
+  // Leases first, claims only as a fallback. A leased task is one every other
+  // run in this repository can see, which is what lets plan admission decide
+  // between them; a merely claimed task is invisible, and two runs holding
+  // invisible claims on the same file is the whole of the bug this replaced.
+  const repositoriesForLease = new RepositoryService();
+  const workerId = await localRunnerWorkerId(store);
+  const leases = new Map<string, WorkLease>();
+  let claimed: SubmittedTask[];
+  if (workerId === undefined) {
+    // Said out loud rather than degraded silently: arbitration being absent
+    // without anyone noticing is exactly how this went unfixed for so long.
+    process.emitWarning(
+      "No user account exists to register a local worker under, so this run " +
+        "cannot hold work leases. Tasks will execute without cross-run plan " +
+        "admission; overlapping work is caught only at integration time.",
+    );
+    claimed = await store.claimSubmittedTasks(repository.id, projectId);
+  } else {
+    const baseVersion =
+      await repositoriesForLease.getCanonicalVersion(canonical);
+    const leasedWork = await leaseQueuedWork(store, {
+      workerId,
+      repositoryId: repository.id,
+      projectId,
+      baseRevision: baseVersion.revision,
+    });
+    claimed = leasedWork.map((entry) => entry.task);
+    for (const entry of leasedWork) {
+      leases.set(entry.task.id, entry.lease);
+    }
+  }
   if (claimed.length === 0) {
     const repositories = new RepositoryService();
     const version = await repositories.getCanonicalVersion(canonical);
@@ -711,6 +832,25 @@ export async function runPendingTasks(
   // holds a copy of one user's credential and whatever the CLI refreshed into
   // it, and must not outlive the run whichever way the run ends.
   const credentialHomes: CredentialHome[] = [];
+  // A lease that stops being renewed is reaped and its task requeued, so this
+  // has to outlive every path out of the run — including the ones that throw.
+  const heartbeat =
+    leases.size === 0
+      ? undefined
+      : setInterval(() => {
+          const now = Date.now();
+          const at = new Date(now).toISOString();
+          const expiresAt = new Date(now + WORK_LEASE_TTL_MS).toISOString();
+          for (const lease of leases.values()) {
+            void store
+              .heartbeatWorkLease(lease.id, at, expiresAt)
+              .catch(() => {
+                // A missed beat is survivable; the TTL allows several. Failing
+                // the run over one would be worse than the lapse it prevents.
+              });
+          }
+        }, LOCAL_LEASE_HEARTBEAT_MS);
+  heartbeat?.unref?.();
   try {
     const repositories = new RepositoryService();
     const worktrees = new GitWorktreeWorkspaceManager(
@@ -768,11 +908,26 @@ export async function runPendingTasks(
     // The project's stored declarative policy governs approvals for this
     // run; without one the coordinator keeps its built-in defaults.
     const projectRecord = await store.getProject(projectId);
+    // Only where this run actually holds leases. Without them there is nothing
+    // to publish a plan onto and nothing to read other plans from, and an
+    // authority that could do neither would answer "admitted" to everything
+    // while looking like arbitration.
+    const planAuthority: PlanAuthority | undefined =
+      leases.size === 0
+        ? undefined
+        : new LeasePlanAuthority({
+            store,
+            leaseIdForTask: new Map(
+              [...leases].map(([taskId, lease]) => [taskId, lease.id]),
+            ),
+            repositories,
+          });
     const coordinator = new Coordinator({
       repositories,
       workspaces,
       store,
       approvalPolicy: approvalPolicyForProject(projectRecord?.policy),
+      ...(planAuthority === undefined ? {} : { planAuthority }),
       ...(options.questions === undefined
         ? {}
         : { questions: options.questions }),
@@ -795,6 +950,20 @@ export async function runPendingTasks(
         failed += 1;
       }
       await store.completeSubmittedTask(entry.task.id, status, result.runId);
+      const lease = leases.get(entry.task.id);
+      if (lease !== undefined) {
+        // Settled the moment the task is, not at the end of the run: the lease
+        // is what holds this task's plan in front of everyone else's
+        // arbitration, and holding it past the work would queue the next task
+        // behind something already finished.
+        await store.finishWorkLease(
+          lease.id,
+          status === "integrated" ? "completed" : "failed",
+          new Date().toISOString(),
+          entry.explanation,
+        );
+        leases.delete(entry.task.id);
+      }
     }
 
     return {
@@ -835,6 +1004,24 @@ export async function runPendingTasks(
     }
     throw error;
   } finally {
+    if (heartbeat !== undefined) {
+      clearInterval(heartbeat);
+    }
+    // Any lease still held here belongs to a task that never reached an
+    // outcome. Settling them is what stops a failed run from blocking the
+    // repository until its leases time out: an unsettled lease still carries
+    // an approved plan, and admission would keep sequencing new work behind a
+    // task that is no longer running.
+    await Promise.allSettled(
+      [...leases.values()].map((lease) =>
+        store.finishWorkLease(
+          lease.id,
+          "failed",
+          new Date().toISOString(),
+          "run ended without an outcome for this task",
+        ),
+      ),
+    );
     // Best effort by design: a directory left behind is worth reporting, but
     // not worth masking the run's own outcome with.
     await Promise.allSettled(credentialHomes.map((home) => home.close()));

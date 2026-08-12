@@ -37,7 +37,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "node --test dist/benchmark.test.js dist/mixed-scenario.test.js dist/dependency-scenario.test.js dist/live-benchmark.test.js dist/persistence.test.js dist/project.test.js dist/recovery.test.js dist/real-repo.test.js dist/worker-operations.test.js dist/rollback.test.js dist/repo-export.test.js dist/error-format.test.js dist/credential-routing.test.js dist/conflict-repair.test.js"
+    "test": "node --test dist/benchmark.test.js dist/mixed-scenario.test.js dist/dependency-scenario.test.js dist/live-benchmark.test.js dist/persistence.test.js dist/project.test.js dist/recovery.test.js dist/real-repo.test.js dist/lease-referee.test.js dist/worker-operations.test.js dist/rollback.test.js dist/repo-export.test.js dist/error-format.test.js dist/credential-routing.test.js dist/conflict-repair.test.js"
   },
   "dependencies": {
     "@coord/adapter-codex": "*",
