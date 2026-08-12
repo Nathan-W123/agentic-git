@@ -1481,18 +1481,22 @@ export class SqliteCoordinationStore implements CoordinationStore {
   }
 
   /**
-   * Runs and submitted tasks are execution history rather than repository
-   * state, so they are left to the `repositories(id)` foreign key on
-   * `runs`/`submitted_tasks`: deleting a repository that either still
-   * references fails loudly (SQLite's default `ON DELETE` action, with
-   * `PRAGMA foreign_keys = ON`), matching the store's documented contract.
+   * Deleting a repository deletes everything scoped to it, execution history
+   * included.
    *
-   * Everything else scoped to this repository — its shared channel (which
-   * would otherwise block deletion outright, since `channel_messages` also
-   * carries that foreign key) and its per-repository access grants — is the
-   * repository's *own* state, not history, and is cascaded here so a repeat
-   * registration of the same id never inherits another repository's chat
-   * room or grants.
+   * This used to stop at the channel and grants, leaving `runs` and
+   * `submitted_tasks` to the foreign key — deliberately, on the argument that
+   * history deserves refusal. In practice the refusal surfaced as a raw
+   * "FOREIGN KEY constraint failed" with no path forward: nothing offered to
+   * delete history, so any repository that had ever run a task was
+   * permanently undeletable, which is the exact set of repositories people
+   * finish with and want gone.
+   *
+   * What history deserves is *survival*, and it has it elsewhere: the audit
+   * log is append-only, hash-chained, and carries no foreign key to any of
+   * this — what happened stays provable after the operational rows that
+   * happened to produce it are gone. The runs tables are working state, and
+   * working state belongs to the repository it works.
    */
   public async removeRepository(id: string): Promise<void> {
     this.db.exec("BEGIN IMMEDIATE");
@@ -1541,6 +1545,54 @@ export class SqliteCoordinationStore implements CoordinationStore {
         .run(id);
       this.db
         .prepare("DELETE FROM canonical_versions WHERE repository_id = ?")
+        .run(id);
+      // The run history, children first. This cascade originally covered the
+      // channel and grants and nothing else, so the first repository anyone
+      // tried to delete *after actually using it* failed on the foreign key
+      // from `runs` — a repository that had only ever been looked at deleted
+      // fine, which is why the gap survived until real work existed.
+      // The one grandchild: patches hang off changesets, which hang off runs.
+      this.db
+        .prepare(
+          `DELETE FROM file_patches
+           WHERE changeset_id IN (
+             SELECT id FROM changesets
+             WHERE run_id IN (SELECT id FROM runs WHERE repository_id = ?)
+           )`,
+        )
+        .run(id);
+      for (const child of [
+        "tasks",
+        "workspaces",
+        "resource_leases",
+        "conflicts",
+        "changesets",
+        "integrations",
+        "task_plan_revisions",
+        "scope_changes",
+        "changeset_comments",
+      ]) {
+        this.db
+          .prepare(
+            `DELETE FROM ${child}
+             WHERE run_id IN (SELECT id FROM runs WHERE repository_id = ?)`,
+          )
+          .run(id);
+      }
+      // References both a run and the repository, so it goes between the
+      // children above and the runs below.
+      this.db
+        .prepare("DELETE FROM approvals WHERE repository_id = ?")
+        .run(id);
+      this.db.prepare("DELETE FROM runs WHERE repository_id = ?").run(id);
+      // No foreign keys, but leases and tasks naming a repository that no
+      // longer exists would resurrect as phantom queue entries on the next
+      // boot's queue resume.
+      this.db
+        .prepare("DELETE FROM work_leases WHERE repository_id = ?")
+        .run(id);
+      this.db
+        .prepare("DELETE FROM submitted_tasks WHERE repository_id = ?")
         .run(id);
       this.db.prepare("DELETE FROM repositories WHERE id = ?").run(id);
       this.db.exec("COMMIT");

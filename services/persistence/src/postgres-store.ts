@@ -1574,6 +1574,47 @@ export class PostgresCoordinationStore implements CoordinationStore {
         "DELETE FROM canonical_versions WHERE repository_id = $1",
         [id],
       );
+      // The run history, children first — see the SQLite store: the cascade
+      // covered the channel and grants and nothing else, so deleting any
+      // repository that had actually been used failed on the `runs` foreign
+      // key.
+      // The one grandchild: patches hang off changesets, which hang off runs.
+      await client.query(
+        `DELETE FROM file_patches
+         WHERE changeset_id IN (
+           SELECT id FROM changesets
+           WHERE run_id IN (SELECT id FROM runs WHERE repository_id = $1)
+         )`,
+        [id],
+      );
+      for (const child of [
+        "tasks",
+        "workspaces",
+        "resource_leases",
+        "conflicts",
+        "changesets",
+        "integrations",
+        "task_plan_revisions",
+        "scope_changes",
+        "changeset_comments",
+      ]) {
+        await client.query(
+          `DELETE FROM ${child}
+           WHERE run_id IN (SELECT id FROM runs WHERE repository_id = $1)`,
+          [id],
+        );
+      }
+      await client.query("DELETE FROM approvals WHERE repository_id = $1", [
+        id,
+      ]);
+      await client.query("DELETE FROM runs WHERE repository_id = $1", [id]);
+      await client.query("DELETE FROM work_leases WHERE repository_id = $1", [
+        id,
+      ]);
+      await client.query(
+        "DELETE FROM submitted_tasks WHERE repository_id = $1",
+        [id],
+      );
       await client.query("DELETE FROM repositories WHERE id = $1", [id]);
     });
   }
