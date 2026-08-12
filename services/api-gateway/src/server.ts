@@ -9605,6 +9605,50 @@ export class ApiGateway {
    * coordinator did, and putting the sentence in an agent's mouth would make
    * it look like agents negotiate with each other.
    */
+  /**
+   * The room-level announcement of one admission decision.
+   *
+   * Named by objective rather than task id, because "task_4ef5f1b waits for
+   * task_a89c9a4" tells a reader nothing they can act on and both names are
+   * one lookup away. The blocker may have finished between the event and this
+   * lookup — the announcement still stands, it just reads as history.
+   */
+  private async announceArbitration(
+    watched: { projectId: string; repositoryId: string; taskId: string },
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const tasks = await this.options.store.listSubmittedTasks({
+      repositoryId: watched.repositoryId,
+    });
+    const objectiveOf = (taskId: unknown): string => {
+      const found = tasks.find((candidate) => candidate.id === taskId);
+      const first = (found?.objective ?? "another task").split("\n")[0] ?? "";
+      return first.length > 60 ? `"${first.slice(0, 57)}…"` : `"${first}"`;
+    };
+    const held = objectiveOf(watched.taskId);
+    const blockers = (Array.isArray(data["blockedBy"]) ? data["blockedBy"] : [])
+      .slice(0, 2)
+      .map(objectiveOf);
+    const blocker = blockers.length > 0 ? blockers.join(" and ") : "work in flight";
+    const line =
+      data["partial"] === true
+        ? `⚖️ ${held} overlaps files leased to ${blocker} — starting it on ` +
+          `the free part now; the overlapping part follows once that lease ` +
+          `clears.`
+        : data["status"] === "blocked"
+          ? `⚖️ Holding ${held} — it overlaps ${blocker} too heavily to run ` +
+            `alongside it. Its agent is narrowing the plan.`
+          : `⚖️ Holding ${held} — files it needs are leased to ${blocker}. ` +
+            `It starts the moment that lands.`;
+    await this.appendChannelEntry({
+      projectId: watched.projectId,
+      repositoryId: watched.repositoryId,
+      kind: "system",
+      authorId: "coordinator",
+      content: line,
+    });
+  }
+
   private async narrateConflicts(): Promise<void> {
     const events = await this.options.store.listAuditEvents({
       types: ["conflict_detected"],
@@ -9769,6 +9813,20 @@ export class ApiGateway {
                 )
                 .catch(() => undefined);
             }
+          }
+          // An arbitration is room news, not thread news. The thread gets the
+          // agent's own account below either way; this is the room being told
+          // that the coordinator held one task behind another — which the
+          // person whose task was *not* held has no thread open to learn
+          // from. It is the referee's call, so it speaks in the room's voice
+          // rather than an agent's.
+          if (
+            record.event.type === "plan_admitted" &&
+            (data["status"] === "sequenced" ||
+              data["status"] === "blocked" ||
+              data["partial"] === true)
+          ) {
+            await this.announceArbitration(watched, data).catch(() => undefined);
           }
           const line = narrateTaskEvent(record.event.type, data);
           if (line === undefined) {
