@@ -1044,11 +1044,24 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   }
 
   public async removeRepository(id: string): Promise<void> {
-    if (
-      [...this.submitted.values()].some((task) => task.repositoryId === id) ||
-      [...this.runs.values()].some((state) => state.run.repositoryId === id)
-    ) {
-      throw new Error(`Repository ${id} is still referenced`);
+    // Execution history goes with the repository — see the SQLite store's doc
+    // comment. The refusal this used to throw surfaced in production as a raw
+    // foreign-key error with no path forward, and the durable record of what
+    // happened lives in the audit log, which none of this touches.
+    for (const [taskId, task] of [...this.submitted]) {
+      if (task.repositoryId === id) {
+        this.submitted.delete(taskId);
+      }
+    }
+    for (const [runId, state] of [...this.runs]) {
+      if (state.run.repositoryId === id) {
+        this.runs.delete(runId);
+      }
+    }
+    for (const [leaseId, lease] of [...this.workLeases]) {
+      if (lease.repositoryId === id) {
+        this.workLeases.delete(leaseId);
+      }
     }
     this.repositories.delete(id);
     for (const key of this.projectRepositories) {
@@ -1060,10 +1073,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     // replies, reactions, per-agent overrides and membership, the one-time
     // backfill flag) and any per-repository access grants — rather than
     // leaving them as orphaned rows a future repository reusing this id would
-    // silently inherit. Runs and submitted tasks are refused above instead of
-    // cascaded: they are execution history, not repository state, and the
-    // store's contract (see `removeRepository`'s doc comment) is that they
-    // block deletion rather than disappear with it.
+    // silently inherit.
     for (const [messageId, message] of this.channelMessages) {
       if (message.repositoryId === id) {
         this.channelMessages.delete(messageId);

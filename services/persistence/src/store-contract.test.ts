@@ -2459,6 +2459,31 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a repository that has actually run work can still be deleted`, async () => {
+    // The cascade originally covered the channel and grants and nothing else,
+    // so the first delete of a repository with real history failed on the
+    // foreign key from `runs` — and only repositories nobody had used could
+    // be removed, which is the exact opposite of which ones people want to.
+    const { store, cleanup } = await backend.open();
+    try {
+      await populate(store);
+      await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "queued and never claimed",
+        agentId: TASK.agentId,
+        validationCommands: TASK.validationCommands,
+      });
+      await store.removeRepository(REPOSITORY.id);
+      assert.equal(await store.getRepository(REPOSITORY.id), undefined);
+      assert.deepEqual(
+        await store.listSubmittedTasks({ repositoryId: REPOSITORY.id }),
+        [],
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: removeRepository cascades the repository's channel and grants`, async () => {
     const { store, cleanup } = await backend.open();
     try {
@@ -2564,7 +2589,13 @@ for (const backend of backends) {
     }
   });
 
-  test(`${backend.name}: removeRepository refuses while a submitted task or run still references it`, async () => {
+  test(`${backend.name}: deleting a repository takes its queue and run history with it`, async () => {
+    // This used to assert the opposite — that history *refuses* deletion.
+    // The refusal surfaced in production as a raw "FOREIGN KEY constraint
+    // failed" with nothing offering to clear the history behind it, so every
+    // repository that had ever run a task was permanently undeletable. The
+    // durable record survives regardless: the audit log carries no foreign
+    // key to any of this.
     const { store, cleanup } = await backend.open();
     try {
       await store.saveRepository({
@@ -2578,24 +2609,12 @@ for (const backend of backends) {
         agentId: "scripted-generic-cli",
         validationCommands: [],
       });
-      await assert.rejects(store.removeRepository("repo_with_task"));
-      // The repository is untouched by the refused attempt.
-      assert.notEqual(
-        await store.getRepository("repo_with_task"),
-        undefined,
+      await store.removeRepository("repo_with_task");
+      assert.equal(await store.getRepository("repo_with_task"), undefined);
+      assert.deepEqual(
+        await store.listSubmittedTasks({ repositoryId: "repo_with_task" }),
+        [],
       );
-
-      await store.saveRepository({
-        id: "repo_with_run",
-        path: "/with-run.git",
-        branch: "main",
-      });
-      await store.createRun({
-        repository: { id: "repo_with_run", path: "/with-run.git", branch: "main" },
-        mode: "coordinated",
-        baseVersion: BASE_VERSION,
-      });
-      await assert.rejects(store.removeRepository("repo_with_run"));
     } finally {
       await store.close();
       await cleanup();
