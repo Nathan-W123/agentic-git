@@ -7602,6 +7602,15 @@ export class ApiGateway {
     }
     const [ownerId = "", provider = ""] = root.authorId.split(":");
     if (ownerId === "" || provider === "") {
+      // An agent-authored root whose author is not `owner:vendor`. Nothing
+      // here resolves to somebody who could answer, and this used to be one
+      // of the returns that stored the reply and said nothing at all.
+      await this.sayThreadIsUnanswered(
+        input,
+        "This thread is not attributed to an agent this channel can reach, " +
+          "so there is nobody here to answer. Ask in the channel and mention " +
+          "an agent by name.",
+      );
       return;
     }
     const candidates = await this.resolveChannelMentionCandidates(
@@ -7721,18 +7730,146 @@ export class ApiGateway {
       await this.answerAsAgent({ ...input, root, candidate, question });
     }
     if (answering.length === 0 && owner === undefined) {
-      // The agent has since been disconnected. Saying so is better than the
-      // silence this method exists to remove.
-      await this.appendChannelThreadReply({
-        projectId: input.projectId,
-        repositoryId: input.repositoryId,
-        messageId: input.messageId,
-        authorId: root.authorId,
-        content:
-          "I cannot answer that right now — this agent is no longer " +
-          "connected. Reconnect it from My Agents.",
-      });
+      // The thread's agent could not be resolved. Reached last on purpose:
+      // everything above — an answer to a pending question, `/retry`, "go
+      // ahead" against a held plan, an auditor's approval — either handles the
+      // reply itself or declines and falls through, so saying "nobody can
+      // answer this" here cannot pre-empt any of them.
+      //
+      // It used to be one fixed sentence, in the missing agent's own voice,
+      // naming the one cause out of four that it happened to describe. The
+      // reader's next move is different in each case, and only one of them is
+      // "reconnect it": if the agent left the channel there is nothing wrong
+      // with the sign-in, and if its owner lost access to the repository
+      // reconnecting will not help at all.
+      await this.sayThreadIsUnanswered(
+        input,
+        await this.explainUnreachableAgent(
+          input.projectId,
+          input.repositoryId,
+          ownerId,
+          provider,
+        ),
+      );
       return;
+    }
+  }
+
+  /**
+   * A line in a thread from the coordinator rather than from an agent.
+   *
+   * `system` rather than `agent`, because the thing being reported is that no
+   * agent is available: attributing it to the missing agent puts words in the
+   * mouth of the participant whose absence is the news, and it renders with a
+   * face and a name as though somebody answered. The channel already says this
+   * class of thing as a system line (`postChannelSystemMessage` for a mention
+   * nobody answers to); this is the same sentence one level in.
+   *
+   * Swallows its own failure. Every caller is on the path that exists to stop
+   * a reply vanishing, and a thrown error here would put it back.
+   */
+  private async sayThreadIsUnanswered(
+    input: { projectId: string; repositoryId: string; messageId: string },
+    content: string,
+  ): Promise<void> {
+    await this.appendChannelThreadReply({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      messageId: input.messageId,
+      authorId: "system",
+      kind: "system",
+      content,
+    }).catch(() => undefined);
+  }
+
+  /**
+   * Why the agent a thread hangs off cannot answer in it.
+   *
+   * `channelAgentConnections` collapses four different situations into one
+   * absence — no access, no connection, no vendor, not in the channel — and
+   * the reader's next move differs in every one. This asks the same sources in
+   * the same order that method reads them, and reports the first that fails,
+   * so the sentence and the reason cannot disagree.
+   *
+   * Best effort by construction: it runs only when something has already gone
+   * wrong, so any failure while diagnosing falls back to the plain statement
+   * that the agent cannot be reached. A vague line still beats silence, which
+   * is the failure this whole path exists to remove.
+   */
+  private async explainUnreachableAgent(
+    projectId: string,
+    repositoryId: string,
+    ownerId: string,
+    provider: string,
+  ): Promise<string> {
+    const label = AGENT_LABEL[provider] ?? provider;
+    const generic =
+      `The ${label} this thread belongs to cannot be reached from this ` +
+      `channel, so there is nobody here to answer. Mention another agent by ` +
+      `name to ask them instead.`;
+    try {
+      const [user, project] = await Promise.all([
+        this.options.store.getUser(ownerId),
+        this.options.store.getProject(projectId),
+      ]);
+      if (user === undefined) {
+        return (
+          `The account this ${label} belonged to is gone, so this thread has ` +
+          `nobody left to answer in it. Mention another agent by name to ask ` +
+          `them instead.`
+        );
+      }
+      const who = firstWord(user.displayName);
+      const [memberships, grants] = await Promise.all([
+        project === undefined
+          ? []
+          : this.options.store.listMemberships(project.organizationId),
+        this.options.store.listRepositoryGrants(repositoryId),
+      ]);
+      if (
+        !memberships.some((membership) => membership.userId === ownerId) &&
+        !grants.some((grant) => grant.userId === ownerId)
+      ) {
+        return (
+          `${who} no longer has access to this repository, so their ${label} ` +
+          `cannot answer here. Give them access again, or mention another ` +
+          `agent by name.`
+        );
+      }
+      const connectionsFor = this.options.operations.chatProviders?.connectionsFor;
+      const connections =
+        connectionsFor === undefined
+          ? []
+          : ((await connectionsFor([ownerId]))[ownerId] ?? []);
+      if (!connections.some((connection) => connection.provider === provider)) {
+        return (
+          `${who}'s ${label} is not connected any more — the sign-in behind ` +
+          `it has been removed or has expired. Only ${who} can reconnect it, ` +
+          `from My Agents; until then, mention another agent by name.`
+        );
+      }
+      if (PROVIDER_TO_VENDOR[provider] === undefined) {
+        return (
+          `This deployment cannot run ${label}, so ${who}'s agent cannot ` +
+          `answer here. Mention another agent by name instead.`
+        );
+      }
+      const members =
+        await this.options.store.listChannelAgentMembers(repositoryId);
+      if (
+        !members.some(
+          (member) => member.userId === ownerId && member.provider === provider,
+        )
+      ) {
+        return (
+          `${who}'s ${label} has left this channel, so it cannot answer ` +
+          `here. Add it back from the channel roster, or mention another ` +
+          `agent by name.`
+        );
+      }
+      return generic;
+    } catch {
+      return generic;
     }
   }
 
@@ -8408,9 +8545,15 @@ export class ApiGateway {
       input.viewerId,
     );
     const [ownerId = "", provider = ""] = (root?.authorId ?? "").split(":");
-    const authorId = ownerId === "" ? undefined : `${ownerId}:${provider}`;
+    const authorId =
+      ownerId === "" || provider === "" ? undefined : `${ownerId}:${provider}`;
+    // In the agent's voice when there is an agent whose thread this is, and as
+    // a system line when there is not — a `/retry` typed in a thread hanging
+    // off a person's message used to return here without saying anything,
+    // which is the exact silence this method's own comment refuses.
     const say = async (content: string): Promise<void> => {
       if (authorId === undefined) {
+        await this.sayThreadIsUnanswered(input, content);
         return;
       }
       await this.appendChannelThreadReply({
@@ -9445,10 +9588,11 @@ export class ApiGateway {
     authorId: string;
     content: string;
     /**
-     * `progress` for a run narrating itself. It reads differently and it
-     * counts differently — see `ChannelEntryKind`.
+     * `progress` for a run narrating itself, `system` for the coordinator
+     * speaking in its own name rather than an agent's. Both read differently
+     * and count differently — see `ChannelEntryKind`.
      */
-    kind?: "agent" | "progress";
+    kind?: "agent" | "progress" | "system";
   }): Promise<void> {
     await this.options.store.addChannelReply({
       repositoryId: input.repositoryId,
