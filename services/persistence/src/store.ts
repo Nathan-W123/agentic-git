@@ -663,10 +663,28 @@ export interface CreateApprovalInput {
  * step-by-step commentary reads better as one block that grows than as thirty
  * messages from somebody who will not stop talking.
  *
+ * `outcome` is the reply that ends a thread — the run's verdict, whether that
+ * is the agent's own account of what it did, a failure, or a cancellation.
+ *
+ * Marked for the same reason `progress` is: the browser was deciding it by
+ * matching the text against the fixed sentences the narration used to write,
+ * and then the ending became the agent's own summary. Nothing an agent writes
+ * begins "Done —", so every thread that finished well was read as still
+ * thinking: the summary — the one line the reader came for — was filed inside
+ * the collapsed reasoning block, the typing dots never retired, and the sweep
+ * that gives unfinished threads an ending could not tell this thread already
+ * had one and gave it a second.
+ *
  * Stored as text like the others, so nothing migrates: rows written before
- * this existed are `agent`, which is what they were.
+ * this existed are `agent`, which is what they were, and the text match stays
+ * as the fallback that reads them.
  */
-export type ChannelEntryKind = "user" | "agent" | "system" | "progress";
+export type ChannelEntryKind =
+  | "user"
+  | "agent"
+  | "system"
+  | "progress"
+  | "outcome";
 
 /** One emoji's reaction summary from one viewer's point of view. */
 export interface ChannelReaction {
