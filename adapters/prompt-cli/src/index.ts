@@ -525,10 +525,12 @@ const PLAN_SHAPE_INSTRUCTIONS = [
 
 const COMPLETION_SHAPE_INSTRUCTIONS = [
   "When you are done (or blocked), answer with exactly one JSON object and nothing else:",
-  '  outcome ("completed" or "scope_change_requested"), symbolsChanged, explanation,',
+  '  outcome ("completed", "scope_change_requested" or "question_asked"), symbolsChanged, explanation,',
   "  requestId, additionalFiles, additionalSymbols, additionalApis, additionalSchemas,",
-  "  additionalConfigKeys, additionalTests, additionalServices, reason",
+  "  additionalConfigKeys, additionalTests, additionalServices, reason,",
+  "  question, options",
   "For completed, use empty scope fields. For scope_change_requested, fill every scope field.",
+  'For question_asked, set requestId, question, and options (at least two); leave the scope fields empty.',
 ].join("\n");
 
 const STRING_ARRAY_JSON_SCHEMA = {
@@ -594,11 +596,16 @@ const COMPLETION_JSON_SCHEMA = JSON.stringify({
   properties: {
     outcome: {
       type: "string",
-      enum: ["completed", "scope_change_requested"],
+      enum: ["completed", "scope_change_requested", "question_asked"],
     },
     symbolsChanged: STRING_ARRAY_JSON_SCHEMA,
     explanation: { type: "string" },
     requestId: { type: "string" },
+    // Present only for `question_asked`, and not required, because a schema
+    // that demanded them would force every ordinary completion to invent a
+    // question to satisfy it.
+    question: { type: "string" },
+    options: STRING_ARRAY_JSON_SCHEMA,
     additionalFiles: STRING_ARRAY_JSON_SCHEMA,
     additionalSymbols: STRING_ARRAY_JSON_SCHEMA,
     additionalApis: STRING_ARRAY_JSON_SCHEMA,
@@ -1489,13 +1496,33 @@ export class PromptCliAdapter implements AgentAdapter {
       "Finish all required edits within the first 80% of the deadline; reserve the remainder only for required validation and the final JSON response.",
       "The coordinator runs every required validation command after collection; do not repeat clean installs, full builds, or full test suites inside this agent session.",
       "Do not install dependency trees, start servers or watchers, or use the network. A package-lock-only operation is allowed only when the task explicitly changes a lockfile.",
-      "Skip optional polish, broad exploration, and repeated validation. Never wait for human input.",
+      "Skip optional polish, broad exploration, and repeated validation.",
+      // Deliberately hedged about. Asking is the right move for a genuine
+      // fork and the wrong one for anything a reasonable engineer would
+      // simply decide — and the cost of over-asking is invisible from in
+      // here: the run holds its workspace and its ownership leases while it
+      // waits, so other work queues behind the question, and nobody
+      // answering ends the task outright.
+      "You may stop and ask, but only for a decision that is genuinely not " +
+        "yours: work that would be thrown away if you guessed wrong, or a " +
+        "choice between approaches with different consequences for the " +
+        "person who asked. Do not ask to confirm something you can check, " +
+        "or to be told a preference you can infer. Prefer deciding and " +
+        "saying what you assumed in the explanation.",
+      "To ask, answer with a question_asked outcome carrying the question " +
+        "and at least two concrete options. Somebody has a limited time to " +
+        "answer; if nobody does, the task is cancelled, so ask once and ask " +
+        "for the thing that actually blocks you.",
       "Do not modify files outside expectedFiles without first answering with a scope_change_requested outcome.",
       "Do not change Git metadata.",
       `Task: ${record.input.task.objective}`,
       `Approved plan: ${JSON.stringify(approvedPlan)}`,
       `Coordinator decision: ${JSON.stringify(context.decision)}`,
       `Prior scope decisions: ${JSON.stringify(record.scopeDecisions)}`,
+      // Answers already given, so a second round does not ask the same thing
+      // again — the CLI is re-invoked per round and remembers nothing of the
+      // last one.
+      `Answers you already have: ${JSON.stringify(record.answers)}`,
       `Canonical revision: ${context.canonicalVersion.revision}`,
       `Coordinator validation labels (do not execute): ${JSON.stringify(validationLabels)}`,
       COMPLETION_SHAPE_INSTRUCTIONS,

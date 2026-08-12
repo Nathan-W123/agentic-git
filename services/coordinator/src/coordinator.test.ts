@@ -10,6 +10,7 @@ import {
   type AgentEvent,
   type AgentSession,
   type CoordinatorContext,
+  type QuestionAnswer,
   type StartTaskInput,
 } from "@coord/agent-protocol";
 import {
@@ -210,6 +211,11 @@ class TestAgent implements AgentAdapter {
     handler: (event: AgentEvent) => void,
   ): Promise<void> {
     this.requireSession(sessionId).eventHandler = handler;
+  }
+
+  /** The event handler for one session, for a subclass that emits its own. */
+  protected handlerFor(sessionId: string): ((event: AgentEvent) => void) | undefined {
+    return this.sessions.get(sessionId)?.eventHandler;
   }
 
   private requireSession(sessionId: string): TestSession {
@@ -993,3 +999,145 @@ test("an untracked file the agent creates is reported as added", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("an unanswered question cancels the task rather than guessing", async () => {
+  // The agent asked because the choice was not its to make, and nobody
+  // answering does not hand it back. Picking a default here would be the
+  // platform deciding on somebody's behalf and calling it consent.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const asked: Array<{ question: string; options: string[] }> = [];
+    const agent = new AskingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      { question: "Change both modules?", options: ["Both", "One and a shim"] },
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store: new InMemoryCoordinationStore(),
+      // Nobody ever answers.
+      questions: {
+        awaitAnswer: async (ask) => {
+          asked.push({ question: ask.question, options: [...ask.options] });
+          return undefined;
+        },
+      },
+      questionDeadlineMs: 50,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0]?.question, "Change both modules?");
+    assert.equal(result.tasks[0]?.status, "failed");
+    // Said as a cancellation, not as a mysterious timeout — the run must not
+    // die on the execution clock when the deadline that lapsed was this one.
+    const types = result.audit.map((event) => event.type);
+    assert.ok(types.includes("question_asked"), JSON.stringify(types));
+    assert.ok(types.includes("question_cancelled"), JSON.stringify(types));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an answered question is handed back and the run continues", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new AskingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      { question: "Change both modules?", options: ["Both", "One and a shim"] },
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store: new InMemoryCoordinationStore(),
+      questions: { awaitAnswer: async () => ({ chosen: 1 }) },
+      questionDeadlineMs: 5_000,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.deepEqual(agent.answers, [{ requestId: "q1", status: "answered", chosen: 1 }]);
+    const types = result.audit.map((event) => event.type);
+    assert.ok(types.includes("question_answered"), JSON.stringify(types));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * An agent that stops once to ask, then does the work it was going to do.
+ *
+ * Separate from `TestAgent` because the interesting behaviour is what it does
+ * with the answer — including the case where there isn't one, where it must
+ * stop rather than carry on with a guess.
+ */
+class AskingAgent extends TestAgent {
+  public readonly answers: QuestionAnswer[] = [];
+  private pending: ((answer: QuestionAnswer) => void) | undefined;
+
+  public constructor(
+    agentId: string,
+    plan: AgentPlan,
+    repository: CanonicalRepository,
+    workspaces: WorkspaceManager,
+    outputPath: string,
+    private readonly ask: { question: string; options: string[] },
+  ) {
+    super(agentId, plan, repository, workspaces, outputPath);
+  }
+
+  public override async sendContext(
+    sessionId: string,
+    context: CoordinatorContext,
+  ): Promise<void> {
+    const answer = await new Promise<QuestionAnswer>((resolve) => {
+      this.pending = resolve;
+      void this.emitQuestion(sessionId);
+    });
+    this.answers.push(answer);
+    if (answer.status !== "answered") {
+      // What the real adapter does: the choice was not its to make, and
+      // silence does not hand it back.
+      throw new Error("No answer — the task was cancelled rather than guessed at.");
+    }
+    await super.sendContext(sessionId, context);
+  }
+
+  public async resolveQuestion(
+    _sessionId: string,
+    answer: QuestionAnswer,
+  ): Promise<void> {
+    this.pending?.(answer);
+    this.pending = undefined;
+  }
+
+  private async emitQuestion(sessionId: string): Promise<void> {
+    this.handlerFor(sessionId)?.({
+      event: "question_asked",
+      requestId: "q1",
+      question: this.ask.question,
+      options: [...this.ask.options],
+      occurredAt: new Date().toISOString(),
+    });
+  }
+}
