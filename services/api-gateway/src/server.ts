@@ -7597,9 +7597,51 @@ export class ApiGateway {
       input.messageId,
       input.viewerId,
     );
-    // Only an agent's thread has an agent to answer in it. A thread hanging
-    // off a person's message is a conversation between people.
-    if (root === undefined || root.kind !== "agent") {
+    if (root === undefined) {
+      return;
+    }
+    // A thread hanging off a person's message is a conversation between
+    // people, so a bare reply in one stays between people. But a reply that
+    // *mentions* an agent has said out loud who it is for, and this used to
+    // return before reading the mention — the one place in the product where
+    // "@agent, question?" produced nothing at all, silently, no matter how
+    // many times it was asked. Threads open from a reply button on every
+    // message, so a person's own request growing a thread is the common case,
+    // not the exception.
+    if (root.kind !== "agent") {
+      const named = question.includes("@")
+        ? (
+            await this.resolveChannelMentionCandidates(
+              input.projectId,
+              input.repositoryId,
+            )
+          ).filter((entry) => question.includes(`@${entry.name}`))
+        : [];
+      for (const candidate of named) {
+        if (
+          candidate.visibility === "personal" &&
+          candidate.userId !== input.viewerId
+        ) {
+          continue;
+        }
+        if (looksLikeTaskRequest(question)) {
+          await this.dispatchOneMention({
+            projectId: input.projectId,
+            repositoryId: input.repositoryId,
+            content: question,
+            senderId: input.viewerId,
+            candidate,
+            threadMessageId: input.messageId,
+          });
+        } else {
+          await this.answerAsAgent({
+            ...input,
+            root,
+            candidate,
+            question,
+          });
+        }
+      }
       return;
     }
     const [ownerId = "", provider = ""] = root.authorId.split(":");
