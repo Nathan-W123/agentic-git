@@ -99,9 +99,48 @@ export type AgentEvent =
       occurredAt: string;
     }
   | {
+      /**
+       * The agent is stuck on a decision that is not its to make, and has
+       * stopped until somebody answers.
+       *
+       * Options are required and enumerated, which is the whole design. A
+       * free-text question is expensive at both ends: the person has to
+       * compose an answer, and the agent has to re-read prose it may
+       * misunderstand. Choices make the answer one word, and make the agent
+       * do the thinking *before* asking — "what should I do?" is a question
+       * this shape cannot express.
+       *
+       * Costly in a way `progress` is not: the agent holds its workspace and
+       * its ownership leases while it waits, so other work queues behind an
+       * unanswered question. That is why the coordinator puts a deadline on
+       * it rather than waiting as long as the run is allowed to live.
+       */
+      event: "question_asked";
+      requestId?: string;
+      question: string;
+      /** At least two; one "option" is a statement, not a question. */
+      options: string[];
+      occurredAt: string;
+    }
+  | {
       event: "completed";
       occurredAt: string;
     };
+
+/**
+ * What a person said, or that nobody did.
+ *
+ * `cancelled` is not a refusal of the chosen option — it is nobody having
+ * chosen at all. The agent is expected to stop rather than pick for itself:
+ * it asked because the decision was not its to make, and silence does not
+ * transfer it back.
+ */
+export interface QuestionAnswer {
+  requestId: string;
+  /** Index into the options it offered, or undefined when nobody answered. */
+  chosen?: number;
+  status: "answered" | "cancelled";
+}
 
 /**
  * Model spend one agent reported for one phase of one session.
@@ -144,6 +183,15 @@ export interface AgentAdapter {
     sessionId: string,
     decision: ScopeChangeDecision,
   ): Promise<void>;
+
+  /**
+   * Hands back what a person chose, or that nobody did.
+   *
+   * Optional: an adapter whose CLI has no way to ask never emits
+   * `question_asked`, so it is never called, and requiring it would make
+   * every adapter implement a path it can never reach.
+   */
+  resolveQuestion?(sessionId: string, answer: QuestionAnswer): Promise<void>;
 
   cancel(sessionId: string): Promise<void>;
 

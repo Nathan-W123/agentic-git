@@ -780,6 +780,11 @@ export type AuditEventType =
   | "ownership_granted"
   | "task_started"
   | "agent_progress"
+  /** An agent stopped on a choice that was not its to make. */
+  | "question_asked"
+  | "question_answered"
+  /** Nobody answered inside the deadline, so the task was cancelled. */
+  | "question_cancelled"
   /**
    * What the agent has touched so far, read from the worktree while it is
    * still editing — the one stretch of a run that previously reported

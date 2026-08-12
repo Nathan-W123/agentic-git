@@ -546,3 +546,50 @@ export function formatFailureVerdict(verdict: FailureVerdict): string {
       : "\n\nRunning it again unchanged would fail the same way.")
   );
 }
+
+/* ------------------------------------------------------- asking a person --
+ *
+ * An agent that has stopped on a choice it should not make alone.
+ *
+ * Options are enumerated by the agent, so the answer is one word rather than
+ * a paragraph, and the numbering is what makes a reply unambiguous — the same
+ * device the auditor's findings already use, for the same reason.
+ */
+
+/** How the question reads in the thread. */
+export function formatAgentQuestion(input: {
+  question: string;
+  options: readonly string[];
+  deadlineMinutes: number;
+}): string {
+  return (
+    `${input.question.trim()}\n\n` +
+    input.options
+      .map((option, index) => `${String(index + 1)}. ${option.trim()}`)
+      .join("\n") +
+    `\n\nReply with a number. I've stopped until you do — if nobody answers ` +
+    `in ${String(input.deadlineMinutes)} minutes I'll cancel this rather ` +
+    `than guess.`
+  );
+}
+
+/**
+ * Which option a reply chose, if any.
+ *
+ * A bare number is the expected answer, and the only one taken from anywhere
+ * in the sentence — "2" and "let's do 2" mean the same thing. Anything
+ * outside the range offered is not an answer: a reply of "5" to three options
+ * is somebody talking about something else, and acting on it would be worse
+ * than asking again.
+ */
+export function optionChosenBy(
+  reply: string,
+  optionCount: number,
+): number | undefined {
+  const match = /\b(\d{1,2})\b/u.exec(reply);
+  if (match === null) {
+    return undefined;
+  }
+  const picked = Number.parseInt(match[1] ?? "", 10) - 1;
+  return picked >= 0 && picked < optionCount ? picked : undefined;
+}

@@ -8,6 +8,7 @@ import {
   type AgentSession,
   type AgentTokenUsage,
   type CoordinatorContext,
+  type QuestionAnswer,
   type StartTaskInput,
 } from "@coord/agent-protocol";
 import {
@@ -315,6 +316,15 @@ interface Completion {
   explanation: string;
 }
 
+interface QuestionAsked {
+  outcome: "question_asked";
+  requestId: string;
+  question: string;
+  options: string[];
+  symbolsChanged: string[];
+  explanation: string;
+}
+
 interface ScopeChange {
   outcome: "scope_change_requested";
   requestId: string;
@@ -330,7 +340,7 @@ interface ScopeChange {
   explanation: string;
 }
 
-type ExecutionResult = Completion | ScopeChange;
+type ExecutionResult = Completion | ScopeChange | QuestionAsked;
 
 interface PromptCliSession {
   session: AgentSession;
@@ -345,11 +355,29 @@ interface PromptCliSession {
   active: Promise<ProcessOutput> | undefined;
   tokenUsage: PromptCliTokenUsage[];
   scopeDecisions: ScopeChangeDecision[];
+  /** What a person chose, for the prompt that follows the question. */
+  answers: Array<{ question: string; chose: string }>;
   pendingScope: Map<
     string,
     {
       promise: Promise<ScopeChangeDecision>;
       resolve: (decision: ScopeChangeDecision) => void;
+      reject: (error: Error) => void;
+    }
+  >;
+  /**
+   * Questions put to a person and not yet answered.
+   *
+   * Separate from `pendingScope` because the two are answered by different
+   * things — arbitration decides a scope request in milliseconds, a person
+   * decides this one when they get to it — and collapsing them would hide
+   * that difference behind one name.
+   */
+  pendingQuestion: Map<
+    string,
+    {
+      promise: Promise<QuestionAnswer>;
+      resolve: (answer: QuestionAnswer) => void;
       reject: (error: Error) => void;
     }
   >;
@@ -448,6 +476,24 @@ function assertExecutionResult(
     );
   }
   if (completion.outcome === "completed") {
+    return;
+  }
+  if (completion.outcome === "question_asked") {
+    // Two options at minimum: one "option" is a statement, and a question
+    // with nothing to choose between is the free-text ask this shape exists
+    // to prevent.
+    if (
+      typeof completion.requestId !== "string" ||
+      typeof completion.question !== "string" ||
+      completion.question.trim().length === 0 ||
+      !stringArray(completion.options) ||
+      completion.options.length < 2
+    ) {
+      throw new TypeError(
+        "A question must carry a requestId, the question itself, and at " +
+          "least two options to choose between",
+      );
+    }
     return;
   }
   if (
@@ -747,6 +793,8 @@ export class PromptCliAdapter implements AgentAdapter {
       tokenUsage: [],
       scopeDecisions: [],
       pendingScope: new Map(),
+      pendingQuestion: new Map(),
+      answers: [],
       cancelled: false,
     });
     this.emit(this.sessions.get(session.id)!, {
@@ -883,6 +931,39 @@ export class PromptCliAdapter implements AgentAdapter {
         return;
       }
 
+      if (execution.outcome === "question_asked") {
+        const askId = execution.requestId.trim() || createId("question");
+        const waiting = this.createQuestionWaiter(record, askId);
+        this.emit(record, {
+          event: "question_asked",
+          requestId: askId,
+          question: execution.question,
+          options: [...execution.options],
+          occurredAt: new Date().toISOString(),
+        });
+        const answer = await waiting;
+        // Nobody answered. The agent asked because the decision was not its
+        // to make, and silence does not hand it back — so the run ends here
+        // rather than guessing on somebody's behalf.
+        if (answer.status !== "answered" || answer.chosen === undefined) {
+          throw new Error(
+            `No answer to "${execution.question}" — the task was cancelled ` +
+              `rather than guessed at.`,
+          );
+        }
+        this.emit(record, {
+          event: "progress",
+          message: `Answered: ${
+            execution.options[answer.chosen] ?? String(answer.chosen)
+          }`,
+          occurredAt: new Date().toISOString(),
+        });
+        record.answers.push({
+          question: execution.question,
+          chose: execution.options[answer.chosen] ?? "",
+        });
+        continue;
+      }
       const requestId = execution.requestId.trim() || createId("scope");
       const pending = this.createScopeWaiter(record, requestId);
       this.emit(record, {
@@ -1187,6 +1268,50 @@ export class PromptCliAdapter implements AgentAdapter {
       });
     }
     return [...totals].map(([phase, sums]) => ({ phase, ...sums }));
+  }
+
+  /**
+   * Hands the agent a promise for what a person will say.
+   *
+   * No timer of its own, unlike the scope waiter. A question is answered by
+   * somebody who may be at lunch, and the coordinator is what knows how long
+   * that is allowed to take — putting a second deadline here would mean two
+   * clocks disagreeing about when the same wait ended.
+   */
+  private createQuestionWaiter(
+    record: PromptCliSession,
+    requestId: string,
+  ): Promise<QuestionAnswer> {
+    if (record.pendingQuestion.has(requestId)) {
+      throw new Error(
+        `${this.profile.name} repeated pending question ${requestId}`,
+      );
+    }
+    let resolvePromise: (answer: QuestionAnswer) => void = () => undefined;
+    let rejectPromise: (error: Error) => void = () => undefined;
+    const promise = new Promise<QuestionAnswer>((resolve, reject) => {
+      resolvePromise = resolve;
+      rejectPromise = reject;
+    });
+    record.pendingQuestion.set(requestId, {
+      promise,
+      resolve: resolvePromise,
+      reject: rejectPromise,
+    });
+    return promise;
+  }
+
+  public async resolveQuestion(
+    sessionId: string,
+    answer: QuestionAnswer,
+  ): Promise<void> {
+    const record = this.requireSession(sessionId);
+    const pending = record.pendingQuestion.get(answer.requestId);
+    if (pending === undefined) {
+      throw new Error(`Unknown question ${answer.requestId}`);
+    }
+    record.pendingQuestion.delete(answer.requestId);
+    pending.resolve(structuredClone(answer));
   }
 
   private createScopeWaiter(
