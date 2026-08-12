@@ -824,13 +824,43 @@ export function parseChangedFiles(
     if (typeof entry !== "object" || entry === null) {
       return [];
     }
-    const { path, status } = entry as { path?: unknown; status?: unknown };
+    const { path, status, added, removed } = entry as {
+      path?: unknown;
+      status?: unknown;
+      added?: unknown;
+      removed?: unknown;
+    };
     if (typeof path !== "string" || path.length === 0) {
       return [];
     }
-    return CHANGED_FILE_STATUSES.includes(status as FilePatchStatus)
-      ? [{ path, status: status as FilePatchStatus }]
-      : [];
+    if (!CHANGED_FILE_STATUSES.includes(status as FilePatchStatus)) {
+      return [];
+    }
+    // The line counts, when the row has them.
+    //
+    // This used to rebuild each entry as `{ path, status }` and drop the rest,
+    // which quietly undid the whole point of storing them: a run wrote its
+    // counts into the row, the thread rendered them once from what the
+    // collector returned, and the next read — a reload, another person opening
+    // the channel — got paths alone. The counts looked like they only worked
+    // for the newest thread, when in fact they only worked before the first
+    // re-read. The in-memory store keeps whole objects, so nothing in the
+    // tests could see it.
+    //
+    // Both or neither, matching the writer: half a count renders as "+8 −0",
+    // which reads as a measurement rather than as the absence of one.
+    const counted =
+      typeof added === "number" &&
+      Number.isFinite(added) &&
+      typeof removed === "number" &&
+      Number.isFinite(removed);
+    return [
+      {
+        path,
+        status: status as FilePatchStatus,
+        ...(counted ? { added, removed } : {}),
+      },
+    ];
   });
   return files.length === 0 ? undefined : files;
 }
