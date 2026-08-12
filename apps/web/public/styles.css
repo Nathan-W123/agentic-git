@@ -651,7 +651,11 @@ svg {
 
 .nav-item.active {
   background: var(--accent-wash);
-  color: #fff;
+  /* The wash is 12% alpha, so the page shows through it — the text
+     sits on the theme's own background, not on the accent. White was
+     right only by coincidence of the dark theme; on light it read as
+     white-on-cream. `--text` is what both themes call readable. */
+  color: var(--text);
 }
 
 .nav-item.active svg {
@@ -1809,7 +1813,11 @@ svg {
 
 .tree-row.active {
   background: var(--accent-wash);
-  color: #fff;
+  /* The wash is 12% alpha, so the page shows through it — the text
+     sits on the theme's own background, not on the accent. White was
+     right only by coincidence of the dark theme; on light it read as
+     white-on-cream. `--text` is what both themes call readable. */
+  color: var(--text);
 }
 
 .tree-row .tw-icon {
@@ -3514,7 +3522,11 @@ svg {
 
 .chan-row.active {
   background: var(--accent-wash);
-  color: #fff;
+  /* The wash is 12% alpha, so the page shows through it — the text
+     sits on the theme's own background, not on the accent. White was
+     right only by coincidence of the dark theme; on light it read as
+     white-on-cream. `--text` is what both themes call readable. */
+  color: var(--text);
 }
 
 .chan-row .cr-hash {
@@ -4418,99 +4430,6 @@ body.resizing-panel {
 }
 
 /* -------------------------------------------------------- utility rail ---- */
-
-/* ------------------------------------------------------ inline code block ---- */
-
-/* Indented to the message text column, so the files a turn touched read as
-   part of that turn rather than as a panel that happens to be nearby. */
-.cblocks {
-  margin: 4px 0 14px 62px;
-  max-width: 760px;
-  border: 1px solid var(--border-soft);
-  border-radius: 8px;
-  overflow: hidden;
-  background: var(--bg-inset);
-}
-
-.cblocks-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-  border-bottom: 1px solid var(--border-soft);
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--text-2);
-  background: var(--bg-panel);
-}
-
-.cblocks-head svg {
-  width: 14px;
-  height: 14px;
-}
-
-.cblock + .cblock {
-  border-top: 1px solid var(--border-soft);
-}
-
-.cblock-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  padding: 7px 12px;
-  background: none;
-  border: 0;
-  cursor: pointer;
-  text-align: left;
-  font: inherit;
-  color: var(--text);
-}
-
-.cblock-head:hover {
-  background: var(--bg-hover);
-}
-
-.cblock-caret {
-  display: inline-flex;
-  color: var(--text-3);
-}
-
-.cblock-caret svg {
-  width: 14px;
-  height: 14px;
-}
-
-.cblock-flag {
-  font-size: 11px;
-  font-weight: 700;
-  width: 12px;
-  text-align: center;
-}
-
-.cblock-path {
-  flex: 1;
-  font-family: var(--font-mono);
-  font-size: 12px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.cblock-stats {
-  display: flex;
-  gap: 6px;
-  font-size: 11px;
-  font-variant-numeric: tabular-nums;
-}
-
-/* The diff scrolls inside the block: a long line must not widen the
-   transcript and push the conversation sideways. */
-.cblock-body {
-  border-top: 1px solid var(--border-soft);
-  max-height: 420px;
-  overflow: auto;
-}
 
 /* ---------------------------------------------------- character motion ---- */
 
@@ -5601,40 +5520,6 @@ dialog.modal::backdrop {
   }
 }
 
-/* The changed-file list, folded. A fifty-file changeset is a footnote to the
-   conversation and used to push every message out of view. */
-.cblocks > summary {
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-}
-
-.cblocks > summary::-webkit-details-marker {
-  display: none;
-}
-
-.cblocks > summary::before {
-  content: "";
-  width: 0;
-  height: 0;
-  border-left: 5px solid currentColor;
-  border-top: 4px solid transparent;
-  border-bottom: 4px solid transparent;
-  transition: transform 0.15s ease;
-  flex: none;
-  margin-right: 2px;
-}
-
-.cblocks[open] > summary::before {
-  transform: rotate(90deg);
-}
-
-/* The file currently open in the side panel, so the list says which one. */
-.cblock.active .cblock-head {
-  background: var(--surface-3, #1b2030);
-  border-radius: 6px;
-}
-
 /* A file read beside the conversation rather than inside it. */
 .file-panel .thread-head {
   gap: 8px;
@@ -5748,12 +5633,6 @@ dialog.modal::backdrop {
   content: "● ";
   color: var(--accent-bright);
   direction: ltr;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .cblocks > summary::before {
-    transition: none;
-  }
 }
 
 /* --------------------------------------------------- roster and threads ---- */
@@ -5898,6 +5777,13 @@ dialog.modal::backdrop {
  * clinical, and off-white is easier to sit in front of for a long session.
  */
 :root[data-theme="light"] {
+  /* The agent doodles are drawn in their owner's colour with no backing at
+     all, which the dark theme could afford: every colour in the picker reads
+     against near-black. On cream the lighter ones dissolve. A dark disc gives
+     every doodle the contrast the dark page used to provide — grey rather
+     than the accent, so the colour identifying the owner stays the doodle's
+     own. Scoped to the theme that needs it; dark mode keeps its bare faces. */
+
   color-scheme: light;
 
   /* Deeper than it was. The old set ran from #f4f0e6 up to #fffdf7, which is
@@ -5933,6 +5819,12 @@ dialog.modal::backdrop {
   --shadow-pop: 0 6px 16px rgba(15, 18, 30, 0.14);
   --shadow-card: 0 1px 1px rgba(15, 18, 30, 0.08);
 }
+:root[data-theme="light"] .agent-face {
+  background: #33322f;
+  border-radius: 50%;
+  padding: 2px;
+}
+
 
 /* The composer aimed at a thread rather than the channel. Loud on purpose:
    a message going somewhere other than where it looks like it will go is
