@@ -9,7 +9,11 @@ import {
   createGeminiAdapter,
 } from "@coord/adapter-prompt-cli";
 import type { AgentAdapter } from "@coord/agent-protocol";
-import { Coordinator, approvalPolicyForProject } from "@coord/coordinator";
+import {
+  Coordinator,
+  approvalPolicyForProject,
+  type QuestionController,
+} from "@coord/coordinator";
 import type {
   CoordinationStore,
   StoredRepository,
@@ -552,6 +556,14 @@ export interface RunOptions {
   repositoryId?: string;
   projectId?: string;
   /**
+   * Where an agent's question goes, and where its answer comes back from.
+   *
+   * Absent on the CLI, which has nobody watching to ask — a question there
+   * is cancelled at once rather than waiting out a deadline for an answer
+   * that was never coming.
+   */
+  questions?: QuestionController;
+  /**
    * Per-user vendor credentials. When supplied, a task whose submitter has
    * connected their own provider account runs under that account instead of
    * the host machine's CLI login.
@@ -761,6 +773,9 @@ export async function runPendingTasks(
       workspaces,
       store,
       approvalPolicy: approvalPolicyForProject(projectRecord?.policy),
+      ...(options.questions === undefined
+        ? {}
+        : { questions: options.questions }),
     });
     const result = await coordinator.run({
       repository: canonical,

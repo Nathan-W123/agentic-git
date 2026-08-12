@@ -4,6 +4,8 @@ import test from "node:test";
 import {
   buildAuditPrompt,
   buildInvestigationPrompt,
+  formatAgentQuestion,
+  optionChosenBy,
   findingsReferencedBy,
   isInvestigatorRole,
   parseFailureVerdict,
@@ -352,4 +354,30 @@ test("investigator is a reserved role name, matched like auditor", () => {
   assert.equal(isInvestigatorRole(undefined), false);
   // The two reserved roles are distinct; holding one is not holding the other.
   assert.equal(isInvestigatorRole("auditor"), false);
+});
+
+test("a question is numbered, and a reply is read only inside the range", () => {
+  const posted = formatAgentQuestion({
+    question: "The config loader is used by two modules. How far should I go?",
+    options: ["Change both", "Change one and leave a shim", "Stop and report"],
+    deadlineMinutes: 15,
+  });
+  assert.match(posted, /1\. Change both/u);
+  assert.match(posted, /3\. Stop and report/u);
+  // The reader is told the cost of not answering, rather than discovering it.
+  assert.match(posted, /15 minutes/u);
+  assert.match(posted, /cancel this rather than guess/u);
+
+  // A bare number, or one inside a sentence — both mean the same thing.
+  assert.equal(optionChosenBy("2", 3), 1);
+  assert.equal(optionChosenBy("let's do 2", 3), 1);
+  assert.equal(optionChosenBy("1", 3), 0);
+
+  // Outside the range offered is not an answer. A "5" against three options
+  // is somebody talking about something else, and acting on it would be
+  // worse than asking again.
+  assert.equal(optionChosenBy("5", 3), undefined);
+  assert.equal(optionChosenBy("0", 3), undefined);
+  assert.equal(optionChosenBy("no idea", 3), undefined);
+  assert.equal(optionChosenBy("", 3), undefined);
 });

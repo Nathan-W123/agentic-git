@@ -5,6 +5,7 @@ import type {
   AgentAdapter,
   AgentEvent,
   AgentSession,
+  QuestionAnswer,
 } from "@coord/agent-protocol";
 import {
   CodeIntelligenceService,
@@ -157,7 +158,46 @@ export interface CoordinatorDependencies {
    * sets its own.
    */
   workingChangePollMs?: number;
+  /**
+   * Who puts an agent's question to a person, and brings back what they said.
+   *
+   * Absent on a deployment with nobody to ask — a CLI run, a benchmark — in
+   * which case a question is cancelled immediately rather than waiting out a
+   * deadline for an answer that was never going to come.
+   */
+  questions?: QuestionController;
+  /** How long a person has, before the task is cancelled. See `answerAgentQuestion`. */
+  questionDeadlineMs?: number;
 }
+
+/**
+ * Somewhere to put a question, and somewhere for the answer to come back.
+ *
+ * An interface rather than a channel client, for the same reason the store
+ * is: the coordinator knows a question needs answering and nothing about
+ * where people are. Returning `undefined` — or resolving with no choice — is
+ * how "nobody answered" is said.
+ */
+export interface QuestionController {
+  awaitAnswer(input: {
+    requestId: string;
+    taskId: string;
+    repositoryId: string;
+    projectId?: string;
+    question: string;
+    options: string[];
+    deadlineMs: number;
+  }): Promise<{ chosen?: number } | undefined>;
+}
+
+/**
+ * Fifteen minutes.
+ *
+ * Long enough that somebody at lunch can still answer, short enough that the
+ * leases an unanswered question is holding are not held for the hour the
+ * execution timeout would otherwise allow.
+ */
+const DEFAULT_QUESTION_DEADLINE_MS = 15 * 60 * 1000;
 
 /** See {@link CoordinatorDependencies.workingChangePollMs}. */
 const DEFAULT_WORKING_CHANGE_POLL_MS = 10_000;
@@ -175,6 +215,8 @@ export class Coordinator {
   private readonly store: CoordinationStore | undefined;
   private readonly repairConflicts: boolean;
   private readonly workingChangePollMs: number;
+  private readonly questions: QuestionController | undefined;
+  private readonly questionDeadlineMs: number;
 
   public constructor(dependencies: CoordinatorDependencies = {}) {
     this.repositories = dependencies.repositories ?? new RepositoryService();
@@ -193,6 +235,9 @@ export class Coordinator {
     this.repairConflicts = dependencies.repairConflicts ?? true;
     this.workingChangePollMs =
       dependencies.workingChangePollMs ?? DEFAULT_WORKING_CHANGE_POLL_MS;
+    this.questions = dependencies.questions;
+    this.questionDeadlineMs =
+      dependencies.questionDeadlineMs ?? DEFAULT_QUESTION_DEADLINE_MS;
     this.store = dependencies.store;
     this.approvals =
       dependencies.approvals ??
@@ -1160,6 +1205,72 @@ export class Coordinator {
     }
   }
 
+  /**
+   * Puts an agent's question to whoever is watching, and bounds the wait.
+   *
+   * The deadline is the whole design. A question costs more than a message:
+   * the agent holds its workspace and its ownership leases while it waits, so
+   * every task that needs one of those files queues behind an unanswered
+   * question. Waiting as long as the run is allowed to live would turn a
+   * question nobody saw into an hour of nothing, ending in a timeout that
+   * says nothing about why.
+   *
+   * Silence cancels rather than defaults. The agent asked because the choice
+   * was not its to make, and nobody answering does not hand it back — a
+   * default would be the platform deciding on the operator's behalf and
+   * calling it consent. Cancelling is recoverable: the question is on the
+   * record, and asking again costs one run.
+   */
+  private async answerAgentQuestion(
+    input: CoordinatorRunInput,
+    entry: PlannedTask,
+    event: Extract<AgentEvent, { event: "question_asked" }>,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<void> {
+    const requestId = event.requestId ?? createId("question");
+    await this.trace(recorder, runAudit, "question_asked", entry.task.id, {
+      requestId,
+      question: event.question,
+      options: event.options,
+      // So a reader knows how long they have, rather than discovering the
+      // deadline by missing it.
+      deadlineMs: this.questionDeadlineMs,
+    });
+    const answered = await this.questions
+      ?.awaitAnswer({
+        requestId,
+        taskId: entry.task.id,
+        repositoryId: input.repository.id,
+        ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+        question: event.question,
+        options: [...event.options],
+        deadlineMs: this.questionDeadlineMs,
+      })
+      .catch(() => undefined);
+    const answer: QuestionAnswer =
+      answered === undefined || answered.chosen === undefined
+        ? { requestId, status: "cancelled" }
+        : { requestId, status: "answered", chosen: answered.chosen };
+    await this.trace(
+      recorder,
+      runAudit,
+      answer.status === "answered" ? "question_answered" : "question_cancelled",
+      entry.task.id,
+      {
+        requestId,
+        ...(answer.chosen === undefined
+          ? {}
+          : { chose: event.options[answer.chosen] ?? "" }),
+      },
+    );
+    // Handed back either way. The adapter is blocked on this call, and a
+    // resolver that threw would leave it waiting on a promise nothing will
+    // ever settle — the run would then die on the execution timeout instead
+    // of the deadline that was actually missed.
+    await entry.adapter.resolveQuestion?.(entry.session.id, answer);
+  }
+
   private async handleAgentEvent(
     input: CoordinatorRunInput,
     entry: PlannedTask,
@@ -1174,6 +1285,10 @@ export class Coordinator {
         message: event.message,
         occurredAt: event.occurredAt,
       });
+      return;
+    }
+    if (event.event === "question_asked") {
+      await this.answerAgentQuestion(input, entry, event, recorder, runAudit);
       return;
     }
     if (event.event === "completed") {

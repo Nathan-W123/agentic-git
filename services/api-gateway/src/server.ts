@@ -33,7 +33,9 @@ import {
   formatAuditSummary,
   formatFinding,
   buildInvestigationPrompt,
+  formatAgentQuestion,
   formatFailureVerdict,
+  optionChosenBy,
   type FailureClass,
   isAuditorRole as roleIsAuditor,
   isInvestigatorRole as roleIsInvestigator,
@@ -1811,6 +1813,22 @@ export class ApiGateway {
   private readonly activeRuns = new Set<string>();
   /** Tasks whose progress is being narrated into a channel thread. */
   private readonly watchedChannelTasks = new Map<string, WatchedChannelTask>();
+  /**
+   * Questions an agent is currently stopped on, by request id.
+   *
+   * In memory only, deliberately: a question is a live wait, and the agent
+   * holding the other end of it does not survive a restart either. A
+   * persisted question would outlive the run it was blocking and invite an
+   * answer that could never be delivered.
+   */
+  private readonly pendingAgentQuestions = new Map<
+    string,
+    {
+      messageId: string;
+      optionCount: number;
+      settle: (chosen: number) => void;
+    }
+  >();
   private channelProgressTimer: NodeJS.Timeout | undefined;
   private auditorTimer: NodeJS.Timeout | undefined;
   private threadReconcileTimer: NodeJS.Timeout | undefined;
@@ -7531,6 +7549,13 @@ export class ApiGateway {
     if (question.length === 0) {
       return;
     }
+    // An agent stopped on a question is waiting on this exact thread, so a
+    // reply naming one of its options is an answer rather than conversation.
+    // Read before anything else: a bare "2" carries no verb and would
+    // otherwise be handed to the agent as a question about the number.
+    if (this.answerPendingQuestion(input.messageId, question)) {
+      return;
+    }
     // `/retry` and `/cancel` are the thread's own commands: they act on the
     // task it follows, which is why they are refused out in the channel. Read
     // before anything else, because they are instructions rather than
@@ -8245,6 +8270,102 @@ export class ApiGateway {
       authorId: `${investigator.userId}:${investigator.provider}`,
       content: formatFailureVerdict(verdict),
     }).catch(() => undefined);
+  }
+
+  /**
+   * Puts an agent's question into the thread its work is being followed in,
+   * and waits there for a number.
+   *
+   * The thread is the right place because it is where somebody is already
+   * watching this task, and because the question needs the surrounding story
+   * to make sense. Which thread is knowable without the run being in memory:
+   * the message records its task.
+   *
+   * The deadline is the coordinator's, passed in rather than decided here —
+   * it is the thing that owns the run's clock, and two components choosing
+   * separately would disagree about when the same wait ended.
+   */
+  public async awaitAgentAnswer(input: {
+    requestId: string;
+    taskId: string;
+    repositoryId: string;
+    projectId?: string;
+    question: string;
+    options: string[];
+    deadlineMs: number;
+  }): Promise<{ chosen?: number } | undefined> {
+    const watched = this.watchedChannelTasks.get(input.taskId);
+    if (watched === undefined) {
+      // Nobody is following this task in a channel, so there is nowhere to
+      // ask. Answering "nobody chose" immediately is better than holding the
+      // agent for fifteen minutes against a question no one will ever see.
+      return undefined;
+    }
+    await this.appendChannelThreadReply({
+      projectId: watched.projectId,
+      repositoryId: watched.repositoryId,
+      messageId: watched.messageId,
+      authorId: watched.authorId,
+      content: formatAgentQuestion({
+        question: input.question,
+        options: input.options,
+        deadlineMinutes: Math.max(1, Math.round(input.deadlineMs / 60_000)),
+      }),
+    }).catch(() => undefined);
+    const answer = await new Promise<{ chosen?: number } | undefined>(
+      (resolve) => {
+        const timer = setTimeout(() => {
+          this.pendingAgentQuestions.delete(input.requestId);
+          resolve(undefined);
+        }, input.deadlineMs);
+        timer.unref?.();
+        this.pendingAgentQuestions.set(input.requestId, {
+          messageId: watched.messageId,
+          optionCount: input.options.length,
+          settle: (chosen) => {
+            clearTimeout(timer);
+            this.pendingAgentQuestions.delete(input.requestId);
+            resolve({ chosen });
+          },
+        });
+      },
+    );
+    if (answer === undefined) {
+      await this.appendChannelThreadReply({
+        projectId: watched.projectId,
+        repositoryId: watched.repositoryId,
+        messageId: watched.messageId,
+        authorId: watched.authorId,
+        content:
+          "Nobody answered, so I've cancelled this rather than guess. Ask " +
+          "again when you know which way you want it.",
+      }).catch(() => undefined);
+    }
+    return answer;
+  }
+
+  /**
+   * Reads a reply as the answer to whatever this thread is waiting on.
+   *
+   * Returns false when the thread has no question pending or the reply names
+   * no option it offered, so the reply falls through to being answered as
+   * ordinary conversation — somebody typing "5" against three options is
+   * talking about something else.
+   */
+  private answerPendingQuestion(messageId: string, reply: string): boolean {
+    for (const [requestId, pending] of this.pendingAgentQuestions) {
+      if (pending.messageId !== messageId) {
+        continue;
+      }
+      const chosen = optionChosenBy(reply, pending.optionCount);
+      if (chosen === undefined) {
+        return false;
+      }
+      pending.settle(chosen);
+      void requestId;
+      return true;
+    }
+    return false;
   }
 
   /**

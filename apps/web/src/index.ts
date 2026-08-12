@@ -143,6 +143,10 @@ async function serve(
       ? ("refuse" as const)
       : ("host-login" as const);
 
+  // Bound after construction: the gateway is built from these operations, and
+  // one of them (a question put to a person) needs the gateway back. Only
+  // read from inside a call, which cannot happen before it is serving.
+  let servingGateway: ApiGateway | undefined;
   const operations: ApiOperations = {
     chatProviders: {
       list: (input) => providerChat.list(input),
@@ -278,6 +282,14 @@ async function serve(
         repositoryId: input.repositoryId,
         credentials,
         credentialPolicy,
+        // Where an agent's question goes. The gateway is the only thing here
+        // that knows where people are watching, and it is the same object
+        // serving the channel the answer will arrive in.
+        questions: {
+          awaitAnswer: async (ask) =>
+            await (servingGateway?.awaitAgentAnswer(ask) ??
+              Promise.resolve(undefined)),
+        },
       });
     },
     async projectMetrics(input) {
@@ -389,6 +401,7 @@ async function serve(
     secureCookies: process.env["COORD_SECURE_COOKIES"] === "true",
     staticAssets: await loadStaticAssets(),
   });
+  servingGateway = runningGateway;
   // Loopback locally, every interface when a platform is hosting us. `PORT`
   // is the signal: a platform that assigns a port also puts a router in front
   // of the container, and that router cannot reach 127.0.0.1 — the deploy
