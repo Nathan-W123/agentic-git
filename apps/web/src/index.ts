@@ -434,6 +434,62 @@ async function serve(
 
   console.log(`Coordinator control room: http://${host}:${port}`);
   console.log(`Project: ${project.root}`);
+
+  // Resume the queue this restart interrupted.
+  //
+  // Task execution had exactly four triggers — a mention, a retry, an
+  // audit-fix dispatch, and the manual run route — and none of them is "the
+  // process came back up". So a deploy mid-run stranded its task forever: the
+  // worker died holding the lease, lease expiry only happens when a worker
+  // polls, and the poll loop died with the worker. The task sat `claimed`,
+  // then `submitted` once something else's dispatch expired the lease, and
+  // nothing ever told the queue to run again. In the channel that read as an
+  // agent thinking forever — dots with no work behind them.
+  //
+  // Expiry first, so tasks a dead worker was holding are back in `submitted`
+  // before the queue is read. Fire-and-forget per repository, one run each:
+  // `runPendingTasks` drains everything queued for that repository, and boot
+  // must not block on agent work.
+  void (async () => {
+    await store.expireWorkLeases(new Date().toISOString());
+    const pending = await store.listSubmittedTasks({ status: "submitted" });
+    const repositories = new Map(
+      pending.map((task) => [
+        `${task.projectId} ${task.repositoryId}`,
+        task,
+      ]),
+    );
+    for (const task of repositories.values()) {
+      // A row from before tasks carried a project cannot be routed to a run;
+      // the default project is what those rows meant.
+      const projectId = task.projectId ?? "proj_default";
+      console.log(
+        `Resuming queued work in ${task.repositoryId} (task ${task.id})`,
+      );
+      void operations
+        .runRepository?.({
+          projectId,
+          repositoryId: task.repositoryId,
+          // The person whose work is being resumed, not whoever restarted the
+          // process: the run spends the same credential the original dispatch
+          // chose, which is keyed off the submitter.
+          actorId: task.submittedBy ?? "system",
+        })
+        .catch((error: unknown) => {
+          console.error(
+            `Resume failed for ${task.repositoryId}: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        });
+    }
+  })().catch((error: unknown) => {
+    console.error(
+      `Queue resume failed: ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  });
   if (setupRequired) {
     console.log(
       bootstrapToken === undefined
