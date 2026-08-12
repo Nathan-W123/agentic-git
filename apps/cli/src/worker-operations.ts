@@ -51,6 +51,7 @@ import {
   planAdmissionPartial,
   projectBudgets,
   reducePlanScope,
+  summariseChangedFiles,
   uniqueRepositoryPaths,
   uniqueStrings,
   type AgentPlan,
@@ -2525,23 +2526,7 @@ export async function acceptWorkResult(
       // only shape that ever reached a thread was the live one the coordinator
       // polls out mid-run, which exists only while the run is being watched.
       // That is why a finished task could end up with no list at all.
-      changedFiles: promoted.patches.map((patch) => {
-        // Counted from the diff itself rather than carried alongside it: the
-        // patch is the only place the number exists, and a count computed
-        // anywhere else could disagree with the text it claims to describe.
-        // `+++`/`---` are the file headers, not content.
-        const lines = String(patch.patch ?? "").split("\n");
-        return {
-          path: patch.path,
-          status: patch.status,
-          added: lines.filter(
-            (line) => line.startsWith("+") && !line.startsWith("+++"),
-          ).length,
-          removed: lines.filter(
-            (line) => line.startsWith("-") && !line.startsWith("---"),
-          ).length,
-        };
-      }),
+      changedFiles: summariseChangedFiles(promoted.patches),
       ...(split.deferred.length === 0
         ? {}
         : {
@@ -2823,6 +2808,13 @@ export async function acceptWorkResult(
         previousRevision: integration.previousVersion.revision,
         revision: integration.canonicalVersion.revision,
         changeSetId: integration.changeSetId,
+        // The agent's own account of what it did. The channel narration has
+        // read this field since it learned to prefer the agent's words over
+        // "Done — the change is in canonical", and nothing ever wrote it — so
+        // every promotion fell through to the canned line and every task
+        // ended identically. The account has existed since `collectChanges`;
+        // it was simply never put on the one event the narration reads.
+        agentExplanation: promoted.agentExplanation,
       });
       // Only now, with the granted half durably in canonical, is the deferred
       // half turned into work of its own. Queueing it earlier would leave a
