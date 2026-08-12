@@ -3764,6 +3764,115 @@ test("a reply in an agent's thread is answered by that agent, with the thread as
   assert.equal(answer.authorId, `${ownerId}:anthropic`);
 });
 
+/**
+ * The reader's next move is different for each way an agent can go missing,
+ * and one fixed sentence about reconnecting is wrong for three of them. These
+ * two cover the pair that actually happen: a sign-in that went away, and an
+ * agent taken out of the channel while its threads stayed behind.
+ */
+test("a reply whose agent is no longer connected says so, and says who can fix it", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "thread-gone-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it — scoping the move generator.",
+  });
+
+  // The credential goes away between the work and the question, which is what
+  // an expired or revoked sign-in looks like from here.
+  runtime.chatConnections.delete(ownerId);
+
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "what did you get done then?" } },
+  );
+  assert.equal(replied.status, 201);
+
+  await waitFor(async () => {
+    const thread = (
+      await runtime.store.listChannelMessages(repositoryId, ownerId)
+    ).find((message) => message.id === root.id);
+    return (thread?.replies ?? []).some((reply) => reply.kind === "system");
+  }, "a reply to a disconnected agent got no answer at all");
+
+  const thread = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.id === root.id);
+  const said = (thread?.replies ?? []).find((reply) => reply.kind === "system");
+  assert.match(String(said?.content), /not connected any more/u);
+  assert.match(String(said?.content), /My Agents/u);
+  // Not in the missing agent's voice: the news is that nobody answered, and
+  // attributing it to the absent participant reads as though somebody did.
+  assert.equal(said?.authorId, "system");
+  assert.equal(
+    (thread?.replies ?? []).some(
+      (reply) => reply.kind === "agent" && reply.authorId.includes("anthropic"),
+    ),
+    false,
+  );
+});
+
+test("a reply whose agent has left the channel says that, not that it is disconnected", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "thread-left-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it — scoping the move generator.",
+  });
+  // Reading the roster first settles the one-time membership backfill, so
+  // removing the row below is a removal rather than something the next read
+  // grandfathers straight back in.
+  assert.equal((await owner.request(`${base}/agents`)).status, 200);
+  await runtime.store.setChannelAgentMember(
+    repositoryId,
+    ownerId,
+    "anthropic",
+    false,
+  );
+
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "what did you get done then?" } },
+  );
+  assert.equal(replied.status, 201);
+
+  await waitFor(async () => {
+    const thread = (
+      await runtime.store.listChannelMessages(repositoryId, ownerId)
+    ).find((message) => message.id === root.id);
+    return (thread?.replies ?? []).some((reply) => reply.kind === "system");
+  }, "a reply to an agent that left the channel got no answer at all");
+
+  const thread = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.id === root.id);
+  const said = (thread?.replies ?? []).find((reply) => reply.kind === "system");
+  // The sign-in is fine. Telling somebody to reconnect it sends them to a
+  // screen where nothing is wrong.
+  assert.match(String(said?.content), /left this channel/u);
+  assert.doesNotMatch(String(said?.content), /My Agents/u);
+});
+
 test("work asked for inside a thread travels with the thread, beside the objective", async (t) => {
   // Threads have had shared context for talking since agents began answering
   // follow-ups. Working was the gap: "now update the other file the same way"

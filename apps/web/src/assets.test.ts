@@ -646,6 +646,54 @@ test("the theme is driven by custom properties rather than per-component colour"
   }
 });
 
+/**
+ * The accent tints were derived once, for a dark ground, and used on both
+ * themes — so switching to light left the highlights sitting on top of cream
+ * at a ratio nobody could read. The numbers below are the point: a source-text
+ * check that the branch exists would pass just as happily on a branch that
+ * darkens by the wrong amount, and "the wrong amount" is exactly how the
+ * default accent read at 2:1 and a chosen yellow at 1.1:1.
+ */
+test("accent text is legible on the light theme's own paper, whatever the accent", async () => {
+  const app = await browserSource();
+  const start = app.indexOf("function channels");
+  const end = app.indexOf("\nfunction currentAgent", start);
+  assert.notEqual(start, -1, "the colour helpers were not found in app.js");
+  assert.notEqual(end, -1, "currentAgent no longer follows the colour helpers");
+  const block = app.slice(start, end);
+  const lift = <T>(name: string): T =>
+    new Function(`${block}\nreturn ${name};`)() as T;
+  const readableOn = lift<(a: string, g: string, t: number) => string>(
+    "readableOn",
+  );
+  const contrastRatio = lift<(a: string, b: string) => number>("contrastRatio");
+  const mix = lift<(a: string, b: string, amount: number) => string>("mix");
+
+  // The light theme's surfaces, from `:root[data-theme="light"]` in
+  // styles.css: the page ground, the cards, and the conversation column.
+  const surfaces = ["#e8e2d4", "#efeadd", "#f6f2e8", "#fdfbf5"];
+  // A deep purple, a bright cyan, a green, a yellow and a pink — the range
+  // somebody can actually pick, not just the default.
+  for (const accent of ["#8b5cf6", "#16bfff", "#4ade80", "#fbbf24", "#f472b6"]) {
+    const bright = readableOn(accent, "#e8e2d4", 4.5);
+    for (const surface of surfaces) {
+      assert.ok(
+        contrastRatio(bright, surface) >= 4.5,
+        `${accent} on ${surface} reads at ${contrastRatio(bright, surface).toFixed(2)}:1`,
+      );
+    }
+    // What the dark theme derives, which is what light used to inherit.
+    // Asserted so this test fails if somebody quietly points light back at it.
+    assert.ok(
+      contrastRatio(mix(accent, "#ffffff", 0.32), "#e8e2d4") < 4.5,
+      `${accent} lightened for dark should not be legible on light`,
+    );
+  }
+  // An accent that is already dark enough is left as it is: darkening past
+  // legibility only costs the colour somebody chose.
+  assert.equal(readableOn("#111111", "#e8e2d4", 4.5), "#111111");
+});
+
 test("a colour that reaches a style attribute is validated first", async () => {
   const ui = await publicFile("ui.js");
   // `red;background:url(...)` is a valid CSS colour prefix, so anything looser

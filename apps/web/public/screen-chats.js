@@ -46,7 +46,6 @@ import { chatComposer, chatProgress, chatThread } from "./chat.js";
 import {
   FLAG_FOR_STATUS,
   buildTree,
-  changeSetStats,
   parsePatch,
   patchStats,
   renderUnified,
@@ -576,10 +575,6 @@ function chanSearchRow() {
  * its own collapsed block inside the thread.
  */
 function threadSummaryLink(entry, replies, repositoryId) {
-  const isThinking = (reply) =>
-    reply.kind === "progress" ||
-    (reply.kind === "agent" &&
-      !THREAD_FINISHED_RE.test(String(reply.content ?? "").trim()));
   const titled = replies.find((reply) =>
     /^Task: /u.test(String(reply.content ?? "")),
   );
@@ -588,7 +583,7 @@ function threadSummaryLink(entry, replies, repositoryId) {
       ? ""
       : String(titled.content).replace(/^Task:\s*/u, "").split("\n")[0].trim();
   const said = replies.filter(
-    (reply) => reply !== titled && !isThinking(reply),
+    (reply) => reply !== titled && !isThreadThinking(reply),
   );
   // One face per participant, in the order they first appear, so a thread
   // shows who is in it before it is opened. Deduplicated by author: three
@@ -702,7 +697,11 @@ function changedFilesBlock(entry) {
   </details>`;
 }
 
-function messageRow(entry, repositoryId, { isReply = false } = {}) {
+function messageRow(
+  entry,
+  repositoryId,
+  { isReply = false, hideChanges = false } = {},
+) {
   const author = channelAuthor(repositoryId, entry);
   // System messages are the coordinator narrating, not a participant in the
   // room — same "centered, no avatar, no reactions" treatment `chat.js`'s
@@ -726,7 +725,6 @@ function messageRow(entry, repositoryId, { isReply = false } = {}) {
         <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
       </div>
       <div class="cmsg-text">${esc(entry.content)}</div>
-      ${changedFilesBlock(entry)}
       ${
         reactions.length === 0
           ? ""
@@ -739,9 +737,18 @@ function messageRow(entry, repositoryId, { isReply = false } = {}) {
               .join("")}</div>`
       }
       ${
+        // The file list belongs to the thread, so it renders under the
+        // thread's own link — the work is the thread's story, and a summary of
+        // it sitting directly under the opening message read as a property of
+        // that one message, beside a second copy wherever else the task was
+        // mentioned. Only a message with no thread keeps the block on itself,
+        // because there is nothing else for it to hang from.
         replies.length === 0
-          ? ""
-          : threadSummaryLink(entry, replies, repositoryId)
+          ? hideChanges
+            ? ""
+            : changedFilesBlock(entry)
+          : threadSummaryLink(entry, replies, repositoryId) +
+            changedFilesBlock(entry)
       }
     </div>
     <span class="cmsg-actions">
@@ -813,8 +820,22 @@ function messageList(repositoryId) {
       // Also on the empty branch: an empty channel is exactly where somebody
       // starting to type matters most, and leaving it off here meant the dots
       // could not appear until the room already had a message in it.
-    )}${codeBlocks(repositoryId)}${typingIndicator(repositoryId, undefined)}</div>`;
+    )}${typingIndicator(repositoryId, undefined)}</div>`;
   }
+  // One file summary per task, and the thread's copy wins. A task can be
+  // named by more than one channel entry — the thread that follows its work
+  // and a bare outcome line — and each carries the same task id, so the same
+  // list rendered under both read as two different changes. The thread is
+  // where the story lives, so it keeps the summary and the loose mention
+  // goes without.
+  const threadedTasks = new Set(
+    entries
+      .filter(
+        (entry) =>
+          (entry.replies ?? []).length > 0 && entry.taskId !== undefined,
+      )
+      .map((entry) => entry.taskId),
+  );
   let lastDay = "";
   const rows = entries.map((entry) => {
     const day = new Date(entry.at ?? Date.now()).toDateString();
@@ -824,22 +845,56 @@ function messageList(repositoryId) {
       const isToday = day === new Date().toDateString();
       separator = `<div class="chan-day">${isToday ? "Today" : esc(day)}</div>`;
     }
-    return separator + messageRow(entry, repositoryId);
+    const hideChanges =
+      (entry.replies ?? []).length === 0 &&
+      entry.taskId !== undefined &&
+      threadedTasks.has(entry.taskId);
+    return separator + messageRow(entry, repositoryId, { hideChanges });
   });
   return `<div class="chan-messages" id="chan-messages">${rows.join(
     "",
-  )}${codeBlocks(repositoryId)}${typingIndicator(repositoryId, undefined)}</div>`;
+  )}${typingIndicator(repositoryId, undefined)}</div>`;
 }
 
 /**
- * The lines that end a thread, as the server writes them.
+ * The lines that end a thread, as the narration used to write them.
  *
- * Matched here rather than carried as a flag because the thread already says
- * this: an agent that has reported finishing has finished. A separate status
- * field would be a second source of truth that could disagree with what the
- * channel is actually showing.
+ * This was once the whole test, on the reasoning that a separate status field
+ * would be a second source of truth that could disagree with what the channel
+ * shows. The reasoning held only while the ending was one of three fixed
+ * sentences. It stopped holding the moment the ending became the agent's own
+ * account of what it did: nothing a model writes begins "Done —", so a thread
+ * that finished perfectly well matched nothing here and was read as still
+ * running — its summary filed inside the collapsed thinking block, its typing
+ * dots never retiring.
+ *
+ * So the flag exists now (`outcome`, see `ChannelEntryKind`) and this is the
+ * fallback for replies written before it did.
  */
 const THREAD_FINISHED_RE = /^(Done —|I could not|This was cancelled)/u;
+
+/** Whether a reply is the one that ended the thread. */
+function isThreadEnding(reply) {
+  return (
+    reply.kind === "outcome" ||
+    THREAD_FINISHED_RE.test(String(reply.content ?? "").trim())
+  );
+}
+
+/**
+ * Whether a reply is the run talking to itself rather than to the reader.
+ *
+ * `progress` is the server's mark. The content test behind it is for replies
+ * written before that mark existed, which are indistinguishable otherwise —
+ * and it must not be applied to a marked ending, which is the bug the
+ * `outcome` kind was added to fix.
+ */
+function isThreadThinking(reply) {
+  return (
+    reply.kind === "progress" ||
+    (reply.kind === "agent" && !isThreadEnding(reply))
+  );
+}
 
 /**
  * Who `@` can currently complete to, narrowed by what has been typed.
@@ -1349,23 +1404,14 @@ function threadReplies(root, repositoryId) {
   if (replies.length === 0) {
     return `<div class="thread-count">No replies yet</div>`;
   }
-  // `progress` is the run narrating itself; the server marks it (see
-  // `ChannelEntryKind`). The content test behind it is for replies written
-  // before that mark existed, which are indistinguishable otherwise.
-  const isThinking = (reply) =>
-    reply.kind === "progress" ||
-    (reply.kind === "agent" &&
-      !THREAD_FINISHED_RE.test(String(reply.content ?? "").trim()));
-  const finishedAt = replies.findIndex((reply) =>
-    THREAD_FINISHED_RE.test(String(reply.content ?? "").trim()),
-  );
+  const finishedAt = replies.findIndex((reply) => isThreadEnding(reply));
   const done = finishedAt !== -1;
   // The title line names the task and is not commentary; it stays out.
   const [first, ...rest] = replies;
   const titleLine = /^Task: /u.test(String(first?.content ?? "")) ? first : undefined;
   const body = titleLine === undefined ? replies : rest;
-  const steps = body.filter(isThinking);
-  const outcome = body.filter((reply) => !isThinking(reply));
+  const steps = body.filter(isThreadThinking);
+  const outcome = body.filter((reply) => !isThreadThinking(reply));
 
   const count = `${steps.length} step${steps.length === 1 ? "" : "s"}`;
   return `
@@ -1408,7 +1454,7 @@ function threadTyping(root) {
   if (
     root.kind !== "agent" ||
     replies.length === 0 ||
-    replies.some((reply) => THREAD_FINISHED_RE.test(String(reply.content ?? "").trim()))
+    replies.some((reply) => isThreadEnding(reply))
   ) {
     return "";
   }
@@ -1427,30 +1473,6 @@ function threadTyping(root) {
  */
 function codeDataLoadedFor(repositoryId) {
   return state.codeRepo === repositoryId && state.codeLoaded === true;
-}
-
-/**
- * One file, inline in the transcript.
- *
- * Collapsed it is a single line — flag, path, and the +/- it carries — which
- * is all a reader scanning the conversation needs. Expanding it reveals the
- * recorded patch in place, so reviewing a change never leaves the channel.
- */
-function codeBlock(patch) {
-  const stats = patchStats(patch.patch);
-  const flag = FLAG_FOR_STATUS[patch.status] ?? "M";
-  const active = state.chanFileView === patch.path;
-  return `<div class="cblock${active ? " active" : ""}">
-    <button type="button" class="cblock-head" data-act="chan-file-open"
-      data-value="${esc(patch.path)}">
-      <span class="cblock-flag flag-${flag}">${flag}</span>
-      <span class="cblock-path">${esc(patch.path)}</span>
-      <span class="cblock-stats">
-        <span class="delta-add">+${stats.additions}</span>
-        <span class="delta-del">-${stats.deletions}</span>
-      </span>
-    </button>
-  </div>`;
 }
 
 /**
@@ -1571,38 +1593,6 @@ function fileEditor(path) {
           state.chanFileSaving ? "Saving…" : "Save"
         }</button>
     </div>`;
-}
-
-/**
- * The changeset, rendered into the conversation rather than beside it.
- *
- * This sits at the end of the transcript because that is where the work
- * landed: the agent said what it did, and the files it touched follow, in the
- * same column, in the same reading order.
- */
-function codeBlocks(repositoryId) {
-  if (!codeDataLoadedFor(repositoryId)) {
-    return "";
-  }
-  const patches = state.changeSet?.patches ?? [];
-  if (patches.length === 0) {
-    return "";
-  }
-  const stats = changeSetStats(state.changeSet);
-  // Folded by default. A changeset of fifty files is a footnote to the
-  // conversation, not the conversation — and it used to push every message
-  // out of view. Opening one now happens beside the transcript, so the
-  // messages that explain the change stay readable next to it.
-  return `<details class="cblocks"${state.chanFilesOpen ? " open" : ""}
-    data-act="chan-files-toggle">
-    <summary class="cblocks-head">
-      ${icon("git")}
-      <span>${patches.length} file${patches.length === 1 ? "" : "s"} changed</span>
-      <span class="delta-add">+${stats.additions}</span>
-      <span class="delta-del">-${stats.deletions}</span>
-    </summary>
-    ${patches.map((patch) => codeBlock(patch)).join("")}
-  </details>`;
 }
 
 /**

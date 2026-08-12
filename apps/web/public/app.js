@@ -1428,13 +1428,55 @@ async function savePolicy(form) {
  */
 function applyTheme() {
   const accent = myAccent();
+  const light = myTheme() === "light";
   const root = document.documentElement.style;
   root.setProperty("--accent", accent);
-  root.setProperty("--accent-bright", mix(accent, "#ffffff", 0.32));
-  root.setProperty("--accent-dim", mix(accent, "#000000", 0.22));
-  root.setProperty("--accent-wash", withAlpha(accent, 0.12));
-  root.setProperty("--accent-wash-strong", withAlpha(accent, 0.2));
-  root.setProperty("--accent-line", withAlpha(accent, 0.38));
+  // "Bright" means "stands out from the ground", not "closer to white".
+  //
+  // Every one of these was derived for a dark ground and used on both themes,
+  // which is why the highlights washed out the moment light was switched on.
+  // `--accent-bright` carries accent-coloured *text* — tab labels, counts, the
+  // active file, the thread's own name — and lightening a purple by a third
+  // puts it a shade or two off cream: the same move that makes it legible on
+  // #141414 makes it vanish on #e8e2d4. Measured, the default accent went from
+  // 5.9:1 on dark to 2.0:1 on light, and a chosen yellow or green reached
+  // 1.1:1, which is not a faint highlight but an invisible one.
+  //
+  // Darkening by a fixed amount does not fix it either, because the shortfall
+  // depends on the accent's own lightness rather than on the theme: the same
+  // -30% that lands purple at 5.7:1 leaves yellow at 2.6:1. So the light value
+  // is searched for instead — darkened until it clears 4.5:1 against `--bg`,
+  // the page ground and the surface most accent text sits on. Every hue then
+  // lands in the same band rather than wherever its own lightness happened to
+  // put it. The hover and active states are a shade below `--bg` and come out
+  // around 3.8:1, which is a deliberate trade: targeting the darkest surface
+  // any accent text can land on would darken every hue past the point of
+  // still looking like the colour somebody picked.
+  //
+  // The dark branch is untouched. It is the theme these numbers were chosen
+  // for and it already reads; searching it too would change a working screen
+  // to make this function symmetrical, which is not a reason.
+  root.setProperty(
+    "--accent-bright",
+    light ? readableOn(accent, "#e8e2d4", 4.5) : mix(accent, "#ffffff", 0.32),
+  );
+  // The quieter of the pair, so it steps toward the ground rather than away
+  // from it — which is toward white on light and toward black on dark.
+  root.setProperty(
+    "--accent-dim",
+    light ? mix(accent, "#ffffff", 0.22) : mix(accent, "#000000", 0.22),
+  );
+  // The washes are the accent laid over the surface at low alpha. The alpha
+  // that reads as a tint over near-black is most of the way to invisible over
+  // cream — a 12% purple on #f6f2e8 is a surface nobody can see is
+  // highlighted, which is what a selected tab and a mentioned message both
+  // rely on. Raised on light so the same tint carries the same weight.
+  root.setProperty("--accent-wash", withAlpha(accent, light ? 0.17 : 0.12));
+  root.setProperty(
+    "--accent-wash-strong",
+    withAlpha(accent, light ? 0.28 : 0.2),
+  );
+  root.setProperty("--accent-line", withAlpha(accent, light ? 0.5 : 0.38));
   // Surfaces are the stylesheet's business, and only the stylesheet's.
   //
   // This used to overwrite every background, border and text colour from here,
@@ -1452,8 +1494,7 @@ function applyTheme() {
   // borders, text and shadows — so nothing here needs restating, and changing
   // a colour means editing the colour rather than hunting for the assignment
   // that overrides it.
-  document.documentElement.dataset.theme =
-    myTheme() === "light" ? "light" : "dark";
+  document.documentElement.dataset.theme = light ? "light" : "dark";
   document
     .querySelector('meta[name="theme-color"]')
     ?.setAttribute("content", accent);
@@ -1475,6 +1516,47 @@ function mix(hex, towards, amount) {
 function withAlpha(hex, alpha) {
   const [red, green, blue] = channels(hex);
   return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+}
+
+/** WCAG relative luminance, which is what a contrast ratio is built from. */
+function luminance(hex) {
+  const [red, green, blue] = channels(hex).map((value) => {
+    const channel = value / 255;
+    return channel <= 0.03928
+      ? channel / 12.92
+      : ((channel + 0.055) / 1.055) ** 2.4;
+  });
+  return 0.2126 * red + 0.7152 * green + 0.0722 * blue;
+}
+
+function contrastRatio(hex, against) {
+  const [lighter, darker] = [luminance(hex), luminance(against)].sort(
+    (left, right) => right - left,
+  );
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+/**
+ * The accent, darkened only as far as it has to be to be read on `ground`.
+ *
+ * Stepped rather than solved for: the relationship between a mix amount and
+ * the resulting ratio is not one anybody should be inverting in a theme
+ * function, and fifty steps of 2% is both exact enough and over in a fraction
+ * of a millisecond. Stopping at the first step that clears the target is what
+ * keeps the hue: darkening further buys contrast nobody needed and spends the
+ * colour somebody chose to get it.
+ *
+ * An accent already dark enough comes back untouched, which is the common case
+ * for anybody who picked a deep colour.
+ */
+function readableOn(accent, ground, target) {
+  for (let step = 0; step <= 40; step += 1) {
+    const candidate = mix(accent, "#000000", step / 50);
+    if (contrastRatio(candidate, ground) >= target) {
+      return candidate;
+    }
+  }
+  return mix(accent, "#000000", 0.8);
 }
 
 /* ------------------------------------------------------------- router ---- */
