@@ -5900,22 +5900,35 @@ dialog.modal::backdrop {
 :root[data-theme="light"] {
   color-scheme: light;
 
-  --bg: #f4f0e6;
-  --bg-panel: #faf7ef;
-  --bg-card: #fffdf7;
-  --bg-card-2: #f6f2e8;
-  --bg-inset: #ece7db;
-  --bg-hover: #ebe5d7;
-  --bg-active: #e3dccb;
+  /* Deeper than it was. The old set ran from #f4f0e6 up to #fffdf7, which is
+     most of the way to white on every surface at once — bright enough to be
+     tiring, and it left nothing for the conversation to stand out against.
+     Everything steps down a shade so the chat column has somewhere to be the
+     lightest thing, which is the same rule the dark theme follows. */
+  --bg: #e8e2d4;
+  --bg-panel: #efeadd;
+  --bg-card: #f6f2e8;
+  --bg-card-2: #ece7da;
+  --bg-inset: #e0d9c8;
+  --bg-hover: #e2dbca;
+  --bg-active: #d8d0bb;
+  /* The conversation, and the lightest surface here — the counterpart of
+     `--bg-chat` in the dark theme, which was defined only there. Its absence
+     is why light mode left the group chat dark: every other surface flipped
+     and this one kept the dark value. */
+  --bg-chat: #fdfbf5;
 
-  --border: #ddd5c4;
-  --border-soft: #e9e2d4;
-  --border-strong: #c6bda8;
+  --border: #d3cab6;
+  --border-soft: #e1d9c8;
+  --border-strong: #b5ab93;
 
-  --text: #26231e;
-  --text-2: #57524a;
-  --text-3: #837c70;
-  --text-4: #a49c8c;
+  /* Darker secondaries. #837c70 and #a49c8c on a cream background are close to
+     the floor of what is readable, and they carry the timestamps, the file
+     paths and the role lines — the text most often squinted at. */
+  --text: #211e19;
+  --text-2: #4a453c;
+  --text-3: #6b6458;
+  --text-4: #8a8274;
 
   --shadow-pop: 0 6px 16px rgba(15, 18, 30, 0.14);
   --shadow-card: 0 1px 1px rgba(15, 18, 30, 0.08);
