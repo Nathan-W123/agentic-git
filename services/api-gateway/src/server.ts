@@ -9649,6 +9649,60 @@ export class ApiGateway {
     });
   }
 
+  /**
+   * The room-level account of a canonical-moved replan.
+   *
+   * Names the winner by looking up which task's promotion produced the
+   * revision this one is now replanning against — the event itself only
+   * knows the revision, and "another task landed first" is a worse sentence
+   * than the objective of the task that did.
+   */
+  private async announceReplay(
+    watched: { projectId: string; repositoryId: string; taskId: string },
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const tasks = await this.options.store.listSubmittedTasks({
+      repositoryId: watched.repositoryId,
+    });
+    const objectiveOf = (taskId: unknown): string | undefined => {
+      const found = tasks.find((candidate) => candidate.id === taskId);
+      const first = found?.objective.split(/\r?\n/u)[0] ?? "";
+      if (first === "") {
+        return undefined;
+      }
+      return first.length > 60 ? `"${first.slice(0, 57)}…"` : `"${first}"`;
+    };
+    const held = objectiveOf(watched.taskId) ?? "a task";
+    const promoted = await this.options.store.listAuditEvents({
+      types: ["canonical_promoted"],
+      limit: 200,
+    });
+    const winnerTaskId = promoted.find(
+      (record) =>
+        (record.event.data as Record<string, unknown>)["revision"] ===
+        data["revision"],
+    )?.event.taskId;
+    const winner = objectiveOf(winnerTaskId);
+    const files = (Array.isArray(data["changedFiles"]) ? data["changedFiles"] : [])
+      .filter((entry): entry is string => typeof entry === "string")
+      .slice(0, 3);
+    const fileClause =
+      files.length === 0 ? "code it was building against" : files.join(", ");
+    await this.appendChannelEntry({
+      projectId: watched.projectId,
+      repositoryId: watched.repositoryId,
+      kind: "system",
+      authorId: "coordinator",
+      content:
+        winner === undefined
+          ? `⚖️ ${held} was building against ${fileClause}, which just ` +
+            `changed underneath it — it is replanning on top of the new code.`
+          : `⚖️ ${held} and ${winner} were working on ${fileClause} at the ` +
+            `same time. ${winner} landed first, so ${held} is replanning on ` +
+            `top of its result rather than overwriting it.`,
+    });
+  }
+
   private async narrateConflicts(): Promise<void> {
     const events = await this.options.store.listAuditEvents({
       types: ["conflict_detected"],
@@ -9827,6 +9881,19 @@ export class ApiGateway {
               data["partial"] === true)
           ) {
             await this.announceArbitration(watched, data).catch(() => undefined);
+          }
+          // The race the lease cannot see: two agents planned at the same
+          // moment, neither plan existed when the other was admitted, both
+          // executed, and the second to finish is now redoing its work on top
+          // of the first. The exact-base check catches it every time — but it
+          // announced itself only inside the loser's thread, so the room
+          // watched two agents "both working fine" and then one of them
+          // silently start over.
+          if (
+            record.event.type === "replan_requested" &&
+            typeof data["revision"] === "string"
+          ) {
+            await this.announceReplay(watched, data).catch(() => undefined);
           }
           const line = narrateTaskEvent(record.event.type, data);
           if (line === undefined) {
