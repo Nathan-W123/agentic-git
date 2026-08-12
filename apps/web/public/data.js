@@ -190,8 +190,6 @@ export const state = {
   chanOpenFiles: [],
   /** The changed file open in the side panel, if any. */
   chanFileView: undefined,
-  /** Whether the changed-file list is unfolded in the transcript. */
-  chanFilesOpen: false,
   /** How the open file is being shown: its diff, or its editable text. */
   chanFileMode: "diff",
   /** The file's text as the workspace last gave it, and as it is being typed. */
@@ -706,13 +704,13 @@ export function agentNameTaken(repositoryId, name, exceptAgentId) {
  * for a runner or a person. A task parked awaiting review is not thinking,
  * and treating it as such left the dots up long after a prompt finished.
  */
-const WORKING_STATUS = new Set([
-  "submitted",
-  "planning",
-  "running",
-  "replanning",
-  "validating",
-]);
+// The statuses the tasks API actually emits are `submitted`, `claimed`,
+// `integrated`, `failed` and `cancelled`. This set used to hold five values of
+// which four never occur — run-level statuses from a different type — and not
+// `claimed`, which is the one a task holds for the whole time an agent is
+// actually working on it. So the dots retired the moment real work began and
+// persisted while a task merely sat in the queue: backwards on both ends.
+const WORKING_STATUS = new Set(["submitted", "claimed"]);
 
 /** Backstop only — the task's own status is what really retires an entry. */
 const BUSY_TTL_MS = 10 * 60_000;
@@ -2543,12 +2541,18 @@ export function channelAuthor(repositoryId, entry) {
     // asked to explain an id it has never heard of.
     return { name: "Coordinator", agent: undefined };
   }
-  // `progress` is an agent too — it is one narrating its own run rather than
-  // speaking to the room, and it is authored the same way. Left out, the
+  // `progress` and `outcome` are agents too — one narrating its own run, one
+  // saying how it ended — and both are authored the same way. Left out, the
   // thread's opening line resolved through `memberName`, which has never
   // heard of `<userId>:<provider>`, so the agent's first words appeared under
-  // a raw composite id instead of its call sign.
-  if (entry.kind === "agent" || entry.kind === "progress") {
+  // a raw composite id instead of its call sign. The ending would have read
+  // the same way, which is a poor place for it: it is the line most people
+  // scroll to.
+  if (
+    entry.kind === "agent" ||
+    entry.kind === "progress" ||
+    entry.kind === "outcome"
+  ) {
     // The server names an agent author `<userId>:<provider>`, because that is
     // the only form meaningful to everybody. The viewer's *own* agents are
     // keyed by bare provider id in this list, so both spellings have to

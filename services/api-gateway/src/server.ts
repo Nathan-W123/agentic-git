@@ -1834,6 +1834,8 @@ export class ApiGateway {
   private channelProgressTimer: NodeJS.Timeout | undefined;
   private auditorTimer: NodeJS.Timeout | undefined;
   private threadReconcileTimer: NodeJS.Timeout | undefined;
+  /** Last `conflict_detected` sequence narrated to a channel. */
+  private conflictSequence: number | undefined;
   /**
    * The audit-log position the auditor has consumed, in memory.
    *
@@ -2002,6 +2004,9 @@ export class ApiGateway {
     void this.reconcileFinishedThreads().catch(() => undefined);
     this.threadReconcileTimer = setInterval(() => {
       void this.reconcileFinishedThreads().catch(() => undefined);
+      // Backstop for a conflict recorded moments before a restart killed the
+      // fast pump: slow, but nothing stays unsaid.
+      void this.narrateConflicts().catch(() => undefined);
     }, THREAD_RECONCILE_INTERVAL_MS);
     this.threadReconcileTimer.unref?.();
   }
@@ -9539,7 +9544,111 @@ export class ApiGateway {
     }
   }
 
+  /**
+   * Says out loud what the coordinator decided when two tasks collided.
+   *
+   * The detector has always written `conflict_detected` — task ids, the
+   * overlapping files, a disposition and its own explanation — and none of it
+   * ever reached a person: the event carried no repository, so nothing could
+   * route it to a channel, and `narrateTaskEvent` had no case for it. The one
+   * thing this product does that a pile of uncoordinated agents cannot was
+   * invisible in the room where people watch the agents work; the only
+   * symptom of an arbitration was one task mysteriously waiting.
+   *
+   * Spoken by the room, not by an agent. Neither agent decided this — the
+   * coordinator did, and putting the sentence in an agent's mouth would make
+   * it look like agents negotiate with each other.
+   */
+  private async narrateConflicts(): Promise<void> {
+    const events = await this.options.store.listAuditEvents({
+      types: ["conflict_detected"],
+      ...(this.conflictSequence === undefined
+        ? { occurredAfter: this.auditorSince }
+        : { afterSequence: this.conflictSequence }),
+      limit: 25,
+    });
+    for (const record of events) {
+      this.conflictSequence = Math.max(
+        this.conflictSequence ?? 0,
+        record.sequence,
+      );
+      const data = (record.event.data ?? {}) as Record<string, unknown>;
+      const repositoryId = data["repositoryId"];
+      const projectId = data["projectId"];
+      const taskIds = Array.isArray(data["taskIds"]) ? data["taskIds"] : [];
+      if (
+        typeof repositoryId !== "string" ||
+        typeof projectId !== "string" ||
+        taskIds.length !== 2
+      ) {
+        // Written before the event carried a repository. Nothing to route.
+        continue;
+      }
+      const disposition = String(data["disposition"] ?? "");
+      // Advisory intent overlap admits both tasks untouched; saying "conflict"
+      // about work that is running anyway would teach readers to ignore the
+      // times it matters.
+      if (disposition === "concurrent") {
+        continue;
+      }
+      const tasks = await this.options.store.listSubmittedTasks({
+        repositoryId,
+      });
+      const named = taskIds.map((taskId) => {
+        const task = tasks.find((candidate) => candidate.id === taskId);
+        const objective = (task?.objective ?? "a task").split("\n")[0] ?? "";
+        return objective.length > 60
+          ? `"${objective.slice(0, 57)}…"`
+          : `"${objective}"`;
+      });
+      const files = (Array.isArray(data["evidence"]) ? data["evidence"] : [])
+        .flatMap((entry) =>
+          typeof entry === "object" && entry !== null
+            ? ((entry as { resources?: unknown }).resources as string[]) ?? []
+            : [],
+        )
+        .filter((value): value is string => typeof value === "string");
+      const shown = [...new Set(files)].slice(0, 3);
+      const fileClause =
+        shown.length === 0
+          ? "the same files"
+          : shown.join(", ") +
+            (files.length > shown.length
+              ? ` and ${String(new Set(files).size - shown.length)} more`
+              : "");
+      const explanation =
+        typeof data["explanation"] === "string" &&
+        data["explanation"].trim().length > 0
+          ? ` ${data["explanation"].trim()}`
+          : "";
+      const line =
+        disposition === "sequence"
+          ? `⚖️ ${named[0]} and ${named[1]} both touch ${fileClause}, so ` +
+            `they run one at a time — the second starts when the first ` +
+            `lands.${explanation}`
+          : disposition === "block"
+            ? `⚖️ Holding ${named[1]} — it conflicts with ${named[0]} on ` +
+              `${fileClause} and needs a decision before both can ` +
+              `proceed.${explanation}`
+            : `⚖️ ${named[0]} and ${named[1]} overlap on ${fileClause} but ` +
+              `can run together — flagging it so nobody is surprised by ` +
+              `nearby edits.${explanation}`;
+      await this.appendChannelEntry({
+        projectId,
+        repositoryId,
+        kind: "system",
+        authorId: "coordinator",
+        content: line,
+      }).catch(() => undefined);
+    }
+  }
+
   private async pumpChannelProgress(): Promise<void> {
+    // Piggybacked here because a conflict can only arise while tasks are
+    // running, which is exactly when this pump is awake — and its 2-second
+    // cadence puts the orchestrator's line in the room while the arbitration
+    // is still news rather than history.
+    await this.narrateConflicts().catch(() => undefined);
     if (this.watchedChannelTasks.size === 0) {
       if (this.channelProgressTimer !== undefined) {
         clearInterval(this.channelProgressTimer);

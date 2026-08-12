@@ -26,6 +26,7 @@ import {
   normalizeRepositoryPath,
   planGroundingConfidence,
   readsAsReportRequest,
+  summariseChangedFiles,
   uniqueStrings,
   type AgentPlan,
   type ApprovalKind,
@@ -412,6 +413,16 @@ export class Coordinator {
                 score: assessment.score,
                 disposition: assessment.disposition,
                 evidence: assessment.evidence,
+                // For whoever narrates this to a room. The channel watcher can
+                // reach a repository's channel only if the event says which
+                // repository — the same stamp `canonical_promoted` carries for
+                // the same reason — and the explanation is the sentence the
+                // detector already wrote about *why* these two collide.
+                repositoryId: input.repository.id,
+                ...(input.projectId === undefined
+                  ? {}
+                  : { projectId: input.projectId }),
+                explanation: assessment.explanation,
               },
             );
           }
@@ -1139,15 +1150,17 @@ export class Coordinator {
         {
           changeSetId: changeSet.id,
           files: changeSet.patches.map((patch) => patch.path),
-          // The same list with what happened to each file. `files` stays as
-          // it is because the narration reads it; this is the authoritative
-          // final set for the summary that hangs off the thread, which the
-          // live poll can only approximate — it stops when the agent does,
-          // and the last edits land between its final tick and this.
-          changedFiles: changeSet.patches.map((patch) => ({
-            path: patch.path,
-            status: patch.status,
-          })),
+          // The same list with what happened to each file, and how much of it.
+          // `files` stays as it is because the narration reads it; this is the
+          // authoritative final set for the summary that hangs off the thread,
+          // which the live poll can only approximate — it stops when the agent
+          // does, and the last edits land between its final tick and this.
+          //
+          // The counts were missing here while the worker path counted the
+          // same patches inline, so whether a thread showed "+12 −3" or bare
+          // paths came down to which executor had run the task. Shared now, so
+          // the four emitters of this event cannot disagree again.
+          changedFiles: summariseChangedFiles(changeSet.patches),
         },
       );
 
