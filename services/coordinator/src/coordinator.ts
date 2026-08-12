@@ -1975,6 +1975,17 @@ export class Coordinator {
           "canonical_promoted",
           result.task.id,
           {
+            // Where canonical moved, not just that it did. Anything watching a
+            // repository rather than a run — the auditor — filters on these,
+            // and `AuditEventFilter` has no repository term, so an event
+            // without them is one it cannot place and silently skips. The
+            // remote worker path has stamped both since the auditor was built;
+            // this one never did, so every advance made in-process, which is
+            // every advance a channel dispatch produces, was invisible to it.
+            repositoryId: input.repository.id,
+            ...(input.projectId === undefined
+              ? {}
+              : { projectId: input.projectId }),
             previousRevision: integration.previousVersion.revision,
             revision: integration.canonicalVersion.revision,
             changeSetId: integration.changeSetId,
