@@ -256,16 +256,23 @@ export class IntegrationService {
     workspacePath: string,
     revision: string,
   ): Promise<void> {
+    // No `--end-of-options` here, and that is a fact about the deployment
+    // rather than a lapse. The container's git (Debian bookworm, 2.39)
+    // rejects the terminator on `reset` — "option '--end-of-options' must
+    // come before non-option arguments" — while the 2.5x a laptop carries
+    // accepts it, so the invocation that passed every local test failed
+    // every salvage in production. The terminator was guarding against a
+    // revision that reads as an option, and the guard below is the same
+    // protection in a form both gits accept: these revisions come from our
+    // own store, and anything that is not a bare commit hash has no business
+    // reaching a `reset --hard`.
+    if (!/^[0-9a-f]{4,64}$/iu.test(revision)) {
+      throw new Error(
+        `Refusing to reset to a revision that is not a commit hash: ${revision}`,
+      );
+    }
     const git = this.repositories.getGitClient();
-    await git.run([
-      "-C",
-      workspacePath,
-      "reset",
-      "--hard",
-      "--quiet",
-      "--end-of-options",
-      revision,
-    ]);
+    await git.run(["-C", workspacePath, "reset", "--hard", "--quiet", revision]);
     await git.run(["-C", workspacePath, "clean", "-fdq"]);
   }
 
