@@ -9201,12 +9201,23 @@ export class ApiGateway {
           continue;
         }
         const replies = message.replies ?? [];
-        const last = replies[replies.length - 1];
-        if (
-          last === undefined ||
-          last.kind !== "progress" ||
-          replies.some((reply) => THREAD_ENDED_RE.test(reply.content.trim()))
-        ) {
+        // Only one test, and it is the one that matters: has this thread been
+        // given an ending yet?
+        //
+        // It used to also require the last reply to exist and to be a progress
+        // line. Both were wrong. A run that finished without narrating
+        // anything has no replies at all, so `last` was undefined and the
+        // thread was skipped — which is the commonest shape of the complaint
+        // this whole sweep was written for: no summary, and dots that never
+        // come down. And requiring the last reply to be `progress` skipped any
+        // thread whose final line happened to be an agent message that was not
+        // yet a conclusion.
+        //
+        // The cost of relaxing it is a thread that ends twice when the agent
+        // already summarised in words that do not match the fixed sentences.
+        // A duplicate ending is a much smaller failure than an agent that
+        // appears to still be working days later.
+        if (replies.some((reply) => THREAD_ENDED_RE.test(reply.content.trim()))) {
           continue;
         }
         await this.appendChannelThreadReply({
