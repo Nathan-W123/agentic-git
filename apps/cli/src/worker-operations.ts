@@ -107,7 +107,7 @@ const HEARTBEAT_INTERVAL_MS = 60 * 1000;
  */
 export const DEFAULT_REPOSITORY_PARALLELISM = 4;
 
-function configuredRepositoryParallelism(explicit?: number): number {
+export function configuredRepositoryParallelism(explicit?: number): number {
   if (explicit !== undefined) {
     return explicit;
   }
