@@ -2214,6 +2214,25 @@ export class ApiGateway {
         bootstrapTokenRequired: this.bootstrapToken !== undefined,
         webSocketConnections: this.webSockets.connections,
         ...(docker === undefined ? {} : { docker }),
+        // Which code is answering, so a deploy can be confirmed from outside
+        // rather than assumed. There was no marker of any kind here, and the
+        // only way to tell whether a push had landed was to find a behaviour
+        // that changed and try it — which cannot distinguish "not deployed
+        // yet" from "deployed and broken", the two cases most worth telling
+        // apart.
+        //
+        // `startedAt` earns its place even where the commit is unknown: it is
+        // the process start, so a redeploy moves it whether or not anything
+        // told the container what it was built from. A restart is visible on
+        // its own.
+        build: {
+          commit:
+            process.env["COORD_BUILD_SHA"] ??
+            process.env["RAILWAY_GIT_COMMIT_SHA"] ??
+            "unknown",
+          startedAt: new Date(Date.now() - Math.round(process.uptime() * 1000))
+            .toISOString(),
+        },
         time: new Date().toISOString(),
       });
       return;
