@@ -577,6 +577,48 @@ export interface FilePatch {
   patch: string;
 }
 
+/**
+ * One changed file as a thread reports it: what happened to it, and how much.
+ *
+ * The counts are the whole reason this exists as a shared shape. Four separate
+ * places emit `changeset_collected`, every one of them holding the patches;
+ * one of them counted the lines and the other three did not, so whether a
+ * thread showed "+12 −3" or bare paths depended on which code path had run the
+ * task. That is not a difference a reader can see the cause of.
+ */
+export interface ChangedFileSummary {
+  path: string;
+  status: FilePatchStatus;
+  added: number;
+  removed: number;
+}
+
+/**
+ * The changed-file summary for a set of patches, counted from the patches.
+ *
+ * Counted from the diff itself rather than carried alongside it: the patch is
+ * the only place the number exists, and a count computed anywhere else could
+ * disagree with the text it claims to describe. `+++`/`---` are the file
+ * headers rather than content, so they are not lines that changed.
+ */
+export function summariseChangedFiles(
+  patches: readonly FilePatch[],
+): ChangedFileSummary[] {
+  return patches.map((patch) => {
+    const lines = String(patch.patch ?? "").split("\n");
+    return {
+      path: patch.path,
+      status: patch.status,
+      added: lines.filter(
+        (line) => line.startsWith("+") && !line.startsWith("+++"),
+      ).length,
+      removed: lines.filter(
+        (line) => line.startsWith("-") && !line.startsWith("---"),
+      ).length,
+    };
+  });
+}
+
 export interface CommandResult {
   command: ValidationCommand;
   exitCode: number;
