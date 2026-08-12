@@ -5791,22 +5791,22 @@ dialog.modal::backdrop {
      tiring, and it left nothing for the conversation to stand out against.
      Everything steps down a shade so the chat column has somewhere to be the
      lightest thing, which is the same rule the dark theme follows. */
-  --bg: #e8e2d4;
-  --bg-panel: #efeadd;
-  --bg-card: #f6f2e8;
-  --bg-card-2: #ece7da;
-  --bg-inset: #e0d9c8;
-  --bg-hover: #e2dbca;
-  --bg-active: #d8d0bb;
+  --bg: #ddd7cb;
+  --bg-panel: #e4dfd3;
+  --bg-card: #ebe6da;
+  --bg-card-2: #e0dbcf;
+  --bg-inset: #d5cfc2;
+  --bg-hover: #d6d0c1;
+  --bg-active: #cbc4b3;
   /* The conversation, and the lightest surface here — the counterpart of
      `--bg-chat` in the dark theme, which was defined only there. Its absence
      is why light mode left the group chat dark: every other surface flipped
      and this one kept the dark value. */
-  --bg-chat: #fdfbf5;
+  --bg-chat: #f1ede3;
 
-  --border: #d3cab6;
-  --border-soft: #e1d9c8;
-  --border-strong: #b5ab93;
+  --border: #c6bda9;
+  --border-soft: #d3ccbc;
+  --border-strong: #a89e88;
 
   /* Darker secondaries. #837c70 and #a49c8c on a cream background are close to
      the floor of what is readable, and they carry the timestamps, the file
