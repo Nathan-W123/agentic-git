@@ -281,6 +281,85 @@ function describe(events: SequencedAuditEvent[], taskId: string): string {
     .join("\n    ");
 }
 
+/**
+ * A waiting task is re-decided on a timer. Production showed what that costs
+ * when every pass is recorded: the ⚖️ hold line arrived in the room every
+ * fifteen seconds for as long as the holder ran. The decision had not changed
+ * — the mechanism was simply working, repeatedly, out loud.
+ */
+test("a task waiting its turn is announced once, not once per retry", async () => {
+  const harness = await createHarness();
+  const store = harness.project.openStore();
+  let runOne: Promise<unknown> | undefined;
+  let runTwo: Promise<unknown> | undefined;
+  let firstId: string | undefined;
+  let secondId: string | undefined;
+
+  await store.createUser({
+    email: "referee@example.com",
+    displayName: "Referee",
+    passwordDigest: "digest",
+  });
+
+  try {
+    const repository = await repoAdd(harness.project, store, {
+      sourcePath: harness.sourcePath,
+      id: "greeter",
+    });
+
+    const first = await taskSubmit(harness.project, store, {
+      objective: `Add a comment to ${OVERLAP_FILE}`,
+    });
+    firstId = first.id;
+    runOne = runPendingTasks(harness.project, store, {
+      repositoryId: repository.id,
+    });
+    await awaitSignal(harness.signalsPath, `executing-${first.id}`);
+
+    const second = await taskSubmit(harness.project, store, {
+      objective: `Add a different comment to ${OVERLAP_FILE}`,
+    });
+    secondId = second.id;
+    runTwo = runPendingTasks(harness.project, store, {
+      repositoryId: repository.id,
+    });
+    await awaitSignal(harness.signalsPath, `planned-${second.id}`);
+
+    // Long enough for the waiting task to be re-decided several times over —
+    // the retry interval is fifteen seconds — while the first task holds the
+    // file. This is the window that produced the repeats.
+    await new Promise((resolve) => setTimeout(resolve, 40_000));
+
+    await releaseSignal(harness.signalsPath, `release-${first.id}`);
+    await releaseSignal(harness.signalsPath, `release-${second.id}`);
+    await Promise.all([runOne, runTwo]);
+
+    const events = await store.listAuditEvents();
+    const holds = events.filter(
+      (entry) =>
+        entry.event.type === "plan_admitted" &&
+        entry.event.taskId === second.id &&
+        entry.event.data["status"] === "sequenced",
+    );
+    assert.equal(
+      holds.length,
+      1,
+      `The hold was announced ${holds.length} times while one decision stood.\n` +
+        `  second task: ${describe(events, second.id)}`,
+    );
+  } finally {
+    if (firstId !== undefined) {
+      await releaseSignal(harness.signalsPath, `release-${firstId}`);
+    }
+    if (secondId !== undefined) {
+      await releaseSignal(harness.signalsPath, `release-${secondId}`);
+    }
+    await Promise.allSettled([runOne, runTwo]);
+    await store.close();
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
 test("two tasks planning the same file are arbitrated, not both admitted", async () => {
   const harness = await createHarness();
   const store = harness.project.openStore();

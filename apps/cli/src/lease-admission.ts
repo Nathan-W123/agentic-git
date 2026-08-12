@@ -27,6 +27,42 @@ import {
 import { blockedAdmissionHistory } from "./worker-operations.js";
 
 /**
+ * What makes one admission answer different from another.
+ *
+ * Everything that changes what a reader would do about it, and nothing that
+ * merely changes with the clock: how long a task has been waiting is not a new
+ * decision, and including it would make every repetition look novel — which is
+ * the whole failure this exists to prevent.
+ */
+function admissionFingerprint(data: Readonly<Record<string, unknown>>): string {
+  const blockedBy = Array.isArray(data["blockedBy"])
+    ? [...(data["blockedBy"] as unknown[])].map(String).sort()
+    : [];
+  const grantedFiles = Array.isArray(data["grantedFiles"])
+    ? [...(data["grantedFiles"] as unknown[])].map(String).sort()
+    : [];
+  return JSON.stringify({
+    status: data["status"] ?? null,
+    blockedBy,
+    partial: data["partial"] === true,
+    grantedFiles,
+    admittedAfterWait: data["admittedAfterWait"] === true,
+  });
+}
+
+/** The pair a conflict is between, and what the detector made of it. */
+function conflictFingerprint(data: Readonly<Record<string, unknown>>): string {
+  const taskIds = Array.isArray(data["taskIds"])
+    ? [...(data["taskIds"] as unknown[])].map(String).sort()
+    : [];
+  return JSON.stringify({
+    taskIds,
+    score: data["score"] ?? null,
+    disposition: data["disposition"] ?? null,
+  });
+}
+
+/**
  * Arbitration for tasks running in this process, against every other task
  * running in the same repository — including those belonging to other runs.
  *
@@ -177,22 +213,38 @@ export class LeasePlanAuthority implements PlanAuthority {
         ? saved.lease.plan!.admission
         : decided;
 
+    // Reported once per collision, not once per time we look at it. The same
+    // two plans stay in conflict for as long as one of them is running, and
+    // the wait is re-decided the whole time.
+    const seenConflicts = new Set(
+      (
+        await this.store.listAuditEvents({
+          taskId: request.task.id,
+          types: ["conflict_detected"],
+        })
+      ).map((entry) => conflictFingerprint(entry.event.data)),
+    );
     for (const assessment of admission.conflicts) {
+      const data = {
+        ...(request.projectId === undefined
+          ? {}
+          : { projectId: request.projectId }),
+        repositoryId: request.repository.id,
+        taskIds: assessment.taskIds,
+        score: assessment.score,
+        disposition: assessment.disposition,
+        evidence: assessment.evidence,
+        explanation: assessment.explanation,
+        stage: "local_plan_admission",
+      };
+      if (seenConflicts.has(conflictFingerprint(data))) {
+        continue;
+      }
+      seenConflicts.add(conflictFingerprint(data));
       await this.store.appendAudit(undefined, {
         type: "conflict_detected",
         taskId: request.task.id,
-        data: {
-          ...(request.projectId === undefined
-            ? {}
-            : { projectId: request.projectId }),
-          repositoryId: request.repository.id,
-          taskIds: assessment.taskIds,
-          score: assessment.score,
-          disposition: assessment.disposition,
-          evidence: assessment.evidence,
-          explanation: assessment.explanation,
-          stage: "local_plan_admission",
-        },
+        data,
       });
     }
 
@@ -200,7 +252,7 @@ export class LeasePlanAuthority implements PlanAuthority {
     const waited = this.waitedMs(request.task.id, approved);
     const forced = !approved && waited >= this.maxWaitMs;
 
-    await this.store.appendAudit(undefined, {
+    await this.record(request, {
       type: "plan_admitted",
       taskId: request.task.id,
       data: {
@@ -245,6 +297,44 @@ export class LeasePlanAuthority implements PlanAuthority {
   }
 
   /**
+   * Appends an admission event, unless it would repeat the last one.
+   *
+   * A task waiting its turn is re-decided every retry interval for as long as
+   * the holder runs, and each pass reaches the same answer — that is the
+   * mechanism working, not news. Writing it every time turned one arbitration
+   * into a message every fifteen seconds in the room, for the whole of a
+   * holder's execution.
+   *
+   * The comparison is against the durable record rather than something held in
+   * memory, so a task deferred by one run and reconsidered by the next is not
+   * announced twice either. Only a decision that actually changed — sequenced
+   * becoming partial, a different blocker, the wait finally ending — is worth
+   * a line, and each of those is.
+   */
+  private async record(
+    request: PlanAdmissionRequest,
+    event: {
+      type: "plan_admitted";
+      taskId: TaskId;
+      data: Readonly<Record<string, unknown>>;
+    },
+  ): Promise<void> {
+    const previous = (
+      await this.store.listAuditEvents({
+        taskId: event.taskId,
+        types: ["plan_admitted"],
+      })
+    ).at(-1);
+    if (
+      previous !== undefined &&
+      admissionFingerprint(previous.event.data) === admissionFingerprint(event.data)
+    ) {
+      return;
+    }
+    await this.store.appendAudit(undefined, event);
+  }
+
+  /**
    * Records a plan nothing contends for, so later arrivals can see it.
    *
    * Separate from the deciding path because there is genuinely nothing to
@@ -276,7 +366,7 @@ export class LeasePlanAuthority implements PlanAuthority {
       // to arbitrate against, so go round again and actually decide.
       return await this.admit(request);
     }
-    await this.store.appendAudit(undefined, {
+    await this.record(request, {
       type: "plan_admitted",
       taskId: request.task.id,
       data: {
