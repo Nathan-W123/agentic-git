@@ -44,6 +44,7 @@ import {
   type ScopeChangeRequest,
   type TaskDefinition,
   type TaskExecutionResult,
+  planAdmissionApproved,
 } from "@coord/shared-types";
 import {
   GitWorktreeWorkspaceManager,
@@ -618,7 +619,49 @@ export class Coordinator {
           // gets its meaning — while a handoff is about the repository in
           // general. Nearest first, so the thing being asked for survives any
           // truncation the model does at the far end.
-          const priorContext = [entry.task.context?.trim() ?? "", seeded]
+          // What other in-flight tasks already hold, told to the agent
+          // *before* it plans. Admission would trim or defer a plan that
+          // reaches into leased files anyway — this makes the agent route
+          // around them from the start, so the common outcome is a plan that
+          // admits cleanly rather than one that gets cut down after the fact.
+          // Advisory wording on purpose: the lease may clear before this plan
+          // arrives, and admission stays the authority either way.
+          const leased =
+            this.store === undefined
+              ? []
+              : await this.store
+                  .listWorkLeases({
+                    status: "active",
+                    repositoryId: input.repository.id,
+                  })
+                  .then((leases) => [
+                    ...new Set(
+                      leases
+                        .filter(
+                          (lease) =>
+                            lease.taskId !== entry.task.id &&
+                            lease.plan !== undefined &&
+                            planAdmissionApproved(lease.plan.admission),
+                        )
+                        .flatMap((lease) => lease.plan?.plan.expectedFiles ?? []),
+                    ),
+                  ])
+                  .catch(() => []);
+          const leaseNote =
+            leased.length === 0
+              ? ""
+              : "Files other tasks in this repository are editing right now — " +
+                "plan around them where the objective allows; work that " +
+                "touches them will be deferred until those tasks land:\n" +
+                leased
+                  .slice(0, 20)
+                  .map((file) => `- ${file}`)
+                  .join("\n");
+          const priorContext = [
+            entry.task.context?.trim() ?? "",
+            leaseNote,
+            seeded,
+          ]
             .filter((part) => part !== "")
             .join("\n\n");
           session = await entry.adapter.startTask({

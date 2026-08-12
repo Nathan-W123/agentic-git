@@ -668,8 +668,54 @@ export function narrateTaskEvent(
             files.length > 4 ? ` and ${String(files.length - 4)} more` : ""
           }.`
         : "Planned the change.";
-    case "plan_admitted":
+    case "plan_admitted": {
+      // One sentence per outcome, because the outcomes are opposites. This
+      // used to say "Plan approved — starting on the code" for every status,
+      // including the ones where the whole point is that the code is *not*
+      // being started: a deferred task announced it was working and then sat
+      // silent, which is indistinguishable from a hang — and was reported as
+      // one.
+      const status = String(data["status"] ?? "");
+      const why =
+        typeof data["explanation"] === "string" &&
+        data["explanation"].trim().length > 0
+          ? ` ${data["explanation"].trim()}`
+          : "";
+      if (status === "sequenced") {
+        return (
+          "⚖️ Waiting my turn — files this plan needs are leased to another " +
+          "task in flight. I start the moment it lands." + why
+        );
+      }
+      if (status === "blocked") {
+        return (
+          "⚖️ Held back — this plan overlaps work in flight too heavily to " +
+          "run alongside it, so I'm narrowing the plan." + why
+        );
+      }
+      if (data["partial"] === true) {
+        const granted = Array.isArray(data["grantedFiles"])
+          ? (data["grantedFiles"] as unknown[]).filter(
+              (entry): entry is string => typeof entry === "string",
+            )
+          : [];
+        const deferred = Array.isArray(data["deferredResources"])
+          ? (data["deferredResources"] as unknown[]).filter(
+              (entry): entry is string => typeof entry === "string",
+            )
+          : [];
+        const clause = (files: string[]) =>
+          files.slice(0, 3).join(", ") +
+          (files.length > 3 ? ` and ${String(files.length - 3)} more` : "");
+        return (
+          `⚖️ Starting on ${granted.length > 0 ? clause(granted) : "the free part"} now — ` +
+          `${deferred.length > 0 ? clause(deferred) : "the rest"} is leased to ` +
+          "another task, so that part follows as its own task once the lease " +
+          "clears."
+        );
+      }
       return "Plan approved — starting on the code.";
+    }
     case "replan_requested":
       return "Something moved underneath me; re-planning against the latest code.";
     case "agent_progress":
