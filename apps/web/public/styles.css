@@ -4113,6 +4113,13 @@ svg {
   overflow: hidden;
 }
 
+/* Outside the panel, not inside its summary: a control in the summary would
+   fight the disclosure toggle for the same click, and this one must never be
+   hit by somebody meaning to open the file list. */
+.cmsg-revert-row {
+  margin-top: 6px;
+}
+
 .cmsg-changes > summary {
   display: flex;
   align-items: center;

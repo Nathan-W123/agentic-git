@@ -63,6 +63,7 @@ import {
   channelMessagesFor,
   deleteAllChannelThreads,
   deleteChannelThread,
+  rollbackTask,
   setAuditorPaused,
   setRepositoryGrant,
   revokeRepositoryGrant,
@@ -1243,6 +1244,43 @@ async function clearThreadsAction(repositoryId) {
  * Switching on says what it is about to do, because it starts spending
  * immediately and the person who flicked it is owed that much warning.
  */
+/**
+ * Undoes one task's landed work, after asking.
+ *
+ * The confirm is not ceremony. Everything else in this channel adds; this is
+ * the one control that takes away, and it takes away something a person may
+ * have waited several minutes of agent time for.
+ *
+ * A refusal comes back as an ordinary result with a reason — canonical having
+ * moved on is the common one — so it is reported as plainly as a success.
+ * Reverting is itself a normal run: it is planned, validated and promoted like
+ * any other change, so the channel narrates it and there is nothing to render
+ * here beyond saying it started.
+ */
+async function revertTaskAction(repositoryId, taskId) {
+  if (
+    !window.confirm(
+      "Revert this task?\n\nThe repository goes back to the state it was in " +
+        "before this work landed. The revert runs through validation like any " +
+        "other change, and is itself undoable.",
+    )
+  ) {
+    return;
+  }
+  try {
+    const result = await rollbackTask(repositoryId, taskId);
+    const status = result?.status;
+    if (status === "blocked" || status === "noop" || status === "policy_failed") {
+      toast(result?.explanation ?? "The revert was refused", "error");
+      return;
+    }
+    toast("Reverting — the channel will report how it goes", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 async function toggleAuditingAction(repositoryId, paused) {
   try {
     const resumed = await setAuditorPaused(repositoryId, paused);
@@ -2618,6 +2656,9 @@ document.addEventListener("click", (event) => {
     case "channel-settings-toggle":
       state.chatSettingsOpenId = state.chatSettingsOpenId === value ? undefined : value;
       render();
+      return;
+    case "chan-revert-task":
+      void revertTaskAction(activeChannelId(), value);
       return;
     case "auditor-toggle":
       // `value` is the *current* paused state, so the new one is its

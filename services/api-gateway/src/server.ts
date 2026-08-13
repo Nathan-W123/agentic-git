@@ -4514,16 +4514,57 @@ export class ApiGateway {
         );
       }
       const body = objectBody(await this.readJson(request));
-      const targetRevision = stringField(
+      // Two ways to say where to go back to. `targetRevision` is the precise
+      // one and stays the contract. `taskId` is what somebody looking at a
+      // task in the channel actually has — they mean "undo this piece of
+      // work", and only the log knows which revision that was. Resolving it
+      // here rather than on the client is what stops a stale page from
+      // reverting to a revision that has since been superseded.
+      const taskId = stringField(body["taskId"], "taskId", {
+        max: 200,
+        optional: true,
+      });
+      let targetRevision = stringField(
         body["targetRevision"],
         "targetRevision",
-        { max: 200 },
+        { max: 200, optional: true },
       );
+      if (targetRevision === undefined && taskId !== undefined) {
+        const resolved = await this.revisionsForTask(repositoryId, taskId);
+        if (resolved === undefined) {
+          throw new HttpError(
+            404,
+            "not_found",
+            "That task has no recorded canonical advance to undo",
+          );
+        }
+        // Reverting to the state before this task discards everything that
+        // landed after it too. Refused rather than done quietly: the button
+        // says "undo this task", and silently undoing three others as well
+        // would be a different act than the one offered.
+        const head = await this.options.operations.canonicalHead?.({
+          projectId,
+          repositoryId,
+        });
+        if (head !== undefined && head !== resolved.revision) {
+          this.sendJson(response, 200, {
+            rollback: {
+              status: "blocked",
+              explanation:
+                "Canonical has moved on since this task landed, so undoing " +
+                "it would discard the work that followed. Revert the newest " +
+                "change first, or roll back to an explicit revision.",
+            },
+          });
+          return;
+        }
+        targetRevision = resolved.previousRevision;
+      }
       if (targetRevision === undefined || targetRevision.length === 0) {
         throw new HttpError(
           400,
           "invalid_request",
-          "targetRevision is required",
+          "targetRevision or taskId is required",
         );
       }
       const reason = stringField(body["reason"], "reason", {
@@ -9385,6 +9426,49 @@ export class ApiGateway {
    * The cost of not caching it is one indexed lookup per unsummarised thread
    * per channel load, which is the cheaper of the two mistakes by a distance.
    */
+  /**
+   * Where canonical stood before and after one task landed.
+   *
+   * Read from the promotion the task itself recorded rather than from the
+   * branch, because "the state before this task" is a fact about that task's
+   * advance and nothing else — the branch has no memory of which move belonged
+   * to whom. Undefined when the task never promoted, which includes every task
+   * that failed and every task still running.
+   */
+  private async revisionsForTask(
+    repositoryId: string,
+    taskId: string,
+  ): Promise<{ previousRevision: string; revision: string } | undefined> {
+    const filter: AuditEventFilter = {
+      taskId,
+      types: ["canonical_promoted"],
+    };
+    // Both halves of the log, for the same reason `withChangedFiles` reads
+    // both: archiving moves rows out of the live table, and a task old enough
+    // to have been archived is exactly the one somebody is undoing.
+    const [archived, live] = await Promise.all([
+      this.options.store.listArchivedAuditEvents(filter).catch(() => []),
+      this.options.store.listAuditEvents(filter),
+    ]);
+    const promotion = [...archived, ...live]
+      .filter((record) => {
+        const data = (record.event.data ?? {}) as Record<string, unknown>;
+        return data["repositoryId"] === repositoryId;
+      })
+      .at(-1);
+    if (promotion === undefined) {
+      return undefined;
+    }
+    const data = (promotion.event.data ?? {}) as Record<string, unknown>;
+    const previousRevision = data["previousRevision"];
+    const revision = data["revision"];
+    return typeof previousRevision === "string" &&
+      typeof revision === "string" &&
+      previousRevision.length > 0
+      ? { previousRevision, revision }
+      : undefined;
+  }
+
   private async withChangedFiles(
     repositoryId: string,
     messages: ChannelMessage[],

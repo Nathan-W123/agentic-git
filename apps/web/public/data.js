@@ -2456,6 +2456,24 @@ export async function setAuditorPaused(repositoryId, paused) {
 }
 
 /**
+ * Returns this repository to the state it was in before one task landed.
+ *
+ * The task id travels rather than a revision: the channel knows which task a
+ * message belongs to and nothing about revisions, and the server is the only
+ * side that can say authoritatively which advance that task made. It is also
+ * the side that can refuse — a refusal is a considered answer here, not a
+ * failure, so it arrives as a normal response and is returned for the caller
+ * to report.
+ */
+export async function rollbackTask(repositoryId, taskId) {
+  const response = await api(repositoryPath(repositoryId, "/rollback"), {
+    method: "POST",
+    body: { taskId },
+  });
+  return response?.rollback;
+}
+
+/**
  * Removes one thread, or every thread in the channel.
  *
  * Local state is updated only once the server has agreed. An optimistic
