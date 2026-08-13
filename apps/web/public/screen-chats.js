@@ -261,6 +261,50 @@ function statusDot(status, title) {
   return `<span class="status-dot status-${status}" title="${esc(title)}"></span>`;
 }
 
+/**
+ * Message text, with any images it refers to drawn underneath it.
+ *
+ * Messages are plain text and stay plain text — this is not markdown, and
+ * nothing here interprets anything else somebody typed. The only pattern read
+ * is `![alt](attachment:<id>)`, and the id is matched against the exact shape
+ * the store issues before it is used at all: thirty-two hex characters and one
+ * of four extensions. Anything else is left as the literal text it was, which
+ * is what keeps a message that merely talks about the syntax from becoming an
+ * image tag.
+ *
+ * Kept out of the record because the alternative was a column and a migration
+ * on three backends to hold what is, in the end, a reference.
+ */
+const ATTACHMENT_PATTERN =
+  /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu;
+
+function messageBody(content, repositoryId) {
+  const text = String(content ?? "");
+  const images = [];
+  let stripped = text;
+  for (const match of text.matchAll(ATTACHMENT_PATTERN)) {
+    images.push({ alt: match[1] ?? "", id: match[2] ?? "" });
+    stripped = stripped.replace(match[0], "");
+  }
+  if (images.length === 0) {
+    return esc(text);
+  }
+  const base =
+    `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
+    `/repositories/${encodeURIComponent(repositoryId ?? "")}/attachments/`;
+  return (
+    esc(stripped.trim()) +
+    images
+      .map(
+        (image) =>
+          `<a class="cmsg-image" href="${esc(base + image.id)}" target="_blank"
+             rel="noopener noreferrer"><img src="${esc(base + image.id)}"
+             alt="${esc(image.alt)}" loading="lazy"></a>`,
+      )
+      .join("")
+  );
+}
+
 function personRow(person) {
   // Two shapes reach here. The organization member list nests the account
   // under `user`; the room's own people list flattens it to `id`/`name`. Only
@@ -895,7 +939,7 @@ function messageRow(
         )}</span>
         <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
       </div>
-      <div class="cmsg-text">${esc(entry.content)}</div>
+      <div class="cmsg-text">${messageBody(entry.content, repositoryId)}</div>
       ${
         reactions.length === 0
           ? ""

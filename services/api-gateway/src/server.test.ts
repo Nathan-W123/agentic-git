@@ -95,6 +95,9 @@ class TestClient {
     options: {
       method?: string;
       body?: unknown;
+      /** Sent verbatim, for the one route that takes bytes. */
+      raw?: Buffer;
+      rawType?: string;
       headers?: Record<string, string>;
       csrf?: boolean;
     } = {},
@@ -107,6 +110,11 @@ class TestClient {
     if (options.body !== undefined) {
       headers.set("Content-Type", "application/json");
     }
+    // A raw body carries its own type. Images are the only thing sent this
+    // way, and JSON-encoding them would be testing a route nothing uses.
+    if (options.raw !== undefined) {
+      headers.set("Content-Type", options.rawType ?? "application/octet-stream");
+    }
     if (
       options.csrf !== false &&
       !["GET", "HEAD", "OPTIONS"].includes(method) &&
@@ -117,9 +125,11 @@ class TestClient {
     const response = await fetch(`${this.origin}${path}`, {
       method,
       headers,
-      ...(options.body === undefined
-        ? {}
-        : { body: JSON.stringify(options.body) }),
+      ...(options.raw !== undefined
+        ? { body: options.raw }
+        : options.body === undefined
+          ? {}
+          : { body: JSON.stringify(options.body) }),
     });
     for (const setCookie of response.headers.getSetCookie()) {
       const [pair] = setCookie.split(";", 1);
@@ -213,6 +223,10 @@ async function startRuntime(
   const chatAnswer: TestRuntime["chatAnswer"] = {};
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
   const rollbacks: TestRuntime["rollbacks"] = [];
+  const attachmentBytes = new Map<
+    string,
+    { bytes: Buffer; contentType: string }
+  >();
   const canonicalState: TestRuntime["canonicalState"] = {
     head: "b".repeat(40),
   };
@@ -353,6 +367,25 @@ async function startRuntime(
         explanation: "reverted",
         revision: input.targetRevision,
       };
+    },
+    // The real store's allowlist, in miniature: the deployment decides what an
+    // image is, and the gateway only ever passes bytes through.
+    async attachmentSave(input) {
+      const extension = { "image/png": "png", "image/jpeg": "jpg" }[
+        input.contentType.split(";")[0]?.trim() ?? ""
+      ];
+      if (extension === undefined) {
+        throw new Error(`Images must be PNG or JPEG (not ${input.contentType})`);
+      }
+      const id = `${"a".repeat(32)}.${extension}`;
+      attachmentBytes.set(id, {
+        bytes: input.bytes,
+        contentType: input.contentType,
+      });
+      return id;
+    },
+    async attachmentRead(id) {
+      return attachmentBytes.get(id);
     },
     async projectMetrics(input) {
       return { stub: true, projectId: input.projectId };
@@ -4817,6 +4850,43 @@ test("the auditor is told what the work was asked to do", async (t) => {
     runtime.chatPrompts[0]?.prompt ?? "",
     /Log the raw API key so failed shares can be debugged/u,
   );
+});
+
+test("an image posted to a channel comes back as an image, and nothing else does", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "with-pictures");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/attachments`;
+
+  const stored = await owner.request(base, {
+    method: "POST",
+    raw: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    rawType: "image/png",
+  });
+  assert.equal(stored.status, 200, JSON.stringify(stored.data));
+  const id = (stored.data as { id?: string }).id ?? "";
+  assert.match(id, /\.png$/u);
+
+  const fetched = await owner.request(`${base}/${id}`);
+  assert.equal(fetched.status, 200);
+  assert.equal(fetched.headers.get("content-type"), "image/png");
+  // The type is derived from an allowlist rather than from whoever uploaded
+  // the bytes, and this header is what stops a browser overriding it and
+  // treating them as something it will execute.
+  assert.equal(fetched.headers.get("x-content-type-options"), "nosniff");
+
+  // SVG is a document that can carry script, so serving one from this origin
+  // would be self-inflicted cross-site scripting. Refused, not stored.
+  const refused = await owner.request(base, {
+    method: "POST",
+    raw: Buffer.from("<svg xmlns='http://www.w3.org/2000/svg'></svg>", "utf8"),
+    rawType: "image/svg+xml",
+  });
+  assert.notEqual(refused.status, 200);
+
+  const missing = await owner.request(`${base}/${"b".repeat(32)}.png`);
+  assert.equal(missing.status, 404);
 });
 
 test("reverting a task rolls back to the state before that task landed", async (t) => {

@@ -23,6 +23,7 @@ import {
   acquireControlPlaneLock,
   type ControlPlaneLock,
 } from "./control-plane-lock.js";
+import { AttachmentStore } from "./attachments.js";
 import { OverlayWorkspaceService } from "./overlay.js";
 import { PreviewService } from "./preview.js";
 import { ProviderChatService, type ProviderId } from "./providers.js";
@@ -132,6 +133,11 @@ async function serve(
   const overlays = new OverlayWorkspaceService(project, store, repositories);
   // Loopback only, and stopped with the process: see PreviewService.
   const previews = new PreviewService(project, store, repositories);
+  // Beside the database rather than inside it, so the volume that persists one
+  // persists the other. See AttachmentStore.
+  const attachments = new AttachmentStore(
+    path.join(project.directory, "attachments"),
+  );
   // One store for the whole process: the chat panel writes credentials and
   // task runs read them, and opening it twice could race on generating the
   // key file.
@@ -348,6 +354,12 @@ async function serve(
     },
     async previewStop(input) {
       await previews.stop(input.repositoryId);
+    },
+    async attachmentSave(input) {
+      return await attachments.save(input.bytes, input.contentType);
+    },
+    async attachmentRead(id) {
+      return await attachments.read(id);
     },
     async repositoryVersions(input) {
       const stored = await store.getRepository(input.repositoryId);

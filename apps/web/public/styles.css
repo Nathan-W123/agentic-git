@@ -4375,6 +4375,28 @@ svg {
   color: var(--text-2);
 }
 
+/* An image posted into a channel. Bounded rather than full size: a screenshot
+   of a whole page is taller than the room it is being read in, and one that
+   pushed the conversation off the screen would be worse than a thumbnail
+   somebody can click. */
+.cmsg-image {
+  display: block;
+  margin-top: 6px;
+  max-width: min(420px, 100%);
+}
+
+.cmsg-image img {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 320px;
+  object-fit: contain;
+  object-position: left top;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-inset);
+}
+
 /* The running app's address, in the channel header beside the controls. Shown
    as the bare host:port it is — a loopback link is only openable on the
    machine running the control plane, and dressing it up as an ordinary link
