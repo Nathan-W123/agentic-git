@@ -9115,6 +9115,10 @@ export class ApiGateway {
       messageId: input.messageId,
       authorId: `${investigator.userId}:${investigator.provider}`,
       content: formatFailureVerdict(verdict),
+      // Why the task failed is the answer somebody opened the thread for, and
+      // it arrives after the ending that prompted it. Unmarked it read as more
+      // of the run's own chatter and was folded away with it.
+      kind: "outcome",
     }).catch(() => undefined);
   }
 
@@ -9603,6 +9607,9 @@ export class ApiGateway {
               fileCount: diff.files.length,
               truncated: diff.truncated,
             }),
+      // Same reasoning as the findings below: an audit's report of itself is
+      // what the thread is for, not the run thinking aloud.
+      kind: "outcome",
     });
     for (const finding of findings) {
       await this.appendChannelThreadReply({
@@ -9611,6 +9618,13 @@ export class ApiGateway {
         messageId: root.id,
         authorId,
         content: formatFinding(finding),
+        // A finding is the thing the audit exists to produce, so it is an
+        // outcome and not commentary. Left unmarked it defaulted to `agent`,
+        // which the thread reads as the run talking to itself and folds away
+        // into the thinking block — burying the one part anybody opened the
+        // thread for, and denying it the fold and the simplify control every
+        // other summary gets.
+        kind: "outcome",
       });
     }
     // Findings get a line in the room; a clean audit does not.
