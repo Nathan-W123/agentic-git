@@ -78,6 +78,12 @@ export interface CreateWorkspaceInput {
   baseVersion: CanonicalVersion;
 }
 
+/** The next tenancy of a workspace being advanced. See {@link WorkspaceManager.advance}. */
+export interface AdvanceWorkspaceInput {
+  taskId: TaskId;
+  baseVersion: CanonicalVersion;
+}
+
 export interface ChangeSetMetadata {
   expectedFiles?: string[];
   symbolsChanged: string[];
@@ -90,6 +96,29 @@ export interface ChangeSetMetadata {
 export interface WorkspaceManager {
   create(input: CreateWorkspaceInput): Promise<TaskWorkspace>;
   destroy(workspace: TaskWorkspace): Promise<void>;
+  /**
+   * Moves an existing workspace's checkout to a newer canonical revision and
+   * hands the directory to a new task.
+   *
+   * This is what lets a conversational task keep its directory between
+   * turns: the checkout catches up to canonical while everything untracked —
+   * `node_modules`, build output, scratch files — survives, which is the
+   * half of a workspace that is expensive to rebuild. The returned record is
+   * a new tenancy of the same path: fresh id, the new task, the new base.
+   * The old record must not be used again; a changeset collected against it
+   * would diff from the wrong base and re-offer work that already landed.
+   *
+   * Only sound for a workspace whose previous work has already been
+   * integrated, which is why it may discard working-tree state rather than
+   * merge it: nothing is lost that canonical does not already hold.
+   *
+   * Optional: a caller falls back to destroy-and-create, which is correct
+   * and merely loses the cheap directory.
+   */
+  advance?(
+    workspace: TaskWorkspace,
+    input: AdvanceWorkspaceInput,
+  ): Promise<TaskWorkspace>;
   runInWorkspace(
     workspace: TaskWorkspace,
     spec: SandboxLaunchSpec,
@@ -523,6 +552,56 @@ export class GitWorktreeWorkspaceManager implements WorkspaceManager {
     if (prune !== undefined && prune.exitCode !== 0) {
       throw new GitCommandError(pruneArgs, prune);
     }
+  }
+
+  public async advance(
+    workspace: TaskWorkspace,
+    input: AdvanceWorkspaceInput,
+  ): Promise<TaskWorkspace> {
+    // No `--end-of-options` here, for the reason the integration service's
+    // reset spells out: the container's git (Debian bookworm, 2.39) rejects
+    // the terminator on `reset`, so the guard below is the same protection
+    // in a form both gits accept — these revisions come from our own store,
+    // and anything that is not a bare commit hash has no business reaching
+    // a `reset --hard`.
+    const revision = input.baseVersion.revision;
+    if (!/^[0-9a-f]{4,64}$/iu.test(revision)) {
+      throw new Error(
+        `Refusing to advance to a revision that is not a commit hash: ${revision}`,
+      );
+    }
+    // `reset --hard` and deliberately no `clean`. The reset clears what the
+    // last turn left behind — the dirty tree of already-landed edits and the
+    // intent-to-add index entries `collectChangeSet` staged — while leaving
+    // everything untracked alone, which is the entire point of keeping the
+    // directory. A tracked file the new revision adds is written over any
+    // untracked copy in the way, which is correct here: the copy is the same
+    // landed content, or older than it.
+    //
+    // No worktree lock: `reset` never enumerates the mirror's worktree
+    // registrations, so it cannot race a teardown the way `add`/`remove`/
+    // `prune` do — the same reason `collectChangeSet` runs unlocked.
+    await this.git.run([
+      "-C",
+      workspace.path,
+      "reset",
+      "--hard",
+      "--quiet",
+      revision,
+    ]);
+    // A new tenancy of the same directory. A fresh id on purpose: the
+    // durable workspace record is insert-only (ON CONFLICT DO NOTHING), so
+    // reusing the old id would silently record nothing for this turn — the
+    // record is one turn's occupancy, the path is what persists. See
+    // docs/architecture/milestone-landing.md on why the base must move with
+    // the tenant.
+    return {
+      ...workspace,
+      id: createId("workspace"),
+      taskId: input.taskId,
+      baseVersion: input.baseVersion,
+      createdAt: new Date().toISOString(),
+    };
   }
 
   public async runInWorkspace(

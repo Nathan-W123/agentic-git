@@ -959,7 +959,7 @@ function threadProgress(entry) {
 function messageRow(
   entry,
   repositoryId,
-  { isReply = false, hideChanges = false } = {},
+  { isReply = false, hideChanges = false, actions = "" } = {},
 ) {
   const author = channelAuthor(repositoryId, entry);
   // System messages are the coordinator narrating, not a participant in the
@@ -1038,8 +1038,24 @@ function messageRow(
       }
       ${iconButton("smile", { act: "channel-react", value: entry.id, title: "React", small: true })}
       ${
+        // Anything the caller wants sitting beside the reply button — the
+        // summary's simplify wand rides here, so the two read as one set of
+        // quiet actions rather than a button under the text and an icon over
+        // it.
+        actions
+      }
+      ${
+        // Every message can be replied to, agent's and person's alike. A
+        // channel message replies by opening its thread; a message already
+        // inside one replies by quoting it into the thread's composer —
+        // there is no third place for the answer to go.
         isReply
-          ? ""
+          ? iconButton("reply", {
+              act: "thread-reply-quote",
+              value: entry.id,
+              title: "Reply to this message",
+              small: true,
+            })
           : iconButton("reply", {
               act: "channel-thread-open",
               value: entry.id,
@@ -1739,6 +1755,12 @@ function dmPanel() {
                 const mine = message.authorId === currentUserId();
                 return `<div class="dm-msg${mine ? " dm-mine" : ""}">
                   <div class="dm-bubble">${esc(message.content)}</div>
+                  <span class="dm-msg-actions">${iconButton("reply", {
+                    act: "dm-reply-quote",
+                    value: message.id,
+                    title: "Reply to this message",
+                    small: true,
+                  })}</span>
                   <time class="dm-time">${esc(clockTime(message.createdAt))}</time>
                 </div>`;
               })
@@ -1887,6 +1909,33 @@ function threadReplies(root, repositoryId) {
 const SUMMARY_FOLD_CHARS = 400;
 
 /**
+ * The wand beside a summary's reply button: one icon, three states.
+ *
+ * Untouched, it asks for the plain rewrite; while that is being written it
+ * waits, visibly busy and unclickable; once the rewrite exists it toggles
+ * between the two versions, lit while the simple one is showing. One icon
+ * rather than a labelled button because it lives in the message's quiet
+ * action row now, next to reply — the tooltip carries the words the label
+ * used to.
+ */
+function simplifyAction(reply) {
+  const simple = state.simplified[reply.id];
+  if (typeof simple === "string") {
+    const showing = state.simplifyShown[reply.id] === true;
+    return `<button type="button" class="icon-btn sm${showing ? " active" : ""}"
+      data-act="summary-simplify-toggle" data-value="${esc(reply.id)}"
+      aria-pressed="${showing}"
+      title="${showing ? "Show what the agent actually said" : "Show the simple version"}"
+      aria-label="${showing ? "Show the full summary" : "Show the simple version"}">${icon("wand")}</button>`;
+  }
+  const busy = state.simplifying[reply.id] === true;
+  return `<button type="button" class="icon-btn sm${busy ? " busy" : ""}"
+    data-act="summary-simplify" data-value="${esc(reply.id)}"${busy ? " disabled" : ""}
+    title="${busy ? "Simplifying…" : "Rewrite this as briefly and plainly as possible"}"
+    aria-label="Simplify this summary">${icon("wand")}</button>`;
+}
+
+/**
  * The agent's own account of what it did, foldable and simplifiable.
  *
  * Folded rather than truncated: a summary is the most valuable thing in a
@@ -1903,22 +1952,10 @@ function summaryBlock(reply, repositoryId) {
   const row = messageRow(
     { ...reply, content: body },
     repositoryId,
-    { isReply: true },
+    { isReply: true, actions: simplifyAction(reply) },
   );
-  const controls = `<div class="summary-tools">
-    ${
-      typeof simple === "string"
-        ? `<button type="button" class="btn btn-ghost btn-sm"
-             data-act="summary-simplify-toggle" data-value="${esc(reply.id)}">
-             ${showingSimple ? "Show full" : "Show simple"}</button>`
-        : `<button type="button" class="btn btn-ghost btn-sm"
-             data-act="summary-simplify" data-value="${esc(reply.id)}"
-             title="Rewrite this as briefly and plainly as possible">
-             ${state.simplifying[reply.id] === true ? "Simplifying…" : "Simplify"}</button>`
-    }
-  </div>`;
   if (full.length <= SUMMARY_FOLD_CHARS) {
-    return row + controls;
+    return row;
   }
   const firstLine = full.split(/\n/u).find((line) => line.trim().length > 0) ?? "";
   return `<details class="thread-summary"${
@@ -1930,7 +1967,7 @@ function summaryBlock(reply, repositoryId) {
         firstLine.length > 90 ? `${firstLine.slice(0, 87)}…` : firstLine,
       )}</span>
     </summary>
-    <div class="ts-body">${row}${controls}</div>
+    <div class="ts-body">${row}</div>
   </details>`;
 }
 
