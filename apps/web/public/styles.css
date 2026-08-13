@@ -4767,6 +4767,16 @@ body.resizing-panel {
   max-width: 340px;
 }
 
+.toast.banner {
+  border-color: var(--accent-line);
+  transition: opacity 0.6s ease, transform 0.6s ease;
+}
+
+.toast.banner.banner-out {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
 .toast.error {
   border-color: rgba(248, 113, 113, 0.4);
   color: #fca5a5;

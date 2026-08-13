@@ -867,6 +867,27 @@ export function elapsed(milliseconds) {
  * on, so errors stay until dismissed and are announced assertively. Anything
  * else is incidental and clears itself.
  */
+/**
+ * A top-right banner for something that just happened — "Zeus completed a
+ * task" — that says its sentence and leaves. Reuses the alert host's corner
+ * because that is where eyes already look for news; unlike an error it takes
+ * no dismissal and holds no focus, five seconds and a fade.
+ */
+export function banner(message) {
+  const host = $("#toasts-alert");
+  if (host === null) {
+    return;
+  }
+  const node = document.createElement("div");
+  node.className = "toast banner";
+  node.textContent = message;
+  host.append(node);
+  window.setTimeout(() => {
+    node.classList.add("banner-out");
+    window.setTimeout(() => node.remove(), 600);
+  }, 5000);
+}
+
 export function toast(message, tone = "") {
   const host = $(tone === "error" ? "#toasts-alert" : "#toasts");
   if (host === null) {
