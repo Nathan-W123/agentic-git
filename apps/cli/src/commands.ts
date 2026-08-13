@@ -735,6 +735,16 @@ export async function openSubmitterCredentialHome(
     ...home,
     close: async () => {
       const result = await home.close();
+      // The task run is where Codex actually works, so its rollout is the
+      // freshest rate-limit record there will ever be — and the directory it
+      // lives in is already gone by this line. Persist the tail the close
+      // handed back, or the usage hover keeps reporting a machine that has
+      // never run a session.
+      if (result.usageSnapshot !== undefined && options.credentials !== undefined) {
+        await options.credentials
+          .putUsageSnapshot(task.submittedBy ?? "", "codex", result.usageSnapshot)
+          .catch(() => undefined);
+      }
       const store = options.credentials;
       if (result.rotatedSecret !== undefined && store !== undefined) {
         await store
