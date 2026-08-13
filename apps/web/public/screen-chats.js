@@ -634,11 +634,29 @@ function threadSummaryLink(entry, replies, repositoryId) {
 const CHANGED_FILE_MARK = { added: "+", modified: "~", deleted: "−" };
 const CHANGED_FILE_ORDER = { added: 0, modified: 1, deleted: 2 };
 
-function changedFilesBlock(entry) {
+function changedFilesBlock(entry, repositoryId) {
   const files = Array.isArray(entry.changedFiles) ? entry.changedFiles : [];
   if (files.length === 0) {
     return "";
   }
+  // Undoing work is offered where the work is shown, because that is the only
+  // place the question "undo what?" already has an answer. Anywhere else it
+  // would need a revision typed in, and nobody reads a channel holding a list
+  // of forty-character hashes.
+  //
+  // Only for a task that landed something, and only for somebody who could
+  // manage the repository anyway — the API refuses either way, and a button
+  // that exists to be refused is worse than no button.
+  const revert =
+    entry.taskId === undefined || !canManageRepository(repositoryId)
+      ? ""
+      : `<div class="cmsg-revert-row">
+          <button class="btn btn-ghost btn-sm" data-act="chan-revert-task"
+            data-value="${esc(entry.taskId)}"
+            title="Return this repository to the state before this task">
+            Revert this
+          </button>
+        </div>`;
   // Counts are per file and summed for the header. Absent on rows written
   // before they were reported, and shown as nothing rather than as zero: a
   // file that changed no lines is a different claim from one nobody counted.
@@ -694,7 +712,7 @@ function changedFilesBlock(entry) {
           : counts(totalAdded, totalRemoved)
       }</summary>
     <ul class="cmsg-files">${rows}</ul>
-  </details>`;
+  </details>${revert}`;
 }
 
 function messageRow(
@@ -746,9 +764,9 @@ function messageRow(
         replies.length === 0
           ? hideChanges
             ? ""
-            : changedFilesBlock(entry)
+            : changedFilesBlock(entry, repositoryId)
           : threadSummaryLink(entry, replies, repositoryId) +
-            changedFilesBlock(entry)
+            changedFilesBlock(entry, repositoryId)
       }
     </div>
     <span class="cmsg-actions">

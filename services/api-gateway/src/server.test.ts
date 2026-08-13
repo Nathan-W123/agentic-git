@@ -74,6 +74,8 @@ interface TestRuntime {
   canonicalState: { head: string | undefined };
   /** Set `reason` to make `runRepository` reject, as a run that cannot start does. */
   runFailure: { reason?: string };
+  /** Every rollback the gateway asked for, in order. */
+  rollbacks: Array<{ repositoryId: string; targetRevision: string }>;
 }
 
 class TestClient {
@@ -210,6 +212,7 @@ async function startRuntime(
   const chatPrompts: TestRuntime["chatPrompts"] = [];
   const chatAnswer: TestRuntime["chatAnswer"] = {};
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
+  const rollbacks: TestRuntime["rollbacks"] = [];
   const canonicalState: TestRuntime["canonicalState"] = {
     head: "b".repeat(40),
   };
@@ -340,6 +343,17 @@ async function startRuntime(
     async canonicalHead() {
       return canonicalState.head;
     },
+    async rollbackRepository(input) {
+      rollbacks.push({
+        repositoryId: input.repositoryId,
+        targetRevision: input.targetRevision,
+      });
+      return {
+        status: "integrated",
+        explanation: "reverted",
+        revision: input.targetRevision,
+      };
+    },
     async projectMetrics(input) {
       return { stub: true, projectId: input.projectId };
     },
@@ -447,6 +461,7 @@ async function startRuntime(
     chatPrompts,
     chatAnswer,
     canonicalDiffs,
+    rollbacks,
     canonicalDiff,
     canonicalState,
     runFailure,
@@ -4750,6 +4765,73 @@ test("an organization admin can delete a repository they did not create", async 
   );
 });
 
+test("reverting a task rolls back to the state before that task landed", async (t) => {
+  // The channel knows which task a message belongs to and nothing about
+  // revisions, so "revert this" travels as a task id and the server is what
+  // turns it into the revision that task moved canonical away from.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "revertible");
+
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: "task-planted",
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+    },
+  });
+  runtime.canonicalState.head = "b".repeat(40);
+
+  const reverted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/rollback`,
+    { method: "POST", body: { taskId: "task-planted" } },
+  );
+  assert.equal(reverted.status, 200, JSON.stringify(reverted.data));
+  // The revision before that task, not the one it produced.
+  assert.deepEqual(runtime.rollbacks, [
+    { repositoryId: repo, targetRevision: "a".repeat(40) },
+  ]);
+});
+
+test("reverting a task is refused once canonical has moved past it", async (t) => {
+  // Undoing this task would take the work that landed after it with it. The
+  // button says "revert this task", so doing more than that is refused rather
+  // than done quietly — and refused with a reason, since a rollback that will
+  // not happen is a considered answer, not a transport failure.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "moved-on");
+
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: "task-early",
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+    },
+  });
+  // Somebody else landed something afterwards.
+  runtime.canonicalState.head = "c".repeat(40);
+
+  const refused = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/rollback`,
+    { method: "POST", body: { taskId: "task-early" } },
+  );
+  assert.equal(refused.status, 200, JSON.stringify(refused.data));
+  assert.equal(
+    (refused.data as { rollback?: { status?: string } }).rollback?.status,
+    "blocked",
+  );
+  assert.deepEqual(runtime.rollbacks, []);
+});
+
 test("deleting a repository refuses while a submitted task references it", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -5759,10 +5841,23 @@ test("the auditor audits a canonical advance and posts what it finds", async (t)
   assert.match(runtime.chatPrompts[0]?.prompt ?? "", /const ok = a \|\| b;/u);
 
   // One thread for every audit this repository will ever have, with the run's
-  // summary and each finding inside it — not a thread per merge.
+  // summary and each finding inside it — not a thread per merge. Alongside it,
+  // one line in the room: a bumped thread says something happened but not
+  // whether it mattered, and a high finding read exactly like a routine
+  // all-clear until somebody opened it.
   const posted = await runtime.store.listChannelMessages(repo, ownerId);
-  assert.equal(posted.length, 1);
-  const [message] = posted;
+  assert.equal(posted.length, 2);
+  const message = posted.find((entry) =>
+    String(entry.content).startsWith("Audit log"),
+  );
+  const announced = posted.find((entry) =>
+    String(entry.content).startsWith("⚖️"),
+  );
+  assert.match(String(announced?.content), /1 issue \(1 high\)/u);
+  assert.match(
+    String(announced?.content),
+    /Inverted condition admits unauthorized callers/u,
+  );
   assert.equal(message?.authorId, `${ownerId}:openai`);
   assert.match(String(message?.content), /^Audit log/u);
   assert.equal(message?.replies.length, 2);
@@ -5975,10 +6070,18 @@ test("a number is read against the newest audit, not the whole thread", async (t
     );
   }
 
-  // One thread holding both audits, which is the condition being tested.
+  // One thread holding both audits, which is the condition being tested. The
+  // two room lines the findings announced are beside it, not more threads.
   const posted = await runtime.store.listChannelMessages(repo, ownerId);
-  assert.equal(posted.length, 1);
-  const audit = posted[0];
+  const audit = posted.find((entry) =>
+    String(entry.content).startsWith("Audit log"),
+  );
+  assert.equal(
+    posted.filter((entry) => String(entry.content).startsWith("Audit log"))
+      .length,
+    1,
+  );
+  assert.equal(audit?.replies.length, 4);
 
   const reply = await owner.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages/${audit?.id}/replies`,
