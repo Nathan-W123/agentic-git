@@ -3502,6 +3502,13 @@ svg {
     margin-left: 6px;
   }
 
+  /* The private-message reply is the same hover-only reveal as the channel's
+     message actions, and needs the same treatment for fingers. */
+  .dm-msg .dm-msg-actions {
+    opacity: 1 !important;
+    pointer-events: auto !important;
+  }
+
   /* `.rr-avatar:hover`/`:focus-within` already reveals this — see
      `rosterRow` in screen-chats.js, which gives the avatar a `tabindex` so a
      tap can focus it. This only removes the width clamp that assumed the
@@ -3694,6 +3701,21 @@ svg {
   margin-top: 2px;
   font-size: 11px;
   color: var(--muted);
+}
+
+/* The reply affordance on a private message: revealed on hover the way the
+   channel's message actions are, and sitting where the bubble points — after
+   theirs, before mine — so it never overlaps the words it acts on. */
+.dm-msg .dm-msg-actions {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.dm-msg:hover .dm-msg-actions,
+.dm-msg:focus-within .dm-msg-actions {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .rr-usage {
@@ -4478,16 +4500,28 @@ svg {
   visibility: hidden;
 }
 
-/* Under the summary it acts on, aligned with its text rather than with the
-   avatar gutter — it belongs to the words, not to the row. */
-.summary-tools {
-  display: flex;
-  gap: 6px;
-  padding: 0 0 8px 46px;
+/* The simplify wand, in the message's own action row beside reply. Lit while
+   the simple version is showing, so the icon carries the state the old
+   "Show full / Show simple" label used to spell out; dimmed and inert while
+   the rewrite is being fetched, because a second click would only queue a
+   second identical request. */
+.cmsg-actions .icon-btn.active {
+  color: var(--accent-bright);
 }
 
-.thread-summary .summary-tools {
-  padding-left: 2px;
+.cmsg-actions .icon-btn.busy {
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+.cmsg-actions .icon-btn.busy svg {
+  animation: simplify-busy 1.1s ease-in-out infinite;
+}
+
+@keyframes simplify-busy {
+  50% {
+    opacity: 0.35;
+  }
 }
 
 /* An image posted into a channel. Bounded rather than full size: a screenshot

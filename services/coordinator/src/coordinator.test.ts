@@ -506,6 +506,85 @@ test("cancels dependency descendants when their producer cannot integrate", asyn
   }
 });
 
+test("closes the agent session when its task integrates", async () => {
+  // The session used to be dropped rather than closed on success: every
+  // adapter.cancel in the coordinator sat on a failure path, so whatever the
+  // adapter still held for the session outlived the task. Settlement now
+  // closes it on every outcome, the way the remote worker always has.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(agent.cancelCount, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("closes the agent session when integration fails", async () => {
+  // Failing at integration is settling all the same. This path never
+  // cancelled either — prepareTask's catch covered execution failures, but a
+  // task whose validation rejected it slipped past both.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        {
+          task: {
+            ...task("task_a"),
+            validationCommands: [
+              {
+                executable: process.execPath,
+                args: ["-e", "process.exit(1)"],
+                label: "always fails",
+              },
+            ],
+          },
+          adapter: agent,
+        },
+      ],
+    });
+
+    assert.equal(result.tasks[0]?.status, "failed");
+    assert.equal(agent.cancelCount, 1);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /**
  * An agent that asks the platform to start its app before it edits anything,
  * the way one checking its own work would.
