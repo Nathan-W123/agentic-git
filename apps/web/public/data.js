@@ -1880,6 +1880,44 @@ export async function loadChannelStats(repositoryId) {
   }
 }
 
+/**
+ * The banner sentence for one audit event, or nothing.
+ *
+ * Named after the agent as this channel knows it, because "Zeus's task
+ * failed" is the sentence a person acts on and "task_failed" is not. Only
+ * endings and questions banner — starts and progress are what the room
+ * itself is for.
+ */
+export function bannerLineForAudit(event) {
+  const type = event?.type;
+  const data = event?.data ?? {};
+  const repositoryId = data.repositoryId;
+  if (typeof repositoryId !== "string") {
+    return undefined;
+  }
+  const task = state.tasks.find((candidate) => candidate.id === event.taskId);
+  const agentId = String(task?.agentId ?? "").toLowerCase();
+  const named = channelAgentsFor(repositoryId).find((agent) => {
+    const vendor = VENDOR_FOR_PROVIDER[agent.provider ?? agent.id];
+    return vendor !== undefined && agentId.includes(vendor);
+  });
+  const name = named?.name?.split(" (")[0] ?? "An agent";
+  switch (type) {
+    case "canonical_promoted":
+      return `${name} completed a task in #${repositoryId}`;
+    case "task_reported":
+      return `${name} finished a report in #${repositoryId}`;
+    case "task_failed":
+      return `${name}'s task failed in #${repositoryId}`;
+    case "task_cancelled":
+      return `${name}'s task was cancelled in #${repositoryId}`;
+    case "question_asked":
+      return `${name} is waiting on an answer in #${repositoryId}`;
+    default:
+      return undefined;
+  }
+}
+
 const directPath = (suffix = "") =>
   `/projects/${encodeURIComponent(state.projectId)}/direct-messages${suffix}`;
 

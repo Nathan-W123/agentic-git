@@ -19,6 +19,7 @@ import {
   noteDirectMessage,
   ensureDirectMessages,
   loadChannelStats,
+  bannerLineForAudit,
   loadDmThread,
   sendDirectMessage,
   noteTyping,
@@ -91,6 +92,7 @@ import {
   relativeTime,
   showModal,
   toast,
+  banner as popupBanner,
 } from "./ui.js";
 import { ensureAgentOptions, scrollThread, sendChat } from "./chat.js";
 import {
@@ -3796,6 +3798,15 @@ async function boot() {
       state.route === "chats"
     ) {
       void refreshChannelMessages(channelRepositoryId).then(() => render());
+    }
+    // News gets a banner before the store gets re-read: an ending or a
+    // question is worth a sentence in the corner wherever the reader is,
+    // which is the notifications tab's job done at the moment it matters.
+    if (frame?.type === "audit") {
+      const line = bannerLineForAudit(frame.event);
+      if (line !== undefined) {
+        popupBanner(line);
+      }
     }
     // The stream tells us something changed; the store stays the source of
     // truth, so re-read rather than patching state from the frame.
