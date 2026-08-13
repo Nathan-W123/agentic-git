@@ -274,8 +274,11 @@ function personRow(person) {
       <span class="rr-avatar">
         ${avatar(name, 30)}
         ${
+          // Your own dot is green whenever you can see it: the page being
+          // open is what "here" means, and a roster where everyone else has
+          // a status and you have none reads as broken rather than modest.
           me
-            ? ""
+            ? statusDot("working", "You're here")
             : statusDot(
                 online ? "working" : "away",
                 online ? `${name} is here` : `${name} is away`,
