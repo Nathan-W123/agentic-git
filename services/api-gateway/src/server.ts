@@ -431,7 +431,21 @@ const CHANNEL_PROGRESS_MAX_MS = 60 * 60 * 1000;
  * order, so the reasoning is there for the one run in ten that needs
  * explaining.
  */
-const CHANNEL_CEREMONIAL_EVENTS = new Set(["task_started", "agent_progress"]);
+const CHANNEL_CEREMONIAL_EVENTS = new Set([
+  "task_started",
+  "agent_progress",
+  // The ordinary body of every clean run. Each of these is true of a task
+  // that changed one word, and any one of them opening a thread is how
+  // "change this 1 to a 2" got a room of its own again — the referee's
+  // publish path now records an approved admission for every solo dispatch,
+  // which made "Plan approved" the thread-maker for everything. Held, they
+  // flush in order into whichever thread a *notable* line opens: a question,
+  // a hold, a failure, a replan, an approval gate. A run none of those touch
+  // ends as two lines in the channel, which is what a quick task is.
+  "workspace_changed",
+  "changeset_collected",
+  "validation_completed",
+]);
 
 /**
  * How much of an agent's own account of its work the ending may carry.
@@ -7001,6 +7015,17 @@ export class ApiGateway {
     const messages = await this.options.store
       .listChannelMessages(input.repositoryId, input.viewerId, { limit: 40 })
       .catch(() => []);
+    // The thread root is the agent's acknowledgement — "On it." — and a new
+    // request rarely overlaps a pleasantry. The task's own objective is the
+    // request the thread grew from, so scoring against it makes the merge
+    // test request-vs-request, which is the comparison a person means by
+    // "this is about the same thing".
+    const tasks = await this.options.store
+      .listSubmittedTasks({ repositoryId: input.repositoryId })
+      .catch(() => []);
+    const objectiveOf = new Map(
+      tasks.map((task) => [task.id, task.objective]),
+    );
     const now = Date.now();
     let best: { id: string; title: string; score: number } | undefined;
     for (const message of messages) {
@@ -7020,7 +7045,11 @@ export class ApiGateway {
         titleReply === undefined
           ? ""
           : (titleReply.content.replace(/^Task:\s*/u, "").split("\n")[0] ?? "").trim();
-      const subject = `${message.content} ${title}`;
+      const subject = `${message.content} ${title} ${
+        message.taskId === undefined
+          ? ""
+          : (objectiveOf.get(message.taskId) ?? "")
+      }`;
       const score = textOverlap(withoutMentions(input.content), subject);
       if (score >= THREAD_MERGE_MIN_OVERLAP && (best === undefined || score > best.score)) {
         best = { id: message.id, title, score };
@@ -7751,38 +7780,55 @@ export class ApiGateway {
     // message, so a person's own request growing a thread is the common case,
     // not the exception.
     if (root.kind !== "agent") {
-      const named = question.includes("@")
-        ? (
-            await this.resolveChannelMentionCandidates(
-              input.projectId,
-              input.repositoryId,
-            )
-          ).filter((entry) => question.includes(`@${entry.name}`))
+      const candidates = await this.resolveChannelMentionCandidates(
+        input.projectId,
+        input.repositoryId,
+      );
+      // Who the reply is for, in order of how directly they were named: an
+      // @mention in the reply itself wins; failing that, whoever the *root*
+      // message mentioned — a thread grown from "@Romeo build X" is Romeo's
+      // conversation by construction, and a bare "why did you do it that
+      // way?" typed into it is addressed to Romeo the way a bare reply in an
+      // agent's own thread is. Only a thread whose root named nobody is a
+      // conversation between people, and stays one.
+      const inReply = question.includes("@")
+        ? candidates.filter((entry) => question.includes(`@${entry.name}`))
         : [];
+      const inRoot =
+        inReply.length === 0 && root.content.includes("@")
+          ? candidates.filter((entry) =>
+              root.content.includes(`@${entry.name}`),
+            )
+          : [];
+      const named = (inReply.length > 0 ? inReply : inRoot).filter(
+        (candidate) =>
+          candidate.visibility !== "personal" ||
+          candidate.userId === input.viewerId,
+      );
+      if (named.length === 0) {
+        return;
+      }
+      // An instruction goes to one agent even when several were named — two
+      // agents editing one repository from one sentence is a collision, not
+      // collaboration. Questions fan out; each named agent answers as itself.
+      if (looksLikeTaskRequest(question) && named[0] !== undefined) {
+        await this.dispatchOneMention({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          content: question,
+          senderId: input.viewerId,
+          candidate: named[0],
+          threadMessageId: input.messageId,
+        });
+        return;
+      }
       for (const candidate of named) {
-        if (
-          candidate.visibility === "personal" &&
-          candidate.userId !== input.viewerId
-        ) {
-          continue;
-        }
-        if (looksLikeTaskRequest(question)) {
-          await this.dispatchOneMention({
-            projectId: input.projectId,
-            repositoryId: input.repositoryId,
-            content: question,
-            senderId: input.viewerId,
-            candidate,
-            threadMessageId: input.messageId,
-          });
-        } else {
-          await this.answerAsAgent({
-            ...input,
-            root,
-            candidate,
-            question,
-          });
-        }
+        await this.answerAsAgent({
+          ...input,
+          root,
+          candidate,
+          question,
+        });
       }
       return;
     }
@@ -10214,14 +10260,33 @@ export class ApiGateway {
           }
           const terminal = CHANNEL_TERMINAL_EVENTS[record.event.type] !== undefined;
           if (!watched.threaded) {
-            if (CHANNEL_CEREMONIAL_EVENTS.has(record.event.type)) {
+            const routineAdmission =
+              record.event.type === "plan_admitted" &&
+              (data["status"] === "approved" ||
+                (data["status"] === "approved_with_constraints" &&
+                  data["partial"] !== true));
+            if (
+              CHANNEL_CEREMONIAL_EVENTS.has(record.event.type) ||
+              routineAdmission
+            ) {
               // True of every run, so it says nothing about this one. Held, so
               // that a task whose whole story is "started, done" does not get
               // a thread on the strength of it.
               watched.pending.push(line);
               continue;
             }
-            if (terminal && !READS_AS_DELIVERABLE(record.event.type, line)) {
+            // Canned means the run had nothing of its own to say — the line
+            // is the fixed sentence for its event, not the agent's account.
+            // Those end as two lines in the channel. An ending in the
+            // agent's words opens the thread even now: the summary and its
+            // counts live on the outcome reply, and the held ceremony
+            // flushes in above it as the collapsed body.
+            const canned = line === CHANNEL_TERMINAL_EVENTS[record.event.type];
+            if (
+              terminal &&
+              canned &&
+              !READS_AS_DELIVERABLE(record.event.type, line)
+            ) {
               // Finished without ever needing to explain itself. The outcome
               // goes in the channel beside the acknowledgement — two lines,
               // no thread to open — and the held ceremony is dropped rather
