@@ -6867,6 +6867,54 @@ export class ApiGateway {
       // reading: it costs nothing to stay silent and let the sender correct
       // themselves, and it keeps this gate as simple as the mention
       // resolution immediately below it.
+      // "@agents" addresses the room's whole roster at once. Questions only:
+      // a broadcast *task* would dispatch the same work N times and bill N
+      // accounts for one job, which nobody has ever meant by it. Personal
+      // agents belonging to someone else stay out for the same reason they
+      // cannot be asked individually — answering spends their owner's
+      // account, and a broadcast is not consent.
+      if (/@agents\b/iu.test(content)) {
+        const reachable = candidates.filter(
+          (candidate) =>
+            candidate.visibility === "org" || candidate.userId === senderId,
+        );
+        if (reachable.length === 0) {
+          await this.postChannelSystemMessage(
+            projectId,
+            repositoryId,
+            "No agents here can answer a broadcast — connect one, or ask " +
+              "their owners to make theirs org-wide.",
+          );
+          return;
+        }
+        // "status report" reads as a task to the verb detector — "report" is
+        // work vocabulary — and it is the whole reason this feature exists,
+        // so status-flavoured asks are let through by name.
+        const statusAsk =
+          /\b(status|report|update|progress|working on|stand-?up)\b/iu.test(
+            content,
+          );
+        if (looksLikeTaskRequest(content) && !readsAsQuestion(content) && !statusAsk) {
+          await this.postChannelSystemMessage(
+            projectId,
+            repositoryId,
+            "@agents is for questions — a broadcast task would run the same " +
+              "job once per agent. Mention one agent to dispatch work.",
+          );
+          return;
+        }
+        await Promise.all(
+          reachable.map((candidate) =>
+            this.answerInChannel(
+              candidate,
+              content,
+              projectId,
+              repositoryId,
+            ).catch(() => undefined),
+          ),
+        );
+        return;
+      }
       const mentioned = candidates.filter((candidate) =>
         content.includes(`@${candidate.name}`),
       );
