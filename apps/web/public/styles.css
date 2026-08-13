@@ -4267,6 +4267,27 @@ svg {
   color: var(--danger, #f85149);
 }
 
+/* The run's position, as quietly as it can be said: three pixels of the
+   chosen accent under the thread it belongs to. The track is the accent's own
+   wash so it reads as one element in any theme, and the fill moves only when
+   the narration above it says something moved. */
+.thread-progress {
+  height: 3px;
+  margin-top: 6px;
+  max-width: 420px;
+  border-radius: 2px;
+  background: var(--accent-wash);
+  overflow: hidden;
+}
+
+.thread-progress i {
+  display: block;
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent);
+  transition: width 0.4s ease;
+}
+
 .cmsg-thread-link {
   display: inline-flex;
   align-items: center;

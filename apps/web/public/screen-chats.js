@@ -736,6 +736,63 @@ function changedFilesBlock(entry, repositoryId) {
   </details>${revert}`;
 }
 
+/**
+ * Where a thread's run has got to, read from what it already said.
+ *
+ * The narration is the progress record: planning, "planned N file(s)",
+ * execution, one "Working on…" line per stretch of files, validation, the
+ * ending. Parsing those beats new plumbing — it works for every thread ever
+ * written, and the bar can never disagree with the words directly above it.
+ *
+ * The executing span is the honest core: files named in "Working on" lines
+ * against the count the plan declared is a measured fact. Everything else is
+ * a fixed milestone, which is all a phase deserves.
+ */
+function threadProgress(entry) {
+  const replies = entry.replies ?? [];
+  if (replies.length === 0) {
+    return undefined;
+  }
+  let planned = 0;
+  const touched = new Set();
+  let progress = 5;
+  for (const reply of replies) {
+    const text = String(reply.content ?? "");
+    if (/planning workspace prepared/iu.test(text)) {
+      progress = Math.max(progress, 10);
+    }
+    const plannedMatch = /planned (\d+) file/iu.exec(text);
+    if (plannedMatch !== null) {
+      planned = Number(plannedMatch[1]);
+      progress = Math.max(progress, 15);
+    }
+    if (/execution started/iu.test(text)) {
+      progress = Math.max(progress, 20);
+    }
+    const working = /^Working on (.+?)(?:…|\.\.\.|$)/u.exec(text.trim());
+    if (working?.[1] !== undefined) {
+      for (const file of working[1].split(/,| and /u)) {
+        const name = file.trim();
+        if (name !== "" && !/^\d+ more$/u.test(name)) {
+          touched.add(name);
+        }
+      }
+      const share = planned > 0 ? Math.min(touched.size / planned, 1) : 0.5;
+      progress = Math.max(progress, Math.round(20 + 55 * share));
+    }
+    if (/Validating…|Wrote changes to/iu.test(text)) {
+      progress = Math.max(progress, 80);
+    }
+    if (/Validation passed/iu.test(text)) {
+      progress = Math.max(progress, 90);
+    }
+    if (THREAD_FINISHED_RE.test(text.trim())) {
+      return undefined; // Finished threads carry no bar; the ending says it.
+    }
+  }
+  return progress;
+}
+
 function messageRow(
   entry,
   repositoryId,
@@ -787,7 +844,19 @@ function messageRow(
             ? ""
             : changedFilesBlock(entry, repositoryId)
           : threadSummaryLink(entry, replies, repositoryId) +
-            changedFilesBlock(entry, repositoryId)
+            changedFilesBlock(entry, repositoryId) +
+            (() => {
+              // A few pixels of accent under the thread: how far its run has
+              // got, present only while there is a run to speak of. Quiet by
+              // design — the thread's own words carry the detail, this just
+              // spares opening it to learn "roughly where".
+              const progress = threadProgress(entry);
+              return progress === undefined
+                ? ""
+                : `<div class="thread-progress" title="${progress}% by phase">
+                     <i style="width:${progress}%"></i>
+                   </div>`;
+            })()
       }
     </div>
     <span class="cmsg-actions">
