@@ -930,10 +930,21 @@ function isThreadThinking(reply) {
  */
 function channelMentionCandidates(repositoryId) {
   const query = state.mentionQuery.trim().toLowerCase();
-  return channelParticipants(repositoryId)
-    .filter((entry) => typeof entry.name === "string" && entry.name !== "")
-    .filter((entry) => query === "" || entry.name.toLowerCase().includes(query))
-    .slice(0, 6);
+  // The broadcast address, offered like any other name so it is
+  // discoverable from the same "@" that reveals everyone else. The server
+  // answers it with every reachable agent — questions only.
+  const broadcast =
+    query === "" || "agents".includes(query)
+      ? [{ name: "agents", kind: "broadcast" }]
+      : [];
+  return [
+    ...broadcast,
+    ...channelParticipants(repositoryId)
+      .filter((entry) => typeof entry.name === "string" && entry.name !== "")
+      .filter(
+        (entry) => query === "" || entry.name.toLowerCase().includes(query),
+      ),
+  ].slice(0, 7);
 }
 
 /**
@@ -978,9 +989,21 @@ function mentionPopover(candidates) {
       (entry, position) => `<button type="button" class="mention-item${
         position === index ? " active" : ""
       }" data-act="channel-mention-pick" data-value="${esc(entry.name)}">
-        ${entry.kind === "agent" ? agentFace(entry.agent, 20) : avatar(entry.name, 20)}
+        ${
+          entry.kind === "broadcast"
+            ? icon("users")
+            : entry.kind === "agent"
+              ? agentFace(entry.agent, 20)
+              : avatar(entry.name, 20)
+        }
         <span>${esc(entry.name)}</span>
-        <span class="mi-kind">${entry.kind === "agent" ? "agent" : ""}</span>
+        <span class="mi-kind">${
+          entry.kind === "broadcast"
+            ? "every agent"
+            : entry.kind === "agent"
+              ? "agent"
+              : ""
+        }</span>
       </button>`,
     )
     .join("")}</div>`;
