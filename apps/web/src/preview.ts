@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { connect, createServer } from "node:net";
+import { createServer as createHttpServer, type Server } from "node:http";
 import { access, mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
@@ -54,7 +55,9 @@ export interface PreviewStatus {
 }
 
 interface Running {
-  child: ChildProcess;
+  /** A spawned dev server, or a static one served in this process. */
+  child?: ChildProcess;
+  server?: Server;
   status: PreviewStatus;
   workspacePath: string;
   lastAskedAt: number;
@@ -101,6 +104,92 @@ async function detectPreviewCommand(
 }
 
 const PREVIEW_SCRIPTS = ["dev", "start", "serve", "preview"];
+
+/** Extensions a preview will serve, and what it calls them. */
+const STATIC_TYPES: Record<string, string> = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".woff": "font/woff",
+  ".woff2": "font/woff2",
+  ".txt": "text/plain; charset=utf-8",
+};
+
+/**
+ * Whether this is a site that only needs serving.
+ *
+ * An `index.html` at the root with nothing that builds it is not a guess: it
+ * is a page, and serving the folder is what anybody meant. This is the one
+ * case worth detecting beyond Node, because it needs no runtime, no install
+ * and no configuration — and it is the shape of a great many small apps.
+ *
+ * Serving over HTTP rather than leaving somebody to open the file matters
+ * more than it looks: a `file://` page is an opaque origin, so every `fetch`
+ * it makes fails, which is exactly how a working app looks broken.
+ */
+export async function isStaticSite(workspacePath: string): Promise<boolean> {
+  try {
+    await access(path.join(workspacePath, "index.html"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Serves one directory over loopback, in this process.
+ *
+ * In-process rather than spawning something, because the alternatives all
+ * assume a runtime that may not be there — `python3 -m http.server` is the
+ * obvious one and a Node container has no Python in it. This needs nothing
+ * that is not already running.
+ *
+ * The path check is the security boundary: a request is resolved and then
+ * required to still be inside the root, so `..` and absolute paths reach
+ * nothing. Symlinks are followed by `readFile` and would escape it, which is
+ * acceptable here and would not be if this were reachable from outside the
+ * machine — it binds loopback and the proxy in front of it authenticates.
+ */
+export function startStaticServer(root: string, port: number): Server {
+  const server = createHttpServer((request, response) => {
+    const raw = decodeURIComponent((request.url ?? "/").split("?")[0] ?? "/");
+    const relative = raw.endsWith("/") ? `${raw}index.html` : raw;
+    const target = path.resolve(root, `.${path.posix.normalize(relative)}`);
+    if (target !== root && !target.startsWith(root + path.sep)) {
+      response.writeHead(403);
+      response.end("Forbidden");
+      return;
+    }
+    readFile(target)
+      .then((bytes) => {
+        response.writeHead(200, {
+          "Content-Type":
+            STATIC_TYPES[path.extname(target).toLowerCase()] ??
+            "application/octet-stream",
+          "Content-Length": String(bytes.length),
+          // A preview is whatever the workspace holds right now, and the
+          // workspace changes under it every time a task lands.
+          "Cache-Control": "no-store",
+        });
+        response.end(bytes);
+      })
+      .catch(() => {
+        response.writeHead(404, { "Content-Type": "text/plain" });
+        response.end("Not found");
+      });
+  });
+  server.listen(port, "127.0.0.1");
+  return server;
+}
 
 /**
  * Why nothing could be started, in terms of what is actually in the
@@ -255,7 +344,7 @@ export class PreviewService {
   /** Task-scoped previews: an agent looking at its own unlanded work. */
   private readonly taskPreviews = new Map<
     string,
-    { child: ChildProcess; port: number }
+    { child?: ChildProcess; server?: Server; port: number }
   >();
   private readonly sweeper: NodeJS.Timeout;
 
@@ -316,6 +405,29 @@ export class PreviewService {
       this.project.config.previewCommands?.[input.repositoryId] ??
       this.project.config.previewCommand ??
       (await detectPreviewCommand(workspace.path));
+    // A page with nothing that builds it needs no command at all, and this
+    // process can serve it without assuming a runtime the machine may not
+    // have.
+    if (command === undefined && (await isStaticSite(workspace.path))) {
+      const port = await freePort();
+      const server = startStaticServer(workspace.path, port);
+      const status: PreviewStatus = {
+        repositoryId: input.repositoryId,
+        url: `http://127.0.0.1:${String(port)}`,
+        port,
+        revision: version.revision,
+        label: "static files",
+        startedAt: new Date().toISOString(),
+        recentOutput: [`serving ${workspace.path}`],
+      };
+      this.running.set(input.repositoryId, {
+        server,
+        status,
+        workspacePath: workspace.path,
+        lastAskedAt: Date.now(),
+      });
+      return { ...status, recentOutput: [...status.recentOutput] };
+    }
     if (command === undefined) {
       const why = await describeUndetectable(workspace.path);
       await rm(workspace.path, { recursive: true, force: true });
@@ -439,6 +551,16 @@ export class PreviewService {
       this.project.config.previewCommands?.[input.repositoryId] ??
       this.project.config.previewCommand ??
       (await detectPreviewCommand(input.workspacePath));
+    if (command === undefined && (await isStaticSite(input.workspacePath))) {
+      const port = await freePort();
+      const server = startStaticServer(input.workspacePath, port);
+      this.taskPreviews.set(input.taskId, { server, port });
+      return {
+        url: `http://127.0.0.1:${String(port)}`,
+        output: [`serving ${input.workspacePath} as static files`],
+        failed: false,
+      };
+    }
     if (command === undefined) {
       return {
         output: [await describeUndetectable(input.workspacePath)],
@@ -510,7 +632,8 @@ export class PreviewService {
     }
     this.taskPreviews.delete(taskId);
     try {
-      running.child.kill("SIGTERM");
+      running.child?.kill("SIGTERM");
+      running.server?.close();
     } catch {
       // Already gone.
     }
@@ -540,7 +663,8 @@ export class PreviewService {
       // parent leaves them holding the port. Best effort either way: this is
       // cleanup, and a failure here must not surface as the caller's error.
       try {
-        entry.child.kill("SIGTERM");
+        entry.child?.kill("SIGTERM");
+        entry.server?.close();
       } catch {
         // Already gone.
       }

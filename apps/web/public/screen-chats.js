@@ -278,6 +278,50 @@ function statusDot(status, title) {
 const ATTACHMENT_PATTERN =
   /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu;
 
+/**
+ * A narrow, safe subset of Markdown for what an agent writes.
+ *
+ * Escaped first, patterns applied second. That order is the whole safety
+ * argument: by the time anything here matches, every `<`, `>` and `&` the
+ * author wrote is already an entity, so the only tags in the output are the
+ * ones constructed below. Nothing an agent writes can become an element.
+ *
+ * Deliberately small. Headings, bold, bullets and paragraphs are what a
+ * summary is actually made of; links, images, tables and raw HTML are not,
+ * and every one of them is a way for text to do something other than be read.
+ */
+function richText(text) {
+  const blocks = esc(String(text ?? ""))
+    .split(/\n{2,}/u)
+    .map((block) => block.trim())
+    .filter((block) => block.length > 0);
+  const inline = (value) =>
+    value
+      .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>")
+      .replace(/`([^`]+)`/gu, "<code>$1</code>");
+  return blocks
+    .map((block) => {
+      const lines = block.split(/\n/u);
+      // A heading is a line of its own, so a sentence that happens to contain
+      // a hash is left alone.
+      if (lines.length === 1 && /^#{1,4}\s+/u.test(block)) {
+        return `<h4 class="rt-head">${inline(block.replace(/^#{1,4}\s+/u, ""))}</h4>`;
+      }
+      if (lines.every((line) => /^\s*[-*]\s+/u.test(line))) {
+        return `<ul class="rt-list">${lines
+          .map((line) => `<li>${inline(line.replace(/^\s*[-*]\s+/u, ""))}</li>`)
+          .join("")}</ul>`;
+      }
+      if (lines.every((line) => /^\s*\d+[.)]\s+/u.test(line))) {
+        return `<ol class="rt-list">${lines
+          .map((line) => `<li>${inline(line.replace(/^\s*\d+[.)]\s+/u, ""))}</li>`)
+          .join("")}</ol>`;
+      }
+      return `<p>${lines.map((line) => inline(line)).join("<br>")}</p>`;
+    })
+    .join("");
+}
+
 function messageBody(content, repositoryId) {
   const text = String(content ?? "");
   const images = [];
@@ -287,13 +331,13 @@ function messageBody(content, repositoryId) {
     stripped = stripped.replace(match[0], "");
   }
   if (images.length === 0) {
-    return esc(text);
+    return richText(text);
   }
   const base =
     `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
     `/repositories/${encodeURIComponent(repositoryId ?? "")}/attachments/`;
   return (
-    esc(stripped.trim()) +
+    richText(stripped.trim()) +
     images
       .map(
         (image) =>
@@ -1769,18 +1813,28 @@ function threadReplies(root, repositoryId) {
   }
   const finishedAt = replies.findIndex((reply) => isThreadEnding(reply));
   const done = finishedAt !== -1;
-  // The title line names the task and is not commentary; it stays out.
+  // The title line names the task, and it now sits inside the thinking block
+  // rather than above it. It used to be its own message row on the reasoning
+  // that it is not commentary — true, and it still left the thread opening
+  // with a restatement of the request that was already the thread's own title
+  // two lines further up. Folded in, it is there for whoever wants the exact
+  // wording and out of the way of everybody else.
   const [first, ...rest] = replies;
   const titleLine = /^Task: /u.test(String(first?.content ?? "")) ? first : undefined;
   const body = titleLine === undefined ? replies : rest;
   const steps = body.filter(isThreadThinking);
   const outcome = body.filter((reply) => !isThreadThinking(reply));
 
-  const count = `${steps.length} step${steps.length === 1 ? "" : "s"}`;
+  // Silent at zero. A task that has been stated and not yet worked on has a
+  // block holding the request alone, and "0 steps" beside it reads as a
+  // failure to do something rather than as work not started.
+  const count =
+    steps.length === 0
+      ? ""
+      : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
   return `
-    ${titleLine === undefined ? "" : messageRow(titleLine, repositoryId, { isReply: true })}
     ${
-      steps.length === 0
+      steps.length === 0 && titleLine === undefined
         ? ""
         : `<details class="thread-thinking"${
             // Open while it runs, unless the reader has said otherwise.
@@ -1799,7 +1853,17 @@ function threadReplies(root, repositoryId) {
              <summary data-act="thinking-toggle" data-value="${esc(root.id)}">
                <span class="tt-label">Thinking</span>
                <span class="tt-count">${esc(count)}</span></summary>
-             <div class="tt-body">${steps
+             <div class="tt-body">${
+               // The request, in the agent's own restatement of it, above the
+               // steps it took. First because it is what the steps are for.
+               titleLine === undefined
+                 ? ""
+                 : `<p class="tt-task">${esc(
+                     String(titleLine.content ?? "")
+                       .replace(/^Task:\s*/u, "")
+                       .trim(),
+                   )}</p>`
+             }${steps
                .map((reply) => String(reply.content ?? "").trim())
                .filter((text) => text.length > 0)
                .join("\n")
@@ -1808,7 +1872,66 @@ function threadReplies(root, repositoryId) {
                .join("")}</div>
            </details>`
     }
-    ${outcome.map((reply) => messageRow(reply, repositoryId, { isReply: true })).join("")}`;
+    ${outcome
+      .map((reply) => summaryBlock(reply, repositoryId))
+      .join("")}`;
+}
+
+/**
+ * How much summary is worth folding away.
+ *
+ * A two-line ending is not a wall of text and putting it behind a disclosure
+ * would cost a click to read three words. This is roughly where a summary
+ * stops being a sentence and starts being a document.
+ */
+const SUMMARY_FOLD_CHARS = 400;
+
+/**
+ * The agent's own account of what it did, foldable and simplifiable.
+ *
+ * Folded rather than truncated: a summary is the most valuable thing in a
+ * thread and cutting it off mid-sentence would be worse than either showing
+ * all of it or none. Open by default — it is the answer, and a reader who has
+ * to expand the answer has been given a filing cabinet rather than a reply —
+ * but the choice is remembered per message, in both directions.
+ */
+function summaryBlock(reply, repositoryId) {
+  const full = String(reply.content ?? "");
+  const simple = state.simplified[reply.id];
+  const showingSimple = state.simplifyShown[reply.id] === true;
+  const body = showingSimple && typeof simple === "string" ? simple : full;
+  const row = messageRow(
+    { ...reply, content: body },
+    repositoryId,
+    { isReply: true },
+  );
+  const controls = `<div class="summary-tools">
+    ${
+      typeof simple === "string"
+        ? `<button type="button" class="btn btn-ghost btn-sm"
+             data-act="summary-simplify-toggle" data-value="${esc(reply.id)}">
+             ${showingSimple ? "Show full" : "Show simple"}</button>`
+        : `<button type="button" class="btn btn-ghost btn-sm"
+             data-act="summary-simplify" data-value="${esc(reply.id)}"
+             title="Rewrite this as briefly and plainly as possible">
+             ${state.simplifying[reply.id] === true ? "Simplifying…" : "Simplify"}</button>`
+    }
+  </div>`;
+  if (full.length <= SUMMARY_FOLD_CHARS) {
+    return row + controls;
+  }
+  const firstLine = full.split(/\n/u).find((line) => line.trim().length > 0) ?? "";
+  return `<details class="thread-summary"${
+    state.summaryOpen[reply.id] === false ? "" : " open"
+  }>
+    <summary data-act="summary-toggle" data-value="${esc(reply.id)}">
+      <span class="tt-label">Summary</span>
+      <span class="ts-peek">${esc(
+        firstLine.length > 90 ? `${firstLine.slice(0, 87)}…` : firstLine,
+      )}</span>
+    </summary>
+    <div class="ts-body">${row}${controls}</div>
+  </details>`;
 }
 
 /** The dots belong where the work is, which is inside the thread. */

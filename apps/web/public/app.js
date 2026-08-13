@@ -68,6 +68,8 @@ import {
   loadPreview,
   rollbackTask,
   setAuditorPaused,
+  setPreviewCommand,
+  simplifySummary,
   startPreview,
   stopPreview,
   setRepositoryGrant,
@@ -1274,7 +1276,42 @@ async function clearThreadsAction(repositoryId) {
  * which reads as "it did not work" for something that is about to work. The
  * link stays in the header for them to click when they are ready.
  */
-async function startPreviewAction(repositoryId) {
+/**
+ * Fetches a shorter version of one summary and shows it.
+ *
+ * Kept beside the original rather than replacing it: the full account is what
+ * the agent actually said, and a reader who finds the short version too short
+ * has to be able to get back to it in one click.
+ */
+async function simplifySummaryAction(repositoryId, replyId) {
+  if (state.simplifying[replyId] === true) {
+    return;
+  }
+  const source = channelMessagesFor(repositoryId)
+    .flatMap((message) => message.replies ?? [])
+    .find((reply) => reply.id === replyId);
+  if (source === undefined) {
+    return;
+  }
+  state.simplifying[replyId] = true;
+  render();
+  try {
+    const text = await simplifySummary(repositoryId, replyId, source.content);
+    if (text.trim().length === 0) {
+      toast("The agent had nothing shorter to say", "error");
+      return;
+    }
+    state.simplified[replyId] = text;
+    state.simplifyShown[replyId] = true;
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    delete state.simplifying[replyId];
+    render();
+  }
+}
+
+async function startPreviewAction(repositoryId, asked = false) {
   toast("Starting…", "ok");
   try {
     const preview = await startPreview(repositoryId);
@@ -1286,8 +1323,29 @@ async function startPreviewAction(repositoryId) {
     );
     render();
   } catch (error) {
-    // The common failure is a repository with no app in it, and the server
-    // says so in a sentence worth showing verbatim rather than replacing.
+    // Detection knows Node and it knows a page. Everything else is a question
+    // with exactly one right answer, held by whoever built the repository —
+    // so it is asked once and remembered, rather than guessed at forever.
+    //
+    // `asked` stops the loop: a command that was just supplied and still did
+    // not work is reported, not re-requested.
+    if (!asked && /could not be started/u.test(error.message ?? "")) {
+      const command = window.prompt(
+        `${error.message}\n\nHow is this app started? For example: npm run dev, ` +
+          `python3 serve.py, go run .`,
+        "",
+      );
+      if (command !== null && command.trim().length > 0) {
+        try {
+          await setPreviewCommand(repositoryId, command.trim());
+        } catch (saveError) {
+          toast(saveError.message, "error");
+          return;
+        }
+        await startPreviewAction(repositoryId, true);
+        return;
+      }
+    }
     toast(error.message, "error");
   }
 }
@@ -2613,6 +2671,18 @@ document.addEventListener("click", (event) => {
       render();
       return;
     }
+    case "summary-toggle":
+      // `<details>` toggles itself; this only records which way, so the choice
+      // survives the next render.
+      state.summaryOpen[value] = !(state.summaryOpen[value] ?? true);
+      return;
+    case "summary-simplify":
+      void simplifySummaryAction(activeChannelId(), value);
+      return;
+    case "summary-simplify-toggle":
+      state.simplifyShown[value] = !(state.simplifyShown[value] === true);
+      render();
+      return;
     case "preview-start":
       void startPreviewAction(value);
       return;

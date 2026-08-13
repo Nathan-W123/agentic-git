@@ -276,6 +276,15 @@ const AUDITOR_EVENT_BATCH = 25;
  * above, which sits in front of a person.
  */
 const AUDIT_TIMEOUT_MS = 180_000;
+
+/**
+ * Far shorter than an audit's, because somebody is watching a button.
+ *
+ * Rewriting text that is already on the screen is a small ask of a model, and
+ * a reader who has waited half a minute for a shorter version of something
+ * they can already read has been failed whether it arrives or not.
+ */
+const SIMPLIFY_TIMEOUT_MS = 30_000;
 /** How long the opening line may take before a fixed one is used instead. */
 const ACKNOWLEDGEMENT_TIMEOUT_MS = 6000;
 /**
@@ -1401,6 +1410,18 @@ export interface ApiOperations {
   previewStop?(input: {
     projectId: string;
     repositoryId: string;
+  }): Promise<void>;
+  /**
+   * Remembers how one repository is started, when nothing could be detected.
+   *
+   * Asking once beats predicting ecosystems. Detection covers Node and static
+   * pages because those can be known rather than guessed; everything else is
+   * a question with one right answer that only the person who built it has.
+   */
+  previewConfigure?(input: {
+    projectId: string;
+    repositoryId: string;
+    command: string;
   }): Promise<void>;
   /**
    * Images posted into a channel. Absent on a deployment with nowhere to put
@@ -4551,6 +4572,68 @@ export class ApiGateway {
       return;
     }
 
+    // Rewriting one summary as briefly as it can be put.
+    //
+    // A separate reply rather than an edit of the original: the full account
+    // is what the agent actually said and what the audit trail refers to, and
+    // replacing it with a shortened paraphrase would quietly make the record
+    // something nobody wrote.
+    const simplifyMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/replies/([^/]+)/simplify$`,
+        "u",
+      ),
+    );
+    if (simplifyMatch !== undefined && method === "POST") {
+      const [projectId = "", repositoryId = "", replyId = ""] = simplifyMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
+      const body = objectBody(await this.readJson(request));
+      const text = stringField(body["text"], "text", { max: 20_000 }) ?? "";
+      if (text.trim().length === 0) {
+        throw new HttpError(400, "invalid_request", "There is nothing to simplify");
+      }
+      // Whoever is already answering in this room. A simplification is a
+      // rewrite of text that is already on the screen, so it needs no
+      // repository access and no agent of its own.
+      const [candidate] = await this.resolveChannelMentionCandidates(
+        projectId,
+        repositoryId,
+      );
+      if (candidate === undefined) {
+        throw new HttpError(
+          409,
+          "no_agent",
+          "No agent is connected to this channel to rewrite it",
+        );
+      }
+      const answer = await this.askAgent(
+        candidate,
+        "Rewrite the following so somebody in a hurry gets the point. " +
+          "Plain words, no jargon, and nothing that was not in the original " +
+          "— do not soften a failure or invent a result. Lead with what " +
+          "happened, then anything the reader has to do. A few short lines " +
+          "at most, and fewer if the original says little.\n\n" +
+          `---\n${text}\n---`,
+        SIMPLIFY_TIMEOUT_MS,
+      );
+      if (answer.text === undefined) {
+        throw new HttpError(
+          502,
+          "simplify_failed",
+          answer.error ?? "The agent did not answer",
+        );
+      }
+      this.sendJson(response, 200, { replyId, text: answer.text.trim() });
+      return;
+    }
+
     // Images in a channel. Scoped to a repository so the permission question
     // is the one already answered for everything else in that room: whoever
     // may read the channel may read what was posted into it.
@@ -4732,6 +4815,43 @@ export class ApiGateway {
       if (method === "DELETE") {
         await operations.previewStop({ projectId, repositoryId });
         this.sendJson(response, 200, { stopped: true });
+        return;
+      }
+      if (method === "PUT") {
+        // Writes deployment configuration, so it needs more than the
+        // `run_task` that starting one does. Somebody who can run work here
+        // is not necessarily somebody who decides how this repository boots.
+        await authorizeRepository(
+          this.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "manage_project",
+        );
+        if (operations.previewConfigure === undefined) {
+          throw new HttpError(
+            501,
+            "not_supported",
+            "This deployment cannot remember preview commands",
+          );
+        }
+        const body = objectBody(await this.readJson(request));
+        const command = stringField(body["command"], "command", { max: 500 });
+        if (command === undefined || command.trim().length === 0) {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "A start command is required",
+          );
+        }
+        await this.performOperation("preview_configure_failed", async () => {
+          await operations.previewConfigure!({
+            projectId,
+            repositoryId,
+            command,
+          });
+        });
+        this.sendJson(response, 200, { configured: true });
         return;
       }
     }
