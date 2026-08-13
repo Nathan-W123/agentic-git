@@ -668,16 +668,6 @@ function changedFilesBlock(entry, repositoryId) {
   // Only for a task that landed something, and only for somebody who could
   // manage the repository anyway — the API refuses either way, and a button
   // that exists to be refused is worse than no button.
-  const revert =
-    entry.taskId === undefined || !canManageRepository(repositoryId)
-      ? ""
-      : `<div class="cmsg-revert-row">
-          <button class="btn btn-ghost btn-sm" data-act="chan-revert-task"
-            data-value="${esc(entry.taskId)}"
-            title="Return this repository to the state before this task">
-            Revert this
-          </button>
-        </div>`;
   // Counts are per file and summed for the header. Absent on rows written
   // before they were reported, and shown as nothing rather than as zero: a
   // file that changed no lines is a different claim from one nobody counted.
@@ -733,7 +723,7 @@ function changedFilesBlock(entry, repositoryId) {
           : counts(totalAdded, totalRemoved)
       }</summary>
     <ul class="cmsg-files">${rows}</ul>
-  </details>${revert}`;
+  </details>`;
 }
 
 /**
@@ -751,6 +741,17 @@ function changedFilesBlock(entry, repositoryId) {
 function threadProgress(entry) {
   const replies = entry.replies ?? [];
   if (replies.length === 0) {
+    return undefined;
+  }
+  // Finished is finished however it was said. The regex catches the fixed
+  // endings; an agent's own summary does not match it, and a bar stuck at 90%
+  // under a task that landed an hour ago reads as a hang. The task's status
+  // and the `outcome` reply kind both survive rewording.
+  const task = state.tasks.find((candidate) => candidate.id === entry.taskId);
+  if (task !== undefined && !["submitted", "claimed"].includes(task.status)) {
+    return undefined;
+  }
+  if (replies.some((reply) => reply.kind === "outcome")) {
     return undefined;
   }
   let planned = 0;
@@ -844,7 +845,6 @@ function messageRow(
             ? ""
             : changedFilesBlock(entry, repositoryId)
           : threadSummaryLink(entry, replies, repositoryId) +
-            changedFilesBlock(entry, repositoryId) +
             (() => {
               // A few pixels of accent under the thread: how far its run has
               // got, present only while there is a run to speak of. Quiet by
@@ -856,10 +856,24 @@ function messageRow(
                 : `<div class="thread-progress" title="${progress}% by phase">
                      <i style="width:${progress}%"></i>
                    </div>`;
-            })()
+            })() +
+            changedFilesBlock(entry, repositoryId)
       }
     </div>
     <span class="cmsg-actions">
+      ${
+        // Revert, as quiet as the actions beside it. It was a labelled button
+        // under the file list, which gave "undo this task" more visual weight
+        // than the task itself had.
+        entry.taskId === undefined || !canManageRepository(repositoryId)
+          ? ""
+          : iconButton("history", {
+              act: "chan-revert-task",
+              value: entry.taskId,
+              title: "Return the repository to the state before this task",
+              small: true,
+            })
+      }
       ${iconButton("smile", { act: "channel-react", value: entry.id, title: "React", small: true })}
       ${
         isReply

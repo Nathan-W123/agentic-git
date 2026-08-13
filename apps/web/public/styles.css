@@ -4272,8 +4272,8 @@ svg {
    wash so it reads as one element in any theme, and the fill moves only when
    the narration above it says something moved. */
 .thread-progress {
-  height: 3px;
-  margin-top: 6px;
+  height: 2px;
+  margin: 6px 0;
   max-width: 420px;
   border-radius: 2px;
   background: var(--accent-wash);
