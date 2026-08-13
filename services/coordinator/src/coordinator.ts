@@ -1170,10 +1170,7 @@ export class Coordinator {
           session =
             resumed?.session !== undefined &&
             entry.adapter.continueTask !== undefined
-              ? await entry.adapter.continueTask(
-                  resumed.session.id,
-                  startInput,
-                )
+              ? await entry.adapter.continueTask(resumed.session, startInput)
               : await this.startColdSession(entry, resumed, startInput);
           if (session.taskId !== entry.task.id) {
             // Held to the contract for the same reason the plan is below: a
@@ -1379,9 +1376,19 @@ export class Coordinator {
       return undefined;
     }
     // Same agent, new adapter instance — the ordinary shape when every run
-    // constructs its own adapters. The session belongs to the instance that
-    // opened it and closes with it; the directory is adapter-independent and
-    // survives. The turn starts cold in a warm workspace, which is the
+    // constructs its own adapters.
+    if (
+      held.session?.resume !== undefined &&
+      entry.adapter.continueTask !== undefined
+    ) {
+      // The session's state lives in the vendor's own store, named by the
+      // resume token — the instance that opened it held nothing the new one
+      // needs. The record rides on to `continueTask`, warm.
+      return { ...held, adapter: entry.adapter };
+    }
+    // No token, or nobody to adopt it: the session belongs to the instance
+    // that opened it and closes with it; the directory is adapter-independent
+    // and survives. The turn starts cold in a warm workspace, which is the
     // trade the design names: the session is the expendable half.
     if (held.session !== undefined) {
       const session = held.session;
@@ -3084,10 +3091,17 @@ export class Coordinator {
       );
       const workspaces = this.workspaces;
       const workspace = result.workspace;
+      // Read now, not remembered from the session's start: every vendor exec
+      // may fork a fresh resume token, and the one worth keeping is the one
+      // that names the state as this turn left it.
+      const resume = result.adapter.resumeToken?.(result.session.id);
       await this.conversations.retain(result.conversationId, {
         adapter: result.adapter,
         agentId: result.task.agentId,
-        session: result.session,
+        session:
+          resume === undefined
+            ? result.session
+            : { ...result.session, resume },
         workspace,
         // Captured here because the registry may outlive this coordinator
         // and its workspace manager; the conversation carries its own way
