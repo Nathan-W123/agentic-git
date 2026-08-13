@@ -5728,6 +5728,124 @@ test("a run that cannot start says so, instead of an hour of silence", async (t)
   assert.match(said, /already mapped to a different canonical repository/u);
 });
 
+test("a finished thread carries its summary and its line counts", async (t) => {
+  // Two failures with one cause between them, both about a thread that has
+  // finished. The ending is the agent's own account of the work now, and
+  // nothing a model writes begins "Done —" — so the browser, which decided
+  // what an ending was by matching that text, filed the summary inside the
+  // collapsed thinking block and left the typing dots running. And the counts
+  // that go beside the file list were emitted by one executor and not the
+  // other, so whether a thread showed "+12 −3" or bare paths came down to
+  // which code path had run the task.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "threadending");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel`;
+  const mention = `Claude (${String(session.user.displayName).split(" ")[0]})`;
+
+  assert.equal(
+    (
+      await owner.request(`${base}/messages`, {
+        method: "POST",
+        body: { content: `@${mention} raise the retry ceiling in worker.ts` },
+      })
+    ).status,
+    201,
+  );
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never dispatched a task",
+  );
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId: repo });
+  assert.ok(task !== undefined, "the dispatch stored no task");
+
+  // The run as the log records it, in order: an edit in flight, the collected
+  // changeset, and the promotion that ends it. Written in one go so a single
+  // poll of the watcher consumes all three.
+  await runtime.store.appendAudit(undefined, {
+    type: "workspace_changed",
+    taskId: task.id,
+    data: {
+      files: [
+        { path: "worker.ts", status: "modified" },
+        { path: "worker.test.ts", status: "modified" },
+      ],
+    },
+  });
+  await runtime.store.appendAudit(undefined, {
+    type: "changeset_collected",
+    taskId: task.id,
+    data: {
+      changeSetId: "cs_1",
+      // Two files on purpose: a single-file run with a one-line account now
+      // ends as a channel `outcome` line rather than a thread — a room is for
+      // work with a story. This test is about the thread-shaped ending, so
+      // its run does thread-shaped work.
+      files: ["worker.ts", "worker.test.ts"],
+      changedFiles: [
+        { path: "worker.ts", status: "modified", added: 12, removed: 3 },
+        { path: "worker.test.ts", status: "modified", added: 6, removed: 1 },
+      ],
+    },
+  });
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: task.id,
+    data: {
+      files: ["worker.ts"],
+      agentExplanation: "Raised the retry ceiling to five.",
+    },
+  });
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) =>
+        message.replies.some((reply) => reply.kind === "outcome"),
+      );
+    },
+    "the run's ending was never marked as one",
+    8_000,
+  );
+
+  const listed = await owner.request(`${base}/messages`);
+  const thread = listed.data.messages.find(
+    (message: any) => (message.replies ?? []).length > 0,
+  );
+  const ending = (thread?.replies ?? []).find(
+    (reply: any) => reply.kind === "outcome",
+  );
+  // The agent's own words, not the sentence that was true of every task this
+  // system has ever finished — and marked, so the browser does not have to
+  // recognise those words to know the thread is done.
+  assert.match(String(ending?.content), /Raised the retry ceiling to five\./u);
+  assert.doesNotMatch(String(ending?.content), /the change is in canonical/u);
+  // Everything before it is the run narrating itself, and stays marked as
+  // such: if the ending were `progress` too the thread would have no visible
+  // conclusion at all.
+  const kinds = (thread?.replies ?? []).map((reply: any) => reply.kind);
+  assert.equal(kinds.filter((kind: string) => kind === "outcome").length, 1);
+  assert.ok(
+    kinds.includes("progress"),
+    `the narration lost its progress mark: ${JSON.stringify(kinds)}`,
+  );
+
+  // And the file summary survives the round trip with its counts. The final
+  // `changeset_collected` is what carries them; the live workspace poll before
+  // it cannot count lines, and must not be what the thread is left showing.
+  assert.deepEqual(thread?.changedFiles, [
+    { path: "worker.ts", status: "modified", added: 12, removed: 3 },
+    { path: "worker.test.ts", status: "modified", added: 6, removed: 1 },
+  ]);
+});
+
 test("a mention nobody answers to says so, instead of vanishing", async (t) => {
   // The browser roster layers this account's own agents on top of the
   // server's, so an agent connected in a way that stored no per-user
