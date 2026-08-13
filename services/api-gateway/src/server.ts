@@ -1412,6 +1412,18 @@ export interface ApiOperations {
     repositoryId: string;
   }): Promise<void>;
   /**
+   * Remembers how one repository is started, when nothing could be detected.
+   *
+   * Asking once beats predicting ecosystems. Detection covers Node and static
+   * pages because those can be known rather than guessed; everything else is
+   * a question with one right answer that only the person who built it has.
+   */
+  previewConfigure?(input: {
+    projectId: string;
+    repositoryId: string;
+    command: string;
+  }): Promise<void>;
+  /**
    * Images posted into a channel. Absent on a deployment with nowhere to put
    * them, in which case the composer offers no attach control.
    */
@@ -4803,6 +4815,43 @@ export class ApiGateway {
       if (method === "DELETE") {
         await operations.previewStop({ projectId, repositoryId });
         this.sendJson(response, 200, { stopped: true });
+        return;
+      }
+      if (method === "PUT") {
+        // Writes deployment configuration, so it needs more than the
+        // `run_task` that starting one does. Somebody who can run work here
+        // is not necessarily somebody who decides how this repository boots.
+        await authorizeRepository(
+          this.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "manage_project",
+        );
+        if (operations.previewConfigure === undefined) {
+          throw new HttpError(
+            501,
+            "not_supported",
+            "This deployment cannot remember preview commands",
+          );
+        }
+        const body = objectBody(await this.readJson(request));
+        const command = stringField(body["command"], "command", { max: 500 });
+        if (command === undefined || command.trim().length === 0) {
+          throw new HttpError(
+            400,
+            "invalid_request",
+            "A start command is required",
+          );
+        }
+        await this.performOperation("preview_configure_failed", async () => {
+          await operations.previewConfigure!({
+            projectId,
+            repositoryId,
+            command,
+          });
+        });
+        this.sendJson(response, 200, { configured: true });
         return;
       }
     }

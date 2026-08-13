@@ -2696,6 +2696,14 @@ export async function startPreview(repositoryId) {
   return state.previews[repositoryId];
 }
 
+/** Remembers how this repository starts, so it is asked once and not again. */
+export async function setPreviewCommand(repositoryId, command) {
+  await api(repositoryPath(repositoryId, "/preview"), {
+    method: "PUT",
+    body: { command },
+  });
+}
+
 export async function stopPreview(repositoryId) {
   await api(repositoryPath(repositoryId, "/preview"), { method: "DELETE" });
   state.previews[repositoryId] = null;

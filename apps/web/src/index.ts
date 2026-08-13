@@ -403,6 +403,26 @@ async function serve(
     async previewStop(input) {
       await previews.stop(input.repositoryId);
     },
+    async previewConfigure(input) {
+      // One string rather than an executable and an argument list, because the
+      // person answering is reading a prompt and knows the command they type
+      // in a terminal. Split on whitespace: a start command is a program and
+      // some flags, and anything needing shell quoting needs a script anyway.
+      const parts = input.command.trim().split(/\s+/u);
+      const [executable, ...args] = parts;
+      if (executable === undefined) {
+        throw new Error("A start command is required");
+      }
+      project.config.previewCommands = {
+        ...project.config.previewCommands,
+        [input.repositoryId]: {
+          executable,
+          args,
+          label: input.command.trim(),
+        },
+      };
+      await project.save();
+    },
     async attachmentSave(input) {
       return await attachments.save(input.bytes, input.contentType);
     },

@@ -68,6 +68,7 @@ import {
   loadPreview,
   rollbackTask,
   setAuditorPaused,
+  setPreviewCommand,
   simplifySummary,
   startPreview,
   stopPreview,
@@ -1310,7 +1311,7 @@ async function simplifySummaryAction(repositoryId, replyId) {
   }
 }
 
-async function startPreviewAction(repositoryId) {
+async function startPreviewAction(repositoryId, asked = false) {
   toast("Starting…", "ok");
   try {
     const preview = await startPreview(repositoryId);
@@ -1322,8 +1323,29 @@ async function startPreviewAction(repositoryId) {
     );
     render();
   } catch (error) {
-    // The common failure is a repository with no app in it, and the server
-    // says so in a sentence worth showing verbatim rather than replacing.
+    // Detection knows Node and it knows a page. Everything else is a question
+    // with exactly one right answer, held by whoever built the repository —
+    // so it is asked once and remembered, rather than guessed at forever.
+    //
+    // `asked` stops the loop: a command that was just supplied and still did
+    // not work is reported, not re-requested.
+    if (!asked && /could not be started/u.test(error.message ?? "")) {
+      const command = window.prompt(
+        `${error.message}\n\nHow is this app started? For example: npm run dev, ` +
+          `python3 serve.py, go run .`,
+        "",
+      );
+      if (command !== null && command.trim().length > 0) {
+        try {
+          await setPreviewCommand(repositoryId, command.trim());
+        } catch (saveError) {
+          toast(saveError.message, "error");
+          return;
+        }
+        await startPreviewAction(repositoryId, true);
+        return;
+      }
+    }
     toast(error.message, "error");
   }
 }
