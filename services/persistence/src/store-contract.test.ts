@@ -528,6 +528,202 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a landed turn leaves its conversational task open, not terminal`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const submitted = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "first turn",
+        agentId: TASK.agentId,
+        validationCommands: [],
+        conversationId: "thread_root_1",
+      });
+      assert.equal(submitted.conversationId, "thread_root_1");
+      await store.claimSubmittedTasks(REPOSITORY.id);
+      await store.openSubmittedTask(submitted.id, "run_1");
+
+      const open = (await store.listSubmittedTasks({ status: "open" }))[0];
+      assert.equal(open?.id, submitted.id);
+      assert.equal(open?.conversationId, "thread_root_1");
+      assert.equal(open?.runId, "run_1");
+      // Open is an ending of a turn, not of the task: nothing is completed.
+      assert.equal(open?.completedAt, undefined);
+      assert.ok(open?.openedAt !== undefined);
+
+      // Not claimable: an open task is waiting for a message, not a worker.
+      assert.deepEqual(await store.claimSubmittedTasks(REPOSITORY.id), []);
+      // Not completable or retryable either — the next turn is its own task.
+      await assert.rejects(
+        store.completeSubmittedTask(submitted.id, "integrated"),
+        /open/u,
+      );
+      await assert.rejects(store.retrySubmittedTask(submitted.id), /open/u);
+      // And only a claimed task can go open.
+      const oneShot = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "one shot",
+        agentId: TASK.agentId,
+        validationCommands: [],
+      });
+      await assert.rejects(
+        store.openSubmittedTask(oneShot.id),
+        /submitted/u,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: submitting the next turn settles the previous open one`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const first = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "first turn",
+        agentId: TASK.agentId,
+        validationCommands: [],
+        conversationId: "thread_root_2",
+      });
+      await store.claimSubmittedTasks(REPOSITORY.id);
+      await store.openSubmittedTask(first.id);
+
+      const second = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "second turn",
+        agentId: TASK.agentId,
+        validationCommands: [],
+        conversationId: "thread_root_2",
+      });
+      const rows = await store.listSubmittedTasks({
+        repositoryId: REPOSITORY.id,
+      });
+      // The first turn's work already landed; the arrival of the next turn
+      // is what it was waiting for, so it settles as integrated — and at
+      // most one turn of a conversation is ever open.
+      assert.equal(
+        rows.find((task) => task.id === first.id)?.status,
+        "integrated",
+      );
+      assert.ok(
+        rows.find((task) => task.id === first.id)?.completedAt !== undefined,
+      );
+      assert.equal(
+        rows.find((task) => task.id === second.id)?.status,
+        "submitted",
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: an open conversation can be ended, and an abandoned one expires`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const ended = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "conversation somebody ends",
+        agentId: TASK.agentId,
+        validationCommands: [],
+        conversationId: "thread_root_3",
+      });
+      const abandoned = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "conversation nobody answers",
+        agentId: TASK.agentId,
+        validationCommands: [],
+        conversationId: "thread_root_4",
+      });
+      await store.claimSubmittedTasks(REPOSITORY.id);
+      await store.openSubmittedTask(ended.id);
+      await store.openSubmittedTask(abandoned.id);
+
+      // "That's it, we're done" — explicit, and terminal as cancelled.
+      const cancelled = await store.cancelSubmittedTask(ended.id);
+      assert.equal(cancelled.status, "cancelled");
+      assert.ok(cancelled.completedAt !== undefined);
+
+      // Nothing expires ahead of the cutoff…
+      assert.deepEqual(
+        await store.expireOpenTasks(new Date(0).toISOString()),
+        [],
+      );
+      // …and a cutoff the silence has outlasted settles it as integrated:
+      // the work landed, only the waiting is over. A future cutoff stands in
+      // for the passage of time.
+      const expired = await store.expireOpenTasks(
+        new Date(Date.now() + 60_000).toISOString(),
+      );
+      assert.equal(expired.length, 1);
+      assert.equal(expired[0]?.id, abandoned.id);
+      assert.equal(expired[0]?.status, "integrated");
+      assert.equal(
+        (await store.listSubmittedTasks({ status: "open" })).length,
+        0,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: an open task is not requeued when its turn's lease ends`, async () => {
+    // The lease is released at the end of each turn while the task stays
+    // open — the released arm's requeue must not flip an open task back to
+    // submitted, or every conversation would immediately re-run its last
+    // turn. Ordering matters: the task goes open before the lease settles.
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "conversations@example.com",
+        displayName: "Fleet",
+        passwordDigest: "digest",
+      });
+      const worker = await store.registerWorker({
+        userId: user.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "worker-conv",
+        adapters: ["codex"],
+        version: "1",
+      });
+      await store.saveRepository(REPOSITORY);
+      const task = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "conversational turn",
+        agentId: "codex",
+        validationCommands: [],
+        conversationId: "thread_root_5",
+      });
+      const leased = await store.leaseNextTask({
+        workerId: worker.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+      });
+      assert.equal(leased?.task.id, task.id);
+      await store.openSubmittedTask(task.id);
+      await store.finishWorkLease(
+        leased?.lease.id ?? "",
+        "released",
+        new Date().toISOString(),
+      );
+      assert.equal(
+        (await store.listSubmittedTasks({ status: "open" }))[0]?.id,
+        task.id,
+      );
+      assert.deepEqual(
+        await store.listSubmittedTasks({ status: "submitted" }),
+        [],
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: concurrent claims never return the same task twice`, async () => {
     const { store, cleanup } = await backend.open();
     try {
