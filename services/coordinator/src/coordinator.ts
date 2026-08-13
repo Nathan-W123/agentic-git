@@ -1160,6 +1160,13 @@ export class Coordinator {
             canonicalVersion: version,
             repositoryId: input.repository.id,
             ...(priorContext === "" ? {} : { priorContext }),
+            // Told before the session opens, because some CLIs decide at
+            // invocation time whether a session persists at all — a turn of
+            // a conversation must keep its vendor-side state resumable,
+            // where a one-shot task is better off hermetic.
+            ...(entry.conversationId === undefined
+              ? {}
+              : { conversational: true }),
           };
           // A resumed conversation continues its session — the expensive
           // half of what a conversation keeps — when the adapter can.

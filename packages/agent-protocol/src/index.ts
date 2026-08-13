@@ -41,6 +41,19 @@ export interface StartTaskInput {
    * revision; the workspace in front of the agent is what is true now.
    */
   priorContext?: string;
+  /**
+   * Whether this task is one turn of a conversation — a session that may be
+   * asked to continue after the turn lands.
+   *
+   * Some CLIs make session persistence a choice per invocation (codex's
+   * `--ephemeral`), and hermetic execution is the right default for a task
+   * that runs once: nothing worth remembering, nothing left on the host.
+   * This flag is how an adapter learns the trade has changed — a
+   * conversational turn should keep its vendor-side state resumable, because
+   * the next turn's warmth is worth more than this turn's tidiness. Adapters
+   * whose CLIs always persist (Claude Code) may ignore it.
+   */
+  conversational?: boolean;
 }
 
 export interface AgentSession {
