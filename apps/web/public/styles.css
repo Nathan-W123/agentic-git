@@ -4410,26 +4410,52 @@ svg {
   padding: 0 3px;
 }
 
-/* The agent's account of what it did, foldable because it is often the
-   longest thing in the thread. Open by default: it is the answer. */
+/* The agent's account of what it did, foldable because it is often the longest
+   thing in the thread. Deliberately identical to `.thread-thinking` — they sit
+   inches apart in the same thread, and two disclosures that behave the same
+   should not look like two different mechanisms. Open by default, because
+   unlike thinking this one is the answer. */
 .thread-summary {
-  border-left: 2px solid var(--border);
-  margin: 4px 0 4px 2px;
+  margin: 2px 0 6px;
+  border-left: 2px solid var(--line, #262b3a);
+  padding-left: 10px;
 }
 
 .thread-summary > summary {
   display: flex;
-  align-items: baseline;
+  align-items: center;
   gap: 8px;
   cursor: pointer;
-  padding: 3px 0 3px 10px;
-  font-size: 12px;
-  color: var(--text-3);
   list-style: none;
+  padding: 5px 2px;
+  color: var(--text-3, #8b93a7);
+  font-size: 0.84rem;
+  user-select: none;
 }
 
 .thread-summary > summary::-webkit-details-marker {
   display: none;
+}
+
+/* The same caret the thinking block turns, for the same reason: open and
+   closed have to be distinguishable without reading the label. */
+.thread-summary > summary::before {
+  content: "";
+  width: 0;
+  height: 0;
+  border-left: 5px solid currentColor;
+  border-top: 4px solid transparent;
+  border-bottom: 4px solid transparent;
+  transition: transform 0.15s ease;
+  flex: none;
+}
+
+.thread-summary[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+.thread-summary > summary:hover {
+  color: var(--text-2, #a6a6a6);
 }
 
 .thread-summary > summary .ts-peek {
@@ -4443,8 +4469,16 @@ svg {
   visibility: hidden;
 }
 
+/* Under the summary it acts on, aligned with its text rather than with the
+   avatar gutter — it belongs to the words, not to the row. */
 .summary-tools {
-  padding: 2px 0 6px 46px;
+  display: flex;
+  gap: 6px;
+  padding: 0 0 8px 46px;
+}
+
+.thread-summary .summary-tools {
+  padding-left: 2px;
 }
 
 /* An image posted into a channel. Bounded rather than full size: a screenshot
