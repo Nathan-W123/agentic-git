@@ -394,12 +394,73 @@ export class PlanAdmissionController {
       return whole;
     }
     // A plan whose declarations verification could not connect to the
-    // repository at all has no trustworthy line to split along: granting
-    // "the uncontested part" of a fiction grants an unknown.
+    // repository has no trustworthy *line* to split along — but it still has
+    // paths. Ranges and symbols come from the index and an ungrounded plan
+    // has none, so those splits stay refused. Declared-path disjointness
+    // needs no index at all: "you name filters.py and nobody else does" is
+    // checkable on the declarations alone, and if the agent then writes
+    // outside what it named, scope enforcement catches that exactly as it
+    // does for a grounded plan.
+    //
+    // This is the greenfield case, not a corner: in an empty repository
+    // *every* file is being created and *every* plan is ungrounded, so
+    // refusing all splitting here meant partial admission could never fire
+    // during the phase of a project when tasks overlap most.
     if (planGroundingConfidence(input.plan) === "ungrounded") {
-      return whole;
+      return this.admitDeclaredPaths(input, whole) ?? whole;
     }
     return this.admitPartially(input, whole) ?? whole;
+  }
+
+  /**
+   * The path-granularity half of partial admission, for plans the index
+   * cannot vouch for.
+   *
+   * Same discipline as `admitPartially` — the reduced plan is re-decided, not
+   * waved through — but only whole declared files are ever withheld: no line
+   * ranges, no symbol claims, because both would be statements about contents
+   * this admission has no way to read.
+   */
+  private admitDeclaredPaths(
+    input: PlanAdmissionInput,
+    whole: PlanAdmission,
+  ): PlanAdmission | undefined {
+    const occupancy = this.occupancy(input);
+    const contested = this.contestedFiles(input, occupancy);
+    if (contested.length === 0) {
+      // The refusal was not about file overlap, so there is no path split
+      // that answers it.
+      return undefined;
+    }
+    const deferred = [...contested, ...this.derivedFrom(input, contested)];
+    const reduced = reducePlanScope(input.plan, deferred);
+    if (reduced.expectedFiles.length === 0) {
+      return undefined;
+    }
+    const partial = this.decide(reduced, input, occupancy);
+    if (!planAdmissionApproved(partial)) {
+      return undefined;
+    }
+    return {
+      ...partial,
+      status: "approved_with_constraints",
+      blockedBy: [],
+      deferredResources: deferred,
+      constraints: [...partial.constraints, ...deferralConstraints(deferred)],
+      conflicts: [
+        ...partial.conflicts,
+        ...whole.conflicts.filter(structuralConflict),
+      ],
+      explanation:
+        `Partially admitted on declared paths: granted ` +
+        `${reduced.expectedFiles.join(", ")}; deferred ` +
+        deferred
+          .map(
+            (resource) =>
+              `${resource.resourceId} (held by ${resource.heldBy.join(", ")})`,
+          )
+          .join(", "),
+    };
   }
 
   /**

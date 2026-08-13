@@ -708,6 +708,35 @@ test("an unverifiable plan with nothing running is approved: it runs alone", () 
   assert.equal(admission.status, "approved");
 });
 
+test("an ungrounded plan splits along declared paths it does not share", () => {
+  // Greenfield: nothing exists yet, so nothing grounds, and refusing every
+  // split meant partial admission could never fire in an empty repository —
+  // the phase when tasks overlap most. Paths need no index: "you name
+  // report.py and nobody else does" is checkable on declarations alone.
+  const admission = admit(
+    ungrounded(
+      plan("task_a", {
+        objective: "generate weekly PDF invoices for accounting",
+        expectedFiles: ["src/store.py", "src/report.py"],
+        expectedSymbols: [],
+      }),
+    ),
+    [
+      plan("task_b", {
+        objective: "cache session tokens in the key-value store",
+        expectedFiles: ["src/store.py"],
+        expectedSymbols: [],
+      }),
+    ],
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(
+    (admission.deferredResources ?? []).map((entry) => entry.resourceId),
+    ["src/store.py"],
+  );
+});
+
 test("an unverifiable plan is sequenced behind executing work about the same objective", () => {
   const admission = admit(
     ungrounded(
