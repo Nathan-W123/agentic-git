@@ -61,6 +61,17 @@ export function buildAuditPrompt(input: {
   files: string[];
   patch: string;
   truncated: boolean;
+  /**
+   * What the work in this range was asked to do, if it is known.
+   *
+   * A diff on its own can only be judged against itself, which leaves the
+   * most valuable defect of all invisible: code that is perfectly reasonable
+   * and does something other than what was requested. The investigator has
+   * always been told the objective for exactly this reason; the auditor —
+   * the one agent whose whole job is judging whether work is right — was
+   * the one that never was.
+   */
+  objectives?: string[];
 }): string {
   const shortFrom = input.fromRevision.slice(0, 12);
   const shortTo = input.toRevision.slice(0, 12);
@@ -81,6 +92,20 @@ export function buildAuditPrompt(input: {
     `the other; a client reading a field the server no longer sends;\n`,
     `- data and security mistakes: missing authorization checks, unvalidated `,
     `input reaching a query, secrets or personal data in logs or URLs.\n\n`,
+    ...(input.objectives === undefined || input.objectives.length === 0
+      ? []
+      : [
+          `This work was asked to do the following:\n`,
+          ...input.objectives.map((objective) => `- ${objective}\n`),
+          `\nSo also report code that is sound in itself but does something `,
+          `other than what was asked — a condition inverted from the one `,
+          `requested, a step quietly left out, a safeguard added that the `,
+          `request ruled out. Judge the code against the request only where `,
+          `the diff actually shows the difference; a request may have been `,
+          `carried out in an earlier change you cannot see here, and a plan `,
+          `is not a promise about wording. Say nothing rather than guess at `,
+          `intent.\n\n`,
+        ]),
     `Do not report style, formatting, naming, test coverage, or "consider `,
     `refactoring". Do not report something you cannot point at a line for. `,
     `If the change is fine, say so — a clean audit is a useful audit, and `,

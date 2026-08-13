@@ -483,6 +483,72 @@ test("cancels dependency descendants when their producer cannot integrate", asyn
   }
 });
 
+test("refuses live scope that overlaps work running in another run", async () => {
+  // The wave this task belongs to is the only thing the conflict check can
+  // see, and a task in a different run is not in it. Before the authority was
+  // consulted here, an agent could widen into a file another run was holding
+  // and nothing noticed until both tried to land — the same blind spot
+  // admission had before it read durable leases, one layer down.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      false,
+      "src/c.txt",
+    );
+    const asked: string[][] = [];
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      planAuthority: {
+        async admit(request) {
+          asked.push([...request.plan.expectedFiles]);
+          // Approve the original plan, refuse the widening — which is what a
+          // durable authority does when somebody else holds the extra file.
+          return request.plan.expectedFiles.includes("src/c.txt")
+            ? {
+                outcome: "deferred",
+                retryAfterMs: 1_000,
+                blockedBy: ["task_elsewhere"],
+                explanation: "src/c.txt is leased to task_elsewhere",
+              }
+            : { outcome: "admitted", plan: request.plan };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    // Refused, not queued: the agent is mid-execution with a plan it can still
+    // work inside, so it is told to carry on rather than left waiting.
+    assert.equal(agent.scopeDecisions[0]?.decision, "rejected");
+    assert.match(
+      agent.scopeDecisions[0]?.explanation ?? "",
+      /task_elsewhere/u,
+    );
+    // The widening was actually put to the authority, rather than the check
+    // being skipped when a run has only one task in it.
+    assert.equal(
+      asked.some((files) => files.includes("src/c.txt")),
+      true,
+    );
+    // And the task still finishes the work it was admitted for.
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(result.tasks[0]?.plan.expectedFiles.includes("src/c.txt"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("grants conflict-free live scope and integrates the revised plan", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
 

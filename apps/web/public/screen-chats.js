@@ -293,8 +293,9 @@ function personRow(person) {
   </div>`;
 }
 
-/** The one role the system acts on, so the one role worth offering. */
+/** The roles the system acts on, so the roles worth offering. */
 const AUDITOR_ROLE = "auditor";
+const INVESTIGATOR_ROLE = "investigator";
 
 function isAuditor(agent) {
   return (agent.role ?? "").trim().toLowerCase() === AUDITOR_ROLE;
@@ -409,9 +410,11 @@ function rosterRow(agent, canModerate) {
             <datalist id="channel-role-options">
               <!-- Every other role is free text that reaches the agent as a
                    sentence and nothing else, so there is nothing to offer.
-                   \`auditor\` is the one the code acts on, and a reserved word
-                   nobody can discover is a reserved word nobody uses. -->
+                   These two are the ones the code acts on, and a reserved word
+                   nobody can discover is a reserved word nobody uses —
+                   \`investigator\` had been exactly that since it was built. -->
               <option value="${AUDITOR_ROLE}">Audits every merge, unprompted</option>
+              <option value="${INVESTIGATOR_ROLE}">Explains why a task failed</option>
             </datalist>
           </form>`
         : ""

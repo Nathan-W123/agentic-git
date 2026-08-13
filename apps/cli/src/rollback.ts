@@ -464,6 +464,12 @@ export async function rollbackCanonical(
         type: "canonical_promoted",
         taskId,
         data: {
+          // Without this the auditor cannot tell which repository moved and
+          // skips the advance silently — so a revert, of all things, went
+          // unreviewed. `AuditEventFilter` has no repository term; this field
+          // is the only thing standing between "canonical moved" and knowing
+          // where.
+          repositoryId: input.repositoryId,
           ...(input.projectId === undefined
             ? {}
             : { projectId: input.projectId }),

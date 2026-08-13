@@ -4765,6 +4765,56 @@ test("an organization admin can delete a repository they did not create", async 
   );
 });
 
+test("the auditor is told what the work was asked to do", async (t) => {
+  // A diff can only be judged against itself, which leaves the most valuable
+  // defect invisible: code that is perfectly reasonable and does something
+  // other than what was requested. The investigator has always been given the
+  // objective; the auditor, whose whole job is judging whether work is right,
+  // never was.
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "intent");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents/${ownerId}:openai`,
+    { method: "POST", body: { role: "auditor" } },
+  );
+
+  const submitted = await runtime.store.submitTask({
+    repositoryId: repo,
+    objective: "Log the raw API key so failed shares can be debugged",
+    agentId: "test-agent",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  // The reply is beside the point here; what is under test is the prompt.
+  runtime.chatAnswer.text = "NO FINDINGS";
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: submitted.id,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+    },
+  });
+
+  await waitFor(
+    async () => runtime.chatPrompts.length > 0,
+    "the auditor never ran",
+  );
+  assert.match(
+    runtime.chatPrompts[0]?.prompt ?? "",
+    /Log the raw API key so failed shares can be debugged/u,
+  );
+});
+
 test("reverting a task rolls back to the state before that task landed", async (t) => {
   // The channel knows which task a message belongs to and nothing about
   // revisions, so "revert this" travels as a task id and the server is what
@@ -4832,42 +4882,40 @@ test("reverting a task is refused once canonical has moved past it", async (t) =
   assert.deepEqual(runtime.rollbacks, []);
 });
 
-test("deleting a repository refuses while a submitted task references it", async (t) => {
+test("deleting a repository takes its queued work with it", async (t) => {
+  // This asserted the opposite until the cascade landed: that a task
+  // referencing the repository refused the deletion. In production that
+  // refusal arrived as a raw foreign-key error with nothing offering to clear
+  // the history behind it, so a repository that had ever done work could not
+  // be removed at all. The store-contract tests carry the same reversal and
+  // the reasoning for it.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
-  await invitableRepository(owner, "blocked-repo");
+  await invitableRepository(owner, "cascading-repo");
 
   await runtime.store.submitTask({
-    repositoryId: "blocked-repo",
+    repositoryId: "cascading-repo",
     objective: "Do something",
     agentId: "test-agent",
     validationCommands: [],
     submittedBy: bootstrapped.user.id,
   });
 
-  const blocked = await owner.request(
-    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/blocked-repo`,
+  const removed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/cascading-repo`,
     { method: "DELETE" },
   );
-  assert.equal(blocked.status, 422);
-  assert.notEqual(await runtime.store.getRepository("blocked-repo"), undefined);
-
-  // A cancelled task is still a task that references the repository — the
-  // store's contract is "no task or run references it", not "no active
-  // one" — so cancelling it does not unblock deletion either.
-  const pending = await runtime.store.listSubmittedTasks({
-    repositoryId: "blocked-repo",
-  });
-  for (const task of pending) {
-    await runtime.store.cancelSubmittedTask(task.id);
-  }
-  const stillBlocked = await owner.request(
-    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/blocked-repo`,
-    { method: "DELETE" },
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+  assert.equal(await runtime.store.getRepository("cascading-repo"), undefined);
+  // The queue went with it rather than being left pointing at a repository
+  // that no longer exists.
+  assert.deepEqual(
+    await runtime.store.listSubmittedTasks({
+      repositoryId: "cascading-repo",
+    }),
+    [],
   );
-  assert.equal(stillBlocked.status, 422);
-  assert.notEqual(await runtime.store.getRepository("blocked-repo"), undefined);
 });
 
 test("deleting a repository with no task or run referencing it cascades its channel", async (t) => {

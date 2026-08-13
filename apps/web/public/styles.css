@@ -440,9 +440,13 @@ svg {
   color: #fff;
 }
 
+/* Derived from the accent, not a second purple. These were literal violet, so
+   the one interaction that proves a button is live reverted to the default
+   colour on every theme somebody chose — most visibly on the sign-in button,
+   which is the first accent-coloured thing anyone sees. */
 .btn-primary:hover:not(:disabled) {
-  background: #7c4ef0;
-  border-color: #7c4ef0;
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
 }
 
 .btn-ghost {
@@ -2381,7 +2385,7 @@ svg {
 }
 
 .send-btn:hover:not(:disabled) {
-  background: #7c4ef0;
+  background: var(--accent-dim);
 }
 
 .send-btn:disabled {

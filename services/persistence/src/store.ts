@@ -1182,16 +1182,19 @@ export interface CoordinationStore {
 
   saveRepository(repository: StoredRepository): Promise<void>;
   /**
-   * Removes a repository registration only when no task or run references
-   * it — that is execution history, and is refused rather than lost.
+   * Removes a repository registration and everything scoped to it.
    *
-   * Everything else scoped to the repository (its shared channel — messages,
-   * replies, reactions, per-agent overrides and membership — and its
-   * per-repository access grants) is cascade-deleted: that is the
-   * repository's own state, not history, and leaving it behind would either
-   * block every future deletion outright (a channel message references its
-   * repository) or silently orphan rows a same-id repository created later
-   * would inherit.
+   * That is the shared channel (messages, replies, reactions, per-agent
+   * overrides and membership), the per-repository access grants, and the
+   * execution history: the queue, runs and their children, approvals, and
+   * leases.
+   *
+   * History used to refuse deletion, on the reasoning that a run is a record
+   * and a record should not be thrown away. In production that surfaced as a
+   * raw "FOREIGN KEY constraint failed" with nothing offering to clear the
+   * history behind it, so a repository that had ever done work could not be
+   * removed at all. A contract nobody can satisfy is not protection; the
+   * cascade is deliberate and the store-contract tests assert it.
    */
   removeRepository(id: string): Promise<void>;
   listRepositories(): Promise<StoredRepository[]>;

@@ -199,6 +199,11 @@ export class LeasePlanAuthority implements PlanAuthority {
       leaseId: lease.id,
       submission: { plan: grantedPlan, admission: decided },
       observedApprovedLeaseIds: approvedLeaseIds,
+      // Without this a task revising its own approved plan would be answered
+      // `already_admitted` and handed back its *old* contract as though it
+      // covered the new plan — approving a widening nobody arbitrated, which
+      // is the precise failure this path exists to prevent.
+      ...(request.revising === true ? { replaceApproved: true } : {}),
     });
     if (saved.outcome === "stale") {
       // Someone was admitted between the read and the write, so this decision
@@ -360,6 +365,10 @@ export class LeasePlanAuthority implements PlanAuthority {
       leaseId: lease.id,
       submission: { plan, admission },
       observedApprovedLeaseIds: approvedLeaseIds,
+      // Same reason as the deciding path: a revision of an approved contract
+      // has to be allowed to replace it, or the lease keeps describing the
+      // narrower plan this task is no longer working to.
+      ...(request.revising === true ? { replaceApproved: true } : {}),
     });
     if (saved.outcome === "stale") {
       // Someone arrived while this was being written. There is now something
