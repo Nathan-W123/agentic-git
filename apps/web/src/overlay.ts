@@ -1134,6 +1134,11 @@ export class OverlayWorkspaceService {
           taskId,
           data: {
             projectId: scope.projectId,
+            // See the same stamp in the coordinator: an advance without a
+            // repository is one the auditor cannot place, and it skips those
+            // without saying so. Work submitted from a workspace is no less
+            // worth reviewing than work submitted from a channel.
+            repositoryId: scope.repositoryId,
             previousRevision: integration.previousVersion.revision,
             revision: integration.canonicalVersion.revision,
             changeSetId: integration.changeSetId,

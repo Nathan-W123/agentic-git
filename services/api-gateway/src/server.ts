@@ -3918,12 +3918,14 @@ export class ApiGateway {
     // role/grant pipeline, with the repository's own creator getting a
     // second path in — see `authorizeRepositoryOwnerAction`'s doc comment.
     //
-    // Runs and submitted tasks block the underlying `removeRepository` call
-    // outright (it is refused, not cascaded — see that method's doc comment
-    // in `@coord/persistence`); everything else scoped to the repository,
-    // including its shared channel, is cascade-deleted there. That surfaces
-    // here as an ordinary thrown error from `performOperation`, the same as
-    // any other operation failure.
+    // Everything scoped to the repository is cascade-deleted by
+    // `removeRepository` — the shared channel, the grants, and the execution
+    // history: queue, runs, approvals, leases. Runs and submitted tasks used
+    // to refuse the call outright, which in production meant a repository
+    // that had ever done work could not be deleted at all; see that method's
+    // doc comment in `@coord/persistence`. A failure here is therefore a real
+    // failure, and surfaces as an ordinary thrown error from
+    // `performOperation` like any other.
     const repositoryMatch = matchPath(
       path,
       new RegExp(
@@ -9042,7 +9044,15 @@ export class ApiGateway {
         findings.length === 0
           ? `Audited ${String(diff.files.length)} file${
               diff.files.length === 1 ? "" : "s"
-            } at ${input.toRevision.slice(0, 8)} — nothing to report.`
+            } at ${input.toRevision.slice(0, 8)} — nothing to report` +
+            // An all-clear over a diff that was cut short is a different
+            // claim from an all-clear over the whole change, and the two read
+            // identically unless this says so. The findings path has carried
+            // the caveat since it was written; the clean path, where it
+            // matters more, did not.
+            (diff.truncated
+              ? ", though the change was too large to read in full."
+              : ".")
           : formatAuditSummary({
               findings,
               fromRevision: input.fromRevision,

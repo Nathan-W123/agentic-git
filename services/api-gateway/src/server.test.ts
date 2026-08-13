@@ -4882,42 +4882,40 @@ test("reverting a task is refused once canonical has moved past it", async (t) =
   assert.deepEqual(runtime.rollbacks, []);
 });
 
-test("deleting a repository refuses while a submitted task references it", async (t) => {
+test("deleting a repository takes its queued work with it", async (t) => {
+  // This asserted the opposite until the cascade landed: that a task
+  // referencing the repository refused the deletion. In production that
+  // refusal arrived as a raw foreign-key error with nothing offering to clear
+  // the history behind it, so a repository that had ever done work could not
+  // be removed at all. The store-contract tests carry the same reversal and
+  // the reasoning for it.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
-  await invitableRepository(owner, "blocked-repo");
+  await invitableRepository(owner, "cascading-repo");
 
   await runtime.store.submitTask({
-    repositoryId: "blocked-repo",
+    repositoryId: "cascading-repo",
     objective: "Do something",
     agentId: "test-agent",
     validationCommands: [],
     submittedBy: bootstrapped.user.id,
   });
 
-  const blocked = await owner.request(
-    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/blocked-repo`,
+  const removed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/cascading-repo`,
     { method: "DELETE" },
   );
-  assert.equal(blocked.status, 422);
-  assert.notEqual(await runtime.store.getRepository("blocked-repo"), undefined);
-
-  // A cancelled task is still a task that references the repository — the
-  // store's contract is "no task or run references it", not "no active
-  // one" — so cancelling it does not unblock deletion either.
-  const pending = await runtime.store.listSubmittedTasks({
-    repositoryId: "blocked-repo",
-  });
-  for (const task of pending) {
-    await runtime.store.cancelSubmittedTask(task.id);
-  }
-  const stillBlocked = await owner.request(
-    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/blocked-repo`,
-    { method: "DELETE" },
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+  assert.equal(await runtime.store.getRepository("cascading-repo"), undefined);
+  // The queue went with it rather than being left pointing at a repository
+  // that no longer exists.
+  assert.deepEqual(
+    await runtime.store.listSubmittedTasks({
+      repositoryId: "cascading-repo",
+    }),
+    [],
   );
-  assert.equal(stillBlocked.status, 422);
-  assert.notEqual(await runtime.store.getRepository("blocked-repo"), undefined);
 });
 
 test("deleting a repository with no task or run referencing it cascades its channel", async (t) => {
