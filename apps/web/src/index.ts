@@ -4,7 +4,10 @@ import { randomBytes } from "node:crypto";
 import path from "node:path";
 
 import { ApiGateway, type ApiOperations } from "@coord/api-gateway";
-import { computeCoordinationMetrics } from "@coord/coordinator";
+import {
+  ConversationRegistry,
+  computeCoordinationMetrics,
+} from "@coord/coordinator";
 import {
   repoCreate,
   repoImportGitHub,
@@ -152,6 +155,18 @@ async function serve(
       ? ("refuse" as const)
       : ("host-login" as const);
 
+  // Where open conversations live between runs. One per process, because a
+  // coordinator is built per run and a conversation has to survive from one
+  // run to the next; every dispatch below hands its coordinator this same
+  // registry. The interval is the quiet-deployment bound: runs sweep idle
+  // sessions on entry, but a deployment with no runs would otherwise hold
+  // its conversation processes until the next dispatch.
+  const conversations = new ConversationRegistry();
+  const conversationSweep = setInterval(() => {
+    void conversations.closeIdleSessions().catch(() => undefined);
+  }, 60_000);
+  conversationSweep.unref?.();
+
   // Bound after construction: the gateway is built from these operations, and
   // one of them (a question put to a person) needs the gateway back. Only
   // read from inside a call, which cannot happen before it is serving.
@@ -283,6 +298,9 @@ async function serve(
         submittedBy: input.actorId,
         ...(agentId === undefined ? {} : { agentId }),
         ...(input.context === undefined ? {} : { context: input.context }),
+        ...(input.conversationId === undefined
+          ? {}
+          : { conversationId: input.conversationId }),
       });
     },
     async runRepository(input) {
@@ -291,6 +309,7 @@ async function serve(
         repositoryId: input.repositoryId,
         credentials,
         credentialPolicy,
+        conversations,
         // What an agent may ask this deployment to do. A fixed list, not a
         // command channel: an agent may only ask for what its submitter could
         // do themselves on this repository, and an open channel would let it

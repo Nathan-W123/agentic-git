@@ -107,13 +107,163 @@ export interface CoordinatedTask {
  */
 interface OpenConversation {
   adapter: AgentAdapter;
+  /** Whose conversation this is — the agent, not the adapter instance. */
+  agentId: string;
   session?: AgentSession;
   workspace: TaskWorkspace;
+  /**
+   * Destroys the workspace directory, captured from the coordinator that
+   * retained it. The registry outlives any one run's workspace manager, so
+   * each conversation carries its own way home instead of the registry
+   * having to hold a manager that may not be the one that built the
+   * directory.
+   */
+  destroyWorkspace: () => Promise<void>;
   plan: AgentPlan;
   changeSet: ChangeSet;
   syncedVersion: CanonicalVersion;
   /** When the conversation's last turn landed, for the idle sweep. */
   lastLandedAt: number;
+}
+
+/** See {@link ConversationRegistry}. */
+export interface ConversationRegistryOptions {
+  /** See {@link CoordinatorDependencies.conversationSessionIdleMs}. */
+  sessionIdleMs?: number;
+  /** See {@link CoordinatorDependencies.maxConversationSessions}. */
+  maxSessions?: number;
+}
+
+/**
+ * The conversations whose last turn landed and whose next has not begun.
+ *
+ * A class of its own, and injectable, because its lifetime is the feature:
+ * the coordinator that runs a turn is built per run — its approval policy
+ * and plan authority are that run's — while a conversation has to survive
+ * from one run to the next. A host that wants continuation makes one
+ * registry per process and hands it to every coordinator it builds; a
+ * coordinator given nothing keeps a private one, which is exactly the old
+ * behaviour and all a single-invocation caller needs.
+ *
+ * The registry also owns the two process bounds, because the processes are
+ * what it holds: the idle sweep and the session cap both shed sessions
+ * only — the conversation stays open and its next turn starts cold, in the
+ * directory it kept.
+ */
+export class ConversationRegistry {
+  private readonly conversations = new Map<string, OpenConversation>();
+  private readonly sessionIdleMs: number;
+  private readonly maxSessions: number;
+
+  public constructor(options: ConversationRegistryOptions = {}) {
+    this.sessionIdleMs =
+      options.sessionIdleMs ?? DEFAULT_CONVERSATION_SESSION_IDLE_MS;
+    this.maxSessions =
+      options.maxSessions ?? DEFAULT_MAX_CONVERSATION_SESSIONS;
+  }
+
+  /** Removes and returns a conversation; the caller owns it from then on. */
+  public take(conversationId: string): OpenConversation | undefined {
+    const held = this.conversations.get(conversationId);
+    this.conversations.delete(conversationId);
+    return held;
+  }
+
+  /** Stores a conversation whose turn just landed, and re-applies the cap. */
+  public async retain(
+    conversationId: string,
+    conversation: OpenConversation,
+  ): Promise<void> {
+    this.conversations.set(conversationId, conversation);
+    // A held session is a held CLI process, so the population is bounded
+    // the moment it grows rather than on some later sweep.
+    await this.enforceSessionCap();
+  }
+
+  /** Closes and forgets one conversation's session, keeping the rest. */
+  private async closeSession(conversation: OpenConversation): Promise<void> {
+    const session = conversation.session;
+    if (session === undefined) {
+      return;
+    }
+    delete conversation.session;
+    try {
+      await conversation.adapter.cancel(session.id);
+    } catch {
+      // A session that will not close is still forgotten: the sweep exists
+      // to stop holding processes, and keeping the record on top of a
+      // wedged one would hold both.
+    }
+  }
+
+  /**
+   * Holds the number of live conversation sessions at the cap.
+   *
+   * Oldest landing gives its session up first — it is the conversation most
+   * likely to already be over. Only the process goes; the conversation and
+   * its directory stay, and its next turn starts cold.
+   */
+  private async enforceSessionCap(): Promise<void> {
+    while (true) {
+      const live = [...this.conversations.values()]
+        .filter((conversation) => conversation.session !== undefined)
+        .sort((a, b) => a.lastLandedAt - b.lastLandedAt);
+      const oldest = live[0];
+      if (oldest === undefined || live.length <= this.maxSessions) {
+        return;
+      }
+      await this.closeSession(oldest);
+    }
+  }
+
+  /**
+   * Closes conversation sessions that have sat idle past the deadline.
+   *
+   * Public so a host can run it on a timer; every run also sweeps on entry,
+   * which bounds a deployment that is doing anything at all. The
+   * conversations stay open — their next turn starts cold, in the directory
+   * they kept — because the session is the expendable half of what a
+   * conversation holds.
+   */
+  public async closeIdleSessions(now: number = Date.now()): Promise<void> {
+    for (const conversation of this.conversations.values()) {
+      if (
+        conversation.session !== undefined &&
+        now - conversation.lastLandedAt >= this.sessionIdleMs
+      ) {
+        await this.closeSession(conversation);
+      }
+    }
+  }
+
+  /**
+   * Ends a conversation entirely: session closed, directory destroyed.
+   *
+   * For whoever owns the decision that the conversation is over — an
+   * explicit "that's it", the task's own expiry — as opposed to the sweeps,
+   * which shed only the process and leave the conversation continuable.
+   * Unknown ids are a no-op: ending twice, or ending what a failed turn
+   * already tore down, is not an error.
+   */
+  public async endConversation(conversationId: string): Promise<void> {
+    const held = this.take(conversationId);
+    if (held === undefined) {
+      return;
+    }
+    await this.closeSession(held);
+    await held.destroyWorkspace();
+  }
+
+  /**
+   * Ends every open conversation, for a host retiring the registry — a
+   * shutdown, mainly — so held processes and directories do not outlive
+   * whoever would have swept them.
+   */
+  public async endAllConversations(): Promise<void> {
+    for (const conversationId of [...this.conversations.keys()]) {
+      await this.endConversation(conversationId);
+    }
+  }
 }
 
 export interface CoordinatorRunInput {
@@ -227,6 +377,9 @@ export interface CoordinatorDependencies {
    * is the first thing in the system that keeps one alive across the gap
    * between a person's messages. Attention is less predictable than work,
    * so the process is bounded even when nobody ends the conversation.
+   *
+   * Configures the coordinator's private registry only; a shared
+   * {@link CoordinatorDependencies.conversations} carries its own bounds.
    */
   conversationSessionIdleMs?: number;
   /**
@@ -235,8 +388,22 @@ export interface CoordinatorDependencies {
    * first — it is the one most likely to already be over. The workspace
    * directory is not counted or evicted here: it holds no process, and it
    * is the half that is expensive to rebuild.
+   *
+   * Configures the coordinator's private registry only, like the idle
+   * deadline above.
    */
   maxConversationSessions?: number;
+  /**
+   * Where open conversations live between turns.
+   *
+   * Injectable because its lifetime is the feature: a coordinator is built
+   * per run — its approval policy and plan authority belong to that run —
+   * while a conversation has to survive from one run to the next. A
+   * long-lived host makes one registry per process and hands it to every
+   * coordinator it builds; absent, the coordinator keeps a private one,
+   * which is all a single-invocation caller needs.
+   */
+  conversations?: ConversationRegistry;
   /**
    * Who arbitrates this run's plans against work running *outside* it.
    *
@@ -425,22 +592,13 @@ export class Coordinator {
   private readonly workingChangePollMs: number;
   private readonly questions: QuestionController | undefined;
   private readonly questionDeadlineMs: number;
-  private readonly conversationSessionIdleMs: number;
-  private readonly maxConversationSessions: number;
+  private readonly conversations: ConversationRegistry;
   private readonly planAuthority: PlanAuthority | undefined;
   private readonly actionAuthority: ActionAuthority | undefined;
   /** Where each task is working, for an action that needs to reach it. */
   private readonly taskWorkspacePaths = new Map<string, string>();
   /** Actions each task has spent, for the cap. */
   private readonly actionsUsed = new Map<string, number>();
-  /**
-   * Conversations whose last turn landed and whose next turn has not begun,
-   * by conversation id. Entries leave this map the moment a turn resumes
-   * them (see {@link takeConversation}) and return only when that turn
-   * integrates; a turn that fails never puts its conversation back, which is
-   * what "a failed task still tears down completely" means in code.
-   */
-  private readonly openConversations = new Map<string, OpenConversation>();
 
   public constructor(dependencies: CoordinatorDependencies = {}) {
     this.repositories = dependencies.repositories ?? new RepositoryService();
@@ -462,12 +620,16 @@ export class Coordinator {
     this.questions = dependencies.questions;
     this.questionDeadlineMs =
       dependencies.questionDeadlineMs ?? DEFAULT_QUESTION_DEADLINE_MS;
-    this.conversationSessionIdleMs =
-      dependencies.conversationSessionIdleMs ??
-      DEFAULT_CONVERSATION_SESSION_IDLE_MS;
-    this.maxConversationSessions =
-      dependencies.maxConversationSessions ??
-      DEFAULT_MAX_CONVERSATION_SESSIONS;
+    this.conversations =
+      dependencies.conversations ??
+      new ConversationRegistry({
+        ...(dependencies.conversationSessionIdleMs === undefined
+          ? {}
+          : { sessionIdleMs: dependencies.conversationSessionIdleMs }),
+        ...(dependencies.maxConversationSessions === undefined
+          ? {}
+          : { maxSessions: dependencies.maxConversationSessions }),
+      });
     this.planAuthority = dependencies.planAuthority;
     this.actionAuthority = dependencies.actionAuthority;
     this.store = dependencies.store;
@@ -486,7 +648,7 @@ export class Coordinator {
     // Sessions past their idle deadline go before any new work starts, so a
     // deployment that is doing anything at all keeps its held processes
     // bounded without needing a timer of its own.
-    await this.closeIdleConversationSessions();
+    await this.conversations.closeIdleSessions();
     const runAudit: AuditEvent[] = [];
     const initialVersion = await this.repositories.getCanonicalVersion(
       input.repository,
@@ -1196,22 +1358,37 @@ export class Coordinator {
     if (entry.conversationId === undefined) {
       return undefined;
     }
-    const held = this.openConversations.get(entry.conversationId);
+    const held = this.conversations.take(entry.conversationId);
     if (held === undefined) {
       return undefined;
     }
-    this.openConversations.delete(entry.conversationId);
-    if (held.adapter !== entry.adapter) {
+    if (held.adapter === entry.adapter) {
+      return held;
+    }
+    if (held.agentId !== entry.task.agentId) {
+      // A different agent has no business resuming this conversation: the
+      // held pair is torn down (best-effort — teardown here must not fail
+      // the new turn) and the turn starts from nothing.
       const closed =
         held.session === undefined
           ? Promise.resolve()
           : held.adapter.cancel(held.session.id).catch(() => undefined);
       void closed
-        .then(async () => await this.workspaces.destroy(held.workspace))
+        .then(async () => await held.destroyWorkspace())
         .catch(() => undefined);
       return undefined;
     }
-    return held;
+    // Same agent, new adapter instance — the ordinary shape when every run
+    // constructs its own adapters. The session belongs to the instance that
+    // opened it and closes with it; the directory is adapter-independent and
+    // survives. The turn starts cold in a warm workspace, which is the
+    // trade the design names: the session is the expendable half.
+    if (held.session !== undefined) {
+      const session = held.session;
+      delete held.session;
+      void held.adapter.cancel(session.id).catch(() => undefined);
+    }
+    return { ...held, adapter: entry.adapter };
   }
 
   /**
@@ -1264,83 +1441,16 @@ export class Coordinator {
     });
   }
 
-  /** Closes and forgets one conversation's session, keeping the rest. */
-  private async closeConversationSession(
-    conversation: OpenConversation,
-  ): Promise<void> {
-    const session = conversation.session;
-    if (session === undefined) {
-      return;
-    }
-    delete conversation.session;
-    try {
-      await conversation.adapter.cancel(session.id);
-    } catch {
-      // A session that will not close is still forgotten: the sweep exists
-      // to stop holding processes, and keeping the record on top of a
-      // wedged one would hold both.
-    }
-  }
-
-  /**
-   * Holds the number of live conversation sessions at the cap.
-   *
-   * Oldest landing gives its session up first — it is the conversation most
-   * likely to already be over. Only the process goes; the conversation and
-   * its directory stay, and its next turn starts cold.
-   */
-  private async enforceConversationSessionCap(): Promise<void> {
-    while (true) {
-      const live = [...this.openConversations.values()]
-        .filter((conversation) => conversation.session !== undefined)
-        .sort((a, b) => a.lastLandedAt - b.lastLandedAt);
-      const oldest = live[0];
-      if (oldest === undefined || live.length <= this.maxConversationSessions) {
-        return;
-      }
-      await this.closeConversationSession(oldest);
-    }
-  }
-
-  /**
-   * Closes conversation sessions that have sat idle past the deadline.
-   *
-   * Public so a host can run it on a timer; every run also sweeps on entry,
-   * which bounds a deployment that is doing anything at all. The
-   * conversations stay open — their next turn starts cold, in the directory
-   * they kept — because the session is the expendable half of what a
-   * conversation holds.
-   */
+  /** See {@link ConversationRegistry.closeIdleSessions}. */
   public async closeIdleConversationSessions(
     now: number = Date.now(),
   ): Promise<void> {
-    for (const conversation of this.openConversations.values()) {
-      if (
-        conversation.session !== undefined &&
-        now - conversation.lastLandedAt >= this.conversationSessionIdleMs
-      ) {
-        await this.closeConversationSession(conversation);
-      }
-    }
+    await this.conversations.closeIdleSessions(now);
   }
 
-  /**
-   * Ends a conversation entirely: session closed, directory destroyed.
-   *
-   * For whoever owns the decision that the conversation is over — an
-   * explicit "that's it", the task's own expiry — as opposed to the sweeps,
-   * which shed only the process and leave the conversation continuable.
-   * Unknown ids are a no-op: ending twice, or ending what a failed turn
-   * already tore down, is not an error.
-   */
+  /** See {@link ConversationRegistry.endConversation}. */
   public async endConversation(conversationId: string): Promise<void> {
-    const held = this.openConversations.get(conversationId);
-    if (held === undefined) {
-      return;
-    }
-    this.openConversations.delete(conversationId);
-    await this.closeConversationSession(held);
-    await this.workspaces.destroy(held.workspace);
+    await this.conversations.endConversation(conversationId);
   }
 
   /**
@@ -2972,18 +3082,24 @@ export class Coordinator {
         runAudit,
         failures,
       );
-      this.openConversations.set(result.conversationId, {
+      const workspaces = this.workspaces;
+      const workspace = result.workspace;
+      await this.conversations.retain(result.conversationId, {
         adapter: result.adapter,
+        agentId: result.task.agentId,
         session: result.session,
-        workspace: result.workspace,
+        workspace,
+        // Captured here because the registry may outlive this coordinator
+        // and its workspace manager; the conversation carries its own way
+        // home.
+        destroyWorkspace: async () => {
+          await workspaces.destroy(workspace);
+        },
         plan: result.plan,
         changeSet: result.changeSet,
         syncedVersion: taskResult.integration.canonicalVersion,
         lastLandedAt: Date.now(),
       });
-      // A held session is a held CLI process, so the population of them is
-      // bounded the moment it grows rather than on some later sweep.
-      await this.enforceConversationSessionCap();
     } else {
       cleanupFailure = await this.cleanupTask(
         result,

@@ -1356,6 +1356,14 @@ export interface ApiOperations {
      * left, and hands the pair to the planning prompt as background.
      */
     context?: string;
+    /**
+     * The conversation this task is one turn of — the thread root's message
+     * id, the one identity every turn of a thread shares. A task submitted
+     * with it leaves its status `open` when a turn lands, waiting for the
+     * next reply, and its arrival settles the conversation's previous open
+     * turn. See docs/architecture/conversational-tasks.md.
+     */
+    conversationId?: string;
   }): Promise<SubmittedTask>;
   runRepository(input: {
     projectId: string;
