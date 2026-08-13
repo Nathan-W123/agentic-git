@@ -1819,6 +1819,23 @@ export function channelInfoPopoverHtml(repositoryId) {
       <p>${esc(repository?.remoteUrl ?? "No remote recorded")}</p>
     </div>
     <div class="pop-block">
+      <h4>Stats</h4>
+      <p>${(() => {
+        const stats = state.channelStats[repositoryId];
+        if (stats === undefined) {
+          return "Counting…";
+        }
+        const fmt = (value) =>
+          value >= 1_000_000
+            ? `${(value / 1_000_000).toFixed(1)}M`
+            : value >= 1_000
+              ? `${(value / 1_000).toFixed(1)}k`
+              : String(value);
+        return `${stats.messages}${stats.capped ? "+" : ""} messages · ` +
+          `${fmt(stats.replies)} replies · ${fmt(stats.tokens)} tokens spent`;
+      })()}</p>
+    </div>
+    <div class="pop-block">
       <h4>Agents in this channel</h4>
       <p>${roster.map((agent) => esc(agent.name)).join(", ") || "None yet"}</p>
     </div>
