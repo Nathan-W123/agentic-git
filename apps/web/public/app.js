@@ -526,7 +526,10 @@ const NAV = [
   // The route is deliberately still reachable by URL — the Task, Files and
   // Metrics views live there and nothing has replaced them yet, so this drops
   // the item without deleting the screen behind it.
-  { route: "notifications", label: "Notifications", iconName: "bell" },
+  // No "Notifications" here. The banner says the news when it happens, the
+  // topbar bell holds the unread count and the record, and the per-agent
+  // history panel (see docs/handoff/agent-identity-and-history.md) is where
+  // the tab's job is going. Route stays reachable through the bell.
   { route: "settings", label: "Settings", iconName: "gear" },
 ];
 
