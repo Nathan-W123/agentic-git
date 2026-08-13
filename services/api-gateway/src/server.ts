@@ -1413,6 +1413,17 @@ export interface ApiOperations {
   attachmentRead?(
     id: string,
   ): Promise<{ bytes: Buffer; contentType: string } | undefined>;
+  /**
+   * One file out of canonical, as bytes. Used to lift an image an agent
+   * committed into the channel, where it can be looked at rather than
+   * listed.
+   */
+  canonicalFileBytes?(input: {
+    projectId: string;
+    repositoryId: string;
+    revision: string;
+    path: string;
+  }): Promise<Buffer | undefined>;
   /** Canonical branch history, newest first. */
   repositoryVersions?(input: {
     projectId: string;
@@ -10614,10 +10625,17 @@ export class ApiGateway {
           ) {
             await this.announceReplay(watched, data).catch(() => undefined);
           }
-          const line = narrateTaskEvent(record.event.type, data);
-          if (line === undefined) {
+          const narrated = narrateTaskEvent(record.event.type, data);
+          if (narrated === undefined) {
             continue;
           }
+          // An image an agent committed is shown rather than listed. A
+          // screenshot named in a changed-file list is a filename; the same
+          // screenshot in the message is the answer to "does it work".
+          const line =
+            record.event.type === "canonical_promoted"
+              ? narrated + (await this.attachCommittedImages(watched, data))
+              : narrated;
           const terminal = CHANNEL_TERMINAL_EVENTS[record.event.type] !== undefined;
           if (!watched.threaded) {
             const routineAdmission =
@@ -11258,6 +11276,70 @@ export class ApiGateway {
    * this process started itself, never anything a caller supplies, so there
    * is nothing here that could be pointed at another host.
    */
+  /**
+   * Lifts images a task committed into the message announcing it.
+   *
+   * The route an agent already has. It cannot hand back bytes — the protocol
+   * carries text — but it can write a file, and a file it writes is part of
+   * its change like any other. So an agent asked for a screenshot takes one
+   * into the repository, and this is what puts it in front of somebody
+   * without them going looking.
+   *
+   * Best effort throughout: this decorates an announcement, and an
+   * announcement that arrives without its pictures is far better than one
+   * that does not arrive.
+   */
+  private async attachCommittedImages(
+    watched: { projectId: string; repositoryId: string },
+    data: Record<string, unknown>,
+  ): Promise<string> {
+    const read = this.options.operations.canonicalFileBytes;
+    const save = this.options.operations.attachmentSave;
+    const revision = data["revision"];
+    if (read === undefined || save === undefined || typeof revision !== "string") {
+      return "";
+    }
+    const files = Array.isArray(data["files"])
+      ? (data["files"] as unknown[]).map(String)
+      : [];
+    const images = files
+      .filter((file) => /\.(png|jpe?g|gif|webp)$/iu.test(file))
+      // Bounded: a task that regenerated a sprite sheet should not post forty
+      // pictures into a room. The change set still lists every one of them.
+      .slice(0, 4);
+    const markers: string[] = [];
+    for (const file of images) {
+      try {
+        const bytes = await read({
+          projectId: watched.projectId,
+          repositoryId: watched.repositoryId,
+          revision,
+          path: file,
+        });
+        if (bytes === undefined) {
+          continue;
+        }
+        const extension = file.toLowerCase().split(".").pop() ?? "";
+        const id = await save({
+          bytes,
+          contentType:
+            extension === "png"
+              ? "image/png"
+              : extension === "gif"
+                ? "image/gif"
+                : extension === "webp"
+                  ? "image/webp"
+                  : "image/jpeg",
+        });
+        markers.push(`\n![${file}](attachment:${id})`);
+      } catch {
+        // Too large, or a type the store will not take. The file is still in
+        // the change set, which is where it was always going to be found.
+      }
+    }
+    return markers.join("");
+  }
+
   private async proxyToPreview(
     request: IncomingMessage,
     response: ServerResponse,

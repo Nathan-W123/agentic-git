@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { access, mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
 import type { CoordinationStore } from "@coord/persistence";
@@ -84,9 +84,11 @@ async function detectPreviewCommand(
     return undefined;
   }
   const scripts = manifest.scripts ?? {};
-  // `dev` before `start`: where a repository has both, `dev` is the one meant
-  // to be watched and `start` is often the production entry point.
-  const script = ["dev", "start"].find(
+  // `dev` first: where a repository has several, that is the one meant to be
+  // watched. The rest are in the order they are usually meant — `start` is
+  // often the production entry point, and the last two are what static-site
+  // tooling tends to call it.
+  const script = PREVIEW_SCRIPTS.find(
     (name) => typeof scripts[name] === "string",
   );
   return script === undefined
@@ -96,6 +98,104 @@ async function detectPreviewCommand(
         args: ["run", script],
         label: `npm run ${script}`,
       };
+}
+
+const PREVIEW_SCRIPTS = ["dev", "start", "serve", "preview"];
+
+/**
+ * Why nothing could be started, in terms of what is actually in the
+ * repository.
+ *
+ * "Nothing here looks like an app" is true and useless: it does not say what
+ * was looked for, so the reader cannot tell a missing script from a missing
+ * package.json from a repository that was never going to have either. The
+ * config file lives on the server, which for a hosted deployment is somewhere
+ * the reader cannot open, so the message has to carry the diagnosis.
+ */
+async function describeUndetectable(workspacePath: string): Promise<string> {
+  try {
+    const manifest = JSON.parse(
+      await readFile(path.join(workspacePath, "package.json"), "utf8"),
+    ) as { scripts?: Record<string, unknown> };
+    const names = Object.keys(manifest.scripts ?? {});
+    return names.length === 0
+      ? "Its package.json has no scripts at all."
+      : `Its package.json has no ${PREVIEW_SCRIPTS.join("/")} script — ` +
+          `only ${names.slice(0, 8).join(", ")}.`;
+  } catch {
+    return "There is no package.json in it, so there is nothing to detect.";
+  }
+}
+
+/**
+ * How to install a repository nobody has configured.
+ *
+ * Only where there is something to install and it has not been installed
+ * already: a checkout that somehow has `node_modules` is left alone, because
+ * installing again would cost minutes to reach the same state.
+ *
+ * `npm ci` where there is a lockfile, `npm install` where there is not — the
+ * first is faster and exact, and it refuses outright without a lockfile, which
+ * would otherwise be a confusing way to fail.
+ */
+async function detectInstallCommand(
+  workspacePath: string,
+): Promise<{ executable: string; args: string[]; label: string } | undefined> {
+  const has = async (name: string): Promise<boolean> => {
+    try {
+      await access(path.join(workspacePath, name));
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  if (!(await has("package.json")) || (await has("node_modules"))) {
+    return undefined;
+  }
+  const locked = await has("package-lock.json");
+  return {
+    executable: process.platform === "win32" ? "npm.cmd" : "npm",
+    args: locked ? ["ci"] : ["install"],
+    label: locked ? "npm ci" : "npm install",
+  };
+}
+
+/**
+ * Runs one command to completion, collecting what it said.
+ *
+ * Answers `undefined` when it worked and a reason when it did not. The output
+ * is kept either way and handed to the preview's own log, because the question
+ * "why did this not start" is usually answered somewhere in an install that
+ * went wrong rather than in the server that never ran.
+ */
+async function runToCompletion(
+  command: { executable: string; args: string[]; label: string },
+  cwd: string,
+  output: string[],
+): Promise<string | undefined> {
+  return await new Promise((resolve) => {
+    const child = spawn(command.executable, [...command.args], {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const record = (chunk: Buffer): void => {
+      for (const line of chunk.toString("utf8").split(/\r?\n/u)) {
+        if (line.trim().length > 0) {
+          output.push(line);
+        }
+      }
+    };
+    child.stdout?.on("data", record);
+    child.stderr?.on("data", record);
+    child.on("error", (error) => resolve(error.message));
+    child.on("close", (code) =>
+      resolve(
+        code === 0
+          ? undefined
+          : `exited ${String(code)} — ${output.slice(-3).join(" ") || "no output"}`,
+      ),
+    );
+  });
 }
 
 /** A free loopback port, chosen by asking the OS for one and letting it go. */
@@ -179,13 +279,37 @@ export class PreviewService {
       this.project.config.previewCommand ??
       (await detectPreviewCommand(workspace.path));
     if (command === undefined) {
+      const why = await describeUndetectable(workspace.path);
       await rm(workspace.path, { recursive: true, force: true });
       throw new Error(
-        `Nothing here looks like an app that can be started. Add a ` +
-          `"previewCommands" entry for "${input.repositoryId}" in ` +
+        `Nothing in "${input.repositoryId}" could be started. ${why} ` +
+          `Add a "previewCommands" entry for "${input.repositoryId}" in ` +
           `.coordinator/config.json — for example ` +
           `{"executable":"npm","args":["run","dev"],"label":"dev server"}.`,
       );
+    }
+
+    // Dependencies first. A checkout of canonical has none — they are ignored
+    // by git, which is exactly why they are not in the revision — so a Node
+    // app started here fails on its first import and looks like a broken
+    // preview rather than an uninstalled one.
+    const install =
+      this.project.config.installCommands?.[input.repositoryId] ??
+      this.project.config.installCommand ??
+      (await detectInstallCommand(workspace.path));
+    const installOutput: string[] = [];
+    if (install !== undefined) {
+      const failure = await runToCompletion(
+        install,
+        workspace.path,
+        installOutput,
+      );
+      if (failure !== undefined) {
+        await rm(workspace.path, { recursive: true, force: true });
+        throw new Error(
+          `Installing dependencies failed (${install.label}): ${failure}`,
+        );
+      }
     }
 
     const port = await freePort();
@@ -208,7 +332,10 @@ export class PreviewService {
       revision: version.revision,
       label: command.label,
       startedAt: new Date().toISOString(),
-      recentOutput: [],
+      // The install's output leads the log. When a server fails to come up the
+      // reason is often in the install that preceded it, and separating the
+      // two would mean the reader finds only the half that says nothing.
+      recentOutput: [...installOutput],
     };
     const entry: Running = {
       child,

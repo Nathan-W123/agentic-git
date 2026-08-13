@@ -361,6 +361,17 @@ async function serve(
     async attachmentRead(id) {
       return await attachments.read(id);
     },
+    async canonicalFileBytes(input) {
+      const stored = await store.getRepository(input.repositoryId);
+      if (stored === undefined) {
+        return undefined;
+      }
+      return await repositories.readFileBytes(
+        { id: stored.id, path: stored.path, branch: stored.branch },
+        input.revision,
+        input.path,
+      );
+    },
     async repositoryVersions(input) {
       const stored = await store.getRepository(input.repositoryId);
       if (stored === undefined) {

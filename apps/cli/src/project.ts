@@ -149,6 +149,20 @@ export interface ProjectConfig {
    * repositories all start the same way.
    */
   previewCommands?: Record<string, ValidationCommand>;
+  /**
+   * How to install this repository's dependencies before its app is started.
+   *
+   * A preview runs in a fresh checkout of canonical, and a fresh checkout has
+   * no dependencies in it — they are ignored by git, which is exactly why they
+   * are not in the revision. Without this, starting a Node app fails on its
+   * first import and reads as the preview being broken.
+   *
+   * Absent means detection decides: a repository with a package.json and no
+   * `node_modules` gets an install, and everything else is started as it is.
+   */
+  installCommand?: ValidationCommand;
+  /** Per-repository overrides, keyed by repository id. */
+  installCommands?: Record<string, ValidationCommand>;
 }
 
 export const DEFAULT_CONFIG: ProjectConfig = {
@@ -538,6 +552,29 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
               assertValidationCommand(
                 entry,
                 `previewCommands["${repositoryId}"]`,
+              ),
+            ]),
+          ),
+        }),
+    ...(config.installCommand === undefined
+      ? {}
+      : {
+          installCommand: assertValidationCommand(
+            config.installCommand,
+            "installCommand",
+          ),
+        }),
+    ...(config.installCommands === undefined
+      ? {}
+      : {
+          installCommands: Object.fromEntries(
+            Object.entries(
+              config.installCommands as Record<string, unknown>,
+            ).map(([repositoryId, entry]) => [
+              repositoryId,
+              assertValidationCommand(
+                entry,
+                `installCommands["${repositoryId}"]`,
               ),
             ]),
           ),

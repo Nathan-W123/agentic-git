@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import {
   lstat,
   mkdir,
@@ -1000,6 +1001,48 @@ export class RepositoryService {
         this.bundleLocks.delete(key);
       }
     }
+  }
+
+  /**
+   * One file out of canonical, as the bytes it actually is.
+   *
+   * Separate from {@link readFile} because that one answers with text, and
+   * text is a lossy way to hold a PNG: decoding bytes as UTF-8 replaces
+   * everything invalid with U+FFFD, and re-encoding produces a file that is
+   * the right length and no longer an image. Anything binary — a screenshot
+   * an agent committed, most obviously — has to come back this way.
+   *
+   * `undefined` when the path is not in that revision, which is an ordinary
+   * answer: a caller walking a change set will ask about files that were
+   * deleted by it.
+   */
+  public async readFileBytes(
+    repository: CanonicalRepository,
+    revision: string,
+    repositoryPath: string,
+  ): Promise<Buffer | undefined> {
+    const safePath = normalizeRepositoryPath(repositoryPath);
+    return await new Promise((resolve, reject) => {
+      const child = spawn(
+        "git",
+        [
+          `--git-dir=${repository.path}`,
+          "show",
+          "--end-of-options",
+          `${revision}:${safePath}`,
+        ],
+        { stdio: ["ignore", "pipe", "ignore"] },
+      );
+      const chunks: Buffer[] = [];
+      child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+      child.on("error", reject);
+      child.on("close", (code) => {
+        // A missing path and a malformed revision are both a non-zero exit,
+        // and neither is worth an exception: the caller asked whether this
+        // file is there.
+        resolve(code === 0 ? Buffer.concat(chunks) : undefined);
+      });
+    });
   }
 
   public async readFile(
