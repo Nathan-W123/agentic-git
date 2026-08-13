@@ -553,8 +553,16 @@ function previewControl(repositoryId) {
       data-value="${esc(repositoryId)}" title="Run this app and open it">
       ${icon("play")}</button>`;
   }
+  // Through this deployment rather than at the preview's own address. The
+  // app binds loopback and nothing opens a port, so its own URL only works on
+  // the machine running the control plane — this path works from anywhere the
+  // reader is already signed in, which includes a phone, and needs no second
+  // set of rules about who may look.
+  const proxied =
+    `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
+    `/repositories/${encodeURIComponent(repositoryId)}/preview/app/`;
   return `<span class="preview-live">
-    <a class="preview-link" href="${esc(preview.url)}" target="_blank"
+    <a class="preview-link" href="${esc(proxied)}" target="_blank"
       rel="noopener noreferrer" title="${esc(preview.label)} — ${esc(preview.url)}">
       ${esc(preview.url.replace("http://", ""))}</a>
     <button type="button" class="icon-btn sm" data-act="preview-stop"

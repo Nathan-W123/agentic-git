@@ -6,6 +6,7 @@ import {
 } from "node:crypto";
 import {
   createServer,
+  request as httpRequest,
   type IncomingMessage,
   type Server,
   type ServerResponse,
@@ -4522,6 +4523,50 @@ export class ApiGateway {
       this.sendJson(response, 200, {
         versions: await operation({ projectId, repositoryId, limit }),
       });
+      return;
+    }
+
+    // Looking at the running app, through here rather than at its own port.
+    //
+    // The preview binds loopback and no port is opened, which on a hosted
+    // deployment made it unreachable — correct, and useless where the product
+    // is actually used. Proxying it puts it behind the session and the same
+    // permission the button needs, so it is reachable by exactly the people
+    // who could have started it and by nobody else. No port is opened and
+    // nothing is added to the attack surface: the code was already running
+    // in this container, because every task already runs here.
+    const previewAppMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/preview/app(/.*)?$`,
+        "u",
+      ),
+    );
+    if (previewAppMatch !== undefined) {
+      const [projectId = "", repositoryId = "", rest = "/"] = previewAppMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "run_task",
+      );
+      const status = (await this.options.operations.previewStatus?.({
+        projectId,
+        repositoryId,
+      })) as { url?: string; exited?: unknown } | undefined;
+      if (
+        status === undefined ||
+        typeof status.url !== "string" ||
+        status.exited !== undefined
+      ) {
+        throw new HttpError(
+          409,
+          "not_running",
+          "No preview is running for this repository",
+        );
+      }
+      await this.proxyToPreview(request, response, status.url, rest, url.search);
       return;
     }
 
@@ -11031,6 +11076,86 @@ export class ApiGateway {
         "font-src 'self'; worker-src 'self'; object-src 'none'; " +
         "base-uri 'none'; frame-ancestors 'none'",
     );
+  }
+
+  /**
+   * Hands one request to the running preview and streams the answer back.
+   *
+   * Streamed rather than buffered because a preview serves whatever the app
+   * serves — a video, a large bundle, a long poll — and holding any of those
+   * in memory to measure them would be a denial of service somebody could
+   * trigger by loading their own page.
+   *
+   * Deliberately not a general proxy. The target is always the loopback URL
+   * this process started itself, never anything a caller supplies, so there
+   * is nothing here that could be pointed at another host.
+   */
+  private async proxyToPreview(
+    request: IncomingMessage,
+    response: ServerResponse,
+    previewUrl: string,
+    rest: string,
+    search: string,
+  ): Promise<void> {
+    const target = new URL(
+      `${rest.length === 0 ? "/" : rest}${search}`,
+      previewUrl,
+    );
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(request.headers)) {
+      const lower = name.toLowerCase();
+      // The session cookie is this deployment's, not the app's, and an app
+      // that can read it could act as the reader everywhere. Host and
+      // encoding are dropped because they describe the hop rather than the
+      // request, and forwarding them makes the app answer about the wrong
+      // origin.
+      if (
+        lower === "cookie" ||
+        lower === "host" ||
+        lower === "authorization" ||
+        lower === "accept-encoding" ||
+        lower === "connection"
+      ) {
+        continue;
+      }
+      if (typeof value === "string") {
+        headers[name] = value;
+      }
+    }
+    await new Promise<void>((resolve) => {
+      const upstream = httpRequest(
+        target,
+        { method: request.method ?? "GET", headers },
+        (answer) => {
+          if (!response.headersSent) {
+            // `content-security-policy` from the app is kept: it is the app's
+            // own claim about itself. Nothing is added, because this is not
+            // trying to sandbox the page — it is trying to reach it.
+            response.writeHead(answer.statusCode ?? 502, answer.headers);
+          }
+          answer.pipe(response);
+          answer.on("end", resolve);
+          answer.on("error", () => {
+            response.destroy();
+            resolve();
+          });
+        },
+      );
+      upstream.on("error", (error: Error) => {
+        if (!response.headersSent) {
+          // A dev server that has not finished binding is the common case,
+          // and it is worth saying so rather than reporting a bare failure.
+          this.sendJson(response, 502, {
+            error: "preview_unreachable",
+            message: `The preview did not answer: ${error.message}`,
+          });
+        } else {
+          response.destroy();
+        }
+        resolve();
+      });
+      request.pipe(upstream);
+    });
   }
 
   private sendJson(
