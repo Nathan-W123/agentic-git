@@ -1,5 +1,15 @@
 # Handoff — the lease referee never fires, and the repro that will find out why
 
+**RESOLVED 2026-08-12, same day.** The cause was suspect #2 below, found and
+fixed in `5b61da3` ("Put the local runner under the referee it was ignoring"):
+the in-process runner claimed tasks without taking leases, so plans were
+published nowhere admission could read. The fix claims lease-first and feeds a
+`LeasePlanAuthority` (`apps/cli/src/lease-admission.ts`) into the coordinator's
+cross-run admission; `apps/cli/src/lease-referee.test.ts` is the regression
+proof, written through the deployed entry point as this handoff specified.
+Degradation is loud now: a runner that cannot hold leases warns on stderr.
+Everything below is kept as the investigation record.
+
 Written at the end of a long session, at the edge of its context. Everything
 below was read out of the code or observed in production runs today; where I
 am guessing, it says so.
