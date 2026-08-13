@@ -1,0 +1,468 @@
+import assert from "node:assert/strict";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import test from "node:test";
+
+import {
+  type AgentAdapter,
+  type AgentCapabilities,
+  type AgentEvent,
+  type AgentSession,
+  type CoordinatorContext,
+  type StartTaskInput,
+} from "@coord/agent-protocol";
+import {
+  createId,
+  type AgentPlan,
+  type ChangeSet,
+  type ReplanRequest,
+  type ScopeChangeDecision,
+  type TaskDefinition,
+} from "@coord/shared-types";
+import {
+  RepositoryService,
+  type CanonicalRepository,
+} from "@coord/repository-service";
+import {
+  GitWorktreeWorkspaceManager,
+  type TaskWorkspace,
+} from "@coord/workspace-manager";
+
+import { Coordinator } from "./coordinator.js";
+
+/**
+ * The conversational-task lifecycle, observed from outside: a task whose
+ * turns share a `conversationId` keeps its workspace directory and its agent
+ * session across a landed turn, a failed turn tears both down, and the next
+ * turn starts from whatever canonical holds by then. See
+ * docs/architecture/conversational-tasks.md, stages one and two.
+ */
+
+interface SessionState {
+  input: StartTaskInput;
+  context?: CoordinatorContext;
+  eventHandler?: (event: AgentEvent) => void;
+}
+
+/**
+ * An agent driven turn by turn: the test sets what it plans and writes
+ * before each run, and reads back what the agent could see when its edit
+ * phase began — which is how "the second turn starts from the rebased
+ * state" becomes an assertion rather than an assumption.
+ */
+class ConversationAgent implements AgentAdapter {
+  private readonly sessions = new Map<string, SessionState>();
+  /** What this agent plans for the current turn; set by the test per run. */
+  public turnPlan: AgentPlan;
+  /** What it writes during the current turn; nothing when undefined. */
+  public turnOutput: { path: string; content: string } | undefined = undefined;
+  /** Workspace-relative files to read at the start of each edit phase. */
+  public probePaths: string[] = [];
+  /** One record per edit phase: probed path → content, or "<absent>". */
+  public readonly observed: Array<Record<string, string>> = [];
+  public readonly startInputs: StartTaskInput[] = [];
+  public readonly startedSessions: AgentSession[] = [];
+  public readonly continueInputs: Array<{
+    sessionId: string;
+    input: StartTaskInput;
+  }> = [];
+  public readonly replanRequests: ReplanRequest[] = [];
+  /** Workspace path seen by each edit phase, in order. */
+  public readonly workspacePaths: string[] = [];
+  public cancelCount = 0;
+
+  /**
+   * Continues the session under the next turn's task. Declared as an
+   * optional property rather than a method so one class can model both an
+   * adapter that supports continuation and one that does not.
+   */
+  public readonly continueTask?: (
+    sessionId: string,
+    input: StartTaskInput,
+  ) => Promise<AgentSession>;
+
+  public constructor(
+    private readonly agentId: string,
+    firstPlan: AgentPlan,
+    private readonly repository: CanonicalRepository,
+    private readonly workspaces: GitWorktreeWorkspaceManager,
+    supportsContinuation = true,
+  ) {
+    this.turnPlan = firstPlan;
+    if (supportsContinuation) {
+      this.continueTask = async (sessionId, input) => {
+        const previous = this.requireSession(sessionId);
+        this.continueInputs.push({ sessionId, input });
+        // The next turn starts fresh everywhere but the session id: new
+        // input, new context, a new streamEvents registration to come.
+        this.sessions.set(sessionId, { input });
+        return {
+          id: sessionId,
+          agentId: this.agentId,
+          taskId: input.task.id,
+          startedAt:
+            this.startedSessions.find((session) => session.id === sessionId)
+              ?.startedAt ?? previous.input.task.id,
+        };
+      };
+    }
+  }
+
+  public async getCapabilities(): Promise<AgentCapabilities> {
+    return {
+      canPlan: true,
+      canEditFiles: true,
+      canRunCommands: true,
+      canUseTools: false,
+      supportsStreaming: false,
+      supportsPause: false,
+    };
+  }
+
+  public async startTask(input: StartTaskInput): Promise<AgentSession> {
+    const session: AgentSession = {
+      id: createId("session"),
+      agentId: this.agentId,
+      taskId: input.task.id,
+      startedAt: new Date().toISOString(),
+    };
+    this.startInputs.push(input);
+    this.startedSessions.push(session);
+    this.sessions.set(session.id, { input });
+    return session;
+  }
+
+  public async requestPlan(sessionId: string): Promise<AgentPlan> {
+    this.requireSession(sessionId);
+    return structuredClone(this.turnPlan);
+  }
+
+  public async requestReplan(
+    sessionId: string,
+    request: ReplanRequest,
+  ): Promise<AgentPlan> {
+    this.requireSession(sessionId);
+    this.replanRequests.push(structuredClone(request));
+    return structuredClone(this.turnPlan);
+  }
+
+  public async sendContext(
+    sessionId: string,
+    context: CoordinatorContext,
+  ): Promise<void> {
+    const session = this.requireSession(sessionId);
+    session.context = context;
+    this.workspacePaths.push(context.workspacePath);
+    const seen: Record<string, string> = {};
+    for (const probe of this.probePaths) {
+      try {
+        seen[probe] = await readFile(
+          path.join(context.workspacePath, probe),
+          "utf8",
+        );
+      } catch {
+        seen[probe] = "<absent>";
+      }
+    }
+    this.observed.push(seen);
+    if (this.turnOutput !== undefined) {
+      await writeFile(
+        path.join(context.workspacePath, this.turnOutput.path),
+        this.turnOutput.content,
+        "utf8",
+      );
+    }
+  }
+
+  public async pause(): Promise<void> {
+    throw new Error("Conversation agents cannot pause");
+  }
+
+  public async resume(): Promise<void> {
+    throw new Error("Conversation agents cannot resume");
+  }
+
+  public async resolveScopeChange(
+    _sessionId: string,
+    _decision: ScopeChangeDecision,
+  ): Promise<void> {}
+
+  public async cancel(sessionId: string): Promise<void> {
+    this.requireSession(sessionId);
+    this.cancelCount += 1;
+  }
+
+  public async collectChanges(sessionId: string): Promise<ChangeSet> {
+    const session = this.requireSession(sessionId);
+    if (session.context === undefined) {
+      throw new Error("Conversation agent has no coordinator context");
+    }
+    const workspace: TaskWorkspace = {
+      id: session.context.decision.workspaceId ?? createId("workspace"),
+      taskId: session.input.task.id,
+      path: session.context.workspacePath,
+      rootPath: session.context.workspacePath,
+      repository: this.repository,
+      baseVersion: session.context.canonicalVersion,
+      isolation: "git-worktree",
+      createdAt: new Date().toISOString(),
+    };
+    return await this.workspaces.collectChangeSet(workspace, {
+      symbolsChanged: [],
+      riskAssessment: { level: this.turnPlan.riskLevel, reasons: [] },
+      agentExplanation: "Conversation lifecycle test",
+    });
+  }
+
+  public async streamEvents(
+    sessionId: string,
+    handler: (event: AgentEvent) => void,
+  ): Promise<void> {
+    this.requireSession(sessionId).eventHandler = handler;
+  }
+
+  private requireSession(sessionId: string): SessionState {
+    const session = this.sessions.get(sessionId);
+    if (session === undefined) {
+      throw new Error(`Unknown session ${sessionId}`);
+    }
+    return session;
+  }
+}
+
+function task(id: string): TaskDefinition {
+  return {
+    id,
+    objective: id,
+    agentId: `agent_${id}`,
+    validationCommands: [],
+  };
+}
+
+function plan(
+  taskId: string,
+  expectedFiles: string[],
+  options: { dependencies?: string[] } = {},
+): AgentPlan {
+  return {
+    taskId,
+    objective: taskId,
+    expectedFiles,
+    expectedSymbols: [],
+    dependencies: options.dependencies ?? [],
+    commands: [],
+    externalAccess: [],
+    riskLevel: "low",
+  };
+}
+
+async function createFixture(root: string): Promise<{
+  repositories: RepositoryService;
+  repository: CanonicalRepository;
+  workspaces: GitWorktreeWorkspaceManager;
+}> {
+  const sourcePath = path.join(root, "source");
+  const repositories = new RepositoryService();
+  await repositories.initializeWorkingRepository(sourcePath);
+  await mkdir(path.join(sourcePath, "src"), { recursive: true });
+  for (const name of ["a.txt", "b.txt", "c.txt", "d.txt", "bc.txt"]) {
+    await writeFile(path.join(sourcePath, "src", name), "seed\n", "utf8");
+  }
+  await repositories.commitAll(sourcePath, "seed");
+  const repository = await repositories.importLocalRepository(
+    sourcePath,
+    path.join(root, "canonical.git"),
+    "fixture",
+  );
+  return {
+    repositories,
+    repository,
+    workspaces: new GitWorktreeWorkspaceManager(repositories.getGitClient()),
+  };
+}
+
+interface Conversation {
+  coordinator: Coordinator;
+  agent: ConversationAgent;
+  runTurn: (
+    definition: TaskDefinition,
+  ) => ReturnType<Coordinator["run"]>;
+}
+
+function openConversation(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  root: string,
+  agent: ConversationAgent,
+  conversationId = "conversation",
+): Conversation {
+  const coordinator = new Coordinator({
+    repositories: fixture.repositories,
+    workspaces: fixture.workspaces,
+  });
+  return {
+    coordinator,
+    agent,
+    runTurn: async (definition) =>
+      await coordinator.run({
+        repository: fixture.repository,
+        workspaceRoot: path.join(root, "workspaces"),
+        integrationRoot: path.join(root, "integration"),
+        tasks: [{ task: definition, adapter: agent, conversationId }],
+      }),
+  };
+}
+
+test("a conversation keeps its workspace directory and session across turns", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ConversationAgent(
+      "agent_conv",
+      plan("turn_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const conversation = openConversation(fixture, root, agent);
+
+    agent.turnOutput = { path: "src/a.txt", content: "turn one\n" };
+    const first = await conversation.runTurn(task("turn_1"));
+    assert.equal(first.tasks[0]?.status, "integrated");
+    // The turn landed and the conversation stays open — so the session was
+    // not closed, but the turn's leases were released all the same: survival
+    // buys no standing claim on the files it touched.
+    assert.equal(agent.cancelCount, 0);
+    assert.ok(
+      first.audit.some(
+        (event) =>
+          event.type === "ownership_released" && event.taskId === "turn_1",
+      ),
+    );
+
+    // Untracked build output stands in for everything the directory keeps
+    // between turns; `dist` is one of the ephemeral names a changeset never
+    // collects, which is exactly why scratch belongs there.
+    const workspacePath = agent.workspacePaths[0];
+    assert.ok(workspacePath !== undefined);
+    await mkdir(path.join(workspacePath, "dist"), { recursive: true });
+    await writeFile(
+      path.join(workspacePath, "dist", "scratch.txt"),
+      "kept between turns\n",
+      "utf8",
+    );
+
+    agent.turnPlan = plan("turn_2", ["src/b.txt"]);
+    agent.turnOutput = { path: "src/b.txt", content: "turn two\n" };
+    agent.probePaths = ["dist/scratch.txt", "src/a.txt"];
+    const second = await conversation.runTurn(task("turn_2"));
+    assert.equal(second.tasks[0]?.status, "integrated");
+
+    // Same directory, same session: the two halves of what a conversation
+    // keeps. The path proves the directory — a rebuilt workspace would live
+    // under a fresh name — and the scratch file proves it arrived with its
+    // contents rather than merely its name.
+    assert.equal(agent.workspacePaths[1], workspacePath);
+    assert.equal(agent.observed[1]?.["dist/scratch.txt"], "kept between turns\n");
+    // The checkout caught up to what the first turn landed before the second
+    // began: nothing accumulates uncommitted between turns.
+    assert.equal(agent.observed[1]?.["src/a.txt"], "turn one\n");
+    assert.equal(agent.startInputs.length, 1);
+    assert.equal(agent.continueInputs.length, 1);
+    assert.equal(
+      agent.continueInputs[0]?.sessionId,
+      agent.startedSessions[0]?.id,
+    );
+    assert.equal(agent.cancelCount, 0);
+    assert.equal(second.canonicalVersion.sequence, 3);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a failed turn tears down the workspace and the session", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ConversationAgent(
+      "agent_conv",
+      plan("turn_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const conversation = openConversation(fixture, root, agent);
+
+    agent.turnOutput = { path: "src/a.txt", content: "turn one\n" };
+    const first = await conversation.runTurn(task("turn_1"));
+    assert.equal(first.tasks[0]?.status, "integrated");
+    const workspacePath = agent.workspacePaths[0];
+    assert.ok(workspacePath !== undefined);
+
+    // The second turn does its work and then fails validation — a settled
+    // failure, not a crash. Survival is only for success: the conversation
+    // ends, the session closes, the directory goes.
+    agent.turnPlan = plan("turn_2", ["src/b.txt"]);
+    agent.turnOutput = { path: "src/b.txt", content: "turn two\n" };
+    const second = await conversation.runTurn({
+      ...task("turn_2"),
+      validationCommands: [
+        {
+          executable: process.execPath,
+          args: ["-e", "process.exit(1)"],
+          label: "always fails",
+        },
+      ],
+    });
+    assert.equal(second.tasks[0]?.status, "failed");
+    assert.equal(agent.cancelCount, 1);
+    await assert.rejects(lstat(workspacePath), { code: "ENOENT" });
+
+    // A third turn finds nothing to resume and starts cold, from a fresh
+    // directory — the conversation did not quietly survive its failure.
+    agent.turnPlan = plan("turn_3", ["src/c.txt"]);
+    agent.turnOutput = { path: "src/c.txt", content: "turn three\n" };
+    const third = await conversation.runTurn(task("turn_3"));
+    assert.equal(third.tasks[0]?.status, "integrated");
+    assert.equal(agent.startInputs.length, 2);
+    assert.equal(agent.continueInputs.length, 1);
+    assert.notEqual(agent.workspacePaths[2], workspacePath);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an adapter without continueTask still keeps the directory, cold", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ConversationAgent(
+      "agent_conv",
+      plan("turn_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      false,
+    );
+    const conversation = openConversation(fixture, root, agent);
+
+    agent.turnOutput = { path: "src/a.txt", content: "turn one\n" };
+    const first = await conversation.runTurn(task("turn_1"));
+    assert.equal(first.tasks[0]?.status, "integrated");
+    assert.equal(agent.cancelCount, 0);
+
+    // The session is the expendable half: without continueTask the old one
+    // is closed and the turn starts cold with the thread as context, while
+    // the directory — the cheap-to-keep, expensive-to-rebuild half — is
+    // still reused.
+    agent.turnPlan = plan("turn_2", ["src/b.txt"]);
+    agent.turnOutput = { path: "src/b.txt", content: "turn two\n" };
+    const second = await conversation.runTurn(task("turn_2"));
+    assert.equal(second.tasks[0]?.status, "integrated");
+    assert.equal(agent.startInputs.length, 2);
+    assert.equal(agent.cancelCount, 1);
+    assert.equal(agent.workspacePaths[1], agent.workspacePaths[0]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

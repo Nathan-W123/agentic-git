@@ -223,6 +223,28 @@ export interface AgentAdapter {
 
   startTask(input: StartTaskInput): Promise<AgentSession>;
 
+  /**
+   * Continues an existing session as a new task — the next turn of a
+   * conversation.
+   *
+   * The session is the expensive half of what a conversation keeps: whatever
+   * the underlying CLI holds in context. This hands it the next request
+   * without paying to rediscover the last one. The returned record is the
+   * same session under the new turn: same id, restamped with the new task.
+   * A continued session starts its turn fresh everywhere else — the caller
+   * registers `streamEvents` again and sends a new context, exactly as it
+   * would for a session just started.
+   *
+   * Optional: an adapter without it is continued "cold" — the coordinator
+   * closes the old session and starts a fresh one with the thread as
+   * context, which is exactly what happens today. The workspace directory is
+   * reused either way; the session is the expendable half.
+   */
+  continueTask?(
+    sessionId: string,
+    input: StartTaskInput,
+  ): Promise<AgentSession>;
+
   requestPlan(sessionId: string): Promise<AgentPlan>;
 
   requestReplan(

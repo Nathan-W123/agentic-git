@@ -6,6 +6,7 @@ import type {
   AgentEvent,
   AgentSession,
   QuestionAnswer,
+  StartTaskInput,
 } from "@coord/agent-protocol";
 import {
   CodeIntelligenceService,
@@ -48,6 +49,7 @@ import {
 } from "@coord/shared-types";
 import {
   GitWorktreeWorkspaceManager,
+  type AdvanceWorkspaceInput,
   type TaskWorkspace,
   type WorkspaceManager,
 } from "@coord/workspace-manager";
@@ -71,6 +73,37 @@ import { assertChangeSetWithinPlan } from "./scope-validator.js";
 export interface CoordinatedTask {
   task: TaskDefinition;
   adapter: AgentAdapter;
+  /**
+   * Present when this task is one turn of a conversation.
+   *
+   * Successive turns carrying the same id reuse the previous turn's
+   * workspace directory and agent session instead of starting from nothing —
+   * see docs/architecture/conversational-tasks.md. Everything else about the
+   * turn is an ordinary task: it plans, is admitted against the world as it
+   * is, lands its change, and releases its leases. Only on success does
+   * anything survive; a turn that fails tears down completely and the next
+   * one starts cold.
+   */
+  conversationId?: string;
+}
+
+/**
+ * What survives between the turns of one conversation.
+ *
+ * The workspace directory and the agent session are the conversation's
+ * memory — the first cheap to keep and expensive to rebuild, the second the
+ * reverse. The last landed turn's plan and change set are kept so the next
+ * turn can ask what an advance underneath the conversation touched, and
+ * `syncedVersion` is where canonical stood once that turn landed: everything
+ * past it is somebody else's work.
+ */
+interface OpenConversation {
+  adapter: AgentAdapter;
+  session: AgentSession;
+  workspace: TaskWorkspace;
+  plan: AgentPlan;
+  changeSet: ChangeSet;
+  syncedVersion: CanonicalVersion;
 }
 
 export interface CoordinatorRunInput {
@@ -89,6 +122,13 @@ interface PlannedTask extends CoordinatedTask {
   planRevision: number;
   plannedVersion: CanonicalVersion;
   decision: CoordinatorDecision;
+  /**
+   * The open conversation this turn resumed, taken out of the coordinator's
+   * map the moment planning began. From then on it rides here, so the
+   * failure paths that already tear an entry down only have to also destroy
+   * this workspace — there is no side table to remember to clear.
+   */
+  resumed?: OpenConversation;
 }
 
 interface PreparedTask extends PlannedTask {
@@ -348,6 +388,14 @@ export class Coordinator {
   private readonly taskWorkspacePaths = new Map<string, string>();
   /** Actions each task has spent, for the cap. */
   private readonly actionsUsed = new Map<string, number>();
+  /**
+   * Conversations whose last turn landed and whose next turn has not begun,
+   * by conversation id. Entries leave this map the moment a turn resumes
+   * them (see {@link takeConversation}) and return only when that turn
+   * integrates; a turn that fails never puts its conversation back, which is
+   * what "a failed task still tears down completely" means in code.
+   */
+  private readonly openConversations = new Map<string, OpenConversation>();
 
   public constructor(dependencies: CoordinatorDependencies = {}) {
     this.repositories = dependencies.repositories ?? new RepositoryService();
@@ -736,7 +784,15 @@ export class Coordinator {
       }
     } catch (error) {
       const cleanup = await Promise.allSettled(
-        pending.map((entry) => entry.adapter.cancel(entry.session.id)),
+        // Sessions and any resumed conversations' workspaces alike: a run
+        // that throws ends every pending turn, and an ended turn ends its
+        // conversation. Flat so one failure cannot shadow the other.
+        pending.flatMap((entry) => [
+          entry.adapter.cancel(entry.session.id),
+          ...(entry.resumed === undefined
+            ? []
+            : [this.workspaces.destroy(entry.resumed.workspace)]),
+        ]),
       );
       const failures = cleanup
         .filter(
@@ -783,6 +839,10 @@ export class Coordinator {
   ): Promise<PlannedTask[]> {
     const results = await Promise.allSettled(
       input.tasks.map(async (entry): Promise<PlannedTask> => {
+        // Taken before the first await, so of two turns naming one
+        // conversation in the same wave exactly one resumes it and the other
+        // cold-starts, rather than both holding the same worktree.
+        const resumed = this.takeConversation(entry);
         let session: AgentSession | undefined;
         try {
           const capabilities = await entry.adapter.getCapabilities();
@@ -861,12 +921,33 @@ export class Coordinator {
           ]
             .filter((part) => part !== "")
             .join("\n\n");
-          session = await entry.adapter.startTask({
+          const startInput: StartTaskInput = {
             task: entry.task,
             canonicalVersion: version,
             repositoryId: input.repository.id,
             ...(priorContext === "" ? {} : { priorContext }),
-          });
+          };
+          // A resumed conversation continues its session — the expensive
+          // half of what a conversation keeps — when the adapter can.
+          // Without `continueTask` the session is the expendable half: the
+          // old one is closed and the turn starts cold with the thread as
+          // context, exactly as a fresh task would, while the workspace
+          // directory is still reused below.
+          session =
+            resumed !== undefined && entry.adapter.continueTask !== undefined
+              ? await entry.adapter.continueTask(
+                  resumed.session.id,
+                  startInput,
+                )
+              : await this.startColdSession(entry, resumed, startInput);
+          if (session.taskId !== entry.task.id) {
+            // Held to the contract for the same reason the plan is below: a
+            // session still stamped with the old turn would make the durable
+            // session record miss this run's task row entirely.
+            throw new Error(
+              `Agent session task ${session.taskId} does not match ${entry.task.id}`,
+            );
+          }
           await recorder?.session(session);
           const submitted = await entry.adapter.requestPlan(session.id);
           assertAgentPlan(submitted);
@@ -907,6 +988,7 @@ export class Coordinator {
           );
           return {
             ...entry,
+            ...(resumed === undefined ? {} : { resumed }),
             session,
             plan,
             planRevision: 1,
@@ -928,6 +1010,23 @@ export class Coordinator {
               await entry.adapter.cancel(session.id);
             } catch (cancelError) {
               errors.push(cancelError);
+            }
+          }
+          if (resumed !== undefined) {
+            // A turn that fails ends its conversation, planning failures
+            // included. The held session may still be open when the
+            // continuation itself threw before producing one.
+            if (session === undefined) {
+              try {
+                await entry.adapter.cancel(resumed.session.id);
+              } catch (cancelError) {
+                errors.push(cancelError);
+              }
+            }
+            try {
+              await this.workspaces.destroy(resumed.workspace);
+            } catch (destroyError) {
+              errors.push(destroyError);
             }
           }
           const failure =
@@ -965,6 +1064,12 @@ export class Coordinator {
         }
         try {
           await result.value.adapter.cancel(result.value.session.id);
+          // A cancelled turn ends its conversation like a failed one: the
+          // resumed workspace was popped at planning and nothing else will
+          // ever destroy it.
+          if (result.value.resumed !== undefined) {
+            await this.workspaces.destroy(result.value.resumed.workspace);
+          }
           await recorder?.status(
             result.value.task.id,
             "cancelled",
@@ -984,6 +1089,92 @@ export class Coordinator {
         throw new Error("Unreachable rejected planning result");
       }
       return result.value;
+    });
+  }
+
+  /**
+   * Claims the open conversation this turn continues, if there is one.
+   *
+   * Synchronous and destructive on purpose: the entry leaves the map before
+   * planning's first await, so a conversation can never be resumed twice,
+   * and from here on its resources ride on the turn — whose failure paths
+   * already tear a turn down. A conversation is only ever put back by a turn
+   * that landed.
+   *
+   * An id held by a different adapter is not resumed: the session belongs to
+   * the adapter that opened it, and handing it to another would cross two
+   * agents' state. The held pair is torn down (best-effort — teardown here
+   * must not fail the new turn) and the turn starts cold.
+   */
+  private takeConversation(
+    entry: CoordinatedTask,
+  ): OpenConversation | undefined {
+    if (entry.conversationId === undefined) {
+      return undefined;
+    }
+    const held = this.openConversations.get(entry.conversationId);
+    if (held === undefined) {
+      return undefined;
+    }
+    this.openConversations.delete(entry.conversationId);
+    if (held.adapter !== entry.adapter) {
+      void held.adapter
+        .cancel(held.session.id)
+        .catch(() => undefined)
+        .then(async () => await this.workspaces.destroy(held.workspace))
+        .catch(() => undefined);
+      return undefined;
+    }
+    return held;
+  }
+
+  /**
+   * Starts a fresh session for a turn, closing the resumed one first.
+   *
+   * The cold half of continuation: the workspace directory is still reused,
+   * but an adapter without `continueTask` — or a conversation whose session
+   * did not survive — pays for a fresh context window seeded from the
+   * thread. Closing the old session before opening the new one keeps the
+   * adapter from holding two sessions for one conversation.
+   */
+  private async startColdSession(
+    entry: CoordinatedTask,
+    resumed: OpenConversation | undefined,
+    startInput: StartTaskInput,
+  ): Promise<AgentSession> {
+    if (resumed !== undefined) {
+      try {
+        await entry.adapter.cancel(resumed.session.id);
+      } catch {
+        // The new turn must not be stopped by an old session that would not
+        // close; the close is re-attempted by nothing, and the session is
+        // already unreachable from the conversation.
+      }
+    }
+    return await entry.adapter.startTask(startInput);
+  }
+
+  /**
+   * Catches a kept workspace up to this wave's canonical and re-tenants it
+   * under the new turn.
+   *
+   * Falls back to destroy-and-create for a manager that cannot advance in
+   * place — correct, merely slower: only the directory's warmth is lost.
+   */
+  private async advanceWorkspace(
+    workspace: TaskWorkspace,
+    input: AdvanceWorkspaceInput,
+  ): Promise<TaskWorkspace> {
+    const advance = this.workspaces.advance?.bind(this.workspaces);
+    if (advance !== undefined) {
+      return await advance(workspace, input);
+    }
+    await this.workspaces.destroy(workspace);
+    return await this.workspaces.create({
+      taskId: input.taskId,
+      rootPath: workspace.rootPath,
+      repository: workspace.repository,
+      baseVersion: input.baseVersion,
     });
   }
 
@@ -1204,6 +1395,15 @@ export class Coordinator {
         await dependent.adapter.cancel(dependent.session.id);
       } catch (error) {
         explanation += `; agent cancellation also failed: ${errorMessage(error)}`;
+      }
+      if (dependent.resumed !== undefined) {
+        // A cancelled turn ends its conversation; nothing else holds this
+        // workspace any more.
+        try {
+          await this.workspaces.destroy(dependent.resumed.workspace);
+        } catch (error) {
+          explanation += `; conversation workspace teardown failed: ${errorMessage(error)}`;
+        }
       }
       await recorder?.status(dependent.task.id, "cancelled", explanation);
       await this.trace(
@@ -1522,12 +1722,24 @@ export class Coordinator {
         { leases },
       );
 
-      workspace = await this.workspaces.create({
-        taskId: entry.task.id,
-        rootPath: input.workspaceRoot,
-        repository: input.repository,
-        baseVersion: waveVersion,
-      });
+      // A resumed conversation keeps its directory and catches the checkout
+      // up to this wave's canonical instead of building a workspace from
+      // nothing — `node_modules`, build output and scratch survive, which is
+      // most of what makes a second turn faster than a first. The advance
+      // lands exactly on waveVersion, so the changeset base check below
+      // holds for a continued turn the same way it does for a fresh one.
+      workspace =
+        entry.resumed === undefined
+          ? await this.workspaces.create({
+              taskId: entry.task.id,
+              rootPath: input.workspaceRoot,
+              repository: input.repository,
+              baseVersion: waveVersion,
+            })
+          : await this.advanceWorkspace(entry.resumed.workspace, {
+              taskId: entry.task.id,
+              baseVersion: waveVersion,
+            });
       entry.decision.workspaceId = workspace.id;
       this.taskWorkspacePaths.set(entry.task.id, workspace.path);
       await recorder?.decision(entry.decision);
@@ -1699,9 +1911,13 @@ export class Coordinator {
       return { ...entry, workspace, changeSet };
     } catch (error) {
       const failures = [errorMessage(error)];
+      // A failed turn tears down completely, resumed conversation included.
+      // Before the advance ran, the held directory is the only workspace to
+      // destroy; after it, `workspace` is the same directory under its new
+      // record — `??` picks exactly one so nothing is destroyed twice.
       const cleanupFailure = await this.cleanupTask(
         entry,
-        workspace,
+        workspace ?? entry.resumed?.workspace,
         recorder,
         runAudit,
       );
@@ -2426,12 +2642,49 @@ export class Coordinator {
       };
     }
 
-    const cleanupFailure = await this.cleanupTask(
-      result,
-      result.workspace,
-      recorder,
-      runAudit,
-    );
+    let cleanupFailure: string | undefined;
+    if (
+      result.conversationId !== undefined &&
+      taskResult.status === "integrated" &&
+      taskResult.integration !== undefined
+    ) {
+      // The turn landed, so the conversation stays open: the session and
+      // the directory are its memory, kept for the next turn. Its leases
+      // are released like any other turn's — survival buys no standing
+      // claim, and the next turn is arbitrated afresh against the world as
+      // it is then. `syncedVersion` is canonical as this turn left it;
+      // everything past it is somebody else's work, which is exactly the
+      // question the next turn opens with. Only success keeps anything: the
+      // failure arm below is the same full teardown every task gets.
+      const failures: string[] = [];
+      await this.releaseTurnLeases(
+        result.task.id,
+        recorder,
+        runAudit,
+        failures,
+      );
+      cleanupFailure = await this.finishCleanup(
+        result.task.id,
+        recorder,
+        runAudit,
+        failures,
+      );
+      this.openConversations.set(result.conversationId, {
+        adapter: result.adapter,
+        session: result.session,
+        workspace: result.workspace,
+        plan: result.plan,
+        changeSet: result.changeSet,
+        syncedVersion: taskResult.integration.canonicalVersion,
+      });
+    } else {
+      cleanupFailure = await this.cleanupTask(
+        result,
+        result.workspace,
+        recorder,
+        runAudit,
+      );
+    }
     if (cleanupFailure !== undefined) {
       taskResult.explanation += `; ${cleanupFailure}`;
       await recorder?.status(
@@ -2568,7 +2821,25 @@ export class Coordinator {
         failures.push(`workspace: ${errorMessage(error)}`);
       }
     }
+    await this.releaseTurnLeases(taskId, recorder, runAudit, failures);
+    return await this.finishCleanup(taskId, recorder, runAudit, failures);
+  }
 
+  /**
+   * Releases what a settled turn never keeps: its ownership leases.
+   *
+   * Split from {@link cleanupTask} because a conversational turn that lands
+   * keeps its session and workspace — the conversation's memory — while the
+   * leases are the repository's and never survive a turn. Holding one across
+   * a conversation would make a person's thinking time into other agents'
+   * waiting time; releasing it means the next turn is arbitrated afresh.
+   */
+  private async releaseTurnLeases(
+    taskId: string,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+    failures: string[],
+  ): Promise<void> {
     let released: ReturnType<OwnershipService["releaseTask"]> = [];
     try {
       released = this.ownership.releaseTask(taskId);
@@ -2591,6 +2862,15 @@ export class Coordinator {
     } catch (error) {
       failures.push(`release audit: ${errorMessage(error)}`);
     }
+  }
+
+  /** Folds teardown failures into one recorded explanation, or nothing. */
+  private async finishCleanup(
+    taskId: string,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+    failures: readonly string[],
+  ): Promise<string | undefined> {
     if (failures.length === 0) {
       return undefined;
     }

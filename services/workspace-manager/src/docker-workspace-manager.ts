@@ -12,6 +12,7 @@ import type { EgressBinding } from "./egress-gateway.js";
 import type { CredentialMount } from "./vendor-credentials.js";
 import {
   GitWorktreeWorkspaceManager,
+  type AdvanceWorkspaceInput,
   type ChangeSetMetadata,
   type CreateWorkspaceInput,
   type SandboxLaunchSpec,
@@ -335,6 +336,26 @@ export class DockerWorkspaceManager
 
   public async destroy(workspace: TaskWorkspace): Promise<void> {
     await this.worktrees.destroy(workspace);
+  }
+
+  public async advance(
+    workspace: TaskWorkspace,
+    input: AdvanceWorkspaceInput,
+  ): Promise<TaskWorkspace> {
+    // The git mask lives beside the workspace directory, so an in-place
+    // advance never disturbs it; the fallback recreates it by going through
+    // this class's own create.
+    const inner = this.worktrees.advance?.bind(this.worktrees);
+    if (inner === undefined) {
+      await this.destroy(workspace);
+      return await this.create({
+        taskId: input.taskId,
+        rootPath: workspace.rootPath,
+        repository: workspace.repository,
+        baseVersion: input.baseVersion,
+      });
+    }
+    return { ...(await inner(workspace, input)), isolation: "docker" };
   }
 
   public async collectChangeSet(
