@@ -3602,12 +3602,12 @@ svg {
    on the avatar rather than punched out of it. */
 .status-dot {
   position: absolute;
-  right: -1px;
-  bottom: -1px;
-  width: 10px;
-  height: 10px;
+  right: 0;
+  bottom: 0;
+  width: 7.5px;
+  height: 7.5px;
   border-radius: 50%;
-  border: 2px solid var(--panel);
+  border: 1.5px solid var(--panel);
   box-sizing: content-box;
 }
 
