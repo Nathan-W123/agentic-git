@@ -295,11 +295,14 @@ function openConversation(
   root: string,
   agent: ConversationAgent,
   conversationId = "conversation",
+  options: { coordinator?: Coordinator } = {},
 ): Conversation {
-  const coordinator = new Coordinator({
-    repositories: fixture.repositories,
-    workspaces: fixture.workspaces,
-  });
+  const coordinator =
+    options.coordinator ??
+    new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    });
   return {
     coordinator,
     agent,
@@ -599,6 +602,146 @@ test("a conflicting advance between turns opens the turn as a replan", async () 
     );
     // And still from the rebased state, exactly like the other outcomes.
     assert.equal(agent.observed[1]?.["src/bc.txt"], "dependency moved\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an idle session closes; the conversation continues cold in its directory", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ConversationAgent(
+      "agent_conv",
+      plan("turn_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const coordinator = new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      // Idle from the moment it lands: the sweep's clock is wall time and a
+      // test cannot wait out a real deadline.
+      conversationSessionIdleMs: 0,
+    });
+    const conversation = openConversation(fixture, root, agent, "conversation", {
+      coordinator,
+    });
+
+    agent.turnOutput = { path: "src/a.txt", content: "turn one\n" };
+    const first = await conversation.runTurn(task("turn_1"));
+    assert.equal(first.tasks[0]?.status, "integrated");
+    assert.equal(agent.cancelCount, 0);
+
+    // The sweep sheds the process and only the process.
+    await coordinator.closeIdleConversationSessions();
+    assert.equal(agent.cancelCount, 1);
+
+    agent.turnPlan = plan("turn_2", ["src/b.txt"]);
+    agent.turnOutput = { path: "src/b.txt", content: "turn two\n" };
+    const second = await conversation.runTurn(task("turn_2"));
+    assert.equal(second.tasks[0]?.status, "integrated");
+    // Cold session, warm directory: startTask ran again, continueTask never
+    // did, and the turn still worked where the last one left off.
+    assert.equal(agent.startInputs.length, 2);
+    assert.equal(agent.continueInputs.length, 0);
+    assert.equal(agent.workspacePaths[1], agent.workspacePaths[0]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the session cap closes the oldest conversation's session first", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const coordinator = new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      maxConversationSessions: 1,
+    });
+    const first = new ConversationAgent(
+      "agent_first",
+      plan("first_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const second = new ConversationAgent(
+      "agent_second",
+      plan("second_1", ["src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const conversationA = openConversation(fixture, root, first, "conv_a", {
+      coordinator,
+    });
+    const conversationB = openConversation(fixture, root, second, "conv_b", {
+      coordinator,
+    });
+
+    first.turnOutput = { path: "src/a.txt", content: "first one\n" };
+    const landedA = await conversationA.runTurn(task("first_1"));
+    assert.equal(landedA.tasks[0]?.status, "integrated");
+    assert.equal(first.cancelCount, 0);
+
+    // The second conversation landing pushes the population past the cap,
+    // and the conversation that landed longest ago pays — with its process,
+    // not its place.
+    second.turnOutput = { path: "src/b.txt", content: "second one\n" };
+    const landedB = await conversationB.runTurn(task("second_1"));
+    assert.equal(landedB.tasks[0]?.status, "integrated");
+    assert.equal(first.cancelCount, 1);
+    assert.equal(second.cancelCount, 0);
+
+    // The evicted conversation is still open: its next turn is cold but in
+    // the directory it kept all along.
+    first.turnPlan = plan("first_2", ["src/c.txt"]);
+    first.turnOutput = { path: "src/c.txt", content: "first two\n" };
+    const resumed = await conversationA.runTurn(task("first_2"));
+    assert.equal(resumed.tasks[0]?.status, "integrated");
+    assert.equal(first.startInputs.length, 2);
+    assert.equal(first.continueInputs.length, 0);
+    assert.equal(first.workspacePaths[1], first.workspacePaths[0]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ending a conversation destroys both halves", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ConversationAgent(
+      "agent_conv",
+      plan("turn_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const conversation = openConversation(fixture, root, agent);
+
+    agent.turnOutput = { path: "src/a.txt", content: "turn one\n" };
+    const first = await conversation.runTurn(task("turn_1"));
+    assert.equal(first.tasks[0]?.status, "integrated");
+    const workspacePath = agent.workspacePaths[0];
+    assert.ok(workspacePath !== undefined);
+
+    await conversation.coordinator.endConversation("conversation");
+    assert.equal(agent.cancelCount, 1);
+    await assert.rejects(lstat(workspacePath), { code: "ENOENT" });
+    // Ending twice is a no-op, not an error.
+    await conversation.coordinator.endConversation("conversation");
+    assert.equal(agent.cancelCount, 1);
+
+    // The next turn finds nothing to resume and starts a fresh conversation.
+    agent.turnPlan = plan("turn_2", ["src/b.txt"]);
+    agent.turnOutput = { path: "src/b.txt", content: "turn two\n" };
+    const second = await conversation.runTurn(task("turn_2"));
+    assert.equal(second.tasks[0]?.status, "integrated");
+    assert.equal(agent.startInputs.length, 2);
+    assert.notEqual(agent.workspacePaths[1], workspacePath);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

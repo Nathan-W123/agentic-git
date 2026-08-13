@@ -98,14 +98,22 @@ export interface CoordinatedTask {
  * turn can ask what an advance underneath the conversation touched, and
  * `syncedVersion` is where canonical stood once that turn landed: everything
  * past it is somebody else's work.
+ *
+ * The session is the expendable half, and the only optional one: the cap and
+ * the idle sweep close it — a held session is a held CLI process — while the
+ * conversation itself stays open. A conversation whose session lapsed starts
+ * its next turn cold with the thread as context, in the directory it always
+ * had.
  */
 interface OpenConversation {
   adapter: AgentAdapter;
-  session: AgentSession;
+  session?: AgentSession;
   workspace: TaskWorkspace;
   plan: AgentPlan;
   changeSet: ChangeSet;
   syncedVersion: CanonicalVersion;
+  /** When the conversation's last turn landed, for the idle sweep. */
+  lastLandedAt: number;
 }
 
 export interface CoordinatorRunInput {
@@ -212,6 +220,23 @@ export interface CoordinatorDependencies {
   questions?: QuestionController;
   /** How long a person has, before the task is cancelled. See `answerAgentQuestion`. */
   questionDeadlineMs?: number;
+  /**
+   * How long a conversation's session may sit idle between turns before it
+   * is closed. The conversation stays open — the next turn starts cold, in
+   * the same directory — because the session is a held CLI process and this
+   * is the first thing in the system that keeps one alive across the gap
+   * between a person's messages. Attention is less predictable than work,
+   * so the process is bounded even when nobody ends the conversation.
+   */
+  conversationSessionIdleMs?: number;
+  /**
+   * How many conversations may hold a live session at once. Past the cap,
+   * the conversation whose turn landed longest ago gives its session up
+   * first — it is the one most likely to already be over. The workspace
+   * directory is not counted or evicted here: it holds no process, and it
+   * is the half that is expensive to rebuild.
+   */
+  maxConversationSessions?: number;
   /**
    * Who arbitrates this run's plans against work running *outside* it.
    *
@@ -369,6 +394,22 @@ const DEFAULT_QUESTION_DEADLINE_MS = 15 * 60 * 1000;
 /** See {@link CoordinatorDependencies.workingChangePollMs}. */
 const DEFAULT_WORKING_CHANGE_POLL_MS = 10_000;
 
+/**
+ * Fifteen minutes, like the question deadline and for the same reason: long
+ * enough that somebody who stepped away can still pick their conversation
+ * back up warm, short enough that an abandoned one is not a process held for
+ * the rest of the day.
+ */
+const DEFAULT_CONVERSATION_SESSION_IDLE_MS = 15 * 60 * 1000;
+
+/**
+ * Eight held CLI processes is a deliberate deployment cost; twenty is the
+ * failure mode the design doc names. Between turns a session does nothing
+ * but remember, so the cap can be small without costing anyone a running
+ * turn — a turn in flight is not in this map at all.
+ */
+const DEFAULT_MAX_CONVERSATION_SESSIONS = 8;
+
 export class Coordinator {
   private readonly repositories: RepositoryService;
   private readonly workspaces: WorkspaceManager;
@@ -384,6 +425,8 @@ export class Coordinator {
   private readonly workingChangePollMs: number;
   private readonly questions: QuestionController | undefined;
   private readonly questionDeadlineMs: number;
+  private readonly conversationSessionIdleMs: number;
+  private readonly maxConversationSessions: number;
   private readonly planAuthority: PlanAuthority | undefined;
   private readonly actionAuthority: ActionAuthority | undefined;
   /** Where each task is working, for an action that needs to reach it. */
@@ -419,6 +462,12 @@ export class Coordinator {
     this.questions = dependencies.questions;
     this.questionDeadlineMs =
       dependencies.questionDeadlineMs ?? DEFAULT_QUESTION_DEADLINE_MS;
+    this.conversationSessionIdleMs =
+      dependencies.conversationSessionIdleMs ??
+      DEFAULT_CONVERSATION_SESSION_IDLE_MS;
+    this.maxConversationSessions =
+      dependencies.maxConversationSessions ??
+      DEFAULT_MAX_CONVERSATION_SESSIONS;
     this.planAuthority = dependencies.planAuthority;
     this.actionAuthority = dependencies.actionAuthority;
     this.store = dependencies.store;
@@ -434,6 +483,10 @@ export class Coordinator {
   }
 
   public async run(input: CoordinatorRunInput): Promise<CoordinationRunResult> {
+    // Sessions past their idle deadline go before any new work starts, so a
+    // deployment that is doing anything at all keeps its held processes
+    // bounded without needing a timer of its own.
+    await this.closeIdleConversationSessions();
     const runAudit: AuditEvent[] = [];
     const initialVersion = await this.repositories.getCanonicalVersion(
       input.repository,
@@ -953,7 +1006,8 @@ export class Coordinator {
           // context, exactly as a fresh task would, while the workspace
           // directory is still reused below.
           session =
-            resumed !== undefined && entry.adapter.continueTask !== undefined
+            resumed?.session !== undefined &&
+            entry.adapter.continueTask !== undefined
               ? await entry.adapter.continueTask(
                   resumed.session.id,
                   startInput,
@@ -1046,7 +1100,7 @@ export class Coordinator {
             // A turn that fails ends its conversation, planning failures
             // included. The held session may still be open when the
             // continuation itself threw before producing one.
-            if (session === undefined) {
+            if (session === undefined && resumed.session !== undefined) {
               try {
                 await entry.adapter.cancel(resumed.session.id);
               } catch (cancelError) {
@@ -1148,9 +1202,11 @@ export class Coordinator {
     }
     this.openConversations.delete(entry.conversationId);
     if (held.adapter !== entry.adapter) {
-      void held.adapter
-        .cancel(held.session.id)
-        .catch(() => undefined)
+      const closed =
+        held.session === undefined
+          ? Promise.resolve()
+          : held.adapter.cancel(held.session.id).catch(() => undefined);
+      void closed
         .then(async () => await this.workspaces.destroy(held.workspace))
         .catch(() => undefined);
       return undefined;
@@ -1172,7 +1228,7 @@ export class Coordinator {
     resumed: OpenConversation | undefined,
     startInput: StartTaskInput,
   ): Promise<AgentSession> {
-    if (resumed !== undefined) {
+    if (resumed?.session !== undefined) {
       try {
         await entry.adapter.cancel(resumed.session.id);
       } catch {
@@ -1206,6 +1262,85 @@ export class Coordinator {
       repository: workspace.repository,
       baseVersion: input.baseVersion,
     });
+  }
+
+  /** Closes and forgets one conversation's session, keeping the rest. */
+  private async closeConversationSession(
+    conversation: OpenConversation,
+  ): Promise<void> {
+    const session = conversation.session;
+    if (session === undefined) {
+      return;
+    }
+    delete conversation.session;
+    try {
+      await conversation.adapter.cancel(session.id);
+    } catch {
+      // A session that will not close is still forgotten: the sweep exists
+      // to stop holding processes, and keeping the record on top of a
+      // wedged one would hold both.
+    }
+  }
+
+  /**
+   * Holds the number of live conversation sessions at the cap.
+   *
+   * Oldest landing gives its session up first — it is the conversation most
+   * likely to already be over. Only the process goes; the conversation and
+   * its directory stay, and its next turn starts cold.
+   */
+  private async enforceConversationSessionCap(): Promise<void> {
+    while (true) {
+      const live = [...this.openConversations.values()]
+        .filter((conversation) => conversation.session !== undefined)
+        .sort((a, b) => a.lastLandedAt - b.lastLandedAt);
+      const oldest = live[0];
+      if (oldest === undefined || live.length <= this.maxConversationSessions) {
+        return;
+      }
+      await this.closeConversationSession(oldest);
+    }
+  }
+
+  /**
+   * Closes conversation sessions that have sat idle past the deadline.
+   *
+   * Public so a host can run it on a timer; every run also sweeps on entry,
+   * which bounds a deployment that is doing anything at all. The
+   * conversations stay open — their next turn starts cold, in the directory
+   * they kept — because the session is the expendable half of what a
+   * conversation holds.
+   */
+  public async closeIdleConversationSessions(
+    now: number = Date.now(),
+  ): Promise<void> {
+    for (const conversation of this.openConversations.values()) {
+      if (
+        conversation.session !== undefined &&
+        now - conversation.lastLandedAt >= this.conversationSessionIdleMs
+      ) {
+        await this.closeConversationSession(conversation);
+      }
+    }
+  }
+
+  /**
+   * Ends a conversation entirely: session closed, directory destroyed.
+   *
+   * For whoever owns the decision that the conversation is over — an
+   * explicit "that's it", the task's own expiry — as opposed to the sweeps,
+   * which shed only the process and leave the conversation continuable.
+   * Unknown ids are a no-op: ending twice, or ending what a failed turn
+   * already tore down, is not an error.
+   */
+  public async endConversation(conversationId: string): Promise<void> {
+    const held = this.openConversations.get(conversationId);
+    if (held === undefined) {
+      return;
+    }
+    this.openConversations.delete(conversationId);
+    await this.closeConversationSession(held);
+    await this.workspaces.destroy(held.workspace);
   }
 
   /**
@@ -2844,7 +2979,11 @@ export class Coordinator {
         plan: result.plan,
         changeSet: result.changeSet,
         syncedVersion: taskResult.integration.canonicalVersion,
+        lastLandedAt: Date.now(),
       });
+      // A held session is a held CLI process, so the population of them is
+      // bounded the moment it grows rather than on some later sweep.
+      await this.enforceConversationSessionCap();
     } else {
       cleanupFailure = await this.cleanupTask(
         result,
