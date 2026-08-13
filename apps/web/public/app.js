@@ -1283,6 +1283,27 @@ async function clearThreadsAction(repositoryId) {
  * the agent actually said, and a reader who finds the short version too short
  * has to be able to get back to it in one click.
  */
+/**
+ * The first line of the message being answered, shaped for a composer.
+ *
+ * A quote rather than a mechanism: replying is typing into the composer the
+ * thread already has, and this only saves the reader scrolling back to say
+ * which message they meant. Truncated hard because the quote is an address,
+ * not a reprint — the full text is right there in the transcript.
+ */
+function replyQuote(content) {
+  const line =
+    String(content ?? "")
+      .split(/\n/u)
+      .map((part) => part.trim())
+      .find((part) => part.length > 0) ?? "";
+  if (line === "") {
+    return "";
+  }
+  const excerpt = line.length > 80 ? `${line.slice(0, 77)}…` : line;
+  return `> ${excerpt}\n\n`;
+}
+
 async function simplifySummaryAction(repositoryId, replyId) {
   if (state.simplifying[replyId] === true) {
     return;
@@ -2617,6 +2638,42 @@ document.addEventListener("click", (event) => {
       state.activeChannelThread = undefined;
       render();
       return;
+    // Replying to a message that is already inside a thread: the answer can
+    // only land in that same thread, so "reply" means the composer opens
+    // with the message being answered already named. The quote is plain
+    // text on purpose — the composer stays an ordinary textarea, and the
+    // person deletes it as easily as they got it.
+    case "thread-reply-quote": {
+      const root = channelMessagesFor(activeChannelId()).find(
+        (entry) => entry.id === state.activeChannelThread,
+      );
+      const target =
+        root === undefined
+          ? undefined
+          : root.id === value
+            ? root
+            : (root.replies ?? []).find((reply) => reply.id === value);
+      state.threadDraft = `${replyQuote(target?.content)}${state.threadDraft}`;
+      render();
+      {
+        const input = $("[data-act='channel-thread-input']");
+        input?.focus();
+        input?.setSelectionRange(input.value.length, input.value.length);
+      }
+      return;
+    }
+    case "dm-reply-quote": {
+      const messages = state.dmThreads[state.activeDm] ?? [];
+      const target = messages.find((message) => message.id === value);
+      state.dmDraft = `${replyQuote(target?.content)}${state.dmDraft}`;
+      render();
+      {
+        const input = $("[data-act='dm-input']");
+        input?.focus();
+        input?.setSelectionRange(input.value.length, input.value.length);
+      }
+      return;
+    }
     // Tapping somebody opens the conversation with them. Rendered before the
     // fetch so the panel is there immediately, with whatever was already
     // loaded — a private message is the one surface where waiting to see
