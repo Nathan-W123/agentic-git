@@ -1319,6 +1319,40 @@ export class Coordinator {
         );
       }
 
+      // What the run spent, written where the budget throttle and the room's
+      // stats both read. Every adapter has reported this for as long as the
+      // method has existed, and only the remote worker ever asked — the
+      // in-process runner threw the answer away, so a deployment with no
+      // remote fleet showed "0 tokens spent" against months of work.
+      // Best-effort on purpose: a run must never fail over bookkeeping.
+      if (this.store !== undefined) {
+        try {
+          for (const usage of entry.adapter.reportedTokenUsage?.(
+            entry.session.id,
+          ) ?? []) {
+            await this.store.recordTokenUsage({
+              usageKey: `${entry.session.id}:${usage.phase}`,
+              repositoryId: input.repository.id,
+              ...(input.projectId === undefined
+                ? {}
+                : { projectId: input.projectId }),
+              taskId: entry.task.id,
+              agentId: entry.task.agentId,
+              phase: usage.phase,
+              totalTokens: usage.totalTokens,
+              ...(usage.inputTokens === undefined
+                ? {}
+                : { inputTokens: usage.inputTokens }),
+              ...(usage.outputTokens === undefined
+                ? {}
+                : { outputTokens: usage.outputTokens }),
+              recordedAt: new Date().toISOString(),
+            });
+          }
+        } catch {
+          // Unpriced work still lands.
+        }
+      }
       const changeSet = await entry.adapter.collectChanges(entry.session.id);
       if (
         changeSet.taskId !== entry.task.id ||
