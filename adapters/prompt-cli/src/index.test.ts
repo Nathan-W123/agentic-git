@@ -26,6 +26,7 @@ import {
   extractJsonObject,
   resolveClaudeCommand,
   type PromptCliProcessRunner,
+  parseClaudeSessionId,
   parseClaudeUsage,
 } from "./index.js";
 
@@ -121,12 +122,13 @@ function output(
   return { exitCode: 0, stdout, stderr: "", durationMs: 1, ...overrides };
 }
 
-function claudeEnvelope(result: string): string {
+function claudeEnvelope(result: string, sessionId?: string): string {
   return JSON.stringify({
     type: "result",
     subtype: "success",
     is_error: false,
     result,
+    ...(sessionId === undefined ? {} : { session_id: sessionId }),
   });
 }
 
@@ -217,6 +219,210 @@ test("claude: plan-mode planning, skip-permissions execution, collected diff", a
   assert.equal(changeSet.patches.length, 1);
   assert.equal(changeSet.patches[0]?.path, "src/value.js");
   assert.deepEqual(changeSet.symbolsChanged, ["value"]);
+});
+
+test("claude: the vendor session id chains --resume across execs and instances", async () => {
+  // Warm continuation, adapter side: the envelope's session_id is captured
+  // after every exec, rides the next one as --resume, and — handed over as
+  // the session record's resume token — lets a completely fresh adapter
+  // instance pick the conversation up where the vendor left it.
+  const fixture = await createFixture();
+  const calls: Array<{ args: readonly string[] }> = [];
+  const runner: PromptCliProcessRunner = async (_executable, args, options = {}) => {
+    calls.push({ args });
+    if (args.includes("--permission-mode")) {
+      return output(
+        claudeEnvelope(
+          "```json\n" + JSON.stringify(PLAN) + "\n```",
+          "sess-plan-11111111",
+        ),
+      );
+    }
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(
+      claudeEnvelope(JSON.stringify(COMPLETION), "sess-exec-22222222"),
+    );
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  // The first exec of a fresh session has nothing to resume.
+  assert.equal(calls[0]?.args.includes("--resume"), false);
+
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+  await adapter.sendContext(session.id, contextFor(workspace));
+  // The edit phase resumed the session planning opened…
+  const executionArgs = calls[1]?.args ?? [];
+  assert.equal(
+    executionArgs[executionArgs.indexOf("--resume") + 1],
+    "sess-plan-11111111",
+  );
+  // …and the token now names the state as the newest exec left it.
+  assert.equal(adapter.resumeToken(session.id), "sess-exec-22222222");
+
+  // A different instance — production's shape, where every run constructs
+  // its own adapters — adopts the handed-over record and opens its first
+  // exec inside the same vendor session.
+  const secondCalls: Array<{ args: readonly string[] }> = [];
+  const secondRunner: PromptCliProcessRunner = async (_executable, args) => {
+    secondCalls.push({ args });
+    return output(
+      claudeEnvelope(
+        "```json\n" +
+          JSON.stringify({ ...PLAN, taskId: "task_turn_two" }) +
+          "\n```",
+        "sess-plan-33333333",
+      ),
+    );
+  };
+  const second = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner: secondRunner,
+  });
+  const continued = await second.continueTask(
+    { ...session, resume: "sess-exec-22222222" },
+    {
+      task: { ...TASK, id: "task_turn_two", objective: "Update it again" },
+      canonicalVersion: await fixture.repositories.getCanonicalVersion(
+        fixture.repository,
+      ),
+      repositoryId: fixture.repository.id,
+    },
+  );
+  assert.equal(continued.id, session.id);
+  assert.equal(continued.taskId, "task_turn_two");
+  assert.equal(continued.resume, "sess-exec-22222222");
+  await second.requestPlan(continued.id);
+  const adoptedArgs = secondCalls[0]?.args ?? [];
+  assert.equal(
+    adoptedArgs[adoptedArgs.indexOf("--resume") + 1],
+    "sess-exec-22222222",
+  );
+  assert.equal(second.resumeToken(continued.id), "sess-plan-33333333");
+});
+
+test("claude: a stale resume token is retried without the flag, once", async () => {
+  // A restart or the CLI's own cleanup can invalidate a session id. That
+  // costs the conversation its memory, never the turn: the exec is retried
+  // once without --resume, the same policy the chat providers apply.
+  const fixture = await createFixture();
+  const calls: Array<{ args: readonly string[] }> = [];
+  const runner: PromptCliProcessRunner = async (_executable, args, options = {}) => {
+    calls.push({ args });
+    if (args.includes("--permission-mode")) {
+      return output(
+        claudeEnvelope(
+          "```json\n" + JSON.stringify(PLAN) + "\n```",
+          "sess-stale-44444444",
+        ),
+      );
+    }
+    if (args.includes("--resume")) {
+      return output("", {
+        exitCode: 1,
+        stderr: "No conversation found with session ID sess-stale-44444444",
+      });
+    }
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(
+      claudeEnvelope(JSON.stringify(COMPLETION), "sess-fresh-55555555"),
+    );
+  };
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+  await adapter.sendContext(session.id, contextFor(workspace));
+
+  // Plan, the failed resume, the bare retry — and nothing more.
+  assert.equal(calls.length, 3);
+  assert.equal(calls[1]?.args.includes("--resume"), true);
+  assert.equal(calls[2]?.args.includes("--resume"), false);
+  // The stale token is gone; the retry's envelope named the fresh state.
+  assert.equal(adapter.resumeToken(session.id), "sess-fresh-55555555");
+});
+
+test("the claude profile carries resume hooks and gemini does not", () => {
+  // Gemini's envelope names no session, so claiming to resume one would
+  // put a flag its CLI may not accept on every invocation.
+  assert.equal(typeof CLAUDE_PROFILE.resumeArgs, "function");
+  assert.equal(typeof CLAUDE_PROFILE.sessionId, "function");
+  assert.equal(GEMINI_PROFILE.resumeArgs, undefined);
+  assert.equal(GEMINI_PROFILE.sessionId, undefined);
+});
+
+test("parseClaudeSessionId accepts the envelope's id and nothing else", () => {
+  assert.equal(
+    parseClaudeSessionId(claudeEnvelope("done", "sess-ok-12345678")),
+    "sess-ok-12345678",
+  );
+  // Absent, malformed, or suspicious ids contribute nothing: a turn that
+  // cannot be resumed is still a turn that worked.
+  assert.equal(parseClaudeSessionId(claudeEnvelope("done")), undefined);
+  assert.equal(parseClaudeSessionId("not json"), undefined);
+  assert.equal(
+    parseClaudeSessionId(claudeEnvelope("done", "short")),
+    undefined,
+  );
+  assert.equal(
+    parseClaudeSessionId(
+      JSON.stringify({ result: "done", session_id: "bad id with spaces" }),
+    ),
+    undefined,
+  );
 });
 
 test(

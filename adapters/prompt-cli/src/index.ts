@@ -96,6 +96,23 @@ export interface PromptCliProfile {
    */
   unwrap(stdout: string): string;
   /**
+   * The flag that resumes a previous invocation's vendor-side session.
+   *
+   * Optional like `usage`, and for the same reason: it describes what one
+   * concrete CLI can do. Claude Code accepts `--resume <session_id>`;
+   * Gemini's envelope names no session, so its profile has no hook and its
+   * invocations never carry the flag.
+   */
+  resumeArgs?(token: string): string[];
+  /**
+   * The vendor session id this invocation's envelope reports, if any.
+   *
+   * Read after every successful exec and overwritten, not written once: a
+   * resumed Claude run forks a fresh session id, and the one worth keeping
+   * is always the newest — it names the state as this invocation left it.
+   */
+  sessionId?(stdout: string): string | undefined;
+  /**
    * What the invocation cost, if the CLI said.
    *
    * Undefined where the envelope carries no usage at all: "not reported" and
@@ -174,6 +191,38 @@ export function parseClaudeUsage(stdout: string): PromptCliUsage | undefined {
   };
 }
 
+/**
+ * The shape Claude Code session ids take, checked before one ever reaches an
+ * argv. The envelope is our own CLI's output, but a malformed or truncated id
+ * fed back through `--resume` buys a confusing exec failure later; refusing
+ * it here costs only the warmth. Same rule the chat providers apply.
+ */
+const CLAUDE_SESSION_ID = /^[A-Za-z0-9-]{8,64}$/u;
+
+/**
+ * Reads the `session_id` Claude Code's result envelope reports.
+ *
+ * The same JSON `unwrap` and `parseClaudeUsage` already parse, for the same
+ * reason: no second invocation, no second parse contract. Tolerant like the
+ * usage reader — an envelope without one contributes nothing, because a turn
+ * that cannot be resumed is still a turn that worked.
+ */
+export function parseClaudeSessionId(stdout: string): string | undefined {
+  let envelope: unknown;
+  try {
+    envelope = JSON.parse(stdout.trim()) as unknown;
+  } catch {
+    return undefined;
+  }
+  if (typeof envelope !== "object" || envelope === null) {
+    return undefined;
+  }
+  const sessionId = (envelope as { session_id?: unknown }).session_id;
+  return typeof sessionId === "string" && CLAUDE_SESSION_ID.test(sessionId)
+    ? sessionId
+    : undefined;
+}
+
 /** What one prompt-cli invocation cost, and which half of the task it bought. */
 export interface PromptCliTokenUsage extends PromptCliUsage {
   phase: "planning" | "execution";
@@ -243,6 +292,8 @@ export const CLAUDE_PROFILE: PromptCliProfile = {
     return record.result;
   },
   usage: parseClaudeUsage,
+  resumeArgs: (token) => ["--resume", token],
+  sessionId: parseClaudeSessionId,
 };
 
 /**
@@ -357,6 +408,13 @@ interface PromptCliSession {
   scopeDecisions: ScopeChangeDecision[];
   /** What a person chose, for the prompt that follows the question. */
   answers: Array<{ question: string; chose: string }>;
+  /**
+   * The newest vendor session id this session's execs reported — what a
+   * `--resume` would pick up. Overwritten after every successful exec,
+   * because a resumed run forks a fresh id; cleared when a resume attempt
+   * turns out stale.
+   */
+  resume: string | undefined;
   pendingScope: Map<
     string,
     {
@@ -802,6 +860,7 @@ export class PromptCliAdapter implements AgentAdapter {
       pendingScope: new Map(),
       pendingQuestion: new Map(),
       answers: [],
+      resume: undefined,
       cancelled: false,
     });
     this.emit(this.sessions.get(session.id)!, {
@@ -810,6 +869,81 @@ export class PromptCliAdapter implements AgentAdapter {
       occurredAt: new Date().toISOString(),
     });
     return session;
+  }
+
+  /**
+   * Continues a session as the next turn of its conversation. See the
+   * protocol doc: the whole record travels because this instance may never
+   * have seen the session — everything a warm continuation needs is on the
+   * vendor's side, named by the record's `resume` token, and adopting it is
+   * building a fresh per-turn record around that name.
+   *
+   * Everything per-turn resets — plan, context, completion, events, waiters —
+   * exactly as a `startTask` would leave it; what carries over is the
+   * identity, the token, and (same-instance) the cumulative token usage,
+   * which is per-session by contract.
+   */
+  public async continueTask(
+    session: AgentSession,
+    input: StartTaskInput,
+  ): Promise<AgentSession> {
+    if (input.repositoryId !== this.options.repository.id) {
+      throw new Error(
+        `${this.profile.name} adapter for ${this.options.repository.id} cannot continue a task for ${input.repositoryId}`,
+      );
+    }
+    const existing = this.sessions.get(session.id);
+    if (existing?.cancelled === true) {
+      throw new Error(`Session ${session.id} was cancelled`);
+    }
+    const planningWorkspace = await this.options.workspaces.create({
+      taskId: `continuing-${input.task.id}`,
+      rootPath: path.resolve(this.options.planningRoot),
+      repository: this.options.repository,
+      baseVersion: input.canonicalVersion,
+    });
+    // This instance's own memory of the session wins when it has one — it is
+    // at least as fresh as what the platform retained at the last settlement.
+    const resume = existing?.resume ?? session.resume;
+    const continued: AgentSession = {
+      id: session.id,
+      agentId: this.options.agentId,
+      taskId: input.task.id,
+      startedAt: session.startedAt,
+      ...(resume === undefined ? {} : { resume }),
+    };
+    this.sessions.set(session.id, {
+      session: continued,
+      input,
+      planningWorkspace,
+      plan: undefined,
+      context: undefined,
+      completion: undefined,
+      events: [],
+      eventHandlers: new Set(),
+      controller: undefined,
+      active: undefined,
+      tokenUsage: existing?.tokenUsage ?? [],
+      scopeDecisions: [],
+      pendingScope: new Map(),
+      pendingQuestion: new Map(),
+      answers: [],
+      resume,
+      cancelled: false,
+    });
+    this.emit(this.sessions.get(session.id)!, {
+      event: "progress",
+      message:
+        resume === undefined
+          ? `${this.profile.name} continuing the conversation cold`
+          : `${this.profile.name} resuming the conversation`,
+      occurredAt: new Date().toISOString(),
+    });
+    return continued;
+  }
+
+  public resumeToken(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.resume;
   }
 
   public async requestPlan(sessionId: string): Promise<AgentPlan> {
@@ -1166,27 +1300,37 @@ export class PromptCliAdapter implements AgentAdapter {
     if (record.cancelled) {
       throw new Error(`Session ${record.session.id} was cancelled`);
     }
-    const controller = new AbortController();
-    record.controller = controller;
-    // The prompt travels over stdin so objectives are never visible in the
-    // process list and never parsed as flags.
-    const active = this.runner(this.command, [...args], {
-      cwd: workingDirectory,
-      input: prompt,
-      ...(this.options.env === undefined ? {} : { env: this.options.env }),
+    // A held resume token rides on every invocation — planning, replanning
+    // and each execution round alike — so the whole turn happens inside the
+    // vendor session the conversation has been having, not beside it.
+    const resume = record.resume;
+    const resumeArgs = this.profile.resumeArgs;
+    const resumable = resume !== undefined && resumeArgs !== undefined;
+    let output = await this.spawn(
+      record,
+      workingDirectory,
+      resumable ? [...args, ...resumeArgs(resume)] : [...args],
+      prompt,
       timeoutMs,
-      maxOutputBytes: this.maxOutputBytes,
-      signal: controller.signal,
-    });
-    record.active = active;
-    let output: ProcessOutput;
-    try {
-      output = await active;
-    } finally {
-      if (record.active === active) {
-        record.active = undefined;
-        record.controller = undefined;
-      }
+    );
+    if (
+      output.exitCode !== 0 &&
+      resumable &&
+      output.aborted !== true &&
+      output.timedOut !== true
+    ) {
+      // A stale session id (restart, CLI cleanup) costs the conversation
+      // its memory, not the turn: retried once without the flag, the same
+      // policy the chat providers apply. The token is dropped first, so a
+      // later round in this same turn does not repeat the failure.
+      record.resume = undefined;
+      output = await this.spawn(
+        record,
+        workingDirectory,
+        [...args],
+        prompt,
+        timeoutMs,
+      );
     }
     if (output.exitCode !== 0) {
       const reason =
@@ -1212,7 +1356,45 @@ export class PromptCliAdapter implements AgentAdapter {
         at: new Date().toISOString(),
       });
     }
+    // Overwritten, never written once: a resumed run forks a fresh vendor
+    // session id, and the newest one is what names the state as this
+    // invocation left it.
+    const vendorSession = this.profile.sessionId?.(output.stdout);
+    if (vendorSession !== undefined) {
+      record.resume = vendorSession;
+    }
     return output.stdout;
+  }
+
+  /** One process, with the record's active/controller bookkeeping around it. */
+  private async spawn(
+    record: PromptCliSession,
+    workingDirectory: string,
+    argv: string[],
+    prompt: string,
+    timeoutMs: number,
+  ): Promise<ProcessOutput> {
+    const controller = new AbortController();
+    record.controller = controller;
+    // The prompt travels over stdin so objectives are never visible in the
+    // process list and never parsed as flags.
+    const active = this.runner(this.command, argv, {
+      cwd: workingDirectory,
+      input: prompt,
+      ...(this.options.env === undefined ? {} : { env: this.options.env }),
+      timeoutMs,
+      maxOutputBytes: this.maxOutputBytes,
+      signal: controller.signal,
+    });
+    record.active = active;
+    try {
+      return await active;
+    } finally {
+      if (record.active === active) {
+        record.active = undefined;
+        record.controller = undefined;
+      }
+    }
   }
 
   /** Every invocation this adapter made, for cost accounting and benchmarks. */
