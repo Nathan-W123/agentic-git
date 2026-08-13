@@ -89,6 +89,9 @@ import { AuditWebSocketHub, type WebSocketAuthorization } from "./websocket.js";
 
 const API_PREFIX = "/api/v1";
 
+/** Mirrors the attachment store's own cap; see `AttachmentStore` in apps/web. */
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
+
 /**
  * The vendor CLI behind each provider id, for @mention dispatch: a task runs
  * under a vendor (`SubmitTaskInput.vendor`/`openSubmitterCredentialHome`),
@@ -1399,6 +1402,17 @@ export interface ApiOperations {
     projectId: string;
     repositoryId: string;
   }): Promise<void>;
+  /**
+   * Images posted into a channel. Absent on a deployment with nowhere to put
+   * them, in which case the composer offers no attach control.
+   */
+  attachmentSave?(input: {
+    bytes: Buffer;
+    contentType: string;
+  }): Promise<string>;
+  attachmentRead?(
+    id: string,
+  ): Promise<{ bytes: Buffer; contentType: string } | undefined>;
   /** Canonical branch history, newest first. */
   repositoryVersions?(input: {
     projectId: string;
@@ -4526,6 +4540,85 @@ export class ApiGateway {
       return;
     }
 
+    // Images in a channel. Scoped to a repository so the permission question
+    // is the one already answered for everything else in that room: whoever
+    // may read the channel may read what was posted into it.
+    // One pattern per shape rather than an optional trailing group: `matchPath`
+    // maps every group through `decodeURIComponent`, so a group that did not
+    // participate comes back as the *string* "undefined" and no branch tests
+    // true. Every other route here is written this way for the same reason.
+    const attachmentMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/attachments$`,
+        "u",
+      ),
+    );
+    const attachmentItemMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/attachments/([^/]+)$`,
+        "u",
+      ),
+    );
+    if (attachmentMatch !== undefined || attachmentItemMatch !== undefined) {
+      const [projectId = "", repositoryId = "", attachmentId] =
+        attachmentItemMatch ?? attachmentMatch ?? [];
+      const operations = this.options.operations;
+      if (
+        operations.attachmentSave === undefined ||
+        operations.attachmentRead === undefined
+      ) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot store images",
+        );
+      }
+      if (method === "POST" && attachmentItemMatch === undefined) {
+        await authorizeRepository(
+          this.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "run_task",
+        );
+        const contentType = request.headers["content-type"] ?? "";
+        const bytes = await this.readBinary(request, MAX_ATTACHMENT_BYTES);
+        const id = await this.performOperation(
+          "attachment_rejected",
+          async () => await operations.attachmentSave!({ bytes, contentType }),
+        );
+        this.sendJson(response, 200, { id });
+        return;
+      }
+      if (method === "GET" && attachmentId !== undefined) {
+        await authorizeRepository(
+          this.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "view",
+        );
+        const found = await operations.attachmentRead(attachmentId);
+        if (found === undefined) {
+          throw new HttpError(404, "not_found", "That image was not found");
+        }
+        // `nosniff` matters more here than anywhere else in this API: the
+        // content type is derived from an allowlist rather than from the
+        // uploader, and this is what stops a browser overriding it and
+        // treating the bytes as something executable.
+        response.setHeader("Content-Type", found.contentType);
+        response.setHeader("Content-Length", String(found.bytes.length));
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        response.setHeader("Content-Disposition", "inline");
+        response.setHeader("Cache-Control", "private, max-age=31536000, immutable");
+        response.writeHead(200);
+        response.end(found.bytes);
+        return;
+      }
+    }
+
     // Looking at the running app, through here rather than at its own port.
     //
     // The preview binds loopback and no port is opened, which on a hosted
@@ -5017,29 +5110,26 @@ export class ApiGateway {
       // The inbox and the roster in one call, because the screen that shows
       // one always shows the other: a list of conversations is useless without
       // the people you have not written to yet.
-      const [conversations, memberships, users] = await Promise.all([
+      const [conversations, reachable] = await Promise.all([
         this.options.store.listDirectConversations(projectId, principal.user.id),
-        this.options.store.listMemberships(project.project.organizationId),
-        this.options.store.listUsers(),
+        this.projectPeople(projectId, project.project.organizationId),
       ]);
-      const byId = new Map(users.map((user) => [user.id, user]));
       const present = new Set(this.webSockets.connectedUserIds(projectId));
       this.sendJson(response, 200, {
         conversations,
-        // Everyone who could be written to, with whether they are here now.
-        // Presence is read off the open sockets rather than a stored flag:
-        // see `connectedUserIds`.
-        people: memberships
-          .filter((membership) => membership.userId !== principal.user.id)
-          .map((membership) => {
-            const user = byId.get(membership.userId);
-            return {
-              id: membership.userId,
-              name: user?.displayName ?? "Someone",
-              role: membership.role,
-              online: present.has(membership.userId),
-            };
-          }),
+        // Everyone who could be written to, with whether they are here now —
+        // and "everyone" is the project's whole room, grants included. A
+        // repository-scoped invite made somebody a colleague in every channel
+        // of the project and a stranger to the DM list; the same person you
+        // could read could not be written to.
+        people: [...reachable.values()]
+          .filter((person) => person.userId !== principal.user.id)
+          .map((person) => ({
+            id: person.userId,
+            name: person.name,
+            role: person.role,
+            online: present.has(person.userId),
+          })),
       });
       return;
     }
@@ -5079,11 +5169,14 @@ export class ApiGateway {
           "A direct message needs two people",
         );
       }
-      const membership = await this.options.store.getMembership(
+      // Reachability is the project's whole room — memberships and grants —
+      // the same set the channel roster shows. An org check alone made a
+      // repo-invited teammate unwritable.
+      const reachable = await this.projectPeople(
+        projectId,
         project.project.organizationId,
-        otherId,
       );
-      if (membership === undefined) {
+      if (!reachable.has(otherId)) {
         throw new HttpError(404, "not_found", "That person was not found");
       }
       if (method === "GET") {
@@ -10286,6 +10379,48 @@ export class ApiGateway {
     });
   }
 
+  /**
+   * Everyone in this project's room: organization members plus anyone holding
+   * a grant on any of the project's repositories. The one answer for the
+   * channel roster, the DM list and DM reachability, so a person the room
+   * shows is always a person the room can write to.
+   */
+  private async projectPeople(
+    projectId: string,
+    organizationId: string,
+  ): Promise<Map<string, { userId: string; name: string; role: string }>> {
+    const [memberships, repositories, users] = await Promise.all([
+      this.options.store.listMemberships(organizationId),
+      this.options.store.listProjectRepositories(projectId),
+      this.options.store.listUsers(),
+    ]);
+    const grants = (
+      await Promise.all(
+        repositories.map((repository) =>
+          this.options.store
+            .listRepositoryGrants(repository.id)
+            .catch(() => []),
+        ),
+      )
+    ).flat();
+    const byId = new Map(users.map((user) => [user.id, user]));
+    const people = new Map<string, { userId: string; name: string; role: string }>();
+    for (const entry of [...memberships, ...grants]) {
+      if (people.has(entry.userId)) {
+        continue;
+      }
+      const user = byId.get(entry.userId);
+      if (user !== undefined) {
+        people.set(entry.userId, {
+          userId: entry.userId,
+          name: user.displayName,
+          role: entry.role,
+        });
+      }
+    }
+    return people;
+  }
+
   private async narrateConflicts(): Promise<void> {
     const events = await this.options.store.listAuditEvents({
       types: ["conflict_detected"],
@@ -10956,6 +11091,39 @@ export class ApiGateway {
         ...input.data,
       },
     });
+  }
+
+  /**
+   * Reads a binary body under an explicit cap.
+   *
+   * Its own cap rather than the JSON one: an image is legitimately far larger
+   * than any request made of this API, and raising the shared limit to suit it
+   * would raise it for every route that has no business receiving megabytes.
+   */
+  private async readBinary(
+    request: IncomingMessage,
+    limit: number,
+  ): Promise<Buffer> {
+    const declared = Number.parseInt(
+      request.headers["content-length"] ?? "0",
+      10,
+    );
+    if (Number.isFinite(declared) && declared > limit) {
+      throw new HttpError(413, "body_too_large", "That image is too large");
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      // Checked as it arrives as well as up front, because `content-length` is
+      // the sender's claim and a chunked body does not carry one at all.
+      if (size > limit) {
+        throw new HttpError(413, "body_too_large", "That image is too large");
+      }
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks);
   }
 
   private async readJson(request: IncomingMessage): Promise<unknown> {

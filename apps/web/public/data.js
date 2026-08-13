@@ -1179,12 +1179,20 @@ export function currentUserId() {
  * naming one.
  */
 export function memberName(userId) {
-  const member = state.members.find(
-    (entry) =>
-      entry.userId === userId ||
-      entry.id === userId ||
-      entry.user?.id === userId,
-  );
+  // The org member list first, then every room list and the DM roster: a
+  // repository-invited teammate is in the latter and not the former, and
+  // falling straight through to the raw id printed "user_9f2…" as a name in
+  // every message they sent.
+  const rooms = Object.values(state.channelPeople ?? {}).flat();
+  const member =
+    state.members.find(
+      (entry) =>
+        entry.userId === userId ||
+        entry.id === userId ||
+        entry.user?.id === userId,
+    ) ??
+    rooms.find((entry) => entry.userId === userId || entry.user?.id === userId) ??
+    state.dmPeople.find((entry) => entry.id === userId);
   return (
     member?.user?.displayName ??
     member?.user?.email ??
