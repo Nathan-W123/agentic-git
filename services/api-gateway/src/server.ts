@@ -9827,21 +9827,83 @@ export class ApiGateway {
       const first = (found?.objective ?? "another task").split("\n")[0] ?? "";
       return first.length > 60 ? `"${first.slice(0, 57)}…"` : `"${first}"`;
     };
-    const held = objectiveOf(watched.taskId);
+    // "@Zephyrus's task" reads better than a quoted objective fragment, and
+    // the channel already knows what each agent is called in this room. The
+    // objective still rides along — two of one person's agents can hold work
+    // at once, and the name alone would not say which.
+    const overrides = await this.options.store
+      .listChannelAgentOverrides(watched.repositoryId)
+      .catch(() => ({}) as Record<string, { name?: string }>);
+    const describe = (taskId: unknown): string => {
+      const found = tasks.find((candidate) => candidate.id === taskId);
+      const agent = found?.agentId ?? "";
+      const name = overrides[agent]?.name;
+      const objective = objectiveOf(taskId);
+      return name === undefined || name === ""
+        ? `${objective}`
+        : `@${name}'s task ${objective}`;
+    };
+    const held = describe(watched.taskId);
     const blockers = (Array.isArray(data["blockedBy"]) ? data["blockedBy"] : [])
       .slice(0, 2)
-      .map(objectiveOf);
+      .map(describe);
     const blocker = blockers.length > 0 ? blockers.join(" and ") : "work in flight";
-    const line =
-      data["partial"] === true
-        ? `⚖️ ${held} overlaps files leased to ${blocker} — starting it on ` +
-          `the free part now; the overlapping part follows once that lease ` +
-          `clears.`
-        : data["status"] === "blocked"
-          ? `⚖️ Holding ${held} — it overlaps ${blocker} too heavily to run ` +
-            `alongside it. Its agent is narrowing the plan.`
-          : `⚖️ Holding ${held} — files it needs are leased to ${blocker}. ` +
-            `It starts the moment that lands.`;
+    const fileList = (value: unknown): string[] =>
+      (Array.isArray(value) ? value : []).filter(
+        (entry): entry is string => typeof entry === "string",
+      );
+    const clause = (files: string[]): string =>
+      files.slice(0, 4).join(", ") +
+      (files.length > 4 ? ` and ${String(files.length - 4)} more` : "");
+    const status = String(data["status"] ?? "");
+    const approved =
+      status === "approved" || status === "approved_with_constraints";
+    let line: string;
+    if (data["partial"] === true) {
+      const granted = fileList(data["grantedFiles"]);
+      const deferredFiles = fileList(
+        (Array.isArray(data["deferredResources"])
+          ? data["deferredResources"]
+          : []
+        ).map((entry) =>
+          typeof entry === "object" && entry !== null
+            ? (entry as { resourceId?: unknown }).resourceId
+            : entry,
+        ),
+      );
+      line =
+        `⚖️ Starting ${held} on ${granted.length > 0 ? clause(granted) : "the free part"} — ` +
+        `holding ${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"} ` +
+        `because ${blocker} has the lease; that part follows when it lands.`;
+    } else if (approved) {
+      // The hold clearing is as much news as the hold was — a room told
+      // "it starts the moment that lands" deserves the moment. Only said
+      // when a hold was actually announced for this task, or every ordinary
+      // approval would ring the bell.
+      const prior = await this.options.store.listAuditEvents({
+        taskId: watched.taskId,
+        types: ["plan_admitted"],
+      });
+      const wasHeld = prior
+        .slice(0, -1)
+        .some((entry) =>
+          ["sequenced", "blocked"].includes(
+            String(entry.event.data["status"] ?? ""),
+          ),
+        );
+      if (!wasHeld) {
+        return;
+      }
+      line = `⚖️ Released — ${held} starts now; what it was waiting on has landed.`;
+    } else if (status === "blocked") {
+      line =
+        `⚖️ Holding ${held} — it overlaps ${blocker} too heavily to run ` +
+        `alongside it. Its agent is narrowing the plan.`;
+    } else {
+      line =
+        `⚖️ Holding ${held} — files it needs are leased to ${blocker}. ` +
+        `It starts the moment that lands.`;
+    }
     await this.appendChannelEntry({
       projectId: watched.projectId,
       repositoryId: watched.repositoryId,
@@ -10077,10 +10139,11 @@ export class ApiGateway {
           // from. It is the referee's call, so it speaks in the room's voice
           // rather than an agent's.
           if (
-            record.event.type === "plan_admitted" &&
-            (data["status"] === "sequenced" ||
-              data["status"] === "blocked" ||
-              data["partial"] === true)
+            // Approved events pass too: `announceArbitration` speaks on an
+            // approval only when it releases a previously-announced hold —
+            // the room that was told "it starts the moment that lands"
+            // deserves the moment itself.
+            record.event.type === "plan_admitted"
           ) {
             await this.announceArbitration(watched, data).catch(() => undefined);
           }
