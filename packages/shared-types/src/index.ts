@@ -762,17 +762,35 @@ export function withoutRoleContext(objective: string): string {
  */
 export function readsAsReportRequest(objective: string): boolean {
   const request = withoutRoleContext(objective);
+  // A forbidden edit is not a requested one. "Don't change anything" is the
+  // plainest way anybody has of saying a task is read-only, and it names an
+  // editing verb to say so — so the veto below read it as a change request and
+  // failed the task for changing nothing, which is the exact outcome that
+  // sentence was asking for. Negated clauses come out before the veto looks.
+  const asked = request.replace(
+    /\b(?:do\s+not|don'?t|never|without|avoid|no\s+need\s+to)\s+(?:\w+\s+){0,2}?(?:fix|add|change|edit|write|create|remove|delete|rename|update|implement|refactor|patch|modify|touch|alter)\w*/giu,
+    " ",
+  );
   if (
     /\b(fix|add|change|edit|write|create|remove|delete|rename|update|implement|refactor|patch|revert|bump|replace|move|migrate|upgrade|install|wire|hook)\b/iu.test(
-      request,
+      asked,
     )
   ) {
     return false;
   }
   return (
-    /\b(audit|audits|audited|auditing|summar(?:y|ise|ize|ised|ized|ising|izing|ies)|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|analysis|inspect|inspects|inspected|inspecting|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|explain|explains|explained|explaining)\b/iu.test(
-      request,
+    // `look`, `describe`, `review`, `report`, `investigate` and `list` are
+    // how people actually ask for a report. The list began with the formal
+    // words — audit, analyse, diagnose — and missed the ordinary ones, so
+    // "look at this repository and describe what it is" was not recognised as
+    // a request to look at all.
+    /\b(audit|audits|audited|auditing|summar(?:y|ise|ize|ised|ized|ising|izing|ies)|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|analysis|inspect|inspects|inspected|inspecting|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|explain|explains|explained|explaining|describe|describes|described|describing|review|reviews|reviewed|reviewing|report|reports|reported|reporting|investigate|investigates|investigated|investigating|list|lists|listed|listing)\b/iu.test(
+      asked,
     ) ||
+    // "Look at X and tell me Y" — the one that names no formal verb at all.
+    // Bare `look` is too loose ("look, just fix it"), so it is required to be
+    // looking *at* or *into* something.
+    /\blook(?:s|ed|ing)?\s+(?:at|into|through|over)\b/iu.test(asked) ||
     // Running something and saying what happened. The result is the output,
     // not a diff — "run the test suite" that changed no files did exactly what
     // was asked, and was recorded as a failure for it.
@@ -782,15 +800,15 @@ export function readsAsReportRequest(objective: string): boolean {
     // change request, and the veto is what tells them apart. That ordering is
     // why these can be this permissive.
     /\b(test|tests|tested|testing|verify|verifies|verified|verifying|validate|validates|validated|validating|reproduce|reproduces|reproduced|reproducing|benchmark|benchmarks|benchmarked|benchmarking|profile|profiles|profiled|profiling|lint|lints|linted|linting|typecheck|typechecks|typechecked|typechecking)\b/iu.test(
-      request,
+      asked,
     ) ||
     // The phrase, for the common request that names no verb of its own.
     /\brun(?:s|ning)?\s+(?:the\s+)?(?:unit\s+|integration\s+|e2e\s+)?(?:test|tests|test\s+suite|suite|checks|linter|benchmarks?)\b/iu.test(
-      request,
+      asked,
     ) ||
-    /\?\s*$/u.test(request.trim()) ||
+    /\?\s*$/u.test(asked.trim()) ||
     /^\s*(?:what|which|where|when|why|how|who|is|are|does|do|did|can|could|should|would)\b/iu.test(
-      request,
+      asked,
     )
   );
 }

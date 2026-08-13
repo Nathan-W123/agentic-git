@@ -480,6 +480,52 @@ test("running something and reporting the result is not a failed change", () => 
   }
 });
 
+test("telling an agent not to change anything is not a request to change something", () => {
+  // The plainest way to say a task is read-only names an editing verb to say
+  // it, so the veto read "don't change anything" as a change request and
+  // failed the task for changing nothing — which is exactly what that
+  // sentence asked for.
+  for (const objective of [
+    "Look at this repository and describe what it is. Don't change anything.",
+    "Describe the entry point. Do not edit any files.",
+    "Summarise the architecture without changing anything",
+    "Review the auth flow — never modify the code",
+    "Explain what this service does, no need to change it",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), true, objective);
+  }
+
+  // A real edit still reads as one. Negation only excuses the verb it negates,
+  // so a request that forbids one change and asks for another is a change
+  // request, and an empty changeset from it is still a failure.
+  for (const objective of [
+    "Don't change the schema, but fix the retry loop",
+    "Without touching the tests, add a health endpoint",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), false, objective);
+  }
+});
+
+test("the ordinary words for asking to be told something count as a report", () => {
+  // The list began with the formal verbs — audit, analyse, diagnose — and
+  // missed how people actually ask, so a plain "look at this and describe it"
+  // was not recognised as a request to look.
+  for (const objective of [
+    "Look at this repository and tell me what language it is",
+    "describe the entry point of this service",
+    "review the changes on this branch",
+    "investigate why the run is slow",
+    "list the routes this app serves",
+    "report on the state of the migration",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), true, objective);
+  }
+
+  // `look` on its own is not enough: it is as often a filler word before an
+  // instruction as it is a request to inspect something.
+  assert.equal(readsAsReportRequest("look, just add the endpoint"), false);
+});
+
 test("a role preamble does not decide whether a request was a report", () => {
   // A channel dispatch prepends the agent's declared role to every objective
   // it submits. That sentence is the operator describing the agent, not
