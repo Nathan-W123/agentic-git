@@ -328,7 +328,10 @@ function rosterRow(agent, canModerate) {
           // the room — the group channel is for work everyone should see. The
           // act sits on the avatar rather than the row so it wins over the
           // row's settings toggle without taking the rest of the row with it.
-          agent.mine
+          // Personal agents only. An org agent's whole point is that its
+          // work happens where the team can see it; a private side-channel
+          // to one would put shared spend behind a curtain.
+          agent.mine && agent.visibility !== "org"
             ? `data-act="agent-chat-open" data-value="${esc(agent.id)}"`
             : ""
         }
