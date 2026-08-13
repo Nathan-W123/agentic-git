@@ -1813,18 +1813,28 @@ function threadReplies(root, repositoryId) {
   }
   const finishedAt = replies.findIndex((reply) => isThreadEnding(reply));
   const done = finishedAt !== -1;
-  // The title line names the task and is not commentary; it stays out.
+  // The title line names the task, and it now sits inside the thinking block
+  // rather than above it. It used to be its own message row on the reasoning
+  // that it is not commentary — true, and it still left the thread opening
+  // with a restatement of the request that was already the thread's own title
+  // two lines further up. Folded in, it is there for whoever wants the exact
+  // wording and out of the way of everybody else.
   const [first, ...rest] = replies;
   const titleLine = /^Task: /u.test(String(first?.content ?? "")) ? first : undefined;
   const body = titleLine === undefined ? replies : rest;
   const steps = body.filter(isThreadThinking);
   const outcome = body.filter((reply) => !isThreadThinking(reply));
 
-  const count = `${steps.length} step${steps.length === 1 ? "" : "s"}`;
+  // Silent at zero. A task that has been stated and not yet worked on has a
+  // block holding the request alone, and "0 steps" beside it reads as a
+  // failure to do something rather than as work not started.
+  const count =
+    steps.length === 0
+      ? ""
+      : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
   return `
-    ${titleLine === undefined ? "" : messageRow(titleLine, repositoryId, { isReply: true })}
     ${
-      steps.length === 0
+      steps.length === 0 && titleLine === undefined
         ? ""
         : `<details class="thread-thinking"${
             // Open while it runs, unless the reader has said otherwise.
@@ -1843,7 +1853,17 @@ function threadReplies(root, repositoryId) {
              <summary data-act="thinking-toggle" data-value="${esc(root.id)}">
                <span class="tt-label">Thinking</span>
                <span class="tt-count">${esc(count)}</span></summary>
-             <div class="tt-body">${steps
+             <div class="tt-body">${
+               // The request, in the agent's own restatement of it, above the
+               // steps it took. First because it is what the steps are for.
+               titleLine === undefined
+                 ? ""
+                 : `<p class="tt-task">${esc(
+                     String(titleLine.content ?? "")
+                       .replace(/^Task:\s*/u, "")
+                       .trim(),
+                   )}</p>`
+             }${steps
                .map((reply) => String(reply.content ?? "").trim())
                .filter((text) => text.length > 0)
                .join("\n")

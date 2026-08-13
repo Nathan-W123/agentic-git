@@ -4410,6 +4410,15 @@ svg {
   padding: 0 3px;
 }
 
+/* The request itself, at the top of the thinking it produced. Set apart from
+   the steps because it is the one line in there that somebody else wrote. */
+.tt-body .tt-task {
+  color: var(--text-2, #a6a6a6);
+  border-left: 2px solid var(--accent-line);
+  padding-left: 8px;
+  margin-bottom: 8px;
+}
+
 /* The agent's account of what it did, foldable because it is often the longest
    thing in the thread. Deliberately identical to `.thread-thinking` — they sit
    inches apart in the same thread, and two disclosures that behave the same
