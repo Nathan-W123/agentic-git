@@ -470,6 +470,24 @@ function chanSidebar(activeRepositoryId) {
       </button>
       <div class="chan-list-label">Agents</div>
       ${
+        // The broadcast address, listed with the agents it reaches so it is
+        // discoverable from the roster and not only from typing "@". Clicking
+        // it starts the message rather than sending one — the person still
+        // says what they want asked.
+        roster.length < 2
+          ? ""
+          : `<div class="roster-row" role="button" tabindex="0"
+               data-act="mention-agents-insert">
+               <div class="roster-row-main">
+                 <span class="rr-avatar">${icon("users")}</span>
+                 <span class="rr-body">
+                   <div class="rr-name">@agents</div>
+                   <div class="rr-role">Ask every agent at once</div>
+                 </span>
+               </div>
+             </div>`
+      }
+      ${
         // No empty state. The "Add an agent" button sits directly beneath and
         // already says what the absence means; a sentence saying the same
         // thing above it is a line to read before reaching the thing to click.
