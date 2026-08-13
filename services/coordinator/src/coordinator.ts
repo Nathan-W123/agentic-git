@@ -1699,14 +1699,9 @@ export class Coordinator {
       return { ...entry, workspace, changeSet };
     } catch (error) {
       const failures = [errorMessage(error)];
-      try {
-        await entry.adapter.cancel(entry.session.id);
-      } catch (cancelError) {
-        failures.push(`Agent cleanup failed: ${errorMessage(cancelError)}`);
-      }
       const cleanupFailure = await this.cleanupTask(
+        entry,
         workspace,
-        entry.task.id,
         recorder,
         runAudit,
       );
@@ -2432,8 +2427,8 @@ export class Coordinator {
     }
 
     const cleanupFailure = await this.cleanupTask(
+      result,
       result.workspace,
-      result.task.id,
       recorder,
       runAudit,
     );
@@ -2535,13 +2530,37 @@ export class Coordinator {
     await recorder?.audit(type, taskId, data);
   }
 
+  /**
+   * Tears down what a settled task was holding: its agent session, its
+   * workspace, and its ownership leases. Runs on every outcome — a task that
+   * integrated and a task that failed release the same three things.
+   */
   private async cleanupTask(
+    entry: {
+      task: TaskDefinition;
+      adapter: AgentAdapter;
+      session: AgentSession;
+    },
     workspace: TaskWorkspace | undefined,
-    taskId: string,
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
   ): Promise<string | undefined> {
+    const taskId = entry.task.id;
     const failures: string[] = [];
+    // Closed, not dropped. Settlement is the one moment the coordinator
+    // knows the session has no further use — the change set is collected,
+    // and any conflict repair that wanted the agent again has already run.
+    // `cancel` is the protocol's only teardown verb and doubles as the close
+    // for a finished session, which is how the remote worker has always
+    // ended its runs. Before this call existed here, every adapter.cancel in
+    // the coordinator sat on a failure path, so a task that succeeded left
+    // its session — and whatever the adapter held for it, like generic-cli's
+    // planning workspace — to outlive the task for no reason.
+    try {
+      await entry.adapter.cancel(entry.session.id);
+    } catch (error) {
+      failures.push(`agent session: ${errorMessage(error)}`);
+    }
     if (workspace !== undefined) {
       try {
         await this.workspaces.destroy(workspace);

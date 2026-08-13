@@ -262,6 +262,15 @@ export interface AgentAdapter {
    */
   resolveAction?(sessionId: string, result: AgentActionResult): Promise<void>;
 
+  /**
+   * Ends a session, whatever state it is in.
+   *
+   * Both the abort and the close: the coordinator calls this when a task
+   * settles — integrated, failed and cancelled alike — because the protocol
+   * has no second verb for a session that merely finished. Implementations
+   * must tolerate a session whose work already completed, and a second
+   * cancel of one already cancelled; both happen in ordinary operation.
+   */
   cancel(sessionId: string): Promise<void>;
 
   collectChanges(sessionId: string): Promise<ChangeSet>;
