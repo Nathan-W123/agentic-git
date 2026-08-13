@@ -640,6 +640,7 @@ async function runTask(
         const statuses: readonly SubmittedTaskStatus[] = [
           "submitted",
           "claimed",
+          "open",
           "integrated",
           "failed",
           "cancelled",

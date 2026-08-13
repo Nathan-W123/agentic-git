@@ -1254,6 +1254,7 @@ const ROLES: readonly OrganizationRole[] = [
 const TASK_STATUSES: readonly SubmittedTaskStatus[] = [
   "submitted",
   "claimed",
+  "open",
   "integrated",
   "failed",
   "cancelled",
@@ -1355,6 +1356,14 @@ export interface ApiOperations {
      * left, and hands the pair to the planning prompt as background.
      */
     context?: string;
+    /**
+     * The conversation this task is one turn of — the thread root's message
+     * id, the one identity every turn of a thread shares. A task submitted
+     * with it leaves its status `open` when a turn lands, waiting for the
+     * next reply, and its arrival settles the conversation's previous open
+     * turn. See docs/architecture/conversational-tasks.md.
+     */
+    conversationId?: string;
   }): Promise<SubmittedTask>;
   runRepository(input: {
     projectId: string;
@@ -7579,7 +7588,7 @@ export class ApiGateway {
      * `submitTask` call below — see `maybeAutoClaimTask` — differing only in
      * how the candidate was chosen and how the claim is announced.
      */
-    trigger?: "mention" | "auto_claim" | "audit_fix";
+    trigger?: "mention" | "auto_claim" | "audit_fix" | "conversation";
     /**
      * Overrides the default "Submitted a task…" confirmation. Auto-claim
      * uses this to explain *why* it picked this agent, since nobody asked
@@ -7829,6 +7838,12 @@ export class ApiGateway {
         // it. Without this "now do the same for the other file" reaches the
         // agent with no idea what "the same" refers to.
         ...(threadContext === undefined ? {} : { context: threadContext }),
+        // The thread root is the conversation: every turn dispatched from
+        // this thread shares it. It is what lets a landed turn wait as
+        // `open` instead of ending, a reply continue the task instead of
+        // commissioning a stranger, and the coordinator keep the turn's
+        // workspace warm for the next one.
+        conversationId: threadRootId,
       });
       await this.options.store.appendAudit(undefined, {
         type: "task_submitted",
@@ -8371,6 +8386,41 @@ export class ApiGateway {
       }))
     ) {
       return;
+    }
+    // A reply in a thread whose task is open continues that task, whoever it
+    // mentions. This is the routing rule stage four of
+    // docs/architecture/conversational-tasks.md was waiting for: the
+    // thread's last turn landed and its task is waiting for exactly this
+    // message, so the work goes back to the agent whose conversation it is —
+    // a mention of somebody else in the reply is content for the turn, not a
+    // re-assignment. Same dispatch path as every other reply-triggered task;
+    // the conversation id it derives from this thread's root is what makes
+    // the coordinator resume the kept workspace instead of building one.
+    if (owner !== undefined && looksLikeTaskRequest(question)) {
+      const rootTask =
+        root.taskId === undefined
+          ? undefined
+          : (
+              await this.options.store.listSubmittedTasks({
+                repositoryId: input.repositoryId,
+              })
+            ).find((task) => task.id === root.taskId);
+      if (
+        rootTask?.status === "open" &&
+        (owner.visibility !== "personal" ||
+          owner.userId === input.viewerId)
+      ) {
+        await this.dispatchOneMention({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          content: question,
+          senderId: input.viewerId,
+          candidate: owner,
+          threadMessageId: input.messageId,
+          trigger: "conversation",
+        });
+        return;
+      }
     }
     // Asking for work inside a thread continues that thread rather than
     // starting a new one. This is the explicit half of grouping related work:

@@ -1641,33 +1641,56 @@ export class SqliteCoordinationStore implements CoordinationStore {
       validationCommands: input.validationCommands,
       submittedBy: input.submittedBy,
       context: input.context,
+      conversationId: input.conversationId,
       status: "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,
       completedAt: undefined,
+      openedAt: undefined,
       runId: undefined,
     };
 
-    this.db
-      .prepare(
-        `INSERT INTO submitted_tasks
-           (id, repository_id, project_id, objective, agent_id,
-            validation_commands_json, submitted_by, status, submitted_at,
-            context)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      )
-      .run(
-        task.id,
-        task.repositoryId,
-        task.projectId ?? DEFAULT_PROJECT_ID,
-        task.objective,
-        task.agentId,
-        JSON.stringify(task.validationCommands),
-        task.submittedBy ?? null,
-        task.status,
-        task.submittedAt,
-        task.context ?? null,
-      );
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      // A new turn settles the conversation's previous one: its work already
+      // landed, and what it was waiting for has now arrived. One transaction
+      // with the insert, so "at most one open turn per conversation" cannot
+      // be caught false in between.
+      if (task.conversationId !== undefined) {
+        this.db
+          .prepare(
+            `UPDATE submitted_tasks
+             SET status = 'integrated', completed_at = ?
+             WHERE conversation_id = ? AND status = 'open'`,
+          )
+          .run(task.submittedAt, task.conversationId);
+      }
+      this.db
+        .prepare(
+          `INSERT INTO submitted_tasks
+             (id, repository_id, project_id, objective, agent_id,
+              validation_commands_json, submitted_by, status, submitted_at,
+              context, conversation_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(
+          task.id,
+          task.repositoryId,
+          task.projectId ?? DEFAULT_PROJECT_ID,
+          task.objective,
+          task.agentId,
+          JSON.stringify(task.validationCommands),
+          task.submittedBy ?? null,
+          task.status,
+          task.submittedAt,
+          task.context ?? null,
+          task.conversationId ?? null,
+        );
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return task;
   }
 
@@ -1769,7 +1792,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `UPDATE submitted_tasks
          SET status = 'cancelled', completed_at = ?
-         WHERE id = ? AND status IN ('submitted', 'claimed')`,
+         WHERE id = ? AND status IN ('submitted', 'claimed', 'open')`,
       )
       .run(completedAt, taskId);
     if (result.changes === 0) {
@@ -1817,6 +1840,60 @@ export class SqliteCoordinationStore implements CoordinationStore {
     }
   }
 
+  public async openSubmittedTask(taskId: TaskId, runId?: string): Promise<void> {
+    const result = this.db
+      .prepare(
+        `UPDATE submitted_tasks
+         SET status = 'open', opened_at = ?, run_id = ?
+         WHERE id = ? AND status = 'claimed'`,
+      )
+      .run(new Date().toISOString(), runId ?? null, taskId);
+    if (result.changes === 0) {
+      const current = this.db
+        .prepare("SELECT status FROM submitted_tasks WHERE id = ?")
+        .get(taskId) as Row | undefined;
+      if (current === undefined) {
+        throw new Error(`Unknown submitted task: ${taskId}`);
+      }
+      throw new Error(
+        `Task ${taskId} cannot be opened from status ${text(current, "status")}`,
+      );
+    }
+  }
+
+  public async expireOpenTasks(
+    cutoff: string,
+    filter: { repositoryId?: string } = {},
+  ): Promise<SubmittedTask[]> {
+    const repositoryClause =
+      filter.repositoryId === undefined ? "" : " AND repository_id = ?";
+    const values =
+      filter.repositoryId === undefined
+        ? [cutoff]
+        : [cutoff, filter.repositoryId];
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM submitted_tasks
+         WHERE status = 'open' AND opened_at <= ?${repositoryClause}
+         ORDER BY submitted_at, rowid`,
+      )
+      .all(...values) as Row[];
+    const completedAt = new Date().toISOString();
+    const update = this.db.prepare(
+      `UPDATE submitted_tasks
+       SET status = 'integrated', completed_at = ?
+       WHERE id = ? AND status = 'open'`,
+    );
+    for (const row of rows) {
+      update.run(completedAt, text(row, "id"));
+    }
+    return rows.map((row) => ({
+      ...this.toSubmittedTask(row),
+      status: "integrated" as const,
+      completedAt,
+    }));
+  }
+
   private toSubmittedTask(row: Row): SubmittedTask {
     return {
       id: text(row, "id"),
@@ -1830,10 +1907,12 @@ export class SqliteCoordinationStore implements CoordinationStore {
       ),
       submittedBy: optionalText(row, "submitted_by"),
       context: optionalText(row, "context"),
+      conversationId: optionalText(row, "conversation_id"),
       status: text(row, "status") as SubmittedTaskStatus,
       submittedAt: text(row, "submitted_at"),
       claimedAt: optionalText(row, "claimed_at"),
       completedAt: optionalText(row, "completed_at"),
+      openedAt: optionalText(row, "opened_at"),
       runId: optionalText(row, "run_id"),
     };
   }

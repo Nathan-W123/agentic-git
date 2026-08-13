@@ -1618,6 +1618,8 @@ const TASK_GLYPH = {
   failed: "✕",
   cancelled: "–",
   awaiting_approval: "?",
+  // A conversation between turns: the last turn landed, more may come.
+  open: "…",
 };
 
 function agentHistory(agent, repositoryId) {

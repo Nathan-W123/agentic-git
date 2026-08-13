@@ -377,10 +377,20 @@ export interface AuthSessionRecord {
  *
  * `claimed` exists so a crashed run leaves evidence that a task was taken,
  * rather than silently returning to the queue and being executed twice.
+ *
+ * `open` is the one non-terminal ending: a conversational task whose turn
+ * landed and whose thread is waiting for the next message — see
+ * docs/architecture/conversational-tasks.md. Not `claimed`, because nothing
+ * holds it right now; not terminal, because a reply continues it. It leaves
+ * `open` when the next turn is submitted (superseded, `integrated`), when
+ * somebody ends the conversation (`cancelled`), or when the silence outlasts
+ * {@link CoordinationStore.expireOpenTasks}'s cutoff (`integrated` — the
+ * work landed; only the waiting is over).
  */
 export type SubmittedTaskStatus =
   | "submitted"
   | "claimed"
+  | "open"
   | "integrated"
   | "failed"
   | "cancelled";
@@ -409,6 +419,17 @@ export interface SubmitTaskInput {
    * the workspace now.
    */
   context?: string;
+  /**
+   * The conversation this task is one turn of — in practice the thread root
+   * message id, which is the one identity every turn of a thread shares.
+   *
+   * Submitting a turn settles the conversation's previous turn: any task of
+   * this conversation still `open` becomes `integrated`, because its work
+   * already landed and the thing it was waiting for has now arrived. That
+   * keeps "at most one open turn per conversation" true by construction
+   * rather than by every caller remembering to close the last one.
+   */
+  conversationId?: string;
 }
 
 export interface SubmittedTask {
@@ -421,10 +442,14 @@ export interface SubmittedTask {
   submittedBy: UserId | undefined;
   /** See {@link SubmitTaskInput.context}. Absent on everything submitted outside a thread. */
   context: string | undefined;
+  /** See {@link SubmitTaskInput.conversationId}. Absent on one-shot tasks. */
+  conversationId: string | undefined;
   status: SubmittedTaskStatus;
   submittedAt: string;
   claimedAt: string | undefined;
   completedAt: string | undefined;
+  /** When the task went `open`, for the abandonment sweep. */
+  openedAt: string | undefined;
   runId: string | undefined;
 }
 
@@ -1227,6 +1252,30 @@ export interface CoordinationStore {
     status: SubmittedTaskCompletionStatus,
     runId?: string,
   ): Promise<void>;
+  /**
+   * Marks a claimed conversational task `open`: its turn landed, and its
+   * thread is waiting for the next message.
+   *
+   * The non-terminal sibling of {@link completeSubmittedTask}, guarded the
+   * same way — only a claimed task can settle, however it settles. An open
+   * task is not claimable; the next turn arrives as its own submitted task
+   * carrying the same conversation id, which supersedes this one.
+   */
+  openSubmittedTask(taskId: TaskId, runId?: string): Promise<void>;
+  /**
+   * Ends open conversations whose silence has outlasted the cutoff.
+   *
+   * The doc's "the ordinary case of nobody replying". Between turns no lease
+   * is active and no process is ticking, so open tasks need their own
+   * sweep — modelled on the opportunistic expiry every lease path performs.
+   * Expired tasks become `integrated`: the work landed; only the waiting is
+   * over. Returns what expired, so a caller can also release whatever it is
+   * holding for those conversations.
+   */
+  expireOpenTasks(
+    cutoff: string,
+    filter?: { repositoryId?: string },
+  ): Promise<SubmittedTask[]>;
 
   createRun(input: CreateRunInput): Promise<StoredRun>;
   finishRun(

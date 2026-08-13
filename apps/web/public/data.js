@@ -1286,6 +1286,9 @@ const STAGE_PROGRESS = {
   replanning: 48,
   awaiting_approval: 78,
   validating: 88,
+  // An open conversational task's turn has landed in full; the task waits
+  // for the next message, not for more work.
+  open: 100,
   integrated: 100,
   failed: 100,
   cancelled: 100,

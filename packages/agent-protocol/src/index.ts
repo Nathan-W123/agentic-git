@@ -41,6 +41,19 @@ export interface StartTaskInput {
    * revision; the workspace in front of the agent is what is true now.
    */
   priorContext?: string;
+  /**
+   * Whether this task is one turn of a conversation — a session that may be
+   * asked to continue after the turn lands.
+   *
+   * Some CLIs make session persistence a choice per invocation (codex's
+   * `--ephemeral`), and hermetic execution is the right default for a task
+   * that runs once: nothing worth remembering, nothing left on the host.
+   * This flag is how an adapter learns the trade has changed — a
+   * conversational turn should keep its vendor-side state resumable, because
+   * the next turn's warmth is worth more than this turn's tidiness. Adapters
+   * whose CLIs always persist (Claude Code) may ignore it.
+   */
+  conversational?: boolean;
 }
 
 export interface AgentSession {
@@ -48,6 +61,21 @@ export interface AgentSession {
   agentId: string;
   taskId: string;
   startedAt: string;
+  /**
+   * An adapter-opaque token naming the session's state in the vendor's own
+   * store — for Claude Code headless, the `session_id` its result envelope
+   * reports and its `--resume` flag accepts.
+   *
+   * What makes a session survive the adapter instance that opened it: an
+   * ephemeral-exec adapter holds no process between calls, so everything a
+   * "warm" continuation needs lives on the vendor's side, named by this. The
+   * platform stamps it onto the session record it keeps for an open
+   * conversation (from {@link AgentAdapter.resumeToken}) and hands the
+   * record back through {@link AgentAdapter.continueTask}, which may be a
+   * different instance entirely. Absent for adapters whose sessions die with
+   * their process.
+   */
+  resume?: string;
 }
 
 export interface CoordinatorContext {
@@ -229,11 +257,14 @@ export interface AgentAdapter {
    *
    * The session is the expensive half of what a conversation keeps: whatever
    * the underlying CLI holds in context. This hands it the next request
-   * without paying to rediscover the last one. The returned record is the
-   * same session under the new turn: same id, restamped with the new task.
-   * A continued session starts its turn fresh everywhere else — the caller
-   * registers `streamEvents` again and sends a new context, exactly as it
-   * would for a session just started.
+   * without paying to rediscover the last one. The whole record travels, not
+   * just the id, because the instance being asked may not be the instance
+   * that opened the session — a fresh one adopts the vendor-side state the
+   * record's `resume` token names. The returned record is the same session
+   * under the new turn: same id, restamped with the new task, carrying
+   * whatever token now names the state. A continued session starts its turn
+   * fresh everywhere else — the caller registers `streamEvents` again and
+   * sends a new context, exactly as it would for a session just started.
    *
    * Optional: an adapter without it is continued "cold" — the coordinator
    * closes the old session and starts a fresh one with the thread as
@@ -241,7 +272,7 @@ export interface AgentAdapter {
    * reused either way; the session is the expendable half.
    */
   continueTask?(
-    sessionId: string,
+    session: AgentSession,
     input: StartTaskInput,
   ): Promise<AgentSession>;
 
@@ -311,4 +342,18 @@ export interface AgentAdapter {
    * discovering the overspend once the bill has been paid.
    */
   reportedTokenUsage?(sessionId: string): AgentTokenUsage[];
+
+  /**
+   * The token that would resume this session's vendor-side state, if the
+   * underlying tool has one. See {@link AgentSession.resume}.
+   *
+   * Synchronous like `reportedTokenUsage` and read at the same kind of
+   * moment: when a turn settles and the platform decides what to keep. The
+   * answer moves as the session works — every Claude headless exec forks a
+   * new vendor session id — so it is read at the end, not remembered from
+   * the start. Absent, or answering undefined, means this session cannot be
+   * resumed by a different instance and a continuation without its process
+   * starts cold.
+   */
+  resumeToken?(sessionId: string): string | undefined;
 }

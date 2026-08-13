@@ -659,6 +659,9 @@ const BADGE_TONES = {
   idle: "orange",
   waiting: "orange",
   awaiting_approval: "orange",
+  /* A conversational task whose turn landed, waiting for the next message —
+     live rather than finished, so blue like the working states. */
+  open: "blue",
   queued: "orange",
   submitted: "orange",
   offline: "grey",

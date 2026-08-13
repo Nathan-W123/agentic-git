@@ -873,6 +873,29 @@ export const MIGRATIONS: readonly Migration[] = [
         ON direct_messages (project_id, recipient_id, read_at)`,
     ],
   },
+  {
+    // A conversational task is one turn of a thread, and the turns share an
+    // identity — the thread root's message id. It goes on the task rather
+    // than in anyone's memory because the coordinator's map of open
+    // conversations dies with its process, while "this thread's task is
+    // waiting for a reply" has to survive a deploy.
+    //
+    // `opened_at` is when the task went `open` (a status, not a column —
+    // status is untyped TEXT here on purpose, like every status in this
+    // schema). Between turns no lease is active and nothing heartbeats, so
+    // abandoned conversations are swept by their own clock rather than by
+    // the lease expiry that covers every other kind of held work.
+    //
+    // Both nullable: every existing row is a one-shot task and stays one.
+    version: 28,
+    name: "conversational-tasks",
+    statements: [
+      `ALTER TABLE submitted_tasks ADD COLUMN conversation_id TEXT`,
+      `ALTER TABLE submitted_tasks ADD COLUMN opened_at TEXT`,
+      `CREATE INDEX submitted_tasks_conversation
+        ON submitted_tasks (conversation_id, status)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

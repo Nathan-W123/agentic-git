@@ -29,7 +29,7 @@ import {
   type TaskWorkspace,
 } from "@coord/workspace-manager";
 
-import { Coordinator } from "./coordinator.js";
+import { ConversationRegistry, Coordinator } from "./coordinator.js";
 
 /**
  * The conversational-task lifecycle, observed from outside: a task whose
@@ -64,9 +64,11 @@ class ConversationAgent implements AgentAdapter {
   public readonly startInputs: StartTaskInput[] = [];
   public readonly startedSessions: AgentSession[] = [];
   public readonly continueInputs: Array<{
-    sessionId: string;
+    session: AgentSession;
     input: StartTaskInput;
   }> = [];
+  /** What resumeToken answers for any of this agent's sessions. */
+  public resumeTokenValue: string | undefined = undefined;
   public readonly replanRequests: ReplanRequest[] = [];
   /** Workspace path seen by each edit phase, in order. */
   public readonly workspacePaths: string[] = [];
@@ -78,7 +80,7 @@ class ConversationAgent implements AgentAdapter {
    * adapter that supports continuation and one that does not.
    */
   public readonly continueTask?: (
-    sessionId: string,
+    session: AgentSession,
     input: StartTaskInput,
   ) => Promise<AgentSession>;
 
@@ -91,22 +93,27 @@ class ConversationAgent implements AgentAdapter {
   ) {
     this.turnPlan = firstPlan;
     if (supportsContinuation) {
-      this.continueTask = async (sessionId, input) => {
-        const previous = this.requireSession(sessionId);
-        this.continueInputs.push({ sessionId, input });
-        // The next turn starts fresh everywhere but the session id: new
-        // input, new context, a new streamEvents registration to come.
-        this.sessions.set(sessionId, { input });
+      this.continueTask = async (session, input) => {
+        this.continueInputs.push({ session: structuredClone(session), input });
+        // Adopting is creating: a fresh instance has never seen this id, and
+        // the record it builds from the handed-over session IS the adoption.
+        // The next turn starts fresh everywhere but the identity: new input,
+        // new context, a new streamEvents registration to come.
+        this.sessions.set(session.id, { input });
         return {
-          id: sessionId,
+          id: session.id,
           agentId: this.agentId,
           taskId: input.task.id,
-          startedAt:
-            this.startedSessions.find((session) => session.id === sessionId)
-              ?.startedAt ?? previous.input.task.id,
+          startedAt: session.startedAt,
+          ...(session.resume === undefined ? {} : { resume: session.resume }),
         };
       };
     }
+  }
+
+  public resumeToken(sessionId: string): string | undefined {
+    this.requireSession(sessionId);
+    return this.resumeTokenValue;
   }
 
   public async getCapabilities(): Promise<AgentCapabilities> {
@@ -295,11 +302,14 @@ function openConversation(
   root: string,
   agent: ConversationAgent,
   conversationId = "conversation",
+  options: { coordinator?: Coordinator } = {},
 ): Conversation {
-  const coordinator = new Coordinator({
-    repositories: fixture.repositories,
-    workspaces: fixture.workspaces,
-  });
+  const coordinator =
+    options.coordinator ??
+    new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    });
   return {
     coordinator,
     agent,
@@ -370,7 +380,7 @@ test("a conversation keeps its workspace directory and session across turns", as
     assert.equal(agent.startInputs.length, 1);
     assert.equal(agent.continueInputs.length, 1);
     assert.equal(
-      agent.continueInputs[0]?.sessionId,
+      agent.continueInputs[0]?.session.id,
       agent.startedSessions[0]?.id,
     );
     assert.equal(agent.cancelCount, 0);
@@ -599,6 +609,209 @@ test("a conflicting advance between turns opens the turn as a replan", async () 
     );
     // And still from the rebased state, exactly like the other outcomes.
     assert.equal(agent.observed[1]?.["src/bc.txt"], "dependency moved\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a resume token carries the session to a fresh adapter instance", async () => {
+  // The production shape of continuation: each run constructs its own
+  // adapters, so the instance asked to continue is never the instance that
+  // opened the session. With a resume token the state lives vendor-side and
+  // the fresh instance adopts it — warm; the same shape without a token is
+  // covered by the cold-continuation tests around this one.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const registry = new ConversationRegistry();
+    const first = new ConversationAgent(
+      "agent_conv",
+      plan("turn_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    first.resumeTokenValue = "vendor-thread-7";
+    first.turnOutput = { path: "src/a.txt", content: "turn one\n" };
+    // The turns share their agent — task ids differ, the agent does not.
+    // The resume ladder reads the task's agentId to tell "same agent, new
+    // instance" from "someone else's conversation".
+    const turnOne = await openConversation(fixture, root, first, "conversation", {
+      coordinator: new Coordinator({
+        repositories: fixture.repositories,
+        workspaces: fixture.workspaces,
+        conversations: registry,
+      }),
+    }).runTurn({ ...task("turn_1"), agentId: "agent_conv" });
+    assert.equal(turnOne.tasks[0]?.status, "integrated");
+
+    const second = new ConversationAgent(
+      "agent_conv",
+      plan("turn_2", ["src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    second.turnOutput = { path: "src/b.txt", content: "turn two\n" };
+    const turnTwo = await openConversation(fixture, root, second, "conversation", {
+      coordinator: new Coordinator({
+        repositories: fixture.repositories,
+        workspaces: fixture.workspaces,
+        conversations: registry,
+      }),
+    }).runTurn({ ...task("turn_2"), agentId: "agent_conv" });
+    assert.equal(turnTwo.tasks[0]?.status, "integrated");
+
+    // Adopted, not restarted: the new instance was continued with the token
+    // the old one reported, opened no session of its own, and nothing was
+    // cancelled — a token is not a process, so there was nothing to close.
+    assert.equal(second.startInputs.length, 0);
+    assert.equal(second.continueInputs.length, 1);
+    assert.equal(
+      second.continueInputs[0]?.session.resume,
+      "vendor-thread-7",
+    );
+    assert.equal(first.cancelCount, 0);
+    assert.equal(second.workspacePaths[0], first.workspacePaths[0]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an idle session closes; the conversation continues cold in its directory", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ConversationAgent(
+      "agent_conv",
+      plan("turn_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const coordinator = new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      // Idle from the moment it lands: the sweep's clock is wall time and a
+      // test cannot wait out a real deadline.
+      conversationSessionIdleMs: 0,
+    });
+    const conversation = openConversation(fixture, root, agent, "conversation", {
+      coordinator,
+    });
+
+    agent.turnOutput = { path: "src/a.txt", content: "turn one\n" };
+    const first = await conversation.runTurn(task("turn_1"));
+    assert.equal(first.tasks[0]?.status, "integrated");
+    assert.equal(agent.cancelCount, 0);
+
+    // The sweep sheds the process and only the process.
+    await coordinator.closeIdleConversationSessions();
+    assert.equal(agent.cancelCount, 1);
+
+    agent.turnPlan = plan("turn_2", ["src/b.txt"]);
+    agent.turnOutput = { path: "src/b.txt", content: "turn two\n" };
+    const second = await conversation.runTurn(task("turn_2"));
+    assert.equal(second.tasks[0]?.status, "integrated");
+    // Cold session, warm directory: startTask ran again, continueTask never
+    // did, and the turn still worked where the last one left off.
+    assert.equal(agent.startInputs.length, 2);
+    assert.equal(agent.continueInputs.length, 0);
+    assert.equal(agent.workspacePaths[1], agent.workspacePaths[0]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the session cap closes the oldest conversation's session first", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const coordinator = new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      maxConversationSessions: 1,
+    });
+    const first = new ConversationAgent(
+      "agent_first",
+      plan("first_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const second = new ConversationAgent(
+      "agent_second",
+      plan("second_1", ["src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const conversationA = openConversation(fixture, root, first, "conv_a", {
+      coordinator,
+    });
+    const conversationB = openConversation(fixture, root, second, "conv_b", {
+      coordinator,
+    });
+
+    first.turnOutput = { path: "src/a.txt", content: "first one\n" };
+    const landedA = await conversationA.runTurn(task("first_1"));
+    assert.equal(landedA.tasks[0]?.status, "integrated");
+    assert.equal(first.cancelCount, 0);
+
+    // The second conversation landing pushes the population past the cap,
+    // and the conversation that landed longest ago pays — with its process,
+    // not its place.
+    second.turnOutput = { path: "src/b.txt", content: "second one\n" };
+    const landedB = await conversationB.runTurn(task("second_1"));
+    assert.equal(landedB.tasks[0]?.status, "integrated");
+    assert.equal(first.cancelCount, 1);
+    assert.equal(second.cancelCount, 0);
+
+    // The evicted conversation is still open: its next turn is cold but in
+    // the directory it kept all along.
+    first.turnPlan = plan("first_2", ["src/c.txt"]);
+    first.turnOutput = { path: "src/c.txt", content: "first two\n" };
+    const resumed = await conversationA.runTurn(task("first_2"));
+    assert.equal(resumed.tasks[0]?.status, "integrated");
+    assert.equal(first.startInputs.length, 2);
+    assert.equal(first.continueInputs.length, 0);
+    assert.equal(first.workspacePaths[1], first.workspacePaths[0]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("ending a conversation destroys both halves", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ConversationAgent(
+      "agent_conv",
+      plan("turn_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const conversation = openConversation(fixture, root, agent);
+
+    agent.turnOutput = { path: "src/a.txt", content: "turn one\n" };
+    const first = await conversation.runTurn(task("turn_1"));
+    assert.equal(first.tasks[0]?.status, "integrated");
+    const workspacePath = agent.workspacePaths[0];
+    assert.ok(workspacePath !== undefined);
+
+    await conversation.coordinator.endConversation("conversation");
+    assert.equal(agent.cancelCount, 1);
+    await assert.rejects(lstat(workspacePath), { code: "ENOENT" });
+    // Ending twice is a no-op, not an error.
+    await conversation.coordinator.endConversation("conversation");
+    assert.equal(agent.cancelCount, 1);
+
+    // The next turn finds nothing to resume and starts a fresh conversation.
+    agent.turnPlan = plan("turn_2", ["src/b.txt"]);
+    agent.turnOutput = { path: "src/b.txt", content: "turn two\n" };
+    const second = await conversation.runTurn(task("turn_2"));
+    assert.equal(second.tasks[0]?.status, "integrated");
+    assert.equal(agent.startInputs.length, 2);
+    assert.notEqual(agent.workspacePaths[1], workspacePath);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
