@@ -196,6 +196,16 @@ export interface PlanAdmissionRequest {
   baseVersion: CanonicalVersion;
   repository: CanonicalRepository;
   projectId?: string;
+  /**
+   * Whether this replaces a contract this task already holds.
+   *
+   * An approved admission is normally immutable — it is what ownership was
+   * granted against, and letting a later request widen it would let a task
+   * grant itself scope nobody arbitrated. Mid-execution scope arbitration is
+   * the one caller that legitimately produces a wider contract, because the
+   * widening is decided against every other holder first.
+   */
+  revising?: boolean;
 }
 
 export type PlanAuthorityDecision =
@@ -1544,6 +1554,38 @@ export class Coordinator {
             activeConflict.taskIds.find((id) => id !== entry.task.id) +
             `: ${activeConflict.explanation}`,
         );
+      }
+      // The check above sees this run's own wave and nothing else, which is
+      // the same blind spot admission had before it read durable leases: an
+      // agent could widen into a file a task in another run was already
+      // holding, and nothing noticed until both tried to land.
+      //
+      // A widening is refused rather than queued. Everywhere else a deferral
+      // means "wait and try again", but this agent is mid-execution with an
+      // approved plan it can still work inside — telling it to carry on is a
+      // real answer, and holding a running agent idle waiting for a lease is
+      // not.
+      if (this.planAuthority !== undefined) {
+        const answer = await this.planAuthority.admit({
+          task: entry.task,
+          plan: revisedPlan,
+          planRevision: entry.planRevision + 1,
+          baseVersion: waveVersion,
+          repository: input.repository,
+          ...(input.projectId === undefined
+            ? {}
+            : { projectId: input.projectId }),
+          // Replaces a contract that was already approved, which is the one
+          // case the store lets a plan be rewritten — and only because the
+          // rewrite has just been decided against every other holder.
+          revising: true,
+        });
+        if (answer.outcome !== "admitted") {
+          throw new Error(
+            `Scope expansion overlaps work running elsewhere in this ` +
+              `repository: ${answer.explanation}`,
+          );
+        }
       }
 
       const reasons = this.approvalPolicy.scopeReasons(revisedPlan, request);
