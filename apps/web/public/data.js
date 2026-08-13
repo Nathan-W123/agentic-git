@@ -1766,7 +1766,16 @@ export function channelAgentsFor(repositoryId) {
         { name: entry.name, role: entry.role ?? "" },
       ]),
   );
-  return [...mine, ...others].map((agent) => {
+  return [...mine, ...others].map((raw) => {
+    // The face's own presence dot tracks the same working-state the roster's
+    // status dot reads, or the transcript disagrees with the sidebar about
+    // whether an agent is busy — the exact disagreement that gets reported
+    // as "the icons in the chat don't update". Working wins over whatever
+    // the connection records said; everything else keeps its floor.
+    const agent =
+      agentStatus(raw, repositoryId) === "working"
+        ? { ...raw, presence: "online" }
+        : raw;
     const server = resolved.get(`${agent.userId}:${agent.provider}`);
     if (server !== undefined) {
       // Model and effort are not part of the roster's answer, so they still
