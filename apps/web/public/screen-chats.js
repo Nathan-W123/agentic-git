@@ -443,7 +443,13 @@ function chanSidebar(activeRepositoryId) {
   const canModerate = canManageRepository(activeRepositoryId);
   // The membership records rather than `collaborators()`, which flattens them
   // to names — the role has to come from somewhere, and it is on the record.
-  const people = state.members ?? [];
+  // The server's room list when it has arrived — it includes repo-scoped
+  // grantees the org member list has never heard of; the org list is only
+  // the floor before the roster resolves.
+  const people =
+    state.channelPeople[activeRepositoryId]?.length > 0
+      ? state.channelPeople[activeRepositoryId]
+      : (state.members ?? []);
 
   return `<aside class="chan-sidebar">
     <div class="chan-sidebar-head">
@@ -768,17 +774,25 @@ function threadProgress(entry) {
   let planned = 0;
   const touched = new Set();
   let progress = 5;
+  // A bar only means something over a run the narration can recognise. The
+  // audit thread — and any other thread whose replies carry none of the run
+  // markers below — sat at the 5% floor forever, reading as a task stuck at
+  // the beginning rather than a thread that simply is not a task.
+  let sawRunMarker = false;
   for (const reply of replies) {
     const text = String(reply.content ?? "");
     if (/planning workspace prepared/iu.test(text)) {
+      sawRunMarker = true;
       progress = Math.max(progress, 10);
     }
     const plannedMatch = /planned (\d+) file/iu.exec(text);
     if (plannedMatch !== null) {
+      sawRunMarker = true;
       planned = Number(plannedMatch[1]);
       progress = Math.max(progress, 15);
     }
     if (/execution started/iu.test(text)) {
+      sawRunMarker = true;
       progress = Math.max(progress, 20);
     }
     const working = /^Working on (.+?)(?:…|\.\.\.|$)/u.exec(text.trim());
@@ -802,7 +816,7 @@ function threadProgress(entry) {
       return undefined; // Finished threads carry no bar; the ending says it.
     }
   }
-  return progress;
+  return sawRunMarker ? progress : undefined;
 }
 
 function messageRow(

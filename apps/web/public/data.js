@@ -193,6 +193,8 @@ export const state = {
   dmDraft: "",
   /** Message/token totals per repository, for the info popover. */
   channelStats: {},
+  /** Everyone in each repository's room — org members plus repo grantees. */
+  channelPeople: {},
   /** The project whose inbox has been fetched, so it is fetched once. */
   dmLoadedProject: undefined,
   // Paths whose inline diff is expanded in the transcript. Plural because a
@@ -2197,6 +2199,7 @@ async function loadChannelRoster(repositoryId) {
   if (response === undefined) {
     return false;
   }
+  state.channelPeople[repositoryId] = response.people ?? [];
   state.channelRoster[repositoryId] = response.agents ?? [];
   // Sent with the roster because the switch it draws sits on the roster. See
   // the route's own comment for why it is not a separate request.

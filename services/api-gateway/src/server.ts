@@ -5345,8 +5345,42 @@ export class ApiGateway {
       // a second round trip to decide how to draw one toggle is a second
       // chance for the two to disagree. Absent row means auditing is on.
       const auditing = await this.options.store.getAuditorCursor(repositoryId);
+      // Everyone who can be in this room, not only organization members. A
+      // repository-scoped invite grants the repository and nothing else, so
+      // its holder was posting in a channel whose Users list had never heard
+      // of them — present in every message and absent from the room.
+      const project = await this.options.store.getProject(projectId);
+      const [memberships, grants, users] = await Promise.all([
+        project === undefined
+          ? Promise.resolve([])
+          : this.options.store.listMemberships(project.organizationId),
+        this.options.store.listRepositoryGrants(repositoryId),
+        this.options.store.listUsers(),
+      ]);
+      const userById = new Map(users.map((user) => [user.id, user]));
+      const seen = new Set<string>();
+      const people = [
+        ...memberships.map((entry) => ({ userId: entry.userId, role: entry.role })),
+        ...grants.map((entry) => ({ userId: entry.userId, role: entry.role })),
+      ].flatMap((entry) => {
+        if (seen.has(entry.userId)) {
+          return [];
+        }
+        seen.add(entry.userId);
+        const user = userById.get(entry.userId);
+        return user === undefined
+          ? []
+          : [
+              {
+                userId: entry.userId,
+                role: entry.role,
+                user: { id: user.id, displayName: user.displayName },
+              },
+            ];
+      });
       this.sendJson(response, 200, {
         agents,
+        people,
         auditorPaused: auditing?.paused === true,
       });
       return;
