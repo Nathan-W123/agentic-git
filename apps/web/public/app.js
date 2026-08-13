@@ -2544,13 +2544,19 @@ document.addEventListener("click", (event) => {
     // `state.selectedAgent` is what `currentAgent` reads, so the composer
     // below is the same one the agents screen has: same `chat-submit`, same
     // `sendChat`, same ability to be given work rather than just talked to.
-    case "agent-chat-open":
+    case "agent-chat-open": {
+      const opened = myAgents().find((agent) => agent.id === value);
+      if (opened?.visibility === "org") {
+        toast("Org agents work in the room — @mention them in the channel.");
+        return;
+      }
       state.selectedAgent = value;
       state.activeAgentPanel = value;
       state.activeDm = undefined;
       state.activeChannelThread = undefined;
       render();
       return;
+    }
     case "agent-panel-close":
       state.activeAgentPanel = undefined;
       render();

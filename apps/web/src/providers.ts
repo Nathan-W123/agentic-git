@@ -151,6 +151,37 @@ export interface ProviderSettings {
   callSign?: string;
 }
 
+/**
+ * Names handed to newly connected accounts, in order.
+ *
+ * Gods rather than things, and the distinction is not decoration. An agent
+ * named after a product talks about itself as one: an agent called Apollo
+ * once reported that "Apollo integration isn't installed" when asked about
+ * itself. `agentIdentity()` counters that directly, and a name with no
+ * software of the same name to be confused with does not start the argument.
+ *
+ * Order is the assignment order, so the first connections on a fresh
+ * deployment get the names people recognise.
+ */
+export const AGENT_CALL_SIGNS = [
+  // Olympians and kin
+  "Zeus", "Hera", "Poseidon", "Demeter", "Athena", "Apollo", "Artemis",
+  "Ares", "Aphrodite", "Hephaestus", "Hermes", "Hestia", "Dionysus",
+  "Hades", "Persephone",
+  // Titans and primordials
+  "Cronus", "Rhea", "Oceanus", "Tethys", "Hyperion", "Theia", "Themis",
+  "Mnemosyne", "Atlas", "Prometheus", "Epimetheus", "Gaia", "Uranus",
+  "Nyx", "Erebus", "Eos", "Helios", "Selene", "Iris",
+  // Winds and lesser gods
+  "Boreas", "Zephyrus", "Notus", "Eurus", "Pan", "Morpheus", "Nemesis",
+  "Nike", "Tyche", "Eris", "Hebe", "Janus",
+  // Roman counterparts and originals
+  "Jupiter", "Juno", "Neptune", "Ceres", "Minerva", "Mars", "Venus",
+  "Vulcan", "Mercury", "Vesta", "Bacchus", "Pluto", "Proserpina",
+  "Saturn", "Ops", "Sol", "Luna", "Aurora", "Victoria", "Fortuna",
+  "Bellona", "Faunus", "Flora", "Pomona", "Terminus", "Quirinus",
+] as const;
+
 export interface ProviderCliState {
   detected: boolean;
   loggedIn: boolean;
@@ -1045,6 +1076,46 @@ export class ProviderChatService {
     }
   }
 
+  /**
+   * Gives a newly connected account a name, if it has not got one.
+   *
+   * At connect rather than at channel-add, because a call sign belongs to the
+   * account and not to a room — somebody who has met Icarus in one channel
+   * should meet the same Icarus in the next, and a name handed out per room
+   * cannot promise that.
+   *
+   * Only ever fills a gap. A user who has chosen their own name keeps it, and
+   * re-connecting the same provider does not rename an agent people have
+   * learned. That also makes this safe to run alongside anything else that
+   * assigns names: whoever gets there first wins, and nobody is renamed.
+   *
+   * Signs already in use anywhere on the deployment are skipped so two agents
+   * in one room are not both Hermes. When the pool is exhausted the vendor
+   * label stands, which is the behaviour every account had before this.
+   */
+  private assignCallSign(file: ConnectionFile, userId: string, provider: ProviderId): void {
+    const connection = file[userId]?.[provider];
+    if (connection === undefined || connection.settings?.callSign !== undefined) {
+      return;
+    }
+    const taken = new Set<string>();
+    for (const byProvider of Object.values(file)) {
+      for (const entry of Object.values(byProvider ?? {})) {
+        const sign = entry?.settings?.callSign;
+        if (sign !== undefined) {
+          taken.add(sign.trim().toLowerCase());
+        }
+      }
+    }
+    const free = AGENT_CALL_SIGNS.find(
+      (sign) => !taken.has(sign.toLowerCase()),
+    );
+    if (free === undefined) {
+      return;
+    }
+    connection.settings = { ...connection.settings, callSign: free };
+  }
+
   private async readConnections(): Promise<ConnectionFile> {
     try {
       return JSON.parse(
@@ -1128,7 +1199,7 @@ export class ProviderChatService {
       ) {
         return cachedCodex.report;
       }
-      const report = await this.codexUsage();
+      const report = await this.codexUsage(input.userId);
       this.usageCache.set(usageKey, { at: Date.now(), report });
       return report;
     }
@@ -1185,10 +1256,34 @@ export class ProviderChatService {
    * the percentage used, the window length, and the reset time. The newest
    * rollout is read and those figures are reported as-is.
    */
-  private async codexUsage(): Promise<ProviderUsageReport> {
+  private async codexUsage(userId?: string): Promise<ProviderUsageReport> {
     const source = "Codex CLI session records (~/.codex/sessions)";
     try {
-      const newest = await this.newestCodexRollout();
+      // Sessions write their rollouts under whatever CODEX_HOME the run was
+      // given, and on this deployment every run gets a per-user credential
+      // home — while this reader searched the ambient one, where no session
+      // has ever run. The reader now resolves the home the same way the runs
+      // do, so it looks where the records actually are; the ambient home
+      // stays as the fallback for a host-login deployment.
+      const credential =
+        userId === undefined
+          ? undefined
+          : await this.ownCredential(userId, "openai").catch(() => undefined);
+      const env = await this.withCompletionEnv(
+        userId,
+        "openai",
+        credential,
+        async (resolved) => resolved,
+      ).catch(() => undefined);
+      const codexHome =
+        typeof env?.["CODEX_HOME"] === "string" && env["CODEX_HOME"] !== ""
+          ? env["CODEX_HOME"]
+          : undefined;
+      const newest = await this.newestCodexRollout(
+        codexHome === undefined
+          ? undefined
+          : path.join(codexHome, "sessions"),
+      );
       if (newest === undefined) {
         return {
           source,
@@ -1218,8 +1313,11 @@ export class ProviderChatService {
   }
 
   /** Rollouts live under sessions/YYYY/MM/DD; the newest one is the current. */
-  private async newestCodexRollout(): Promise<string | undefined> {
-    const root = path.join(this.homeDirectory, ".codex", "sessions");
+  private async newestCodexRollout(
+    rootOverride?: string,
+  ): Promise<string | undefined> {
+    const root =
+      rootOverride ?? path.join(this.homeDirectory, ".codex", "sessions");
     let newest: { path: string; at: number } | undefined;
     const walk = async (directory: string, depth: number): Promise<void> => {
       if (depth > 4) {
@@ -1421,19 +1519,40 @@ export class ProviderChatService {
   public async listConnectionsFor(
     userIds: readonly string[],
   ): Promise<
-    Record<string, Array<{ provider: ProviderId; visibility: CredentialVisibility }>>
+    Record<
+      string,
+      Array<{
+        provider: ProviderId;
+        visibility: CredentialVisibility;
+        callSign?: string;
+      }>
+    >
   > {
     const store = await this.credentialStore();
+    // The call sign travels with the connection because the channel roster is
+    // built from this and has no other route to an account-level name. Without
+    // it every agent fell back to its vendor label, which is why naming had to
+    // be redone per room to have any effect at all.
+    const connections = await this.readConnections();
     const result: Record<
       string,
-      Array<{ provider: ProviderId; visibility: CredentialVisibility }>
+      Array<{
+        provider: ProviderId;
+        visibility: CredentialVisibility;
+        callSign?: string;
+      }>
     > = {};
     for (const userId of userIds) {
       const summaries = await store.list(userId);
-      result[userId] = summaries.map((summary) => ({
-        provider: VENDOR_PROVIDERS[summary.vendor],
-        visibility: summary.visibility,
-      }));
+      result[userId] = summaries.map((summary) => {
+        const provider = VENDOR_PROVIDERS[summary.vendor];
+        const callSign = connections[userId]?.[provider]?.settings?.callSign;
+        return {
+          provider,
+          visibility: summary.visibility,
+          ...(callSign === undefined ? {} : { callSign }),
+        };
+      });
     }
     return result;
   }
@@ -1549,6 +1668,7 @@ export class ProviderChatService {
           createdAt: new Date().toISOString(),
         },
       };
+      this.assignCallSign(file, input.userId, input.provider);
       await this.writeConnections(file);
     }
 
@@ -2214,6 +2334,7 @@ export class ProviderChatService {
           : { settings: file[input.userId]?.[input.provider]?.settings }),
       },
     };
+    this.assignCallSign(file, input.userId, input.provider);
     await this.writeConnections(file);
     return await this.list(input);
   }
