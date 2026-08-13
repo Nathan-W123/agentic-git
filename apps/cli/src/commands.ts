@@ -12,6 +12,7 @@ import type { AgentAdapter } from "@coord/agent-protocol";
 import {
   Coordinator,
   approvalPolicyForProject,
+  type ActionAuthority,
   type PlanAuthority,
   type QuestionController,
 } from "@coord/coordinator";
@@ -658,6 +659,14 @@ export interface RunOptions {
    */
   questions?: QuestionController;
   /**
+   * Who performs what an agent asks the platform for.
+   *
+   * Absent on the CLI for the same reason `questions` is: nothing here can
+   * start a preview or hold one open, so an agent that asks is told plainly
+   * that this deployment does nothing and carries on.
+   */
+  actions?: ActionAuthority;
+  /**
    * Per-user vendor credentials. When supplied, a task whose submitter has
    * connected their own provider account runs under that account instead of
    * the host machine's CLI login.
@@ -938,6 +947,9 @@ export async function runPendingTasks(
       store,
       approvalPolicy: approvalPolicyForProject(projectRecord?.policy),
       ...(planAuthority === undefined ? {} : { planAuthority }),
+      ...(options.actions === undefined
+        ? {}
+        : { actionAuthority: options.actions }),
       ...(options.questions === undefined
         ? {}
         : { questions: options.questions }),

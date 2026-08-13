@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import {
+  type AgentActionResult,
   type AgentAdapter,
   type AgentCapabilities,
   type AgentEvent,
@@ -45,6 +46,7 @@ interface TestSession {
   eventHandler?: (event: AgentEvent) => void;
   scopeResolver?: (decision: ScopeChangeDecision) => void;
   scopeRejecter?: (error: Error) => void;
+  actionResolver?: (result: AgentActionResult) => void;
 }
 
 class TestAgent implements AgentAdapter {
@@ -53,6 +55,7 @@ class TestAgent implements AgentAdapter {
   public readonly startInputs: StartTaskInput[] = [];
   public readonly executionVersions: number[] = [];
   public readonly scopeDecisions: ScopeChangeDecision[] = [];
+  public readonly actionResults: AgentActionResult[] = [];
   public cancelCount = 0;
 
   public constructor(
@@ -176,6 +179,16 @@ class TestAgent implements AgentAdapter {
     delete session.scopeRejecter;
   }
 
+  public async resolveAction(
+    sessionId: string,
+    result: AgentActionResult,
+  ): Promise<void> {
+    const session = this.requireSession(sessionId);
+    this.actionResults.push(structuredClone(result));
+    session.actionResolver?.(result);
+    delete session.actionResolver;
+  }
+
   public async cancel(sessionId: string): Promise<void> {
     const session = this.requireSession(sessionId);
     this.cancelCount += 1;
@@ -216,6 +229,11 @@ class TestAgent implements AgentAdapter {
   /** The event handler for one session, for a subclass that emits its own. */
   protected handlerFor(sessionId: string): ((event: AgentEvent) => void) | undefined {
     return this.sessions.get(sessionId)?.eventHandler;
+  }
+
+  /** One session, for a subclass that has to park a resolver on it. */
+  protected sessionFor(sessionId: string): TestSession {
+    return this.requireSession(sessionId);
   }
 
   private requireSession(sessionId: string): TestSession {
@@ -478,6 +496,120 @@ test("cancels dependency descendants when their producer cannot integrate", asyn
       ),
       true,
     );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * An agent that asks the platform to start its app before it edits anything,
+ * the way one checking its own work would.
+ */
+class ActionAgent extends TestAgent {
+  public readonly seen: AgentActionResult[] = [];
+
+  public override async sendContext(
+    sessionId: string,
+    context: CoordinatorContext,
+  ): Promise<void> {
+    const result = await new Promise<AgentActionResult>((resolve) => {
+      this.sessionFor(sessionId).actionResolver = resolve;
+      this.handlerFor(sessionId)?.({
+        event: "action_requested",
+        requestId: "action_1",
+        action: "preview_start",
+        occurredAt: new Date().toISOString(),
+      });
+    });
+    this.seen.push(result);
+    await super.sendContext(sessionId, context);
+  }
+}
+
+test("an agent can ask the platform to act, and is told what happened", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ActionAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+    const asked: string[] = [];
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      actionAuthority: {
+        async perform(request) {
+          asked.push(request.action);
+          // The workspace, not canonical — an agent looking at its own work
+          // needs the change it has just made, which canonical does not have.
+          assert.equal(typeof request.workspacePath, "string");
+          assert.notEqual(request.workspacePath, "");
+          return {
+            outcome: "done",
+            detail: { url: "http://127.0.0.1:4321", output: ["listening"] },
+            explanation: "The app is at http://127.0.0.1:4321.",
+          };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.deepEqual(asked, ["preview_start"]);
+    assert.equal(agent.seen[0]?.outcome, "done");
+    assert.equal(agent.seen[0]?.detail?.url, "http://127.0.0.1:4321");
+    // Both halves are in the log, so "what did this agent ask for" and "what
+    // was it given" are each answerable after the fact.
+    assert.equal(
+      result.audit.some((event) => event.type === "action_requested"),
+      true,
+    );
+    assert.equal(
+      result.audit.some((event) => event.type === "action_performed"),
+      true,
+    );
+    assert.equal(result.tasks[0]?.status, "integrated");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a deployment that performs no actions says so, and the task carries on", async () => {
+  // The agent is blocked waiting and holds an approved plan it can still work
+  // inside, so a refusal costs it one round trip. An exception would cost the
+  // whole task.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ActionAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(agent.seen[0]?.outcome, "refused");
+    assert.match(agent.seen[0]?.explanation ?? "", /does not perform actions/u);
+    assert.equal(result.tasks[0]?.status, "integrated");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

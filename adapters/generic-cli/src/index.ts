@@ -1,6 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 
 import {
+  type AgentActionResult,
   type AgentAdapter,
   type AgentCapabilities,
   type AgentEvent,
@@ -598,6 +599,21 @@ export class GenericCliAdapter implements AgentAdapter {
     }
     this.requireProcess(record).send({ type: "resume", sessionId });
     record.paused = false;
+  }
+
+  public async resolveAction(
+    sessionId: string,
+    result: AgentActionResult,
+  ): Promise<void> {
+    const record = this.requireSession(sessionId);
+    // Nothing about the plan changes here. An action is the platform doing
+    // something on the agent's behalf, not the agent being granted anything —
+    // which is exactly why it needs no equivalent of the scope widening below.
+    this.requireProcess(record).send({
+      type: "action_result",
+      sessionId,
+      result,
+    });
   }
 
   public async resolveScopeChange(

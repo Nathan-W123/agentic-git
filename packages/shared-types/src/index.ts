@@ -852,6 +852,13 @@ export type AuditEventType =
    * not have to accumulate a diff of its own.
    */
   | "workspace_changed"
+  /**
+   * An agent asked the platform to do something, and what came of it. Kept as
+   * a pair so "what did this agent ask for" and "what was it given" are both
+   * answerable from the log.
+   */
+  | "action_requested"
+  | "action_performed"
   | "scope_change_requested"
   | "scope_change_decided"
   | "changeset_collected"

@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { createServer } from "node:net";
+import { connect, createServer } from "node:net";
 import { access, mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
@@ -198,6 +198,39 @@ async function runToCompletion(
   });
 }
 
+/**
+ * Waits for something to start answering on a port.
+ *
+ * Bounded, because the caller is an agent holding its workspace and its leases
+ * while it waits. `false` means "not yet", which is not the same as "never" —
+ * a slow dev server is still a working one, and the decision about whether to
+ * keep waiting belongs to whoever asked rather than here.
+ */
+async function waitForPort(
+  port: number,
+  exited: () => boolean,
+  timeoutMs = 20_000,
+): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline && !exited()) {
+    const open = await new Promise<boolean>((resolve) => {
+      const probe = connect({ port, host: "127.0.0.1" });
+      const settle = (answer: boolean): void => {
+        probe.destroy();
+        resolve(answer);
+      };
+      probe.once("connect", () => settle(true));
+      probe.once("error", () => settle(false));
+      probe.setTimeout(1_000, () => settle(false));
+    });
+    if (open) {
+      return true;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  return false;
+}
+
 /** A free loopback port, chosen by asking the OS for one and letting it go. */
 async function freePort(): Promise<number> {
   return await new Promise((resolve, reject) => {
@@ -219,6 +252,11 @@ export class PreviewService {
   private readonly repositories: RepositoryService;
   private readonly worktrees: GitWorktreeWorkspaceManager;
   private readonly running = new Map<string, Running>();
+  /** Task-scoped previews: an agent looking at its own unlanded work. */
+  private readonly taskPreviews = new Map<
+    string,
+    { child: ChildProcess; port: number }
+  >();
   private readonly sweeper: NodeJS.Timeout;
 
   public constructor(
@@ -373,6 +411,111 @@ export class PreviewService {
     return { ...status, recentOutput: [...status.recentOutput] };
   }
 
+  /**
+   * Runs a task's own workspace, for the agent working in it.
+   *
+   * A different thing from the repository preview above, sharing only the
+   * machinery. That one serves canonical for a person; this serves the
+   * unlanded work of one task for the agent that wrote it — and the
+   * distinction is not a nicety. An agent checking its own work against
+   * canonical would be looking at the app *without* the change it just made,
+   * so any screenshot it took would be confidently wrong.
+   *
+   * Keyed by task, dies with the task, and never touches the repository's
+   * preview: no idle sweep is needed because a task ends, and no checkout is
+   * made because the workspace is already there and already installed.
+   *
+   * Waits for the server to answer before returning. An agent cannot watch a
+   * port come up the way a person can, so "started" on its own would be
+   * useless to it — what it needs is the URL, or the reason there is not one.
+   */
+  public async startForTask(input: {
+    taskId: string;
+    repositoryId: string;
+    workspacePath: string;
+  }): Promise<{ url?: string; output: string[]; failed: boolean }> {
+    await this.stopForTask(input.taskId);
+    const command =
+      this.project.config.previewCommands?.[input.repositoryId] ??
+      this.project.config.previewCommand ??
+      (await detectPreviewCommand(input.workspacePath));
+    if (command === undefined) {
+      return {
+        output: [await describeUndetectable(input.workspacePath)],
+        failed: true,
+      };
+    }
+    const output: string[] = [];
+    const install =
+      this.project.config.installCommands?.[input.repositoryId] ??
+      this.project.config.installCommand ??
+      (await detectInstallCommand(input.workspacePath));
+    if (install !== undefined) {
+      const failure = await runToCompletion(
+        install,
+        input.workspacePath,
+        output,
+      );
+      if (failure !== undefined) {
+        return { output, failed: true };
+      }
+    }
+
+    const port = await freePort();
+    const child = spawn(command.executable, [...command.args], {
+      cwd: input.workspacePath,
+      env: { ...process.env, PORT: String(port), HOST: "127.0.0.1" },
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let exited = false;
+    const record = (chunk: Buffer): void => {
+      for (const line of chunk.toString("utf8").split(/\r?\n/u)) {
+        if (line.trim().length > 0) {
+          output.push(line);
+        }
+      }
+      if (output.length > LOG_LINES) {
+        output.splice(0, output.length - LOG_LINES);
+      }
+    };
+    child.stdout?.on("data", record);
+    child.stderr?.on("data", record);
+    child.on("exit", () => {
+      exited = true;
+    });
+    child.on("error", (error) => {
+      exited = true;
+      output.push(`could not start: ${error.message}`);
+    });
+    this.taskPreviews.set(input.taskId, { child, port });
+
+    const url = `http://127.0.0.1:${String(port)}`;
+    const ready = await waitForPort(port, () => exited);
+    if (exited) {
+      this.taskPreviews.delete(input.taskId);
+      return { output, failed: true };
+    }
+    // Slow is not failed. A server that has not answered yet but is still
+    // running gets its URL and its output so far, and the agent decides for
+    // itself whether to keep waiting — `ready` is reported so it can.
+    void ready;
+    return { url, output, failed: false };
+  }
+
+  /** Stops a task's preview. Called on request and again at teardown. */
+  public async stopForTask(taskId: string): Promise<void> {
+    const running = this.taskPreviews.get(taskId);
+    if (running === undefined) {
+      return;
+    }
+    this.taskPreviews.delete(taskId);
+    try {
+      running.child.kill("SIGTERM");
+    } catch {
+      // Already gone.
+    }
+  }
+
   /** What this repository's preview is doing, if it has one. */
   public status(repositoryId: string): PreviewStatus | undefined {
     const entry = this.running.get(repositoryId);
@@ -412,9 +555,10 @@ export class PreviewService {
   /** Stops everything. Called when the process serving these is going away. */
   public async close(): Promise<void> {
     clearInterval(this.sweeper);
-    await Promise.allSettled(
-      [...this.running.keys()].map((repositoryId) => this.stop(repositoryId)),
-    );
+    await Promise.allSettled([
+      ...[...this.running.keys()].map((repositoryId) => this.stop(repositoryId)),
+      ...[...this.taskPreviews.keys()].map((taskId) => this.stopForTask(taskId)),
+    ]);
   }
 
   private async sweepIdle(): Promise<void> {

@@ -123,9 +123,46 @@ export type AgentEvent =
       occurredAt: string;
     }
   | {
+      /**
+       * The agent is asking the platform to do something it cannot do itself,
+       * and has stopped until it is told what happened.
+       *
+       * A name from a fixed list, never a command. The rule the list is drawn
+       * from is that an agent may only request what the task's submitter could
+       * do themselves, on the task's own repository — see
+       * docs/architecture/agent-actions.md. An open channel here would let an
+       * agent ask the platform to do what the agent itself is forbidden to do,
+       * which would quietly undo scope enforcement.
+       *
+       * Costly the same way `question_asked` is: the workspace and the leases
+       * are held while it waits.
+       */
+      event: "action_requested";
+      requestId?: string;
+      action: string;
+      occurredAt: string;
+    }
+  | {
       event: "completed";
       occurredAt: string;
     };
+
+/** What the platform did, or why it would not. */
+export interface AgentActionResult {
+  requestId: string;
+  action: string;
+  outcome: "done" | "refused";
+  /**
+   * What the agent needs to act on the answer — for a preview, the URL and
+   * whatever the app said while starting.
+   *
+   * The output matters as much as the URL: an agent whose app failed to boot
+   * is the one best placed to fix it, and it can only do that if it is told
+   * what went wrong rather than that something did.
+   */
+  detail?: { url?: string; output?: string[] };
+  explanation: string;
+}
 
 /**
  * What a person said, or that nobody did.
@@ -192,6 +229,15 @@ export interface AgentAdapter {
    * every adapter implement a path it can never reach.
    */
   resolveQuestion?(sessionId: string, answer: QuestionAnswer): Promise<void>;
+
+  /**
+   * Hands back what the platform did about a requested action.
+   *
+   * Optional for the same reason as `resolveQuestion`: an adapter whose CLI
+   * never emits `action_requested` is never called, and requiring it would
+   * make every adapter implement a path it cannot reach.
+   */
+  resolveAction?(sessionId: string, result: AgentActionResult): Promise<void>;
 
   cancel(sessionId: string): Promise<void>;
 

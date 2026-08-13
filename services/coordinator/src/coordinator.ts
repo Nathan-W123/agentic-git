@@ -185,7 +185,52 @@ export interface CoordinatorDependencies {
    * runs at once supplies one backed by durable state.
    */
   planAuthority?: PlanAuthority;
+  /**
+   * Who performs the things an agent can ask the platform for.
+   *
+   * Absent by default, so an agent that asks is told plainly that this
+   * deployment does nothing — which is a real answer and lets the agent carry
+   * on, rather than a failure. A deployment that can host actions supplies
+   * one; see docs/architecture/agent-actions.md.
+   */
+  actionAuthority?: ActionAuthority;
 }
+
+/**
+ * The platform doing something on an agent's behalf, mid-task.
+ *
+ * Kept behind an interface for the same reason the plan authority is: the
+ * coordinator is a service and knows nothing about deployments, and the only
+ * thing that can start a preview lives in the app that serves the API.
+ *
+ * The rule the implementation is held to — an agent may only request what the
+ * task's submitter could do themselves, on the task's own repository — is
+ * enforced there rather than here. This side chooses nothing; it carries the
+ * request and returns the answer.
+ */
+export interface ActionAuthority {
+  perform(input: {
+    task: TaskDefinition;
+    repository: CanonicalRepository;
+    projectId?: string;
+    action: string;
+    /** The task's own checkout, which is what an agent asks to look at. */
+    workspacePath: string;
+  }): Promise<{
+    outcome: "done" | "refused";
+    detail?: { url?: string; output?: string[] };
+    explanation: string;
+  }>;
+}
+
+/**
+ * How many actions one task may ask for.
+ *
+ * An agent legitimately restarts its app after each fix, so this cannot be
+ * small. It exists because a loop that asks a thousand times is three lines of
+ * agent and a denial of service, not because ten is a meaningful number.
+ */
+const MAX_ACTIONS_PER_TASK = 10;
 
 /** One planned task, offered for arbitration before it is allowed to edit. */
 export interface PlanAdmissionRequest {
@@ -298,6 +343,11 @@ export class Coordinator {
   private readonly questions: QuestionController | undefined;
   private readonly questionDeadlineMs: number;
   private readonly planAuthority: PlanAuthority | undefined;
+  private readonly actionAuthority: ActionAuthority | undefined;
+  /** Where each task is working, for an action that needs to reach it. */
+  private readonly taskWorkspacePaths = new Map<string, string>();
+  /** Actions each task has spent, for the cap. */
+  private readonly actionsUsed = new Map<string, number>();
 
   public constructor(dependencies: CoordinatorDependencies = {}) {
     this.repositories = dependencies.repositories ?? new RepositoryService();
@@ -320,6 +370,7 @@ export class Coordinator {
     this.questionDeadlineMs =
       dependencies.questionDeadlineMs ?? DEFAULT_QUESTION_DEADLINE_MS;
     this.planAuthority = dependencies.planAuthority;
+    this.actionAuthority = dependencies.actionAuthority;
     this.store = dependencies.store;
     this.approvals =
       dependencies.approvals ??
@@ -1185,6 +1236,89 @@ export class Coordinator {
     }
   }
 
+  /**
+   * Puts an agent's request to the platform and hands back what happened.
+   *
+   * Never throws at the agent. Every path here ends in an answer it can act
+   * on — a deployment that does nothing, a cap it has reached, an authority
+   * that failed — because the agent is blocked waiting and has an approved
+   * plan it can still work inside. A refusal costs it one round trip; an
+   * exception would cost the whole task.
+   */
+  private async handleActionRequest(
+    input: CoordinatorRunInput,
+    entry: PlannedTask,
+    event: { requestId?: string; action: string },
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<void> {
+    const requestId = event.requestId?.trim() || createId("action");
+    const action = event.action.trim();
+    const spent = (this.actionsUsed.get(entry.task.id) ?? 0) + 1;
+    this.actionsUsed.set(entry.task.id, spent);
+
+    await this.trace(recorder, runAudit, "action_requested", entry.task.id, {
+      requestId,
+      action,
+      repositoryId: input.repository.id,
+      ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+    });
+
+    const answer =
+      this.actionAuthority === undefined
+        ? {
+            outcome: "refused" as const,
+            explanation:
+              "This deployment does not perform actions. Carry on within " +
+              "the plan you already have.",
+          }
+        : spent > MAX_ACTIONS_PER_TASK
+          ? {
+              outcome: "refused" as const,
+              explanation:
+                `This task has already asked for ${String(
+                  MAX_ACTIONS_PER_TASK,
+                )} actions, which is the limit.`,
+            }
+          : await this.actionAuthority
+              .perform({
+                task: entry.task,
+                repository: input.repository,
+                ...(input.projectId === undefined
+                  ? {}
+                  : { projectId: input.projectId }),
+                action,
+                // The task's own checkout, not canonical: an agent looking at
+                // its own work wants the change it just made, and canonical
+                // does not have it yet.
+                workspacePath: this.taskWorkspacePaths.get(entry.task.id) ?? "",
+              })
+              .catch((error: unknown) => ({
+                outcome: "refused" as const,
+                explanation: `The action failed: ${errorMessage(error)}`,
+              }));
+
+    await this.trace(recorder, runAudit, "action_performed", entry.task.id, {
+      requestId,
+      action,
+      outcome: answer.outcome,
+      explanation: answer.explanation,
+      repositoryId: input.repository.id,
+    });
+
+    // An adapter whose CLI never emits the event has no reason to implement
+    // the reply, so this is optional and its absence is not an error.
+    await entry.adapter
+      .resolveAction?.(entry.session.id, {
+        requestId,
+        action,
+        outcome: answer.outcome,
+        ...(answer.detail === undefined ? {} : { detail: answer.detail }),
+        explanation: answer.explanation,
+      })
+      .catch(() => undefined);
+  }
+
   private async prepareTask(
     input: CoordinatorRunInput,
     entry: PlannedTask,
@@ -1242,6 +1376,7 @@ export class Coordinator {
         baseVersion: waveVersion,
       });
       entry.decision.workspaceId = workspace.id;
+      this.taskWorkspacePaths.set(entry.task.id, workspace.path);
       await recorder?.decision(entry.decision);
       await recorder?.workspace({
         id: workspace.id,
@@ -1528,6 +1663,10 @@ export class Coordinator {
       return;
     }
     if (event.event === "completed") {
+      return;
+    }
+    if (event.event === "action_requested") {
+      await this.handleActionRequest(input, entry, event, recorder, runAudit);
       return;
     }
 

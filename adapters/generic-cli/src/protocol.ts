@@ -1,4 +1,4 @@
-import type { AgentEvent } from "@coord/agent-protocol";
+import type { AgentActionResult, AgentEvent } from "@coord/agent-protocol";
 import {
   assertAgentPlan,
   type AgentPlan,
@@ -73,12 +73,20 @@ export interface ScopeDecisionMessage {
   decision: ScopeChangeDecision;
 }
 
+/** The answer to an `action_requested` event. */
+export interface ActionResultMessage {
+  type: "action_result";
+  sessionId: string;
+  result: AgentActionResult;
+}
+
 export type HostMessage =
   | StartMessage
   | PlanRequestMessage
   | ReplanRequestMessage
   | ContextMessage
   | ScopeDecisionMessage
+  | ActionResultMessage
   | ControlMessage;
 
 export interface PlanReplyMessage {
@@ -329,6 +337,15 @@ export function parseAgentEvent(value: unknown): AgentEvent {
               ),
             }),
         reason: requireString(record, "reason", "scope change event"),
+        occurredAt,
+      };
+    case "action_requested":
+      return {
+        event: "action_requested",
+        ...(typeof record["requestId"] === "string"
+          ? { requestId: record["requestId"] }
+          : {}),
+        action: requireString(record, "action", "action request"),
         occurredAt,
       };
     case "completed":

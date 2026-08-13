@@ -291,6 +291,54 @@ async function serve(
         repositoryId: input.repositoryId,
         credentials,
         credentialPolicy,
+        // What an agent may ask this deployment to do. A fixed list, not a
+        // command channel: an agent may only ask for what its submitter could
+        // do themselves on this repository, and an open channel would let it
+        // ask the platform to do what it is itself forbidden to do. See
+        // docs/architecture/agent-actions.md.
+        actions: {
+          async perform(request) {
+            if (request.action === "preview_stop") {
+              await previews.stopForTask(request.task.id);
+              return { outcome: "done", explanation: "The preview is stopped." };
+            }
+            if (request.action !== "preview_start") {
+              return {
+                outcome: "refused",
+                explanation:
+                  `"${request.action}" is not something this deployment does. ` +
+                  "Available actions: preview_start, preview_stop.",
+              };
+            }
+            // The task's own workspace, never canonical. An agent looking at
+            // canonical would be looking at the app without the change it has
+            // just made, so anything it concluded — or screenshotted — would
+            // be about the wrong version.
+            const started = await previews.startForTask({
+              taskId: request.task.id,
+              repositoryId: request.repository.id,
+              workspacePath: request.workspacePath,
+            });
+            return started.failed
+              ? {
+                  outcome: "refused",
+                  detail: { output: started.output },
+                  explanation:
+                    "The app did not start. Its output is in `detail.output`.",
+                }
+              : {
+                  outcome: "done",
+                  detail: {
+                    ...(started.url === undefined ? {} : { url: started.url }),
+                    output: started.output,
+                  },
+                  explanation:
+                    `The app is at ${started.url ?? "an unknown address"}. ` +
+                    "It serves this task's workspace, so it includes changes " +
+                    "that have not landed yet.",
+                };
+          },
+        },
         // Where an agent's question goes. The gateway is the only thing here
         // that knows where people are watching, and it is the same object
         // serving the channel the answer will arrive in.
