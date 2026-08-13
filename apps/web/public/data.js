@@ -1880,13 +1880,14 @@ export async function loadDirectMessages() {
   }
   const response = await apiOptional(directPath(), undefined);
   if (response === undefined) {
-    return;
+    return false;
   }
   state.dmConversations = response.conversations ?? [];
   state.dmPeople = response.people ?? [];
   state.presence = (response.people ?? [])
     .filter((person) => person.online === true)
     .map((person) => person.id);
+  return true;
 }
 
 /** One conversation, and marking it read because it is now on screen. */
@@ -2158,8 +2159,12 @@ export async function ensureDirectMessages(rerender) {
   if (!state.projectId || state.dmLoadedProject === state.projectId) {
     return;
   }
-  state.dmLoadedProject = state.projectId;
-  await loadDirectMessages();
+  // Marked loaded only on success: claiming it before the fetch meant one
+  // failed request silenced every unread badge until the next full reload,
+  // because nothing ever asked again.
+  if ((await loadDirectMessages()) === true) {
+    state.dmLoadedProject = state.projectId;
+  }
   rerender();
 }
 
