@@ -2007,8 +2007,39 @@ function agentIsWorking(agent, repositoryId) {
       return true;
     }
   }
+  // The durable half. Busy frames are transient by design — a browser opened
+  // after the dispatch never received one, so an agent mid-run showed idle
+  // until its next frame, which for a long plan is minutes of a green dot
+  // that should be on and is not. The task list is durable and re-read on
+  // every audit frame, so it answers for the whole run: a claimed task naming
+  // this agent's vendor is this agent working, no frame required.
+  //
+  // Own agents only. A task's `agentId` names a vendor, not an owner, so with
+  // two people's Codex in one room the task alone cannot say whose is
+  // working — the frames still carry that, and a teammate's dot keeps
+  // depending on them rather than lighting both.
+  if (agent.mine === true) {
+    const vendor =
+      VENDOR_FOR_PROVIDER[agent.provider ?? agent.id] ??
+      String(agent.provider ?? agent.id);
+    return state.tasks.some(
+      (task) =>
+        task.repositoryId === repositoryId &&
+        WORKING_STATUS.has(task.status) &&
+        String(task.agentId ?? "")
+          .toLowerCase()
+          .includes(vendor),
+    );
+  }
   return false;
 }
+
+/** The vendor CLI each chat provider drives, as task `agentId`s name it. */
+const VENDOR_FOR_PROVIDER = {
+  anthropic: "claude",
+  openai: "codex",
+  google: "gemini",
+};
 
 /**
  * Reads one channel back from the server, replacing whatever local or seeded

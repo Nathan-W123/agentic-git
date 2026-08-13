@@ -2511,6 +2511,17 @@ document.addEventListener("click", (event) => {
       render();
       void loadDmThread(value).then(() => render());
       return;
+    // Starts an "@agents …" message rather than sending one: the person still
+    // says what they want asked; this only saves them typing the address.
+    case "mention-agents-insert": {
+      const input = document.querySelector("[data-act='channel-input']");
+      if (input !== null) {
+        input.value = `@agents ${input.value.replace(/^@agents\s*/u, "")}`;
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
+      }
+      return;
+    }
     case "dm-close":
       state.activeDm = undefined;
       state.dmDraft = "";
@@ -2632,9 +2643,6 @@ document.addEventListener("click", (event) => {
           render();
         }
       });
-      return;
-    case "chan-files-toggle":
-      state.chanFilesOpen = !state.chanFilesOpen;
       return;
     case "chan-file-toggle": {
       const open = state.chanOpenFiles ?? [];
