@@ -4375,6 +4375,78 @@ svg {
   color: var(--text-2);
 }
 
+/* Sections inside an agent's own writing. A summary that ran to several
+   hundred words was one undifferentiated paragraph, which is the format that
+   makes a reader skip it. */
+.cmsg-text .rt-head {
+  margin: 10px 0 4px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--text-1);
+}
+
+.cmsg-text .rt-head:first-child {
+  margin-top: 0;
+}
+
+.cmsg-text p + p {
+  margin-top: 7px;
+}
+
+.cmsg-text .rt-list {
+  margin: 5px 0 5px 4px;
+  padding-left: 16px;
+}
+
+.cmsg-text .rt-list li {
+  margin: 2px 0;
+}
+
+.cmsg-text code {
+  font-family: var(--mono, ui-monospace, monospace);
+  font-size: 12px;
+  background: var(--bg-inset);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
+/* The agent's account of what it did, foldable because it is often the
+   longest thing in the thread. Open by default: it is the answer. */
+.thread-summary {
+  border-left: 2px solid var(--border);
+  margin: 4px 0 4px 2px;
+}
+
+.thread-summary > summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  padding: 3px 0 3px 10px;
+  font-size: 12px;
+  color: var(--text-3);
+  list-style: none;
+}
+
+.thread-summary > summary::-webkit-details-marker {
+  display: none;
+}
+
+.thread-summary > summary .ts-peek {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-4);
+}
+
+.thread-summary[open] > summary .ts-peek {
+  visibility: hidden;
+}
+
+.summary-tools {
+  padding: 2px 0 6px 46px;
+}
+
 /* An image posted into a channel. Bounded rather than full size: a screenshot
    of a whole page is taller than the room it is being read in, and one that
    pushed the conversation off the screen would be worse than a thumbnail

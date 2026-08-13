@@ -189,6 +189,14 @@ export const state = {
    * once finished) still apply to every thread they have not touched.
    */
   thinkingOpen: {},
+  /** Whether a summary is unfolded, keyed by reply id. Absent means open. */
+  summaryOpen: {},
+  /** A simplified rewrite of one summary, once it has been asked for. */
+  simplified: {},
+  /** Whether the simple version is the one showing, keyed by reply id. */
+  simplifyShown: {},
+  /** Requests in flight, so the button can say so and not fire twice. */
+  simplifying: {},
   /** What is half-typed to them. */
   dmDraft: "",
   /** Message/token totals per repository, for the info popover. */
@@ -2691,6 +2699,21 @@ export async function startPreview(repositoryId) {
 export async function stopPreview(repositoryId) {
   await api(repositoryPath(repositoryId, "/preview"), { method: "DELETE" });
   state.previews[repositoryId] = null;
+}
+
+/**
+ * Asks for a shorter version of one summary.
+ *
+ * The text travels rather than being looked up server-side, because what is
+ * being rewritten is what the reader is looking at — and a reply that has been
+ * simplified once should not be re-fetched to be simplified again.
+ */
+export async function simplifySummary(repositoryId, replyId, text) {
+  const response = await api(
+    repositoryPath(repositoryId, `/channel/replies/${encodeURIComponent(replyId)}/simplify`),
+    { method: "POST", body: { text } },
+  );
+  return response?.text ?? "";
 }
 
 export async function rollbackTask(repositoryId, taskId) {

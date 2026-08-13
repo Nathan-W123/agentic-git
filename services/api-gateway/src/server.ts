@@ -276,6 +276,15 @@ const AUDITOR_EVENT_BATCH = 25;
  * above, which sits in front of a person.
  */
 const AUDIT_TIMEOUT_MS = 180_000;
+
+/**
+ * Far shorter than an audit's, because somebody is watching a button.
+ *
+ * Rewriting text that is already on the screen is a small ask of a model, and
+ * a reader who has waited half a minute for a shorter version of something
+ * they can already read has been failed whether it arrives or not.
+ */
+const SIMPLIFY_TIMEOUT_MS = 30_000;
 /** How long the opening line may take before a fixed one is used instead. */
 const ACKNOWLEDGEMENT_TIMEOUT_MS = 6000;
 /**
@@ -4548,6 +4557,68 @@ export class ApiGateway {
       this.sendJson(response, 200, {
         versions: await operation({ projectId, repositoryId, limit }),
       });
+      return;
+    }
+
+    // Rewriting one summary as briefly as it can be put.
+    //
+    // A separate reply rather than an edit of the original: the full account
+    // is what the agent actually said and what the audit trail refers to, and
+    // replacing it with a shortened paraphrase would quietly make the record
+    // something nobody wrote.
+    const simplifyMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/replies/([^/]+)/simplify$`,
+        "u",
+      ),
+    );
+    if (simplifyMatch !== undefined && method === "POST") {
+      const [projectId = "", repositoryId = "", replyId = ""] = simplifyMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
+      const body = objectBody(await this.readJson(request));
+      const text = stringField(body["text"], "text", { max: 20_000 }) ?? "";
+      if (text.trim().length === 0) {
+        throw new HttpError(400, "invalid_request", "There is nothing to simplify");
+      }
+      // Whoever is already answering in this room. A simplification is a
+      // rewrite of text that is already on the screen, so it needs no
+      // repository access and no agent of its own.
+      const [candidate] = await this.resolveChannelMentionCandidates(
+        projectId,
+        repositoryId,
+      );
+      if (candidate === undefined) {
+        throw new HttpError(
+          409,
+          "no_agent",
+          "No agent is connected to this channel to rewrite it",
+        );
+      }
+      const answer = await this.askAgent(
+        candidate,
+        "Rewrite the following so somebody in a hurry gets the point. " +
+          "Plain words, no jargon, and nothing that was not in the original " +
+          "— do not soften a failure or invent a result. Lead with what " +
+          "happened, then anything the reader has to do. A few short lines " +
+          "at most, and fewer if the original says little.\n\n" +
+          `---\n${text}\n---`,
+        SIMPLIFY_TIMEOUT_MS,
+      );
+      if (answer.text === undefined) {
+        throw new HttpError(
+          502,
+          "simplify_failed",
+          answer.error ?? "The agent did not answer",
+        );
+      }
+      this.sendJson(response, 200, { replyId, text: answer.text.trim() });
       return;
     }
 

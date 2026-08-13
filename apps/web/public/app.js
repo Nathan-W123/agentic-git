@@ -68,6 +68,7 @@ import {
   loadPreview,
   rollbackTask,
   setAuditorPaused,
+  simplifySummary,
   startPreview,
   stopPreview,
   setRepositoryGrant,
@@ -1274,6 +1275,41 @@ async function clearThreadsAction(repositoryId) {
  * which reads as "it did not work" for something that is about to work. The
  * link stays in the header for them to click when they are ready.
  */
+/**
+ * Fetches a shorter version of one summary and shows it.
+ *
+ * Kept beside the original rather than replacing it: the full account is what
+ * the agent actually said, and a reader who finds the short version too short
+ * has to be able to get back to it in one click.
+ */
+async function simplifySummaryAction(repositoryId, replyId) {
+  if (state.simplifying[replyId] === true) {
+    return;
+  }
+  const source = channelMessagesFor(repositoryId)
+    .flatMap((message) => message.replies ?? [])
+    .find((reply) => reply.id === replyId);
+  if (source === undefined) {
+    return;
+  }
+  state.simplifying[replyId] = true;
+  render();
+  try {
+    const text = await simplifySummary(repositoryId, replyId, source.content);
+    if (text.trim().length === 0) {
+      toast("The agent had nothing shorter to say", "error");
+      return;
+    }
+    state.simplified[replyId] = text;
+    state.simplifyShown[replyId] = true;
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    delete state.simplifying[replyId];
+    render();
+  }
+}
+
 async function startPreviewAction(repositoryId) {
   toast("Starting…", "ok");
   try {
@@ -2613,6 +2649,18 @@ document.addEventListener("click", (event) => {
       render();
       return;
     }
+    case "summary-toggle":
+      // `<details>` toggles itself; this only records which way, so the choice
+      // survives the next render.
+      state.summaryOpen[value] = !(state.summaryOpen[value] ?? true);
+      return;
+    case "summary-simplify":
+      void simplifySummaryAction(activeChannelId(), value);
+      return;
+    case "summary-simplify-toggle":
+      state.simplifyShown[value] = !(state.simplifyShown[value] === true);
+      render();
+      return;
     case "preview-start":
       void startPreviewAction(value);
       return;
