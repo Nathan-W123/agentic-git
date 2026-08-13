@@ -65,8 +65,11 @@ import {
   channelMessagesFor,
   deleteAllChannelThreads,
   deleteChannelThread,
+  loadPreview,
   rollbackTask,
   setAuditorPaused,
+  startPreview,
+  stopPreview,
   setRepositoryGrant,
   revokeRepositoryGrant,
   state,
@@ -1263,6 +1266,41 @@ async function clearThreadsAction(repositoryId) {
  * any other change, so the channel narrates it and there is nothing to render
  * here beyond saying it started.
  */
+/**
+ * Starts the repository's app and says where it went.
+ *
+ * The URL is not opened for the reader. A dev server takes a moment to bind
+ * and a tab opened the instant the process spawns shows a connection error —
+ * which reads as "it did not work" for something that is about to work. The
+ * link stays in the header for them to click when they are ready.
+ */
+async function startPreviewAction(repositoryId) {
+  toast("Starting…", "ok");
+  try {
+    const preview = await startPreview(repositoryId);
+    toast(
+      preview === null
+        ? "Started"
+        : `Running at ${preview.url} — ${preview.label}`,
+      "ok",
+    );
+    render();
+  } catch (error) {
+    // The common failure is a repository with no app in it, and the server
+    // says so in a sentence worth showing verbatim rather than replacing.
+    toast(error.message, "error");
+  }
+}
+
+async function stopPreviewAction(repositoryId) {
+  try {
+    await stopPreview(repositoryId);
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 async function revertTaskAction(repositoryId, taskId) {
   if (
     !window.confirm(
@@ -2221,6 +2259,21 @@ function renderNow() {
         render();
       }
     });
+    // Asked once per channel, not on every render: the preview outlives the
+    // page, so a reload has to find the one already running rather than offer
+    // to start a second. `undefined` is "not asked yet"; `null` is "asked,
+    // there is none", which is why this tests for the former.
+    if (state.previews[activeChannelId()] === undefined) {
+      const channel = activeChannelId();
+      // Claimed before the request so a second render in the same tick does
+      // not fire it again.
+      state.previews[channel] = null;
+      void loadPreview(channel).then(() => {
+        if (state.route === "chats") {
+          render();
+        }
+      });
+    }
     // Unread counts and presence, for the dots and badges beside the roster
     // this screen is already drawing. Unconditional rather than cached: both
     // are answers about right now, and a stale one is worse than none.
@@ -2560,6 +2613,12 @@ document.addEventListener("click", (event) => {
       render();
       return;
     }
+    case "preview-start":
+      void startPreviewAction(value);
+      return;
+    case "preview-stop":
+      void stopPreviewAction(value);
+      return;
     case "agent-panel-open":
       // Any agent in the room, not only your own, and history first. The
       // private-chat entry above stays as it was: that one is a deliberate

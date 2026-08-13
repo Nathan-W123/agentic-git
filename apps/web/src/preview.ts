@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
 import type { CoordinationStore } from "@coord/persistence";
@@ -45,6 +45,8 @@ export interface PreviewStatus {
   port: number;
   /** Canonical revision the preview was started from. */
   revision: string;
+  /** What is actually running, so the reader is not guessing. */
+  label: string;
   startedAt: string;
   /** Set once the process has exited, with however it went. */
   exited?: { code: number | null; signal: string | null; at: string };
@@ -56,6 +58,44 @@ interface Running {
   status: PreviewStatus;
   workspacePath: string;
   lastAskedAt: number;
+}
+
+/**
+ * Works out how to start a repository nobody has configured.
+ *
+ * Deliberately narrow. Node is the one ecosystem with a real convention — a
+ * `dev` or `start` script in package.json — and guessing beyond it does more
+ * harm than good: Python, Go and Rust each have several plausible answers and
+ * a wrong guess spawns something that fails in a way nobody can read.
+ *
+ * `undefined` means "say so", not "try something". A repository with no app in
+ * it — a library, a CLI like taskman — has no localhost to boot, and telling
+ * somebody that is more use than a process that exits with a usage message.
+ */
+async function detectPreviewCommand(
+  workspacePath: string,
+): Promise<{ executable: string; args: string[]; label: string } | undefined> {
+  let manifest: { scripts?: Record<string, unknown> };
+  try {
+    manifest = JSON.parse(
+      await readFile(path.join(workspacePath, "package.json"), "utf8"),
+    ) as { scripts?: Record<string, unknown> };
+  } catch {
+    return undefined;
+  }
+  const scripts = manifest.scripts ?? {};
+  // `dev` before `start`: where a repository has both, `dev` is the one meant
+  // to be watched and `start` is often the production entry point.
+  const script = ["dev", "start"].find(
+    (name) => typeof scripts[name] === "string",
+  );
+  return script === undefined
+    ? undefined
+    : {
+        executable: process.platform === "win32" ? "npm.cmd" : "npm",
+        args: ["run", script],
+        label: `npm run ${script}`,
+      };
 }
 
 /** A free loopback port, chosen by asking the OS for one and letting it go. */
@@ -106,14 +146,6 @@ export class PreviewService {
   public async start(input: {
     repositoryId: string;
   }): Promise<PreviewStatus> {
-    const command = this.project.config.previewCommand;
-    if (command === undefined) {
-      throw new Error(
-        'No preview command is configured. Add "previewCommand" to ' +
-          '.coordinator/config.json — for example {"executable":"npm",' +
-          '"args":["run","dev"],"label":"dev server"}.',
-      );
-    }
     const stored = await this.store.getRepository(input.repositoryId);
     if (stored === undefined) {
       throw new Error(`Unknown repository: ${input.repositoryId}`);
@@ -138,6 +170,24 @@ export class PreviewService {
       baseVersion: version,
     });
 
+    // Resolved after the checkout exists, because detection reads the
+    // repository's own files. A repository nobody has configured and nothing
+    // can be detected for is told so plainly rather than being handed a
+    // command that exits immediately.
+    const command =
+      this.project.config.previewCommands?.[input.repositoryId] ??
+      this.project.config.previewCommand ??
+      (await detectPreviewCommand(workspace.path));
+    if (command === undefined) {
+      await rm(workspace.path, { recursive: true, force: true });
+      throw new Error(
+        `Nothing here looks like an app that can be started. Add a ` +
+          `"previewCommands" entry for "${input.repositoryId}" in ` +
+          `.coordinator/config.json — for example ` +
+          `{"executable":"npm","args":["run","dev"],"label":"dev server"}.`,
+      );
+    }
+
     const port = await freePort();
     const child = spawn(command.executable, [...command.args], {
       cwd: workspace.path,
@@ -156,6 +206,7 @@ export class PreviewService {
       url: `http://127.0.0.1:${String(port)}`,
       port,
       revision: version.revision,
+      label: command.label,
       startedAt: new Date().toISOString(),
       recentOutput: [],
     };

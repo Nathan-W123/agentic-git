@@ -195,6 +195,14 @@ export const state = {
   channelStats: {},
   /** Everyone in each repository's room — org members plus repo grantees. */
   channelPeople: {},
+  /**
+   * This repository's running app, keyed by repository id.
+   *
+   * `null` means asked and there is none — which is different from absent,
+   * meaning nobody has asked yet, and is what stops the button flickering
+   * between states on every render.
+   */
+  previews: {},
   /** The project whose inbox has been fetched, so it is fetched once. */
   dmLoadedProject: undefined,
   // Paths whose inline diff is expanded in the transcript. Plural because a
@@ -2644,6 +2652,39 @@ export async function setAuditorPaused(repositoryId, paused) {
  * failure, so it arrives as a normal response and is returned for the caller
  * to report.
  */
+/**
+ * Whether this repository's app is running, and where.
+ *
+ * Fetched rather than assumed, because the preview outlives the page: a
+ * reload, or a second tab, must find the one that is already up instead of
+ * offering to start a second.
+ */
+export async function loadPreview(repositoryId) {
+  try {
+    const response = await api(repositoryPath(repositoryId, "/preview"));
+    state.previews[repositoryId] = response?.preview ?? null;
+  } catch {
+    // A deployment that cannot run previews answers 501, and a reader who
+    // never asked for one should not see an error about it. Absent is the
+    // same as "no button", which is the right outcome either way.
+    state.previews[repositoryId] = null;
+  }
+  return state.previews[repositoryId];
+}
+
+export async function startPreview(repositoryId) {
+  const response = await api(repositoryPath(repositoryId, "/preview"), {
+    method: "POST",
+  });
+  state.previews[repositoryId] = response?.preview ?? null;
+  return state.previews[repositoryId];
+}
+
+export async function stopPreview(repositoryId) {
+  await api(repositoryPath(repositoryId, "/preview"), { method: "DELETE" });
+  state.previews[repositoryId] = null;
+}
+
 export async function rollbackTask(repositoryId, taskId) {
   const response = await api(repositoryPath(repositoryId, "/rollback"), {
     method: "POST",

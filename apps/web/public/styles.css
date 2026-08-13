@@ -4375,6 +4375,29 @@ svg {
   color: var(--text-2);
 }
 
+/* The running app's address, in the channel header beside the controls. Shown
+   as the bare host:port it is — a loopback link is only openable on the
+   machine running the control plane, and dressing it up as an ordinary link
+   would hide that. */
+.preview-live {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 6px;
+}
+
+.preview-link {
+  font-size: 12px;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--accent-bright);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.preview-link:hover {
+  text-decoration: underline;
+}
+
 /* One agent's work in this repository. Sits in the middle row of
    `.thread-panel`'s grid, which is the row that stretches, so the list
    scrolls rather than pushing anything off the bottom. */

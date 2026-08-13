@@ -140,6 +140,15 @@ export interface ProjectConfig {
    * until it is stopped, unlike a validation command.
    */
   previewCommand?: ValidationCommand;
+  /**
+   * Per-repository overrides, keyed by repository id.
+   *
+   * One command cannot serve every repository — a Node app and a Python CLI
+   * want different things, and a project holds both. This wins over
+   * `previewCommand`, which stays as the default for a project whose
+   * repositories all start the same way.
+   */
+  previewCommands?: Record<string, ValidationCommand>;
 }
 
 export const DEFAULT_CONFIG: ProjectConfig = {
@@ -516,6 +525,21 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
           previewCommand: assertValidationCommand(
             config.previewCommand,
             "previewCommand",
+          ),
+        }),
+    ...(config.previewCommands === undefined
+      ? {}
+      : {
+          previewCommands: Object.fromEntries(
+            Object.entries(
+              config.previewCommands as Record<string, unknown>,
+            ).map(([repositoryId, entry]) => [
+              repositoryId,
+              assertValidationCommand(
+                entry,
+                `previewCommands["${repositoryId}"]`,
+              ),
+            ]),
           ),
         }),
     ...(defaultRepository === undefined

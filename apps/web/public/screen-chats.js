@@ -532,6 +532,36 @@ function chanSidebar(activeRepositoryId) {
 
 /* ---------------------------------------------------------- chan main ---- */
 
+/**
+ * Start this repository's app, or go and look at the one already running.
+ *
+ * The link is a plain anchor to a loopback address, which works only on the
+ * machine running the control plane. That is the whole design of the preview
+ * and not an oversight — see `PreviewService` — so on a hosted deployment this
+ * offers a link that will not open, and it says where it points rather than
+ * pretending otherwise.
+ */
+function previewControl(repositoryId) {
+  if (!repositoryId) {
+    return "";
+  }
+  const preview = state.previews[repositoryId];
+  const running = preview !== null && preview !== undefined &&
+    preview.exited === undefined;
+  if (!running) {
+    return `<button type="button" class="icon-btn" data-act="preview-start"
+      data-value="${esc(repositoryId)}" title="Run this app and open it">
+      ${icon("play")}</button>`;
+  }
+  return `<span class="preview-live">
+    <a class="preview-link" href="${esc(preview.url)}" target="_blank"
+      rel="noopener noreferrer" title="${esc(preview.label)} — ${esc(preview.url)}">
+      ${esc(preview.url.replace("http://", ""))}</a>
+    <button type="button" class="icon-btn sm" data-act="preview-stop"
+      data-value="${esc(repositoryId)}" title="Stop it">${icon("close")}</button>
+  </span>`;
+}
+
 function chanHeader(repository, repositoryId) {
   const roster = channelAgentsFor(repositoryId);
   const people = collaborators();
@@ -581,6 +611,7 @@ function chanHeader(repository, repositoryId) {
       </div>
     </div>
     <span class="spacer"></span>
+    ${previewControl(repositoryId)}
     <span class="avatar-stack">${faces}${avatarStack(people, 3, 24)}</span>
     <button type="button" class="icon-btn${state.chanTree === true ? " on" : ""}"
       data-act="chan-tree-toggle" title="Files"
