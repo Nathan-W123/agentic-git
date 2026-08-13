@@ -998,10 +998,48 @@ export function myAgentColor() {
   return agentColorFor(currentUserId());
 }
 
+/**
+ * The accent this browser last saw somebody signed in with.
+ *
+ * Kept for the signed-out screens, which have no principal to read a colour
+ * off and so painted themselves the default purple for everybody — including
+ * the person who had just spent time choosing something else, and who sees
+ * that screen every time their session lapses. The theme has been remembered
+ * here for the same reason since light mode existed; this is the other half
+ * of the same idea.
+ *
+ * Deliberately not cleared on sign-out: "the colour this machine is" is the
+ * whole point, and a machine with one user — which is most of them — should
+ * not flash purple on the way back in. On a shared machine it does reveal
+ * that the last person preferred green, which is the same thing the theme
+ * already reveals and about as consequential.
+ */
+function rememberAccent(accent) {
+  try {
+    localStorage.setItem("ag.accent", accent);
+  } catch {
+    // Storage can be full or blocked outright. A colour is not worth failing
+    // a sign-in over; the default is a perfectly good colour.
+  }
+}
+
 export function myAccent() {
-  return (
-    validColor(state.principal?.user?.appearance?.accent) ?? DEFAULT_ACCENT
-  );
+  const chosen = validColor(state.principal?.user?.appearance?.accent);
+  if (chosen !== undefined) {
+    rememberAccent(chosen);
+    return chosen;
+  }
+  // Only while signed out. Somebody who *is* signed in and has chosen no
+  // accent gets the default, not whatever the last person on this machine
+  // picked — that would be showing them somebody else's preference and
+  // calling it theirs.
+  if (state.principal === undefined) {
+    const remembered = validColor(localStorage.getItem("ag.accent"));
+    if (remembered !== undefined) {
+      return remembered;
+    }
+  }
+  return DEFAULT_ACCENT;
 }
 
 /** Saves an appearance choice and re-reads the principal it now belongs to. */

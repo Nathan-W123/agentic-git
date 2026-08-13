@@ -3606,6 +3606,14 @@ window.addEventListener("hashchange", applyHash);
 
 function showAuth() {
   closeSocket();
+  // The signed-out screens theme themselves too. `renderNow` applies the
+  // accent only once a principal exists, which is the one moment it certainly
+  // does not — so sign-in, bootstrap and the invite screens were the single
+  // part of the product that could not be re-themed, and greeted somebody
+  // who had chosen green with the default purple every time their session
+  // lapsed. `myAccent` answers with the last accent this browser saw while
+  // there is nobody to ask.
+  applyTheme();
   $("#app-root").hidden = true;
   $("#auth-root").hidden = false;
   $("#auth-root").innerHTML = renderAuth();
