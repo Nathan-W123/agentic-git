@@ -171,8 +171,16 @@ export const state = {
   dmThreads: {},
   /** The conversation open in the side panel, if any. */
   activeDm: undefined,
-  /** Your own agent, open in that same panel. */
+  /** Any agent in the room, open in that same panel. */
   activeAgentPanel: undefined,
+  /**
+   * Which half of an agent's panel is showing: "history" or "chat".
+   *
+   * History is the default because it is the half that exists for every
+   * agent — a private chat is only ever with your own, so opening straight
+   * into one would show most of the roster an empty room they cannot use.
+   */
+  agentPanelTab: "history",
   /*
    * Whether a thread's thinking block is unfolded, keyed by thread id.
    *
@@ -185,6 +193,8 @@ export const state = {
   dmDraft: "",
   /** Message/token totals per repository, for the info popover. */
   channelStats: {},
+  /** Everyone in each repository's room — org members plus repo grantees. */
+  channelPeople: {},
   /** The project whose inbox has been fetched, so it is fetched once. */
   dmLoadedProject: undefined,
   // Paths whose inline diff is expanded in the transcript. Plural because a
@@ -2093,7 +2103,7 @@ function agentIsWorking(agent, repositoryId) {
 }
 
 /** The vendor CLI each chat provider drives, as task `agentId`s name it. */
-const VENDOR_FOR_PROVIDER = {
+export const VENDOR_FOR_PROVIDER = {
   anthropic: "claude",
   openai: "codex",
   google: "gemini",
@@ -2189,6 +2199,7 @@ async function loadChannelRoster(repositoryId) {
   if (response === undefined) {
     return false;
   }
+  state.channelPeople[repositoryId] = response.people ?? [];
   state.channelRoster[repositoryId] = response.agents ?? [];
   // Sent with the roster because the switch it draws sits on the roster. See
   // the route's own comment for why it is not a separate request.

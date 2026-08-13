@@ -1584,7 +1584,15 @@ export interface ChatProviderOperations {
   connectionsFor?(
     userIds: readonly string[],
   ): Promise<
-    Record<string, Array<{ provider: string; visibility: "personal" | "org" }>>
+    Record<
+      string,
+      Array<{
+        provider: string;
+        visibility: "personal" | "org";
+        /** The agent's own name, held per account. See `ProviderSettings`. */
+        callSign?: string;
+      }>
+    >
   >;
 }
 
@@ -5337,8 +5345,42 @@ export class ApiGateway {
       // a second round trip to decide how to draw one toggle is a second
       // chance for the two to disagree. Absent row means auditing is on.
       const auditing = await this.options.store.getAuditorCursor(repositoryId);
+      // Everyone who can be in this room, not only organization members. A
+      // repository-scoped invite grants the repository and nothing else, so
+      // its holder was posting in a channel whose Users list had never heard
+      // of them — present in every message and absent from the room.
+      const project = await this.options.store.getProject(projectId);
+      const [memberships, grants, users] = await Promise.all([
+        project === undefined
+          ? Promise.resolve([])
+          : this.options.store.listMemberships(project.organizationId),
+        this.options.store.listRepositoryGrants(repositoryId),
+        this.options.store.listUsers(),
+      ]);
+      const userById = new Map(users.map((user) => [user.id, user]));
+      const seen = new Set<string>();
+      const people = [
+        ...memberships.map((entry) => ({ userId: entry.userId, role: entry.role })),
+        ...grants.map((entry) => ({ userId: entry.userId, role: entry.role })),
+      ].flatMap((entry) => {
+        if (seen.has(entry.userId)) {
+          return [];
+        }
+        seen.add(entry.userId);
+        const user = userById.get(entry.userId);
+        return user === undefined
+          ? []
+          : [
+              {
+                userId: entry.userId,
+                role: entry.role,
+                user: { id: user.id, displayName: user.displayName },
+              },
+            ];
+      });
       this.sendJson(response, 200, {
         agents,
+        people,
         auditorPaused: auditing?.paused === true,
       });
       return;
@@ -6717,6 +6759,7 @@ export class ApiGateway {
       userName: string;
       provider: string;
       visibility: "personal" | "org";
+      callSign?: string;
     }>
   > {
     const project = await this.options.store.getProject(projectId);
@@ -6750,6 +6793,9 @@ export class ApiGateway {
         userName: user.displayName,
         provider: connection.provider,
         visibility: connection.visibility ?? "personal",
+        ...(connection.callSign === undefined
+          ? {}
+          : { callSign: connection.callSign }),
       }));
     });
     if (!(await this.options.store.hasBackfilledChannelMembership(repositoryId))) {
@@ -6807,7 +6853,14 @@ export class ApiGateway {
         return [];
       }
       const label = AGENT_LABEL[connection.provider] ?? connection.provider;
-      const defaultName = `${label} (${firstWord(connection.userName)})`;
+      // The account's own name wins over the vendor label, and needs no owner
+      // in brackets: a call sign is already unique across the deployment, and
+      // "Athena (Bob)" reads as a disambiguation of something that was never
+      // ambiguous. A channel override still beats both — that is the
+      // exception, for the day two people's agents collide in a room neither
+      // of them chose.
+      const defaultName =
+        connection.callSign ?? `${label} (${firstWord(connection.userName)})`;
       const { name, role } = resolveChannelAgentPresentation(
         overrides,
         connection,
