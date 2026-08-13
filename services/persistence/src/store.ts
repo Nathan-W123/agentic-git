@@ -474,7 +474,13 @@ export interface StoredPlanRevision {
   runId: string;
   taskId: TaskId;
   revision: number;
-  reason: "initial" | "canonical_change" | "scope_change";
+  /**
+   * `agent_replan` is the agent deciding its own approved plan was the wrong
+   * one, which is a different thing from the three that came before it: those
+   * are all the coordinator revising a plan in response to something that
+   * happened *to* the task.
+   */
+  reason: "initial" | "canonical_change" | "scope_change" | "agent_replan";
   canonicalRevision: string;
   plan: AgentPlan;
   createdAt: string;

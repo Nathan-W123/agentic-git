@@ -143,6 +143,29 @@ export type AgentEvent =
       occurredAt: string;
     }
   | {
+      /**
+       * The agent has decided its approved plan is the wrong one, and is
+       * offering a different one.
+       *
+       * Distinct from `scope_change_requested`, which asks for *more* of the
+       * same plan. This says the shape was wrong — the work turned out to
+       * belong in different files, or the declared approach cannot be made to
+       * work. Without it, an agent that discovers this mid-task has two
+       * choices and both are bad: build the thing it no longer believes in, or
+       * stop and be recorded as having failed.
+       *
+       * Answered with a `ScopeChangeDecision`, because the answer to "may I
+       * work to this plan instead" has the same shape as the answer to "may I
+       * widen this plan": approved or not, and the plan now in force. The
+       * requests differ; the decisions do not.
+       */
+      event: "replan_proposed";
+      requestId?: string;
+      plan: AgentPlan;
+      reason: string;
+      occurredAt: string;
+    }
+  | {
       event: "completed";
       occurredAt: string;
     };

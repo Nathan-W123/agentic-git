@@ -60,7 +60,7 @@ class TestAgent implements AgentAdapter {
 
   public constructor(
     private readonly agentId: string,
-    private readonly plan: AgentPlan,
+    protected readonly plan: AgentPlan,
     private readonly repository: CanonicalRepository,
     private readonly workspaces: WorkspaceManager,
     /** Empty writes nothing, which is what a task asked only to look does. */
@@ -229,6 +229,11 @@ class TestAgent implements AgentAdapter {
   /** The event handler for one session, for a subclass that emits its own. */
   protected handlerFor(sessionId: string): ((event: AgentEvent) => void) | undefined {
     return this.sessions.get(sessionId)?.eventHandler;
+  }
+
+  /** This agent's plan, for a subclass building a variation of it. */
+  protected planFor(): AgentPlan {
+    return this.plan;
   }
 
   /** One session, for a subclass that has to park a resolver on it. */
@@ -525,6 +530,130 @@ class ActionAgent extends TestAgent {
     await super.sendContext(sessionId, context);
   }
 }
+
+/** An agent that decides mid-task that its approved plan was the wrong one. */
+class ReplanningAgent extends TestAgent {
+  public readonly answers: ScopeChangeDecision[] = [];
+
+  public constructor(
+    agentId: string,
+    plan: AgentPlan,
+    repository: CanonicalRepository,
+    workspaces: WorkspaceManager,
+    outputPath: string,
+    private readonly proposedFiles: string[],
+  ) {
+    super(agentId, plan, repository, workspaces, outputPath);
+  }
+
+  public override async sendContext(
+    sessionId: string,
+    context: CoordinatorContext,
+  ): Promise<void> {
+    const answer = await new Promise<ScopeChangeDecision>((resolve) => {
+      this.sessionFor(sessionId).scopeResolver = resolve;
+      this.handlerFor(sessionId)?.({
+        event: "replan_proposed",
+        requestId: "replan_1",
+        plan: {
+          ...structuredClone(this.planFor()),
+          expectedFiles: [...this.proposedFiles],
+        },
+        reason: "The work belongs in a different file than I declared",
+        occurredAt: new Date().toISOString(),
+      });
+    });
+    this.answers.push(answer);
+    await super.sendContext(sessionId, context);
+  }
+}
+
+test("an agent may replace its own plan, and is held to the same checks", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ReplanningAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      ["src/a.txt", "src/c.txt"],
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(agent.answers[0]?.decision, "approved");
+    assert.equal(
+      agent.answers[0]?.revisedPlan.expectedFiles.includes("src/c.txt"),
+      true,
+    );
+    // The plan in force is the new one, so scope enforcement holds the agent
+    // to what it proposed rather than to what it originally declared.
+    assert.equal(result.tasks[0]?.plan.expectedFiles.includes("src/c.txt"), true);
+    assert.equal(result.tasks[0]?.status, "integrated");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a proposed plan that reaches into work running elsewhere is refused", async () => {
+  // The point of putting a mid-task plan through the durable authority. An
+  // agent rewriting its own plan is exactly when it would otherwise be able to
+  // claim whatever it liked, and a refusal leaves it working inside the plan
+  // it already had rather than ending the task.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ReplanningAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      ["src/held.txt"],
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      planAuthority: {
+        async admit(request) {
+          return request.plan.expectedFiles.includes("src/held.txt")
+            ? {
+                outcome: "deferred",
+                retryAfterMs: 1_000,
+                blockedBy: ["task_elsewhere"],
+                explanation: "src/held.txt is leased to task_elsewhere",
+              }
+            : { outcome: "admitted", plan: request.plan };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(agent.answers[0]?.decision, "rejected");
+    assert.match(agent.answers[0]?.explanation ?? "", /task_elsewhere/u);
+    // Refused, not failed: the original plan is still in force and the task
+    // finishes inside it.
+    assert.deepEqual(agent.answers[0]?.revisedPlan.expectedFiles, ["src/a.txt"]);
+    assert.equal(result.tasks[0]?.status, "integrated");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("an agent can ask the platform to act, and is told what happened", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));

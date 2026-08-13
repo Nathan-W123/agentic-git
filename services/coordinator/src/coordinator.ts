@@ -1237,6 +1237,159 @@ export class Coordinator {
   }
 
   /**
+   * Decides a plan an agent has offered in place of the one it was approved
+   * for.
+   *
+   * Held to exactly the checks the original plan was, and for the same reason:
+   * a plan the agent wrote mid-task is no more trustworthy than the one it
+   * wrote at the start, and it arrives at a moment when the agent has every
+   * incentive to declare whatever would let it carry on. So it is grounded
+   * against the repository, assessed against the rest of this wave, put to the
+   * durable authority, and passed through the approval policy before any of it
+   * counts.
+   *
+   * A refusal leaves the approved plan in force and the agent still working
+   * inside it, which is the same contract a refused scope change leaves
+   * behind. It is not a failure and does not end the task.
+   */
+  private async handleReplanProposal(
+    input: CoordinatorRunInput,
+    entry: PlannedTask,
+    wave: readonly PlannedTask[],
+    waveVersion: CanonicalVersion,
+    event: { requestId?: string; plan: AgentPlan; reason: string },
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<void> {
+    const requestId = event.requestId?.trim() || createId("replan");
+    let decision: ScopeChangeDecision;
+    try {
+      const proposed = structuredClone(event.plan);
+      assertAgentPlan(proposed);
+      if (proposed.taskId !== entry.task.id) {
+        throw new Error("The proposed plan is for a different task");
+      }
+      if (event.reason.trim().length === 0) {
+        throw new Error("A replan proposal must say why");
+      }
+      // Grounded before anything reads it, exactly as the first plan was: a
+      // plan written mid-task is the one most likely to name files the agent
+      // merely believes exist.
+      const revisedPlan = groundPlan(
+        proposed,
+        await this.intelligence.index(input.repository, waveVersion.revision),
+      );
+      const activeConflict = wave
+        .filter((candidate) => candidate.task.id !== entry.task.id)
+        .map((candidate) => this.conflicts.assess(revisedPlan, candidate.plan))
+        .find(
+          (assessment) =>
+            assessment !== undefined && structuralConflict(assessment),
+        );
+      if (activeConflict !== undefined) {
+        throw new Error(
+          `The proposed plan conflicts with active task ` +
+            activeConflict.taskIds.find((id) => id !== entry.task.id) +
+            `: ${activeConflict.explanation}`,
+        );
+      }
+      // And against everything running outside this run, which the wave above
+      // cannot see. A new plan is a new claim on the repository whether it
+      // widens the old one or merely points somewhere else.
+      if (this.planAuthority !== undefined) {
+        const answer = await this.planAuthority.admit({
+          task: entry.task,
+          plan: revisedPlan,
+          planRevision: entry.planRevision + 1,
+          baseVersion: waveVersion,
+          repository: input.repository,
+          ...(input.projectId === undefined
+            ? {}
+            : { projectId: input.projectId }),
+          revising: true,
+        });
+        if (answer.outcome !== "admitted") {
+          throw new Error(
+            `The proposed plan overlaps work running elsewhere in this ` +
+              `repository: ${answer.explanation}`,
+          );
+        }
+      }
+      const reasons = this.approvalPolicy.planReasons(revisedPlan);
+      if (reasons.length > 0) {
+        await this.requireApproval(
+          input,
+          entry,
+          "policy_override",
+          reasons,
+          recorder,
+          runAudit,
+        );
+      }
+      const leases = this.ownership.acquire(
+        revisedPlan,
+        entry.task.agentId,
+        waveVersion.sequence,
+        { approvedResources: approvedSchemaResources(revisedPlan) },
+      );
+      entry.plan = revisedPlan;
+      entry.planRevision += 1;
+      entry.decision.planRevision = entry.planRevision;
+      entry.decision.ownershipGrants.push(...leases);
+      await recorder?.leases(leases);
+      await recorder?.planRevision(entry.task.id, {
+        revision: entry.planRevision,
+        reason: "agent_replan",
+        canonicalRevision: waveVersion.revision,
+        plan: revisedPlan,
+      });
+      await recorder?.decision(entry.decision);
+      await this.trace(recorder, runAudit, "plan_revised", entry.task.id, {
+        requestId,
+        revision: entry.planRevision,
+        reason: event.reason.trim(),
+        proposedBy: "agent",
+        expectedFiles: revisedPlan.expectedFiles,
+      });
+      decision = {
+        requestId,
+        taskId: entry.task.id,
+        decision: reasons.length > 0 ? "approved_with_constraints" : "approved",
+        revisedPlan,
+        constraints:
+          reasons.length > 0
+            ? ["The replan received required human approval"]
+            : [],
+        ownershipGrants: leases,
+        explanation: "The proposed plan is conflict-free and now in force",
+        decidedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      decision = {
+        requestId,
+        taskId: entry.task.id,
+        decision: "rejected",
+        revisedPlan: entry.plan,
+        constraints: ["Continue within the previously approved plan"],
+        ownershipGrants: [],
+        explanation: errorMessage(error),
+        decidedAt: new Date().toISOString(),
+      };
+      await this.trace(recorder, runAudit, "replan_requested", entry.task.id, {
+        requestId,
+        proposedBy: "agent",
+        refused: true,
+        explanation: decision.explanation,
+      });
+    }
+    // The same reply a scope change gets: the answer to "may I work to this
+    // plan instead" has the shape of the answer to "may I widen this plan".
+    await entry.adapter
+      .resolveScopeChange(entry.session.id, decision)
+      .catch(() => undefined);
+  }
+
+  /**
    * Puts an agent's request to the platform and hands back what happened.
    *
    * Never throws at the agent. Every path here ends in an answer it can act
@@ -1667,6 +1820,18 @@ export class Coordinator {
     }
     if (event.event === "action_requested") {
       await this.handleActionRequest(input, entry, event, recorder, runAudit);
+      return;
+    }
+    if (event.event === "replan_proposed") {
+      await this.handleReplanProposal(
+        input,
+        entry,
+        wave,
+        waveVersion,
+        event,
+        recorder,
+        runAudit,
+      );
       return;
     }
 

@@ -339,6 +339,19 @@ export function parseAgentEvent(value: unknown): AgentEvent {
         reason: requireString(record, "reason", "scope change event"),
         occurredAt,
       };
+    case "replan_proposed": {
+      const proposed: unknown = record["plan"];
+      assertAgentPlan(proposed);
+      return {
+        event: "replan_proposed",
+        ...(typeof record["requestId"] === "string"
+          ? { requestId: record["requestId"] }
+          : {}),
+        plan: proposed,
+        reason: requireString(record, "reason", "replan proposal"),
+        occurredAt,
+      };
+    }
     case "action_requested":
       return {
         event: "action_requested",
