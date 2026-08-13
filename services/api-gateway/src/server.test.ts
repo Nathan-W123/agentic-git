@@ -4765,6 +4765,56 @@ test("an organization admin can delete a repository they did not create", async 
   );
 });
 
+test("the auditor is told what the work was asked to do", async (t) => {
+  // A diff can only be judged against itself, which leaves the most valuable
+  // defect invisible: code that is perfectly reasonable and does something
+  // other than what was requested. The investigator has always been given the
+  // objective; the auditor, whose whole job is judging whether work is right,
+  // never was.
+  const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "intent");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents/${ownerId}:openai`,
+    { method: "POST", body: { role: "auditor" } },
+  );
+
+  const submitted = await runtime.store.submitTask({
+    repositoryId: repo,
+    objective: "Log the raw API key so failed shares can be debugged",
+    agentId: "test-agent",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  // The reply is beside the point here; what is under test is the prompt.
+  runtime.chatAnswer.text = "NO FINDINGS";
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: submitted.id,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+    },
+  });
+
+  await waitFor(
+    async () => runtime.chatPrompts.length > 0,
+    "the auditor never ran",
+  );
+  assert.match(
+    runtime.chatPrompts[0]?.prompt ?? "",
+    /Log the raw API key so failed shares can be debugged/u,
+  );
+});
+
 test("reverting a task rolls back to the state before that task landed", async (t) => {
   // The channel knows which task a message belongs to and nothing about
   // revisions, so "revert this" travels as a task id and the server is what

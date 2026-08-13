@@ -8992,6 +8992,11 @@ export class ApiGateway {
       // merge that moved the branch pointer only. Nothing to read.
       return;
     }
+    const objectives = await this.objectivesBehind(
+      repositoryId,
+      input.fromRevision,
+      input.toRevision,
+    );
     const answer = await this.askAgent(
       auditor,
       buildAuditPrompt({
@@ -9001,6 +9006,7 @@ export class ApiGateway {
         files: diff.files,
         patch: diff.patch,
         truncated: diff.truncated,
+        ...(objectives.length === 0 ? {} : { objectives }),
       }),
       AUDIT_TIMEOUT_MS,
     );
@@ -9435,6 +9441,72 @@ export class ApiGateway {
    * to whom. Undefined when the task never promoted, which includes every task
    * that failed and every task still running.
    */
+  /**
+   * What the work between two revisions was asked to do.
+   *
+   * Matched by walking the promotions this repository recorded and keeping
+   * the ones whose advance lands inside the range — `previousRevision` and
+   * `revision` chain, so the range is followed rather than guessed at. A
+   * promotion whose task has since been deleted contributes nothing rather
+   * than a placeholder: an objective the auditor cannot trust is worse than
+   * none, because it would be judged against.
+   */
+  private async objectivesBehind(
+    repositoryId: string,
+    fromRevision: string,
+    toRevision: string,
+  ): Promise<string[]> {
+    const promotions = (
+      await this.options.store.listAuditEvents({
+        types: ["canonical_promoted"],
+      })
+    ).filter((record) => {
+      const data = (record.event.data ?? {}) as Record<string, unknown>;
+      return data["repositoryId"] === repositoryId;
+    });
+    // Walk forward from the base, following each advance to the next, so a
+    // range covering several merges collects all of them and a promotion from
+    // some unrelated stretch of history collects none.
+    const byPrevious = new Map<string, (typeof promotions)[number]>();
+    for (const record of promotions) {
+      const data = (record.event.data ?? {}) as Record<string, unknown>;
+      const previous = data["previousRevision"];
+      if (typeof previous === "string") {
+        byPrevious.set(previous, record);
+      }
+    }
+    const taskIds: string[] = [];
+    let cursor = fromRevision;
+    // Bounded by the number of promotions, so a cycle in malformed data
+    // cannot spin here.
+    for (let step = 0; step < promotions.length; step += 1) {
+      const next = byPrevious.get(cursor);
+      if (next === undefined) {
+        break;
+      }
+      const taskId = next.event.taskId;
+      if (taskId !== undefined) {
+        taskIds.push(taskId);
+      }
+      const data = (next.event.data ?? {}) as Record<string, unknown>;
+      const revision = data["revision"];
+      if (typeof revision !== "string" || revision === toRevision) {
+        break;
+      }
+      cursor = revision;
+    }
+    if (taskIds.length === 0) {
+      return [];
+    }
+    const tasks = await this.options.store.listSubmittedTasks({ repositoryId });
+    const objectiveOf = new Map(tasks.map((task) => [task.id, task.objective]));
+    return taskIds
+      .map((taskId) => objectiveOf.get(taskId))
+      .filter((objective): objective is string => objective !== undefined)
+      .map((objective) => objective.replace(/\s+/gu, " ").trim())
+      .filter((objective) => objective.length > 0);
+  }
+
   private async revisionsForTask(
     repositoryId: string,
     taskId: string,
