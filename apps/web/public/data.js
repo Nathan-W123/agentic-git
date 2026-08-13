@@ -183,6 +183,8 @@ export const state = {
   thinkingOpen: {},
   /** What is half-typed to them. */
   dmDraft: "",
+  /** Message/token totals per repository, for the info popover. */
+  channelStats: {},
   /** The project whose inbox has been fetched, so it is fetched once. */
   dmLoadedProject: undefined,
   // Paths whose inline diff is expanded in the transcript. Plural because a
@@ -1860,6 +1862,14 @@ export function channelMessagesFor(repositoryId) {
 
 const channelPath = (repositoryId, suffix = "") =>
   `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/channel${suffix}`;
+
+/** Channel stats for the info popover, keyed by repository id. */
+export async function loadChannelStats(repositoryId) {
+  const stats = await apiOptional(channelPath(repositoryId, "/stats"), undefined);
+  if (stats !== undefined) {
+    state.channelStats[repositoryId] = stats;
+  }
+}
 
 const directPath = (suffix = "") =>
   `/projects/${encodeURIComponent(state.projectId)}/direct-messages${suffix}`;

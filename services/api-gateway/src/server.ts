@@ -4801,6 +4801,45 @@ export class ApiGateway {
         "u",
       ),
     );
+    const channelStatsMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/stats$`,
+        "u",
+      ),
+    );
+    if (channelStatsMatch !== undefined && method === "GET") {
+      const [projectId = "", repositoryId = ""] = channelStatsMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
+      // The page cap is the read cap: counting by fetching is honest about
+      // what the channel API can see, and a room past two hundred roots is
+      // reported as "200+" rather than paid for with a table scan.
+      const messages = await this.options.store.listChannelMessages(
+        repositoryId,
+        principal.user.id,
+        { limit: 200 },
+      );
+      const replies = messages.reduce(
+        (sum, message) => sum + (message.replies?.length ?? 0),
+        0,
+      );
+      const tokens = (
+        await this.options.store.listTokenUsage({ repositoryId })
+      ).reduce((sum, entry) => sum + entry.totalTokens, 0);
+      this.sendJson(response, 200, {
+        messages: messages.length,
+        replies,
+        capped: messages.length >= 200,
+        tokens,
+      });
+      return;
+    }
     const channelTypingMatch = matchPath(
       path,
       new RegExp(
@@ -7011,7 +7050,6 @@ export class ApiGateway {
     content: string;
     candidate: ChannelMentionCandidate;
   }): Promise<{ id: string; title: string } | undefined> {
-    const authorId = `${input.candidate.userId}:${input.candidate.provider}`;
     const messages = await this.options.store
       .listChannelMessages(input.repositoryId, input.viewerId, { limit: 40 })
       .catch(() => []);
@@ -7029,7 +7067,14 @@ export class ApiGateway {
     const now = Date.now();
     let best: { id: string; title: string; score: number } | undefined;
     for (const message of messages) {
-      if (message.kind !== "agent" || message.authorId !== authorId) {
+      // Any agent's thread qualifies, not only this candidate's own. Thread
+      // context is shared — the dispatch reads the thread's history whoever
+      // wrote it — and the explicit path has always allowed a second agent
+      // into a thread by mention. The automatic path insisting on the same
+      // agent meant "now do the same for the other file", sent to whichever
+      // agent was free, opened a parallel thread about the same work instead
+      // of continuing the one that holds its story.
+      if (message.kind !== "agent") {
         continue;
       }
       const age = now - new Date(message.createdAt).getTime();

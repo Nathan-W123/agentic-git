@@ -18,6 +18,7 @@ import {
   noteAgentBusy,
   noteDirectMessage,
   ensureDirectMessages,
+  loadChannelStats,
   loadDmThread,
   sendDirectMessage,
   noteTyping,
@@ -2680,6 +2681,7 @@ document.addEventListener("click", (event) => {
       // them only ever shows for someone who can already manage the
       // repository, so most opens of this popover need nothing here.
       void ensureRepositoryGrants(value, refreshChannelInfoPopover);
+      void loadChannelStats(value).then(refreshChannelInfoPopover);
       return;
     case "channel-agent-add":
       addChannelAgent(activeChannelId(), value);
