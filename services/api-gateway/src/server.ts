@@ -10348,16 +10348,24 @@ export class ApiGateway {
                   )
                   .catch(() => undefined)
               )?.changedFiles?.length ?? 0;
+            // Size of the work, not shape of the prose. Agents write their
+            // sentence across two lines as often as one, and the newline
+            // test was reopening a room for every one-file change whose
+            // account happened to wrap. A report stays a thread — its text
+            // is the deliverable — as does anything beyond one file or an
+            // account too long to read inline.
             const threadWorthy =
-              READS_AS_DELIVERABLE(record.event.type, line) ||
-              (!canned && touchedFiles > 1);
+              record.event.type === "task_reported" ||
+              touchedFiles > 1 ||
+              line.length > 400;
             if (terminal && !threadWorthy) {
               await this.appendChannelEntry({
                 projectId: watched.projectId,
                 repositoryId: watched.repositoryId,
                 kind: "outcome",
                 authorId: watched.authorId,
-                content: line,
+                // One line in the room reads as one line.
+                content: collapseWhitespace(line),
               });
               this.watchedChannelTasks.delete(watched.taskId);
               break;
@@ -10601,16 +10609,10 @@ export class ApiGateway {
       senderId,
       candidate: chosen.candidate,
       trigger: "auto_claim",
-      // No role to name it after when the winning candidate is unlabeled —
-      // it won on name overlap alone, which is a real match, just not one
-      // with a role phrase to hang the sentence on.
-      claimMessage:
-        chosen.candidate.role.trim() === ""
-          ? `(Nobody was @mentioned, so I picked this up as the closest ` +
-            `match — mention someone by name to send it elsewhere.)`
-          : `(Nobody was @mentioned, so I picked this up as the closest match ` +
-            `for ${chosen.candidate.role.toLowerCase()} work — mention someone ` +
-            `by name to send it elsewhere.)`,
+      // No parenthetical explaining the auto-claim. The acknowledgement
+      // already names the agent that took it, which is the whole of what a
+      // reader needs; a sentence of process justification on every unpinged
+      // request read as the system apologising for working.
     });
   }
 
