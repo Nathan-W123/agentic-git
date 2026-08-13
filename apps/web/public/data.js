@@ -1155,15 +1155,52 @@ export function currentUserId() {
   return state.principal?.user?.id ?? "";
 }
 
+/**
+ * A person's name, from whichever shape the record arrived in.
+ *
+ * There are two, and reading only one of them is why a name showed up as a
+ * raw `user_…` id everywhere except the one screen that happened to read the
+ * other. The organization member list nests the account under `user`; the
+ * room's people list flattens it to `id`/`name`. Both are legitimate — one is
+ * a membership carrying an account, the other is a list of who can be written
+ * to — so this reads either rather than picking a winner.
+ *
+ * The id is the last resort and not a name at all. It is kept because showing
+ * something is better than showing "Unknown", but seeing one means the record
+ * for that person never arrived, which is a loading problem rather than a
+ * naming one.
+ */
 export function memberName(userId) {
-  const member = state.members.find((entry) => entry.userId === userId || entry.id === userId);
-  return member?.displayName ?? member?.email ?? userId ?? "Unknown";
+  const member = state.members.find(
+    (entry) =>
+      entry.userId === userId ||
+      entry.id === userId ||
+      entry.user?.id === userId,
+  );
+  return (
+    member?.user?.displayName ??
+    member?.user?.email ??
+    member?.displayName ??
+    member?.name ??
+    member?.email ??
+    userId ??
+    "Unknown"
+  );
 }
 
 /** Everyone with a seat on this project — the collaborator avatars. */
 export function collaborators() {
   const names = state.members
-    .map((member) => member.displayName ?? member.email)
+    .map(
+      (member) =>
+        // Same two shapes as `memberName`; reading only the flat one left the
+        // collaborator avatars blank for everybody the server nested.
+        member.user?.displayName ??
+        member.user?.email ??
+        member.displayName ??
+        member.name ??
+        member.email,
+    )
     .filter(Boolean);
   return names.length > 0 ? names : [currentUserName()];
 }

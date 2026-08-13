@@ -262,9 +262,19 @@ function statusDot(status, title) {
 }
 
 function personRow(person) {
-  const name = person.user?.displayName ?? person.user?.email ?? "Someone";
+  // Two shapes reach here. The organization member list nests the account
+  // under `user`; the room's own people list flattens it to `id`/`name`. Only
+  // the first was read, so on every room whose people list had loaded the
+  // name fell back to "Someone" and — worse — the id came out empty, which
+  // opened a direct message to nobody and was answered "that person was not
+  // found".
+  const name =
+    person.user?.displayName ??
+    person.user?.email ??
+    person.name ??
+    "Someone";
   const role = String(person.role ?? "").trim();
-  const userId = person.user?.id ?? person.userId ?? "";
+  const userId = person.user?.id ?? person.userId ?? person.id ?? "";
   const me = userId === currentUserId();
   const online = personOnline(userId);
   const unread = dmUnreadFrom(userId);
