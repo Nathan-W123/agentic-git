@@ -432,6 +432,178 @@ test("a failed turn tears down the workspace and the session", async () => {
   }
 });
 
+/**
+ * Lands one change from a second agent through the same coordinator, the way
+ * an unrelated task would between two turns of a conversation.
+ */
+async function landInterloper(
+  fixture: Awaited<ReturnType<typeof createFixture>>,
+  root: string,
+  conversation: Conversation,
+  file: string,
+  content: string,
+): Promise<{ revision: string }> {
+  const interloper = new ConversationAgent(
+    "agent_other",
+    plan("interloper", [file]),
+    fixture.repository,
+    fixture.workspaces,
+  );
+  interloper.turnOutput = { path: file, content };
+  const landed = await conversation.coordinator.run({
+    repository: fixture.repository,
+    workspaceRoot: path.join(root, "workspaces"),
+    integrationRoot: path.join(root, "integration"),
+    tasks: [{ task: task("interloper"), adapter: interloper }],
+  });
+  assert.equal(landed.tasks[0]?.status, "integrated");
+  return { revision: landed.canonicalVersion.revision };
+}
+
+test("a disjoint advance between turns is caught up silently", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ConversationAgent(
+      "agent_conv",
+      plan("turn_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const conversation = openConversation(fixture, root, agent);
+
+    agent.turnOutput = { path: "src/a.txt", content: "turn one\n" };
+    const first = await conversation.runTurn(task("turn_1"));
+    assert.equal(first.tasks[0]?.status, "integrated");
+
+    await landInterloper(fixture, root, conversation, "src/d.txt", "other\n");
+
+    agent.turnPlan = plan("turn_2", ["src/b.txt"]);
+    agent.turnOutput = { path: "src/b.txt", content: "turn two\n" };
+    agent.probePaths = ["src/d.txt"];
+    const second = await conversation.runTurn(task("turn_2"));
+    assert.equal(second.tasks[0]?.status, "integrated");
+
+    // The advance touched nothing this conversation wrote, claimed or
+    // depends on, so the turn opens without a word about it — but from the
+    // rebased state: the interloper's landing is on disk before the edit
+    // phase begins.
+    assert.equal(agent.observed[1]?.["src/d.txt"], "other\n");
+    assert.equal(agent.replanRequests.length, 0);
+    assert.equal(agent.continueInputs[0]?.input.priorContext, undefined);
+    assert.equal(agent.workspacePaths[1], agent.workspacePaths[0]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a clean overlap between turns is caught up and named to the agent", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ConversationAgent(
+      "agent_conv",
+      plan("turn_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const conversation = openConversation(fixture, root, agent);
+
+    agent.turnOutput = { path: "src/a.txt", content: "turn one\n" };
+    const first = await conversation.runTurn(task("turn_1"));
+    assert.equal(first.tasks[0]?.status, "integrated");
+
+    // The interloper lands in a file this conversation wrote — but not one
+    // it declared a dependency on, so the overlap is textual: both merged
+    // cleanly at landing time, and only the telling remains.
+    await landInterloper(
+      fixture,
+      root,
+      conversation,
+      "src/a.txt",
+      "other landed\n",
+    );
+
+    agent.turnPlan = plan("turn_2", ["src/b.txt"]);
+    agent.turnOutput = { path: "src/b.txt", content: "turn two\n" };
+    agent.probePaths = ["src/a.txt"];
+    const second = await conversation.runTurn(task("turn_2"));
+    assert.equal(second.tasks[0]?.status, "integrated");
+
+    // No replan — the conversation's knowledge still stands — but the turn
+    // opens told which of its files moved, and the workspace already holds
+    // the other change.
+    assert.equal(agent.replanRequests.length, 0);
+    assert.match(
+      agent.continueInputs[0]?.input.priorContext ?? "",
+      /src\/a\.txt/u,
+    );
+    assert.equal(agent.observed[1]?.["src/a.txt"], "other landed\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a conflicting advance between turns opens the turn as a replan", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ConversationAgent(
+      "agent_conv",
+      // The first turn declares it depends on src/bc.txt: the conversation
+      // read that file and reasoned from it.
+      plan("turn_1", ["src/a.txt"], { dependencies: ["file:src/bc.txt"] }),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const conversation = openConversation(fixture, root, agent);
+
+    agent.turnOutput = { path: "src/a.txt", content: "turn one\n" };
+    const first = await conversation.runTurn(task("turn_1"));
+    assert.equal(first.tasks[0]?.status, "integrated");
+    const syncedRevision = first.canonicalVersion.revision;
+
+    const interloped = await landInterloper(
+      fixture,
+      root,
+      conversation,
+      "src/bc.txt",
+      "dependency moved\n",
+    );
+
+    agent.turnPlan = plan("turn_2", ["src/b.txt"]);
+    agent.turnOutput = { path: "src/b.txt", content: "turn two\n" };
+    agent.probePaths = ["src/bc.txt"];
+    const second = await conversation.runTurn(task("turn_2"));
+    assert.equal(second.tasks[0]?.status, "integrated");
+
+    // The advance invalidated what the conversation knows, so the turn
+    // opened with the same conversation a replan has: the previous plan and
+    // a notice of exactly what moved, spanning last turn's landing to the
+    // interloper's.
+    assert.equal(agent.replanRequests.length, 1);
+    const request = agent.replanRequests[0];
+    assert.equal(request?.taskId, "turn_2");
+    assert.equal(request?.previousPlan.taskId, "turn_1");
+    assert.ok(request?.canonicalChange.changedFiles.includes("src/bc.txt"));
+    assert.equal(
+      request?.canonicalChange.previousVersion.revision,
+      syncedRevision,
+    );
+    assert.equal(
+      request?.canonicalChange.canonicalVersion.revision,
+      interloped.revision,
+    );
+    // And still from the rebased state, exactly like the other outcomes.
+    assert.equal(agent.observed[1]?.["src/bc.txt"], "dependency moved\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("an adapter without continueTask still keeps the directory, cold", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
 

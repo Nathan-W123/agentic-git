@@ -33,6 +33,7 @@ import {
   type ApprovalKind,
   type AuditEvent,
   type AuditEventType,
+  type CanonicalChangeNotice,
   type CanonicalVersion,
   type ChangeSet,
   type IntegrationResult,
@@ -67,6 +68,7 @@ import {
   approvedSchemaResources,
   structuralConflict,
 } from "./plan-admission.js";
+import { assessReplay } from "./replay.js";
 import { RunRecorder } from "./run-recorder.js";
 import { assertChangeSetWithinPlan } from "./scope-validator.js";
 
@@ -914,8 +916,25 @@ export class Coordinator {
                   .slice(0, 20)
                   .map((file) => `- ${file}`)
                   .join("\n");
+          // What landed underneath the conversation since its last turn,
+          // graded before the agent plans so the turn opens knowing it.
+          // Nothing to ask for a first turn, or when canonical has not
+          // moved past where the last turn left it.
+          const turnStart =
+            resumed !== undefined &&
+            resumed.syncedVersion.revision !== version.revision
+              ? await this.assessTurnStart(
+                  input,
+                  entry,
+                  resumed,
+                  version,
+                  recorder,
+                  runAudit,
+                )
+              : { note: "" };
           const priorContext = [
             entry.task.context?.trim() ?? "",
+            turnStart.note,
             leaseNote,
             seeded,
           ]
@@ -949,7 +968,18 @@ export class Coordinator {
             );
           }
           await recorder?.session(session);
-          const submitted = await entry.adapter.requestPlan(session.id);
+          // A semantic collision opens the turn as a replan rather than a
+          // plain plan request: the previous plan and the notice of what
+          // moved are the same conversation a replan already has with an
+          // agent, and the answer is judged below exactly as a first plan
+          // would be.
+          const submitted =
+            turnStart.replan === undefined
+              ? await entry.adapter.requestPlan(session.id)
+              : await entry.adapter.requestReplan(
+                  session.id,
+                  turnStart.replan,
+                );
           assertAgentPlan(submitted);
           if (submitted.taskId !== entry.task.id) {
             throw new Error(
@@ -1178,34 +1208,155 @@ export class Coordinator {
     });
   }
 
-  private async replanTask(
+  /**
+   * Stage two of conversational tasks: what landed underneath the
+   * conversation since its last turn, and what to do about it.
+   *
+   * Graded with the same machinery integration uses — `assessReplay`
+   * against the last landed turn's plan and change set — and answered in
+   * the doc's three outcomes. Disjoint: say nothing. Textual overlap only:
+   * the workspace will already reflect it, so the agent is told which of
+   * its files moved and carries on. Semantic: the advance invalidated what
+   * the conversation *knows*, so the turn opens with the same conversation
+   * a replan already has with an agent — the previous plan, the notice,
+   * and a request to plan from the new state.
+   *
+   * The loose grading is deliberate, despite the stricter plan-path
+   * precedent in the worker: that rule guards executing an already-written
+   * plan without a fresh planning round. Every conversational turn plans
+   * afresh against current canonical, and its workspace is reset to that
+   * canonical before any edit — the outcomes here only shape what the
+   * planning round is told. For the same reason a notice that cannot be
+   * built must never fail the turn: the fallback tells the agent canonical
+   * moved and lets the fresh plan do the rest.
+   *
+   * Graded from the last turn's landing to this run's planning version; if
+   * canonical moves again before this turn's wave, the wave loop's
+   * existing replan covers the remainder on the same session, and the
+   * workspace advances once, straight to the wave's version — a reset is
+   * oblivious to how many advances it spans.
+   */
+  private async assessTurnStart(
     input: CoordinatorRunInput,
-    entry: PlannedTask,
+    entry: CoordinatedTask,
+    resumed: OpenConversation,
     version: CanonicalVersion,
-    index: RepositoryIndex,
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
-  ): Promise<void> {
+  ): Promise<{ note: string; replan?: ReplanRequest }> {
+    let notice: CanonicalChangeNotice;
+    try {
+      notice = await this.describeCanonicalAdvance(
+        input.repository,
+        resumed.syncedVersion,
+        version,
+        "Other work landed after this conversation's last turn",
+      );
+    } catch {
+      return {
+        note:
+          "Canonical advanced since your last turn; the workspace reflects " +
+          "the current state. Read before assuming anything you remember.",
+      };
+    }
+    const assessment = assessReplay(resumed.plan, resumed.changeSet, notice);
+    if (assessment.semantic.length > 0) {
+      await this.trace(
+        recorder,
+        runAudit,
+        "canonical_changed",
+        entry.task.id,
+        {
+          stage: "turn_start",
+          previousRevision: resumed.syncedVersion.revision,
+          revision: version.revision,
+          changedFiles: notice.changedFiles,
+          changedSymbols: notice.changedSymbols,
+          changedApis: notice.changedApis,
+          changedSchemas: notice.changedSchemas,
+          changedConfigKeys: notice.changedConfigKeys,
+          changedTests: notice.changedTests,
+          changedServices: notice.changedServices,
+        },
+      );
+      await this.trace(
+        recorder,
+        runAudit,
+        "replan_requested",
+        entry.task.id,
+        {
+          stage: "turn_start",
+          previousTaskId: resumed.plan.taskId,
+          canonicalRevision: version.revision,
+          changedFiles: notice.changedFiles,
+        },
+      );
+      return {
+        note: "",
+        replan: {
+          taskId: entry.task.id,
+          previousPlan: resumed.plan,
+          canonicalChange: notice,
+          constraints: [],
+        },
+      };
+    }
+    if (assessment.textual.length > 0) {
+      const files = assessment.textual
+        .map((blocker) => blocker.replace(/^file:/u, ""))
+        .join(", ");
+      return {
+        note:
+          "Since your last turn, other work landed in files this " +
+          `conversation touched: ${files}. The workspace already reflects ` +
+          "the current state; build on what is there rather than on what " +
+          "you remember writing.",
+      };
+    }
+    return { note: "" };
+  }
+
+  /**
+   * What one canonical advance changed, described for a grader and an agent
+   * alike.
+   *
+   * Resources are unioned from the indexes at both endpoints, not read from
+   * the destination alone: a symbol the advance deleted exists only in the
+   * old index, one it introduced only in the new, and a stale assumption
+   * about either is worth surfacing. The returned notice is structurally a
+   * `CanonicalAdvance`, so the same object can feed `assessReplay` and a
+   * `ReplanRequest` without being built twice.
+   */
+  private async describeCanonicalAdvance(
+    repository: CanonicalRepository,
+    from: CanonicalVersion,
+    to: CanonicalVersion,
+    reason: string,
+    /** The index at `to`, when the caller already built one (the wave has). */
+    index?: RepositoryIndex,
+  ): Promise<CanonicalChangeNotice> {
     const changedFiles = await this.repositories.listChangedFiles(
-      input.repository,
-      entry.plannedVersion.revision,
-      version.revision,
+      repository,
+      from.revision,
+      to.revision,
     );
     const previousIndex = await this.intelligence.index(
-      input.repository,
-      entry.plannedVersion.revision,
+      repository,
+      from.revision,
     );
+    const currentIndex =
+      index ?? (await this.intelligence.index(repository, to.revision));
     const previousResources = this.intelligence.changedResources(
       changedFiles,
       previousIndex,
     );
     const currentResources = this.intelligence.changedResources(
       changedFiles,
-      index,
+      currentIndex,
     );
-    const notice = {
-      previousVersion: entry.plannedVersion,
-      canonicalVersion: version,
+    return {
+      previousVersion: from,
+      canonicalVersion: to,
       changedFiles,
       changedSymbols: uniqueStrings([
         ...previousResources.symbols,
@@ -1231,8 +1382,25 @@ export class Coordinator {
         ...previousResources.services,
         ...currentResources.services,
       ]),
-      reason: "Blocking work changed canonical state before this task started",
+      reason,
     };
+  }
+
+  private async replanTask(
+    input: CoordinatorRunInput,
+    entry: PlannedTask,
+    version: CanonicalVersion,
+    index: RepositoryIndex,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<void> {
+    const notice = await this.describeCanonicalAdvance(
+      input.repository,
+      entry.plannedVersion,
+      version,
+      "Blocking work changed canonical state before this task started",
+      index,
+    );
     const request: ReplanRequest = {
       taskId: entry.task.id,
       previousPlan: entry.plan,
@@ -1243,7 +1411,7 @@ export class Coordinator {
     await this.trace(recorder, runAudit, "canonical_changed", entry.task.id, {
       previousRevision: entry.plannedVersion.revision,
       revision: version.revision,
-      changedFiles,
+      changedFiles: notice.changedFiles,
       changedSymbols: notice.changedSymbols,
       changedApis: notice.changedApis,
       changedSchemas: notice.changedSchemas,
@@ -1254,7 +1422,7 @@ export class Coordinator {
     await this.trace(recorder, runAudit, "replan_requested", entry.task.id, {
       previousPlanRevision: entry.planRevision,
       canonicalRevision: version.revision,
-      changedFiles,
+      changedFiles: notice.changedFiles,
     });
 
     const submitted = await entry.adapter.requestReplan(entry.session.id, request);
