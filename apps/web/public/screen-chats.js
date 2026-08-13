@@ -29,6 +29,8 @@ import {
   personOnline,
   dmUnreadFrom,
   currentUserId,
+  currentUserName,
+  myAvatar,
   memberName,
   channelParticipants,
   channelUnreadCount,
@@ -272,7 +274,7 @@ function personRow(person) {
         : ` role="button" tabindex="0" data-act="dm-open" data-value="${esc(userId)}"`
     }>
       <span class="rr-avatar">
-        ${avatar(name, 30)}
+        ${avatar(name, 30, name, me ? myAvatar() : undefined)}
         ${
           // Your own dot is green whenever you can see it: the page being
           // open is what "here" means, and a roster where everyone else has
@@ -625,7 +627,7 @@ function threadSummaryLink(entry, replies, repositoryId) {
     })
     .slice(0, 4)
     .map((author) =>
-      author.agent !== undefined ? agentFace(author.agent, 18) : avatar(author.name, 18),
+      author.agent !== undefined ? agentFace(author.agent, 18) : avatar(author.name, 18, author.name, author.name === currentUserName() ? myAvatar() : undefined),
     )
     .join("");
   const count =
@@ -815,7 +817,7 @@ function messageRow(
   const replies = entry.replies ?? [];
   return `<div class="cmsg-row">
     <span class="cmsg-avatar">${
-      author.agent !== undefined ? agentFace(author.agent, 32) : avatar(author.name, 32)
+      author.agent !== undefined ? agentFace(author.agent, 32) : avatar(author.name, 32, author.name, author.name === currentUserName() ? myAvatar() : undefined)
     }</span>
     <div class="cmsg-body">
       <div class="cmsg-top">

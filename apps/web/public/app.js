@@ -576,7 +576,7 @@ function sidebar() {
 
     <div class="sidebar-foot">
       <button class="user-card" data-act="user-menu">
-        ${avatar(user, 32)}
+        ${avatar(user, 32, user, myAvatar())}
         <span class="uc-body">
           <span class="uc-name">${esc(user)}</span>
           <span class="uc-mail">${esc(email)}</span>
@@ -641,7 +641,7 @@ function topbar() {
       title="Notifications" aria-label="Notifications">
       ${icon("bell")}${unread > 0 ? `<span class="dot-badge">${unread}</span>` : ""}
     </button>
-    <button data-act="user-menu" title="${esc(user)}">${avatar(user, 32)}</button>
+    <button data-act="user-menu" title="${esc(user)}">${avatar(user, 32, user, myAvatar())}</button>
   </header>`;
 }
 

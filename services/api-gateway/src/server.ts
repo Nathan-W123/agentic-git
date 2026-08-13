@@ -10281,20 +10281,36 @@ export class ApiGateway {
             // agent's words opens the thread even now: the summary and its
             // counts live on the outcome reply, and the held ceremony
             // flushes in above it as the collapsed body.
+            // A thread is a room, and a room is for work with a story. A
+            // one-file change whose whole account fits in a sentence has no
+            // story — "add hello to the README" getting a thread of its own
+            // is furniture, however honest the sentence. So the ending's
+            // *size* decides, not merely whether the agent wrote it: a
+            // multiline or long account, a report someone asked for, or a
+            // change that touched more than one file opens the thread and
+            // the held ceremony flushes in above it. Anything smaller lands
+            // in the channel as the agent's own line, marked `outcome` so
+            // the browser retires the dots off it exactly as it would off a
+            // thread's ending.
             const canned = line === CHANNEL_TERMINAL_EVENTS[record.event.type];
-            if (
-              terminal &&
-              canned &&
-              !READS_AS_DELIVERABLE(record.event.type, line)
-            ) {
-              // Finished without ever needing to explain itself. The outcome
-              // goes in the channel beside the acknowledgement — two lines,
-              // no thread to open — and the held ceremony is dropped rather
-              // than written to a thread that now exists only to hold it.
+            const touchedFiles =
+              (
+                await this.options.store
+                  .getChannelMessage(
+                    watched.repositoryId,
+                    watched.messageId,
+                    watched.authorId,
+                  )
+                  .catch(() => undefined)
+              )?.changedFiles?.length ?? 0;
+            const threadWorthy =
+              READS_AS_DELIVERABLE(record.event.type, line) ||
+              (!canned && touchedFiles > 1);
+            if (terminal && !threadWorthy) {
               await this.appendChannelEntry({
                 projectId: watched.projectId,
                 repositoryId: watched.repositoryId,
-                kind: "agent",
+                kind: "outcome",
                 authorId: watched.authorId,
                 content: line,
               });
@@ -10381,7 +10397,7 @@ export class ApiGateway {
   private async appendChannelEntry(input: {
     projectId: string;
     repositoryId: string;
-    kind: "agent" | "system";
+    kind: "agent" | "system" | "outcome";
     authorId: string;
     content: string;
   }): Promise<{ id: string }> {
