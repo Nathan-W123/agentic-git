@@ -24,6 +24,7 @@ import {
   type ControlPlaneLock,
 } from "./control-plane-lock.js";
 import { OverlayWorkspaceService } from "./overlay.js";
+import { PreviewService } from "./preview.js";
 import { ProviderChatService, type ProviderId } from "./providers.js";
 import {
   UserCredentialStore,
@@ -129,6 +130,8 @@ async function serve(
 
   const repositories = new RepositoryService();
   const overlays = new OverlayWorkspaceService(project, store, repositories);
+  // Loopback only, and stopped with the process: see PreviewService.
+  const previews = new PreviewService(project, store, repositories);
   // One store for the whole process: the chat panel writes credentials and
   // task runs read them, and opening it twice could race on generating the
   // key file.
@@ -337,6 +340,15 @@ async function serve(
       );
       return newest?.revision;
     },
+    async previewStart(input) {
+      return await previews.start({ repositoryId: input.repositoryId });
+    },
+    async previewStatus(input) {
+      return previews.status(input.repositoryId);
+    },
+    async previewStop(input) {
+      await previews.stop(input.repositoryId);
+    },
     async repositoryVersions(input) {
       const stored = await store.getRepository(input.repositoryId);
       if (stored === undefined) {
@@ -508,6 +520,9 @@ async function serve(
     try {
       await runningGateway.close();
     } finally {
+      // Previews are child processes holding ports and checkouts. Nothing else
+      // will reap them if this process goes without saying so.
+      await previews.close();
       try {
         await store.close();
       } finally {

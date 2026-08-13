@@ -1378,6 +1378,26 @@ export interface ApiOperations {
     projectId: string;
     repositoryId: string;
   }): Promise<string | undefined>;
+  /**
+   * Runs the repository's own app so somebody can look at it.
+   *
+   * Absent on a deployment that cannot host one. The URL these answer with is
+   * always loopback on the machine running this process — see `PreviewService`
+   * — so it is useful when that machine is the reader's own and unreachable
+   * otherwise, which is the safe way round.
+   */
+  previewStart?(input: {
+    projectId: string;
+    repositoryId: string;
+  }): Promise<unknown>;
+  previewStatus?(input: {
+    projectId: string;
+    repositoryId: string;
+  }): Promise<unknown>;
+  previewStop?(input: {
+    projectId: string;
+    repositoryId: string;
+  }): Promise<void>;
   /** Canonical branch history, newest first. */
   repositoryVersions?(input: {
     projectId: string;
@@ -4503,6 +4523,68 @@ export class ApiGateway {
         versions: await operation({ projectId, repositoryId, limit }),
       });
       return;
+    }
+
+    // Running the repository's app to look at it. Gated on `run_task` rather
+    // than `manage_project`: starting a preview spends a little of this
+    // machine and changes nothing about the repository, which is much closer
+    // to submitting work than to administering the project.
+    const previewMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/preview$`,
+        "u",
+      ),
+    );
+    if (previewMatch !== undefined) {
+      const [projectId = "", repositoryId = ""] = previewMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "run_task",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      const operations = this.options.operations;
+      if (
+        operations.previewStart === undefined ||
+        operations.previewStatus === undefined ||
+        operations.previewStop === undefined
+      ) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot run previews",
+        );
+      }
+      if (method === "POST") {
+        const preview = await this.performOperation("preview_failed", async () =>
+          await operations.previewStart!({ projectId, repositoryId }),
+        );
+        this.sendJson(response, 200, { preview });
+        return;
+      }
+      if (method === "GET") {
+        const preview = await operations.previewStatus({
+          projectId,
+          repositoryId,
+        });
+        // `null` rather than a 404: "no preview is running" is an answer about
+        // this repository, not a missing route, and the caller renders a
+        // start button either way.
+        this.sendJson(response, 200, { preview: preview ?? null });
+        return;
+      }
+      if (method === "DELETE") {
+        await operations.previewStop({ projectId, repositoryId });
+        this.sendJson(response, 200, { stopped: true });
+        return;
+      }
     }
 
     const rollbackMatch = matchPath(
