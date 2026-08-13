@@ -1279,6 +1279,20 @@ export class ProviderChatService {
         typeof env?.["CODEX_HOME"] === "string" && env["CODEX_HOME"] !== ""
           ? env["CODEX_HOME"]
           : undefined;
+      // The persisted snapshot first: credential homes are temporary and
+      // removed at close, so live directories are empty by design — the
+      // close hook copies the newest rollout's tail out, and that copy is
+      // the only durable record.
+      if (userId !== undefined) {
+        const store = await this.credentialStore();
+        const snapshot = await store.readUsageSnapshot(userId, "codex");
+        if (snapshot !== undefined) {
+          const persisted = parseCodexRateLimits(snapshot);
+          if (persisted !== undefined) {
+            return { ...persisted, source };
+          }
+        }
+      }
       const newest = await this.newestCodexRollout(
         codexHome === undefined
           ? undefined
@@ -2752,6 +2766,14 @@ export class ProviderChatService {
         // Chat runs the CLI the same way a task does, so it rotates the token
         // the same way. Storing it here means a channel conversation keeps
         // the account alive rather than quietly ageing it out.
+        ...(userId === undefined || provider !== "openai"
+          ? {}
+          : {
+              onUsageSnapshot: async (snapshot: string) => {
+                const store = await this.credentialStore();
+                await store.putUsageSnapshot(userId, "codex", snapshot);
+              },
+            }),
         ...(userId === undefined
           ? {}
           : {

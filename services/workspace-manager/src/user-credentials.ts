@@ -359,6 +359,38 @@ export class UserCredentialStore {
     }
   }
 
+  /**
+   * Rate-limit figures are not secrets, so they live in a plain sidecar next
+   * to the encrypted store — one file per user and vendor, replaced whole.
+   */
+  public async putUsageSnapshot(
+    userId: string,
+    vendor: string,
+    snapshot: string,
+  ): Promise<void> {
+    const file = this.usageSnapshotPath(userId, vendor);
+    await mkdir(path.dirname(file), { recursive: true });
+    await writeFile(file, snapshot, "utf8");
+  }
+
+  public async readUsageSnapshot(
+    userId: string,
+    vendor: string,
+  ): Promise<string | undefined> {
+    return await readFile(this.usageSnapshotPath(userId, vendor), "utf8").catch(
+      () => undefined,
+    );
+  }
+
+  private usageSnapshotPath(userId: string, vendor: string): string {
+    const safe = (value: string) => value.replace(/[^\w.-]/gu, "_");
+    return path.join(
+      path.dirname(this.filePath),
+      "usage",
+      `${safe(userId)}-${safe(vendor)}.txt`,
+    );
+  }
+
   public async put(
     userId: string,
     vendor: VendorCliKind,
@@ -840,7 +872,7 @@ export interface CredentialHome {
    * `rotatedSecret` is the replacement to store, and is absent when the CLI
    * left the file alone — which is most runs, and must not cause a write.
    */
-  close(): Promise<{ rotatedSecret?: string }>;
+  close(): Promise<{ rotatedSecret?: string; usageSnapshot?: string }>;
 }
 
 /**
@@ -1001,10 +1033,58 @@ export async function openCredentialHome(input: {
           rotatedSecret = current;
         }
       }
+      // Codex records its rate limits only in the session rollouts it writes
+      // under this very directory — which is about to be removed. Reading the
+      // newest one's tail out first is the only chance the figures get to
+      // outlive the run; without this, every home starts empty and every
+      // usage question is answered "no session has recorded rate limits yet"
+      // on a machine running Codex all day.
+      let usageSnapshot: string | undefined;
+      if (vendor === "codex") {
+        usageSnapshot = await newestRolloutTail(
+          path.join(directory, "sessions"),
+        ).catch(() => undefined);
+      }
       await rm(directory, { recursive: true, force: true });
-      return rotatedSecret === undefined ? {} : { rotatedSecret };
+      return {
+        ...(rotatedSecret === undefined ? {} : { rotatedSecret }),
+        ...(usageSnapshot === undefined ? {} : { usageSnapshot }),
+      };
     },
   };
+}
+
+/** The last 64KB of the most recently written rollout, or nothing. */
+async function newestRolloutTail(root: string): Promise<string | undefined> {
+  let newest: { path: string; at: number } | undefined;
+  const walk = async (directory: string, depth: number): Promise<void> => {
+    if (depth > 4) {
+      return;
+    }
+    let entries;
+    try {
+      entries = await readdir(directory, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const full = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full, depth + 1);
+      } else if (entry.isFile()) {
+        const info = await stat(full).catch(() => undefined);
+        if (info !== undefined && (newest === undefined || info.mtimeMs > newest.at)) {
+          newest = { path: full, at: info.mtimeMs };
+        }
+      }
+    }
+  };
+  await walk(root, 0);
+  if (newest === undefined) {
+    return undefined;
+  }
+  const contents = await readFile(newest.path, "utf8");
+  return contents.length > 65_536 ? contents.slice(-65_536) : contents;
 }
 
 /** Runs `use` against an isolated credential home and always cleans up after. */
@@ -1021,6 +1101,11 @@ export async function withCredentialHome<T>(
      * expired snapshot again.
      */
     onRotate?: (secret: string) => Promise<void> | void;
+    /**
+     * Called with the tail of the newest Codex rollout, when there is one.
+     * Same contract as `onRotate`: persist it or it dies with the directory.
+     */
+    onUsageSnapshot?: (snapshot: string) => Promise<void> | void;
   },
   use: (home: CredentialHome) => Promise<T>,
 ): Promise<T> {
@@ -1028,7 +1113,12 @@ export async function withCredentialHome<T>(
   try {
     return await use(home);
   } finally {
-    const { rotatedSecret } = await home.close();
+    const { rotatedSecret, usageSnapshot } = await home.close();
+    if (usageSnapshot !== undefined && input.onUsageSnapshot !== undefined) {
+      await Promise.resolve(input.onUsageSnapshot(usageSnapshot)).catch(
+        () => undefined,
+      );
+    }
     if (rotatedSecret !== undefined && input.onRotate !== undefined) {
       // Never allowed to fail the run it followed: the work is already done,
       // and losing a refreshed token costs one reconnect, while throwing here
