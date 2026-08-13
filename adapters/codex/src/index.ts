@@ -214,6 +214,13 @@ interface CodexSession {
   scopeDecisions: ScopeChangeDecision[];
   /** One entry per `codex exec` invocation this session made. */
   tokenUsage: CodexTokenUsage[];
+  /**
+   * The newest thread id this session's execs reported — what an
+   * `exec resume` would pick up. Overwritten after every successful exec,
+   * because a resumed run forks a fresh id; cleared when a resume attempt
+   * turns out stale. Always undefined for an ephemeral (one-shot) session.
+   */
+  resume: string | undefined;
   pendingScope: Map<
     string,
     {
@@ -333,6 +340,34 @@ export function parseCodexTokens(output: string): number | undefined {
   }
   const tokens = Number.parseInt(match[1].replaceAll(",", ""), 10);
   return Number.isSafeInteger(tokens) ? tokens : undefined;
+}
+
+/**
+ * The shape Codex thread ids take, checked before one ever reaches an argv.
+ * Same rule the chat providers and the Claude profile apply: the id is our
+ * own CLI's output, but a malformed one fed back through `exec resume` buys
+ * a confusing failure later, and refusing it costs only the warmth.
+ */
+const CODEX_THREAD_ID = /^[A-Za-z0-9-]{8,64}$/u;
+
+/**
+ * Pulls the session/thread id out of a `codex exec` transcript.
+ *
+ * A persisted run names its thread in the banner, the way it prints its
+ * token figure — on stderr when `--output-schema` reserves stdout, on stdout
+ * otherwise, so callers should offer both. Tolerant on the label because the
+ * banner is prose, not a contract, and tolerant of absence because an
+ * `--ephemeral` run persists nothing and prints nothing: a turn that cannot
+ * be resumed is still a turn that worked.
+ */
+export function parseCodexSessionId(output: string): string | undefined {
+  const match = /(?:session|thread)\s*id[:\s]+([A-Za-z0-9-]{8,64})\b/iu.exec(
+    output,
+  );
+  const thread = match?.[1];
+  return thread !== undefined && CODEX_THREAD_ID.test(thread)
+    ? thread
+    : undefined;
 }
 
 function parseJsonObject(output: string, operation: string): unknown {
@@ -481,6 +516,7 @@ export class CodexAdapter implements AgentAdapter {
       scopeDecisions: [],
       tokenUsage: [],
       pendingScope: new Map(),
+      resume: undefined,
       cancelled: false,
     };
     this.sessions.set(session.id, record);
@@ -490,6 +526,77 @@ export class CodexAdapter implements AgentAdapter {
       occurredAt: new Date().toISOString(),
     });
     return session;
+  }
+
+  /**
+   * Continues a session as the next turn of its conversation. The whole
+   * record travels because this instance may never have seen the session —
+   * a conversational codex turn persists its thread on the vendor's side,
+   * named by the record's `resume` token, and adopting it is building a
+   * fresh per-turn record around that name. Everything per-turn resets
+   * exactly as `startTask` would leave it; the identity, the token, and
+   * (same-instance) the cumulative token usage carry.
+   */
+  public async continueTask(
+    session: AgentSession,
+    input: StartTaskInput,
+  ): Promise<AgentSession> {
+    if (input.repositoryId !== this.options.repository.id) {
+      throw new Error(
+        `Codex adapter for ${this.options.repository.id} cannot continue a task for ${input.repositoryId}`,
+      );
+    }
+    const existing = this.sessions.get(session.id);
+    if (existing?.cancelled === true) {
+      throw new Error(`Session ${session.id} was cancelled`);
+    }
+    const planningWorkspace = await this.options.workspaces.create({
+      taskId: `continuing-${input.task.id}`,
+      rootPath: path.resolve(this.options.planningRoot),
+      repository: this.options.repository,
+      baseVersion: input.canonicalVersion,
+    });
+    // This instance's own memory of the session wins when it has one — it is
+    // at least as fresh as what the platform retained at the last settlement.
+    const resume = existing?.resume ?? session.resume;
+    const continued: AgentSession = {
+      id: session.id,
+      agentId: this.options.agentId,
+      taskId: input.task.id,
+      startedAt: session.startedAt,
+      ...(resume === undefined ? {} : { resume }),
+    };
+    const record: CodexSession = {
+      session: continued,
+      input,
+      planningWorkspace,
+      plan: undefined,
+      context: undefined,
+      completion: undefined,
+      events: [],
+      eventHandlers: new Set(),
+      controller: undefined,
+      active: undefined,
+      scopeDecisions: [],
+      tokenUsage: existing?.tokenUsage ?? [],
+      pendingScope: new Map(),
+      resume,
+      cancelled: false,
+    };
+    this.sessions.set(session.id, record);
+    this.emit(record, {
+      event: "progress",
+      message:
+        resume === undefined
+          ? "Codex continuing the conversation cold"
+          : "Codex resuming the conversation",
+      occurredAt: new Date().toISOString(),
+    });
+    return continued;
+  }
+
+  public resumeToken(sessionId: string): string | undefined {
+    return this.sessions.get(sessionId)?.resume;
   }
 
   public async requestPlan(sessionId: string): Promise<AgentPlan> {
@@ -916,12 +1023,16 @@ export class CodexAdapter implements AgentAdapter {
       throw new Error(`Session ${record.session.id} was cancelled`);
     }
 
-    const controller = new AbortController();
-    record.controller = controller;
+    // Hermetic by default, persistent for a conversation. `--ephemeral` is
+    // the right posture for a task that runs once — nothing worth
+    // remembering, nothing left on the host — and exactly wrong for a turn
+    // whose next turn wants the thread back. Read off `record.input`, which
+    // replans rebind, so the posture survives a replan.
+    const conversational = record.input.conversational === true;
     const args = [
       "exec",
       ...this.additionalArgs,
-      "--ephemeral",
+      ...(conversational ? [] : ["--ephemeral"]),
       "--sandbox",
       sandbox,
       "--color",
@@ -938,24 +1049,56 @@ export class CodexAdapter implements AgentAdapter {
       schemaPath,
       "-",
     ];
-    const active = this.runner(this.command, args, {
-      cwd: workingDirectory,
-      input: prompt,
-      ...(this.options.env === undefined ? {} : { env: this.options.env }),
+    // A held thread id rides every invocation of a conversational session —
+    // planning, replanning and each execution round — as the `exec resume`
+    // subcommand, whose flag surface is narrower than a fresh exec's: the
+    // sandbox travels as `-c` configuration and `-C` is dropped (the
+    // process's own cwd already points at the right directory), the shape
+    // the chat providers proved. The prompt stays on stdin either way.
+    const resume = record.resume;
+    const resumeArgs =
+      conversational && resume !== undefined
+        ? [
+            "exec",
+            "resume",
+            resume,
+            "-c",
+            `sandbox_mode="${sandbox}"`,
+            ...(this.platform === "win32"
+              ? ["-c", `windows.sandbox="${this.windowsSandbox}"`]
+              : []),
+            "--output-schema",
+            schemaPath,
+            "-",
+          ]
+        : undefined;
+    let output = await this.spawnCodex(
+      record,
+      workingDirectory,
+      resumeArgs ?? args,
+      prompt,
       timeoutMs,
-      maxOutputBytes: this.maxOutputBytes,
-      signal: controller.signal,
-    });
-    record.active = active;
-
-    let output: ProcessOutput;
-    try {
-      output = await active;
-    } finally {
-      if (record.active === active) {
-        record.active = undefined;
-        record.controller = undefined;
-      }
+    );
+    if (
+      output.exitCode !== 0 &&
+      resumeArgs !== undefined &&
+      output.aborted !== true &&
+      output.timedOut !== true
+    ) {
+      // A stale thread id — a restart, a CODEX_HOME that did not survive the
+      // gap between turns, an `exec resume` surface that refuses a flag —
+      // costs the conversation its memory, never the turn: retried once as
+      // a fresh exec, the same policy the chat providers and the Claude
+      // profile apply. The token is dropped first, so a later round in this
+      // same turn does not repeat the failure.
+      record.resume = undefined;
+      output = await this.spawnCodex(
+        record,
+        workingDirectory,
+        args,
+        prompt,
+        timeoutMs,
+      );
     }
     if (output.exitCode !== 0) {
       const reason =
@@ -983,7 +1126,44 @@ export class CodexAdapter implements AgentAdapter {
         at: new Date().toISOString(),
       });
     }
+    // Overwritten, never written once: a resumed run forks a fresh thread
+    // id, and the newest names the state as this invocation left it. An
+    // ephemeral run prints none and contributes nothing.
+    const thread =
+      parseCodexSessionId(output.stderr) ?? parseCodexSessionId(output.stdout);
+    if (thread !== undefined) {
+      record.resume = thread;
+    }
     return output.stdout;
+  }
+
+  /** One process, with the record's active/controller bookkeeping around it. */
+  private async spawnCodex(
+    record: CodexSession,
+    workingDirectory: string,
+    argv: string[],
+    prompt: string,
+    timeoutMs: number,
+  ): Promise<ProcessOutput> {
+    const controller = new AbortController();
+    record.controller = controller;
+    const active = this.runner(this.command, argv, {
+      cwd: workingDirectory,
+      input: prompt,
+      ...(this.options.env === undefined ? {} : { env: this.options.env }),
+      timeoutMs,
+      maxOutputBytes: this.maxOutputBytes,
+      signal: controller.signal,
+    });
+    record.active = active;
+    try {
+      return await active;
+    } finally {
+      if (record.active === active) {
+        record.active = undefined;
+        record.controller = undefined;
+      }
+    }
   }
 
   private async withSchema<T>(

@@ -28,6 +28,7 @@ import {
 import {
   CodexAdapter,
   CodexWriteDeniedError,
+  parseCodexSessionId,
   parseCodexTokens,
   type CodexProcessRunner,
 } from "./index.js";
@@ -224,6 +225,222 @@ test("runs structured read-only planning then workspace-write execution", async 
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
+});
+
+test("a conversational turn drops --ephemeral and resumes its thread", async () => {
+  // The trade the conversational flag names: hermetic execution for a task
+  // that runs once, a persisted thread for a turn whose next turn wants it
+  // back. Planning runs fresh and names the thread; every exec after rides
+  // it via the `exec resume` subcommand, whose narrower flag surface takes
+  // the sandbox as configuration.
+  const fixture = await createFixture();
+  const calls: Array<{ args: readonly string[]; options: ProcessOptions }> = [];
+  const runner: CodexProcessRunner = async (_executable, args, options = {}) => {
+    calls.push({ args, options });
+    if (args[1] === "resume") {
+      assert.equal(args[2], "thread-cdx-11111111");
+      assert.equal(args.includes("--sandbox"), false);
+      assert.ok(args.includes('sandbox_mode="workspace-write"'));
+      assert.ok(args.includes("--output-schema"));
+      assert.equal(args.at(-1), "-");
+      assert.ok(options.cwd !== undefined);
+      await writeFile(
+        path.join(String(options.cwd), "src", "value.js"),
+        "export const value = 2;\n",
+        "utf8",
+      );
+      return {
+        ...completedWith("1,204"),
+        stderr: "codex\nsession id: thread-cdx-22222222\ntokens used\n1,204\n",
+      };
+    }
+    // The fresh planning exec of a conversational session: persistent, so
+    // no --ephemeral, and it names the thread in its banner.
+    assert.equal(args.includes("--ephemeral"), false);
+    assert.equal(args[args.indexOf("--sandbox") + 1], "read-only");
+    return output(JSON.stringify(PLAN), {
+      stderr: "codex\nsession id: thread-cdx-11111111\n",
+    });
+  };
+
+  try {
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      runner,
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const session = await adapter.startTask({
+      task: TASK,
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+      conversational: true,
+    });
+    await adapter.requestPlan(session.id);
+    const workspace = await fixture.workspaces.create({
+      taskId: TASK.id,
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    await adapter.sendContext(session.id, contextFor(workspace));
+
+    assert.equal(calls.length, 2);
+    // The token names the state as the newest exec left it.
+    assert.equal(adapter.resumeToken(session.id), "thread-cdx-22222222");
+
+    await fixture.workspaces.destroy(workspace);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a stale thread id falls back to a fresh exec, once", async () => {
+  // A CODEX_HOME that did not survive the gap, a restart, a resume surface
+  // that refuses a flag — whatever staled the thread costs the conversation
+  // its memory, never the turn.
+  const fixture = await createFixture();
+  const calls: Array<{ args: readonly string[] }> = [];
+  const runner: CodexProcessRunner = async (_executable, args, options = {}) => {
+    calls.push({ args });
+    if (args[1] === "resume") {
+      return output("", {
+        exitCode: 1,
+        stderr: "no thread found with id thread-cdx-33333333",
+      });
+    }
+    if (args[args.indexOf("--sandbox") + 1] === "read-only") {
+      return output(JSON.stringify(PLAN), {
+        stderr: "codex\nsession id: thread-cdx-33333333\n",
+      });
+    }
+    // The bare retry: a fresh exec, still persistent — the conversation is
+    // still a conversation even after its memory lapsed.
+    assert.equal(args.includes("--ephemeral"), false);
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return {
+      ...completedWith("980"),
+      stderr: "codex\nsession id: thread-cdx-44444444\ntokens used\n980\n",
+    };
+  };
+
+  try {
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      runner,
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const session = await adapter.startTask({
+      task: TASK,
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+      conversational: true,
+    });
+    await adapter.requestPlan(session.id);
+    const workspace = await fixture.workspaces.create({
+      taskId: TASK.id,
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    await adapter.sendContext(session.id, contextFor(workspace));
+
+    // Plan, the failed resume, the bare retry — and nothing more.
+    assert.equal(calls.length, 3);
+    assert.equal(calls[1]?.args[1], "resume");
+    assert.notEqual(calls[2]?.args[1], "resume");
+    assert.equal(adapter.resumeToken(session.id), "thread-cdx-44444444");
+
+    await fixture.workspaces.destroy(workspace);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("continueTask adopts a handed-over thread on a fresh instance", async () => {
+  // Production's shape: every run constructs its own adapters, so the
+  // instance asked to continue has never seen the session. The record it is
+  // handed carries the thread's name, and its first exec re-enters it.
+  const fixture = await createFixture();
+  const calls: Array<{ args: readonly string[] }> = [];
+  const runner: CodexProcessRunner = async (_executable, args) => {
+    calls.push({ args });
+    assert.equal(args[1], "resume");
+    assert.equal(args[2], "thread-cdx-55555555");
+    assert.ok(args.includes('sandbox_mode="read-only"'));
+    return output(
+      JSON.stringify({ ...PLAN, taskId: "task_turn_two" }),
+      { stderr: "codex\nsession id: thread-cdx-66666666\n" },
+    );
+  };
+
+  try {
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      runner,
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const continued = await adapter.continueTask(
+      {
+        id: "session_prior_turn",
+        agentId: "codex",
+        taskId: TASK.id,
+        startedAt: new Date().toISOString(),
+        resume: "thread-cdx-55555555",
+      },
+      {
+        task: { ...TASK, id: "task_turn_two", objective: "Update it again" },
+        canonicalVersion: baseVersion,
+        repositoryId: fixture.repository.id,
+        conversational: true,
+      },
+    );
+    assert.equal(continued.id, "session_prior_turn");
+    assert.equal(continued.taskId, "task_turn_two");
+    assert.equal(continued.resume, "thread-cdx-55555555");
+    await adapter.requestPlan(continued.id);
+    assert.equal(calls.length, 1);
+    assert.equal(adapter.resumeToken(continued.id), "thread-cdx-66666666");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("parseCodexSessionId reads the banner and nothing else", () => {
+  assert.equal(
+    parseCodexSessionId("codex\nsession id: thread-cdx-12345678\n"),
+    "thread-cdx-12345678",
+  );
+  // The label is prose, not a contract — both spellings are read.
+  assert.equal(
+    parseCodexSessionId("thread id 0195a2b4-aaaa-bbbb-cccc-121212121212"),
+    "0195a2b4-aaaa-bbbb-cccc-121212121212",
+  );
+  // Absent, malformed, or suspicious ids contribute nothing: an ephemeral
+  // run persists no thread, and a turn that cannot be resumed still worked.
+  assert.equal(parseCodexSessionId("codex\ntokens used\n1,204\n"), undefined);
+  assert.equal(parseCodexSessionId("session id: short"), undefined);
 });
 
 test("cancellation aborts an active Codex process and removes planning state", async () => {
