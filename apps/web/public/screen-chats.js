@@ -262,9 +262,19 @@ function statusDot(status, title) {
 }
 
 function personRow(person) {
-  const name = person.user?.displayName ?? person.user?.email ?? "Someone";
+  // Two shapes reach here. The organization member list nests the account
+  // under `user`; the room's own people list flattens it to `id`/`name`. Only
+  // the first was read, so on every room whose people list had loaded the
+  // name fell back to "Someone" and — worse — the id came out empty, which
+  // opened a direct message to nobody and was answered "that person was not
+  // found".
+  const name =
+    person.user?.displayName ??
+    person.user?.email ??
+    person.name ??
+    "Someone";
   const role = String(person.role ?? "").trim();
-  const userId = person.user?.id ?? person.userId ?? "";
+  const userId = person.user?.id ?? person.userId ?? person.id ?? "";
   const me = userId === currentUserId();
   const online = personOnline(userId);
   const unread = dmUnreadFrom(userId);
@@ -522,6 +532,44 @@ function chanSidebar(activeRepositoryId) {
 
 /* ---------------------------------------------------------- chan main ---- */
 
+/**
+ * Start this repository's app, or go and look at the one already running.
+ *
+ * The link is a plain anchor to a loopback address, which works only on the
+ * machine running the control plane. That is the whole design of the preview
+ * and not an oversight — see `PreviewService` — so on a hosted deployment this
+ * offers a link that will not open, and it says where it points rather than
+ * pretending otherwise.
+ */
+function previewControl(repositoryId) {
+  if (!repositoryId) {
+    return "";
+  }
+  const preview = state.previews[repositoryId];
+  const running = preview !== null && preview !== undefined &&
+    preview.exited === undefined;
+  if (!running) {
+    return `<button type="button" class="icon-btn" data-act="preview-start"
+      data-value="${esc(repositoryId)}" title="Run this app and open it">
+      ${icon("play")}</button>`;
+  }
+  // Through this deployment rather than at the preview's own address. The
+  // app binds loopback and nothing opens a port, so its own URL only works on
+  // the machine running the control plane — this path works from anywhere the
+  // reader is already signed in, which includes a phone, and needs no second
+  // set of rules about who may look.
+  const proxied =
+    `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
+    `/repositories/${encodeURIComponent(repositoryId)}/preview/app/`;
+  return `<span class="preview-live">
+    <a class="preview-link" href="${esc(proxied)}" target="_blank"
+      rel="noopener noreferrer" title="${esc(preview.label)} — ${esc(preview.url)}">
+      ${esc(preview.url.replace("http://", ""))}</a>
+    <button type="button" class="icon-btn sm" data-act="preview-stop"
+      data-value="${esc(repositoryId)}" title="Stop it">${icon("close")}</button>
+  </span>`;
+}
+
 function chanHeader(repository, repositoryId) {
   const roster = channelAgentsFor(repositoryId);
   const people = collaborators();
@@ -571,6 +619,7 @@ function chanHeader(repository, repositoryId) {
       </div>
     </div>
     <span class="spacer"></span>
+    ${previewControl(repositoryId)}
     <span class="avatar-stack">${faces}${avatarStack(people, 3, 24)}</span>
     <button type="button" class="icon-btn${state.chanTree === true ? " on" : ""}"
       data-act="chan-tree-toggle" title="Files"

@@ -131,6 +131,24 @@ export interface ProjectConfig {
   validationCommands: ValidationCommand[];
   agents: Record<string, AgentConfig>;
   sandbox?: SandboxConfig;
+  /**
+   * How to run this repository's own app, for looking at it.
+   *
+   * Absent means the repository has no preview, which is most of them — a
+   * library has nothing to boot. The command is run in a checkout of canonical
+   * with `PORT` and `HOST` in its environment; it is expected to keep running
+   * until it is stopped, unlike a validation command.
+   */
+  previewCommand?: ValidationCommand;
+  /**
+   * Per-repository overrides, keyed by repository id.
+   *
+   * One command cannot serve every repository — a Node app and a Python CLI
+   * want different things, and a project holds both. This wins over
+   * `previewCommand`, which stays as the default for a project whose
+   * repositories all start the same way.
+   */
+  previewCommands?: Record<string, ValidationCommand>;
 }
 
 export const DEFAULT_CONFIG: ProjectConfig = {
@@ -498,6 +516,32 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
       assertValidationCommand(entry, `validationCommands[${index}]`),
     ),
     agents,
+    // Validated the same way a validation command is, because it is the same
+    // shape and the same mistakes are available: a missing executable, args
+    // that are not an array.
+    ...(config.previewCommand === undefined
+      ? {}
+      : {
+          previewCommand: assertValidationCommand(
+            config.previewCommand,
+            "previewCommand",
+          ),
+        }),
+    ...(config.previewCommands === undefined
+      ? {}
+      : {
+          previewCommands: Object.fromEntries(
+            Object.entries(
+              config.previewCommands as Record<string, unknown>,
+            ).map(([repositoryId, entry]) => [
+              repositoryId,
+              assertValidationCommand(
+                entry,
+                `previewCommands["${repositoryId}"]`,
+              ),
+            ]),
+          ),
+        }),
     ...(defaultRepository === undefined
       ? {}
       : { defaultRepository }),

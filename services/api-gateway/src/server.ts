@@ -6,6 +6,7 @@ import {
 } from "node:crypto";
 import {
   createServer,
+  request as httpRequest,
   type IncomingMessage,
   type Server,
   type ServerResponse,
@@ -87,6 +88,9 @@ import { CollabWebSocketHub } from "./collab-websocket.js";
 import { AuditWebSocketHub, type WebSocketAuthorization } from "./websocket.js";
 
 const API_PREFIX = "/api/v1";
+
+/** Mirrors the attachment store's own cap; see `AttachmentStore` in apps/web. */
+const MAX_ATTACHMENT_BYTES = 8 * 1024 * 1024;
 
 /**
  * The vendor CLI behind each provider id, for @mention dispatch: a task runs
@@ -1378,6 +1382,37 @@ export interface ApiOperations {
     projectId: string;
     repositoryId: string;
   }): Promise<string | undefined>;
+  /**
+   * Runs the repository's own app so somebody can look at it.
+   *
+   * Absent on a deployment that cannot host one. The URL these answer with is
+   * always loopback on the machine running this process — see `PreviewService`
+   * — so it is useful when that machine is the reader's own and unreachable
+   * otherwise, which is the safe way round.
+   */
+  previewStart?(input: {
+    projectId: string;
+    repositoryId: string;
+  }): Promise<unknown>;
+  previewStatus?(input: {
+    projectId: string;
+    repositoryId: string;
+  }): Promise<unknown>;
+  previewStop?(input: {
+    projectId: string;
+    repositoryId: string;
+  }): Promise<void>;
+  /**
+   * Images posted into a channel. Absent on a deployment with nowhere to put
+   * them, in which case the composer offers no attach control.
+   */
+  attachmentSave?(input: {
+    bytes: Buffer;
+    contentType: string;
+  }): Promise<string>;
+  attachmentRead?(
+    id: string,
+  ): Promise<{ bytes: Buffer; contentType: string } | undefined>;
   /** Canonical branch history, newest first. */
   repositoryVersions?(input: {
     projectId: string;
@@ -4505,6 +4540,191 @@ export class ApiGateway {
       return;
     }
 
+    // Images in a channel. Scoped to a repository so the permission question
+    // is the one already answered for everything else in that room: whoever
+    // may read the channel may read what was posted into it.
+    // One pattern per shape rather than an optional trailing group: `matchPath`
+    // maps every group through `decodeURIComponent`, so a group that did not
+    // participate comes back as the *string* "undefined" and no branch tests
+    // true. Every other route here is written this way for the same reason.
+    const attachmentMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/attachments$`,
+        "u",
+      ),
+    );
+    const attachmentItemMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/attachments/([^/]+)$`,
+        "u",
+      ),
+    );
+    if (attachmentMatch !== undefined || attachmentItemMatch !== undefined) {
+      const [projectId = "", repositoryId = "", attachmentId] =
+        attachmentItemMatch ?? attachmentMatch ?? [];
+      const operations = this.options.operations;
+      if (
+        operations.attachmentSave === undefined ||
+        operations.attachmentRead === undefined
+      ) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot store images",
+        );
+      }
+      if (method === "POST" && attachmentItemMatch === undefined) {
+        await authorizeRepository(
+          this.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "run_task",
+        );
+        const contentType = request.headers["content-type"] ?? "";
+        const bytes = await this.readBinary(request, MAX_ATTACHMENT_BYTES);
+        const id = await this.performOperation(
+          "attachment_rejected",
+          async () => await operations.attachmentSave!({ bytes, contentType }),
+        );
+        this.sendJson(response, 200, { id });
+        return;
+      }
+      if (method === "GET" && attachmentId !== undefined) {
+        await authorizeRepository(
+          this.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "view",
+        );
+        const found = await operations.attachmentRead(attachmentId);
+        if (found === undefined) {
+          throw new HttpError(404, "not_found", "That image was not found");
+        }
+        // `nosniff` matters more here than anywhere else in this API: the
+        // content type is derived from an allowlist rather than from the
+        // uploader, and this is what stops a browser overriding it and
+        // treating the bytes as something executable.
+        response.setHeader("Content-Type", found.contentType);
+        response.setHeader("Content-Length", String(found.bytes.length));
+        response.setHeader("X-Content-Type-Options", "nosniff");
+        response.setHeader("Content-Disposition", "inline");
+        response.setHeader("Cache-Control", "private, max-age=31536000, immutable");
+        response.writeHead(200);
+        response.end(found.bytes);
+        return;
+      }
+    }
+
+    // Looking at the running app, through here rather than at its own port.
+    //
+    // The preview binds loopback and no port is opened, which on a hosted
+    // deployment made it unreachable — correct, and useless where the product
+    // is actually used. Proxying it puts it behind the session and the same
+    // permission the button needs, so it is reachable by exactly the people
+    // who could have started it and by nobody else. No port is opened and
+    // nothing is added to the attack surface: the code was already running
+    // in this container, because every task already runs here.
+    const previewAppMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/preview/app(/.*)?$`,
+        "u",
+      ),
+    );
+    if (previewAppMatch !== undefined) {
+      const [projectId = "", repositoryId = "", rest = "/"] = previewAppMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "run_task",
+      );
+      const status = (await this.options.operations.previewStatus?.({
+        projectId,
+        repositoryId,
+      })) as { url?: string; exited?: unknown } | undefined;
+      if (
+        status === undefined ||
+        typeof status.url !== "string" ||
+        status.exited !== undefined
+      ) {
+        throw new HttpError(
+          409,
+          "not_running",
+          "No preview is running for this repository",
+        );
+      }
+      await this.proxyToPreview(request, response, status.url, rest, url.search);
+      return;
+    }
+
+    // Running the repository's app to look at it. Gated on `run_task` rather
+    // than `manage_project`: starting a preview spends a little of this
+    // machine and changes nothing about the repository, which is much closer
+    // to submitting work than to administering the project.
+    const previewMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/preview$`,
+        "u",
+      ),
+    );
+    if (previewMatch !== undefined) {
+      const [projectId = "", repositoryId = ""] = previewMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "run_task",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      const operations = this.options.operations;
+      if (
+        operations.previewStart === undefined ||
+        operations.previewStatus === undefined ||
+        operations.previewStop === undefined
+      ) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment cannot run previews",
+        );
+      }
+      if (method === "POST") {
+        const preview = await this.performOperation("preview_failed", async () =>
+          await operations.previewStart!({ projectId, repositoryId }),
+        );
+        this.sendJson(response, 200, { preview });
+        return;
+      }
+      if (method === "GET") {
+        const preview = await operations.previewStatus({
+          projectId,
+          repositoryId,
+        });
+        // `null` rather than a 404: "no preview is running" is an answer about
+        // this repository, not a missing route, and the caller renders a
+        // start button either way.
+        this.sendJson(response, 200, { preview: preview ?? null });
+        return;
+      }
+      if (method === "DELETE") {
+        await operations.previewStop({ projectId, repositoryId });
+        this.sendJson(response, 200, { stopped: true });
+        return;
+      }
+    }
+
     const rollbackMatch = matchPath(
       path,
       new RegExp(
@@ -4890,29 +5110,26 @@ export class ApiGateway {
       // The inbox and the roster in one call, because the screen that shows
       // one always shows the other: a list of conversations is useless without
       // the people you have not written to yet.
-      const [conversations, memberships, users] = await Promise.all([
+      const [conversations, reachable] = await Promise.all([
         this.options.store.listDirectConversations(projectId, principal.user.id),
-        this.options.store.listMemberships(project.project.organizationId),
-        this.options.store.listUsers(),
+        this.projectPeople(projectId, project.project.organizationId),
       ]);
-      const byId = new Map(users.map((user) => [user.id, user]));
       const present = new Set(this.webSockets.connectedUserIds(projectId));
       this.sendJson(response, 200, {
         conversations,
-        // Everyone who could be written to, with whether they are here now.
-        // Presence is read off the open sockets rather than a stored flag:
-        // see `connectedUserIds`.
-        people: memberships
-          .filter((membership) => membership.userId !== principal.user.id)
-          .map((membership) => {
-            const user = byId.get(membership.userId);
-            return {
-              id: membership.userId,
-              name: user?.displayName ?? "Someone",
-              role: membership.role,
-              online: present.has(membership.userId),
-            };
-          }),
+        // Everyone who could be written to, with whether they are here now —
+        // and "everyone" is the project's whole room, grants included. A
+        // repository-scoped invite made somebody a colleague in every channel
+        // of the project and a stranger to the DM list; the same person you
+        // could read could not be written to.
+        people: [...reachable.values()]
+          .filter((person) => person.userId !== principal.user.id)
+          .map((person) => ({
+            id: person.userId,
+            name: person.name,
+            role: person.role,
+            online: present.has(person.userId),
+          })),
       });
       return;
     }
@@ -4952,11 +5169,14 @@ export class ApiGateway {
           "A direct message needs two people",
         );
       }
-      const membership = await this.options.store.getMembership(
+      // Reachability is the project's whole room — memberships and grants —
+      // the same set the channel roster shows. An org check alone made a
+      // repo-invited teammate unwritable.
+      const reachable = await this.projectPeople(
+        projectId,
         project.project.organizationId,
-        otherId,
       );
-      if (membership === undefined) {
+      if (!reachable.has(otherId)) {
         throw new HttpError(404, "not_found", "That person was not found");
       }
       if (method === "GET") {
@@ -10159,6 +10379,48 @@ export class ApiGateway {
     });
   }
 
+  /**
+   * Everyone in this project's room: organization members plus anyone holding
+   * a grant on any of the project's repositories. The one answer for the
+   * channel roster, the DM list and DM reachability, so a person the room
+   * shows is always a person the room can write to.
+   */
+  private async projectPeople(
+    projectId: string,
+    organizationId: string,
+  ): Promise<Map<string, { userId: string; name: string; role: string }>> {
+    const [memberships, repositories, users] = await Promise.all([
+      this.options.store.listMemberships(organizationId),
+      this.options.store.listProjectRepositories(projectId),
+      this.options.store.listUsers(),
+    ]);
+    const grants = (
+      await Promise.all(
+        repositories.map((repository) =>
+          this.options.store
+            .listRepositoryGrants(repository.id)
+            .catch(() => []),
+        ),
+      )
+    ).flat();
+    const byId = new Map(users.map((user) => [user.id, user]));
+    const people = new Map<string, { userId: string; name: string; role: string }>();
+    for (const entry of [...memberships, ...grants]) {
+      if (people.has(entry.userId)) {
+        continue;
+      }
+      const user = byId.get(entry.userId);
+      if (user !== undefined) {
+        people.set(entry.userId, {
+          userId: entry.userId,
+          name: user.displayName,
+          role: entry.role,
+        });
+      }
+    }
+    return people;
+  }
+
   private async narrateConflicts(): Promise<void> {
     const events = await this.options.store.listAuditEvents({
       types: ["conflict_detected"],
@@ -10831,6 +11093,39 @@ export class ApiGateway {
     });
   }
 
+  /**
+   * Reads a binary body under an explicit cap.
+   *
+   * Its own cap rather than the JSON one: an image is legitimately far larger
+   * than any request made of this API, and raising the shared limit to suit it
+   * would raise it for every route that has no business receiving megabytes.
+   */
+  private async readBinary(
+    request: IncomingMessage,
+    limit: number,
+  ): Promise<Buffer> {
+    const declared = Number.parseInt(
+      request.headers["content-length"] ?? "0",
+      10,
+    );
+    if (Number.isFinite(declared) && declared > limit) {
+      throw new HttpError(413, "body_too_large", "That image is too large");
+    }
+    const chunks: Buffer[] = [];
+    let size = 0;
+    for await (const chunk of request) {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      size += buffer.length;
+      // Checked as it arrives as well as up front, because `content-length` is
+      // the sender's claim and a chunked body does not carry one at all.
+      if (size > limit) {
+        throw new HttpError(413, "body_too_large", "That image is too large");
+      }
+      chunks.push(buffer);
+    }
+    return Buffer.concat(chunks);
+  }
+
   private async readJson(request: IncomingMessage): Promise<unknown> {
     const contentType = request.headers["content-type"]?.split(";")[0]?.trim();
     if (contentType !== "application/json") {
@@ -10949,6 +11244,86 @@ export class ApiGateway {
         "font-src 'self'; worker-src 'self'; object-src 'none'; " +
         "base-uri 'none'; frame-ancestors 'none'",
     );
+  }
+
+  /**
+   * Hands one request to the running preview and streams the answer back.
+   *
+   * Streamed rather than buffered because a preview serves whatever the app
+   * serves — a video, a large bundle, a long poll — and holding any of those
+   * in memory to measure them would be a denial of service somebody could
+   * trigger by loading their own page.
+   *
+   * Deliberately not a general proxy. The target is always the loopback URL
+   * this process started itself, never anything a caller supplies, so there
+   * is nothing here that could be pointed at another host.
+   */
+  private async proxyToPreview(
+    request: IncomingMessage,
+    response: ServerResponse,
+    previewUrl: string,
+    rest: string,
+    search: string,
+  ): Promise<void> {
+    const target = new URL(
+      `${rest.length === 0 ? "/" : rest}${search}`,
+      previewUrl,
+    );
+    const headers: Record<string, string> = {};
+    for (const [name, value] of Object.entries(request.headers)) {
+      const lower = name.toLowerCase();
+      // The session cookie is this deployment's, not the app's, and an app
+      // that can read it could act as the reader everywhere. Host and
+      // encoding are dropped because they describe the hop rather than the
+      // request, and forwarding them makes the app answer about the wrong
+      // origin.
+      if (
+        lower === "cookie" ||
+        lower === "host" ||
+        lower === "authorization" ||
+        lower === "accept-encoding" ||
+        lower === "connection"
+      ) {
+        continue;
+      }
+      if (typeof value === "string") {
+        headers[name] = value;
+      }
+    }
+    await new Promise<void>((resolve) => {
+      const upstream = httpRequest(
+        target,
+        { method: request.method ?? "GET", headers },
+        (answer) => {
+          if (!response.headersSent) {
+            // `content-security-policy` from the app is kept: it is the app's
+            // own claim about itself. Nothing is added, because this is not
+            // trying to sandbox the page — it is trying to reach it.
+            response.writeHead(answer.statusCode ?? 502, answer.headers);
+          }
+          answer.pipe(response);
+          answer.on("end", resolve);
+          answer.on("error", () => {
+            response.destroy();
+            resolve();
+          });
+        },
+      );
+      upstream.on("error", (error: Error) => {
+        if (!response.headersSent) {
+          // A dev server that has not finished binding is the common case,
+          // and it is worth saying so rather than reporting a bare failure.
+          this.sendJson(response, 502, {
+            error: "preview_unreachable",
+            message: `The preview did not answer: ${error.message}`,
+          });
+        } else {
+          response.destroy();
+        }
+        resolve();
+      });
+      request.pipe(upstream);
+    });
   }
 
   private sendJson(

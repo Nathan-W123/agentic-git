@@ -195,6 +195,14 @@ export const state = {
   channelStats: {},
   /** Everyone in each repository's room — org members plus repo grantees. */
   channelPeople: {},
+  /**
+   * This repository's running app, keyed by repository id.
+   *
+   * `null` means asked and there is none — which is different from absent,
+   * meaning nobody has asked yet, and is what stops the button flickering
+   * between states on every render.
+   */
+  previews: {},
   /** The project whose inbox has been fetched, so it is fetched once. */
   dmLoadedProject: undefined,
   // Paths whose inline diff is expanded in the transcript. Plural because a
@@ -1155,15 +1163,60 @@ export function currentUserId() {
   return state.principal?.user?.id ?? "";
 }
 
+/**
+ * A person's name, from whichever shape the record arrived in.
+ *
+ * There are two, and reading only one of them is why a name showed up as a
+ * raw `user_…` id everywhere except the one screen that happened to read the
+ * other. The organization member list nests the account under `user`; the
+ * room's people list flattens it to `id`/`name`. Both are legitimate — one is
+ * a membership carrying an account, the other is a list of who can be written
+ * to — so this reads either rather than picking a winner.
+ *
+ * The id is the last resort and not a name at all. It is kept because showing
+ * something is better than showing "Unknown", but seeing one means the record
+ * for that person never arrived, which is a loading problem rather than a
+ * naming one.
+ */
 export function memberName(userId) {
-  const member = state.members.find((entry) => entry.userId === userId || entry.id === userId);
-  return member?.displayName ?? member?.email ?? userId ?? "Unknown";
+  // The org member list first, then every room list and the DM roster: a
+  // repository-invited teammate is in the latter and not the former, and
+  // falling straight through to the raw id printed "user_9f2…" as a name in
+  // every message they sent.
+  const rooms = Object.values(state.channelPeople ?? {}).flat();
+  const member =
+    state.members.find(
+      (entry) =>
+        entry.userId === userId ||
+        entry.id === userId ||
+        entry.user?.id === userId,
+    ) ??
+    rooms.find((entry) => entry.userId === userId || entry.user?.id === userId) ??
+    state.dmPeople.find((entry) => entry.id === userId);
+  return (
+    member?.user?.displayName ??
+    member?.user?.email ??
+    member?.displayName ??
+    member?.name ??
+    member?.email ??
+    userId ??
+    "Unknown"
+  );
 }
 
 /** Everyone with a seat on this project — the collaborator avatars. */
 export function collaborators() {
   const names = state.members
-    .map((member) => member.displayName ?? member.email)
+    .map(
+      (member) =>
+        // Same two shapes as `memberName`; reading only the flat one left the
+        // collaborator avatars blank for everybody the server nested.
+        member.user?.displayName ??
+        member.user?.email ??
+        member.displayName ??
+        member.name ??
+        member.email,
+    )
     .filter(Boolean);
   return names.length > 0 ? names : [currentUserName()];
 }
@@ -2607,6 +2660,39 @@ export async function setAuditorPaused(repositoryId, paused) {
  * failure, so it arrives as a normal response and is returned for the caller
  * to report.
  */
+/**
+ * Whether this repository's app is running, and where.
+ *
+ * Fetched rather than assumed, because the preview outlives the page: a
+ * reload, or a second tab, must find the one that is already up instead of
+ * offering to start a second.
+ */
+export async function loadPreview(repositoryId) {
+  try {
+    const response = await api(repositoryPath(repositoryId, "/preview"));
+    state.previews[repositoryId] = response?.preview ?? null;
+  } catch {
+    // A deployment that cannot run previews answers 501, and a reader who
+    // never asked for one should not see an error about it. Absent is the
+    // same as "no button", which is the right outcome either way.
+    state.previews[repositoryId] = null;
+  }
+  return state.previews[repositoryId];
+}
+
+export async function startPreview(repositoryId) {
+  const response = await api(repositoryPath(repositoryId, "/preview"), {
+    method: "POST",
+  });
+  state.previews[repositoryId] = response?.preview ?? null;
+  return state.previews[repositoryId];
+}
+
+export async function stopPreview(repositoryId) {
+  await api(repositoryPath(repositoryId, "/preview"), { method: "DELETE" });
+  state.previews[repositoryId] = null;
+}
+
 export async function rollbackTask(repositoryId, taskId) {
   const response = await api(repositoryPath(repositoryId, "/rollback"), {
     method: "POST",
