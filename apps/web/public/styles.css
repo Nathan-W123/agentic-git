@@ -4375,6 +4375,64 @@ svg {
   color: var(--text-2);
 }
 
+/* One agent's work in this repository. Sits in the middle row of
+   `.thread-panel`'s grid, which is the row that stretches, so the list
+   scrolls rather than pushing anything off the bottom. */
+.agent-history {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 6px 0;
+}
+
+.agent-history-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 14px;
+  font-size: 13px;
+  border-left: 2px solid transparent;
+}
+
+/* Only the rows that go somewhere look like they do. A task with no channel
+   message behind it is still worth showing — it happened — but it is not a
+   button, and styling it as one would promise a conversation to open. */
+.agent-history-row[role="button"] {
+  cursor: pointer;
+}
+
+.agent-history-row[role="button"]:hover {
+  background: var(--bg-inset);
+  border-left-color: var(--accent-line);
+}
+
+.agent-history-row .ah-glyph {
+  width: 12px;
+  flex: none;
+  color: var(--text-3);
+}
+
+.agent-history-row.integrated .ah-glyph {
+  color: var(--green);
+}
+
+.agent-history-row.failed .ah-glyph {
+  color: var(--red);
+}
+
+.agent-history-row .ah-objective {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-history-row .ah-when {
+  flex: none;
+  color: var(--text-3);
+  font-size: 11px;
+}
+
 /* -------------------------------------------------------------- thread ---- */
 
 .thread-panel {

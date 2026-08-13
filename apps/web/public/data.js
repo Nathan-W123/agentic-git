@@ -171,8 +171,16 @@ export const state = {
   dmThreads: {},
   /** The conversation open in the side panel, if any. */
   activeDm: undefined,
-  /** Your own agent, open in that same panel. */
+  /** Any agent in the room, open in that same panel. */
   activeAgentPanel: undefined,
+  /**
+   * Which half of an agent's panel is showing: "history" or "chat".
+   *
+   * History is the default because it is the half that exists for every
+   * agent — a private chat is only ever with your own, so opening straight
+   * into one would show most of the roster an empty room they cannot use.
+   */
+  agentPanelTab: "history",
   /*
    * Whether a thread's thinking block is unfolded, keyed by thread id.
    *
@@ -2093,7 +2101,7 @@ function agentIsWorking(agent, repositoryId) {
 }
 
 /** The vendor CLI each chat provider drives, as task `agentId`s name it. */
-const VENDOR_FOR_PROVIDER = {
+export const VENDOR_FOR_PROVIDER = {
   anthropic: "claude",
   openai: "codex",
   google: "gemini",

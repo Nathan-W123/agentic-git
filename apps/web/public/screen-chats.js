@@ -43,6 +43,7 @@ import {
   postChannelReply,
   sendChannelMessage,
   state,
+  VENDOR_FOR_PROVIDER,
 } from "./data.js";
 import { chatComposer, chatProgress, chatThread } from "./chat.js";
 import {
@@ -63,7 +64,9 @@ import {
   iconButton,
   emptyState,
   miniSelect,
+  relativeTime,
   searchBox,
+  tabs,
 } from "./ui.js";
 
 /* ------------------------------------------------------------- options ---- */
@@ -320,7 +323,7 @@ function rosterRow(agent, canModerate) {
   const status = agentStatus(agent, activeChannelId());
   return `<div class="roster-row">
     <div class="roster-row-main" role="button" tabindex="0"
-      data-act="channel-settings-toggle" data-value="${esc(agent.id)}">
+      data-act="agent-panel-open" data-value="${esc(agent.id)}">
       <span class="rr-avatar" data-hover="agent-usage"
         data-hover-value="${esc(agent.id)}" tabindex="0"
         ${
@@ -1408,15 +1411,94 @@ function threadListPanel(repositoryId) {
  * buttons that belong to a screen built around one agent at a time, and its
  * close button toggles the Code screen's pane rather than this panel.
  */
+/**
+ * What this agent has been asked to do in this repository, newest first.
+ *
+ * Matched by vendor rather than by owner, because a task records which vendor
+ * ran it and not whose account paid for it. With two people's Codex in one
+ * room their histories are therefore indistinguishable here — the same
+ * boundary the working dot has, and the same fix: stamp the owner on the task,
+ * server-side. Until then this is honest about being per-vendor.
+ */
+function agentHistoryRows(agent, repositoryId) {
+  const vendor = VENDOR_FOR_PROVIDER[agent.provider ?? agent.id];
+  if (vendor === undefined) {
+    return [];
+  }
+  const messages = channelMessagesFor(repositoryId);
+  return state.tasks
+    .filter(
+      (task) =>
+        task.repositoryId === repositoryId &&
+        String(task.agentId ?? "").toLowerCase().includes(vendor),
+    )
+    .sort(
+      (left, right) =>
+        new Date(right.submittedAt ?? 0).getTime() -
+        new Date(left.submittedAt ?? 0).getTime(),
+    )
+    .map((task) => ({
+      task,
+      // Where the work was talked about, so a row opens the conversation
+      // rather than being a dead label. Not every task has one — a task
+      // submitted outside the channel never got a message.
+      message: messages.find((entry) => entry.taskId === task.id),
+    }));
+}
+
+const TASK_GLYPH = {
+  integrated: "✓",
+  failed: "✕",
+  cancelled: "–",
+  awaiting_approval: "?",
+};
+
+function agentHistory(agent, repositoryId) {
+  const rows = agentHistoryRows(agent, repositoryId);
+  if (rows.length === 0) {
+    return `<div class="agent-history empty">${emptyState(
+      "robot",
+      "Nothing yet",
+      `${esc(agent.name.split(" ")[0])} has not been asked for anything in this repository.`,
+    )}</div>`;
+  }
+  return `<div class="agent-history scroll">${rows
+    .map(({ task, message }) => {
+      const glyph = TASK_GLYPH[task.status] ?? "•";
+      const line = String(task.objective ?? "").split(/\r?\n/u)[0] ?? "";
+      const open =
+        message === undefined
+          ? ""
+          : ` role="button" tabindex="0" data-act="channel-thread-open"
+              data-value="${esc(message.id)}"`;
+      return `<div class="agent-history-row ${esc(task.status)}"${open}>
+        <span class="ah-glyph">${glyph}</span>
+        <span class="ah-objective">${esc(line)}</span>
+        <span class="ah-when">${esc(relativeTime(task.submittedAt))}</span>
+      </div>`;
+    })
+    .join("")}</div>`;
+}
+
 function agentPanel() {
   const agentId = state.activeAgentPanel;
   if (agentId === undefined) {
     return "";
   }
-  const agent = myAgents().find((candidate) => candidate.id === agentId);
+  // Every agent in the room, not only this account's. Clicking a teammate's
+  // agent asked a question the panel could not answer before: it resolved
+  // from `myAgents()` alone, so the click did nothing at all.
+  const agent = channelAgentsFor(activeChannelId()).find(
+    (candidate) => candidate.id === agentId,
+  );
   if (agent === undefined) {
     return "";
   }
+  const repositoryId = activeChannelId();
+  // A private chat is only ever with your own agent; somebody else's has a
+  // history and nothing else, so it gets no tab strip to choose between one
+  // thing.
+  const tab = agent.mine === true ? (state.agentPanelTab ?? "history") : "history";
   const status = agentStatus(agent, activeChannelId());
   return `<aside class="thread-panel">
     ${panelGrip()}
@@ -1433,17 +1515,38 @@ function agentPanel() {
       })}
     </header>
     ${
-      // Progress and transcript share one row, as they do in `chatPanel`.
-      // `.thread-panel` is a three-row grid and the middle row is the one that
-      // stretches: left as siblings, a visible progress bar would take the
-      // stretch and the transcript would stop scrolling — but only while a
-      // task was running, which is exactly when it is being read.
-      `<div style="display:grid;grid-template-rows:auto 1fr;min-height:0">
-        ${chatProgress(agent)}
-        ${chatThread(agent)}
-      </div>`
+      agent.mine === true
+        ? tabs("agent-panel-tab", [
+            { value: "history", label: "History" },
+            { value: "chat", label: "Private chat" },
+          ], tab)
+        : ""
     }
-    ${chatComposer(agent, `Ask ${agent.name.split(" ")[0]} to do anything...`)}
+    ${
+      tab === "chat"
+        ? // Progress and transcript share one row, as they do in `chatPanel`.
+          // `.thread-panel` is a three-row grid and the middle row is the one
+          // that stretches: left as siblings, a visible progress bar would take
+          // the stretch and the transcript would stop scrolling — but only
+          // while a task was running, which is exactly when it is being read.
+          `<div style="display:grid;grid-template-rows:auto 1fr;min-height:0">
+            ${chatProgress(agent)}
+            ${chatThread(agent)}
+          </div>`
+        : agentHistory(agent, repositoryId)
+    }
+    ${
+      // The composer belongs to the private chat and nothing else. Under a
+      // history it would offer to send a message into a conversation the
+      // reader is not having — and for somebody else's agent, into one they
+      // are not allowed to have at all.
+      tab === "chat"
+        ? chatComposer(
+            agent,
+            `Ask ${agent.name.split(" ")[0]} to do anything...`,
+          )
+        : ""
+    }
   </aside>`;
 }
 

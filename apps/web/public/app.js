@@ -2552,11 +2552,28 @@ document.addEventListener("click", (event) => {
       }
       state.selectedAgent = value;
       state.activeAgentPanel = value;
+      // This entry point is "talk to my agent", so it lands on the chat half
+      // rather than making somebody who clicked the avatar choose a tab.
+      state.agentPanelTab = "chat";
       state.activeDm = undefined;
       state.activeChannelThread = undefined;
       render();
       return;
     }
+    case "agent-panel-open":
+      // Any agent in the room, not only your own, and history first. The
+      // private-chat entry above stays as it was: that one is a deliberate
+      // "talk to my agent" and lands on the chat tab.
+      state.activeAgentPanel = value;
+      state.agentPanelTab = "history";
+      state.activeDm = undefined;
+      state.activeChannelThread = undefined;
+      render();
+      return;
+    case "agent-panel-tab":
+      state.agentPanelTab = value;
+      render();
+      return;
     case "agent-panel-close":
       state.activeAgentPanel = undefined;
       render();
