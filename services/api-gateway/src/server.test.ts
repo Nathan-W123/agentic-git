@@ -3094,7 +3094,10 @@ test("a clearly-scoped task message auto-claims to the one obviously-best agent"
     JSON.stringify(systemMessages[0]),
   );
   assert.match(systemMessages[0].content, /On it/u);
-  assert.match(systemMessages[0].content, /Nobody was @mentioned/u);
+  // No parenthetical about the auto-claim: the acknowledgement names the
+  // agent that took it, and a sentence of process justification on every
+  // unpinged request read as the system apologising for working.
+  assert.doesNotMatch(systemMessages[0].content, /Nobody was @mentioned/u);
 });
 
 test("an ambiguous task message is dispatched anyway, deterministically", async (t) => {
@@ -3464,8 +3467,9 @@ test("an unaddressed task is taken even when it matches no agent's role", async 
     (message) => message.kind === "agent",
   );
   assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
-  // Nobody was named, so the agent says why it picked the work up.
-  assert.match(agentMessages[0].content, /Nobody was @mentioned/u);
+  // Nobody was named, and the pickup still reads as an ordinary
+  // acknowledgement — the explanation was removed as noise.
+  assert.doesNotMatch(agentMessages[0].content, /Nobody was @mentioned/u);
 });
 
 test("recent activity is one agent's, not its owner's whole roster", async (t) => {
