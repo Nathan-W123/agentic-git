@@ -9013,6 +9013,33 @@ export class ApiGateway {
         content: formatFinding(finding),
       });
     }
+    // Findings get a line in the room; a clean audit does not.
+    //
+    // The mute argument above holds for "all clear after every merge" and
+    // fails for a defect nobody has seen yet. Bumping the thread moves it to
+    // the foot of the channel but says nothing about what is in it, so a high
+    // finding looked exactly like a routine all-clear until somebody thought
+    // to open it — which is the same silence problem one layer up.
+    if (findings.length > 0) {
+      const high = findings.filter(
+        (finding) => finding.severity === "high",
+      ).length;
+      const worst = findings[0];
+      await this.appendChannelEntry({
+        projectId,
+        repositoryId,
+        kind: "system",
+        authorId: "coordinator",
+        content:
+          `⚖️ Audit of ${String(diff.files.length)} file` +
+          `${diff.files.length === 1 ? "" : "s"} found ` +
+          `${String(findings.length)} issue` +
+          `${findings.length === 1 ? "" : "s"}` +
+          `${high > 0 ? ` (${String(high)} high)` : ""}` +
+          `${worst === undefined ? "" : ` — ${worst.title}`}` +
+          `. Open the audit thread to approve a fix.`,
+      });
+    }
     // Back to the foot of the channel, which is also what keeps it findable:
     // `auditThreadRoot` looks through recent messages, and a thread bumped on
     // every audit never falls out of that window.

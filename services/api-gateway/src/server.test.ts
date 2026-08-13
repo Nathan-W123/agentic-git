@@ -5759,10 +5759,23 @@ test("the auditor audits a canonical advance and posts what it finds", async (t)
   assert.match(runtime.chatPrompts[0]?.prompt ?? "", /const ok = a \|\| b;/u);
 
   // One thread for every audit this repository will ever have, with the run's
-  // summary and each finding inside it — not a thread per merge.
+  // summary and each finding inside it — not a thread per merge. Alongside it,
+  // one line in the room: a bumped thread says something happened but not
+  // whether it mattered, and a high finding read exactly like a routine
+  // all-clear until somebody opened it.
   const posted = await runtime.store.listChannelMessages(repo, ownerId);
-  assert.equal(posted.length, 1);
-  const [message] = posted;
+  assert.equal(posted.length, 2);
+  const message = posted.find((entry) =>
+    String(entry.content).startsWith("Audit log"),
+  );
+  const announced = posted.find((entry) =>
+    String(entry.content).startsWith("⚖️"),
+  );
+  assert.match(String(announced?.content), /1 issue \(1 high\)/u);
+  assert.match(
+    String(announced?.content),
+    /Inverted condition admits unauthorized callers/u,
+  );
   assert.equal(message?.authorId, `${ownerId}:openai`);
   assert.match(String(message?.content), /^Audit log/u);
   assert.equal(message?.replies.length, 2);
@@ -5975,10 +5988,18 @@ test("a number is read against the newest audit, not the whole thread", async (t
     );
   }
 
-  // One thread holding both audits, which is the condition being tested.
+  // One thread holding both audits, which is the condition being tested. The
+  // two room lines the findings announced are beside it, not more threads.
   const posted = await runtime.store.listChannelMessages(repo, ownerId);
-  assert.equal(posted.length, 1);
-  const audit = posted[0];
+  const audit = posted.find((entry) =>
+    String(entry.content).startsWith("Audit log"),
+  );
+  assert.equal(
+    posted.filter((entry) => String(entry.content).startsWith("Audit log"))
+      .length,
+    1,
+  );
+  assert.equal(audit?.replies.length, 4);
 
   const reply = await owner.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages/${audit?.id}/replies`,
