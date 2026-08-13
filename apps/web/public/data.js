@@ -213,6 +213,8 @@ export const state = {
   previews: {},
   /** The project whose inbox has been fetched, so it is fetched once. */
   dmLoadedProject: undefined,
+  /** When the inbox was last fetched, for the refresh floor. */
+  dmLoadedAt: 0,
   // Paths whose inline diff is expanded in the transcript. Plural because a
   // reader comparing two files should not have to close one to open the other.
   chanOpenFiles: [],
@@ -2277,22 +2279,46 @@ async function loadChannelRoster(repositoryId) {
  * re-render.
  */
 /**
- * The inbox, fetched once per project rather than on every render.
+ * The inbox, refreshed at most this often rather than on every render.
  *
  * `renderNow` calls this, so it has to be idempotent and quiet: an
- * unconditional fetch that re-renders on completion is an infinite loop.
- * Presence does go stale under this, which is the trade — a socket frame or
- * reopening a conversation refreshes it, and neither is worth a poll.
+ * unconditional fetch that re-renders on completion is an infinite loop. It
+ * used to answer that by fetching once per project and never again, which
+ * made both of the things it feeds permanently stale — a badge for a message
+ * that arrived while the tab was closed never appeared, and presence was
+ * whoever happened to be online at load.
+ *
+ * A socket frame covers a message arriving *while somebody is watching*, and
+ * that is the common case. This is for the other ones: a tab reopened, a
+ * socket that dropped and came back, a message sent while the page sat
+ * untouched. The floor makes it a refresh rather than a poll — a render storm
+ * still costs one request.
  */
+const DM_REFRESH_MS = 15_000;
+
 export async function ensureDirectMessages(rerender) {
-  if (!state.projectId || state.dmLoadedProject === state.projectId) {
+  if (!state.projectId) {
     return;
   }
+  const now = Date.now();
+  if (
+    state.dmLoadedProject === state.projectId &&
+    now - (state.dmLoadedAt ?? 0) < DM_REFRESH_MS
+  ) {
+    return;
+  }
+  // Claimed before the request, not after, so the render this triggers cannot
+  // start a second one — the guard above is what makes this safe to call from
+  // a render path at all.
+  state.dmLoadedAt = now;
   // Marked loaded only on success: claiming it before the fetch meant one
   // failed request silenced every unread badge until the next full reload,
   // because nothing ever asked again.
   if ((await loadDirectMessages()) === true) {
     state.dmLoadedProject = state.projectId;
+  } else {
+    // A failure should be retried on the next render rather than waited out.
+    state.dmLoadedAt = 0;
   }
   rerender();
 }
