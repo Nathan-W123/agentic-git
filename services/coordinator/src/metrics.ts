@@ -18,9 +18,31 @@ export interface ConflictMetrics {
   predictionsByDisposition: Record<string, number>;
   /** Replans and non-integrated integration outcomes: contention that happened. */
   materialized: number;
-  /** Predicted pairs where a member later replanned or failed to integrate. */
-  confirmedPredictions: number;
-  /** Predicted pairs where both members integrated untouched by contention. */
+  /**
+   * Predicted pairs where contention materialised on its own — a member
+   * replanned, integrated onto a stale base, or failed to integrate.
+   *
+   * The only bucket that is evidence the prediction was worth making, because
+   * it is the only one the scheduler did not author. This is the number to
+   * read when asking whether arbitration earns its keep.
+   */
+  confirmedByContention: number;
+  /**
+   * Predicted pairs whose sole corroboration is the hold the scheduler itself
+   * placed, after which everything settled quietly.
+   *
+   * Counted apart from `confirmedByContention` because it cannot be wrong. A
+   * `blocked` or `sequenced` admission is what the scheduler *does* about a
+   * prediction, so treating it as proof of the prediction lets arbitration
+   * grade its own homework: every hold confirms itself, and the only
+   * prediction that could ever be scored a false positive is one that was
+   * never acted on. Whether these holds prevented a broken merge or cost a
+   * task its turn for nothing is not knowable from the audit chain — it needs
+   * a counterfactual the log cannot contain — so it is reported rather than
+   * folded into either verdict.
+   */
+  confirmedByOwnHold: number;
+  /** Predicted pairs the scheduler let run, where both members landed clean. */
   falsePositives: number;
   /** Predicted pairs whose members have not all reached an outcome yet. */
   openPredictions: number;
@@ -185,10 +207,12 @@ export async function computeCoordinationMetrics(
           (status === "blocked" || status === "sequenced") &&
           taskId !== undefined
         ) {
-          // Contention that really happened, so a prediction naming this task
-          // is confirmed — it just cost a plan rather than an execution.
+          // Deliberately NOT contention. This is the scheduler's own answer to
+          // a prediction, and counting it as evidence for that prediction made
+          // every hold self-confirming — arbitration marking its own homework.
+          // It lands in its own bucket (`confirmedByOwnHold`) so the number
+          // that survives is the contention nobody here authored.
           deferredTasks.add(taskId);
-          contendedTasks.add(taskId);
         }
         break;
       }
@@ -270,7 +294,8 @@ export async function computeCoordinationMetrics(
     }
   }
 
-  let confirmedPredictions = 0;
+  let confirmedByContention = 0;
+  let confirmedByOwnHold = 0;
   let falsePositives = 0;
   let openPredictions = 0;
   const predictedTasks = new Set<string>();
@@ -278,14 +303,25 @@ export async function computeCoordinationMetrics(
     for (const id of taskIds) {
       predictedTasks.add(id);
     }
+    // Order matters, and it is the order of how much the evidence is worth.
+    // Real contention settles a pair whatever else happened to it. Failing
+    // that, a pair still in flight is not yet anything — a hold that has not
+    // outlived its tasks may still be vindicated by a replan tomorrow, so it
+    // waits rather than banking a verdict early. Only once every member has
+    // finished does the absence of contention mean something, and then the
+    // hold decides which kind of nothing it was: unfalsifiable if the
+    // scheduler intervened, a clean refutation if it stood back and watched
+    // both land.
     if (taskIds.some((id) => contendedTasks.has(id))) {
-      confirmedPredictions += 1;
+      confirmedByContention += 1;
     } else if (
-      taskIds.every((id) => integratedTasks.has(id) || failedTasks.has(id))
+      !taskIds.every((id) => integratedTasks.has(id) || failedTasks.has(id))
     ) {
-      falsePositives += 1;
-    } else {
       openPredictions += 1;
+    } else if (taskIds.some((id) => deferredTasks.has(id))) {
+      confirmedByOwnHold += 1;
+    } else {
+      falsePositives += 1;
     }
   }
   let unpredictedContention = 0;
@@ -334,7 +370,8 @@ export async function computeCoordinationMetrics(
       predictions,
       predictionsByDisposition,
       materialized: contendedTasks.size,
-      confirmedPredictions,
+      confirmedByContention,
+      confirmedByOwnHold,
       falsePositives,
       openPredictions,
       unpredictedContention,
