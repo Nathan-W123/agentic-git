@@ -2548,7 +2548,9 @@ document.addEventListener("click", (event) => {
       render();
       return;
     case "channel-pin":
-      toggleChannelMessagePin(activeChannelId(), value);
+      // `render` travels with it so a refusal can put the banner back: the
+      // POST resolves long after this turn's render has run.
+      toggleChannelMessagePin(activeChannelId(), value, render);
       render();
       return;
     case "channel-pins-toggle":

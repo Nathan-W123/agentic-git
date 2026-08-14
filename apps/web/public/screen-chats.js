@@ -1089,12 +1089,23 @@ function messageRow(
             })
       }
       ${iconButton("smile", { act: "channel-react", value: entry.id, title: "React", small: true })}
-      ${iconButton("pin", {
-        act: "channel-pin",
-        value: entry.id,
-        title: entry.pinnedAt === undefined ? "Pin" : "Unpin",
-        small: true,
-      })}
+      ${
+        // Roots only. A pin lives on `channel_messages`, and a reply is a row
+        // in another table entirely — offering the button on one sent a POST
+        // that could only ever 404, and the optimistic local pin it had
+        // already drawn stayed in the banner afterwards, advertising a pin the
+        // server had no record of. The thread's own header carries the pin for
+        // everything inside it, which is the affordance a reader wants anyway:
+        // you pin the conversation, not one line of it.
+        isReply
+          ? ""
+          : iconButton("pin", {
+              act: "channel-pin",
+              value: entry.id,
+              title: entry.pinnedAt === undefined ? "Pin" : "Unpin",
+              small: true,
+            })
+      }
       ${
         // Anything the caller wants sitting beside the reply button — the
         // summary's simplify wand rides here, so the two read as one set of

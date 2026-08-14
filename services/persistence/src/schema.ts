@@ -913,6 +913,22 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE channel_messages ADD COLUMN pinned_by TEXT`,
     ],
   },
+  {
+    // When a task's ending was written somewhere other than this thread.
+    //
+    // A quick task deliberately ends as its own line in the channel rather
+    // than as a reply, so "root with a task and no replies" does not mean
+    // "thread still waiting for an ending" — and the sweep that closes
+    // orphaned threads was reading it that way, pasting a second, canned
+    // ending under work that had already reported and handing it the room it
+    // was spared. A stamp on the root is what tells the two apart after the
+    // process that knew has gone.
+    version: 30,
+    name: "channel-message-ended-elsewhere",
+    statements: [
+      `ALTER TABLE channel_messages ADD COLUMN ended_at TEXT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

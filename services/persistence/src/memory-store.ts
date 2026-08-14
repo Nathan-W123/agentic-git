@@ -140,6 +140,8 @@ interface StoredChannelMessage {
   /** When somebody pinned it to the channel's banner, and who. */
   pinnedAt?: string;
   pinnedBy?: string;
+  /** When this thread's task was ended outside the thread. */
+  endedAt?: string;
   replies: StoredChannelReply[];
   /** Emoji to the set of user ids who reacted with it. */
   reactions: Map<string, Set<string>>;
@@ -1947,7 +1949,19 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       changedFiles: message.changedFiles,
       pinnedAt: message.pinnedAt,
       pinnedBy: message.pinnedBy,
+      endedAt: message.endedAt,
     };
+  }
+
+  public async markChannelMessageEnded(
+    repositoryId: string,
+    messageId: string,
+  ): Promise<void> {
+    const message = this.channelMessages.get(messageId);
+    if (message === undefined || message.repositoryId !== repositoryId) {
+      return;
+    }
+    message.endedAt ??= new Date().toISOString();
   }
 
   public async setChannelMessageChangedFiles(

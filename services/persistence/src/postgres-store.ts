@@ -3119,6 +3119,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       changedFiles: undefined,
       pinnedAt: undefined,
       pinnedBy: undefined,
+      endedAt: undefined,
     };
   }
 
@@ -3589,6 +3590,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
       pinnedAt: optionalText(row, "pinned_at"),
       pinnedBy: optionalText(row, "pinned_by"),
+      endedAt: optionalText(row, "ended_at"),
     };
   }
 
@@ -3601,6 +3603,19 @@ export class PostgresCoordinationStore implements CoordinationStore {
       `UPDATE channel_messages SET changed_files_json = $1
        WHERE id = $2 AND repository_id = $3`,
       [JSON.stringify(files), messageId, repositoryId],
+    );
+  }
+
+  public async markChannelMessageEnded(
+    repositoryId: string,
+    messageId: string,
+  ): Promise<void> {
+    // First ending wins: a re-narrated run must not restamp the row and make
+    // the mark look like it belongs to the later pass.
+    await this.query(
+      `UPDATE channel_messages SET ended_at = $1
+       WHERE id = $2 AND repository_id = $3 AND ended_at IS NULL`,
+      [new Date().toISOString(), messageId, repositoryId],
     );
   }
 

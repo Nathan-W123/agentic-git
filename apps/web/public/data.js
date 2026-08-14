@@ -2562,7 +2562,7 @@ export function postChannelReply(repositoryId, messageId, text) {
  * exists to keep visible. Both copies flip when both exist, so the
  * transcript's pin button and the banner never disagree.
  */
-export function toggleChannelMessagePin(repositoryId, messageId) {
+export function toggleChannelMessagePin(repositoryId, messageId, rerender) {
   const pins = state.channelPins[repositoryId] ?? [];
   const message =
     findChannelMessage(repositoryId, messageId) ??
@@ -2573,23 +2573,43 @@ export function toggleChannelMessagePin(repositoryId, messageId) {
   const pinning = message.pinnedAt === undefined;
   const stamp = pinning ? new Date().toISOString() : undefined;
   const pinner = pinning ? currentUserId() || undefined : undefined;
-  for (const copy of [
-    findChannelMessage(repositoryId, messageId),
-    pins.find((entry) => entry.id === messageId),
-  ]) {
-    if (copy !== undefined) {
-      copy.pinnedAt = stamp;
-      copy.pinnedBy = pinner;
+  // What to put back if the server refuses. Read before the optimistic write,
+  // because after it there is nothing left to read.
+  const before = { at: message.pinnedAt, by: message.pinnedBy, pins };
+  const apply = (at, by, list) => {
+    for (const copy of [
+      findChannelMessage(repositoryId, messageId),
+      state.channelPins[repositoryId]?.find((entry) => entry.id === messageId),
+      message,
+    ]) {
+      if (copy !== undefined) {
+        copy.pinnedAt = at;
+        copy.pinnedBy = by;
+      }
     }
-  }
-  state.channelPins[repositoryId] = pinning
-    ? [...pins.filter((entry) => entry.id !== messageId), message]
-    : pins.filter((entry) => entry.id !== messageId);
+    state.channelPins[repositoryId] = list;
+  };
+  apply(
+    stamp,
+    pinner,
+    pinning
+      ? [...pins.filter((entry) => entry.id !== messageId), message]
+      : pins.filter((entry) => entry.id !== messageId),
+  );
   if (state.projectId && isServerChannelId(repositoryId, messageId)) {
     void api(
       channelPath(repositoryId, `/messages/${encodeURIComponent(messageId)}/pin`),
       { method: "POST", body: {} },
-    ).catch((error) => toast(`Pin did not save: ${error.message}`, "error"));
+    ).catch((error) => {
+      // Put it back. Leaving the optimistic write in place after a refusal
+      // left the banner advertising a pin the server did not have, and
+      // nothing reloads `channelPins` until somebody else posts in the
+      // channel — so the phantom outlived the toast that explained it, and
+      // survived navigating away and back.
+      apply(before.at, before.by, before.pins);
+      rerender?.();
+      toast(`Pin did not save: ${error.message}`, "error");
+    });
   }
 }
 

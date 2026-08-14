@@ -3097,6 +3097,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       changedFiles: undefined,
       pinnedAt: undefined,
       pinnedBy: undefined,
+      endedAt: undefined,
     };
   }
 
@@ -3231,6 +3232,20 @@ export class SqliteCoordinationStore implements CoordinationStore {
          WHERE id = ? AND repository_id = ?`,
       )
       .run(JSON.stringify(files), messageId, repositoryId);
+  }
+
+  public async markChannelMessageEnded(
+    repositoryId: string,
+    messageId: string,
+  ): Promise<void> {
+    // First ending wins: a re-narrated run must not restamp the row and make
+    // the mark look like it belongs to the later pass.
+    this.db
+      .prepare(
+        `UPDATE channel_messages SET ended_at = ?
+         WHERE id = ? AND repository_id = ? AND ended_at IS NULL`,
+      )
+      .run(new Date().toISOString(), messageId, repositoryId);
   }
 
   public async setChannelMessageTask(
@@ -3697,6 +3712,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
       pinnedAt: optionalText(row, "pinned_at"),
       pinnedBy: optionalText(row, "pinned_by"),
+      endedAt: optionalText(row, "ended_at"),
     };
   }
 

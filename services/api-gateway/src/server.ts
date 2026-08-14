@@ -504,6 +504,15 @@ const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
  */
 const TERMINAL_STATUS_LINE: Record<string, string> = {
   integrated: CHANNEL_TERMINAL_EVENTS["canonical_promoted"] ?? "Done.",
+  // A landed conversational turn, which is finished work even though the task
+  // is not finished: `open` means the change is in canonical and the thread is
+  // waiting for the next message. Its absence here quietly retired this whole
+  // sweep for the case it was written for — every channel dispatch carries a
+  // conversation id, so every turn that succeeds settles as `open`, and an
+  // orphaned thread was skipped on every pass forever while its last word
+  // stayed a progress line. Failed and cancelled turns still settle
+  // terminally, which is why only the successful ones went quiet.
+  open: CHANNEL_TERMINAL_EVENTS["canonical_promoted"] ?? "Done.",
   failed: CHANNEL_TERMINAL_EVENTS["task_failed"] ?? "I could not finish this.",
   cancelled:
     CHANNEL_TERMINAL_EVENTS["task_cancelled"] ?? "This was cancelled.",
@@ -8073,7 +8082,16 @@ export class ApiGateway {
         // its id, and the store filters by it rather than this scanning.
         cursor: 0,
         pending,
-        threaded: false,
+        // Whether a room already exists, not whether one is deserved. The
+        // held-narration rule is about sparing the channel a thread nobody
+        // needs — but when this dispatch joined an existing thread the room is
+        // already there, the acknowledgement is already in it, and the person
+        // who asked is reading it. Hardcoding `false` there sent the turn's
+        // ending to `appendChannelEntry` as a loose message at the foot of the
+        // channel, leaving the thread stopped dead after "On it." with its
+        // held title and reasoning discarded. `startPlannedTaskFor` has always
+        // passed `true` for exactly this reason.
+        threaded: continuing !== undefined,
       });
     } catch (error) {
       await this.appendChannelThreadReply({
@@ -10467,6 +10485,14 @@ export class ApiGateway {
           // A live watcher still owns this one and will close it itself.
           continue;
         }
+        if (message.endedAt !== undefined) {
+          // Already finished, just not in here: a task too small to deserve a
+          // thread ends as its own line in the channel. Without this the root
+          // reads as a thread that never got an ending, and this sweep gave
+          // it one — duplicating the outcome and opening the very room the
+          // narrator had decided against.
+          continue;
+        }
         const ending = TERMINAL_STATUS_LINE[byId.get(taskId)?.status ?? ""];
         if (ending === undefined) {
           continue;
@@ -11001,6 +11027,19 @@ export class ApiGateway {
                 // One line in the room reads as one line.
                 content: collapseWhitespace(line),
               });
+              // Said on the root, because the ending did not go there. A
+              // thread root carrying a task and no replies is otherwise
+              // indistinguishable from one whose watcher died mid-run, and
+              // `reconcileFinishedThreads` treated it as exactly that — 60
+              // seconds later it pasted a second, canned ending underneath,
+              // which both repeated the outcome and gave the task the room
+              // this branch exists to spare it.
+              await this.options.store
+                .markChannelMessageEnded(
+                  watched.repositoryId,
+                  watched.messageId,
+                )
+                .catch(() => undefined);
               this.watchedChannelTasks.delete(watched.taskId);
               break;
             }

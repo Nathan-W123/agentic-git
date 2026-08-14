@@ -746,6 +746,46 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a thread remembers that its ending went elsewhere`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const root = await store.appendChannelMessage({
+        repositoryId: REPOSITORY.id,
+        projectId: DEFAULT_PROJECT_ID,
+        kind: "agent",
+        authorId: "user_1:anthropic",
+        content: "On it.",
+      });
+      assert.equal(root.endedAt, undefined);
+
+      await store.markChannelMessageEnded(REPOSITORY.id, root.id);
+      const ended = await store.getChannelMessage(
+        REPOSITORY.id,
+        root.id,
+        "user_1",
+      );
+      assert.equal(typeof ended?.endedAt, "string");
+
+      // First ending wins, so a re-narrated run cannot restamp the row and
+      // make the mark look like it belongs to the later pass.
+      await store.markChannelMessageEnded(REPOSITORY.id, root.id);
+      assert.equal(
+        (await store.getChannelMessage(REPOSITORY.id, root.id, "user_1"))
+          ?.endedAt,
+        ended?.endedAt,
+      );
+
+      // Scoped to its repository, and silent about a message that is not
+      // there: this runs inside a narration loop that must not throw.
+      await store.markChannelMessageEnded("repo_elsewhere", root.id);
+      await store.markChannelMessageEnded(REPOSITORY.id, "chanmsg_missing");
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a plan nobody approved can still be cancelled`, async () => {
     const { store, cleanup } = await backend.open();
     try {

@@ -791,6 +791,15 @@ export interface ChannelMessage {
    * of who flagged it, not a lock on who may clear it.
    */
   pinnedBy: UserId | undefined;
+  /**
+   * When this thread's task was given its ending outside the thread.
+   *
+   * A quick task ends as its own line in the channel rather than as a reply,
+   * which leaves the root looking like a thread that was never finished. This
+   * says otherwise, so the sweep that closes threads orphaned by a restart
+   * does not paste a second, canned ending under work that already reported.
+   */
+  endedAt: string | undefined;
 }
 
 /**
@@ -1451,6 +1460,18 @@ export interface CoordinationStore {
     repositoryId: string,
     messageId: string,
     files: readonly ChannelChangedFile[],
+  ): Promise<void>;
+  /**
+   * Records that this thread's task was ended somewhere other than in it.
+   *
+   * Written by the narrator when a task finishes too small to deserve a
+   * thread, so the ending goes into the channel as its own line. Without it
+   * the root is indistinguishable from a thread whose watcher died, and the
+   * orphan sweep gives it an ending it already has.
+   */
+  markChannelMessageEnded(
+    repositoryId: string,
+    messageId: string,
   ): Promise<void>;
   /**
    * Records which task a thread is the story of.

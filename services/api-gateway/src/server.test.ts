@@ -6269,6 +6269,126 @@ test("a quick task ends as two lines in the room, with no thread at all", async 
   );
 });
 
+test("the sweep leaves a quiet task alone, and closes a thread its watcher abandoned", async (t) => {
+  // Two halves of one confusion. The sweep decides a thread still needs an
+  // ending from its replies, and a quick task's ending is deliberately not a
+  // reply — so it pasted a second, canned one underneath, duplicating the
+  // outcome and handing the task the room the narrator had spared it. And it
+  // reads the task's status to know an ending is due, but a landed
+  // conversational turn settles `open`, which was in no table here — so the
+  // orphaned threads this sweep exists for were skipped on every pass.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "sweeproom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel`;
+  const mention = `Claude (${String(session.user.displayName).split(" ")[0]})`;
+
+  assert.equal(
+    (
+      await owner.request(`${base}/messages`, {
+        method: "POST",
+        body: { content: `@${mention} fix the typo in the README` },
+      })
+    ).status,
+    201,
+  );
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never dispatched a task",
+  );
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId: repo });
+  assert.ok(task !== undefined);
+
+  await runtime.store.appendAudit(undefined, {
+    type: "task_started",
+    taskId: task.id,
+    data: {},
+  });
+  await runtime.store.appendAudit(undefined, {
+    type: "task_failed",
+    taskId: task.id,
+    data: { error: "npm test exited 1" },
+  });
+  await waitFor(
+    async () =>
+      (await runtime.store.listChannelMessages(repo, ownerId)).some(
+        (message) => message.kind === "outcome",
+      ),
+    "the quiet ending never reached the room",
+    8_000,
+  );
+
+  // The run is over and its watcher is gone — the state a restart leaves.
+  await runtime.store.claimSubmittedTasks(repo);
+  await runtime.store.completeSubmittedTask(task.id, "failed");
+  await (runtime.gateway as unknown as {
+    reconcileFinishedThreads(): Promise<void>;
+  }).reconcileFinishedThreads();
+
+  const swept = await runtime.store.listChannelMessages(repo, ownerId);
+  assert.deepEqual(
+    swept.flatMap((message) =>
+      (message.replies ?? []).map((reply) => reply.content),
+    ),
+    [],
+    "the sweep gave a thread to a task that had already reported in the room",
+  );
+  assert.equal(
+    swept.filter((message) => message.kind === "outcome").length,
+    1,
+    "the ending was said twice",
+  );
+
+  // And the other half: a thread that really was left mid-sentence, on a turn
+  // that landed conversationally and so sits `open`.
+  const stranded = await runtime.store.appendChannelMessage({
+    repositoryId: repo,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it.",
+  });
+  const turn = await runtime.store.submitTask({
+    repositoryId: repo,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "refactor the auth module",
+    agentId: "test-agent",
+    validationCommands: [],
+    conversationId: stranded.id,
+  });
+  await runtime.store.setChannelMessageTask(repo, stranded.id, turn.id);
+  await runtime.store.addChannelReply({
+    repositoryId: repo,
+    messageId: stranded.id,
+    authorId: `${ownerId}:anthropic`,
+    content: "Working on it…",
+    kind: "progress",
+  });
+  await runtime.store.claimSubmittedTasks(repo);
+  await runtime.store.openSubmittedTask(turn.id);
+
+  await (runtime.gateway as unknown as {
+    reconcileFinishedThreads(): Promise<void>;
+  }).reconcileFinishedThreads();
+
+  const closed = (
+    await runtime.store.listChannelMessages(repo, ownerId)
+  ).find((message) => message.id === stranded.id);
+  assert.ok(
+    (closed?.replies ?? []).some((reply) => reply.kind === "outcome"),
+    `an orphaned open turn was never given an ending: ${JSON.stringify(
+      closed?.replies,
+    )}`,
+  );
+});
+
 test("a mention nobody answers to says so, instead of vanishing", async (t) => {
   // The browser roster layers this account's own agents on top of the
   // server's, so an agent connected in a way that stored no per-user
