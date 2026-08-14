@@ -1658,6 +1658,35 @@ function agentHistoryRows(agent, repositoryId) {
     }));
 }
 
+/**
+ * What was actually asked for, with any role preamble taken off.
+ *
+ * A channel dispatch prepends "Your role in this repository: …" to every
+ * objective it submits, so the first line of a dispatched task's objective is
+ * the operator describing the agent — not the request. A history that took
+ * the first line rendered every entry as the same sentence, and an agent that
+ * had done forty different things looked like it had done one thing forty
+ * times.
+ *
+ * Mirrors `withoutRoleContext` in shared-types, which the browser cannot
+ * import. Kept deliberately identical, including leaving a preamble with
+ * nothing behind it alone rather than reducing it to nothing.
+ */
+const ROLE_CONTEXT_PREFIX = "Your role in this repository:";
+
+function withoutRolePreamble(objective) {
+  const trimmed = String(objective ?? "").trimStart();
+  if (!trimmed.startsWith(ROLE_CONTEXT_PREFIX)) {
+    return trimmed;
+  }
+  const separator = /\n[^\S\n]*\n/u.exec(trimmed);
+  if (separator === null) {
+    return trimmed;
+  }
+  const request = trimmed.slice(separator.index + separator[0].length);
+  return request.trim() === "" ? trimmed : request;
+}
+
 const TASK_GLYPH = {
   integrated: "✓",
   failed: "✕",
@@ -1679,7 +1708,13 @@ function agentHistory(agent, repositoryId) {
   return `<div class="agent-history scroll">${rows
     .map(({ task, message }) => {
       const glyph = TASK_GLYPH[task.status] ?? "•";
-      const line = String(task.objective ?? "").split(/\r?\n/u)[0] ?? "";
+      // The first line of the request, not of the objective: those differ by a
+      // role preamble on everything a channel dispatched.
+      const line =
+        withoutRolePreamble(task.objective)
+          .split(/\r?\n/u)
+          .map((entry) => entry.trim())
+          .find((entry) => entry.length > 0) ?? "(no description)";
       const open =
         message === undefined
           ? ""

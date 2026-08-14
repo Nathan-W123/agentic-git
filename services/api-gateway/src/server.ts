@@ -52,6 +52,7 @@ import {
   createId,
   projectBudgets,
   ROLE_CONTEXT_PREFIX,
+  withoutRoleContext,
   type ApprovalStatus,
   type FilePatchStatus,
   type SequencedAuditEvent,
@@ -10125,7 +10126,10 @@ export class ApiGateway {
     return taskIds
       .map((taskId) => objectiveOf.get(taskId))
       .filter((objective): objective is string => objective !== undefined)
-      .map((objective) => objective.replace(/\s+/gu, " ").trim())
+      // Without the role preamble: the auditor is being told what the work was
+      // asked to do, and "your role is auditor" is a sentence about a different
+      // agent entirely.
+      .map((objective) => withoutRoleContext(objective).replace(/\s+/gu, " ").trim())
       .filter((objective) => objective.length > 0);
   }
 
@@ -10436,7 +10440,12 @@ export class ApiGateway {
     });
     const objectiveOf = (taskId: unknown): string => {
       const found = tasks.find((candidate) => candidate.id === taskId);
-      const first = (found?.objective ?? "another task").split("\n")[0] ?? "";
+      // The request, not the preamble a channel dispatch puts in front of it.
+      // Otherwise every hold in a repository with roles set reads "Your role in
+      // this repository: auditor" and names nothing.
+      const first =
+        withoutRoleContext(found?.objective ?? "another task").split("\n")[0] ??
+        "";
       return first.length > 60 ? `"${first.slice(0, 57)}…"` : `"${first}"`;
     };
     // "@Zephyrus's task" reads better than a quoted objective fragment, and
