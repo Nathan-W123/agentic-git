@@ -242,6 +242,73 @@ test("openai options come from the account's own models cache and settings are v
   );
 });
 
+test("a sign-in's model list is kept, so the account's own models replace the suggestions", async () => {
+  // The gap this closes: sign-in runs the CLI against a throwaway CODEX_HOME
+  // so the host's keys stay out of the captured credential, and the model list
+  // the CLI caches there is discarded with the directory. The reader looks in
+  // `~/.codex`; the writer only ever writes to a temp dir; they never meet, so
+  // every deployment fell back to suggested names no matter how many times
+  // somebody signed in.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      codex: (args) =>
+        args[0] === "--version" ? output("codex-cli 0.146.0") : output(""),
+    }),
+  });
+
+  // Before: nothing reported, so the picker runs on suggestions.
+  const before = await service.options({ provider: "openai" });
+  assert.equal(before.models, null);
+  assert.ok((before.suggestedModels ?? []).length > 0);
+
+  // A sign-in leaves a model list behind in its throwaway home.
+  const flowHome = path.join(harness.home, "throwaway-device-home");
+  await mkdir(flowHome, { recursive: true });
+  await writeFile(
+    path.join(flowHome, "models_cache.json"),
+    JSON.stringify({
+      models: [
+        {
+          slug: "codex-house-model",
+          display_name: "Codex House Model",
+          supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }],
+        },
+      ],
+    }),
+    "utf8",
+  );
+  await (
+    service as unknown as {
+      captureCodexModelCache(home: string): Promise<void>;
+    }
+  ).captureCodexModelCache(flowHome);
+
+  // After: the account's own list, and no suggestions beside it to be
+  // mistaken for reported models.
+  const after = await service.options({ provider: "openai" });
+  assert.deepEqual(
+    after.models?.map((model) => model.id),
+    ["codex-house-model"],
+  );
+  assert.deepEqual(after.models?.[0]?.efforts, ["low", "high"]);
+  assert.equal(after.suggestedModels, undefined);
+  assert.equal(after.allowCustomModel, false);
+
+  // A later unreadable or empty cache must not wipe a good one.
+  await writeFile(path.join(flowHome, "models_cache.json"), "{oops", "utf8");
+  await (
+    service as unknown as {
+      captureCodexModelCache(home: string): Promise<void>;
+    }
+  ).captureCodexModelCache(flowHome);
+  assert.deepEqual(
+    (await service.options({ provider: "openai" })).models?.map((m) => m.id),
+    ["codex-house-model"],
+  );
+});
+
 test("openai with no cached model list stays usable instead of refusing everything", async () => {
   // The shipped control plane is this case, not the one above: every Codex
   // invocation runs against a throwaway CODEX_HOME, so nothing ever writes

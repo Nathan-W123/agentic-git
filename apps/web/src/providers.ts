@@ -2051,6 +2051,18 @@ export class ProviderChatService {
         visibility: "personal",
       });
 
+      // The one moment a real CODEX_HOME exists on this host. Sign-in runs
+      // the CLI against a throwaway directory so the host's own keys stay out
+      // of the captured credential — which also means anything the CLI writes
+      // there, including the model list it caches, is discarded with it. The
+      // reader looks in `~/.codex`, the writer only ever writes to a temp
+      // directory, and the two can therefore never meet: that is why a
+      // deployment offers suggested model names rather than the account's
+      // own. Copying the cache out closes the gap for the next `options()`
+      // call, and is best-effort in every direction — the CLI may not write
+      // one at login, in which case nothing changes and the suggestions still
+      // apply.
+      await this.captureCodexModelCache(flow.home);
       const store = await this.credentialStore();
       await store.put(flow.userId, "codex", {
         kind: "session_file",
@@ -2476,6 +2488,40 @@ export class ProviderChatService {
   }
 
   /* ----------------------------------------------- settings/options ----- */
+
+  /**
+   * Keeps a signed-in account's model list where `codexModels` will find it.
+   *
+   * Deployment-wide rather than per-user, because `options()` is asked about a
+   * vendor and not about a person — so this is "what a Codex CLI on this host
+   * last reported", and the last sign-in wins. Two accounts on different plans
+   * would therefore see one list; that is a better failure than the current
+   * one, where every account sees a hardcoded guess, and the value is only
+   * ever a suggestion anyway — a name outside it still saves.
+   */
+  private async captureCodexModelCache(home: string): Promise<void> {
+    try {
+      const cached = await readFile(
+        path.join(home, "models_cache.json"),
+        "utf8",
+      );
+      // Parsed before it is kept: a half-written or unreadable file must not
+      // replace a good cache from an earlier sign-in.
+      const parsed = JSON.parse(cached) as { models?: unknown };
+      if (!Array.isArray(parsed.models) || parsed.models.length === 0) {
+        return;
+      }
+      const destination = path.join(this.homeDirectory, ".codex");
+      await mkdir(destination, { recursive: true });
+      await writeFile(path.join(destination, "models_cache.json"), cached, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+    } catch {
+      // No cache written by this sign-in, or nowhere to put it. The suggested
+      // list still covers the picker, so this is never worth failing on.
+    }
+  }
 
   private async codexModels(): Promise<ProviderModelOption[] | undefined> {
     try {
