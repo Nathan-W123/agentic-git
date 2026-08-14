@@ -4433,7 +4433,11 @@ svg {
   padding: 4px;
   display: grid;
   gap: 1px;
-  max-height: 220px;
+  /* A flat 220px was half the message list on a laptop, where the chat pane
+     is a good deal shorter than the window. Bounded by the viewport as well
+     as by a ceiling, so a short screen gets a short picker instead of one
+     sized for a screen it does not have. */
+  max-height: min(180px, 30vh);
   overflow-y: auto;
   z-index: 5;
 }
@@ -4443,7 +4447,7 @@ svg {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 7px 9px;
+  padding: 5px 8px;
   border-radius: 7px;
   font-size: 12.5px;
   color: var(--text-2);

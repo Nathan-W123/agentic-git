@@ -1297,7 +1297,12 @@ function channelMentionCandidates(repositoryId) {
       .filter(
         (entry) => query === "" || entry.name.toLowerCase().includes(query),
       ),
-  ].slice(0, 7);
+    // Five, not seven. The picker opens upward from the composer and covers
+    // the conversation you are replying to, so every extra row is a line of
+    // context taken away at the moment you most want it. Five is enough to
+    // recognise a name; past that you are reading a directory, and typing
+    // one more character narrows it faster than scanning does.
+  ].slice(0, 5);
 }
 
 /**
@@ -1346,8 +1351,8 @@ function mentionPopover(candidates) {
           entry.kind === "broadcast"
             ? icon("users")
             : entry.kind === "agent"
-              ? agentFace(entry.agent, 20)
-              : avatar(entry.name, 20)
+              ? agentFace(entry.agent, 18)
+              : avatar(entry.name, 18)
         }
         <span>${esc(entry.name)}</span>
         <span class="mi-kind">${
