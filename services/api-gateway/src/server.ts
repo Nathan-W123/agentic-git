@@ -195,6 +195,54 @@ function summariseAuditData(data: Record<string, unknown>): string {
  * Both are validated rather than trusted: this decorates a thread, and an
  * event written by a newer version must cost the reader a dropdown at worst.
  */
+/**
+ * One file list from several tasks' worth of them.
+ *
+ * A run reports its whole changeset every time, so within one task the newest
+ * report replaces the last — that is why the stored list is written rather
+ * than accumulated. Across tasks it has to be a union: a thread that dispatched
+ * three turns is one piece of work, and storing only the newest turn's set left
+ * it claiming the one file the last turn touched.
+ *
+ * Counts add up; the status is the net effect, so a file added by one task and
+ * modified by the next reads as added, and one deleted last reads as deleted.
+ */
+function unionChangedFiles(
+  groups: readonly (readonly ChannelChangedFile[])[],
+): ChannelChangedFile[] {
+  const byPath = new Map<string, ChannelChangedFile>();
+  for (const group of groups) {
+    for (const file of group) {
+      const seen = byPath.get(file.path);
+      if (seen === undefined) {
+        byPath.set(file.path, { ...file });
+        continue;
+      }
+      const sum = (
+        left: number | undefined,
+        right: number | undefined,
+      ): number | undefined =>
+        left === undefined && right === undefined
+          ? undefined
+          : (left ?? 0) + (right ?? 0);
+      const added = sum(seen.added, file.added);
+      const removed = sum(seen.removed, file.removed);
+      byPath.set(file.path, {
+        ...seen,
+        ...(added === undefined ? {} : { added }),
+        ...(removed === undefined ? {} : { removed }),
+        status:
+          file.status === "deleted"
+            ? "deleted"
+            : seen.status === "added" || file.status === "added"
+              ? "added"
+              : seen.status,
+      });
+    }
+  }
+  return [...byPath.values()];
+}
+
 function changedFilesFrom(
   data: Record<string, unknown>,
 ): Array<{ path: string; status: FilePatchStatus }> {
@@ -2039,6 +2087,19 @@ export class ApiGateway {
   private readonly activeRuns = new Set<string>();
   /** Tasks whose progress is being narrated into a channel thread. */
   private readonly watchedChannelTasks = new Map<string, WatchedChannelTask>();
+  /**
+   * What each task in a thread has changed, by thread then by task.
+   *
+   * The stored list is one flat set per thread with no record of which task
+   * contributed what, so this is what lets a second dispatch add to a thread's
+   * summary instead of overwriting it. Held for as long as the process runs —
+   * one small map per thread that has reported work, which is the same
+   * lifetime the watchers themselves have.
+   */
+  private readonly threadChangedFiles = new Map<
+    string,
+    Map<string, ChannelChangedFile[]>
+  >();
   /**
    * Questions an agent is currently stopped on, by request id.
    *
@@ -11000,11 +11061,23 @@ export class ApiGateway {
           ) {
             const files = changedFilesFrom(data);
             if (files.length > 0) {
+              // Per task, then unioned. Replacing outright is right within one
+              // task and wrong across a thread: a second dispatch joining an
+              // existing thread wrote its own set over the first task's, so a
+              // conversation that had built three files reported whichever one
+              // the latest turn wrote. The reverting case the outright write
+              // protects against is still protected — this task's entry is
+              // replaced whole, so a file it stopped touching leaves with it.
+              const perTask =
+                this.threadChangedFiles.get(watched.messageId) ??
+                new Map<string, ChannelChangedFile[]>();
+              perTask.set(watched.taskId, files);
+              this.threadChangedFiles.set(watched.messageId, perTask);
               await this.options.store
                 .setChannelMessageChangedFiles(
                   watched.repositoryId,
                   watched.messageId,
-                  files,
+                  unionChangedFiles([...perTask.values()]),
                 )
                 .catch(() => undefined);
             }

@@ -478,6 +478,33 @@ test("running something and reporting the result is not a failed change", () => 
   ]) {
     assert.equal(readsAsReportRequest(objective), false, objective);
   }
+
+  // "List all files in this repo" was a report and "name all files in this
+  // repo" was a failed task, which is not a distinction anybody typing either
+  // sentence meant to draw. The formal words were there and the ordinary ones
+  // were not.
+  for (const objective of [
+    "name all files in this repo",
+    "show me all files",
+    "tell me what this repository does",
+    "enumerate the modules",
+    "identify the entry points",
+    "count the lines in the parser",
+    "print the dependency tree",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), true, objective);
+  }
+
+  // Still change requests: the added verbs must not swallow a task that names
+  // an edit, or an empty changeset from a sandbox refusing every write would
+  // be filed as a successful report.
+  for (const objective of [
+    "rename the helper to normalise_key",
+    "add a name field to the user model",
+    "show me the bug and then fix it",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), false, objective);
+  }
 });
 
 test("telling an agent not to change anything is not a request to change something", () => {

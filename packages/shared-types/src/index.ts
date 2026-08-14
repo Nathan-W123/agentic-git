@@ -784,7 +784,17 @@ export function readsAsReportRequest(objective: string): boolean {
     // words — audit, analyse, diagnose — and missed the ordinary ones, so
     // "look at this repository and describe what it is" was not recognised as
     // a request to look at all.
-    /\b(audit|audits|audited|auditing|summar(?:y|ise|ize|ised|ized|ising|izing|ies)|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|analysis|inspect|inspects|inspected|inspecting|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|explain|explains|explained|explaining|describe|describes|described|describing|review|reviews|reviewed|reviewing|report|reports|reported|reporting|investigate|investigates|investigated|investigating|list|lists|listed|listing)\b/iu.test(
+    //
+    // `name`, `show`, `tell`, `enumerate`, `identify`, `print`, `display` and
+    // `count` are the same lesson a second time. "List all files in this repo"
+    // was a report and "name all files in this repo" was a failed task, which
+    // is not a distinction anybody typing either sentence intended to draw.
+    //
+    // Verbs that could as easily introduce a change stay out — "find a way to
+    // make this faster" asks for work and names nothing this could veto on, so
+    // reading it as a report would record an empty changeset as success and
+    // hide exactly the failure the empty-changeset check exists to catch.
+    /\b(audit|audits|audited|auditing|summar(?:y|ise|ize|ised|ized|ising|izing|ies)|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|analysis|inspect|inspects|inspected|inspecting|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|explain|explains|explained|explaining|describe|describes|described|describing|review|reviews|reviewed|reviewing|report|reports|reported|reporting|investigate|investigates|investigated|investigating|list|lists|listed|listing|name|names|named|naming|show|shows|showed|showing|shown|tell|tells|telling|told|enumerate|enumerates|enumerated|enumerating|identify|identifies|identified|identifying|print|prints|printed|printing|display|displays|displayed|displaying|count|counts|counted|counting)\b/iu.test(
       asked,
     ) ||
     // "Look at X and tell me Y" — the one that names no formal verb at all.

@@ -847,55 +847,8 @@ function threadSummaryLink(entry, replies, repositoryId) {
 const CHANGED_FILE_MARK = { added: "+", modified: "~", deleted: "−" };
 const CHANGED_FILE_ORDER = { added: 0, modified: 1, deleted: 2 };
 
-/**
- * Every file a conversation touched, not every file its last turn touched.
- *
- * A thread is one piece of work across several turns, and each turn recorded
- * only its own changeset — so the block under a thread that had built three
- * files reported whichever one the most recent turn happened to write, and the
- * other two were only findable by opening the thread and scrolling. A reader
- * asking "what did this do to the repository" was answered about a fragment.
- *
- * Counts add up across turns; the status is the conversation's net effect, so
- * a file created in one turn and edited in the next reads as added, and one
- * deleted last reads as deleted whatever came before it. A file nobody counted
- * stays uncounted rather than becoming zero — those are different claims.
- */
-function mergeChangedFiles(sources) {
-  const byPath = new Map();
-  for (const source of sources) {
-    for (const file of Array.isArray(source?.changedFiles)
-      ? source.changedFiles
-      : []) {
-      const seen = byPath.get(file.path);
-      if (seen === undefined) {
-        byPath.set(file.path, { ...file });
-        continue;
-      }
-      const sum = (left, right) =>
-        left === undefined && right === undefined
-          ? undefined
-          : (left ?? 0) + (right ?? 0);
-      seen.added = sum(seen.added, file.added);
-      seen.removed = sum(seen.removed, file.removed);
-      seen.status =
-        file.status === "deleted"
-          ? "deleted"
-          : seen.status === "added" || file.status === "added"
-            ? "added"
-            : seen.status;
-    }
-  }
-  return [...byPath.values()];
-}
-
-function changedFilesBlock(entry, repositoryId, alsoFrom = []) {
-  const files =
-    alsoFrom.length > 0
-      ? mergeChangedFiles([entry, ...alsoFrom])
-      : Array.isArray(entry.changedFiles)
-        ? entry.changedFiles
-        : [];
+function changedFilesBlock(entry, repositoryId) {
+  const files = Array.isArray(entry.changedFiles) ? entry.changedFiles : [];
   if (files.length === 0) {
     return "";
   }
@@ -1116,9 +1069,7 @@ function messageRow(
                      <i style="width:${progress}%"></i>
                    </div>`;
             })() +
-            // The whole conversation's work, since this block hangs off the
-            // thread rather than off the opening message.
-            changedFilesBlock(entry, repositoryId, replies)
+            changedFilesBlock(entry, repositoryId)
       }
     </div>
     <span class="cmsg-actions">
