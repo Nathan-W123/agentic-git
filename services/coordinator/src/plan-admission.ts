@@ -441,6 +441,13 @@ export class PlanAdmissionController {
     if (!planAdmissionApproved(partial)) {
       return undefined;
     }
+    // The evidence recorded is the collision this split was an answer to, and
+    // `whole` may not carry it: where the refusal came from the unverifiability
+    // gate, that branch returns before anything is assessed and its `conflicts`
+    // are empty. Assessing the whole plan structurally is what puts the file
+    // overlap back in the audit trail, rather than reporting a partial
+    // admission with nothing to say what was partial about it.
+    const structural = this.decide(input.plan, input, occupancy, true);
     return {
       ...partial,
       status: "approved_with_constraints",
@@ -449,8 +456,15 @@ export class PlanAdmissionController {
       constraints: [...partial.constraints, ...deferralConstraints(deferred)],
       conflicts: [
         ...partial.conflicts,
+        ...structural.conflicts.filter(structuralConflict),
         ...whole.conflicts.filter(structuralConflict),
-      ],
+      ].filter(
+        (assessment, index, all) =>
+          all.findIndex(
+            (other) =>
+              other.taskIds.join("\0") === assessment.taskIds.join("\0"),
+          ) === index,
+      ),
       explanation:
         `Partially admitted on declared paths: granted ` +
         `${reduced.expectedFiles.join(", ")}; deferred ` +
