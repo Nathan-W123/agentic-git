@@ -23,6 +23,8 @@ import {
   channelAgentsFor,
   channelAuthor,
   channelMessagesFor,
+  threadTitle,
+  threadTitleReply,
   typingOn,
   agentsThinkingIn,
   agentStatus,
@@ -750,13 +752,12 @@ function chanSearchRow() {
  * its own collapsed block inside the thread.
  */
 function threadSummaryLink(entry, replies, repositoryId) {
-  const titled = replies.find((reply) =>
-    /^Task: /u.test(String(reply.content ?? "")),
-  );
-  const name =
-    titled === undefined
-      ? ""
-      : String(titled.content).replace(/^Task:\s*/u, "").split("\n")[0].trim();
+  const titled = threadTitleReply(entry);
+  // No content fallback here: this link renders directly under the root
+  // message's own text, and a "title" echoing it would say nothing twice.
+  // The task-objective fallback inside the helper still names threads that
+  // never got a "Task:" reply.
+  const name = threadTitle(entry, { fallbackToContent: false });
   const said = replies.filter(
     (reply) => reply !== titled && !isThreadThinking(reply),
   );
@@ -1513,34 +1514,31 @@ function threadListPanel(repositoryId) {
           : threads
               .map((entry) => {
                 const replies = entry.replies ?? [];
+                const titled = threadTitleReply(entry);
                 // Thinking is the run talking to itself; it has never been a
-                // reply and should not be counted as one here either.
+                // reply and should not be counted as one here either. The
+                // title reply is the thread's name, not a message in it.
                 const count = replies.filter(
-                  (reply) =>
-                    reply.kind !== "progress" &&
-                    !/^Task: /u.test(String(reply.content ?? "")),
+                  (reply) => reply.kind !== "progress" && reply !== titled,
                 ).length;
-                const titled = replies.find((reply) =>
-                  /^Task: /u.test(String(reply.content ?? "")),
-                );
-                const name =
-                  titled === undefined
-                    ? ""
-                    : (String(titled.content).replace(/^Task:\s*/u, "").split("\n")[0] ?? "").trim();
                 const author = channelAuthor(repositoryId, entry);
+                // The subject leads: somebody scanning this log is looking
+                // for a piece of work, and the agent's name told them which
+                // colleague — the wrong first question. Who and when demote
+                // to the metadata row beneath.
                 return `<div class="thread-item-row">
                   <button type="button" class="thread-item"
                     data-act="channel-thread-open" data-value="${esc(entry.id)}">
+                    <span class="ti-text">${esc(threadTitle(entry))}</span>
                     <span class="ti-top">
                       <span class="ti-face">${
                         author.agent !== undefined
-                          ? agentFace(author.agent, 18)
-                          : avatar(author.name, 18)
+                          ? agentFace(author.agent, 16)
+                          : avatar(author.name, 16)
                       }</span>
                       <span class="ti-who">${esc(author.name)}</span>
                       <span class="ti-time">${esc(clockTime(entry.at))}</span>
                     </span>
-                    <span class="ti-text">${esc(name === "" ? entry.content : name)}</span>
                     <span class="ti-count">${
                       count === 0
                         ? "No replies yet"
@@ -1789,10 +1787,14 @@ function threadPanel(repositoryId) {
   if (root === undefined) {
     return "";
   }
+  // The subject in the header, where a reader looks first. "Thread" only
+  // when nothing names it — and the title being here is what the fold
+  // comment inside threadReplies has assumed all along.
+  const title = threadTitle(root) || "Thread";
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
-      <span>Thread</span>
+      <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
       ${iconButton("reply", {
         act: "composer-thread-continue",
@@ -1844,6 +1846,9 @@ function threadReplies(root, repositoryId) {
   // two lines further up. Folded in, it is there for whoever wants the exact
   // wording and out of the way of everybody else.
   const [first, ...rest] = replies;
+  // Deliberately first-reply-only, unlike the shared threadTitleReply
+  // detector: folding a mid-thread "Task:" message into the thinking block
+  // would hide a real reply, not a name.
   const titleLine = /^Task: /u.test(String(first?.content ?? "")) ? first : undefined;
   const body = titleLine === undefined ? replies : rest;
   const steps = body.filter(isThreadThinking);
@@ -2423,13 +2428,7 @@ function composerThreadChip(repositoryId) {
   if (root === undefined) {
     return "";
   }
-  const title = String(
-    (root.replies ?? []).find((reply) => /^Task: /u.test(String(reply.content ?? "")))
-      ?.content ?? root.content,
-  )
-    .replace(/^Task: /u, "")
-    .replace(/\s+/gu, " ")
-    .trim();
+  const title = threadTitle(root);
   return `<div class="composer-thread">
     ${icon("reply")}
     <span class="ct-label">Continuing in</span>

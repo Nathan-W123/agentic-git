@@ -1943,6 +1943,50 @@ export function channelMessagesFor(repositoryId) {
   return state.channelMessages[repositoryId];
 }
 
+/**
+ * The reply that names a thread — the agent's own "Task: …" opener.
+ *
+ * A detector rather than a string, because some callers need the reply
+ * itself: the thread list excludes it from the reply count, and the summary
+ * link skips it when collecting participants. One detector, so the places
+ * that find the title and the places that step around it cannot disagree.
+ */
+export function threadTitleReply(entry) {
+  return (entry?.replies ?? []).find((reply) =>
+    /^Task: /u.test(String(reply.content ?? "")),
+  );
+}
+
+/**
+ * What a thread is about, as one trimmed line.
+ *
+ * Three sources, nearest-to-authoritative first: the agent's own "Task:"
+ * reply; the objective of the task the thread follows; and — unless the
+ * caller refuses it — the root message's first line. The refusal exists for
+ * surfaces that sit directly beneath that text, where the fallback would
+ * only echo what the reader just read.
+ */
+export function threadTitle(entry, { fallbackToContent = true } = {}) {
+  const line = (value) =>
+    String(value ?? "")
+      .split("\n")[0]
+      .replace(/\s+/gu, " ")
+      .trim();
+  const titled = threadTitleReply(entry);
+  if (titled !== undefined) {
+    return line(String(titled.content).replace(/^Task:\s*/u, ""));
+  }
+  const objective =
+    entry?.taskId === undefined
+      ? undefined
+      : state.tasks.find((task) => task.id === entry.taskId)?.objective;
+  const objectiveLine = line(objective);
+  if (objectiveLine !== "") {
+    return objectiveLine;
+  }
+  return fallbackToContent ? line(entry?.content) : "";
+}
+
 const channelPath = (repositoryId, suffix = "") =>
   `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/channel${suffix}`;
 

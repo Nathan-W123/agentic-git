@@ -4691,6 +4691,17 @@ body.resizing-panel {
   font-weight: 600;
 }
 
+/* The thread's subject, in the slot that used to say "Thread". Ellipsized
+   rather than wrapped: a header is a label, and a long title would push the
+   panel's controls out of reach — the full text rides the tooltip. */
+.thread-head .thread-title {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
 .thread-head .spacer {
   flex: 1;
 }
@@ -6004,15 +6015,19 @@ dialog.modal::backdrop {
   background: var(--bg-hover);
 }
 
+/* The subject leads the row now; who and when are the metadata beneath it.
+   Same classes, swapped weights — the row was agent-first and readers scan
+   this log for a piece of work, not for a colleague. */
 .ti-top {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 12px;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
 }
 
 .ti-who {
-  font-weight: 600;
+  font-weight: 400;
+  color: var(--text-2);
 }
 
 .ti-time {
@@ -6021,8 +6036,9 @@ dialog.modal::backdrop {
 }
 
 .ti-text {
-  font-size: 12.5px;
-  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
