@@ -1744,33 +1744,45 @@ function agentPanel() {
     return "";
   }
   const repositoryId = activeChannelId();
-  // A private chat is only ever with your own agent; somebody else's has a
-  // history and nothing else, so it gets no tab strip to choose between one
-  // thing.
-  const tab = agent.mine === true ? (state.agentPanelTab ?? "history") : "history";
+  // A private chat is only ever with a personal agent of your own. Somebody
+  // else's has a history and nothing else, and so does an org-wide agent —
+  // the whole point of publishing one is that its work happens where the team
+  // can see it, so a private side-channel with it would be a way around that
+  // rather than a convenience. The avatar shortcut already refuses for the
+  // same reason; this is the same rule where the tabs are drawn.
+  const canChatPrivately = agent.mine === true && agent.visibility !== "org";
+  const tab = canChatPrivately ? (state.agentPanelTab ?? "history") : "history";
   const status = agentStatus(agent, activeChannelId());
+  // Header and tabs share the grid's first row. `.thread-panel` is three rows
+  // — header, a stretching body, composer — and an extra top-level child does
+  // not add a row to it: it takes the body's. The tab strip became the
+  // stretching element and sat in the vertical middle of the panel with the
+  // history pushed below it, which is what a fourth child gets in a grid that
+  // was drawn for three.
   return `<aside class="thread-panel">
     ${panelGrip()}
-    <header class="thread-head">
-      <span class="dm-head-name">
-        ${agentFace(agent, 20)}
-        ${esc(agent.name)}
-        ${statusDot(status, AGENT_STATUS_TITLE[status])}
-      </span>
-      <span class="spacer"></span>
-      ${iconButton("close", {
-        act: "agent-panel-close",
-        title: "Close this conversation",
-      })}
-    </header>
-    ${
-      agent.mine === true
-        ? tabs("agent-panel-tab", [
-            { value: "history", label: "History" },
-            { value: "chat", label: "Private chat" },
-          ], tab)
-        : ""
-    }
+    <div class="agent-panel-head">
+      <header class="thread-head">
+        <span class="dm-head-name">
+          ${agentFace(agent, 20)}
+          ${esc(agent.name)}
+          ${statusDot(status, AGENT_STATUS_TITLE[status])}
+        </span>
+        <span class="spacer"></span>
+        ${iconButton("close", {
+          act: "agent-panel-close",
+          title: "Close this conversation",
+        })}
+      </header>
+      ${
+        canChatPrivately
+          ? tabs("agent-panel-tab", [
+              { value: "history", label: "History" },
+              { value: "chat", label: "Private chat" },
+            ], tab)
+          : ""
+      }
+    </div>
     ${
       tab === "chat"
         ? // Progress and transcript share one row, as they do in `chatPanel`.
