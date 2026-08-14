@@ -20,6 +20,7 @@
     "@coord/agent-protocol": "*",
     "@coord/code-intelligence": "*",
     "@coord/integration-service": "*",
+    "@coord/intent-analysis": "*",
     "@coord/persistence": "*",
     "@coord/repository-service": "*",
     "@coord/shared-types": "*",

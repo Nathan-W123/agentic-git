@@ -1,3 +1,4 @@
+import { intentTerms } from "@coord/intent-analysis";
 import {
   arbitrationFiles,
   arbitrationSymbols,
@@ -199,6 +200,15 @@ function consumes(consumer: AgentPlan, producer: AgentPlan): boolean {
   );
 }
 
+/**
+ * Raw tokens, minus ordinary function words.
+ *
+ * Deliberately keeps the plan boilerplate {@link relatedObjectives} discards,
+ * because {@link analyzeIntent} is looking for exactly that vocabulary: the
+ * whole opposing-action check is "one plan says add where the other says
+ * remove", and a tokenizer that dropped `add` and `remove` would have nothing
+ * left to compare.
+ */
 function words(value: string): Set<string> {
   return new Set(
     value
@@ -218,11 +228,51 @@ function words(value: string): Set<string> {
  * Two tasks that both talk about checkout charges are plausibly after the
  * same code however differently they misname it; a task about raising a value
  * and a task about adding a new module share nothing worth serialising over.
+ *
+ * What it compares is the reason it needs saying twice. The obvious reading —
+ * shared words, minus the twelve function words {@link words} removes — turns
+ * out to make almost every pair of plans look related, because the text being
+ * compared is not a human's description. It is the `intent` field the planning
+ * schema requires of the agent, and agents write those in a house style:
+ * "add", "new", "module", "existing", "update", "helper". One shared token is
+ * enough, so two plans built from the same boilerplate collide on the
+ * boilerplate.
+ *
+ * That is not a hypothetical. A greenfield run of two deliberately unrelated
+ * tasks — a CSV reader and a table renderer, overlapping on one shared helper
+ * file out of three — was serialised on their intents alone, and the serialising
+ * happens *before* {@link PlanAdmissionController.admitDeclaredPaths} can offer
+ * the split that would have run them together. Since the gate's precondition
+ * (an ungrounded candidate) is the same as that splitter's, the boilerplate
+ * false positive did not merely cost throughput here and there; it made
+ * greenfield partial admission close to unreachable, in the phase of a project
+ * where every plan is ungrounded and overlap is the norm.
+ *
+ * So the terms are the ones `@coord/intent-analysis` already derived for this
+ * exact problem: lemmatized, with plan boilerplate and terms too generic to
+ * corroborate anything removed. That list was written from the intents this
+ * repository's agents actually produce, and it was already trusted by the
+ * grounded intent signal — it was simply never wired into the cheap check that
+ * gates scheduling. Lemmatizing is a second, smaller gain: "renders" and
+ * "rendering" are the same claim about the same code, and the raw tokenizer
+ * read them as unrelated.
+ *
+ * The direction of the change is worth stating plainly, because it is a
+ * loosening: fewer pairs are called related, so more unverifiable plans run
+ * concurrently. Nothing downstream is relaxed to pay for it. A plan is still
+ * held to the files it declared, a contested file is still withheld from
+ * whoever asks for it second, and a changeset that reaches outside its grant is
+ * still split apart rather than applied. What is given up is the serialising of
+ * two plans whose only demonstrated connection was that both were written by an
+ * agent.
  */
 export function relatedObjectives(first: AgentPlan, second: AgentPlan): boolean {
-  const left = words(first.intent ?? first.objective);
-  const right = words(second.intent ?? second.objective);
-  return [...left].some((word) => word.length > 2 && right.has(word));
+  // `strong` rather than `lemmas`: the weak terms are content words that
+  // belong in a sentence being embedded, but "data", "module" and "path" are
+  // no more evidence of a collision than "add" is.
+  const left = intentTerms(first.intent ?? first.objective).strong;
+  const right = intentTerms(second.intent ?? second.objective).strong;
+  return [...left].some((term) => right.has(term));
 }
 
 export interface IntentResult {

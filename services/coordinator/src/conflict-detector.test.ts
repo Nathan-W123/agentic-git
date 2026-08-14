@@ -6,6 +6,7 @@ import type { AgentPlan } from "@coord/shared-types";
 import {
   ConflictDetector,
   DEFAULT_CONFLICT_OPTIONS,
+  relatedObjectives,
 } from "./conflict-detector.js";
 
 function plan(taskId: string, expectedFiles: string[]): AgentPlan {
@@ -546,5 +547,141 @@ test("without an occupancy view every shared path is evidence", () => {
     assessment.evidence.find((entry) => entry.kind === "file_overlap")
       ?.resources,
     ["src/pricing/total.js"],
+  );
+});
+
+/** Two plans distinguished only by the intent sentence their agent wrote. */
+function intending(taskId: string, intent: string): AgentPlan {
+  return { ...plan(taskId, []), intent };
+}
+
+test("plan boilerplate is not evidence that two intents are about the same code", () => {
+  // Two tasks with genuinely disjoint subjects, written in the house style the
+  // planning schema asks for. Under a twelve-word stop list "add", "new",
+  // "module", "preserving" and "existing" were all shared tokens, and one is
+  // enough to serialise the pair.
+  assert.equal(
+    relatedObjectives(
+      intending("task_a", "Add a new CSV ingest module, preserving existing behavior"),
+      intending("task_b", "Add a new table renderer module, preserving existing behavior"),
+    ),
+    false,
+  );
+});
+
+/**
+ * Where the word list stops, and why it is not the whole fix.
+ *
+ * "A shared helper" is how an agent describes code organisation, not what the
+ * code is about, but neither term is in a list written from observed intents —
+ * and curating one further is guesswork: the 359 recorded intents in
+ * `docs/benchmarks/data` come from eleven closely related objectives, so they
+ * cannot separate boilerplate from subject well enough to justify an addition.
+ *
+ * Pinned as a known limit rather than tuned away. What stops this pair being
+ * serialised is not a longer list; it is that withholding the one file they
+ * both declare leaves declared scopes that are provably disjoint — see the
+ * path-disjointness exemption in `plan-admission.ts`.
+ */
+test("organisational vocabulary still relates two intents; the word list is not the whole fix", () => {
+  assert.equal(
+    relatedObjectives(
+      intending("task_a", "Add CSV row parsing and a shared key-normalisation helper"),
+      intending("task_b", "Add aligned table rendering and a shared cell-padding helper"),
+    ),
+    true,
+  );
+});
+
+test("a shared subject still relates two intents", () => {
+  assert.equal(
+    relatedObjectives(
+      intending("task_a", "Add a checkout handling fee"),
+      intending("task_b", "Waive checkout delivery charges"),
+    ),
+    true,
+  );
+});
+
+test("intents relate through a lemma, not only through an identical token", () => {
+  // "renders" and "rendering" are the same claim about the same code. The raw
+  // tokenizer read them as two unrelated words.
+  assert.equal(
+    relatedObjectives(
+      intending("task_a", "Fix how the invoice renders"),
+      intending("task_b", "Speed up invoice rendering"),
+    ),
+    true,
+  );
+});
+
+test("intents relate on a compound's parts, not just the whole compound", () => {
+  assert.equal(
+    relatedObjectives(
+      intending("task_a", "Correct the order-total arithmetic"),
+      intending("task_b", "Display the total on the receipt"),
+    ),
+    true,
+  );
+});
+
+test("relatedness falls back to the objective when no intent was written", () => {
+  // The remote worker rebinds objective to the assigned task text and moves the
+  // model's phrasing to intent; the local path takes whatever the adapter sent.
+  // Neither is guaranteed, so the fallback has to keep working.
+  assert.equal(
+    relatedObjectives(
+      { ...plan("task_a", []), objective: "Raise the checkout fee" },
+      { ...plan("task_b", []), objective: "Lower the checkout fee" },
+    ),
+    true,
+  );
+  assert.equal(
+    relatedObjectives(
+      { ...plan("task_a", []), objective: "Raise the checkout fee" },
+      { ...plan("task_b", []), objective: "Rotate the archived logs" },
+    ),
+    false,
+  );
+});
+
+test("intent wins over objective, so a shared objective does not relate", () => {
+  // Both channel dispatches carry the same role preamble and house wording in
+  // their objective. That must not decide scheduling when the agents said what
+  // they were actually doing.
+  const shared = "You are acting as the resident engineer. Build part of the tool.";
+  assert.equal(
+    relatedObjectives(
+      { ...intending("task_a", "Parse comma separated input rows"), objective: shared },
+      { ...intending("task_b", "Align terminal display width"), objective: shared },
+    ),
+    false,
+  );
+});
+
+test("the opposing-action reading still sees the verbs relatedness discards", () => {
+  // analyzeIntent keeps its own tokenizer for exactly this: "add"/"remove" are
+  // boilerplate to the relatedness gate and the entire signal to the antonym
+  // check, and both readings have to stay true at once.
+  const detector = new ConflictDetector();
+  const first: AgentPlan = {
+    ...plan("task_a", ["src/pricing/total.js"]),
+    intent: "add a surcharge to the checkout total",
+  };
+  const second: AgentPlan = {
+    ...plan("task_b", ["src/pricing/total.js"]),
+    intent: "remove the surcharge from the checkout total",
+  };
+
+  assert.equal(relatedObjectives(first, second), true);
+  const assessment = detector.assess(first, second);
+  assert.ok(assessment);
+  assert.equal(
+    assessment.evidence.some(
+      (entry) =>
+        entry.kind === "intent_conflict" &&
+        (entry.explanation ?? "").includes("add/remove"),
+    ),
+    true,
   );
 });
