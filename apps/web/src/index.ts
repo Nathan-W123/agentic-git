@@ -17,8 +17,10 @@ import {
 import { CoordinatorProject } from "@coord/cli/project";
 import { recoverCoordinationState } from "@coord/cli/recovery";
 import { rollbackCanonical } from "@coord/cli/rollback";
+import { pushCredentials, repoPush } from "@coord/cli/repo-export";
 import { workerOperations } from "@coord/cli/worker-operations";
 import type { CoordinationStore } from "@coord/persistence";
+import { describeError } from "@coord/shared-types";
 import { RepositoryService, runProcess } from "@coord/repository-service";
 
 import { loadStaticAssets } from "./assets.js";
@@ -75,6 +77,72 @@ function resolveAgentIdForVendor(
     }
   }
   return undefined;
+}
+
+/**
+ * Publishes canonical to the repository's recorded remote, as an agent action.
+ *
+ * Pushes to a *new* branch by default and refuses to update one that already
+ * exists — `allowExistingTarget` stays off. An agent asking to publish is
+ * asking to put work somewhere a person will look at it, which a branch does;
+ * overwriting a branch somebody else is using is a different act, and not one
+ * to grant on the strength of a sentence in an objective. `pushToRemote` also
+ * refuses when the upstream has moved under the revision being published.
+ *
+ * The credential comes from `GITHUB_TOKEN` in the deployment's environment,
+ * never from the store or a config file — see `pushCredentials`. A deployment
+ * without one refuses rather than half-succeeding, and says which of the two
+ * things it is missing, because "push failed" sends somebody to the wrong
+ * place half the time.
+ */
+async function pushCanonical(
+  project: CoordinatorProject,
+  store: CoordinationStore,
+  request: {
+    repository: { id: string; path: string; branch: string };
+    task: { objective: string };
+  },
+): Promise<{
+  outcome: "done" | "refused";
+  detail?: { url?: string; output?: string[] };
+  explanation: string;
+}> {
+  const stored = await store.getRepository(request.repository.id);
+  const remoteUrl = stored?.remoteUrl ?? "";
+  if (remoteUrl.length === 0) {
+    return {
+      outcome: "refused",
+      explanation:
+        `${request.repository.id} has no remote recorded, so there is ` +
+        "nowhere to push it. Connect it to a GitHub repository first.",
+    };
+  }
+  if (pushCredentials() === undefined) {
+    return {
+      outcome: "refused",
+      explanation:
+        "This deployment has no GITHUB_TOKEN set, so it cannot authenticate " +
+        "to the remote. Nothing was pushed.",
+    };
+  }
+  try {
+    const pushed = await repoPush(project, store, {
+      repositoryId: request.repository.id,
+    });
+    return {
+      outcome: "done",
+      detail: { url: pushed.remoteUrl },
+      explanation:
+        `Pushed ${pushed.revision.slice(0, 8)} to ${pushed.targetBranch} on ` +
+        `${pushed.remoteUrl}. Open a pull request from that branch when you ` +
+        "want it reviewed.",
+    };
+  } catch (error) {
+    return {
+      outcome: "refused",
+      explanation: `The push did not go through: ${describeError(error)}`,
+    };
+  }
 }
 
 async function main(): Promise<void> {
@@ -324,12 +392,20 @@ async function serve(
               await previews.stopForTask(request.task.id);
               return { outcome: "done", explanation: "The preview is stopped." };
             }
+            if (request.action === "push") {
+              // Canonical, never the task's workspace. What an agent has in
+              // its checkout has not been integrated or validated yet, and
+              // publishing it would put work on a remote that this repository
+              // has not accepted — the one place where "the agent's version"
+              // and "the project's version" must not be confused.
+              return await pushCanonical(project, store, request);
+            }
             if (request.action !== "preview_start") {
               return {
                 outcome: "refused",
                 explanation:
                   `"${request.action}" is not something this deployment does. ` +
-                  "Available actions: preview_start, preview_stop.",
+                  "Available actions: preview_start, preview_stop, push.",
               };
             }
             // The task's own workspace, never canonical. An agent looking at

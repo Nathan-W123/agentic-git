@@ -14,6 +14,10 @@
       "types": "./dist/project.d.ts",
       "default": "./dist/project.js"
     },
+    "./repo-export": {
+      "types": "./dist/repo-export.d.ts",
+      "default": "./dist/repo-export.js"
+    },
     "./worker-operations": {
       "types": "./dist/worker-operations.d.ts",
       "default": "./dist/worker-operations.js"
