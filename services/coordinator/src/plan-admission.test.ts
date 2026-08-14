@@ -14,7 +14,7 @@ import {
   structuralConflict,
   type PlanAdmissionInput,
 } from "./plan-admission.js";
-import { ConflictDetector } from "./conflict-detector.js";
+import { ConflictDetector, relatedObjectives } from "./conflict-detector.js";
 
 /**
  * Arbitration of a single plan against the work already running — the answer a
@@ -735,6 +735,89 @@ test("an ungrounded plan splits along declared paths it does not share", () => {
     (admission.deferredResources ?? []).map((entry) => entry.resourceId),
     ["src/store.py"],
   );
+});
+
+test("a shared word in two greenfield intents does not cost the split", () => {
+  // The run this was written from: two deliberately unrelated greenfield tasks
+  // sharing one file of three, whose agent-written intents happened to share
+  // "shared" and "helper". `admit` decides the whole plan first, so the
+  // unverifiability gate answered before the split was considered — and then
+  // answered again, identically, when the reduced plan was re-decided, because
+  // reduction does not touch the intent. The gate strictly dominated the
+  // splitter, and both have the same precondition, so no greenfield pair the
+  // gate caught could ever be split.
+  const candidate = ungrounded(
+    plan("task_a", {
+      objective: "Align terminal display width",
+      intent: "Add aligned table rendering and a shared cell-padding helper",
+      expectedFiles: ["src/tool/render.py", "src/tool/shared.py"],
+      expectedSymbols: [],
+    }),
+  );
+  const holder = ungrounded(
+    plan("task_b", {
+      objective: "Parse comma separated input rows",
+      intent: "Add CSV row parsing and a shared key-normalisation helper",
+      expectedFiles: ["src/tool/ingest.py", "src/tool/shared.py"],
+      expectedSymbols: [],
+    }),
+  );
+  // The precondition the test rests on: these two really are "related", so the
+  // gate really does fire on the whole plan. Without this the test would pass
+  // for the wrong reason the moment someone changed the word list.
+  assert.equal(relatedObjectives(candidate, holder), true);
+
+  const admission = admit(candidate, [holder]);
+
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(
+    (admission.deferredResources ?? []).map((entry) => entry.resourceId),
+    ["src/tool/shared.py"],
+  );
+  assert.deepEqual(admission.blockedBy, []);
+  // The file overlap is still on the record. The gate returns before anything
+  // is assessed, so without assessing the whole plan separately this would be
+  // a partial admission with nothing saying what was partial about it.
+  assert.equal(
+    admission.conflicts.some((assessment) =>
+      assessment.evidence.some(
+        (entry) =>
+          entry.kind === "file_overlap" &&
+          entry.resources.includes("src/tool/shared.py"),
+      ),
+    ),
+    true,
+  );
+});
+
+test("a greenfield plan with nothing of its own to work on still waits", () => {
+  // The exemption is for a plan that keeps something. One whose only declared
+  // file is the contested one has no remainder to be granted, so the gate's
+  // answer stands rather than being talked around.
+  const admission = admit(
+    ungrounded(
+      plan("task_a", {
+        objective: "Align terminal display width",
+        intent: "Add aligned table rendering and a shared cell-padding helper",
+        expectedFiles: ["src/tool/shared.py"],
+        expectedSymbols: [],
+      }),
+    ),
+    [
+      ungrounded(
+        plan("task_b", {
+          objective: "Parse comma separated input rows",
+          intent: "Add CSV row parsing and a shared key-normalisation helper",
+          expectedFiles: ["src/tool/ingest.py", "src/tool/shared.py"],
+          expectedSymbols: [],
+        }),
+      ),
+    ],
+  );
+
+  assert.equal(admission.status, "sequenced");
+  assert.deepEqual(admission.blockedBy, ["task_b"]);
+  assert.equal(admission.deferredResources, undefined);
 });
 
 test("an unverifiable plan is sequenced behind executing work about the same objective", () => {
