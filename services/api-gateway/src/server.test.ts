@@ -6088,6 +6088,101 @@ test("a finished thread carries its summary and its line counts", async (t) => {
   ]);
 });
 
+test("a quick task ends as two lines in the room, with no thread at all", async (t) => {
+  // The counterpart of the test above, and the one that was missing while the
+  // feature it covers sat inert. Holding the ceremony is only half of it: the
+  // held set has to name *every* line that is true of all runs, and
+  // `plan_received` — the first thing narrated after the opening, traced by
+  // every planned turn — was not in it. So the first poll flushed the held
+  // opening into a thread and marked the run threaded before any ending
+  // existed, and "change this 1 to a 2" got the room, the title and the
+  // running commentary the whole mechanism was written to prevent.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "quicktask");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel`;
+  const mention = `Claude (${String(session.user.displayName).split(" ")[0]})`;
+
+  assert.equal(
+    (
+      await owner.request(`${base}/messages`, {
+        method: "POST",
+        body: { content: `@${mention} change the retry count to 2` },
+      })
+    ).status,
+    201,
+  );
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never dispatched a task",
+  );
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId: repo });
+  assert.ok(task !== undefined, "the dispatch stored no task");
+
+  // The whole life of an ordinary one-file run, in the order the coordinator
+  // traces it. Every one of these is true of every run that has ever
+  // succeeded, so not one of them is a reason to open a room.
+  for (const event of [
+    { type: "plan_received" as const, data: { expectedFiles: ["retry.ts"] } },
+    { type: "plan_admitted" as const, data: { status: "approved" } },
+    { type: "task_started" as const, data: {} },
+    {
+      type: "changeset_collected" as const,
+      data: {
+        changeSetId: "cs_quick",
+        files: ["retry.ts"],
+        changedFiles: [
+          { path: "retry.ts", status: "modified", added: 1, removed: 1 },
+        ],
+      },
+    },
+    {
+      type: "canonical_promoted" as const,
+      data: { files: ["retry.ts"], agentExplanation: "Changed the retry count to 2." },
+    },
+  ]) {
+    await runtime.store.appendAudit(undefined, {
+      type: event.type,
+      taskId: task.id,
+      data: event.data,
+    });
+  }
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.kind === "outcome");
+    },
+    "the run never produced an ending",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  // Two lines: the agent taking the work, and the agent reporting it done.
+  const ending = messages.find((message) => message.kind === "outcome");
+  assert.match(
+    String(ending?.content),
+    /Changed the retry count to 2\./u,
+    `the ending did not carry the agent's own words: ${JSON.stringify(ending)}`,
+  );
+  // And not one reply anywhere in the room. This is the assertion that fails
+  // the moment a run-generic event goes missing from the held set again.
+  assert.deepEqual(
+    messages.flatMap((message) =>
+      (message.replies ?? []).map((reply) => reply.content),
+    ),
+    [],
+    "a quick task was given a thread",
+  );
+});
+
 test("a mention nobody answers to says so, instead of vanishing", async (t) => {
   // The browser roster layers this account's own agents on top of the
   // server's, so an agent connected in a way that stored no per-user
