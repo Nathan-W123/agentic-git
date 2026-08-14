@@ -526,14 +526,16 @@ test("an error envelope fails planning instead of being parsed as a plan", async
   );
 });
 
-test("a completion that changed nothing is a failure, not an empty success", async () => {
+test("a completion that changed nothing is reported, not failed", async () => {
   const fixture = await createFixture();
   const runner: PromptCliProcessRunner = async (_executable, args) => {
     if (!args.includes("--yolo")) {
       return output(geminiEnvelope(JSON.stringify(PLAN)));
     }
-    // Reports success without touching the workspace — the signature of an
-    // unauthenticated CLI answering conversationally.
+    // Reports success without touching the workspace. This used to be failed
+    // as a broken CLI, which meant judging intent from the objective's
+    // wording — and ordinary requests were told their authentication was
+    // broken when it was not.
     return output(geminiEnvelope(JSON.stringify(COMPLETION)));
   };
   const adapter = createGeminiAdapter({
@@ -560,10 +562,10 @@ test("a completion that changed nothing is a failure, not an empty success", asy
     ),
   });
   await adapter.sendContext(session.id, contextFor(workspace));
-  await assert.rejects(
-    adapter.collectChanges(session.id),
-    /changed no files/u,
-  );
+  // Collected, not thrown: an empty result travels on and is narrated as
+  // having changed nothing, which a reader can judge for themselves.
+  const changeSet = await adapter.collectChanges(session.id);
+  assert.equal(changeSet.patches.length, 0);
 });
 
 test("configuration cannot smuggle arbitrary flags through args", async () => {
