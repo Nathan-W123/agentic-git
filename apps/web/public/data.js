@@ -470,6 +470,71 @@ export async function loadProviders() {
   return state.providers;
 }
 
+/**
+ * The models a vendor actually reports, or nothing at all.
+ *
+ * Deliberately empty when the options have not loaded, or when the CLI could
+ * not tell us. Both pickers used to fall back to a hardcoded list at that
+ * point, which meant the commonest thing a person saw was two invented model
+ * names presented with the same confidence as the real ones — and no way to
+ * tell which they were looking at. An empty list plus the server's own
+ * explanation (`optionsNote`) is less useful and much more honest.
+ */
+export function providerModelOptions(providerId) {
+  return (state.providerOptions[providerId]?.models ?? []).map((model) => ({
+    value: model.id,
+    label: model.label ?? model.id,
+  }));
+}
+
+/**
+ * The reasoning levels available, for one model.
+ *
+ * Two shapes, because the vendors answer differently. Claude's levels are the
+ * same whichever model is picked, so they arrive provider-wide. Codex's vary
+ * per model — `supported_reasoning_levels` on each entry — so the provider
+ * answer is null and the levels ride on the model record. Reading only the
+ * first is why a Codex agent offered a generic low/medium/high that had
+ * nothing to do with the model selected beside it.
+ */
+export function providerEffortOptions(providerId, model) {
+  const loaded = state.providerOptions[providerId];
+  const efforts =
+    loaded?.efforts ??
+    loaded?.models?.find((entry) => entry.id === model)?.efforts ??
+    [];
+  return efforts.map((effort) => ({
+    value: effort,
+    label: effort.charAt(0).toUpperCase() + effort.slice(1),
+  }));
+}
+
+/**
+ * What the server said about why a list looks the way it does.
+ *
+ * The options response has always carried `notes` and `modelListSource` —
+ * "The Codex CLI has not cached a model list for this account yet", or which
+ * file the models were read from — and nothing in the browser had ever read
+ * either. The one component that knew why the list was empty was silent, and
+ * the screen invented a list instead.
+ */
+export function providerOptionsNote(providerId) {
+  const loaded = state.providerOptions[providerId];
+  if (loaded === undefined) {
+    return "";
+  }
+  if (loaded === null) {
+    return "This deployment could not report what models are available.";
+  }
+  const notes = Array.isArray(loaded.notes) ? loaded.notes : [];
+  return [
+    ...(loaded.models === null || loaded.models === undefined ? notes : []),
+    ...(typeof loaded.modelListSource === "string" && loaded.models
+      ? [loaded.modelListSource]
+      : []),
+  ].join(" ");
+}
+
 export async function loadProviderOptions(providerId) {
   if (state.providerOptions[providerId] !== undefined) {
     return state.providerOptions[providerId];

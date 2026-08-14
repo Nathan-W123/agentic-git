@@ -234,6 +234,61 @@ test("openai options come from the account's own models cache and settings are v
   );
 });
 
+test("openai with no cached model list stays usable instead of refusing everything", async () => {
+  // The shipped control plane is this case, not the one above: every Codex
+  // invocation runs against a throwaway CODEX_HOME, so nothing ever writes
+  // `~/.codex/models_cache.json` for `options()` to read. With no list, the
+  // settings validator's `?? false` rejected every effort — including the
+  // three the picker was offering — and `allowCustomModel: false` rejected
+  // every model name, so neither setting could be changed at all. Not knowing
+  // what a CLI supports is not the same as knowing a value is wrong.
+  const harness = await createHarness();
+  // Deliberately no seedCodexCache: this is a host that has never cached one.
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      codex: (args) =>
+        args[0] === "--version"
+          ? output("codex-cli 0.146.0")
+          : args[0] === "login"
+            ? output("Logged in using ChatGPT")
+            : output(""),
+    }),
+  });
+  const options = await service.options({ provider: "openai" });
+  assert.equal(options.models, null);
+  assert.equal(options.allowCustomModel, true);
+  // And it says why, rather than leaving the screen to invent a list.
+  assert.match(options.notes.join(" "), /has not cached a model list/u);
+
+  await service.connect({ userId: "u", systemAdmin: true, provider: "openai" });
+  const saved = await service.setSettings({
+    userId: "u",
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    effort: "xhigh",
+  });
+  const openai = saved.find((entry) => entry.id === "openai");
+  assert.equal(openai?.model, "gpt-5.6-sol");
+  assert.equal(openai?.effort, "xhigh");
+
+  // Permissive, not credulous: the shape guards still hold.
+  await assert.rejects(
+    service.setSettings({
+      userId: "u",
+      provider: "openai",
+      effort: "not a level",
+    }),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "invalid_effort",
+  );
+  await assert.rejects(
+    service.setSettings({ userId: "u", provider: "openai", model: "../etc" }),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "invalid_model",
+  );
+});
+
 test("anthropic reports no model list when the CLI offers neither source", async () => {
   const harness = await createHarness();
   const service = new ProviderChatService(harness.project, {

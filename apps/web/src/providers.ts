@@ -504,6 +504,17 @@ const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 // Square brackets appear in real Claude Code model values (e.g. the
 // "claude-fable-5[1m]" context variant it caches for its own picker).
 const MODEL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,99}$/u;
+/**
+ * A reasoning level's shape, for when we have no list to check it against.
+ *
+ * The vendors keep adding levels — `xhigh`, `max`, `minimal` — and a control
+ * plane that has never managed to read a model list cannot know which of them
+ * this CLI takes. Refusing every value in that state was the strictly worse
+ * answer: the picker offered three and the save rejected all three, so the
+ * setting could not be changed at all. A bare word is enough of a guard when
+ * the alternative is a feature nobody can use.
+ */
+const EFFORT_VALUE = /^[a-z][a-z0-9_-]{0,31}$/u;
 
 /**
  * The vendor's own words for why a credential was refused.
@@ -2499,10 +2510,20 @@ export class ProviderChatService {
                 "Models and reasoning levels reported by the signed-in Codex account (~/.codex/models_cache.json)",
             }),
         efforts: null,
-        allowCustomModel: false,
+        // A reported list stays authoritative — it is read from the account's
+        // own cache, so a name outside it is a typo worth catching. With no
+        // list there is nothing to be outside of, and refusing every name left
+        // a deployment whose CLI had never cached one unable to pick any model
+        // at all. The value reaches `codex exec -m <model>` unaltered either
+        // way, exactly as it does for Claude.
+        allowCustomModel: models === undefined,
         notes:
           models === undefined
-            ? ["The Codex CLI has not cached a model list for this account yet."]
+            ? [
+                "The Codex CLI has not cached a model list for this account " +
+                  "yet, so there is nothing to choose from here — type a " +
+                  "model name and it is passed to the CLI as given.",
+              ]
             : [],
       };
     }
@@ -2572,6 +2593,12 @@ export class ProviderChatService {
       settings.model = input.model;
     }
     if (input.effort !== undefined && input.effort.length > 0) {
+      // Checked against what the provider reported, and only against that.
+      // When it reported nothing — no provider-wide list and no models, which
+      // is every deployment whose CLI has not cached one — the old `?? false`
+      // made this reject every possible value, including the three the picker
+      // was offering at the time. Not knowing is not the same as knowing it is
+      // wrong, so an unreported vocabulary falls back to a shape check.
       const valid =
         options.efforts?.includes(input.effort) ??
         options.models?.some(
@@ -2579,7 +2606,7 @@ export class ProviderChatService {
             (settings.model === undefined || model.id === settings.model) &&
             model.efforts?.includes(input.effort as string),
         ) ??
-        false;
+        EFFORT_VALUE.test(input.effort);
       if (!valid) {
         throw new ProviderChatError(
           400,
