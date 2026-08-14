@@ -750,19 +750,33 @@ export function narrateTaskEvent(
               (entry): entry is string => typeof entry === "string",
             )
           : [];
-        const deferred = Array.isArray(data["deferredResources"])
-          ? (data["deferredResources"] as unknown[]).filter(
-              (entry): entry is string => typeof entry === "string",
-            )
-          : [];
+        // `deferredResources` are records, not strings — `{resourceType,
+        // resourceId, heldBy, reason}`. Filtering them for strings kept
+        // nothing, every time, so this line has never once named the file it
+        // was holding: it always fell through to "the rest", which is the one
+        // thing the reader wanted it to say.
+        const deferred = (
+          Array.isArray(data["deferredResources"])
+            ? (data["deferredResources"] as unknown[])
+            : []
+        )
+          .map((entry) =>
+            typeof entry === "object" && entry !== null
+              ? (entry as { resourceId?: unknown }).resourceId
+              : entry,
+          )
+          .filter((entry): entry is string => typeof entry === "string");
         const clause = (files: string[]) =>
           files.slice(0, 3).join(", ") +
           (files.length > 3 ? ` and ${String(files.length - 3)} more` : "");
+        // First person, because this is the agent's own thread and the lines
+        // around it are too. The channel copy names both agents instead —
+        // there the reader is watching a room, here they are reading one
+        // worker's account of its own turn.
         return (
-          `⚖️ Starting on ${granted.length > 0 ? clause(granted) : "the free part"} now — ` +
+          `⚖️ Starting on ${granted.length > 0 ? clause(granted) : "the free part"} — ` +
           `${deferred.length > 0 ? clause(deferred) : "the rest"} is leased to ` +
-          "another task, so that part follows as its own task once the lease " +
-          "clears."
+          "another task and follows when that lands."
         );
       }
       return "Plan approved — starting on the code.";

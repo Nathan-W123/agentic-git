@@ -4076,6 +4076,18 @@ async function boot() {
         popupBanner(line);
       }
     }
+    // Canonical moved, so the file tree on screen is history now.
+    //
+    // `refresh` below already runs on every frame, but `ensureCodeData` keeps
+    // what it loaded until something invalidates it and nothing ever did for
+    // an advance. So the channel's Files panel went on showing the tree as it
+    // was when the channel was first opened, however many tasks landed after —
+    // a repository with three files in it displaying the one that existed when
+    // somebody happened to open the tab, with a refresh button as the only way
+    // to find out.
+    if (frame?.type === "audit" && frame.event?.type === "canonical_promoted") {
+      invalidateCode();
+    }
     // The stream tells us something changed; the store stays the source of
     // truth, so re-read rather than patching state from the frame.
     window.clearTimeout(state.timer);
