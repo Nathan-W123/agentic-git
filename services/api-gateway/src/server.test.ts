@@ -2601,6 +2601,76 @@ test("the repository channel round-trips messages, replies, reactions, reads, an
   assert.equal(missing.status, 404);
 });
 
+test("channel messages pin, surface in the payload, and unpin", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "pin-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "Deploy checklist lives here." },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const messageId = posted.data.message.id;
+
+  const pinned = await owner.request(`${base}/messages/${messageId}/pin`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(pinned.status, 200, JSON.stringify(pinned.data));
+  assert.equal(typeof pinned.data.message.pinnedAt, "string");
+  assert.equal(pinned.data.message.pinnedBy, bootstrapped.user.id);
+
+  // The channel payload carries the pinned list alongside the transcript, so
+  // the banner never depends on the pinned row being inside the page window.
+  const listed = await owner.request(`${base}/messages`);
+  assert.equal(listed.status, 200);
+  assert.equal(listed.data.pinned.length, 1);
+  assert.equal(listed.data.pinned[0].id, messageId);
+  assert.equal(listed.data.pinned[0].pinnedBy, bootstrapped.user.id);
+
+  const audit = await runtime.store.listAudit();
+  assert.ok(
+    audit.some(
+      (event) =>
+        event.type === "channel_message_pinned" &&
+        event.data["messageId"] === messageId &&
+        event.data["pinned"] === true &&
+        event.data["repositoryId"] === repositoryId,
+    ),
+  );
+
+  // The same route toggles: pinning again unpins, and the audit says so.
+  const unpinned = await owner.request(`${base}/messages/${messageId}/pin`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(unpinned.status, 200);
+  assert.equal(unpinned.data.message.pinnedAt, undefined);
+  assert.equal(unpinned.data.message.pinnedBy, undefined);
+
+  const cleared = await owner.request(`${base}/messages`);
+  assert.deepEqual(cleared.data.pinned, []);
+  const auditAfter = await runtime.store.listAudit();
+  assert.ok(
+    auditAfter.some(
+      (event) =>
+        event.type === "channel_message_pinned" &&
+        event.data["messageId"] === messageId &&
+        event.data["pinned"] === false,
+    ),
+  );
+
+  // Pinning a message that does not exist is a 404, not a crash.
+  const missing = await owner.request(`${base}/messages/does-not-exist/pin`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(missing.status, 404);
+});
+
 test("the repository channel is scoped by repository access, like everything else", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

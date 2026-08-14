@@ -3103,6 +3103,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
       reactions: {},
       taskId: input.taskId,
       changedFiles: undefined,
+      pinnedAt: undefined,
+      pinnedBy: undefined,
     };
   }
 
@@ -3322,6 +3324,54 @@ export class PostgresCoordinationStore implements CoordinationStore {
     return message;
   }
 
+  public async toggleChannelMessagePin(
+    repositoryId: string,
+    messageId: string,
+    userId: string,
+  ): Promise<ChannelMessage> {
+    const current = await this.row(
+      "SELECT pinned_at FROM channel_messages WHERE id = $1 AND repository_id = $2",
+      [messageId, repositoryId],
+    );
+    if (current === undefined) {
+      throw new Error(`Unknown channel message: ${messageId}`);
+    }
+    if (optionalText(current, "pinned_at") === undefined) {
+      await this.query(
+        `UPDATE channel_messages SET pinned_at = $1, pinned_by = $2
+          WHERE repository_id = $3 AND id = $4`,
+        [new Date().toISOString(), userId, repositoryId, messageId],
+      );
+    } else {
+      await this.query(
+        `UPDATE channel_messages SET pinned_at = NULL, pinned_by = NULL
+          WHERE repository_id = $1 AND id = $2`,
+        [repositoryId, messageId],
+      );
+    }
+    const message = await this.getChannelMessage(repositoryId, messageId, userId);
+    if (message === undefined) {
+      throw new Error(`Unknown channel message: ${messageId}`);
+    }
+    return message;
+  }
+
+  public async listPinnedChannelMessages(
+    repositoryId: string,
+    viewerId: string,
+  ): Promise<ChannelMessage[]> {
+    const rows = await this.rows(
+      `SELECT * FROM channel_messages
+       WHERE repository_id = $1 AND pinned_at IS NOT NULL
+       ORDER BY pinned_at, id`,
+      [repositoryId],
+    );
+    return await this.hydrateChannelMessages(
+      rows.map((row) => this.toChannelMessageBase(row)),
+      viewerId,
+    );
+  }
+
   public async listChannelAgentOverrides(
     repositoryId: string,
   ): Promise<Record<string, ChannelAgentOverride>> {
@@ -3523,6 +3573,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
       createdAt: text(row, "created_at"),
       taskId: optionalText(row, "task_id") as TaskId | undefined,
       changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
+      pinnedAt: optionalText(row, "pinned_at"),
+      pinnedBy: optionalText(row, "pinned_by"),
     };
   }
 

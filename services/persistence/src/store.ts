@@ -762,6 +762,14 @@ export interface ChannelMessage {
    * task changed nothing, which is a different statement.
    */
   changedFiles: ChannelChangedFile[] | undefined;
+  /** When somebody pinned this message to the channel's banner, if anyone has. */
+  pinnedAt: string | undefined;
+  /**
+   * Who pinned it. Anyone who can view the channel may pin, and anyone may
+   * unpin — a pin is shared attention, not moderation — so this is a record
+   * of who flagged it, not a lock on who may clear it.
+   */
+  pinnedBy: UserId | undefined;
 }
 
 /**
@@ -1440,6 +1448,28 @@ export interface CoordinationStore {
     userId: UserId,
     emoji: string,
   ): Promise<ChannelMessage>;
+  /**
+   * Pins when unpinned, unpins when pinned. The reactions rule: anyone who
+   * can view the channel may do either, and the pinner is recorded rather
+   * than privileged.
+   */
+  toggleChannelMessagePin(
+    repositoryId: string,
+    messageId: string,
+    userId: UserId,
+  ): Promise<ChannelMessage>;
+  /**
+   * Every pinned message in one channel, oldest pin first.
+   *
+   * Its own read, unbounded by {@link listChannelMessages}'s 200-row page:
+   * a pin exists precisely so a message survives the room moving on, and a
+   * banner that lost pins because the room kept talking would be the exact
+   * failure pinning exists to prevent.
+   */
+  listPinnedChannelMessages(
+    repositoryId: string,
+    viewerId: UserId,
+  ): Promise<ChannelMessage[]>;
   /**
    * Moves a message to the foot of the channel without changing when it was
    * said.

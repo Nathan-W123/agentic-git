@@ -208,6 +208,19 @@ export const state = {
   dmDraft: "",
   /** Message/token totals per repository, for the info popover. */
   channelStats: {},
+  /**
+   * Pinned messages per repository — the banner's own list, server-fed.
+   *
+   * Banner-only read data, kept beside the transcript rather than folded
+   * into it: a pin can outlive the loaded page, and this list is what keeps
+   * it visible when the transcript copy has aged out. The pin toggle flips
+   * both copies when both exist.
+   */
+  channelPins: {},
+  /** Whether the pinned banner is unfolded. A reading preference, session-only. */
+  pinsOpen: true,
+  /** A one-shot message id the next channel render should scroll to. */
+  scrollToMessage: undefined,
   /** Everyone in each repository's room — org members plus repo grantees. */
   channelPeople: {},
   /**
@@ -1952,6 +1965,50 @@ export function channelMessagesFor(repositoryId) {
   return state.channelMessages[repositoryId];
 }
 
+/**
+ * The reply that names a thread — the agent's own "Task: …" opener.
+ *
+ * A detector rather than a string, because some callers need the reply
+ * itself: the thread list excludes it from the reply count, and the summary
+ * link skips it when collecting participants. One detector, so the places
+ * that find the title and the places that step around it cannot disagree.
+ */
+export function threadTitleReply(entry) {
+  return (entry?.replies ?? []).find((reply) =>
+    /^Task: /u.test(String(reply.content ?? "")),
+  );
+}
+
+/**
+ * What a thread is about, as one trimmed line.
+ *
+ * Three sources, nearest-to-authoritative first: the agent's own "Task:"
+ * reply; the objective of the task the thread follows; and — unless the
+ * caller refuses it — the root message's first line. The refusal exists for
+ * surfaces that sit directly beneath that text, where the fallback would
+ * only echo what the reader just read.
+ */
+export function threadTitle(entry, { fallbackToContent = true } = {}) {
+  const line = (value) =>
+    String(value ?? "")
+      .split("\n")[0]
+      .replace(/\s+/gu, " ")
+      .trim();
+  const titled = threadTitleReply(entry);
+  if (titled !== undefined) {
+    return line(String(titled.content).replace(/^Task:\s*/u, ""));
+  }
+  const objective =
+    entry?.taskId === undefined
+      ? undefined
+      : state.tasks.find((task) => task.id === entry.taskId)?.objective;
+  const objectiveLine = line(objective);
+  if (objectiveLine !== "") {
+    return objectiveLine;
+  }
+  return fallbackToContent ? line(entry?.content) : "";
+}
+
 const channelPath = (repositoryId, suffix = "") =>
   `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/channel${suffix}`;
 
@@ -2227,6 +2284,9 @@ async function loadChannel(repositoryId) {
   if (Array.isArray(response.slashCommands)) {
     state.channelSlashCommands[repositoryId] = response.slashCommands;
   }
+  if (Array.isArray(response.pinned)) {
+    state.channelPins[repositoryId] = response.pinned.map(withSentTime);
+  }
   if (response.readAt !== undefined) {
     state.channelRead[repositoryId] = Date.parse(response.readAt);
     window.localStorage.setItem("ag.chanread", JSON.stringify(state.channelRead));
@@ -2486,6 +2546,46 @@ export function postChannelReply(repositoryId, messageId, text) {
 }
 
 /** A single-emoji toggle, same idea as a Slack reaction — on, then off. */
+/**
+ * Pins or unpins one message, optimistically, then tells the server.
+ *
+ * The lookup falls back to the banner's own list because an old pin may have
+ * no transcript copy on the loaded page — without the fallback, the banner's
+ * unpin button would silently do nothing for exactly the pins the banner
+ * exists to keep visible. Both copies flip when both exist, so the
+ * transcript's pin button and the banner never disagree.
+ */
+export function toggleChannelMessagePin(repositoryId, messageId) {
+  const pins = state.channelPins[repositoryId] ?? [];
+  const message =
+    findChannelMessage(repositoryId, messageId) ??
+    pins.find((entry) => entry.id === messageId);
+  if (message === undefined) {
+    return;
+  }
+  const pinning = message.pinnedAt === undefined;
+  const stamp = pinning ? new Date().toISOString() : undefined;
+  const pinner = pinning ? currentUserId() || undefined : undefined;
+  for (const copy of [
+    findChannelMessage(repositoryId, messageId),
+    pins.find((entry) => entry.id === messageId),
+  ]) {
+    if (copy !== undefined) {
+      copy.pinnedAt = stamp;
+      copy.pinnedBy = pinner;
+    }
+  }
+  state.channelPins[repositoryId] = pinning
+    ? [...pins.filter((entry) => entry.id !== messageId), message]
+    : pins.filter((entry) => entry.id !== messageId);
+  if (state.projectId && isServerChannelId(repositoryId, messageId)) {
+    void api(
+      channelPath(repositoryId, `/messages/${encodeURIComponent(messageId)}/pin`),
+      { method: "POST", body: {} },
+    ).catch((error) => toast(`Pin did not save: ${error.message}`, "error"));
+  }
+}
+
 export function toggleChannelReaction(repositoryId, messageId, emoji = "👍") {
   const message = findChannelMessage(repositoryId, messageId);
   if (message === undefined) {

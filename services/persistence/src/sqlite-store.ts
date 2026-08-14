@@ -3075,6 +3075,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
       reactions: {},
       taskId: input.taskId,
       changedFiles: undefined,
+      pinnedAt: undefined,
+      pinnedBy: undefined,
     };
   }
 
@@ -3325,6 +3327,58 @@ export class SqliteCoordinationStore implements CoordinationStore {
       throw new Error(`Unknown channel message: ${messageId}`);
     }
     return message;
+  }
+
+  public async toggleChannelMessagePin(
+    repositoryId: string,
+    messageId: string,
+    userId: string,
+  ): Promise<ChannelMessage> {
+    const current = this.db
+      .prepare(
+        "SELECT pinned_at FROM channel_messages WHERE id = ? AND repository_id = ?",
+      )
+      .get(messageId, repositoryId) as Row | undefined;
+    if (current === undefined) {
+      throw new Error(`Unknown channel message: ${messageId}`);
+    }
+    if (optionalText(current, "pinned_at") === undefined) {
+      this.db
+        .prepare(
+          `UPDATE channel_messages SET pinned_at = ?, pinned_by = ?
+            WHERE repository_id = ? AND id = ?`,
+        )
+        .run(new Date().toISOString(), userId, repositoryId, messageId);
+    } else {
+      this.db
+        .prepare(
+          `UPDATE channel_messages SET pinned_at = NULL, pinned_by = NULL
+            WHERE repository_id = ? AND id = ?`,
+        )
+        .run(repositoryId, messageId);
+    }
+    const message = await this.getChannelMessage(repositoryId, messageId, userId);
+    if (message === undefined) {
+      throw new Error(`Unknown channel message: ${messageId}`);
+    }
+    return message;
+  }
+
+  public async listPinnedChannelMessages(
+    repositoryId: string,
+    viewerId: string,
+  ): Promise<ChannelMessage[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM channel_messages
+         WHERE repository_id = ? AND pinned_at IS NOT NULL
+         ORDER BY pinned_at, rowid`,
+      )
+      .all(repositoryId) as Row[];
+    return this.hydrateChannelMessages(
+      rows.map((row) => this.toChannelMessageBase(row)),
+      viewerId,
+    );
   }
 
   public async bumpChannelMessage(
@@ -3621,6 +3675,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
       createdAt: text(row, "created_at"),
       taskId: optionalText(row, "task_id"),
       changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
+      pinnedAt: optionalText(row, "pinned_at"),
+      pinnedBy: optionalText(row, "pinned_by"),
     };
   }
 

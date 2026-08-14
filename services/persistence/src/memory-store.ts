@@ -137,6 +137,9 @@ interface StoredChannelMessage {
   taskId?: TaskId;
   /** What that task changed, kept with the thread. */
   changedFiles?: ChannelChangedFile[];
+  /** When somebody pinned it to the channel's banner, and who. */
+  pinnedAt?: string;
+  pinnedBy?: string;
   replies: StoredChannelReply[];
   /** Emoji to the set of user ids who reacted with it. */
   reactions: Map<string, Set<string>>;
@@ -1929,6 +1932,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       reactions,
       taskId: message.taskId,
       changedFiles: message.changedFiles,
+      pinnedAt: message.pinnedAt,
+      pinnedBy: message.pinnedBy,
     };
   }
 
@@ -2228,6 +2233,43 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       message.reactions.set(emoji, reactors);
     }
     return this.toPublicChannelMessage(message, userId);
+  }
+
+  public async toggleChannelMessagePin(
+    repositoryId: string,
+    messageId: string,
+    userId: string,
+  ): Promise<ChannelMessage> {
+    const message = this.channelMessages.get(messageId);
+    if (message === undefined || message.repositoryId !== repositoryId) {
+      throw new Error(`Unknown channel message: ${messageId}`);
+    }
+    if (message.pinnedAt === undefined) {
+      message.pinnedAt = new Date().toISOString();
+      message.pinnedBy = userId;
+    } else {
+      delete message.pinnedAt;
+      delete message.pinnedBy;
+    }
+    return this.toPublicChannelMessage(message, userId);
+  }
+
+  public async listPinnedChannelMessages(
+    repositoryId: string,
+    viewerId: string,
+  ): Promise<ChannelMessage[]> {
+    return [...this.channelMessages.values()]
+      .filter(
+        (message) =>
+          message.repositoryId === repositoryId &&
+          message.pinnedAt !== undefined,
+      )
+      .sort(
+        (left, right) =>
+          String(left.pinnedAt).localeCompare(String(right.pinnedAt)) ||
+          left.id.localeCompare(right.id),
+      )
+      .map((message) => this.toPublicChannelMessage(message, viewerId));
   }
 
   public async listChannelAgentOverrides(

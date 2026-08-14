@@ -23,6 +23,8 @@ import {
   channelAgentsFor,
   channelAuthor,
   channelMessagesFor,
+  threadTitle,
+  threadTitleReply,
   typingOn,
   agentsThinkingIn,
   agentStatus,
@@ -67,6 +69,7 @@ import {
   relativeTime,
   searchBox,
   tabs,
+  toast,
 } from "./ui.js";
 
 /* ------------------------------------------------------------- options ---- */
@@ -788,13 +791,12 @@ function chanSearchRow() {
  * its own collapsed block inside the thread.
  */
 function threadSummaryLink(entry, replies, repositoryId) {
-  const titled = replies.find((reply) =>
-    /^Task: /u.test(String(reply.content ?? "")),
-  );
-  const name =
-    titled === undefined
-      ? ""
-      : String(titled.content).replace(/^Task:\s*/u, "").split("\n")[0].trim();
+  const titled = threadTitleReply(entry);
+  // No content fallback here: this link renders directly under the root
+  // message's own text, and a "title" echoing it would say nothing twice.
+  // The task-objective fallback inside the helper still names threads that
+  // never got a "Task:" reply.
+  const name = threadTitle(entry, { fallbackToContent: false });
   const said = replies.filter(
     (reply) => reply !== titled && !isThreadThinking(reply),
   );
@@ -1017,7 +1019,12 @@ function messageRow(
     // rather than a colour of their own, because a second meaning-carrying
     // colour in a room that already has one is just noise.
     isAuditor(author.agent ?? {}) ? " cmsg-auditor" : ""
-  }">
+  }"${
+    // The id is the jump target the pinned banner scrolls to. Gated on the
+    // channel copy only: the thread panel renders the same root with
+    // isReply, and one message must not put two ids in the document.
+    isReply ? "" : ` id="cmsg-${esc(entry.id)}"`
+  }>
     <span class="cmsg-avatar">${
       author.agent !== undefined ? agentFace(author.agent, 32) : avatar(author.name, 32, author.name, author.name === currentUserName() ? myAvatar() : undefined)
     }</span>
@@ -1082,6 +1089,12 @@ function messageRow(
             })
       }
       ${iconButton("smile", { act: "channel-react", value: entry.id, title: "React", small: true })}
+      ${iconButton("pin", {
+        act: "channel-pin",
+        value: entry.id,
+        title: entry.pinnedAt === undefined ? "Pin" : "Unpin",
+        small: true,
+      })}
       ${
         // Anything the caller wants sitting beside the reply button — the
         // summary's simplify wand rides here, so the two read as one set of
@@ -1558,34 +1571,31 @@ function threadListPanel(repositoryId) {
           : threads
               .map((entry) => {
                 const replies = entry.replies ?? [];
+                const titled = threadTitleReply(entry);
                 // Thinking is the run talking to itself; it has never been a
-                // reply and should not be counted as one here either.
+                // reply and should not be counted as one here either. The
+                // title reply is the thread's name, not a message in it.
                 const count = replies.filter(
-                  (reply) =>
-                    reply.kind !== "progress" &&
-                    !/^Task: /u.test(String(reply.content ?? "")),
+                  (reply) => reply.kind !== "progress" && reply !== titled,
                 ).length;
-                const titled = replies.find((reply) =>
-                  /^Task: /u.test(String(reply.content ?? "")),
-                );
-                const name =
-                  titled === undefined
-                    ? ""
-                    : (String(titled.content).replace(/^Task:\s*/u, "").split("\n")[0] ?? "").trim();
                 const author = channelAuthor(repositoryId, entry);
+                // The subject leads: somebody scanning this log is looking
+                // for a piece of work, and the agent's name told them which
+                // colleague — the wrong first question. Who and when demote
+                // to the metadata row beneath.
                 return `<div class="thread-item-row">
                   <button type="button" class="thread-item"
                     data-act="channel-thread-open" data-value="${esc(entry.id)}">
+                    <span class="ti-text">${esc(threadTitle(entry))}</span>
                     <span class="ti-top">
                       <span class="ti-face">${
                         author.agent !== undefined
-                          ? agentFace(author.agent, 18)
-                          : avatar(author.name, 18)
+                          ? agentFace(author.agent, 16)
+                          : avatar(author.name, 16)
                       }</span>
                       <span class="ti-who">${esc(author.name)}</span>
                       <span class="ti-time">${esc(clockTime(entry.at))}</span>
                     </span>
-                    <span class="ti-text">${esc(name === "" ? entry.content : name)}</span>
                     <span class="ti-count">${
                       count === 0
                         ? "No replies yet"
@@ -1877,15 +1887,30 @@ function threadPanel(repositoryId) {
   if (messageId === undefined) {
     return "";
   }
-  const root = channelMessagesFor(repositoryId).find((entry) => entry.id === messageId);
+  // The banner's copy answers for a pinned thread whose transcript row has
+  // aged past the loaded page — its stored replies are what let it open.
+  const root =
+    channelMessagesFor(repositoryId).find((entry) => entry.id === messageId) ??
+    (state.channelPins[repositoryId] ?? []).find(
+      (entry) => entry.id === messageId,
+    );
   if (root === undefined) {
     return "";
   }
+  // The subject in the header, where a reader looks first. "Thread" only
+  // when nothing names it — and the title being here is what the fold
+  // comment inside threadReplies has assumed all along.
+  const title = threadTitle(root) || "Thread";
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
-      <span>Thread</span>
+      <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
+      ${iconButton("pin", {
+        act: "channel-pin",
+        value: messageId,
+        title: root.pinnedAt === undefined ? "Pin thread" : "Unpin thread",
+      })}
       ${iconButton("reply", {
         act: "composer-thread-continue",
         value: messageId,
@@ -1936,6 +1961,9 @@ function threadReplies(root, repositoryId) {
   // two lines further up. Folded in, it is there for whoever wants the exact
   // wording and out of the way of everybody else.
   const [first, ...rest] = replies;
+  // Deliberately first-reply-only, unlike the shared threadTitleReply
+  // detector: folding a mid-thread "Task:" message into the thinking block
+  // would hide a real reply, not a name.
   const titleLine = /^Task: /u.test(String(first?.content ?? "")) ? first : undefined;
   const body = titleLine === undefined ? replies : rest;
   const steps = body.filter(isThreadThinking);
@@ -2375,6 +2403,7 @@ export function renderChats() {
     <div class="chan-main">
       ${chanHeader(repository, repositoryId)}
       ${chanSearchRow()}
+      ${pinnedBanner(repositoryId)}
       ${messageList(repositoryId)}
       ${composer(repositoryId)}
       ${state.termOpen ? terminalDrawer() : ""}
@@ -2427,6 +2456,20 @@ export function restoreChannelScroll() {
   const list = document.querySelector("#chan-messages");
   if (list === null) {
     return;
+  }
+  // A requested jump outranks following: the reader asked for one message,
+  // and snapping to the bottom over it would answer a different question.
+  // One-shot, and following turns off so the next arriving message does not
+  // yank them away mid-read; scrolling back down re-arms it as always.
+  if (state.scrollToMessage !== undefined) {
+    const target = document.getElementById(`cmsg-${state.scrollToMessage}`);
+    state.scrollToMessage = undefined;
+    if (target !== null) {
+      followingChannel = false;
+      target.scrollIntoView({ block: "center" });
+      return;
+    }
+    toast("That message is older than the loaded history", "error");
   }
   if (followingChannel) {
     list.scrollTop = list.scrollHeight;
@@ -2498,6 +2541,61 @@ export function submitComposerMessage(rerender) {
 }
 
 /**
+ * What this channel has decided not to lose, in a strip above the messages.
+ *
+ * The banner reads from the server-fed pinned list rather than the loaded
+ * transcript, because a pin exists precisely so a message survives the room
+ * moving on — a banner that only knew the current page would forget exactly
+ * the pins it was for. Collapsible to one line, because pins are a shelf,
+ * not a second conversation.
+ */
+function pinnedBanner(repositoryId) {
+  const pins = state.channelPins[repositoryId] ?? [];
+  if (pins.length === 0) {
+    // The same no-op the search row uses, so the column's child list keeps
+    // its shape whether or not anything is pinned.
+    return `<div hidden></div>`;
+  }
+  const open = state.pinsOpen === true;
+  return `<div class="chan-pins">
+    <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
+      aria-expanded="${open}">
+      ${icon("pin")}
+      <span>${pins.length} pinned</span>
+      <span class="spacer"></span>
+      ${icon(open ? "chevronUp" : "chevronDown")}
+    </button>
+    ${
+      !open
+        ? ""
+        : `<div class="chan-pins-list">${pins
+            .map((entry) => {
+              const title = threadTitle(entry) || "(no text)";
+              const pinner =
+                entry.pinnedBy === undefined
+                  ? "someone"
+                  : (memberName(entry.pinnedBy) ?? entry.pinnedBy);
+              return `<div class="chan-pin-row">
+                <button type="button" class="chan-pin-jump"
+                  data-act="channel-pin-jump" data-value="${esc(entry.id)}"
+                  title="Pinned by ${esc(pinner)}">
+                  <span class="cp-title">${esc(title)}</span>
+                  <span class="cp-time">${esc(clockTime(entry.at ?? entry.createdAt))}</span>
+                </button>
+                ${iconButton("close", {
+                  act: "channel-pin",
+                  value: entry.id,
+                  title: "Unpin",
+                  small: true,
+                })}
+              </div>`;
+            })
+            .join("")}</div>`
+    }
+  </div>`;
+}
+
+/**
  * The line naming the thread the next message will join.
  *
  * Deliberately loud and dismissable: a composer that silently posts somewhere
@@ -2515,13 +2613,7 @@ function composerThreadChip(repositoryId) {
   if (root === undefined) {
     return "";
   }
-  const title = String(
-    (root.replies ?? []).find((reply) => /^Task: /u.test(String(reply.content ?? "")))
-      ?.content ?? root.content,
-  )
-    .replace(/^Task: /u, "")
-    .replace(/\s+/gu, " ")
-    .trim();
+  const title = threadTitle(root);
   return `<div class="composer-thread">
     ${icon("reply")}
     <span class="ct-label">Continuing in</span>

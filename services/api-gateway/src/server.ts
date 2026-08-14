@@ -5420,23 +5420,34 @@ export class ApiGateway {
           Math.max(1, Number.parseInt(url.searchParams.get("limit") ?? "50", 10)),
         );
         const before = url.searchParams.get("before") ?? undefined;
-        const [messages, agentOverrides, readAt] = await Promise.all([
+        const [messages, agentOverrides, readAt, pinned] = await Promise.all([
           this.options.store.listChannelMessages(repositoryId, principal.user.id, {
             limit,
             ...(before === undefined ? {} : { before }),
           }),
           this.options.store.listChannelAgentOverrides(repositoryId),
           this.options.store.getChannelReadCursor(repositoryId, principal.user.id),
+          this.options.store.listPinnedChannelMessages(
+            repositoryId,
+            principal.user.id,
+          ),
         ]);
         // Sent with the messages rather than on a route of its own: the
         // picker is drawn on this screen, and a second round trip to learn
         // what to offer is a second chance for the two to disagree — the
         // same reasoning `auditorPaused` rides the roster for.
+        //
+        // The pinned list rides here too, and separately from `messages`: a
+        // pin exists so a message survives the room moving on, so it must
+        // not vanish just because it aged past the page. Not run through
+        // `withChangedFiles` — the banner wants a title and a target, and
+        // any on-page copy already carries its file summary.
         this.sendJson(response, 200, {
           messages: await this.withChangedFiles(repositoryId, messages),
           agentOverrides,
           readAt,
           slashCommands: SLASH_COMMANDS,
+          pinned,
         });
         return;
       }
@@ -5591,6 +5602,58 @@ export class ApiGateway {
       await this.options.store.appendAudit(undefined, {
         type: "channel_reaction_toggled",
         data: { projectId, repositoryId, messageId, emoji, userId: principal.user.id },
+      });
+      this.sendJson(response, 200, { message });
+      return;
+    }
+
+    const channelPinMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/messages/([^/]+)/pin$`,
+        "u",
+      ),
+    );
+    if (channelPinMatch !== undefined && method === "POST") {
+      const [projectId = "", repositoryId = "", messageId = ""] = channelPinMatch;
+      // The reactions rule, deliberately: a pin is shared attention, not
+      // moderation — anyone who can read the room may flag what it should
+      // not lose, and anyone may unflag it. The audit records who did which.
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      let message;
+      try {
+        message = await this.options.store.toggleChannelMessagePin(
+          repositoryId,
+          messageId,
+          principal.user.id,
+        );
+      } catch (error) {
+        throw new HttpError(
+          404,
+          "not_found",
+          error instanceof Error ? error.message : "Channel message was not found",
+        );
+      }
+      await this.options.store.appendAudit(undefined, {
+        type: "channel_message_pinned",
+        data: {
+          projectId,
+          repositoryId,
+          messageId,
+          pinned: message.pinnedAt !== undefined,
+          userId: principal.user.id,
+        },
       });
       this.sendJson(response, 200, { message });
       return;

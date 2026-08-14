@@ -75,6 +75,7 @@ import {
   setRepositoryGrant,
   revokeRepositoryGrant,
   state,
+  toggleChannelMessagePin,
   toggleChannelReaction,
   toggleFavourite,
   unreadCount,
@@ -2546,6 +2547,40 @@ document.addEventListener("click", (event) => {
       toggleChannelReaction(activeChannelId(), value, "👍");
       render();
       return;
+    case "channel-pin":
+      toggleChannelMessagePin(activeChannelId(), value);
+      render();
+      return;
+    case "channel-pins-toggle":
+      state.pinsOpen = state.pinsOpen !== true;
+      render();
+      return;
+    // A pinned thread opens as a thread; a plain pinned message scrolls
+    // into view. The banner's copy answers for pins whose transcript row
+    // has aged past the loaded page.
+    case "channel-pin-jump": {
+      const repositoryId = activeChannelId();
+      const entry =
+        channelMessagesFor(repositoryId).find((m) => m.id === value) ??
+        (state.channelPins[repositoryId] ?? []).find((m) => m.id === value);
+      if (
+        entry !== undefined &&
+        ((entry.replies ?? []).length > 0 || entry.taskId !== undefined)
+      ) {
+        if (!confirmDiscardEdit()) {
+          return;
+        }
+        state.activeChannelThread = value;
+        state.activeDm = undefined;
+        state.activeAgentPanel = undefined;
+        closeChannelFile();
+        render();
+        return;
+      }
+      state.scrollToMessage = value;
+      render();
+      return;
+    }
     case "chan-tree-toggle":
       state.chanTree = state.chanTree !== true;
       state.chanFileView = undefined;
