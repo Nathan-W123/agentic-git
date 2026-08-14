@@ -242,6 +242,73 @@ test("openai options come from the account's own models cache and settings are v
   );
 });
 
+test("a sign-in's model list is kept, so the account's own models replace the suggestions", async () => {
+  // The gap this closes: sign-in runs the CLI against a throwaway CODEX_HOME
+  // so the host's keys stay out of the captured credential, and the model list
+  // the CLI caches there is discarded with the directory. The reader looks in
+  // `~/.codex`; the writer only ever writes to a temp dir; they never meet, so
+  // every deployment fell back to suggested names no matter how many times
+  // somebody signed in.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      codex: (args) =>
+        args[0] === "--version" ? output("codex-cli 0.146.0") : output(""),
+    }),
+  });
+
+  // Before: nothing reported, so the picker runs on suggestions.
+  const before = await service.options({ provider: "openai" });
+  assert.equal(before.models, null);
+  assert.ok((before.suggestedModels ?? []).length > 0);
+
+  // A sign-in leaves a model list behind in its throwaway home.
+  const flowHome = path.join(harness.home, "throwaway-device-home");
+  await mkdir(flowHome, { recursive: true });
+  await writeFile(
+    path.join(flowHome, "models_cache.json"),
+    JSON.stringify({
+      models: [
+        {
+          slug: "codex-house-model",
+          display_name: "Codex House Model",
+          supported_reasoning_levels: [{ effort: "low" }, { effort: "high" }],
+        },
+      ],
+    }),
+    "utf8",
+  );
+  await (
+    service as unknown as {
+      captureCodexModelCache(home: string): Promise<void>;
+    }
+  ).captureCodexModelCache(flowHome);
+
+  // After: the account's own list, and no suggestions beside it to be
+  // mistaken for reported models.
+  const after = await service.options({ provider: "openai" });
+  assert.deepEqual(
+    after.models?.map((model) => model.id),
+    ["codex-house-model"],
+  );
+  assert.deepEqual(after.models?.[0]?.efforts, ["low", "high"]);
+  assert.equal(after.suggestedModels, undefined);
+  assert.equal(after.allowCustomModel, false);
+
+  // A later unreadable or empty cache must not wipe a good one.
+  await writeFile(path.join(flowHome, "models_cache.json"), "{oops", "utf8");
+  await (
+    service as unknown as {
+      captureCodexModelCache(home: string): Promise<void>;
+    }
+  ).captureCodexModelCache(flowHome);
+  assert.deepEqual(
+    (await service.options({ provider: "openai" })).models?.map((m) => m.id),
+    ["codex-house-model"],
+  );
+});
+
 test("openai with no cached model list stays usable instead of refusing everything", async () => {
   // The shipped control plane is this case, not the one above: every Codex
   // invocation runs against a throwaway CODEX_HOME, so nothing ever writes
@@ -349,6 +416,48 @@ test("every provider offers a model list to pick from, cached or not", async () 
   assert.ok((openai.efforts ?? openai.suggestedEfforts ?? []).length > 0);
   const google = await service.options({ provider: "google" });
   assert.deepEqual(google.efforts ?? google.suggestedEfforts ?? [], []);
+});
+
+test("the aliases the Claude CLI documents are shown as names, not as bare words", async () => {
+  // `claude --help` documents its `--model` values as bare words, and they
+  // were rendered into the picker exactly as parsed — a dropdown reading
+  // "fable / sonnet / opus / claude-fable-5". Every value is real and every
+  // one works; as a list it is unreadable, and it gives no clue that the
+  // first three float to the newest release while the fourth pins one.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) =>
+        args[0] === "auth"
+          ? output(JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }))
+          : args[0] === "--help"
+            ? output(
+                [
+                  "Usage: claude [options]",
+                  "",
+                  "  --model <model>  Model for the session. Accepts an alias",
+                  "                   ('fable', 'opus', 'sonnet') or a full name",
+                  "                   ('claude-fable-5', 'claude-opus-5').",
+                  "  --verbose        Print more",
+                ].join("\n"),
+              )
+            : output(""),
+    }),
+  });
+
+  const options = await service.options({ provider: "anthropic" });
+  const byId = new Map((options.models ?? []).map((m) => [m.id, m.label]));
+  // The value is the CLI's and travels unaltered; only the label is ours.
+  assert.equal(byId.get("fable"), "Fable (latest)");
+  assert.equal(byId.get("opus"), "Opus (latest)");
+  assert.equal(byId.get("claude-fable-5"), "Fable 5");
+  assert.equal(byId.get("claude-opus-5"), "Opus 5");
+  // Nothing is dropped for lacking a label — an alias this deployment has
+  // never heard of still has to be selectable.
+  for (const model of options.models ?? []) {
+    assert.ok((model.label ?? "").length > 0, model.id);
+  }
 });
 
 test("anthropic reports no model list when the CLI offers neither source", async () => {
