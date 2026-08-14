@@ -57,7 +57,8 @@ test("predictions are confirmed by contention and refuted by clean integration",
 
   const metrics = await computeCoordinationMetrics(store);
   assert.equal(metrics.conflicts.predictions, 3);
-  assert.equal(metrics.conflicts.confirmedPredictions, 1);
+  assert.equal(metrics.conflicts.confirmedByContention, 1);
+  assert.equal(metrics.conflicts.confirmedByOwnHold, 0);
   assert.equal(metrics.conflicts.falsePositives, 1);
   assert.equal(metrics.conflicts.openPredictions, 1);
   assert.equal(metrics.conflicts.unpredictedContention, 1);
@@ -89,10 +90,11 @@ test("stale integrations count as contention, other failures as rework", async (
   await store.close();
 });
 
-test("a deferred plan counts as contention that cost nothing to execute", async () => {
+test("a deferred plan confirms nothing until its tasks settle, and then only itself", async () => {
   const store = new InMemoryCoordinationStore();
-  // Predicted, then the plan was stopped before any editing: the prediction
-  // is confirmed, but unlike a replan no execution was thrown away.
+  // Predicted, then the plan was stopped before any editing: no execution was
+  // thrown away, and — the point of this test — no contention was observed
+  // either. The hold is the scheduler's own answer to its own prediction.
   await append(store, "conflict_detected", "task_b", {
     taskIds: ["task_a", "task_b"],
     disposition: "sequence",
@@ -104,11 +106,73 @@ test("a deferred plan counts as contention that cost nothing to execute", async 
   await append(store, "plan_admitted", "task_b", { status: "sequenced" });
   await append(store, "plan_admitted", "task_a", { status: "approved" });
 
+  // Mid-flight the hold has not outlived its tasks, so no verdict is banked:
+  // a replan tomorrow would still vindicate the prediction properly.
+  const midflight = await computeCoordinationMetrics(store);
+  assert.equal(midflight.rework.planTimeDeferrals, 1);
+  assert.equal(midflight.conflicts.openPredictions, 1);
+  assert.equal(midflight.conflicts.confirmedByOwnHold, 0);
+  assert.equal(midflight.conflicts.confirmedByContention, 0);
+
+  // Both land clean. Nothing ever contended, so the hold is the only thing
+  // corroborating the prediction — which is not evidence, and is counted
+  // where it cannot be mistaken for any.
+  await append(store, "canonical_promoted", "task_a", {});
+  await append(store, "canonical_promoted", "task_b", {});
+
+  const settled = await computeCoordinationMetrics(store);
+  assert.equal(settled.conflicts.confirmedByOwnHold, 1);
+  assert.equal(settled.conflicts.confirmedByContention, 0);
+  assert.equal(settled.conflicts.falsePositives, 0);
+  assert.equal(settled.conflicts.materialized, 0);
+  assert.equal(settled.rework.planTimeDeferrals, 1);
+  assert.equal(settled.rework.taskRestarts, 0);
+  assert.equal(settled.rework.replansRequested, 0);
+
+  await store.close();
+});
+
+test("a hold that prevented something and one that prevented nothing are told apart", async () => {
+  const store = new InMemoryCoordinationStore();
+
+  // Pair A/B — the scheduler held B, and contention then materialised on its
+  // own: canonical moved and B had to replan. The prediction earned its keep.
+  await append(store, "conflict_detected", undefined, {
+    taskIds: ["task_a", "task_b"],
+    disposition: "sequence",
+    score: 40,
+  });
+  await append(store, "plan_admitted", "task_b", { status: "blocked" });
+  await append(store, "replan_requested", "task_b", { revision: "rev_2" });
+  await append(store, "canonical_promoted", "task_a", {});
+  await append(store, "canonical_promoted", "task_b", {});
+
+  // Pair C/D — the same detection, the same hold, and then nothing at all.
+  // No replan, no stale base, no failed validation: both landed clean, and
+  // whether the hold saved a merge or cost D its turn is unknowable.
+  await append(store, "conflict_detected", undefined, {
+    taskIds: ["task_c", "task_d"],
+    disposition: "sequence",
+    score: 40,
+  });
+  await append(store, "plan_admitted", "task_d", { status: "blocked" });
+  await append(store, "canonical_promoted", "task_c", {});
+  await append(store, "canonical_promoted", "task_d", {});
+
   const metrics = await computeCoordinationMetrics(store);
-  assert.equal(metrics.rework.planTimeDeferrals, 1);
-  assert.equal(metrics.rework.taskRestarts, 0);
-  assert.equal(metrics.rework.replansRequested, 0);
-  assert.equal(metrics.conflicts.confirmedPredictions, 1);
+  // The whole reason the buckets are separate. Counting a hold as proof of
+  // the prediction it answers made these two indistinguishable, and made the
+  // only prediction that could ever be scored a false positive one the
+  // scheduler never acted on.
+  assert.equal(metrics.conflicts.predictions, 2);
+  assert.equal(metrics.conflicts.confirmedByContention, 1);
+  assert.equal(metrics.conflicts.confirmedByOwnHold, 1);
+  assert.equal(metrics.conflicts.falsePositives, 0);
+  assert.equal(metrics.conflicts.openPredictions, 0);
+  // One replan, and only the replan: the two holds are rework the scheduler
+  // avoided rather than contention it observed.
+  assert.equal(metrics.conflicts.materialized, 1);
+  assert.equal(metrics.rework.planTimeDeferrals, 2);
 
   await store.close();
 });

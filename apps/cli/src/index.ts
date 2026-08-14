@@ -843,10 +843,16 @@ async function runMetrics(json: boolean): Promise<void> {
     console.log("");
     console.log("Conflicts");
     console.log(`  Predictions:             ${conflicts.predictions}`);
-    console.log(`  Confirmed predictions:   ${conflicts.confirmedPredictions}`);
+    console.log(`  Confirmed by contention: ${conflicts.confirmedByContention}`);
+    console.log(`  Confirmed by own hold:   ${conflicts.confirmedByOwnHold}`);
     console.log(`  False positives:         ${conflicts.falsePositives}`);
     console.log(`  Still open:              ${conflicts.openPredictions}`);
     console.log(`  Missed (unpredicted):    ${conflicts.unpredictedContention}`);
+    // Said out loud because the split is the whole point, and a reader who
+    // adds the two "confirmed" lines together has undone it.
+    console.log(
+      "  (only contention is evidence; a hold cannot confirm itself)",
+    );
     console.log("");
     console.log("Rework");
     console.log(`  Replans requested:       ${rework.replansRequested}`);
