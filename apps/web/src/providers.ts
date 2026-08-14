@@ -519,8 +519,37 @@ const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
  * the property that makes keeping the list honest cheap, and it is why the
  * list is allowed to exist at all.
  */
+/**
+ * Readable names for the model values the Claude CLI reports.
+ *
+ * `claude --help` documents its `--model` values as bare words — `fable`,
+ * `opus`, `claude-fable-5` — and they were rendered into the picker exactly
+ * as parsed, so the dropdown read "fable / sonnet / opus / claude-fable-5":
+ * correct values, unreadable as a list, and giving no clue that the first
+ * three float to the newest release while the fourth pins one.
+ *
+ * The values are the CLI's, not ours — only the labels are added here, and a
+ * value with no entry still renders as itself rather than being hidden.
+ */
+const CLAUDE_MODEL_LABELS: Record<string, string> = {
+  fable: "Fable (latest)",
+  opus: "Opus (latest)",
+  sonnet: "Sonnet (latest)",
+  haiku: "Haiku (latest)",
+  "claude-fable-5": "Fable 5",
+  "claude-mythos-5": "Mythos 5",
+  "claude-opus-5": "Opus 5",
+  "claude-opus-4-8": "Opus 4.8",
+  "claude-opus-4-7": "Opus 4.7",
+  "claude-opus-4-6": "Opus 4.6",
+  "claude-sonnet-5": "Sonnet 5",
+  "claude-sonnet-4-6": "Sonnet 4.6",
+  "claude-haiku-4-5": "Haiku 4.5",
+};
+
 const SUGGESTED_MODELS: Record<ProviderId, ProviderModelOption[]> = {
   anthropic: [
+    { id: "claude-fable-5", label: "Fable 5" },
     { id: "claude-opus-5", label: "Opus 5" },
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-haiku-4-5", label: "Haiku 4.5" },
@@ -2022,6 +2051,18 @@ export class ProviderChatService {
         visibility: "personal",
       });
 
+      // The one moment a real CODEX_HOME exists on this host. Sign-in runs
+      // the CLI against a throwaway directory so the host's own keys stay out
+      // of the captured credential — which also means anything the CLI writes
+      // there, including the model list it caches, is discarded with it. The
+      // reader looks in `~/.codex`, the writer only ever writes to a temp
+      // directory, and the two can therefore never meet: that is why a
+      // deployment offers suggested model names rather than the account's
+      // own. Copying the cache out closes the gap for the next `options()`
+      // call, and is best-effort in every direction — the CLI may not write
+      // one at login, in which case nothing changes and the suggestions still
+      // apply.
+      await this.captureCodexModelCache(flow.home);
       const store = await this.credentialStore();
       await store.put(flow.userId, "codex", {
         kind: "session_file",
@@ -2448,6 +2489,40 @@ export class ProviderChatService {
 
   /* ----------------------------------------------- settings/options ----- */
 
+  /**
+   * Keeps a signed-in account's model list where `codexModels` will find it.
+   *
+   * Deployment-wide rather than per-user, because `options()` is asked about a
+   * vendor and not about a person — so this is "what a Codex CLI on this host
+   * last reported", and the last sign-in wins. Two accounts on different plans
+   * would therefore see one list; that is a better failure than the current
+   * one, where every account sees a hardcoded guess, and the value is only
+   * ever a suggestion anyway — a name outside it still saves.
+   */
+  private async captureCodexModelCache(home: string): Promise<void> {
+    try {
+      const cached = await readFile(
+        path.join(home, "models_cache.json"),
+        "utf8",
+      );
+      // Parsed before it is kept: a half-written or unreadable file must not
+      // replace a good cache from an earlier sign-in.
+      const parsed = JSON.parse(cached) as { models?: unknown };
+      if (!Array.isArray(parsed.models) || parsed.models.length === 0) {
+        return;
+      }
+      const destination = path.join(this.homeDirectory, ".codex");
+      await mkdir(destination, { recursive: true });
+      await writeFile(path.join(destination, "models_cache.json"), cached, {
+        encoding: "utf8",
+        mode: 0o600,
+      });
+    } catch {
+      // No cache written by this sign-in, or nowhere to put it. The suggested
+      // list still covers the picker, so this is never worth failing on.
+    }
+  }
+
   private async codexModels(): Promise<ProviderModelOption[] | undefined> {
     try {
       const cache = JSON.parse(
@@ -2517,7 +2592,10 @@ export class ProviderChatService {
         }
         models.set(option.value, {
           id: option.value,
-          label: option.label ?? option.value,
+          label:
+            option.label ??
+            CLAUDE_MODEL_LABELS[option.value] ??
+            option.value,
           ...(option.description === undefined
             ? {}
             : { description: option.description }),
@@ -2545,7 +2623,10 @@ export class ProviderChatService {
           .filter((value) => MODEL_VALUE.test(value));
         for (const value of quoted) {
           if (!models.has(value)) {
-            models.set(value, { id: value, label: value });
+            models.set(value, {
+              id: value,
+              label: CLAUDE_MODEL_LABELS[value] ?? value,
+            });
           }
         }
         if (quoted.length > 0) {
