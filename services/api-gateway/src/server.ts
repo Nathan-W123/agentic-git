@@ -10714,10 +10714,15 @@ export class ApiGateway {
         (connection) => connection.userId === found?.submittedBy,
       );
       const agentId = String(found?.agentId ?? "").toLowerCase();
-      const connection =
-        owned.find((candidate) =>
-          agentId.includes(candidate.provider.toLowerCase()),
-        ) ?? owned[0];
+      // Matched on provider, never "the first one this person owns". That
+      // fallback named both sides of a conflict after whichever agent came
+      // first, so a hold read "@Juliett overlaps @Juliett" — which tells the
+      // reader nothing and looks like the coordinator arguing with itself.
+      // Better to fall through to the objective than to name the wrong agent
+      // confidently.
+      const connection = owned.find((candidate) =>
+        agentId.includes(candidate.provider.toLowerCase()),
+      );
       if (connection !== undefined) {
         return `@${
           resolveChannelAgentPresentation(
@@ -10947,9 +10952,14 @@ export class ApiGateway {
           ? `"${objective.slice(0, 57)}…"`
           : `"${objective}"`;
       });
+      // File evidence only. Every kind was flattened together, so a symbol
+      // name landed in a sentence about files — "they both touch app.js,
+      // BARE and 332 more" — and the count was of symbols, not of files.
       const files = (Array.isArray(data["evidence"]) ? data["evidence"] : [])
         .flatMap((entry) =>
-          typeof entry === "object" && entry !== null
+          typeof entry === "object" &&
+          entry !== null &&
+          (entry as { kind?: unknown }).kind === "file_overlap"
             ? ((entry as { resources?: unknown }).resources as string[]) ?? []
             : [],
         )
@@ -10962,23 +10972,23 @@ export class ApiGateway {
             (files.length > shown.length
               ? ` and ${String(new Set(files).size - shown.length)} more`
               : "");
-      const explanation =
-        typeof data["explanation"] === "string" &&
-        data["explanation"].trim().length > 0
-          ? ` ${data["explanation"].trim()}`
-          : "";
+      // The detector's explanation is deliberately not appended. It is the
+      // full structural case — every overlapping file, every shared symbol,
+      // every dependency edge, with the score — and pasting it into the room
+      // produced a message thousands of words long listing variable names,
+      // for a reader whose question was "what is happening and what happens
+      // next". It is written to the audit record, which is where an argument
+      // that long belongs; the room gets the finding.
       const line =
         disposition === "sequence"
           ? `⚖️ ${named[0]} and ${named[1]} both touch ${fileClause}, so ` +
-            `they run one at a time — the second starts when the first ` +
-            `lands.${explanation}`
+            `they run one at a time — the second starts when the first lands.`
           : disposition === "block"
-            ? `⚖️ Holding ${named[1]} — it conflicts with ${named[0]} on ` +
-              `${fileClause} and needs a decision before both can ` +
-              `proceed.${explanation}`
+            ? `⚖️ Holding ${named[1]} — it overlaps ${named[0]} on ` +
+              `${fileClause}, so its agent is narrowing the plan.`
             : `⚖️ ${named[0]} and ${named[1]} overlap on ${fileClause} but ` +
               `can run together — flagging it so nobody is surprised by ` +
-              `nearby edits.${explanation}`;
+              `nearby edits.`;
       await this.appendChannelEntry({
         projectId,
         repositoryId,

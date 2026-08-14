@@ -261,7 +261,10 @@ test("a sign-in's model list is kept, so the account's own models replace the su
   // Before: nothing reported, so the picker runs on suggestions.
   const before = await service.options({ provider: "openai" });
   assert.equal(before.models, null);
-  assert.ok((before.suggestedModels ?? []).length > 0);
+  // Nothing offered before the account reports one — a suggested model name
+  // is a guess about someone else's entitlements, and the point of this test
+  // is what replaces it, not that a placeholder was there first.
+  assert.equal((before.suggestedModels ?? []).length, 0);
 
   // A sign-in leaves a model list behind in its throwaway home.
   const flowHome = path.join(harness.home, "throwaway-device-home");
@@ -396,6 +399,15 @@ test("every provider offers a model list to pick from, cached or not", async () 
   for (const provider of ["anthropic", "openai", "google"] as const) {
     const options = await service.options({ provider });
     const models = options.models ?? options.suggestedModels ?? [];
+    // Codex is the exception, and deliberately: with no cached list there is
+    // nothing to offer that is not a guess about this account's entitlements,
+    // and a guess presented as a choice is how an account was set to a model
+    // it answers 400 for. It gets a free-text field and a note instead.
+    if (provider === "openai" && options.models === null) {
+      assert.equal(options.allowCustomModel, true);
+      assert.ok(options.notes.length > 0);
+      continue;
+    }
     assert.ok(
       models.length > 0,
       `${provider} offers no models at all: ${JSON.stringify(options)}`,
