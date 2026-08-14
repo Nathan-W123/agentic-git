@@ -629,17 +629,35 @@ function chanSidebar(activeRepositoryId) {
  * offers a link that will not open, and it says where it points rather than
  * pretending otherwise.
  */
+function previewRunning(repositoryId) {
+  const preview = state.previews[repositoryId];
+  return preview !== null && preview !== undefined && preview.exited === undefined
+    ? preview
+    : undefined;
+}
+
+/** The control, which lives in the tool tray with its siblings. */
 function previewControl(repositoryId) {
   if (!repositoryId) {
     return "";
   }
-  const preview = state.previews[repositoryId];
-  const running = preview !== null && preview !== undefined &&
-    preview.exited === undefined;
-  if (!running) {
-    return `<button type="button" class="icon-btn" data-act="preview-start"
-      data-value="${esc(repositoryId)}" title="Run this app and open it">
-      ${icon("play")}</button>`;
+  return previewRunning(repositoryId) === undefined
+    ? `<button type="button" class="icon-btn" data-act="preview-start"
+        data-value="${esc(repositoryId)}" title="Run this app and open it">
+        ${icon("play")}</button>`
+    : `<button type="button" class="icon-btn on" data-act="preview-stop"
+        data-value="${esc(repositoryId)}" title="Stop the running app">
+        ${icon("close")}</button>`;
+}
+
+/** The address, which stays in the header because it is state, not a control. */
+function previewLink(repositoryId) {
+  if (!repositoryId) {
+    return "";
+  }
+  const preview = previewRunning(repositoryId);
+  if (preview === undefined) {
+    return "";
   }
   // Through this deployment rather than at the preview's own address. The
   // app binds loopback and nothing opens a port, so its own URL only works on
@@ -649,12 +667,11 @@ function previewControl(repositoryId) {
   const proxied =
     `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
     `/repositories/${encodeURIComponent(repositoryId)}/preview/app/`;
+  // No stop control beside it: stopping is a tool and lives with the tools.
   return `<span class="preview-live">
     <a class="preview-link" href="${esc(proxied)}" target="_blank"
       rel="noopener noreferrer" title="${esc(preview.label)} — ${esc(preview.url)}">
       ${esc(preview.url.replace("http://", ""))}</a>
-    <button type="button" class="icon-btn sm" data-act="preview-stop"
-      data-value="${esc(repositoryId)}" title="Stop it">${icon("close")}</button>
   </span>`;
 }
 
@@ -707,21 +724,42 @@ function chanHeader(repository, repositoryId) {
       </div>
     </div>
     <span class="spacer"></span>
-    ${previewControl(repositoryId)}
+    ${
+      // A running preview's address is not a control, so it stays out of the
+      // fold. The point of hiding the tools is a quieter header; hiding the
+      // one live thing in it would mean expanding a menu to find out whether
+      // your app is up.
+      previewLink(repositoryId)
+    }
     <span class="avatar-stack">${faces}${avatarStack(people, 3, 24)}</span>
-    <button type="button" class="icon-btn${state.chanTree === true ? " on" : ""}"
-      data-act="chan-tree-toggle" title="Files"
-      aria-pressed="${state.chanTree === true}">${icon("folder")}</button>
-    <button type="button" class="icon-btn${state.chanThreadList === true ? " on" : ""}"
-      data-act="channel-threads-toggle" title="Threads"
-      aria-pressed="${state.chanThreadList === true}">${icon("reply")}</button>
-    <button type="button" class="icon-btn${state.termOpen ? " on" : ""}"
-      data-act="chan-term-toggle" title="Terminal"
-      aria-pressed="${state.termOpen}">${icon("terminal")}</button>
-    <button type="button" class="icon-btn${state.chanMsgSearchOpen ? " on" : ""}"
-      data-act="channel-msg-search-toggle" title="Search messages"
-      aria-pressed="${state.chanMsgSearchOpen}">${icon("search")}</button>
-    ${iconButton("info", { act: "channel-info", value: repositoryId ?? "", title: "Channel info" })}
+    ${
+      // Six controls sat permanently in a header that is 44 pixels tall on a
+      // phone, and on any given visit a reader wants none of them. Behind one
+      // arrow they are a menu; in front of it they were the header.
+      state.chanToolsOpen !== true
+        ? ""
+        : `<span class="chan-tools">
+            ${previewControl(repositoryId)}
+            <button type="button" class="icon-btn${state.chanTree === true ? " on" : ""}"
+              data-act="chan-tree-toggle" title="Files"
+              aria-pressed="${state.chanTree === true}">${icon("folder")}</button>
+            <button type="button" class="icon-btn${state.chanThreadList === true ? " on" : ""}"
+              data-act="channel-threads-toggle" title="Threads"
+              aria-pressed="${state.chanThreadList === true}">${icon("reply")}</button>
+            <button type="button" class="icon-btn${state.termOpen ? " on" : ""}"
+              data-act="chan-term-toggle" title="Terminal"
+              aria-pressed="${state.termOpen}">${icon("terminal")}</button>
+            <button type="button" class="icon-btn${state.chanMsgSearchOpen ? " on" : ""}"
+              data-act="channel-msg-search-toggle" title="Search messages"
+              aria-pressed="${state.chanMsgSearchOpen}">${icon("search")}</button>
+            ${iconButton("info", { act: "channel-info", value: repositoryId ?? "", title: "Channel info" })}
+          </span>`
+    }
+    <button type="button" class="icon-btn chan-tools-toggle${
+      state.chanToolsOpen === true ? " on" : ""
+    }" data-act="chan-tools-toggle"
+      title="${state.chanToolsOpen === true ? "Hide tools" : "Show tools"}"
+      aria-expanded="${state.chanToolsOpen === true}">${icon("chevronDown")}</button>
   </header>`;
 }
 

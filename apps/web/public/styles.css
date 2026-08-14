@@ -4557,6 +4557,24 @@ svg {
   padding-left: 6px;
 }
 
+/* The header's tools, revealed together. Laid out as one group so they read
+   as a tray that opened rather than as controls that appeared one by one. */
+.chan-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* The arrow turns to point at what it opened, which is the only thing telling
+   a reader the header has more in it than they can see. */
+.chan-tools-toggle svg {
+  transition: transform 0.15s ease;
+}
+
+.chan-tools-toggle.on svg {
+  transform: rotate(180deg);
+}
+
 .preview-link {
   font-size: 12px;
   font-family: var(--mono, ui-monospace, monospace);

@@ -189,6 +189,13 @@ export const state = {
    * once finished) still apply to every thread they have not touched.
    */
   thinkingOpen: {},
+  /**
+   * Whether the channel header's tool icons are showing.
+   *
+   * Closed by default. Six controls in a header 44 pixels tall is most of a
+   * phone's width spent on things a reader wants on one visit in twenty.
+   */
+  chanToolsOpen: false,
   /** Whether a summary is unfolded, keyed by reply id. Absent means open. */
   summaryOpen: {},
   /** A simplified rewrite of one summary, once it has been asked for. */
