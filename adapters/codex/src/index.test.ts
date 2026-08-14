@@ -1149,3 +1149,58 @@ test("earlier work reaches the planning prompt as background, not as fact", asyn
   assert.match(planning, /Objective: /u);
   await rm(fixture.root, { recursive: true, force: true });
 });
+
+test("a reasoning effort reaches Codex as its own configuration override", async (t) => {
+  // The channel can now pick a reasoning level for a Codex agent, and this is
+  // the last link in the chain that makes picking one mean anything: Codex
+  // exposes the setting as `model_reasoning_effort` configuration rather than
+  // as a flag, which is the same surface the chat path already drives.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  const seen: string[][] = [];
+  const adapter = new CodexAdapter({
+    agentId: "codex",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "codex-test",
+    effort: "xhigh",
+    runner: async (_command, args) => {
+      seen.push([...args]);
+      return output(JSON.stringify(PLAN));
+    },
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+
+  const argv = seen[0] ?? [];
+  const at = argv.indexOf('model_reasoning_effort="xhigh"');
+  assert.ok(at > 0, `no effort override in ${JSON.stringify(argv)}`);
+  assert.equal(argv[at - 1], "-c");
+});
+
+test("a reasoning effort that could break out of the config expression is refused", async (t) => {
+  // The value is interpolated into `-c key="value"`, so anything that could
+  // close the quote and start a second setting is rejected at construction
+  // rather than escaped — a level is a bare word in every vendor that has one,
+  // and `sandbox_mode` is one `-c` away from being the thing overridden.
+  const fixture = await createFixture();
+  t.after(async () => await rm(fixture.root, { recursive: true, force: true }));
+  assert.throws(
+    () =>
+      new CodexAdapter({
+        agentId: "codex",
+        repository: fixture.repository,
+        workspaces: fixture.workspaces,
+        planningRoot: fixture.planningRoot,
+        effort: 'high" -c sandbox_mode="danger-full-access',
+      }),
+    /bare word/u,
+  );
+});

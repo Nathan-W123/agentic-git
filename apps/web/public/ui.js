@@ -748,7 +748,19 @@ export function miniSelect(act, options, current, title = "") {
   if (options.length === 0) {
     return "";
   }
-  const body = options
+  // A setting the list does not contain still has to show as itself. A
+  // `<select>` whose options match nothing displays the first one, so an agent
+  // configured `xhigh` against a list that stopped at `high` rendered as
+  // "Low" — the control quietly misreporting the one thing it exists to
+  // report, and turning a glance at it into a silent downgrade on the next
+  // save. Shown at the top, marked, so the value is visible and still
+  // replaceable.
+  const known = options.some((option) => option.value === current);
+  const shown =
+    current === "" || current === undefined || known
+      ? options
+      : [{ value: current, label: `${current} (set)` }, ...options];
+  const body = shown
     .map(
       (option) =>
         `<option value="${esc(option.value)}"${

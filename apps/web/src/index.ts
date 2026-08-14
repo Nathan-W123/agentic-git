@@ -302,6 +302,8 @@ async function serve(
           ? {}
           : { conversationId: input.conversationId }),
         ...(input.planOnly === true ? { planOnly: true } : {}),
+        ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.effort === undefined ? {} : { effort: input.effort }),
       });
     },
     async runRepository(input) {

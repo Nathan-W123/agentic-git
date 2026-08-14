@@ -3914,6 +3914,16 @@ svg {
   color: var(--text-3);
 }
 
+/* Why the picker above it is empty, in the words of the component that knows.
+   Set apart from `.rs-hint`, which explains a choice that exists; this one
+   explains the absence of one. */
+.roster-settings .rs-note {
+  margin: -2px 0 2px;
+  font-size: 10.5px;
+  line-height: 1.45;
+  color: var(--text-4);
+}
+
 .roster-settings .mini-select {
   max-width: 100%;
   width: 100%;

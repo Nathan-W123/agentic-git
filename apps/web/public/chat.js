@@ -12,6 +12,8 @@ import {
   API_ROOT,
   contextPercentFor,
   loadProviderOptions,
+  providerEffortOptions,
+  providerModelOptions,
   state,
 } from "./data.js";
 import {
@@ -134,16 +136,15 @@ export function chatComposer(agent, placeholder = "Ask your agent to do anything
         )}</button>
     </div>`;
   }
-  const options = state.providerOptions[agent?.id];
-  const models = (options?.models ?? []).map((model) => ({
-    value: model.id,
-    label: shortModel(model.label ?? model.id),
+  // The same two helpers the channel roster's pickers read. They used to be
+  // two independent readings of the same state, and the other one had drifted
+  // — it never learned that Codex hangs its reasoning levels off each model
+  // rather than off the provider, which this one has always handled.
+  const models = providerModelOptions(agent?.id).map((model) => ({
+    value: model.value,
+    label: shortModel(model.label),
   }));
-  const efforts = (
-    options?.efforts ??
-    options?.models?.find((model) => model.id === agent?.model)?.efforts ??
-    []
-  ).map((effort) => ({ value: effort, label: titleCase(effort) }));
+  const efforts = providerEffortOptions(agent?.id, agent?.model);
   const busy = state.sending[agent?.id] === true;
   const ready = agent !== undefined;
 
@@ -169,11 +170,6 @@ export function chatComposer(agent, placeholder = "Ask your agent to do anything
 
 function shortModel(label) {
   return String(label).replace(/^(claude|gpt|gemini|codex)[-\s]/iu, "");
-}
-
-function titleCase(value) {
-  const text = String(value);
-  return text.charAt(0).toUpperCase() + text.slice(1);
 }
 
 /** The whole panel, as used by the Code screen. */

@@ -17,34 +17,37 @@
  */
 
 import {
-  api,
+  activeChannelId,
+  agentStatus,
+  agentsThinkingIn,
+api,
   canLeaveRepository,
   canManageRepository,
   channelAgentsFor,
   channelAuthor,
   channelMessagesFor,
+  channelParticipants,
+  channelUnreadCount,
+  collaborators,
+  currentRepository,
+  currentUserId,
+  currentUserName,
+  dmUnreadFrom,
+  markChannelRead,
+  memberName,
+  myAgents,
+  myAvatar,
+  persist,
+  personOnline,
+  postChannelReply,
+  providerEffortOptions,
+  providerModelOptions,
+  providerOptionsNote,
+  sendChannelMessage,
+  state,
   threadTitle,
   threadTitleReply,
   typingOn,
-  agentsThinkingIn,
-  agentStatus,
-  personOnline,
-  dmUnreadFrom,
-  currentUserId,
-  currentUserName,
-  myAvatar,
-  memberName,
-  channelParticipants,
-  channelUnreadCount,
-  activeChannelId,
-  collaborators,
-  currentRepository,
-  markChannelRead,
-  myAgents,
-  persist,
-  postChannelReply,
-  sendChannelMessage,
-  state,
   VENDOR_FOR_PROVIDER,
 } from "./data.js";
 import { chatComposer, chatProgress, chatThread } from "./chat.js";
@@ -75,49 +78,41 @@ import {
 /* ------------------------------------------------------------- options ---- */
 
 /**
- * A usable model/effort list before the real one has loaded, or for a
- * teammate's seeded agent this account has never connected and so has no
- * `providerOptions` for. Real options — loaded the same way My Agents and
- * Code load them, through `ensureAgentOptions` — replace this the moment
- * they arrive; nothing here is invented once the real list exists.
+ * What this agent's vendor really offers, or nothing.
+ *
+ * There used to be a hardcoded model and effort list here, meant as a stopgap
+ * until the real one arrived. It became the answer almost everybody got: it
+ * named two OpenAI models that no deployment had reported, and three Claude
+ * reasoning levels out of the five that exist — and it looked exactly like
+ * real data, so nobody could tell they were reading a placeholder. Both
+ * pickers now read the same loaded options the Code and My Agents screens
+ * read, through the shared helpers, and show nothing at all rather than
+ * something invented.
  */
-const FALLBACK_MODELS = {
-  anthropic: [
-    { value: "claude-sonnet", label: "Sonnet" },
-    { value: "claude-opus", label: "Opus" },
-  ],
-  openai: [
-    { value: "gpt-5", label: "GPT-5" },
-    { value: "gpt-5-mini", label: "Mini" },
-  ],
-  google: [
-    { value: "gemini-2.5-pro", label: "2.5 Pro" },
-    { value: "gemini-2.5-flash", label: "Flash" },
-  ],
-  xai: [{ value: "grok-4", label: "Grok 4" }],
-  deepseek: [{ value: "deepseek-v3", label: "V3" }],
-};
-
-const FALLBACK_EFFORTS = [
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-];
-
 function optionsFor(agent) {
-  const loaded = state.providerOptions[agent.provider];
-  const models =
-    loaded?.models?.length > 0
-      ? loaded.models.map((model) => ({ value: model.id, label: model.label ?? model.id }))
-      : (FALLBACK_MODELS[agent.provider] ?? [{ value: "default", label: "Default" }]);
-  const efforts =
-    loaded?.efforts?.length > 0
-      ? loaded.efforts.map((effort) => ({
-          value: effort,
-          label: effort.charAt(0).toUpperCase() + effort.slice(1),
-        }))
-      : FALLBACK_EFFORTS;
-  return { models, efforts };
+  return {
+    models: providerModelOptions(agent.provider),
+    efforts: providerEffortOptions(agent.provider, agent.model),
+    note: providerOptionsNote(agent.provider),
+  };
+}
+
+/**
+ * One setting, as a dropdown that always has something in it.
+ *
+ * The list is the account's own reported one where there is one and a curated
+ * one where there is not — `providerModelOptions` resolves that, so nothing
+ * here has to care which it got. An empty row is not rendered at all rather
+ * than leaving a label with nothing under it.
+ */
+function settingRow(label, act, options, current) {
+  if (options.length === 0) {
+    return "";
+  }
+  return `<div>
+    <div class="rs-label">${esc(label)}</div>
+    ${miniSelect(act, options, current || options[0]?.value || "", label)}
+  </div>`;
 }
 
 /* ------------------------------------------------------------- sidebar ---- */
@@ -151,24 +146,26 @@ function chanRow(repo, activeRepositoryId) {
 function rosterSettings(agent) {
   const options = optionsFor(agent);
   return `<div class="roster-settings" data-agent="${esc(agent.id)}">
-    <div>
-      <div class="rs-label">Model</div>
-      ${miniSelect(
-        "channel-agent-model",
-        options.models,
-        agent.model || options.models[0]?.value || "",
-        "Model",
-      )}
-    </div>
-    <div>
-      <div class="rs-label">Reasoning effort</div>
-      ${miniSelect(
-        "channel-agent-effort",
-        options.efforts,
-        agent.effort || options.efforts[0]?.value || "",
-        "Reasoning effort",
-      )}
-    </div>
+    ${settingRow("Model", "channel-agent-model", options.models, agent.model ?? "")}
+    ${
+      // Where the list above came from, in the words of the thing that knows:
+      // either the file the account's own models were read from, or the
+      // admission that none were and these are suggestions. The server has
+      // always sent this and nothing ever displayed it, so a deployment whose
+      // CLI had never cached a model list looked identical to one offering a
+      // considered shortlist. Not gated on the list being empty any more —
+      // it never is now, which is exactly why saying where it came from
+      // matters.
+      options.note === ""
+        ? ""
+        : `<div class="rs-note">${esc(options.note)}</div>`
+    }
+    ${settingRow(
+      "Reasoning effort",
+      "channel-agent-effort",
+      options.efforts,
+      agent.effort ?? "",
+    )}
     ${
       // Unlike model and effort, this is not how the agent presents itself in
       // this room — it decides whose credential a teammate's prompt spends, so

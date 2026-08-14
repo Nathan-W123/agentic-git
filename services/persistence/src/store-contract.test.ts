@@ -786,6 +786,44 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a task remembers the model and effort it was asked for`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const picked = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "raise the retry ceiling",
+        agentId: "codex",
+        validationCommands: [],
+        model: "gpt-5.1-codex",
+        effort: "xhigh",
+      });
+      assert.equal(picked.model, "gpt-5.1-codex");
+      assert.equal(picked.effort, "xhigh");
+      // Read back, because the runner that builds the adapter loads the row
+      // rather than receiving the object the submit returned.
+      const listed = (
+        await store.listSubmittedTasks({ repositoryId: REPOSITORY.id })
+      ).find((task) => task.id === picked.id);
+      assert.equal(listed?.model, "gpt-5.1-codex");
+      assert.equal(listed?.effort, "xhigh");
+
+      // Absent means "whatever the agent is configured with", not empty
+      // strings that would override a real setting with nothing.
+      const plain = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "no preference",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      assert.equal(plain.model, undefined);
+      assert.equal(plain.effort, undefined);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a plan nobody approved can still be cancelled`, async () => {
     const { store, cleanup } = await backend.open();
     try {

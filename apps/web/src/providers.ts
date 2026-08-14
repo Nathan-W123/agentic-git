@@ -255,6 +255,21 @@ export interface ProviderOptions {
   efforts: string[] | null;
   allowCustomModel: boolean;
   notes: string[];
+  /**
+   * Names worth offering when the account has reported none of its own.
+   *
+   * Kept apart from `models` on purpose, and that separation is the whole
+   * point: `models` is what this account's CLI actually reports, and a
+   * suggestion is a guess that saves typing. Merging the two is what went
+   * wrong before — a hardcoded pair of names rendered in the same control as
+   * reported ones, so a person had no way to tell which they were reading,
+   * and the pair was two years stale besides. Offered only where the real
+   * list is absent, labelled as suggestions, and always overridable by
+   * typing, because the value is passed to the CLI verbatim either way.
+   */
+  suggestedModels?: ProviderModelOption[];
+  /** The same, for reasoning levels the provider did not enumerate. */
+  suggestedEfforts?: string[];
 }
 
 export class ProviderChatError extends Error {
@@ -487,6 +502,53 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
 
 /** Real `--effort` values the Claude CLI accepts. */
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Names to offer when an account has reported no list of its own.
+ *
+ * One table, in the service that already owns every other fact about these
+ * CLIs, rather than a copy in each screen that renders a picker — the last
+ * arrangement had five independent literals and the browser's had drifted two
+ * reasoning levels behind the adapter's.
+ *
+ * These are conveniences, not claims. They are offered only where the real
+ * list is missing, they are labelled as suggestions where they are rendered,
+ * and the control that shows them accepts anything typed instead, because the
+ * value goes to `--model` / `-m` verbatim. A name here going out of date
+ * therefore costs a stale entry in a dropdown, not a broken setting: that is
+ * the property that makes keeping the list honest cheap, and it is why the
+ * list is allowed to exist at all.
+ */
+const SUGGESTED_MODELS: Record<ProviderId, ProviderModelOption[]> = {
+  anthropic: [
+    { id: "claude-opus-5", label: "Opus 5" },
+    { id: "claude-sonnet-5", label: "Sonnet 5" },
+    { id: "claude-haiku-4-5", label: "Haiku 4.5" },
+  ],
+  openai: [
+    { id: "gpt-5.1-codex", label: "GPT-5.1 Codex" },
+    { id: "gpt-5.1-codex-mini", label: "GPT-5.1 Codex Mini" },
+    { id: "gpt-5.1", label: "GPT-5.1" },
+    { id: "gpt-5", label: "GPT-5" },
+  ],
+  google: [
+    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  ],
+};
+
+/**
+ * Reasoning levels to offer when a provider enumerated none.
+ *
+ * Codex reports its levels per model, so an account with no cached model list
+ * has no levels either — and the picker had nothing to show. These are the
+ * words its CLI takes today; typing another still works.
+ */
+const SUGGESTED_EFFORTS: Record<ProviderId, string[]> = {
+  anthropic: [...CLAUDE_EFFORTS],
+  openai: ["minimal", "low", "medium", "high", "xhigh"],
+  google: [],
+};
 const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5";
 const DEFAULT_CLAUDE_EFFORT = "high";
 
@@ -504,6 +566,17 @@ const MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
 // Square brackets appear in real Claude Code model values (e.g. the
 // "claude-fable-5[1m]" context variant it caches for its own picker).
 const MODEL_VALUE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,99}$/u;
+/**
+ * A reasoning level's shape, for when we have no list to check it against.
+ *
+ * The vendors keep adding levels — `xhigh`, `max`, `minimal` — and a control
+ * plane that has never managed to read a model list cannot know which of them
+ * this CLI takes. Refusing every value in that state was the strictly worse
+ * answer: the picker offered three and the save rejected all three, so the
+ * setting could not be changed at all. A bare word is enough of a guard when
+ * the alternative is a feature nobody can use.
+ */
+const EFFORT_VALUE = /^[a-z][a-z0-9_-]{0,31}$/u;
 
 /**
  * The vendor's own words for why a credential was refused.
@@ -2499,10 +2572,27 @@ export class ProviderChatService {
                 "Models and reasoning levels reported by the signed-in Codex account (~/.codex/models_cache.json)",
             }),
         efforts: null,
-        allowCustomModel: false,
+        // A reported list stays authoritative — it is read from the account's
+        // own cache, so a name outside it is a typo worth catching. With no
+        // list there is nothing to be outside of, and refusing every name left
+        // a deployment whose CLI had never cached one unable to pick any model
+        // at all. The value reaches `codex exec -m <model>` unaltered either
+        // way, exactly as it does for Claude.
+        allowCustomModel: models === undefined,
+        // Suggestions only where there is no real list to contradict.
+        ...(models === undefined
+          ? {
+              suggestedModels: [...SUGGESTED_MODELS.openai],
+              suggestedEfforts: [...SUGGESTED_EFFORTS.openai],
+            }
+          : {}),
         notes:
           models === undefined
-            ? ["The Codex CLI has not cached a model list for this account yet."]
+            ? [
+                "The Codex CLI has not cached a model list for this account " +
+                  "yet, so these are suggested names rather than the ones it " +
+                  "reports.",
+              ]
             : [],
       };
     }
@@ -2517,6 +2607,9 @@ export class ProviderChatService {
           : {}),
         efforts: [...CLAUDE_EFFORTS],
         allowCustomModel: true,
+        ...(claude.models.length > 0
+          ? {}
+          : { suggestedModels: [...SUGGESTED_MODELS.anthropic] }),
         notes: [
           "Any other model name still works — the value is passed to --model as-is.",
           "Reasoning effort maps to the CLI's real --effort option.",
@@ -2527,6 +2620,8 @@ export class ProviderChatService {
       models: null,
       efforts: null,
       allowCustomModel: false,
+      suggestedModels: [...SUGGESTED_MODELS.google],
+      suggestedEfforts: [...SUGGESTED_EFFORTS.google],
       notes: [
         "Gemini CLI settings become available once the signed-in account is eligible to use it.",
       ],
@@ -2572,6 +2667,12 @@ export class ProviderChatService {
       settings.model = input.model;
     }
     if (input.effort !== undefined && input.effort.length > 0) {
+      // Checked against what the provider reported, and only against that.
+      // When it reported nothing — no provider-wide list and no models, which
+      // is every deployment whose CLI has not cached one — the old `?? false`
+      // made this reject every possible value, including the three the picker
+      // was offering at the time. Not knowing is not the same as knowing it is
+      // wrong, so an unreported vocabulary falls back to a shape check.
       const valid =
         options.efforts?.includes(input.effort) ??
         options.models?.some(
@@ -2579,7 +2680,7 @@ export class ProviderChatService {
             (settings.model === undefined || model.id === settings.model) &&
             model.efforts?.includes(input.effort as string),
         ) ??
-        false;
+        EFFORT_VALUE.test(input.effort);
       if (!valid) {
         throw new ProviderChatError(
           400,

@@ -57,6 +57,9 @@ interface TestRuntime {
     conversationId?: string;
     /** Whether the dispatch asked for the work to be held, not queued. */
     planOnly?: boolean;
+    /** What the channel picked for this agent, if it picked anything. */
+    model?: string;
+    effort?: string;
   }>;
   /**
    * Every prompt the fake `complete` was asked, and what it should answer —
@@ -339,6 +342,8 @@ async function startRuntime(
           ? {}
           : { conversationId: input.conversationId }),
         ...(input.planOnly === undefined ? {} : { planOnly: input.planOnly }),
+        ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.effort === undefined ? {} : { effort: input.effort }),
       });
       return await store.submitTask({
         projectId: input.projectId,
@@ -352,6 +357,8 @@ async function startRuntime(
         // test: a fixture that dropped this would file every plan as
         // ordinary queued work and quietly pass.
         ...(input.planOnly === true ? { planOnly: true } : {}),
+        ...(input.model === undefined ? {} : { model: input.model }),
+        ...(input.effort === undefined ? {} : { effort: input.effort }),
         // A real deployment resolves `vendor` to one of its own configured
         // agent ids (see `resolveAgentIdForVendor` in apps/web/src/index.ts);
         // the fixture only needs a stable, distinguishable id back.
@@ -4486,6 +4493,51 @@ test("a command and a mention work together, and /plan holds the run", async (t)
       /Starting now/u.test(reply.content),
     );
   }, "the approved plan never started");
+});
+
+test("a channel's chosen model and reasoning level travel to the task", async (t) => {
+  // The pickers beside an agent in the roster wrote to a table nothing read:
+  // name and role reached the dispatch, model and effort were stored and
+  // dropped. Choosing a model moved a control and changed nothing about how
+  // the run was performed, which is the one thing a model picker is for.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "picked-model");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel`;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+
+  const chosen = await owner.request(
+    `${base}/agents/${encodeURIComponent(`${ownerId}:anthropic`)}`,
+    { method: "POST", body: { model: "claude-opus-5", effort: "max" } },
+  );
+  assert.equal(chosen.status, 200, JSON.stringify(chosen.data));
+
+  const mention = `Claude (${String(session.user.displayName).split(" ")[0]})`;
+  assert.equal(
+    (
+      await owner.request(`${base}/messages`, {
+        method: "POST",
+        body: { content: `@${mention} raise the retry ceiling` },
+      })
+    ).status,
+    201,
+  );
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never dispatched a task",
+  );
+  assert.equal(runtime.submittedTasks[0]?.model, "claude-opus-5");
+  assert.equal(runtime.submittedTasks[0]?.effort, "max");
+  // And onto the row the runner actually reads when it builds the adapter.
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId: repo });
+  assert.equal(task?.model, "claude-opus-5");
+  assert.equal(task?.effort, "max");
 });
 
 test("an unrelated mention does not run somebody's held plan", async (t) => {

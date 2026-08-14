@@ -148,6 +148,16 @@ export interface CodexAdapterOptions {
    * accepted so project configuration cannot weaken the enforced sandbox.
    */
   args?: readonly string[];
+  /**
+   * Reasoning level, as Codex's own `model_reasoning_effort` configuration.
+   *
+   * A `-c` override rather than a flag because that is the surface Codex
+   * exposes it on, and the same one the chat path already drives it through.
+   * The vocabulary is the model's, not ours: whatever the CLI accepts for the
+   * selected model is what works, so this is passed through as given and a
+   * level the model does not know is refused by Codex rather than here.
+   */
+  effort?: string;
   env?: NodeJS.ProcessEnv;
   planningTimeoutMs?: number;
   executionTimeoutMs?: number;
@@ -238,6 +248,27 @@ function positiveInteger(value: number | undefined, fallback: number, label: str
     throw new RangeError(`${label} must be a positive safe integer`);
   }
   return resolved;
+}
+
+/**
+ * A reasoning level safe to interpolate into a `-c key="value"` override.
+ *
+ * The value is quoted into a config expression, so anything that could close
+ * the quote or start a second setting is refused outright rather than
+ * escaped — the vocabulary is a bare word in every vendor that has one, and a
+ * level needing more than that is a level worth rejecting.
+ */
+function safeEffort(value: string | undefined): string | undefined {
+  if (value === undefined || value.trim() === "") {
+    return undefined;
+  }
+  const effort = value.trim();
+  if (!/^[A-Za-z][A-Za-z0-9_-]{0,31}$/u.test(effort)) {
+    throw new Error(
+      `Codex adapter reasoning effort must be a bare word: ${effort}`,
+    );
+  }
+  return effort;
 }
 
 function safeAdditionalArgs(values: readonly string[]): string[] {
@@ -443,6 +474,7 @@ export class CodexAdapter implements AgentAdapter {
   private readonly windowsSandbox: CodexWindowsSandbox;
   private readonly platform: NodeJS.Platform;
   private readonly additionalArgs: string[];
+  private readonly effort: string | undefined;
   private readonly planningTimeoutMs: number;
   private readonly executionTimeoutMs: number;
   private readonly maxOutputBytes: number;
@@ -451,6 +483,7 @@ export class CodexAdapter implements AgentAdapter {
   public constructor(private readonly options: CodexAdapterOptions) {
     this.command = options.command?.trim() || "codex";
     this.additionalArgs = safeAdditionalArgs(options.args ?? []);
+    this.effort = safeEffort(options.effort);
     this.planningTimeoutMs = positiveInteger(
       options.planningTimeoutMs,
       DEFAULT_PLANNING_TIMEOUT_MS,
@@ -1043,6 +1076,9 @@ export class CodexAdapter implements AgentAdapter {
       ...(this.platform === "win32"
         ? ["-c", `windows.sandbox="${this.windowsSandbox}"`]
         : []),
+      ...(this.effort === undefined
+        ? []
+        : ["-c", `model_reasoning_effort="${this.effort}"`]),
       "-C",
       workingDirectory,
       "--output-schema",
@@ -1067,6 +1103,9 @@ export class CodexAdapter implements AgentAdapter {
             ...(this.platform === "win32"
               ? ["-c", `windows.sandbox="${this.windowsSandbox}"`]
               : []),
+            ...(this.effort === undefined
+              ? []
+              : ["-c", `model_reasoning_effort="${this.effort}"`]),
             "--output-schema",
             schemaPath,
             "-",

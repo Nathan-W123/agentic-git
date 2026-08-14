@@ -929,6 +929,23 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE channel_messages ADD COLUMN ended_at TEXT`,
     ],
   },
+  {
+    // What this one task should run with, when it differs from the agent's
+    // configured default.
+    //
+    // The channel's per-agent model and reasoning pickers wrote to a table
+    // nothing read: name and role reached the dispatch, model and effort were
+    // stored and dropped, so changing them moved a control and nothing else.
+    // Carried on the task because that is what it describes — this request,
+    // run this way — rather than on the agent, which is deployment config and
+    // shared by every channel.
+    version: 31,
+    name: "submitted-task-model-effort",
+    statements: [
+      `ALTER TABLE submitted_tasks ADD COLUMN model TEXT`,
+      `ALTER TABLE submitted_tasks ADD COLUMN effort TEXT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

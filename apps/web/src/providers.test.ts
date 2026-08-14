@@ -23,6 +23,9 @@ import {
  * every number shown traces to a field a CLI actually emitted.
  */
 
+/** Mirrors `MODEL_VALUE` in providers.ts: what the settings route will take. */
+const MODEL_VALUE_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,99}$/u;
+
 interface Harness {
   project: CoordinatorProject;
   home: string;
@@ -209,6 +212,11 @@ test("openai options come from the account's own models cache and settings are v
   );
   assert.deepEqual(options.models?.[0]?.efforts, ["low", "high", "xhigh"]);
   assert.equal(options.allowCustomModel, false);
+  // A reported list is the authority, so nothing is suggested alongside it —
+  // a guess sitting next to the account's own answer is the exact confusion
+  // the separate field exists to prevent.
+  assert.equal(options.suggestedModels, undefined);
+  assert.equal(options.suggestedEfforts, undefined);
 
   await service.connect({ userId: "u", systemAdmin: true, provider: "openai" });
   await service.setSettings({
@@ -232,6 +240,115 @@ test("openai options come from the account's own models cache and settings are v
     (error: unknown) =>
       error instanceof ProviderChatError && error.code === "invalid_effort",
   );
+});
+
+test("openai with no cached model list stays usable instead of refusing everything", async () => {
+  // The shipped control plane is this case, not the one above: every Codex
+  // invocation runs against a throwaway CODEX_HOME, so nothing ever writes
+  // `~/.codex/models_cache.json` for `options()` to read. With no list, the
+  // settings validator's `?? false` rejected every effort — including the
+  // three the picker was offering — and `allowCustomModel: false` rejected
+  // every model name, so neither setting could be changed at all. Not knowing
+  // what a CLI supports is not the same as knowing a value is wrong.
+  const harness = await createHarness();
+  // Deliberately no seedCodexCache: this is a host that has never cached one.
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      codex: (args) =>
+        args[0] === "--version"
+          ? output("codex-cli 0.146.0")
+          : args[0] === "login"
+            ? output("Logged in using ChatGPT")
+            : output(""),
+    }),
+  });
+  const options = await service.options({ provider: "openai" });
+  assert.equal(options.models, null);
+  assert.equal(options.allowCustomModel, true);
+  // And it says why, rather than leaving the screen to invent a list.
+  assert.match(options.notes.join(" "), /has not cached a model list/u);
+  // Names worth offering, carried in their own field so nothing can render
+  // them as though the account had reported them. Both lists are non-empty,
+  // because a picker that suggests nothing is the bare text box this exists
+  // to avoid.
+  assert.ok((options.suggestedModels ?? []).length > 0);
+  assert.ok((options.suggestedEfforts ?? []).length > 0);
+  // Every suggestion must be a value the validator will actually accept —
+  // offering one that saves as a 400 is worse than offering none.
+  for (const effort of options.suggestedEfforts ?? []) {
+    assert.match(effort, /^[a-z][a-z0-9_-]{0,31}$/u, effort);
+  }
+
+  await service.connect({ userId: "u", systemAdmin: true, provider: "openai" });
+  const saved = await service.setSettings({
+    userId: "u",
+    provider: "openai",
+    model: "gpt-5.6-sol",
+    effort: "xhigh",
+  });
+  const openai = saved.find((entry) => entry.id === "openai");
+  assert.equal(openai?.model, "gpt-5.6-sol");
+  assert.equal(openai?.effort, "xhigh");
+
+  // Permissive, not credulous: the shape guards still hold.
+  await assert.rejects(
+    service.setSettings({
+      userId: "u",
+      provider: "openai",
+      effort: "not a level",
+    }),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "invalid_effort",
+  );
+  await assert.rejects(
+    service.setSettings({ userId: "u", provider: "openai", model: "../etc" }),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "invalid_model",
+  );
+});
+
+test("every provider offers a model list to pick from, cached or not", async () => {
+  // The property the pickers depend on, asserted here rather than left to the
+  // browser: a dropdown with nothing in it is the bug this whole thread of
+  // work is about, and it happened because `models` was allowed to be null
+  // with nothing standing behind it. Either the account reported a list or a
+  // suggested one is sent; never neither.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      ...CLAUDE_OK,
+      codex: (args) =>
+        args[0] === "--version" ? output("codex-cli 0.146.0") : output(""),
+      gemini: (args) => (args[0] === "--version" ? output("0.9.0") : output("")),
+    }),
+  });
+  for (const provider of ["anthropic", "openai", "google"] as const) {
+    const options = await service.options({ provider });
+    const models = options.models ?? options.suggestedModels ?? [];
+    assert.ok(
+      models.length > 0,
+      `${provider} offers no models at all: ${JSON.stringify(options)}`,
+    );
+    // Every entry is pickable and readable — an id the CLI takes, and a label
+    // that is not just the id repeated back when a nicer one exists.
+    for (const model of models) {
+      assert.match(model.id, MODEL_VALUE_SHAPE, `${provider}: ${model.id}`);
+      assert.ok((model.label ?? "").length > 0, `${provider}: ${model.id}`);
+    }
+  }
+
+  // Reasoning is the one setting that legitimately has no list: the Gemini
+  // CLI takes no effort flag at all, and the adapter refuses one. An empty
+  // list there means the row is not rendered, which is right — unlike Codex,
+  // where an empty list meant a label with nothing under it.
+  const anthropic = await service.options({ provider: "anthropic" });
+  assert.ok((anthropic.efforts ?? []).length > 0);
+  const openai = await service.options({ provider: "openai" });
+  assert.ok((openai.efforts ?? openai.suggestedEfforts ?? []).length > 0);
+  const google = await service.options({ provider: "google" });
+  assert.deepEqual(google.efforts ?? google.suggestedEfforts ?? [], []);
 });
 
 test("anthropic reports no model list when the CLI offers neither source", async () => {
