@@ -738,6 +738,86 @@ test("a proposed plan that reaches into work running elsewhere is refused", asyn
   }
 });
 
+test("a replan is refused rather than quietly narrowed", async () => {
+  // Partial admission is an answer to "what may this task start on", and a
+  // replan is past that: the agent is running inside an approved plan.
+  //
+  // Taking a narrower grant here would be worse than refusing. `revisedPlan`
+  // is what ownership is taken on and what the changeset is validated
+  // against, so a withheld file would sit *inside* the approved plan, pass
+  // the check, and reach canonical while another task held its lease. The
+  // authority is asked for all-or-nothing, and one that narrows anyway is
+  // refused rather than obeyed — which is what this stub does.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ReplanningAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      ["src/a.txt", "src/held.txt"],
+    );
+    const asked: (boolean | undefined)[] = [];
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      planAuthority: {
+        async admit(request) {
+          asked.push(request.partialAdmission);
+          if (!request.plan.expectedFiles.includes("src/held.txt")) {
+            return { outcome: "admitted", plan: request.plan };
+          }
+          // Ignores the all-or-nothing request on purpose.
+          return {
+            outcome: "admitted",
+            plan: { ...request.plan, expectedFiles: ["src/a.txt"] },
+            admission: {
+              status: "approved_with_constraints",
+              taskId: request.task.id,
+              planRevision: 1,
+              baseRevision: "b".repeat(40),
+              ownershipGrants: [],
+              constraints: [],
+              blockedBy: [],
+              conflicts: [],
+              deferredResources: [
+                {
+                  resourceType: "file",
+                  resourceId: "src/held.txt",
+                  heldBy: ["task_elsewhere"],
+                  reason: "held by task_elsewhere",
+                },
+              ],
+              explanation: "src/held.txt is leased to task_elsewhere",
+              decidedAt: new Date().toISOString(),
+            },
+          };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    // The replan asked for all-or-nothing rather than taking what it got.
+    assert.equal(asked.includes(false), true);
+    // Refused, so the agent stays on the plan it already had and finishes
+    // inside it — and src/held.txt never enters the approved plan at all.
+    assert.equal(agent.answers[0]?.decision, "rejected");
+    assert.match(agent.answers[0]?.explanation ?? "", /task_elsewhere/u);
+    assert.deepEqual(agent.answers[0]?.revisedPlan.expectedFiles, ["src/a.txt"]);
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(result.tasks[0]?.plan.expectedFiles.includes("src/held.txt"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /** Writes a file it was not granted, the way a real agent does under a split. */
 class OverreachingAgent extends TestAgent {
   public constructor(

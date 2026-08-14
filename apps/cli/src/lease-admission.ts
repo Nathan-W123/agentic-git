@@ -182,7 +182,15 @@ export class LeasePlanAuthority implements PlanAuthority {
       // A task that exists because an earlier admission was partial is decided
       // whole: one split per lineage is what stops a task shedding scope round
       // after round, paying for another agent run each time.
-      partialAdmission: !isDeferredScopeFollowUp(request.task.objective),
+      // The caller's veto first: a mid-execution replan cannot act on a
+      // narrower plan than it asked for, and offering one would write a
+      // reduced contract to the lease that the running agent knows nothing
+      // about. Then the lineage rule — one split per task, so a task cannot
+      // shed scope round after round, each round costing another agent run.
+      partialAdmission:
+        request.partialAdmission === false
+          ? false
+          : !isDeferredScopeFollowUp(request.task.objective),
       resourcesInFile: (file) => this.intelligence.resourcesInFile(index, file),
       symbolRangesInFile: (file) =>
         this.intelligence.symbolRangesInFile(index, file),

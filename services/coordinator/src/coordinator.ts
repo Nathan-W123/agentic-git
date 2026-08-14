@@ -483,6 +483,20 @@ export interface PlanAdmissionRequest {
    * widening is decided against every other holder first.
    */
   revising?: boolean;
+  /**
+   * Refuse rather than narrow: answer `deferred` where a partial grant would
+   * otherwise be offered.
+   *
+   * Set by the mid-execution callers. A partial admission is an answer to
+   * "what may this task start on", and both replan paths are past that — the
+   * agent is already running inside an approved plan. Handing one of them a
+   * narrower plan than it asked for means its contract, its ownership and the
+   * changeset it eventually returns are describing three different things,
+   * and the caller has no way to renegotiate with an agent mid-flight. A
+   * refusal is a real answer there: the agent keeps the plan it already had
+   * and carries on working inside it.
+   */
+  partialAdmission?: boolean;
 }
 
 export type PlanAuthorityDecision =
@@ -1975,11 +1989,27 @@ export class Coordinator {
             ? {}
             : { projectId: input.projectId }),
           revising: true,
+          // All-or-nothing: this agent is mid-execution and its old plan is
+          // still in force, so a refusal leaves it somewhere workable. A
+          // narrower grant would not — see below.
+          partialAdmission: false,
         });
         if (answer.outcome !== "admitted") {
           throw new Error(
             `The proposed plan overlaps work running elsewhere in this ` +
               `repository: ${answer.explanation}`,
+          );
+        }
+        // An authority that narrowed anyway is refused rather than obeyed.
+        // `revisedPlan` is what ownership is taken on and what the changeset
+        // is later held to, so accepting a narrower grant here would leave the
+        // withheld file inside the plan the validator checks against — it
+        // would pass, and reach canonical while another task holds its lease.
+        // Silently promoting somebody else's file is worse than this refusal.
+        if (answer.admission !== undefined) {
+          throw new Error(
+            `The proposed plan overlaps work running elsewhere in this ` +
+              `repository: ${answer.admission.explanation}`,
           );
         }
       }
@@ -2622,7 +2652,23 @@ export class Coordinator {
           // case the store lets a plan be rewritten — and only because the
           // rewrite has just been decided against every other holder.
           revising: true,
+          // The same all-or-nothing rule the comment above states for a
+          // deferral, applied to a narrower grant: both are "not the whole
+          // thing", and this caller can act on neither.
+          partialAdmission: false,
         });
+        if (answer.outcome === "admitted" && answer.admission !== undefined) {
+          // Refused for the reason the wave loop welcomes a partial grant and
+          // this path cannot: there, the reduced plan becomes the contract. On
+          // this path `revisedPlan` is what ownership is taken on and what the
+          // changeset is validated against, so a withheld file would sit
+          // inside the approved plan, pass the check, and land while another
+          // task holds its lease.
+          throw new Error(
+            `Scope expansion overlaps work running elsewhere in this ` +
+              `repository: ${answer.admission.explanation}`,
+          );
+        }
         if (answer.outcome !== "admitted") {
           throw new Error(
             `Scope expansion overlaps work running elsewhere in this ` +
