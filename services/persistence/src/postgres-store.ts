@@ -1656,31 +1656,51 @@ export class PostgresCoordinationStore implements CoordinationStore {
       validationCommands: input.validationCommands,
       submittedBy: input.submittedBy,
       context: input.context,
+      conversationId: input.conversationId,
       status: "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,
       completedAt: undefined,
+      openedAt: undefined,
       runId: undefined,
     };
 
-    await this.query(
-      `INSERT INTO submitted_tasks
-         (id, repository_id, project_id, objective, agent_id,
-          validation_commands_json, submitted_by, status, submitted_at,
-          context)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-      [
-        task.id,
-        task.repositoryId,
-        task.projectId ?? DEFAULT_PROJECT_ID,
-        task.objective,
-        task.agentId,
-        JSON.stringify(task.validationCommands),
-        task.submittedBy ?? null,
-        task.status,
-        task.submittedAt,
-        task.context ?? null,
-      ],
+    await this.transaction(
+      async (client) => {
+        // A new turn settles the conversation's previous one: its work
+        // already landed, and what it was waiting for has now arrived. One
+        // transaction with the insert, so "at most one open turn per
+        // conversation" cannot be caught false in between.
+        if (task.conversationId !== undefined) {
+          await client.query(
+            `UPDATE submitted_tasks
+             SET status = 'integrated', completed_at = $1
+             WHERE conversation_id = $2 AND status = 'open'`,
+            [task.submittedAt, task.conversationId],
+          );
+        }
+        await client.query(
+          `INSERT INTO submitted_tasks
+             (id, repository_id, project_id, objective, agent_id,
+              validation_commands_json, submitted_by, status, submitted_at,
+              context, conversation_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+          [
+            task.id,
+            task.repositoryId,
+            task.projectId ?? DEFAULT_PROJECT_ID,
+            task.objective,
+            task.agentId,
+            JSON.stringify(task.validationCommands),
+            task.submittedBy ?? null,
+            task.status,
+            task.submittedAt,
+            task.context ?? null,
+            task.conversationId ?? null,
+          ],
+        );
+      },
+      { serialize: true },
     );
     return task;
   }
@@ -1780,7 +1800,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const result = await this.query(
       `UPDATE submitted_tasks
        SET status = 'cancelled', completed_at = $1
-       WHERE id = $2 AND status IN ('submitted', 'claimed')`,
+       WHERE id = $2 AND status IN ('submitted', 'claimed', 'open')`,
       [completedAt, taskId],
     );
     if ((result.rowCount ?? 0) === 0) {
@@ -1832,6 +1852,65 @@ export class PostgresCoordinationStore implements CoordinationStore {
     }
   }
 
+  public async openSubmittedTask(taskId: TaskId, runId?: string): Promise<void> {
+    const result = await this.query(
+      `UPDATE submitted_tasks
+       SET status = 'open', opened_at = $1, run_id = $2
+       WHERE id = $3 AND status = 'claimed'`,
+      [new Date().toISOString(), runId ?? null, taskId],
+    );
+    if ((result.rowCount ?? 0) === 0) {
+      const current = await this.row(
+        "SELECT status FROM submitted_tasks WHERE id = $1",
+        [taskId],
+      );
+      if (current === undefined) {
+        throw new Error(`Unknown submitted task: ${taskId}`);
+      }
+      throw new Error(
+        `Task ${taskId} cannot be opened from status ${text(current, "status")}`,
+      );
+    }
+  }
+
+  public async expireOpenTasks(
+    cutoff: string,
+    filter: { repositoryId?: string } = {},
+  ): Promise<SubmittedTask[]> {
+    return await this.transaction(
+      async (client) => {
+        const values: unknown[] = [cutoff];
+        const repositoryClause =
+          filter.repositoryId === undefined
+            ? ""
+            : ` AND repository_id = ${bind(values, filter.repositoryId)}`;
+        const rows = (
+          await client.query(
+            `SELECT * FROM submitted_tasks
+             WHERE status = 'open' AND opened_at <= $1${repositoryClause}
+             ORDER BY submitted_at, seq`,
+            values,
+          )
+        ).rows as Row[];
+        const completedAt = new Date().toISOString();
+        for (const row of rows) {
+          await client.query(
+            `UPDATE submitted_tasks
+             SET status = 'integrated', completed_at = $1
+             WHERE id = $2 AND status = 'open'`,
+            [completedAt, text(row, "id")],
+          );
+        }
+        return rows.map((row) => ({
+          ...this.toSubmittedTask(row),
+          status: "integrated" as const,
+          completedAt,
+        }));
+      },
+      { serialize: true },
+    );
+  }
+
   private toSubmittedTask(row: Row): SubmittedTask {
     return {
       id: text(row, "id"),
@@ -1845,10 +1924,12 @@ export class PostgresCoordinationStore implements CoordinationStore {
       ),
       submittedBy: optionalText(row, "submitted_by"),
       context: optionalText(row, "context"),
+      conversationId: optionalText(row, "conversation_id"),
       status: text(row, "status") as SubmittedTaskStatus,
       submittedAt: text(row, "submitted_at"),
       claimedAt: optionalText(row, "claimed_at"),
       completedAt: optionalText(row, "completed_at"),
+      openedAt: optionalText(row, "opened_at"),
       runId: optionalText(row, "run_id"),
     };
   }

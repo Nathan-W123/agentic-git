@@ -11,8 +11,10 @@ import {
 import type { AgentAdapter } from "@coord/agent-protocol";
 import {
   Coordinator,
+  ConversationRegistry,
   approvalPolicyForProject,
   type ActionAuthority,
+  type CoordinatedTask,
   type PlanAuthority,
   type QuestionController,
 } from "@coord/coordinator";
@@ -58,6 +60,17 @@ const LOCAL_RUNNER_WORKER_NAME = "in-process-runner";
  * a lease that is genuinely still being worked on is reaped out from under it.
  */
 const LOCAL_LEASE_HEARTBEAT_MS = WORK_LEASE_TTL_MS / 5;
+
+/**
+ * How long a conversation may wait for its next message before it is over.
+ *
+ * Six hours, deliberately the same span the gateway treats a thread as
+ * current for (`THREAD_MERGE_MAX_AGE_MS`): a reply inside the window
+ * continues the conversation, a reply after it starts an ordinary task in
+ * the same thread — the two clocks describing "is this still going on"
+ * should not disagree with each other.
+ */
+const OPEN_CONVERSATION_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
 /**
  * The worker record this process leases work under, if one can be had.
@@ -455,6 +468,11 @@ export interface TaskSubmitOptions {
    * `SubmitTaskInput.context` in the persistence store.
    */
   context?: string;
+  /**
+   * The conversation this task is one turn of. See
+   * `SubmitTaskInput.conversationId` in the persistence store.
+   */
+  conversationId?: string;
 }
 
 export async function taskSubmit(
@@ -485,6 +503,9 @@ export async function taskSubmit(
     ...(options.context === undefined || options.context.trim() === ""
       ? {}
       : { context: options.context.trim() }),
+    ...(options.conversationId === undefined
+      ? {}
+      : { conversationId: options.conversationId }),
   });
 }
 
@@ -686,6 +707,17 @@ export interface RunOptions {
    * projects are unaffected.
    */
   credentialPolicy?: "host-login" | "refuse";
+  /**
+   * Where open conversations live between runs.
+   *
+   * A coordinator is built per run — its approval policy and plan authority
+   * belong to that run — so conversational continuity cannot live inside
+   * one. A long-lived host (the web app) makes one registry per process and
+   * passes it here; every run's coordinator then reads and feeds the same
+   * conversations. The CLI passes nothing: its process ends with the run,
+   * and a conversation's next turn simply starts cold from the thread.
+   */
+  conversations?: ConversationRegistry;
 }
 
 /**
@@ -802,6 +834,23 @@ export async function runPendingTasks(
   const canonical = toCanonical(repository);
   const projectId = options.projectId ?? DEFAULT_PROJECT_ID;
 
+  // Conversations whose silence has outlasted the deadline end before new
+  // work starts — the sweep is opportunistic, like every lease expiry in
+  // this codebase, because between turns nothing is ticking on its own. The
+  // store settles the rows; the registry, when there is one, releases the
+  // directories and sessions those conversations were keeping.
+  const expiredConversations = await store.expireOpenTasks(
+    new Date(Date.now() - OPEN_CONVERSATION_MAX_AGE_MS).toISOString(),
+    { repositoryId: repository.id },
+  );
+  for (const expired of expiredConversations) {
+    if (expired.conversationId !== undefined) {
+      await options.conversations
+        ?.endConversation(expired.conversationId)
+        .catch(() => undefined);
+    }
+  }
+
   // Leases first, claims only as a fallback. A leased task is one every other
   // run in this repository can see, which is what lets plan admission decide
   // between them; a merely claimed task is invisible, and two runs holding
@@ -885,7 +934,7 @@ export async function runPendingTasks(
     await mkdir(project.workspaceRoot, { recursive: true });
     await mkdir(project.integrationRoot, { recursive: true });
 
-    const tasks: Array<{ task: TaskDefinition; adapter: AgentAdapter }> = [];
+    const tasks: CoordinatedTask[] = [];
     for (const task of claimed) {
       const definition: TaskDefinition = {
         id: task.id,
@@ -921,6 +970,13 @@ export async function runPendingTasks(
           project.planningRoot,
           home?.env ?? process.env,
         ),
+        // One turn of a conversation, when the row says so: the coordinator
+        // resumes whatever the registry still holds for this id, and starts
+        // cold — same directory rules, fresh session — when it holds
+        // nothing, which is also what a restart looks like.
+        ...(task.conversationId === undefined
+          ? {}
+          : { conversationId: task.conversationId }),
       });
     }
 
@@ -953,6 +1009,9 @@ export async function runPendingTasks(
       ...(options.questions === undefined
         ? {}
         : { questions: options.questions }),
+      ...(options.conversations === undefined
+        ? {}
+        : { conversations: options.conversations }),
     });
     const result = await coordinator.run({
       repository: canonical,
@@ -971,7 +1030,17 @@ export async function runPendingTasks(
       } else {
         failed += 1;
       }
-      await store.completeSubmittedTask(entry.task.id, status, result.runId);
+      const source = claimed.find(
+        (candidate) => candidate.id === entry.task.id,
+      );
+      if (status === "integrated" && source?.conversationId !== undefined) {
+        // A conversational turn that landed leaves its task open — waiting
+        // for the next message, not finished. Before the lease settles, so
+        // no released arm can catch the row still claimed and requeue it.
+        await store.openSubmittedTask(entry.task.id, result.runId);
+      } else {
+        await store.completeSubmittedTask(entry.task.id, status, result.runId);
+      }
       const lease = leases.get(entry.task.id);
       if (lease !== undefined) {
         // Settled the moment the task is, not at the end of the run: the lease

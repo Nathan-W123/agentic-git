@@ -53,6 +53,8 @@ interface TestRuntime {
     actorId: string;
     /** The thread the request was asked inside, when it was asked inside one. */
     context?: string;
+    /** The thread root's id — the conversation every dispatch from it shares. */
+    conversationId?: string;
   }>;
   /**
    * Every prompt the fake `complete` was asked, and what it should answer —
@@ -331,12 +333,18 @@ async function startRuntime(
         ...(input.agentId === undefined ? {} : { agentId: input.agentId }),
         ...(input.vendor === undefined ? {} : { vendor: input.vendor }),
         ...(input.context === undefined ? {} : { context: input.context }),
+        ...(input.conversationId === undefined
+          ? {}
+          : { conversationId: input.conversationId }),
       });
       return await store.submitTask({
         projectId: input.projectId,
         repositoryId: input.repositoryId,
         objective: input.objective,
         ...(input.context === undefined ? {} : { context: input.context }),
+        ...(input.conversationId === undefined
+          ? {}
+          : { conversationId: input.conversationId }),
         // A real deployment resolves `vendor` to one of its own configured
         // agent ids (see `resolveAgentIdForVendor` in apps/web/src/index.ts);
         // the fixture only needs a stable, distinguishable id back.
@@ -4085,6 +4093,96 @@ test("a reply in a person's thread does not summon an agent", async (t) => {
     before,
     "a human thread must not spend somebody's model usage",
   );
+});
+
+test("a reply in an open thread continues the conversation, whoever it mentions", async (t) => {
+  // Stage four of docs/architecture/conversational-tasks.md: the open status
+  // is a routing rule. A thread whose task is open is a conversation between
+  // turns, and a work request replied into it goes back to the agent whose
+  // conversation it is — mentioning somebody else in the reply is content
+  // for the turn, not a re-assignment.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "open-thread-repo");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Keeper" },
+    })).status,
+    200,
+  );
+  assert.equal(
+    (await owner.request(`${base}/agents/openai`, {
+      method: "POST",
+      body: { name: "Other" },
+    })).status,
+    200,
+  );
+
+  runtime.chatAnswer.text = "On it — updating the retry helper.";
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Keeper please update the retry helper in src/retry.ts" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never dispatched a task",
+  );
+
+  const threadRoot = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.kind === "agent");
+  assert.ok(threadRoot !== undefined, "the dispatch never opened a thread");
+  // The first turn already carries the conversation — the thread root's own
+  // id — so the task it leaves behind can wait as `open`.
+  assert.equal(runtime.submittedTasks[0]?.conversationId, threadRoot.id);
+  assert.ok(threadRoot.taskId !== undefined, "the thread never got its task");
+
+  // The turn lands, the way the run loop lands a conversational turn: the
+  // claimed task goes open instead of terminal. The store row is what the
+  // replies route reads to route the next message.
+  await runtime.store.claimSubmittedTasks(repositoryId);
+  await runtime.store.openSubmittedTask(threadRoot.taskId);
+
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(threadRoot.id)}/replies`,
+    {
+      method: "POST",
+      body: { content: "@Other now update the config loader the same way" },
+    },
+  );
+  assert.equal(replied.status, 201);
+  await waitFor(
+    async () => runtime.submittedTasks.length > 1,
+    "the reply never continued the conversation",
+  );
+
+  // Same conversation, same agent — the mention of @Other rode along as
+  // content rather than redirecting the work.
+  assert.equal(runtime.submittedTasks[1]?.conversationId, threadRoot.id);
+  assert.equal(
+    runtime.submittedTasks[1]?.vendor,
+    runtime.submittedTasks[0]?.vendor,
+  );
+  assert.match(
+    runtime.submittedTasks[1]?.objective ?? "",
+    /config loader/u,
+  );
+  // And the next turn's submission settled the previous open one: at most
+  // one turn of a conversation is ever open.
+  const settled = (
+    await runtime.store.listSubmittedTasks({ repositoryId })
+  ).find((task) => task.id === threadRoot.taskId);
+  assert.equal(settled?.status, "integrated");
 });
 
 /*

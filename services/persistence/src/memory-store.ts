@@ -1124,6 +1124,19 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     if (input.submittedBy !== undefined) {
       this.requireUser(input.submittedBy);
     }
+    // A new turn settles the conversation's previous one: its work already
+    // landed, and what it was waiting for has now arrived.
+    if (input.conversationId !== undefined) {
+      for (const existing of this.submitted.values()) {
+        if (
+          existing.conversationId === input.conversationId &&
+          existing.status === "open"
+        ) {
+          existing.status = "integrated";
+          existing.completedAt = new Date().toISOString();
+        }
+      }
+    }
     const task: SubmittedTask = {
       id: createId("task"),
       repositoryId: input.repositoryId,
@@ -1133,10 +1146,12 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       validationCommands: copy(input.validationCommands),
       submittedBy: input.submittedBy,
       context: input.context,
+      conversationId: input.conversationId,
       status: "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,
       completedAt: undefined,
+      openedAt: undefined,
       runId: undefined,
     };
     this.submitted.set(task.id, task);
@@ -1201,7 +1216,12 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     if (task === undefined) {
       throw new Error(`Unknown submitted task: ${taskId}`);
     }
-    if (task.status !== "submitted" && task.status !== "claimed") {
+    if (
+      task.status !== "submitted" &&
+      task.status !== "claimed" &&
+      // "That's it, we're done" is exactly how an open conversation ends.
+      task.status !== "open"
+    ) {
       throw new Error(
         `Task ${taskId} cannot be cancelled from status ${task.status}`,
       );
@@ -1228,6 +1248,42 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     task.status = status;
     task.completedAt = new Date().toISOString();
     task.runId = runId;
+  }
+
+  public async openSubmittedTask(taskId: TaskId, runId?: string): Promise<void> {
+    const task = this.submitted.get(taskId);
+    if (task === undefined) {
+      throw new Error(`Unknown submitted task: ${taskId}`);
+    }
+    if (task.status !== "claimed") {
+      throw new Error(
+        `Task ${taskId} cannot be opened from status ${task.status}`,
+      );
+    }
+    task.status = "open";
+    task.openedAt = new Date().toISOString();
+    task.runId = runId;
+  }
+
+  public async expireOpenTasks(
+    cutoff: string,
+    filter: { repositoryId?: string } = {},
+  ): Promise<SubmittedTask[]> {
+    const expired: SubmittedTask[] = [];
+    for (const task of this.submitted.values()) {
+      if (
+        task.status === "open" &&
+        task.openedAt !== undefined &&
+        task.openedAt <= cutoff &&
+        (filter.repositoryId === undefined ||
+          task.repositoryId === filter.repositoryId)
+      ) {
+        task.status = "integrated";
+        task.completedAt = new Date().toISOString();
+        expired.push(copy(task));
+      }
+    }
+    return expired;
   }
 
   public async createRun(input: CreateRunInput): Promise<StoredRun> {

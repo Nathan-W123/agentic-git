@@ -743,4 +743,15 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
         ON direct_messages (project_id, recipient_id, read_at)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 28,
+    name: "conversational-tasks",
+    statements: [
+      `ALTER TABLE submitted_tasks ADD COLUMN conversation_id TEXT`,
+      `ALTER TABLE submitted_tasks ADD COLUMN opened_at TEXT`,
+      `CREATE INDEX submitted_tasks_conversation
+        ON submitted_tasks (conversation_id, status)`,
+    ],
+  },
 ];
