@@ -1642,7 +1642,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       submittedBy: input.submittedBy,
       context: input.context,
       conversationId: input.conversationId,
-      status: "submitted",
+      status: input.planOnly === true ? "planned" : "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,
       completedAt: undefined,
@@ -1792,7 +1792,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `UPDATE submitted_tasks
          SET status = 'cancelled', completed_at = ?
-         WHERE id = ? AND status IN ('submitted', 'claimed', 'open')`,
+         WHERE id = ? AND status IN ('submitted', 'claimed', 'planned', 'open')`,
       )
       .run(completedAt, taskId);
     if (result.changes === 0) {
@@ -1813,6 +1813,26 @@ export class SqliteCoordinationStore implements CoordinationStore {
       throw new Error(`Submitted task disappeared after cancellation: ${taskId}`);
     }
     return this.toSubmittedTask(row);
+  }
+
+  public async releasePlannedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    // One statement, so two "go ahead"s racing produce one release: the
+    // second finds no `planned` row to update and changes nothing.
+    const result = this.db
+      .prepare(
+        `UPDATE submitted_tasks SET status = 'submitted'
+         WHERE id = ? AND status = 'planned'`,
+      )
+      .run(taskId);
+    if (result.changes === 0) {
+      return undefined;
+    }
+    const row = this.db
+      .prepare("SELECT * FROM submitted_tasks WHERE id = ?")
+      .get(taskId) as Row | undefined;
+    return row === undefined ? undefined : this.toSubmittedTask(row);
   }
 
   public async completeSubmittedTask(
@@ -3075,6 +3095,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
       reactions: {},
       taskId: input.taskId,
       changedFiles: undefined,
+      pinnedAt: undefined,
+      pinnedBy: undefined,
+      endedAt: undefined,
     };
   }
 
@@ -3211,6 +3234,20 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .run(JSON.stringify(files), messageId, repositoryId);
   }
 
+  public async markChannelMessageEnded(
+    repositoryId: string,
+    messageId: string,
+  ): Promise<void> {
+    // First ending wins: a re-narrated run must not restamp the row and make
+    // the mark look like it belongs to the later pass.
+    this.db
+      .prepare(
+        `UPDATE channel_messages SET ended_at = ?
+         WHERE id = ? AND repository_id = ? AND ended_at IS NULL`,
+      )
+      .run(new Date().toISOString(), messageId, repositoryId);
+  }
+
   public async setChannelMessageTask(
     repositoryId: string,
     messageId: string,
@@ -3325,6 +3362,58 @@ export class SqliteCoordinationStore implements CoordinationStore {
       throw new Error(`Unknown channel message: ${messageId}`);
     }
     return message;
+  }
+
+  public async toggleChannelMessagePin(
+    repositoryId: string,
+    messageId: string,
+    userId: string,
+  ): Promise<ChannelMessage> {
+    const current = this.db
+      .prepare(
+        "SELECT pinned_at FROM channel_messages WHERE id = ? AND repository_id = ?",
+      )
+      .get(messageId, repositoryId) as Row | undefined;
+    if (current === undefined) {
+      throw new Error(`Unknown channel message: ${messageId}`);
+    }
+    if (optionalText(current, "pinned_at") === undefined) {
+      this.db
+        .prepare(
+          `UPDATE channel_messages SET pinned_at = ?, pinned_by = ?
+            WHERE repository_id = ? AND id = ?`,
+        )
+        .run(new Date().toISOString(), userId, repositoryId, messageId);
+    } else {
+      this.db
+        .prepare(
+          `UPDATE channel_messages SET pinned_at = NULL, pinned_by = NULL
+            WHERE repository_id = ? AND id = ?`,
+        )
+        .run(repositoryId, messageId);
+    }
+    const message = await this.getChannelMessage(repositoryId, messageId, userId);
+    if (message === undefined) {
+      throw new Error(`Unknown channel message: ${messageId}`);
+    }
+    return message;
+  }
+
+  public async listPinnedChannelMessages(
+    repositoryId: string,
+    viewerId: string,
+  ): Promise<ChannelMessage[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT * FROM channel_messages
+         WHERE repository_id = ? AND pinned_at IS NOT NULL
+         ORDER BY pinned_at, rowid`,
+      )
+      .all(repositoryId) as Row[];
+    return this.hydrateChannelMessages(
+      rows.map((row) => this.toChannelMessageBase(row)),
+      viewerId,
+    );
   }
 
   public async bumpChannelMessage(
@@ -3621,6 +3710,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
       createdAt: text(row, "created_at"),
       taskId: optionalText(row, "task_id"),
       changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
+      pinnedAt: optionalText(row, "pinned_at"),
+      pinnedBy: optionalText(row, "pinned_by"),
+      endedAt: optionalText(row, "ended_at"),
     };
   }
 

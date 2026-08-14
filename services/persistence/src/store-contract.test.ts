@@ -671,6 +671,141 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a planned task is unleasable until it is released`, async () => {
+    // The hold has to live in the status, because the status is what every
+    // lease query selects on. Parked as `submitted` it was ordinary queued
+    // work, and `leaseNextTask` takes the oldest queued row in a repository
+    // rather than the one its caller meant — so an unrelated dispatch ran
+    // work a person had explicitly declined to start.
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "planholder@example.com",
+        displayName: "Planner",
+        passwordDigest: "digest",
+      });
+      const worker = await store.registerWorker({
+        userId: user.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "worker-plan",
+        adapters: ["codex"],
+        version: "1",
+      });
+      await store.saveRepository(REPOSITORY);
+      const held = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "rewrite the auth module",
+        agentId: "codex",
+        validationCommands: [],
+        planOnly: true,
+      });
+      assert.equal(held.status, "planned");
+
+      // The queue cannot see it, even when it is the only task there is.
+      assert.equal(
+        await store.leaseNextTask({
+          workerId: worker.id,
+          repositoryId: REPOSITORY.id,
+          baseRevision: "rev_1",
+          ttlMs: 60_000,
+        }),
+        undefined,
+      );
+      // Nor by name: naming a task is not the same as approving it.
+      assert.equal(
+        await store.leaseNextTask({
+          workerId: worker.id,
+          taskId: held.id,
+          baseRevision: "rev_1",
+          ttlMs: 60_000,
+        }),
+        undefined,
+      );
+      assert.equal(
+        (await store.listSubmittedTasks({ status: "submitted" })).length,
+        0,
+      );
+
+      const released = await store.releasePlannedTask(held.id);
+      assert.equal(released?.status, "submitted");
+      // Releasing is the test as well as the write, so a second approval —
+      // two people saying "go ahead" at once — starts nothing further.
+      assert.equal(await store.releasePlannedTask(held.id), undefined);
+      assert.equal(await store.releasePlannedTask("task_missing"), undefined);
+
+      const leased = await store.leaseNextTask({
+        workerId: worker.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: "rev_1",
+        ttlMs: 60_000,
+      });
+      assert.equal(leased?.task.id, held.id);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a thread remembers that its ending went elsewhere`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const root = await store.appendChannelMessage({
+        repositoryId: REPOSITORY.id,
+        projectId: DEFAULT_PROJECT_ID,
+        kind: "agent",
+        authorId: "user_1:anthropic",
+        content: "On it.",
+      });
+      assert.equal(root.endedAt, undefined);
+
+      await store.markChannelMessageEnded(REPOSITORY.id, root.id);
+      const ended = await store.getChannelMessage(
+        REPOSITORY.id,
+        root.id,
+        "user_1",
+      );
+      assert.equal(typeof ended?.endedAt, "string");
+
+      // First ending wins, so a re-narrated run cannot restamp the row and
+      // make the mark look like it belongs to the later pass.
+      await store.markChannelMessageEnded(REPOSITORY.id, root.id);
+      assert.equal(
+        (await store.getChannelMessage(REPOSITORY.id, root.id, "user_1"))
+          ?.endedAt,
+        ended?.endedAt,
+      );
+
+      // Scoped to its repository, and silent about a message that is not
+      // there: this runs inside a narration loop that must not throw.
+      await store.markChannelMessageEnded("repo_elsewhere", root.id);
+      await store.markChannelMessageEnded(REPOSITORY.id, "chanmsg_missing");
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a plan nobody approved can still be cancelled`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const held = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "a plan thought better of",
+        agentId: "codex",
+        validationCommands: [],
+        planOnly: true,
+      });
+      const cancelled = await store.cancelSubmittedTask(held.id);
+      assert.equal(cancelled.status, "cancelled");
+      assert.equal(await store.releasePlannedTask(held.id), undefined);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: an open task is not requeued when its turn's lease ends`, async () => {
     // The lease is released at the end of each turn while the task stays
     // open — the released arm's requeue must not flip an open task back to
@@ -2993,6 +3128,101 @@ for (const backend of backends) {
         ["Can you look at the deploy?"],
       );
     } finally {
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: pinned channel messages toggle, survive paging, and die with the row`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_pins",
+        path: "/pins.git",
+        branch: "main",
+      });
+      const alice = await store.createUser({
+        email: "pin-alice@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+      const bob = await store.createUser({
+        email: "pin-bob@example.invalid",
+        displayName: "Bob",
+        passwordDigest: "unused",
+      });
+
+      const first = await store.appendChannelMessage({
+        repositoryId: "repo_pins",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "Decision: we ship on Friday.",
+      });
+      assert.equal(first.pinnedAt, undefined);
+      const pinned = await store.toggleChannelMessagePin(
+        "repo_pins",
+        first.id,
+        alice.id,
+      );
+      assert.ok(pinned.pinnedAt !== undefined);
+      assert.equal(pinned.pinnedBy, alice.id);
+
+      // Paging cannot lose a pin: the room moves on, the pin does not. The
+      // short gap keeps the timestamps from tying, as the pagination test
+      // below this one does.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const second = await store.appendChannelMessage({
+        repositoryId: "repo_pins",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: bob.id,
+        content: "Later chatter.",
+      });
+      const newestOnly = await store.listChannelMessages("repo_pins", bob.id, {
+        limit: 1,
+      });
+      assert.deepEqual(
+        newestOnly.map((message) => message.id),
+        [second.id],
+      );
+      const shelf = await store.listPinnedChannelMessages("repo_pins", bob.id);
+      assert.deepEqual(
+        shelf.map((message) => message.id),
+        [first.id],
+      );
+      assert.equal(shelf[0]?.pinnedBy, alice.id);
+
+      // Anyone may unpin — a pin is shared attention, not a lock.
+      const cleared = await store.toggleChannelMessagePin(
+        "repo_pins",
+        first.id,
+        bob.id,
+      );
+      assert.equal(cleared.pinnedAt, undefined);
+      assert.equal(cleared.pinnedBy, undefined);
+      assert.deepEqual(
+        await store.listPinnedChannelMessages("repo_pins", bob.id),
+        [],
+      );
+
+      // Re-pinning records the new pinner, and deletion takes the pin with
+      // the row — the columns live and die with the message.
+      const repinned = await store.toggleChannelMessagePin(
+        "repo_pins",
+        first.id,
+        bob.id,
+      );
+      assert.equal(repinned.pinnedBy, bob.id);
+      await store.deleteChannelMessage("repo_pins", first.id);
+      assert.deepEqual(
+        await store.listPinnedChannelMessages("repo_pins", bob.id),
+        [],
+      );
+
+      await assert.rejects(
+        store.toggleChannelMessagePin("repo_pins", "chanmsg_missing", alice.id),
+        /Unknown channel message/u,
+      );
+    } finally {
+      await store.close();
       await cleanup();
     }
   });

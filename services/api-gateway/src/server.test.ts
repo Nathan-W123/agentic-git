@@ -55,6 +55,8 @@ interface TestRuntime {
     context?: string;
     /** The thread root's id — the conversation every dispatch from it shares. */
     conversationId?: string;
+    /** Whether the dispatch asked for the work to be held, not queued. */
+    planOnly?: boolean;
   }>;
   /**
    * Every prompt the fake `complete` was asked, and what it should answer —
@@ -336,6 +338,7 @@ async function startRuntime(
         ...(input.conversationId === undefined
           ? {}
           : { conversationId: input.conversationId }),
+        ...(input.planOnly === undefined ? {} : { planOnly: input.planOnly }),
       });
       return await store.submitTask({
         projectId: input.projectId,
@@ -345,6 +348,10 @@ async function startRuntime(
         ...(input.conversationId === undefined
           ? {}
           : { conversationId: input.conversationId }),
+        // Carried through, because holding the row is the behaviour under
+        // test: a fixture that dropped this would file every plan as
+        // ordinary queued work and quietly pass.
+        ...(input.planOnly === true ? { planOnly: true } : {}),
         // A real deployment resolves `vendor` to one of its own configured
         // agent ids (see `resolveAgentIdForVendor` in apps/web/src/index.ts);
         // the fixture only needs a stable, distinguishable id back.
@@ -2601,6 +2608,76 @@ test("the repository channel round-trips messages, replies, reactions, reads, an
   assert.equal(missing.status, 404);
 });
 
+test("channel messages pin, surface in the payload, and unpin", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "pin-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "Deploy checklist lives here." },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const messageId = posted.data.message.id;
+
+  const pinned = await owner.request(`${base}/messages/${messageId}/pin`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(pinned.status, 200, JSON.stringify(pinned.data));
+  assert.equal(typeof pinned.data.message.pinnedAt, "string");
+  assert.equal(pinned.data.message.pinnedBy, bootstrapped.user.id);
+
+  // The channel payload carries the pinned list alongside the transcript, so
+  // the banner never depends on the pinned row being inside the page window.
+  const listed = await owner.request(`${base}/messages`);
+  assert.equal(listed.status, 200);
+  assert.equal(listed.data.pinned.length, 1);
+  assert.equal(listed.data.pinned[0].id, messageId);
+  assert.equal(listed.data.pinned[0].pinnedBy, bootstrapped.user.id);
+
+  const audit = await runtime.store.listAudit();
+  assert.ok(
+    audit.some(
+      (event) =>
+        event.type === "channel_message_pinned" &&
+        event.data["messageId"] === messageId &&
+        event.data["pinned"] === true &&
+        event.data["repositoryId"] === repositoryId,
+    ),
+  );
+
+  // The same route toggles: pinning again unpins, and the audit says so.
+  const unpinned = await owner.request(`${base}/messages/${messageId}/pin`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(unpinned.status, 200);
+  assert.equal(unpinned.data.message.pinnedAt, undefined);
+  assert.equal(unpinned.data.message.pinnedBy, undefined);
+
+  const cleared = await owner.request(`${base}/messages`);
+  assert.deepEqual(cleared.data.pinned, []);
+  const auditAfter = await runtime.store.listAudit();
+  assert.ok(
+    auditAfter.some(
+      (event) =>
+        event.type === "channel_message_pinned" &&
+        event.data["messageId"] === messageId &&
+        event.data["pinned"] === false,
+    ),
+  );
+
+  // Pinning a message that does not exist is a 404, not a crash.
+  const missing = await owner.request(`${base}/messages/does-not-exist/pin`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(missing.status, 404);
+});
+
 test("the repository channel is scoped by repository access, like everything else", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -4357,10 +4434,12 @@ test("a command and a mention work together, and /plan holds the run", async (t)
   assert.match(runtime.submittedTasks[0]?.objective ?? "", /rework the retry loop/u);
   assert.doesNotMatch(runtime.submittedTasks[0]?.objective ?? "", /\/plan/u);
 
-  // Filed, and deliberately not started: the queue does the waiting, so a
-  // held plan costs no lease, no workspace and no clock.
+  // Filed as held, and deliberately not started. `planned` rather than
+  // `submitted` is the whole point: `submitted` means "queued to run", which
+  // is what every lease query selects on, so a hold spelled that way was
+  // indistinguishable from ordinary queued work.
   const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
-  assert.equal(task?.status, "submitted");
+  assert.equal(task?.status, "planned");
   const root = (
     await runtime.store.listChannelMessages(repositoryId, ownerId)
   ).find((message) => message.kind === "agent");
@@ -4368,6 +4447,30 @@ test("a command and a mention work together, and /plan holds the run", async (t)
     (root?.replies ?? []).map((reply) => reply.content).join("\n"),
     /nothing is running yet/u,
   );
+
+  // The browser retires the typing dots by looking this task up in the list
+  // it polls and finding a status outside its working set. That only works if
+  // the list carries the task at all — a held plan filtered out of the API
+  // would leave `agentsThinkingIn` unable to find it, and the agent would
+  // show as thinking for the full ten-minute backstop underneath a message
+  // that says in words that nothing is running.
+  const listed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`,
+  );
+  assert.equal(listed.status, 200);
+  assert.equal(
+    (listed.data.tasks as Array<{ id: string; status: string }>).find(
+      (entry) => entry.id === task?.id,
+    )?.status,
+    "planned",
+    JSON.stringify(listed.data.tasks),
+  );
+  // And the filter knows the status, so asking for held work is not a 400.
+  const filtered = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks?status=planned`,
+  );
+  assert.equal(filtered.status, 200);
+  assert.equal((filtered.data.tasks as unknown[]).length, 1);
 
   // And "go ahead" is what starts it.
   const go = await owner.request(
@@ -4383,6 +4486,83 @@ test("a command and a mention work together, and /plan holds the run", async (t)
       /Starting now/u.test(reply.content),
     );
   }, "the approved plan never started");
+});
+
+test("an unrelated mention does not run somebody's held plan", async (t) => {
+  // The approval that comes *before* the work is paid for is the only one of
+  // its kind in the system, and it was being spent by strangers. A held plan
+  // sat in `submitted` — the status every lease query selects on — and
+  // `leaseNextTask` hands out the oldest queued row in the repository, not the
+  // one the caller had in mind. So the next person to mention any agent in the
+  // channel fired `runRepository`, which leased the older held plan and ran
+  // it, against its author's credential, with nobody having said go.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "held-plan");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  assert.equal(
+    (
+      await owner.request(`${base}/messages`, {
+        method: "POST",
+        body: { content: "/plan @Claude (Owner) rewrite the auth module" },
+      })
+    ).status,
+    201,
+  );
+  const held = (await runtime.store.listSubmittedTasks({ repositoryId }))[0];
+  assert.equal(held?.status, "planned");
+
+  // Somebody else's ordinary request, in the same channel, later.
+  assert.equal(
+    (
+      await owner.request(`${base}/messages`, {
+        method: "POST",
+        body: { content: "@Claude (Owner) fix the typo in the README" },
+      })
+    ).status,
+    201,
+  );
+  await waitFor(
+    async () =>
+      (await runtime.store.listSubmittedTasks({ repositoryId })).length === 2,
+    "the second mention never dispatched",
+  );
+
+  // The queue may hand out the typo fix. It must not hand out the plan: a
+  // lease naming the held task is the bypass itself.
+  const worker = await runtime.store.registerWorker({
+    userId: ownerId,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    name: "queue-probe",
+    adapters: [],
+    version: "1",
+  });
+  const leased = await runtime.store.leaseNextTask({
+    workerId: worker.id,
+    repositoryId,
+    baseRevision: "rev_1",
+    ttlMs: 60_000,
+  });
+  assert.notEqual(
+    leased?.task.id,
+    held?.id,
+    "a held plan was leased without anybody approving it",
+  );
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).find(
+      (task) => task.id === held?.id,
+    )?.status,
+    "planned",
+    "the held plan left the held status without an approval",
+  );
 });
 
 test("a slash inside a sentence is left alone, and /help answers", async (t) => {
@@ -6016,6 +6196,221 @@ test("a finished thread carries its summary and its line counts", async (t) => {
     { path: "worker.ts", status: "modified", added: 12, removed: 3 },
     { path: "worker.test.ts", status: "modified", added: 6, removed: 1 },
   ]);
+});
+
+test("a quick task ends as two lines in the room, with no thread at all", async (t) => {
+  // The counterpart of the test above, and the one that was missing while the
+  // feature it covers sat inert. Holding the ceremony is only half of it: the
+  // held set has to name *every* line that is true of all runs, and
+  // `plan_received` — the first thing narrated after the opening, traced by
+  // every planned turn — was not in it. So the first poll flushed the held
+  // opening into a thread and marked the run threaded before any ending
+  // existed, and "change this 1 to a 2" got the room, the title and the
+  // running commentary the whole mechanism was written to prevent.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "quicktask");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel`;
+  const mention = `Claude (${String(session.user.displayName).split(" ")[0]})`;
+
+  assert.equal(
+    (
+      await owner.request(`${base}/messages`, {
+        method: "POST",
+        body: { content: `@${mention} change the retry count to 2` },
+      })
+    ).status,
+    201,
+  );
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never dispatched a task",
+  );
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId: repo });
+  assert.ok(task !== undefined, "the dispatch stored no task");
+
+  // The whole life of an ordinary one-file run, in the order the coordinator
+  // traces it. Every one of these is true of every run that has ever
+  // succeeded, so not one of them is a reason to open a room.
+  for (const event of [
+    { type: "plan_received" as const, data: { expectedFiles: ["retry.ts"] } },
+    { type: "plan_admitted" as const, data: { status: "approved" } },
+    { type: "task_started" as const, data: {} },
+    {
+      type: "changeset_collected" as const,
+      data: {
+        changeSetId: "cs_quick",
+        files: ["retry.ts"],
+        changedFiles: [
+          { path: "retry.ts", status: "modified", added: 1, removed: 1 },
+        ],
+      },
+    },
+    {
+      type: "canonical_promoted" as const,
+      data: { files: ["retry.ts"], agentExplanation: "Changed the retry count to 2." },
+    },
+  ]) {
+    await runtime.store.appendAudit(undefined, {
+      type: event.type,
+      taskId: task.id,
+      data: event.data,
+    });
+  }
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.kind === "outcome");
+    },
+    "the run never produced an ending",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  // Two lines: the agent taking the work, and the agent reporting it done.
+  const ending = messages.find((message) => message.kind === "outcome");
+  assert.match(
+    String(ending?.content),
+    /Changed the retry count to 2\./u,
+    `the ending did not carry the agent's own words: ${JSON.stringify(ending)}`,
+  );
+  // And not one reply anywhere in the room. This is the assertion that fails
+  // the moment a run-generic event goes missing from the held set again.
+  assert.deepEqual(
+    messages.flatMap((message) =>
+      (message.replies ?? []).map((reply) => reply.content),
+    ),
+    [],
+    "a quick task was given a thread",
+  );
+});
+
+test("the sweep leaves a quiet task alone, and closes a thread its watcher abandoned", async (t) => {
+  // Two halves of one confusion. The sweep decides a thread still needs an
+  // ending from its replies, and a quick task's ending is deliberately not a
+  // reply — so it pasted a second, canned one underneath, duplicating the
+  // outcome and handing the task the room the narrator had spared it. And it
+  // reads the task's status to know an ending is due, but a landed
+  // conversational turn settles `open`, which was in no table here — so the
+  // orphaned threads this sweep exists for were skipped on every pass.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "sweeproom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel`;
+  const mention = `Claude (${String(session.user.displayName).split(" ")[0]})`;
+
+  assert.equal(
+    (
+      await owner.request(`${base}/messages`, {
+        method: "POST",
+        body: { content: `@${mention} fix the typo in the README` },
+      })
+    ).status,
+    201,
+  );
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never dispatched a task",
+  );
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId: repo });
+  assert.ok(task !== undefined);
+
+  await runtime.store.appendAudit(undefined, {
+    type: "task_started",
+    taskId: task.id,
+    data: {},
+  });
+  await runtime.store.appendAudit(undefined, {
+    type: "task_failed",
+    taskId: task.id,
+    data: { error: "npm test exited 1" },
+  });
+  await waitFor(
+    async () =>
+      (await runtime.store.listChannelMessages(repo, ownerId)).some(
+        (message) => message.kind === "outcome",
+      ),
+    "the quiet ending never reached the room",
+    8_000,
+  );
+
+  // The run is over and its watcher is gone — the state a restart leaves.
+  await runtime.store.claimSubmittedTasks(repo);
+  await runtime.store.completeSubmittedTask(task.id, "failed");
+  await (runtime.gateway as unknown as {
+    reconcileFinishedThreads(): Promise<void>;
+  }).reconcileFinishedThreads();
+
+  const swept = await runtime.store.listChannelMessages(repo, ownerId);
+  assert.deepEqual(
+    swept.flatMap((message) =>
+      (message.replies ?? []).map((reply) => reply.content),
+    ),
+    [],
+    "the sweep gave a thread to a task that had already reported in the room",
+  );
+  assert.equal(
+    swept.filter((message) => message.kind === "outcome").length,
+    1,
+    "the ending was said twice",
+  );
+
+  // And the other half: a thread that really was left mid-sentence, on a turn
+  // that landed conversationally and so sits `open`.
+  const stranded = await runtime.store.appendChannelMessage({
+    repositoryId: repo,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it.",
+  });
+  const turn = await runtime.store.submitTask({
+    repositoryId: repo,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "refactor the auth module",
+    agentId: "test-agent",
+    validationCommands: [],
+    conversationId: stranded.id,
+  });
+  await runtime.store.setChannelMessageTask(repo, stranded.id, turn.id);
+  await runtime.store.addChannelReply({
+    repositoryId: repo,
+    messageId: stranded.id,
+    authorId: `${ownerId}:anthropic`,
+    content: "Working on it…",
+    kind: "progress",
+  });
+  await runtime.store.claimSubmittedTasks(repo);
+  await runtime.store.openSubmittedTask(turn.id);
+
+  await (runtime.gateway as unknown as {
+    reconcileFinishedThreads(): Promise<void>;
+  }).reconcileFinishedThreads();
+
+  const closed = (
+    await runtime.store.listChannelMessages(repo, ownerId)
+  ).find((message) => message.id === stranded.id);
+  assert.ok(
+    (closed?.replies ?? []).some((reply) => reply.kind === "outcome"),
+    `an orphaned open turn was never given an ending: ${JSON.stringify(
+      closed?.replies,
+    )}`,
+  );
 });
 
 test("a mention nobody answers to says so, instead of vanishing", async (t) => {

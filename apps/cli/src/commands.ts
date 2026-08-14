@@ -473,6 +473,11 @@ export interface TaskSubmitOptions {
    * `SubmitTaskInput.conversationId` in the persistence store.
    */
   conversationId?: string;
+  /**
+   * File this as held rather than queued. See `SubmitTaskInput.planOnly` in
+   * the persistence store.
+   */
+  planOnly?: boolean;
 }
 
 export async function taskSubmit(
@@ -506,6 +511,7 @@ export async function taskSubmit(
     ...(options.conversationId === undefined
       ? {}
       : { conversationId: options.conversationId }),
+    ...(options.planOnly === true ? { planOnly: true } : {}),
   });
 }
 

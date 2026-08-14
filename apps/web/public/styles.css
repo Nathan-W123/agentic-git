@@ -3954,8 +3954,85 @@ svg {
 
 .chan-main > .chan-head,
 .chan-main > .chan-search,
+.chan-main > .chan-pins,
 .chan-main > .chan-composer-wrap {
   flex: none;
+}
+
+/* What the channel decided not to lose: a slim shelf between the toolbar
+   and the messages. One header line collapsed; a bounded, scrollable list
+   open — many pins must never squeeze the conversation itself out. */
+.chan-pins {
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-card-2);
+}
+
+.chan-pins-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 14px;
+  background: none;
+  border: none;
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chan-pins-head svg {
+  width: 14px;
+  height: 14px;
+}
+
+.chan-pins-head .spacer {
+  flex: 1;
+}
+
+.chan-pins-list {
+  max-height: 132px;
+  overflow-y: auto;
+  padding: 0 8px 6px;
+}
+
+.chan-pin-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chan-pin-jump {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chan-pin-jump:hover {
+  background: var(--bg-hover);
+}
+
+.chan-pin-jump .cp-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chan-pin-jump .cp-time {
+  margin-left: auto;
+  flex: none;
+  color: var(--text-4);
+  font-size: 11px;
 }
 
 .chan-head {
@@ -4729,6 +4806,17 @@ body.resizing-panel {
   border-bottom: 1px solid var(--border-soft);
   font-size: 13.5px;
   font-weight: 600;
+}
+
+/* The thread's subject, in the slot that used to say "Thread". Ellipsized
+   rather than wrapped: a header is a label, and a long title would push the
+   panel's controls out of reach — the full text rides the tooltip. */
+.thread-head .thread-title {
+  min-width: 0;
+  flex: 0 1 auto;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
 }
 
 .thread-head .spacer {
@@ -6044,15 +6132,19 @@ dialog.modal::backdrop {
   background: var(--bg-hover);
 }
 
+/* The subject leads the row now; who and when are the metadata beneath it.
+   Same classes, swapped weights — the row was agent-first and readers scan
+   this log for a piece of work, not for a colleague. */
 .ti-top {
   display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 12px;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
 }
 
 .ti-who {
-  font-weight: 600;
+  font-weight: 400;
+  color: var(--text-2);
 }
 
 .ti-time {
@@ -6061,8 +6153,9 @@ dialog.modal::backdrop {
 }
 
 .ti-text {
-  font-size: 12.5px;
-  color: var(--text-2);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;

@@ -1657,7 +1657,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       submittedBy: input.submittedBy,
       context: input.context,
       conversationId: input.conversationId,
-      status: "submitted",
+      status: input.planOnly === true ? "planned" : "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,
       completedAt: undefined,
@@ -1800,7 +1800,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const result = await this.query(
       `UPDATE submitted_tasks
        SET status = 'cancelled', completed_at = $1
-       WHERE id = $2 AND status IN ('submitted', 'claimed', 'open')`,
+       WHERE id = $2 AND status IN ('submitted', 'claimed', 'planned', 'open')`,
       [completedAt, taskId],
     );
     if ((result.rowCount ?? 0) === 0) {
@@ -1825,6 +1825,20 @@ export class PostgresCoordinationStore implements CoordinationStore {
       );
     }
     return this.toSubmittedTask(row);
+  }
+
+  public async releasePlannedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    // Returning the row from the UPDATE itself, so the release and the read
+    // of what was released cannot straddle another writer.
+    const row = await this.row(
+      `UPDATE submitted_tasks SET status = 'submitted'
+       WHERE id = $1 AND status = 'planned'
+       RETURNING *`,
+      [taskId],
+    );
+    return row === undefined ? undefined : this.toSubmittedTask(row);
   }
 
   public async completeSubmittedTask(
@@ -3103,6 +3117,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
       reactions: {},
       taskId: input.taskId,
       changedFiles: undefined,
+      pinnedAt: undefined,
+      pinnedBy: undefined,
+      endedAt: undefined,
     };
   }
 
@@ -3322,6 +3339,54 @@ export class PostgresCoordinationStore implements CoordinationStore {
     return message;
   }
 
+  public async toggleChannelMessagePin(
+    repositoryId: string,
+    messageId: string,
+    userId: string,
+  ): Promise<ChannelMessage> {
+    const current = await this.row(
+      "SELECT pinned_at FROM channel_messages WHERE id = $1 AND repository_id = $2",
+      [messageId, repositoryId],
+    );
+    if (current === undefined) {
+      throw new Error(`Unknown channel message: ${messageId}`);
+    }
+    if (optionalText(current, "pinned_at") === undefined) {
+      await this.query(
+        `UPDATE channel_messages SET pinned_at = $1, pinned_by = $2
+          WHERE repository_id = $3 AND id = $4`,
+        [new Date().toISOString(), userId, repositoryId, messageId],
+      );
+    } else {
+      await this.query(
+        `UPDATE channel_messages SET pinned_at = NULL, pinned_by = NULL
+          WHERE repository_id = $1 AND id = $2`,
+        [repositoryId, messageId],
+      );
+    }
+    const message = await this.getChannelMessage(repositoryId, messageId, userId);
+    if (message === undefined) {
+      throw new Error(`Unknown channel message: ${messageId}`);
+    }
+    return message;
+  }
+
+  public async listPinnedChannelMessages(
+    repositoryId: string,
+    viewerId: string,
+  ): Promise<ChannelMessage[]> {
+    const rows = await this.rows(
+      `SELECT * FROM channel_messages
+       WHERE repository_id = $1 AND pinned_at IS NOT NULL
+       ORDER BY pinned_at, id`,
+      [repositoryId],
+    );
+    return await this.hydrateChannelMessages(
+      rows.map((row) => this.toChannelMessageBase(row)),
+      viewerId,
+    );
+  }
+
   public async listChannelAgentOverrides(
     repositoryId: string,
   ): Promise<Record<string, ChannelAgentOverride>> {
@@ -3523,6 +3588,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
       createdAt: text(row, "created_at"),
       taskId: optionalText(row, "task_id") as TaskId | undefined,
       changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
+      pinnedAt: optionalText(row, "pinned_at"),
+      pinnedBy: optionalText(row, "pinned_by"),
+      endedAt: optionalText(row, "ended_at"),
     };
   }
 
@@ -3535,6 +3603,19 @@ export class PostgresCoordinationStore implements CoordinationStore {
       `UPDATE channel_messages SET changed_files_json = $1
        WHERE id = $2 AND repository_id = $3`,
       [JSON.stringify(files), messageId, repositoryId],
+    );
+  }
+
+  public async markChannelMessageEnded(
+    repositoryId: string,
+    messageId: string,
+  ): Promise<void> {
+    // First ending wins: a re-narrated run must not restamp the row and make
+    // the mark look like it belongs to the later pass.
+    await this.query(
+      `UPDATE channel_messages SET ended_at = $1
+       WHERE id = $2 AND repository_id = $3 AND ended_at IS NULL`,
+      [new Date().toISOString(), messageId, repositoryId],
     );
   }
 

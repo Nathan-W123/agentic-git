@@ -390,6 +390,18 @@ export interface AuthSessionRecord {
 export type SubmittedTaskStatus =
   | "submitted"
   | "claimed"
+  /**
+   * Planned, and waiting on a person before it may run.
+   *
+   * Distinct from `submitted` because that status means "queued to run", and
+   * every lease query is written against it. A `/plan` task parked as
+   * `submitted` was picked up by the next unrelated dispatch in the same
+   * repository — `leaseNextTask` takes the oldest queued row, not the one the
+   * caller had in mind — so work a person had explicitly not approved ran
+   * anyway, on their credential. Held work is a different thing from queued
+   * work and now says so.
+   */
+  | "planned"
   | "open"
   | "integrated"
   | "failed"
@@ -430,6 +442,15 @@ export interface SubmitTaskInput {
    * rather than by every caller remembering to close the last one.
    */
   conversationId?: string;
+  /**
+   * File this task as `planned` rather than `submitted`: intent recorded, and
+   * nothing may run it until a person releases it.
+   *
+   * Set at insert rather than by holding the row afterwards, because the gap
+   * between the two is exactly long enough for another dispatch's
+   * `runRepository` to lease it.
+   */
+  planOnly?: boolean;
 }
 
 export interface SubmittedTask {
@@ -762,6 +783,23 @@ export interface ChannelMessage {
    * task changed nothing, which is a different statement.
    */
   changedFiles: ChannelChangedFile[] | undefined;
+  /** When somebody pinned this message to the channel's banner, if anyone has. */
+  pinnedAt: string | undefined;
+  /**
+   * Who pinned it. Anyone who can view the channel may pin, and anyone may
+   * unpin — a pin is shared attention, not moderation — so this is a record
+   * of who flagged it, not a lock on who may clear it.
+   */
+  pinnedBy: UserId | undefined;
+  /**
+   * When this thread's task was given its ending outside the thread.
+   *
+   * A quick task ends as its own line in the channel rather than as a reply,
+   * which leaves the root looking like a thread that was never finished. This
+   * says otherwise, so the sweep that closes threads orphaned by a restart
+   * does not paste a second, canned ending under work that already reported.
+   */
+  endedAt: string | undefined;
 }
 
 /**
@@ -1247,6 +1285,16 @@ export interface CoordinationStore {
   /** Explicitly returns a claimed or failed task to the pending queue. */
   retrySubmittedTask(taskId: TaskId): Promise<SubmittedTask>;
   cancelSubmittedTask(taskId: TaskId): Promise<SubmittedTask>;
+  /**
+   * Releases a `planned` task into the queue, because a person said go.
+   *
+   * Returns undefined when the task is not held — already released, already
+   * running, gone — so an approval arriving twice, or arriving for work that
+   * was never held, is answered as ordinary conversation rather than starting
+   * something a second time. The status test and the write are one step for
+   * the same reason: two "go ahead"s racing must produce one run.
+   */
+  releasePlannedTask(taskId: TaskId): Promise<SubmittedTask | undefined>;
   completeSubmittedTask(
     taskId: TaskId,
     status: SubmittedTaskCompletionStatus,
@@ -1414,6 +1462,18 @@ export interface CoordinationStore {
     files: readonly ChannelChangedFile[],
   ): Promise<void>;
   /**
+   * Records that this thread's task was ended somewhere other than in it.
+   *
+   * Written by the narrator when a task finishes too small to deserve a
+   * thread, so the ending goes into the channel as its own line. Without it
+   * the root is indistinguishable from a thread whose watcher died, and the
+   * orphan sweep gives it an ending it already has.
+   */
+  markChannelMessageEnded(
+    repositoryId: string,
+    messageId: string,
+  ): Promise<void>;
+  /**
    * Records which task a thread is the story of.
    *
    * Set after the fact rather than when the thread opens, because the thread
@@ -1440,6 +1500,28 @@ export interface CoordinationStore {
     userId: UserId,
     emoji: string,
   ): Promise<ChannelMessage>;
+  /**
+   * Pins when unpinned, unpins when pinned. The reactions rule: anyone who
+   * can view the channel may do either, and the pinner is recorded rather
+   * than privileged.
+   */
+  toggleChannelMessagePin(
+    repositoryId: string,
+    messageId: string,
+    userId: UserId,
+  ): Promise<ChannelMessage>;
+  /**
+   * Every pinned message in one channel, oldest pin first.
+   *
+   * Its own read, unbounded by {@link listChannelMessages}'s 200-row page:
+   * a pin exists precisely so a message survives the room moving on, and a
+   * banner that lost pins because the room kept talking would be the exact
+   * failure pinning exists to prevent.
+   */
+  listPinnedChannelMessages(
+    repositoryId: string,
+    viewerId: UserId,
+  ): Promise<ChannelMessage[]>;
   /**
    * Moves a message to the foot of the channel without changing when it was
    * said.
