@@ -646,10 +646,6 @@ function topbar() {
         ? `<span class="health"><span class="dot grey"></span>Control plane unreachable</span>`
         : ""
     }
-    <button class="icon-btn bell" data-act="nav" data-value="notifications"
-      title="Notifications" aria-label="Notifications">
-      ${icon("bell")}${unread > 0 ? `<span class="dot-badge">${unread}</span>` : ""}
-    </button>
     <button data-act="user-menu" title="${esc(user)}">${avatar(user, 32, user, myAvatar())}</button>
   </header>`;
 }

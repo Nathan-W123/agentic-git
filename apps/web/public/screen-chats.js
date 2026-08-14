@@ -554,7 +554,6 @@ function chanSidebar(activeRepositoryId) {
       title="Settings">
       ${brandMark(26)}
       <span class="brand-text"><b>Lattice</b></span>
-      ${icon("gear", 'class="chan-brand-gear"')}
     </button>
     <div class="chan-sidebar-head">
       ${searchBox("Search channels...", state.chatQuery, "channel-search")}

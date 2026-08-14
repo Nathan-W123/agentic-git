@@ -948,6 +948,9 @@ svg {
 .page {
   padding: 34px 40px 48px;
   max-width: 1320px;
+  /* Centered. The cap used to lean against the rail; with the rail gone it
+     hugged the left edge of a full-width main. */
+  margin: 0 auto;
 }
 
 .page-head {
@@ -3410,7 +3413,10 @@ svg {
   width: 268px;
   flex: none;
   display: grid;
-  grid-template-rows: auto auto 1fr;
+  /* Brand, search, channels, then the roster takes what remains — so Users
+     starts directly under the last channel instead of being shoved to the
+     floor by a stretched channel list. The list caps and scrolls instead. */
+  grid-template-rows: auto auto auto 1fr;
   min-height: 0;
   background: var(--bg-panel);
   border-right: 1px solid var(--border-soft);
@@ -3449,6 +3455,7 @@ svg {
 
 .chan-list {
   overflow-y: auto;
+  max-height: 38vh;
   padding: 2px 8px 10px;
   display: grid;
   gap: 2px;
