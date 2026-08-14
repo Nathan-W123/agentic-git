@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import os from "node:os";
 import {
   mkdir,
   open,
@@ -16,6 +17,14 @@ interface LockOwner {
   instanceId: string;
   pid: number;
   startedAt: string;
+  /**
+   * Which machine wrote it. A pid is only meaningful on the host that issued
+   * it, and this lock lives on a volume that outlives the container holding
+   * it -- so a redeploy read the previous container pid and tested it in its
+   * own namespace, where low pids always exist. A container is pid 1, so the
+   * arriving instance found *itself* and refused to start, every time.
+   */
+  hostname?: string;
 }
 
 export interface ControlPlaneLock {
@@ -64,11 +73,39 @@ async function readOwner(lockPath: string): Promise<LockOwner | undefined> {
 
 async function removeStaleLock(lockPath: string): Promise<boolean> {
   const owner = await readOwner(lockPath);
-  if (owner !== undefined && processIsRunning(owner.pid)) {
+  // Only ask about a pid this machine could have issued. Asking otherwise is
+  // not merely unreliable, it is reliably wrong: the lock outlives the
+  // container that wrote it, every container starts at pid 1, and the
+  // arriving instance therefore finds a live process every time and refuses
+  // to start — a permanent crash loop on redeploy, cleared only by deleting
+  // the file by hand.
+  //
+  // Only a *stated* other host disables the pid check. A lock with no hostname
+  // predates this field and was almost certainly written here, so it keeps the
+  // old behaviour rather than being held for the grace period on the strength
+  // of a missing key.
+  const foreignHost =
+    owner?.hostname !== undefined && owner.hostname !== os.hostname();
+  if (owner !== undefined && !foreignHost && processIsRunning(owner.pid)) {
     throw new Error(
       `A coordinator control plane is already running for this project ` +
         `(PID ${owner.pid}, started ${owner.startedAt})`,
     );
+  }
+  if (owner !== undefined && foreignHost) {
+    // Another machine's lock. It cannot be probed, so age decides: a holder
+    // that is still alive rewrites this file as it runs, and one that is gone
+    // leaves it to go stale.
+    const metadata = await stat(lockPath).catch(() => undefined);
+    if (
+      metadata !== undefined &&
+      Date.now() - metadata.mtimeMs < INCOMPLETE_LOCK_GRACE_MS
+    ) {
+      throw new Error(
+        `A coordinator control plane on ${owner.hostname ?? "another host"} ` +
+          "holds this project and is still reporting",
+      );
+    }
   }
   if (owner === undefined) {
     try {
@@ -111,6 +148,7 @@ export async function acquireControlPlaneLock(
     instanceId: randomUUID(),
     pid: process.pid,
     startedAt: new Date().toISOString(),
+    hostname: os.hostname(),
   };
   let handle: FileHandle | undefined;
   for (let attempt = 0; attempt < 3; attempt += 1) {
