@@ -4448,6 +4448,30 @@ test("a command and a mention work together, and /plan holds the run", async (t)
     /nothing is running yet/u,
   );
 
+  // The browser retires the typing dots by looking this task up in the list
+  // it polls and finding a status outside its working set. That only works if
+  // the list carries the task at all — a held plan filtered out of the API
+  // would leave `agentsThinkingIn` unable to find it, and the agent would
+  // show as thinking for the full ten-minute backstop underneath a message
+  // that says in words that nothing is running.
+  const listed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks`,
+  );
+  assert.equal(listed.status, 200);
+  assert.equal(
+    (listed.data.tasks as Array<{ id: string; status: string }>).find(
+      (entry) => entry.id === task?.id,
+    )?.status,
+    "planned",
+    JSON.stringify(listed.data.tasks),
+  );
+  // And the filter knows the status, so asking for held work is not a 400.
+  const filtered = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/tasks?status=planned`,
+  );
+  assert.equal(filtered.status, 200);
+  assert.equal((filtered.data.tasks as unknown[]).length, 1);
+
   // And "go ahead" is what starts it.
   const go = await owner.request(
     `${base}/messages/${encodeURIComponent(root?.id ?? "")}/replies`,

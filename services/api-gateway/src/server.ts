@@ -1277,6 +1277,7 @@ const ROLES: readonly OrganizationRole[] = [
 const TASK_STATUSES: readonly SubmittedTaskStatus[] = [
   "submitted",
   "claimed",
+  "planned",
   "open",
   "integrated",
   "failed",
