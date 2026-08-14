@@ -448,6 +448,19 @@ const CHANNEL_PROGRESS_MAX_MS = 60 * 60 * 1000;
 const CHANNEL_CEREMONIAL_EVENTS = new Set([
   "task_started",
   "agent_progress",
+  // Every planned run has a plan, so saying it has one distinguishes nothing.
+  // Its absence from this set quietly made the whole feature inert: the
+  // coordinator traces `plan_received` on every planned turn
+  // (`coordinator.ts`, and each of the worker paths), it is the *first* thing
+  // narrated after the held opening, and being neither ceremonial nor an
+  // admission it fell straight through to the flush below — so `threaded`
+  // was already true by the time any ending arrived, and the branch that ends
+  // a quick task as two lines in the channel could only ever be reached by a
+  // run that died before it planned. Both spellings are held: "Planning
+  // changes to a.ts, b.ts" names files, but naming them is still just the
+  // shape of every plan, and the file list reaches the reader anyway on the
+  // outcome's own changed-file summary.
+  "plan_received",
   // The ordinary body of every clean run. Each of these is true of a task
   // that changed one word, and any one of them opening a thread is how
   // "change this 1 to a 2" got a room of its own again — the referee's
