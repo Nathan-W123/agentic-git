@@ -636,18 +636,45 @@ function previewRunning(repositoryId) {
     : undefined;
 }
 
+/**
+ * Why the last preview of this repository stopped, if it stopped on its own.
+ *
+ * A preview that fails to come up at all is reported as an error the moment it
+ * is asked for. This is the other case: one that ran, was watched, and then
+ * died — which the control cannot show by flipping back to "play", because that
+ * is also what it looks like before anything was ever started.
+ */
+function previewStopped(repositoryId) {
+  const preview = state.previews[repositoryId];
+  return preview !== null && preview !== undefined && preview.exited !== undefined
+    ? preview
+    : undefined;
+}
+
 /** The control, which lives in the tool tray with its siblings. */
 function previewControl(repositoryId) {
   if (!repositoryId) {
     return "";
   }
-  return previewRunning(repositoryId) === undefined
-    ? `<button type="button" class="icon-btn" data-act="preview-start"
-        data-value="${esc(repositoryId)}" title="Run this app and open it">
-        ${icon("play")}</button>`
-    : `<button type="button" class="icon-btn on" data-act="preview-stop"
+  if (previewRunning(repositoryId) !== undefined) {
+    return `<button type="button" class="icon-btn on" data-act="preview-stop"
         data-value="${esc(repositoryId)}" title="Stop the running app">
         ${icon("close")}</button>`;
+  }
+  const stopped = previewStopped(repositoryId);
+  // The output is the diagnosis and it is the only copy: nothing else in the
+  // page renders it, so a dead preview used to be indistinguishable from one
+  // that was never started.
+  const why =
+    stopped === undefined
+      ? "Run this app and open it"
+      : `${stopped.label} stopped — ${
+          (stopped.recentOutput ?? []).slice(-3).join(" ").trim() ||
+          "it printed nothing"
+        }. Press to run it again.`;
+  return `<button type="button" class="icon-btn${stopped === undefined ? "" : " warn"}"
+      data-act="preview-start" data-value="${esc(repositoryId)}"
+      title="${esc(why)}">${icon("play")}</button>`;
 }
 
 /** The address, which stays in the header because it is state, not a control. */

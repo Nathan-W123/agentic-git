@@ -518,6 +518,12 @@ svg {
   color: var(--accent-bright);
 }
 
+/* Ready to run again, but the last attempt stopped on its own. Colour only —
+   the control does the same thing either way, and the reason is in its title. */
+.icon-btn.warn {
+  color: var(--warn, #f59e0b);
+}
+
 .icon-btn.sm svg {
   width: 14px;
   height: 14px;

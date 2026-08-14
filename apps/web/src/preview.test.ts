@@ -4,7 +4,11 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { isStaticSite, startStaticServer } from "./preview.js";
+import { repoAdd } from "@coord/cli/commands";
+import { CoordinatorProject } from "@coord/cli/project";
+import { RepositoryService } from "@coord/repository-service";
+
+import { isStaticSite, PreviewService, startStaticServer } from "./preview.js";
 
 /**
  * The static preview exists so a page with nothing that builds it can be
@@ -109,6 +113,92 @@ test("a directory with no index page is not a static site", async () => {
     await writeFile(path.join(root, "main.py"), "print('hi')\n", "utf8");
     assert.equal(await isStaticSite(root), false);
   } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A preview that never comes up must say so.
+ *
+ * Reported from a real attempt: pressing play on a monorepo produced a success
+ * toast naming a URL, a control flipped to "stop", and a link that answered
+ * nothing. Detection had fallen through `dev` to a `start` script reading
+ * `node dist/index.js`, and `dist` is a build output — which a fresh checkout
+ * of canonical does not contain, because that is what `.gitignore` is for. The
+ * process died in milliseconds and the status had already been returned.
+ */
+
+/** A repository whose `start` script points at something that is not there. */
+async function unbuiltRepository(): Promise<{
+  root: string;
+  sourcePath: string;
+  project: CoordinatorProject;
+}> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "preview-start-"));
+  const sourcePath = path.join(root, "src-repo");
+  const repositories = new RepositoryService();
+  await repositories.initializeWorkingRepository(sourcePath);
+  await writeFile(
+    path.join(sourcePath, "package.json"),
+    `${JSON.stringify({
+      name: "unbuilt",
+      private: true,
+      type: "module",
+      // No `dev`, so detection falls through to `start` exactly as it did.
+      scripts: { start: "node dist/index.js" },
+    })}\n`,
+    "utf8",
+  );
+  // Deliberately not committed, and named by .gitignore, so the worktree the
+  // preview checks out has neither the build output nor a way to make one.
+  await writeFile(path.join(sourcePath, ".gitignore"), "dist/\n", "utf8");
+  await mkdir(path.join(sourcePath, "dist"), { recursive: true });
+  await writeFile(
+    path.join(sourcePath, "dist", "index.js"),
+    "console.log('should never run');\n",
+    "utf8",
+  );
+  await repositories.commitAll(sourcePath, "seed unbuilt app");
+
+  const projectRoot = path.join(root, "proj");
+  await mkdir(projectRoot, { recursive: true });
+  const project = await CoordinatorProject.init(projectRoot);
+  return { root, sourcePath, project };
+}
+
+test("a preview whose command exits immediately is reported, not called running", async () => {
+  const { root, sourcePath, project } = await unbuiltRepository();
+  const store = project.openStore();
+  try {
+    const repository = await repoAdd(project, store, {
+      sourcePath,
+      id: "unbuilt",
+    });
+    const previews = new PreviewService(project, store);
+    try {
+      await assert.rejects(
+        async () => await previews.start({ repositoryId: repository.id }),
+        (error: Error) => {
+          // The phrasing the dashboard keys off to offer "how is this app
+          // started?", so a wording change that loses the recovery prompt
+          // fails here rather than in front of somebody.
+          assert.match(error.message, /could not be started/u);
+          assert.match(error.message, /exited immediately/u);
+          // The diagnosis travels with it. This is the only copy: the process
+          // output is not rendered anywhere else in the page.
+          assert.match(error.message, /Cannot find module|MODULE_NOT_FOUND/u);
+          assert.match(error.message, /previewCommands/u);
+          return true;
+        },
+      );
+      // And nothing is left claiming to run, so the control does not offer a
+      // stop button for a process that is gone.
+      assert.equal(previews.status(repository.id), undefined);
+    } finally {
+      await previews.close();
+    }
+  } finally {
+    await store.close();
     await rm(root, { recursive: true, force: true });
   }
 });

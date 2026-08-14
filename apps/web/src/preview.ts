@@ -187,6 +187,12 @@ export function startStaticServer(root: string, port: number): Server {
         response.end("Not found");
       });
   });
+  // An unhandled `error` event on a net server is a fatal exception, and this
+  // one binds a port that was free a moment ago — a race the OS is entitled to
+  // lose. Callers add their own listener to record what happened; this one
+  // exists so that a caller who does not cannot take the control plane down
+  // with a preview.
+  server.on("error", () => {});
   server.listen(port, "127.0.0.1");
   return server;
 }
@@ -420,6 +426,17 @@ export class PreviewService {
         startedAt: new Date().toISOString(),
         recentOutput: [`serving ${workspace.path}`],
       };
+      // The port was free when it was asked for and may not be by now. Recorded
+      // the same way a spawned server's failure is, so the reader is told the
+      // preview stopped rather than being left with a link to nothing.
+      server.on("error", (error) => {
+        status.recentOutput.push(`could not serve: ${error.message}`);
+        status.exited = {
+          code: null,
+          signal: null,
+          at: new Date().toISOString(),
+        };
+      });
       this.running.set(input.repositoryId, {
         server,
         status,
@@ -520,6 +537,41 @@ export class PreviewService {
     });
 
     this.running.set(input.repositoryId, entry);
+
+    // Whether it actually came up. Without this the status was returned the
+    // moment the child was spawned, so a command that dies on its first line
+    // was reported as running: a success toast naming a URL, the control
+    // flipped to "stop", and a link that answers nothing. The reason was
+    // written to `recentOutput` and read by nobody.
+    //
+    // The commonest way to reach that is not an exotic failure. Detection
+    // prefers a `dev` script and falls back to `start`, and a `start` script
+    // very often points at a build output — which a fresh checkout of canonical
+    // does not contain, because build outputs are what `.gitignore` is for.
+    // `node dist/index.js` then exits in milliseconds with a module it cannot
+    // find.
+    //
+    // Exiting is a failure; being slow is not. A dev server that builds before
+    // it serves can take minutes, and calling that broken would be worse than
+    // the bug being fixed — so the wait ends the instant the child dies, and
+    // otherwise gives up quietly and reports the preview as started. This is
+    // the same reading `startForTask` has always taken.
+    const ready = await waitForPort(port, () => status.exited !== undefined);
+    const exit = status.exited;
+    if (exit !== undefined) {
+      const said = status.recentOutput.slice(-4).join(" ").trim();
+      await this.stop(input.repositoryId);
+      throw new Error(
+        `"${input.repositoryId}" could not be started: ${command.label} ` +
+          `exited immediately${
+            exit.code === null ? "" : ` (code ${String(exit.code)})`
+          }. ${said === "" ? "It printed nothing." : said} ` +
+          `If that is not how this app runs, name the command in ` +
+          `"previewCommands" for "${input.repositoryId}" in ` +
+          `.coordinator/config.json.`,
+      );
+    }
+    void ready;
     return { ...status, recentOutput: [...status.recentOutput] };
   }
 
