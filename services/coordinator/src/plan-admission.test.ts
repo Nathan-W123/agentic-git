@@ -737,6 +737,41 @@ test("an ungrounded plan splits along declared paths it does not share", () => {
   );
 });
 
+test("an ungrounded plan splits along declared paths even when the objectives are related", () => {
+  // Two halves of one small tool, handed out separately: an ingest half and a
+  // render half, sharing exactly one file. This is the shape somebody reaches
+  // for to watch partial admission work, and it is the shape that did not.
+  //
+  // The split above passes only because those two objectives share no words.
+  // Here they do — they are halves of the same tool, so of course they do —
+  // and relatedness is a whole-plan judgement that narrowing the file set
+  // cannot clear. Withdrawing the one contested file has to be enough: the
+  // remaining paths are disjoint by declaration, and scope enforcement holds
+  // the agent to them whether or not the objectives sound alike.
+  const admission = admit(
+    ungrounded(
+      plan("task_render", {
+        objective: "align terminal display width for the python data tool",
+        expectedFiles: ["src/tool/render.py", "src/tool/shared.py"],
+        expectedSymbols: [],
+      }),
+    ),
+    [
+      plan("task_ingest", {
+        objective: "parse comma separated input rows for the python data tool",
+        expectedFiles: ["src/tool/ingest.py", "src/tool/shared.py"],
+        expectedSymbols: [],
+      }),
+    ],
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(
+    (admission.deferredResources ?? []).map((entry) => entry.resourceId),
+    ["src/tool/shared.py"],
+  );
+});
+
 test("an unverifiable plan is sequenced behind executing work about the same objective", () => {
   const admission = admit(
     ungrounded(

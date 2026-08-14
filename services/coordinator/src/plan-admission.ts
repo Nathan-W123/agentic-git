@@ -437,7 +437,7 @@ export class PlanAdmissionController {
     if (reduced.expectedFiles.length === 0) {
       return undefined;
     }
-    const partial = this.decide(reduced, input, occupancy);
+    const partial = this.decide(reduced, input, occupancy, true);
     if (!planAdmissionApproved(partial)) {
       return undefined;
     }
@@ -530,7 +530,9 @@ export class PlanAdmissionController {
       return undefined;
     }
     let partial =
-      deferred.length === 0 ? whole : this.decide(reduced, input, narrowed);
+      deferred.length === 0
+        ? whole
+        : this.decide(reduced, input, narrowed, true);
 
     // Dropping the contested files was not enough, or there were none to drop.
     // Withholding a symbol is only offered when every file still being granted
@@ -545,7 +547,7 @@ export class PlanAdmissionController {
       if (reduced.expectedFiles.length === 0) {
         return undefined;
       }
-      partial = this.decide(reduced, input, narrowed);
+      partial = this.decide(reduced, input, narrowed, true);
     }
     if (!planAdmissionApproved(partial) || deferred.length === 0) {
       return undefined;
@@ -1065,6 +1067,23 @@ export class PlanAdmissionController {
     plan: AgentPlan,
     input: PlanAdmissionInput,
     occupancy: FileOccupancy = () => undefined,
+    /**
+     * Whether `plan` is what is left of a plan after every contested resource
+     * was withdrawn from it, rather than a plan as an agent submitted it.
+     *
+     * The objective-relatedness gates below exist because an unverifiable
+     * plan's declarations say nothing trustworthy, leaving the objective as
+     * the only signal about what it will really touch. A reduction supplies
+     * something better: `contested` drops every path that any executing plan
+     * declares or holds a lease on, so what remains is disjoint by
+     * construction — a direct answer where the objective was a proxy for one.
+     *
+     * Left applying, those gates make the reduction pointless. They are
+     * whole-plan judgements and narrowing the file set cannot clear them, so
+     * the reduced plan is refused for the same reason the whole plan was and
+     * partial admission can never succeed against related work.
+     */
+    reduced = false,
   ): PlanAdmission {
     const taskId = plan.taskId;
     const retryAfterMs = input.retryAfterMs ?? DEFAULT_PLAN_RETRY_MS;
@@ -1088,7 +1107,11 @@ export class PlanAdmissionController {
     // misname it, so those are serialised; work about something else entirely
     // keeps its concurrency. The same rule holds from the other side, against
     // executing plans that could not be verified.
-    if (others.length > 0 && planGroundingConfidence(plan) === "ungrounded") {
+    if (
+      !reduced &&
+      others.length > 0 &&
+      planGroundingConfidence(plan) === "ungrounded"
+    ) {
       const related = others.filter((entry) =>
         relatedObjectives(plan, entry.plan),
       );
@@ -1111,11 +1134,13 @@ export class PlanAdmissionController {
         };
       }
     }
-    const ungroundedActive = others.filter(
-      (entry) =>
-        planGroundingConfidence(entry.plan) === "ungrounded" &&
-        relatedObjectives(plan, entry.plan),
-    );
+    const ungroundedActive = reduced
+      ? []
+      : others.filter(
+          (entry) =>
+            planGroundingConfidence(entry.plan) === "ungrounded" &&
+            relatedObjectives(plan, entry.plan),
+        );
     if (ungroundedActive.length > 0) {
       return {
         ...shared,
