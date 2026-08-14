@@ -10601,31 +10601,32 @@ export class ApiGateway {
     const tasks = await this.options.store.listSubmittedTasks({
       repositoryId: watched.repositoryId,
     });
-    const objectiveOf = (taskId: unknown): string => {
+    // Who, not what. A dispatched objective is the whole message somebody
+    // typed — several sentences of it — and quoting even the first 57
+    // characters put a truncated wall of prompt on both sides of every hold,
+    // twice in one sentence. The room already knows these agents by name, and
+    // the files are named in the same line, so the name is the whole of what a
+    // reader needs to place the hold.
+    //
+    // The objective survives only as the fallback for an agent with no name in
+    // this channel, and short: enough to tell two holds apart, not enough to
+    // read as a quotation.
+    const overrides = await this.options.store
+      .listChannelAgentOverrides(watched.repositoryId)
+      .catch(() => ({}) as Record<string, { name?: string }>);
+    const describe = (taskId: unknown): string => {
       const found = tasks.find((candidate) => candidate.id === taskId);
+      const name = overrides[found?.agentId ?? ""]?.name;
+      if (name !== undefined && name !== "") {
+        return `@${name}`;
+      }
       // The request, not the preamble a channel dispatch puts in front of it.
       // Otherwise every hold in a repository with roles set reads "Your role in
       // this repository: auditor" and names nothing.
       const first =
         withoutRoleContext(found?.objective ?? "another task").split("\n")[0] ??
         "";
-      return first.length > 60 ? `"${first.slice(0, 57)}…"` : `"${first}"`;
-    };
-    // "@Zephyrus's task" reads better than a quoted objective fragment, and
-    // the channel already knows what each agent is called in this room. The
-    // objective still rides along — two of one person's agents can hold work
-    // at once, and the name alone would not say which.
-    const overrides = await this.options.store
-      .listChannelAgentOverrides(watched.repositoryId)
-      .catch(() => ({}) as Record<string, { name?: string }>);
-    const describe = (taskId: unknown): string => {
-      const found = tasks.find((candidate) => candidate.id === taskId);
-      const agent = found?.agentId ?? "";
-      const name = overrides[agent]?.name;
-      const objective = objectiveOf(taskId);
-      return name === undefined || name === ""
-        ? `${objective}`
-        : `@${name}'s task ${objective}`;
+      return first.length > 40 ? `"${first.slice(0, 37)}…"` : `"${first}"`;
     };
     const held = describe(watched.taskId);
     const blockers = (Array.isArray(data["blockedBy"]) ? data["blockedBy"] : [])
@@ -10655,10 +10656,12 @@ export class ApiGateway {
             : entry,
         ),
       );
+      // Two agents and the files between them, in that order, because that is
+      // the shape of the fact: who is working, on what, and who has the rest.
       line =
-        `⚖️ Starting ${held} on ${granted.length > 0 ? clause(granted) : "the free part"} — ` +
-        `holding ${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"} ` +
-        `because ${blocker} has the lease; that part follows when it lands.`;
+        `⚖️ ${held} has ${granted.length > 0 ? clause(granted) : "the free part"}; ` +
+        `${blocker} has ${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"}. ` +
+        `${held} picks that up when the lease clears.`;
     } else if (approved) {
       // The hold clearing is as much news as the hold was — a room told
       // "it starts the moment that lands" deserves the moment. Only said
@@ -10678,14 +10681,14 @@ export class ApiGateway {
       if (!wasHeld) {
         return;
       }
-      line = `⚖️ Released — ${held} starts now; what it was waiting on has landed.`;
+      line = `⚖️ ${held} starts now — what it was waiting on has landed.`;
     } else if (status === "blocked") {
       line =
-        `⚖️ Holding ${held} — it overlaps ${blocker} too heavily to run ` +
-        `alongside it. Its agent is narrowing the plan.`;
+        `⚖️ ${held} overlaps ${blocker} too heavily to run alongside it, ` +
+        `so it is narrowing its plan.`;
     } else {
       line =
-        `⚖️ Holding ${held} — files it needs are leased to ${blocker}. ` +
+        `⚖️ ${held} is waiting — ${blocker} has the files it needs. ` +
         `It starts the moment that lands.`;
     }
     await this.appendChannelEntry({
