@@ -8,8 +8,10 @@ import {
   BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
   DEFAULT_PLAN_RETRY_MS,
   PlanAdmissionController,
+  deferredScopeObjective,
   isDeferredScopeFollowUp,
   type ActivePlan,
+  type DeferredScopeRequest,
   type PlanAdmissionRequest,
   type PlanAuthority,
   type PlanAuthorityDecision,
@@ -284,7 +286,13 @@ export class LeasePlanAuthority implements PlanAuthority {
 
     if (approved) {
       this.waitingSince.delete(request.task.id);
-      return { outcome: "admitted", plan: grantedPlan };
+      return {
+        outcome: "admitted",
+        plan: grantedPlan,
+        // Carried only when it narrowed the plan. The executor needs it to
+        // tell a file this decision withheld from one nobody arbitrated.
+        ...(planAdmissionPartial(admission) ? { admission } : {}),
+      };
     }
     if (forced) {
       // Let through without an approved contract on the lease: the record
@@ -316,6 +324,60 @@ export class LeasePlanAuthority implements PlanAuthority {
    * becoming partial, a different blocker, the wait finally ending — is worth
    * a line, and each of those is.
    */
+  /**
+   * Queues the files this task planned, was granted, and had withheld.
+   *
+   * The agent's own patches for those files are deliberately not carried
+   * forward. They were written against a revision another task is in the
+   * middle of rewriting, so replaying them later would apply a diff to a base
+   * that no longer exists. The paths are recorded; the content is not
+   * resurrected — the follow-up is planned fresh against whatever canonical
+   * looks like once the holder is done.
+   */
+  public async deferRemainder(request: DeferredScopeRequest): Promise<void> {
+    const deferred = request.admission.deferredResources ?? [];
+    if (deferred.length === 0) {
+      return;
+    }
+    const followUp = await this.store.submitTask({
+      repositoryId: request.repository.id,
+      ...(request.projectId === undefined
+        ? {}
+        : { projectId: request.projectId }),
+      objective: deferredScopeObjective(
+        request.task.objective,
+        deferred,
+        // A granted file whose patch was held back for reaching a withheld
+        // symbol lost its other edits with it. The follow-up covers those, or
+        // that work is gone as quietly as the deferred files would have been.
+        Object.keys(request.split.withheldSymbols).sort(),
+      ),
+      agentId: request.task.agentId,
+      validationCommands: request.task.validationCommands,
+      // Whatever conversation the original was asked inside is as much the
+      // follow-up's background as it was its own.
+      ...(request.task.context === undefined
+        ? {}
+        : { context: request.task.context }),
+    });
+    await this.store.appendAudit(undefined, {
+      type: "task_submitted",
+      taskId: followUp.id,
+      data: {
+        ...(request.projectId === undefined
+          ? {}
+          : { projectId: request.projectId }),
+        repositoryId: request.repository.id,
+        objective: followUp.objective,
+        deferredFrom: request.task.id,
+        deferredResources: deferred,
+        discardedPatches: request.split.deferred
+          .map((patch) => patch.path)
+          .sort(),
+      },
+    });
+  }
+
   private async record(
     request: PlanAdmissionRequest,
     event: {
