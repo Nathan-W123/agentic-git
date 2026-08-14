@@ -70,6 +70,12 @@ export type PromptCliProcessRunner = (
   options?: ProcessOptions,
 ) => Promise<ProcessOutput>;
 
+/**
+ * A partial line this long is not a line. Guards the reassembly buffer against
+ * a CLI that streams something enormous without a newline in it.
+ */
+const MAX_NARRATION_TAIL = 512 * 1024;
+
 /** How one concrete CLI is invoked and how its output is unwrapped. */
 export interface PromptCliProfile {
   /** Adapter id used in configuration and error messages. */
@@ -95,6 +101,15 @@ export interface PromptCliProfile {
    * the envelope itself reports failure.
    */
   unwrap(stdout: string): string;
+  /**
+   * What the agent said, out of one line of a streamed run, or nothing.
+   *
+   * Absent on a profile whose CLI answers only at exit, which is every one but
+   * Claude's execution today — and absence is the whole of the difference: a
+   * profile without this narrates its lifecycle and nothing else, exactly as
+   * before.
+   */
+  narrate?(event: unknown): string | undefined;
   /**
    * The flag that resumes a previous invocation's vendor-side session.
    *
@@ -155,10 +170,102 @@ function numberField(source: Record<string, unknown>, name: string): number {
  * second invocation and no second parse contract — if the shape ever changes,
  * both fail together rather than one silently reporting zero.
  */
+/**
+ * The result envelope, from either output format.
+ *
+ * Claude answers `--output-format json` with one envelope and `stream-json`
+ * with a line per event, the last of which is that same envelope under
+ * `type: "result"`. Reading both here is what lets execution stream while
+ * planning stays as it was: one format change, not two parsers to keep in
+ * step.
+ *
+ * A stream that ends without a result event is an error and says so. That is
+ * the failure this has to be loudest about — a run that did the work and
+ * reported nothing looks exactly like a run that did nothing, and the whole
+ * point of the change is that the work is now visible while it happens.
+ */
+export function claudeResultEnvelope(stdout: string): unknown {
+  const text = stdout.trim();
+  if (!text.includes("\n")) {
+    return parseJson(text, "the Claude result envelope");
+  }
+  let envelope: unknown;
+  for (const line of text.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) {
+      continue;
+    }
+    let event: unknown;
+    try {
+      event = JSON.parse(trimmed);
+    } catch {
+      // A line that is not JSON is not the envelope, and a stream carrying
+      // one is not thereby broken — the vendor may print anything it likes
+      // alongside its events.
+      continue;
+    }
+    if (
+      typeof event === "object" &&
+      event !== null &&
+      (event as { type?: unknown }).type === "result"
+    ) {
+      envelope = event;
+    }
+  }
+  if (envelope === undefined) {
+    // Not "no result text": the distinction matters when reading a failure.
+    throw new Error(
+      "Claude streamed no result event, so the run's outcome is unknown",
+    );
+  }
+  return envelope;
+}
+
+/**
+ * What the agent said, out of one stream event, or nothing worth saying.
+ *
+ * Assistant *text* only. A stream also carries tool calls and their results,
+ * and narrating those would turn a thread into a transcript of every file
+ * read — the noise the thinking block exists to fold away, except there would
+ * be far more of it. What a reader wants is the sentence the agent wrote
+ * before it acted: "the pieces are pink and angular, changing them now".
+ */
+export function readClaudeNarration(event: unknown): string | undefined {
+  if (typeof event !== "object" || event === null) {
+    return undefined;
+  }
+  const record = event as { type?: unknown; message?: unknown };
+  if (record.type !== "assistant") {
+    return undefined;
+  }
+  const content = (record.message as { content?: unknown } | undefined)
+    ?.content;
+  if (!Array.isArray(content)) {
+    return undefined;
+  }
+  const said = content
+    .filter(
+      (block): block is { type: string; text: string } =>
+        typeof block === "object" &&
+        block !== null &&
+        (block as { type?: unknown }).type === "text" &&
+        typeof (block as { text?: unknown }).text === "string",
+    )
+    .map((block) => block.text.trim())
+    .filter((text) => text.length > 0)
+    .join("\n")
+    .trim();
+  return said.length === 0 ? undefined : said;
+}
+
 export function parseClaudeUsage(stdout: string): PromptCliUsage | undefined {
   let envelope: unknown;
   try {
-    envelope = JSON.parse(stdout.trim()) as unknown;
+    // The same reader `unwrap` uses, so a streamed run is billed exactly as a
+    // buffered one is. Read separately rather than threaded through, because
+    // a missing usage block is not worth failing a run over and a missing
+    // result event is.
+    envelope = claudeResultEnvelope(stdout);
   } catch {
     return undefined;
   }
@@ -260,17 +367,25 @@ export const CLAUDE_PROFILE: PromptCliProfile = {
     ...(effort === undefined ? [] : ["--effort", effort]),
     ...(jsonSchema === undefined ? [] : ["--json-schema", jsonSchema]),
   ],
+  // Execution streams; planning does not. A plan is one answer and arrives at
+  // the end either way, so streaming it would buy nothing and put the schema
+  // parse behind a second format. Execution is the long half — the stretch
+  // where the run has plenty to say and said none of it, because with
+  // `--output-format json` the adapter hears nothing until the process exits.
   executionArgs: (model, effort, jsonSchema) => [
     "-p",
     "--output-format",
-    "json",
+    "stream-json",
+    // `stream-json` is refused without it.
+    "--verbose",
     "--dangerously-skip-permissions",
     ...(model === undefined ? [] : ["--model", model]),
     ...(effort === undefined ? [] : ["--effort", effort]),
     ...(jsonSchema === undefined ? [] : ["--json-schema", jsonSchema]),
   ],
+  narrate: readClaudeNarration,
   unwrap: (stdout) => {
-    const envelope = parseJson(stdout, "the Claude result envelope");
+    const envelope = claudeResultEnvelope(stdout);
     if (typeof envelope !== "object" || envelope === null) {
       throw new Error("Claude returned a non-object result envelope");
     }
@@ -1312,6 +1427,8 @@ export class PromptCliAdapter implements AgentAdapter {
       resumable ? [...args, ...resumeArgs(resume)] : [...args],
       prompt,
       timeoutMs,
+      // Only execution streams; see the Claude profile's `executionArgs`.
+      phase === "execution",
     );
     if (
       output.exitCode !== 0 &&
@@ -1330,6 +1447,7 @@ export class PromptCliAdapter implements AgentAdapter {
         [...args],
         prompt,
         timeoutMs,
+        phase === "execution",
       );
     }
     if (output.exitCode !== 0) {
@@ -1366,6 +1484,53 @@ export class PromptCliAdapter implements AgentAdapter {
     return output.stdout;
   }
 
+  /**
+   * Turns a streamed run's output into progress events as it arrives.
+   *
+   * Chunks arrive on no particular boundary, so lines are reassembled here
+   * rather than assumed — a JSON object split across two reads would
+   * otherwise be two unparseable fragments and one lost sentence.
+   *
+   * Everything here is best effort by construction. Narration is commentary
+   * on a run, and a run must not fail because its commentary could not be
+   * parsed: an unreadable line is skipped, and the result is still read from
+   * the buffered stdout at exit exactly as it was before.
+   */
+  private narrator(record: PromptCliSession): (chunk: string) => void {
+    let pending = "";
+    return (chunk: string): void => {
+      pending += chunk;
+      let index = pending.indexOf("\n");
+      while (index !== -1) {
+        const line = pending.slice(0, index).trim();
+        pending = pending.slice(index + 1);
+        index = pending.indexOf("\n");
+        if (line.length === 0) {
+          continue;
+        }
+        let said: string | undefined;
+        try {
+          said = this.profile.narrate?.(JSON.parse(line));
+        } catch {
+          said = undefined;
+        }
+        if (said !== undefined) {
+          this.emit(record, {
+            event: "progress",
+            message: said,
+            occurredAt: new Date().toISOString(),
+          });
+        }
+      }
+      // A tail without a newline is held rather than dropped: the next chunk
+      // usually completes it, and at exit the result is read from stdout
+      // anyway, so nothing depends on this ever finishing a line.
+      if (pending.length > MAX_NARRATION_TAIL) {
+        pending = "";
+      }
+    };
+  }
+
   /** One process, with the record's active/controller bookkeeping around it. */
   private async spawn(
     record: PromptCliSession,
@@ -1373,6 +1538,8 @@ export class PromptCliAdapter implements AgentAdapter {
     argv: string[],
     prompt: string,
     timeoutMs: number,
+    /** Set while executing, so a streamed run can say what it is doing. */
+    narrate = false,
   ): Promise<ProcessOutput> {
     const controller = new AbortController();
     record.controller = controller;
@@ -1385,6 +1552,9 @@ export class PromptCliAdapter implements AgentAdapter {
       timeoutMs,
       maxOutputBytes: this.maxOutputBytes,
       signal: controller.signal,
+      ...(narrate && this.profile.narrate !== undefined
+        ? { onStdout: this.narrator(record) }
+        : {}),
     });
     record.active = active;
     try {
