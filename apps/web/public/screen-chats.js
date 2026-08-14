@@ -41,9 +41,7 @@ api,
   personOnline,
   postChannelReply,
   providerEffortOptions,
-  providerEffortSuggestions,
   providerModelOptions,
-  providerModelSuggestions,
   providerOptionsNote,
   sendChannelMessage,
   state,
@@ -66,7 +64,6 @@ import {
   avatarStack,
   chime,
   clockTime,
-  comboSelect,
   esc,
   icon,
   iconButton,
@@ -96,36 +93,25 @@ function optionsFor(agent) {
   return {
     models: providerModelOptions(agent.provider),
     efforts: providerEffortOptions(agent.provider, agent.model),
-    modelSuggestions: providerModelSuggestions(agent.provider),
-    effortSuggestions: providerEffortSuggestions(agent.provider),
     note: providerOptionsNote(agent.provider),
   };
 }
 
 /**
- * One setting, rendered by how much is actually known about it.
+ * One setting, as a dropdown that always has something in it.
  *
- * A reported list is authoritative, so it gets a plain select. Where the
- * account reported nothing the control has to stay usable anyway — the value
- * reaches the CLI verbatim, so anything typed is as valid as anything picked
- * — and it says which of the two it is offering. Rendering the guess as
- * though it were the report is precisely what made two invented model names
- * read as this deployment's considered shortlist.
+ * The list is the account's own reported one where there is one and a curated
+ * one where there is not — `providerModelOptions` resolves that, so nothing
+ * here has to care which it got. An empty row is not rendered at all rather
+ * than leaving a label with nothing under it.
  */
-function settingRow(label, act, options, suggestions, current, placeholder) {
-  if (options.length > 0) {
-    return `<div>
-      <div class="rs-label">${esc(label)}</div>
-      ${miniSelect(act, options, current || options[0]?.value || "", label)}
-    </div>`;
-  }
-  if (suggestions.length === 0) {
+function settingRow(label, act, options, current) {
+  if (options.length === 0) {
     return "";
   }
   return `<div>
     <div class="rs-label">${esc(label)}</div>
-    ${comboSelect(act, suggestions, current, label, placeholder)}
-    <div class="rs-note">Suggestions — anything you type is sent as-is.</div>
+    ${miniSelect(act, options, current || options[0]?.value || "", label)}
   </div>`;
 }
 
@@ -160,20 +146,17 @@ function chanRow(repo, activeRepositoryId) {
 function rosterSettings(agent) {
   const options = optionsFor(agent);
   return `<div class="roster-settings" data-agent="${esc(agent.id)}">
-    ${settingRow(
-      "Model",
-      "channel-agent-model",
-      options.models,
-      options.modelSuggestions,
-      agent.model ?? "",
-      "e.g. gpt-5.1-codex",
-    )}
+    ${settingRow("Model", "channel-agent-model", options.models, agent.model ?? "")}
     ${
-      // Why the control above is offering guesses, in the words of the thing
-      // that knows. The server has always sent this and nothing ever
-      // displayed it, so a deployment whose CLI had never cached a model list
-      // looked identical to one offering a considered shortlist.
-      options.note === "" || options.models.length > 0
+      // Where the list above came from, in the words of the thing that knows:
+      // either the file the account's own models were read from, or the
+      // admission that none were and these are suggestions. The server has
+      // always sent this and nothing ever displayed it, so a deployment whose
+      // CLI had never cached a model list looked identical to one offering a
+      // considered shortlist. Not gated on the list being empty any more —
+      // it never is now, which is exactly why saying where it came from
+      // matters.
+      options.note === ""
         ? ""
         : `<div class="rs-note">${esc(options.note)}</div>`
     }
@@ -181,9 +164,7 @@ function rosterSettings(agent) {
       "Reasoning effort",
       "channel-agent-effort",
       options.efforts,
-      options.effortSuggestions,
       agent.effort ?? "",
-      "e.g. high",
     )}
     ${
       // Unlike model and effort, this is not how the agent presents itself in

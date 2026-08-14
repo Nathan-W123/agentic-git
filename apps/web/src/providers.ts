@@ -267,7 +267,7 @@ export interface ProviderOptions {
    * list is absent, labelled as suggestions, and always overridable by
    * typing, because the value is passed to the CLI verbatim either way.
    */
-  suggestedModels?: string[];
+  suggestedModels?: ProviderModelOption[];
   /** The same, for reasoning levels the provider did not enumerate. */
   suggestedEfforts?: string[];
 }
@@ -519,19 +519,22 @@ const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
  * the property that makes keeping the list honest cheap, and it is why the
  * list is allowed to exist at all.
  */
-const SUGGESTED_MODELS: Record<ProviderId, string[]> = {
+const SUGGESTED_MODELS: Record<ProviderId, ProviderModelOption[]> = {
   anthropic: [
-    "claude-opus-5",
-    "claude-sonnet-5",
-    "claude-haiku-4-5",
+    { id: "claude-opus-5", label: "Opus 5" },
+    { id: "claude-sonnet-5", label: "Sonnet 5" },
+    { id: "claude-haiku-4-5", label: "Haiku 4.5" },
   ],
   openai: [
-    "gpt-5.1-codex",
-    "gpt-5.1-codex-mini",
-    "gpt-5.1",
-    "gpt-5",
+    { id: "gpt-5.1-codex", label: "GPT-5.1 Codex" },
+    { id: "gpt-5.1-codex-mini", label: "GPT-5.1 Codex Mini" },
+    { id: "gpt-5.1", label: "GPT-5.1" },
+    { id: "gpt-5", label: "GPT-5" },
   ],
-  google: ["gemini-2.5-pro", "gemini-2.5-flash"],
+  google: [
+    { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
+    { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash" },
+  ],
 };
 
 /**
@@ -2587,8 +2590,8 @@ export class ProviderChatService {
           models === undefined
             ? [
                 "The Codex CLI has not cached a model list for this account " +
-                  "yet, so these are suggestions rather than what it reports " +
-                  "— any other name you type is passed to the CLI as given.",
+                  "yet, so these are suggested names rather than the ones it " +
+                  "reports.",
               ]
             : [],
       };
@@ -2617,6 +2620,8 @@ export class ProviderChatService {
       models: null,
       efforts: null,
       allowCustomModel: false,
+      suggestedModels: [...SUGGESTED_MODELS.google],
+      suggestedEfforts: [...SUGGESTED_EFFORTS.google],
       notes: [
         "Gemini CLI settings become available once the signed-in account is eligible to use it.",
       ],

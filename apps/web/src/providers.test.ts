@@ -23,6 +23,9 @@ import {
  * every number shown traces to a field a CLI actually emitted.
  */
 
+/** Mirrors `MODEL_VALUE` in providers.ts: what the settings route will take. */
+const MODEL_VALUE_SHAPE = /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,99}$/u;
+
 interface Harness {
   project: CoordinatorProject;
   home: string;
@@ -303,6 +306,49 @@ test("openai with no cached model list stays usable instead of refusing everythi
     (error: unknown) =>
       error instanceof ProviderChatError && error.code === "invalid_model",
   );
+});
+
+test("every provider offers a model list to pick from, cached or not", async () => {
+  // The property the pickers depend on, asserted here rather than left to the
+  // browser: a dropdown with nothing in it is the bug this whole thread of
+  // work is about, and it happened because `models` was allowed to be null
+  // with nothing standing behind it. Either the account reported a list or a
+  // suggested one is sent; never neither.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      ...CLAUDE_OK,
+      codex: (args) =>
+        args[0] === "--version" ? output("codex-cli 0.146.0") : output(""),
+      gemini: (args) => (args[0] === "--version" ? output("0.9.0") : output("")),
+    }),
+  });
+  for (const provider of ["anthropic", "openai", "google"] as const) {
+    const options = await service.options({ provider });
+    const models = options.models ?? options.suggestedModels ?? [];
+    assert.ok(
+      models.length > 0,
+      `${provider} offers no models at all: ${JSON.stringify(options)}`,
+    );
+    // Every entry is pickable and readable — an id the CLI takes, and a label
+    // that is not just the id repeated back when a nicer one exists.
+    for (const model of models) {
+      assert.match(model.id, MODEL_VALUE_SHAPE, `${provider}: ${model.id}`);
+      assert.ok((model.label ?? "").length > 0, `${provider}: ${model.id}`);
+    }
+  }
+
+  // Reasoning is the one setting that legitimately has no list: the Gemini
+  // CLI takes no effort flag at all, and the adapter refuses one. An empty
+  // list there means the row is not rendered, which is right — unlike Codex,
+  // where an empty list meant a label with nothing under it.
+  const anthropic = await service.options({ provider: "anthropic" });
+  assert.ok((anthropic.efforts ?? []).length > 0);
+  const openai = await service.options({ provider: "openai" });
+  assert.ok((openai.efforts ?? openai.suggestedEfforts ?? []).length > 0);
+  const google = await service.options({ provider: "google" });
+  assert.deepEqual(google.efforts ?? google.suggestedEfforts ?? [], []);
 });
 
 test("anthropic reports no model list when the CLI offers neither source", async () => {

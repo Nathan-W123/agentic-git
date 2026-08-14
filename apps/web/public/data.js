@@ -481,7 +481,14 @@ export async function loadProviders() {
  * explanation (`optionsNote`) is less useful and much more honest.
  */
 export function providerModelOptions(providerId) {
-  return (state.providerOptions[providerId]?.models ?? []).map((model) => ({
+  const loaded = state.providerOptions[providerId];
+  // The account's own answer when there is one, and a curated list when there
+  // is not, so the control is always a populated dropdown. `suggestedModels`
+  // is sent only where `models` is absent, so these can never be mixed — the
+  // list is either entirely reported or entirely suggested, and
+  // `providerOptionsNote` says which.
+  const models = loaded?.models ?? loaded?.suggestedModels ?? [];
+  return models.map((model) => ({
     value: model.id,
     label: model.label ?? model.id,
   }));
@@ -502,29 +509,12 @@ export function providerEffortOptions(providerId, model) {
   const efforts =
     loaded?.efforts ??
     loaded?.models?.find((entry) => entry.id === model)?.efforts ??
+    loaded?.suggestedEfforts ??
     [];
   return efforts.map((effort) => ({
     value: effort,
     label: effort.charAt(0).toUpperCase() + effort.slice(1),
   }));
-}
-
-/**
- * Names to offer when the account reported none of its own.
- *
- * Separate from {@link providerModelOptions} because the two mean different
- * things: that one is what this account's CLI reports, this one is a guess
- * that saves typing. The caller renders them in a control that says which it
- * is showing, and that accepts anything typed instead.
- */
-export function providerModelSuggestions(providerId) {
-  const loaded = state.providerOptions[providerId];
-  return Array.isArray(loaded?.suggestedModels) ? loaded.suggestedModels : [];
-}
-
-export function providerEffortSuggestions(providerId) {
-  const loaded = state.providerOptions[providerId];
-  return Array.isArray(loaded?.suggestedEfforts) ? loaded.suggestedEfforts : [];
 }
 
 /**

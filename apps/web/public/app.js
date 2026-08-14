@@ -2190,46 +2190,6 @@ function captureEditor() {
   };
 }
 
-/**
- * The half-typed setting in a combo box, across a re-render.
- *
- * These commit on `change`, which for a text input means on blur — so a
- * render triggered by anything else while somebody is still typing a model
- * name would replace the field with its stored value and throw the typing
- * away. The channel re-renders on every websocket frame, so that is a
- * two-second window, not a rare one. Keyed by the control's action, which is
- * unique within the open panel.
- */
-function captureCombo() {
-  const active = document.activeElement;
-  if (
-    active === null ||
-    active.tagName !== "INPUT" ||
-    active.closest(".combo-select") === null
-  ) {
-    return undefined;
-  }
-  return {
-    act: active.dataset.act,
-    value: active.value,
-    start: active.selectionStart,
-    end: active.selectionEnd,
-  };
-}
-
-function restoreCombo(saved) {
-  if (saved === undefined) {
-    return;
-  }
-  const input = $(`.combo-select input[data-act='${saved.act}']`);
-  if (input === null) {
-    return;
-  }
-  input.value = saved.value;
-  input.focus();
-  input.setSelectionRange(saved.start, saved.end);
-}
-
 function restoreEditor(saved) {
   if (saved === undefined) {
     return;
@@ -2336,7 +2296,6 @@ function renderNow() {
     classes.push("nav-collapsed");
   }
   const editorCaret = captureEditor();
-  const comboDraft = captureCombo();
   root.innerHTML = `<div class="${classes.join(" ")}">
     ${sidebar()}
     <div class="main${BARE.has(state.route) ? " bare" : ""}${
@@ -2357,7 +2316,6 @@ function renderNow() {
     // Put it back where the reader had it before anything else runs.
     restoreChannelScroll();
     restoreEditor(editorCaret);
-    restoreCombo(comboDraft);
     void ensureCodeData(render);
     scrollThread();
   }
