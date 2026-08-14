@@ -3311,6 +3311,16 @@ svg {
   display: grid;
   gap: 16px;
   max-width: 720px;
+  /* The page centers itself, but a 720px block inside a 1320px page still
+     leans hard left. Centering here brings the cards to the middle… */
+  margin: 0 auto;
+}
+
+/* …and capping the settings page itself brings the heading with them, so
+   the title is not stranded at the far-left of a canvas twice as wide as
+   anything under it. */
+.page:has(.settings-grid) {
+  max-width: 800px;
 }
 
 .set-row {
