@@ -510,6 +510,24 @@ export function providerEffortOptions(providerId, model) {
 }
 
 /**
+ * Names to offer when the account reported none of its own.
+ *
+ * Separate from {@link providerModelOptions} because the two mean different
+ * things: that one is what this account's CLI reports, this one is a guess
+ * that saves typing. The caller renders them in a control that says which it
+ * is showing, and that accepts anything typed instead.
+ */
+export function providerModelSuggestions(providerId) {
+  const loaded = state.providerOptions[providerId];
+  return Array.isArray(loaded?.suggestedModels) ? loaded.suggestedModels : [];
+}
+
+export function providerEffortSuggestions(providerId) {
+  const loaded = state.providerOptions[providerId];
+  return Array.isArray(loaded?.suggestedEfforts) ? loaded.suggestedEfforts : [];
+}
+
+/**
  * What the server said about why a list looks the way it does.
  *
  * The options response has always carried `notes` and `modelListSource` —

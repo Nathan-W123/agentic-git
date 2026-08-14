@@ -209,6 +209,11 @@ test("openai options come from the account's own models cache and settings are v
   );
   assert.deepEqual(options.models?.[0]?.efforts, ["low", "high", "xhigh"]);
   assert.equal(options.allowCustomModel, false);
+  // A reported list is the authority, so nothing is suggested alongside it —
+  // a guess sitting next to the account's own answer is the exact confusion
+  // the separate field exists to prevent.
+  assert.equal(options.suggestedModels, undefined);
+  assert.equal(options.suggestedEfforts, undefined);
 
   await service.connect({ userId: "u", systemAdmin: true, provider: "openai" });
   await service.setSettings({
@@ -260,6 +265,17 @@ test("openai with no cached model list stays usable instead of refusing everythi
   assert.equal(options.allowCustomModel, true);
   // And it says why, rather than leaving the screen to invent a list.
   assert.match(options.notes.join(" "), /has not cached a model list/u);
+  // Names worth offering, carried in their own field so nothing can render
+  // them as though the account had reported them. Both lists are non-empty,
+  // because a picker that suggests nothing is the bare text box this exists
+  // to avoid.
+  assert.ok((options.suggestedModels ?? []).length > 0);
+  assert.ok((options.suggestedEfforts ?? []).length > 0);
+  // Every suggestion must be a value the validator will actually accept —
+  // offering one that saves as a 400 is worse than offering none.
+  for (const effort of options.suggestedEfforts ?? []) {
+    assert.match(effort, /^[a-z][a-z0-9_-]{0,31}$/u, effort);
+  }
 
   await service.connect({ userId: "u", systemAdmin: true, provider: "openai" });
   const saved = await service.setSettings({

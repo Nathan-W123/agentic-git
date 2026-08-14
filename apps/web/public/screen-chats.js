@@ -41,7 +41,9 @@ api,
   personOnline,
   postChannelReply,
   providerEffortOptions,
+  providerEffortSuggestions,
   providerModelOptions,
+  providerModelSuggestions,
   providerOptionsNote,
   sendChannelMessage,
   state,
@@ -64,6 +66,7 @@ import {
   avatarStack,
   chime,
   clockTime,
+  comboSelect,
   esc,
   icon,
   iconButton,
@@ -93,8 +96,37 @@ function optionsFor(agent) {
   return {
     models: providerModelOptions(agent.provider),
     efforts: providerEffortOptions(agent.provider, agent.model),
+    modelSuggestions: providerModelSuggestions(agent.provider),
+    effortSuggestions: providerEffortSuggestions(agent.provider),
     note: providerOptionsNote(agent.provider),
   };
+}
+
+/**
+ * One setting, rendered by how much is actually known about it.
+ *
+ * A reported list is authoritative, so it gets a plain select. Where the
+ * account reported nothing the control has to stay usable anyway — the value
+ * reaches the CLI verbatim, so anything typed is as valid as anything picked
+ * — and it says which of the two it is offering. Rendering the guess as
+ * though it were the report is precisely what made two invented model names
+ * read as this deployment's considered shortlist.
+ */
+function settingRow(label, act, options, suggestions, current, placeholder) {
+  if (options.length > 0) {
+    return `<div>
+      <div class="rs-label">${esc(label)}</div>
+      ${miniSelect(act, options, current || options[0]?.value || "", label)}
+    </div>`;
+  }
+  if (suggestions.length === 0) {
+    return "";
+  }
+  return `<div>
+    <div class="rs-label">${esc(label)}</div>
+    ${comboSelect(act, suggestions, current, label, placeholder)}
+    <div class="rs-note">Suggestions — anything you type is sent as-is.</div>
+  </div>`;
 }
 
 /* ------------------------------------------------------------- sidebar ---- */
@@ -128,33 +160,31 @@ function chanRow(repo, activeRepositoryId) {
 function rosterSettings(agent) {
   const options = optionsFor(agent);
   return `<div class="roster-settings" data-agent="${esc(agent.id)}">
-    <div>
-      <div class="rs-label">Model</div>
-      ${miniSelect(
-        "channel-agent-model",
-        options.models,
-        agent.model || options.models[0]?.value || "",
-        "Model",
-      )}
-    </div>
+    ${settingRow(
+      "Model",
+      "channel-agent-model",
+      options.models,
+      options.modelSuggestions,
+      agent.model ?? "",
+      "e.g. gpt-5.1-codex",
+    )}
     ${
-      // Why the list above is empty, in the words of the thing that knows.
-      // The server has always sent this and nothing ever displayed it, so a
-      // deployment whose CLI had never cached a model list looked identical
-      // to one offering a considered shortlist.
+      // Why the control above is offering guesses, in the words of the thing
+      // that knows. The server has always sent this and nothing ever
+      // displayed it, so a deployment whose CLI had never cached a model list
+      // looked identical to one offering a considered shortlist.
       options.note === "" || options.models.length > 0
         ? ""
         : `<div class="rs-note">${esc(options.note)}</div>`
     }
-    <div>
-      <div class="rs-label">Reasoning effort</div>
-      ${miniSelect(
-        "channel-agent-effort",
-        options.efforts,
-        agent.effort || options.efforts[0]?.value || "",
-        "Reasoning effort",
-      )}
-    </div>
+    ${settingRow(
+      "Reasoning effort",
+      "channel-agent-effort",
+      options.efforts,
+      options.effortSuggestions,
+      agent.effort ?? "",
+      "e.g. high",
+    )}
     ${
       // Unlike model and effort, this is not how the agent presents itself in
       // this room — it decides whose credential a teammate's prompt spends, so

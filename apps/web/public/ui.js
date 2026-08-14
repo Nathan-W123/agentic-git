@@ -772,6 +772,32 @@ export function miniSelect(act, options, current, title = "") {
     <select data-act="${act}">${body}</select>${icon("chevronDown")}</span>`;
 }
 
+/**
+ * A picker you can also type into.
+ *
+ * For the settings whose valid values this deployment cannot enumerate — a
+ * model name when the CLI has cached no list, a reasoning level when the
+ * provider reports none per model. A `<select>` is wrong there because it can
+ * only offer what we guessed, and a bare text box is wrong because it makes
+ * the reader remember an exact string. A `datalist` is both: the suggestions
+ * are one click away and anything else can still be typed, and either route
+ * sends the identical value.
+ *
+ * `suggestions` are plain strings and are labelled as suggestions by the
+ * caller, never merged into a list of what the account actually reports.
+ */
+export function comboSelect(act, suggestions, current, title = "", placeholder = "") {
+  const listId = `dl-${act}`;
+  const body = suggestions
+    .map((value) => `<option value="${esc(value)}"></option>`)
+    .join("");
+  return `<span class="combo-select" title="${esc(title)}">
+    <input data-act="${act}" list="${esc(listId)}" value="${esc(current ?? "")}"
+      placeholder="${esc(placeholder)}" spellcheck="false" autocapitalize="off" />
+    <datalist id="${esc(listId)}">${body}</datalist>
+  </span>`;
+}
+
 export function segmented(act, options, current) {
   return `<span class="seg">${options
     .map(

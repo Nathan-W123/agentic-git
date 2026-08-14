@@ -255,6 +255,21 @@ export interface ProviderOptions {
   efforts: string[] | null;
   allowCustomModel: boolean;
   notes: string[];
+  /**
+   * Names worth offering when the account has reported none of its own.
+   *
+   * Kept apart from `models` on purpose, and that separation is the whole
+   * point: `models` is what this account's CLI actually reports, and a
+   * suggestion is a guess that saves typing. Merging the two is what went
+   * wrong before — a hardcoded pair of names rendered in the same control as
+   * reported ones, so a person had no way to tell which they were reading,
+   * and the pair was two years stale besides. Offered only where the real
+   * list is absent, labelled as suggestions, and always overridable by
+   * typing, because the value is passed to the CLI verbatim either way.
+   */
+  suggestedModels?: string[];
+  /** The same, for reasoning levels the provider did not enumerate. */
+  suggestedEfforts?: string[];
 }
 
 export class ProviderChatError extends Error {
@@ -487,6 +502,50 @@ export function parseClaudeUsage(stdout: string): ProviderUsageReport {
 
 /** Real `--effort` values the Claude CLI accepts. */
 const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
+
+/**
+ * Names to offer when an account has reported no list of its own.
+ *
+ * One table, in the service that already owns every other fact about these
+ * CLIs, rather than a copy in each screen that renders a picker — the last
+ * arrangement had five independent literals and the browser's had drifted two
+ * reasoning levels behind the adapter's.
+ *
+ * These are conveniences, not claims. They are offered only where the real
+ * list is missing, they are labelled as suggestions where they are rendered,
+ * and the control that shows them accepts anything typed instead, because the
+ * value goes to `--model` / `-m` verbatim. A name here going out of date
+ * therefore costs a stale entry in a dropdown, not a broken setting: that is
+ * the property that makes keeping the list honest cheap, and it is why the
+ * list is allowed to exist at all.
+ */
+const SUGGESTED_MODELS: Record<ProviderId, string[]> = {
+  anthropic: [
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+  ],
+  openai: [
+    "gpt-5.1-codex",
+    "gpt-5.1-codex-mini",
+    "gpt-5.1",
+    "gpt-5",
+  ],
+  google: ["gemini-2.5-pro", "gemini-2.5-flash"],
+};
+
+/**
+ * Reasoning levels to offer when a provider enumerated none.
+ *
+ * Codex reports its levels per model, so an account with no cached model list
+ * has no levels either — and the picker had nothing to show. These are the
+ * words its CLI takes today; typing another still works.
+ */
+const SUGGESTED_EFFORTS: Record<ProviderId, string[]> = {
+  anthropic: [...CLAUDE_EFFORTS],
+  openai: ["minimal", "low", "medium", "high", "xhigh"],
+  google: [],
+};
 const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5";
 const DEFAULT_CLAUDE_EFFORT = "high";
 
@@ -2517,12 +2576,19 @@ export class ProviderChatService {
         // at all. The value reaches `codex exec -m <model>` unaltered either
         // way, exactly as it does for Claude.
         allowCustomModel: models === undefined,
+        // Suggestions only where there is no real list to contradict.
+        ...(models === undefined
+          ? {
+              suggestedModels: [...SUGGESTED_MODELS.openai],
+              suggestedEfforts: [...SUGGESTED_EFFORTS.openai],
+            }
+          : {}),
         notes:
           models === undefined
             ? [
                 "The Codex CLI has not cached a model list for this account " +
-                  "yet, so there is nothing to choose from here — type a " +
-                  "model name and it is passed to the CLI as given.",
+                  "yet, so these are suggestions rather than what it reports " +
+                  "— any other name you type is passed to the CLI as given.",
               ]
             : [],
       };
@@ -2538,6 +2604,9 @@ export class ProviderChatService {
           : {}),
         efforts: [...CLAUDE_EFFORTS],
         allowCustomModel: true,
+        ...(claude.models.length > 0
+          ? {}
+          : { suggestedModels: [...SUGGESTED_MODELS.anthropic] }),
         notes: [
           "Any other model name still works — the value is passed to --model as-is.",
           "Reasoning effort maps to the CLI's real --effort option.",
