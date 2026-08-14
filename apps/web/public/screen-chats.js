@@ -58,7 +58,6 @@ import {
 import {
   agentFace,
   avatar,
-  avatarStack,
   chime,
   clockTime,
   esc,
@@ -681,7 +680,6 @@ function previewLink(repositoryId) {
 function chanHeader(repository, repositoryId) {
   const roster = channelAgentsFor(repositoryId);
   const people = collaborators();
-  const faces = roster.slice(0, 3).map((agent) => agentFace(agent, 24)).join("");
   return `<header class="chan-head">
     <button type="button" class="icon-btn menu-btn" data-act="nav-toggle"
       title="Menu" aria-label="Menu">${icon("menu")}</button>
@@ -734,7 +732,9 @@ function chanHeader(repository, repositoryId) {
       // your app is up.
       previewLink(repositoryId)
     }
-    <span class="avatar-stack">${faces}${avatarStack(people, 3, 24)}</span>
+    <!-- No faces here. Six cropped circles said "some agents and some people
+         are in this room", which the two counts beside the branch name
+         already say exactly, in less space and without the guessing. -->
     ${
       // Six controls sat permanently in a header that is 44 pixels tall on a
       // phone, and on any given visit a reader wants none of them. Behind one
@@ -762,7 +762,15 @@ function chanHeader(repository, repositoryId) {
       state.chanToolsOpen === true ? " on" : ""
     }" data-act="chan-tools-toggle"
       title="${state.chanToolsOpen === true ? "Hide tools" : "Show tools"}"
-      aria-expanded="${state.chanToolsOpen === true}">${icon("chevronDown")}</button>
+      aria-expanded="${
+        state.chanToolsOpen === true
+      }">${
+        // Points up when the tools are away and left when they are out: the
+        // arrow indicates the direction they went, not the direction of the
+        // fold. Closed it stands up on its own; open it lies down pointing
+        // back along the row it just laid out.
+        icon("chevronUp")
+      }</button>
   </header>`;
 }
 
