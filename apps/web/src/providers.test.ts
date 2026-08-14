@@ -351,6 +351,48 @@ test("every provider offers a model list to pick from, cached or not", async () 
   assert.deepEqual(google.efforts ?? google.suggestedEfforts ?? [], []);
 });
 
+test("the aliases the Claude CLI documents are shown as names, not as bare words", async () => {
+  // `claude --help` documents its `--model` values as bare words, and they
+  // were rendered into the picker exactly as parsed — a dropdown reading
+  // "fable / sonnet / opus / claude-fable-5". Every value is real and every
+  // one works; as a list it is unreadable, and it gives no clue that the
+  // first three float to the newest release while the fourth pins one.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) =>
+        args[0] === "auth"
+          ? output(JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }))
+          : args[0] === "--help"
+            ? output(
+                [
+                  "Usage: claude [options]",
+                  "",
+                  "  --model <model>  Model for the session. Accepts an alias",
+                  "                   ('fable', 'opus', 'sonnet') or a full name",
+                  "                   ('claude-fable-5', 'claude-opus-5').",
+                  "  --verbose        Print more",
+                ].join("\n"),
+              )
+            : output(""),
+    }),
+  });
+
+  const options = await service.options({ provider: "anthropic" });
+  const byId = new Map((options.models ?? []).map((m) => [m.id, m.label]));
+  // The value is the CLI's and travels unaltered; only the label is ours.
+  assert.equal(byId.get("fable"), "Fable (latest)");
+  assert.equal(byId.get("opus"), "Opus (latest)");
+  assert.equal(byId.get("claude-fable-5"), "Fable 5");
+  assert.equal(byId.get("claude-opus-5"), "Opus 5");
+  // Nothing is dropped for lacking a label — an alias this deployment has
+  // never heard of still has to be selectable.
+  for (const model of options.models ?? []) {
+    assert.ok((model.label ?? "").length > 0, model.id);
+  }
+});
+
 test("anthropic reports no model list when the CLI offers neither source", async () => {
   const harness = await createHarness();
   const service = new ProviderChatService(harness.project, {

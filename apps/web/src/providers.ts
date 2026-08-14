@@ -519,8 +519,37 @@ const CLAUDE_EFFORTS = ["low", "medium", "high", "xhigh", "max"];
  * the property that makes keeping the list honest cheap, and it is why the
  * list is allowed to exist at all.
  */
+/**
+ * Readable names for the model values the Claude CLI reports.
+ *
+ * `claude --help` documents its `--model` values as bare words — `fable`,
+ * `opus`, `claude-fable-5` — and they were rendered into the picker exactly
+ * as parsed, so the dropdown read "fable / sonnet / opus / claude-fable-5":
+ * correct values, unreadable as a list, and giving no clue that the first
+ * three float to the newest release while the fourth pins one.
+ *
+ * The values are the CLI's, not ours — only the labels are added here, and a
+ * value with no entry still renders as itself rather than being hidden.
+ */
+const CLAUDE_MODEL_LABELS: Record<string, string> = {
+  fable: "Fable (latest)",
+  opus: "Opus (latest)",
+  sonnet: "Sonnet (latest)",
+  haiku: "Haiku (latest)",
+  "claude-fable-5": "Fable 5",
+  "claude-mythos-5": "Mythos 5",
+  "claude-opus-5": "Opus 5",
+  "claude-opus-4-8": "Opus 4.8",
+  "claude-opus-4-7": "Opus 4.7",
+  "claude-opus-4-6": "Opus 4.6",
+  "claude-sonnet-5": "Sonnet 5",
+  "claude-sonnet-4-6": "Sonnet 4.6",
+  "claude-haiku-4-5": "Haiku 4.5",
+};
+
 const SUGGESTED_MODELS: Record<ProviderId, ProviderModelOption[]> = {
   anthropic: [
+    { id: "claude-fable-5", label: "Fable 5" },
     { id: "claude-opus-5", label: "Opus 5" },
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-haiku-4-5", label: "Haiku 4.5" },
@@ -2517,7 +2546,10 @@ export class ProviderChatService {
         }
         models.set(option.value, {
           id: option.value,
-          label: option.label ?? option.value,
+          label:
+            option.label ??
+            CLAUDE_MODEL_LABELS[option.value] ??
+            option.value,
           ...(option.description === undefined
             ? {}
             : { description: option.description }),
@@ -2545,7 +2577,10 @@ export class ProviderChatService {
           .filter((value) => MODEL_VALUE.test(value));
         for (const value of quoted) {
           if (!models.has(value)) {
-            models.set(value, { id: value, label: value });
+            models.set(value, {
+              id: value,
+              label: CLAUDE_MODEL_LABELS[value] ?? value,
+            });
           }
         }
         if (quoted.length > 0) {
