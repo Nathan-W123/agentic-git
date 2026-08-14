@@ -2364,14 +2364,25 @@ function renderNow() {
     });
     // The roster's model/effort pickers read the same real options My Agents
     // and Code load — loaded here too, rather than invented for this screen.
-    for (const agent of channelAgentsFor(activeChannelId())) {
-      if (agent.mine) {
-        void ensureAgentOptions(agent.id, () => {
-          if (state.route === "chats") {
-            render();
-          }
-        });
-      }
+    //
+    // By vendor, and for everyone's agents. The options route answers about
+    // the CLI installed on this host and takes no per-user argument, so one
+    // fetch per vendor serves every agent running on it. Loading only for
+    // `agent.mine` left a colleague's agent with no options at all, and its
+    // pickers fell back to a hardcoded list for as long as the channel was
+    // open. Keyed on `provider` rather than `id` because a teammate's roster
+    // id is `${userId}:${provider}`, which is not a provider and would fetch
+    // a 404 and cache it.
+    for (const provider of new Set(
+      channelAgentsFor(activeChannelId())
+        .map((agent) => agent.provider)
+        .filter((provider) => typeof provider === "string" && provider !== ""),
+    )) {
+      void ensureAgentOptions(provider, () => {
+        if (state.route === "chats") {
+          render();
+        }
+      });
     }
   }
 }
@@ -2548,7 +2559,9 @@ document.addEventListener("click", (event) => {
       render();
       return;
     case "channel-pin":
-      toggleChannelMessagePin(activeChannelId(), value);
+      // `render` travels with it so a refusal can put the banner back: the
+      // POST resolves long after this turn's render has run.
+      toggleChannelMessagePin(activeChannelId(), value, render);
       render();
       return;
     case "channel-pins-toggle":

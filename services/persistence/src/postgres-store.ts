@@ -1657,7 +1657,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
       submittedBy: input.submittedBy,
       context: input.context,
       conversationId: input.conversationId,
-      status: "submitted",
+      model: input.model,
+      effort: input.effort,
+      status: input.planOnly === true ? "planned" : "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,
       completedAt: undefined,
@@ -1683,8 +1685,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
           `INSERT INTO submitted_tasks
              (id, repository_id, project_id, objective, agent_id,
               validation_commands_json, submitted_by, status, submitted_at,
-              context, conversation_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+              context, conversation_id, model, effort)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
           [
             task.id,
             task.repositoryId,
@@ -1697,6 +1699,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
             task.submittedAt,
             task.context ?? null,
             task.conversationId ?? null,
+            task.model ?? null,
+            task.effort ?? null,
           ],
         );
       },
@@ -1800,7 +1804,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const result = await this.query(
       `UPDATE submitted_tasks
        SET status = 'cancelled', completed_at = $1
-       WHERE id = $2 AND status IN ('submitted', 'claimed', 'open')`,
+       WHERE id = $2 AND status IN ('submitted', 'claimed', 'planned', 'open')`,
       [completedAt, taskId],
     );
     if ((result.rowCount ?? 0) === 0) {
@@ -1825,6 +1829,20 @@ export class PostgresCoordinationStore implements CoordinationStore {
       );
     }
     return this.toSubmittedTask(row);
+  }
+
+  public async releasePlannedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    // Returning the row from the UPDATE itself, so the release and the read
+    // of what was released cannot straddle another writer.
+    const row = await this.row(
+      `UPDATE submitted_tasks SET status = 'submitted'
+       WHERE id = $1 AND status = 'planned'
+       RETURNING *`,
+      [taskId],
+    );
+    return row === undefined ? undefined : this.toSubmittedTask(row);
   }
 
   public async completeSubmittedTask(
@@ -1925,6 +1943,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
       submittedBy: optionalText(row, "submitted_by"),
       context: optionalText(row, "context"),
       conversationId: optionalText(row, "conversation_id"),
+      model: optionalText(row, "model"),
+      effort: optionalText(row, "effort"),
       status: text(row, "status") as SubmittedTaskStatus,
       submittedAt: text(row, "submitted_at"),
       claimedAt: optionalText(row, "claimed_at"),
@@ -3105,6 +3125,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       changedFiles: undefined,
       pinnedAt: undefined,
       pinnedBy: undefined,
+      endedAt: undefined,
     };
   }
 
@@ -3575,6 +3596,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
       pinnedAt: optionalText(row, "pinned_at"),
       pinnedBy: optionalText(row, "pinned_by"),
+      endedAt: optionalText(row, "ended_at"),
     };
   }
 
@@ -3587,6 +3609,19 @@ export class PostgresCoordinationStore implements CoordinationStore {
       `UPDATE channel_messages SET changed_files_json = $1
        WHERE id = $2 AND repository_id = $3`,
       [JSON.stringify(files), messageId, repositoryId],
+    );
+  }
+
+  public async markChannelMessageEnded(
+    repositoryId: string,
+    messageId: string,
+  ): Promise<void> {
+    // First ending wins: a re-narrated run must not restamp the row and make
+    // the mark look like it belongs to the later pass.
+    await this.query(
+      `UPDATE channel_messages SET ended_at = $1
+       WHERE id = $2 AND repository_id = $3 AND ended_at IS NULL`,
+      [new Date().toISOString(), messageId, repositoryId],
     );
   }
 

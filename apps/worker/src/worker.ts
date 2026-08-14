@@ -8,8 +8,10 @@ import {
   type CodexProcessRunner,
 } from "@coord/adapter-codex";
 import {
+  PROMPT_CLI_EFFORTS,
   createClaudeAdapter,
   createGeminiAdapter,
+  type PromptCliEffort,
 } from "@coord/adapter-prompt-cli";
 import type {
   AgentAdapter,
@@ -20,7 +22,10 @@ import {
   WORKER_PROTOCOL_VERSION,
   type WorkAssignment,
 } from "@coord/cli/worker-operations";
-import { codexExecutionSandbox } from "@coord/cli/commands";
+import {
+  codexExecutionSandbox,
+  withModelOverride,
+} from "@coord/cli/commands";
 import type { AgentConfig, CoordinatorProject } from "@coord/cli/project";
 import { DEFAULT_PROJECT_ID } from "@coord/persistence";
 import { GitClient } from "@coord/repository-service";
@@ -861,6 +866,16 @@ export class Worker {
   ): AgentAdapter {
     const [agentId, agent]: [string, AgentConfig] =
       this.options.project.requireAgent(assignment.task.agentId);
+    // The same merge the in-process runner does: what the dispatching channel
+    // picked for this agent beats the deployment's configured default, and a
+    // remote worker must not quietly run the request at a different model or
+    // reasoning depth than the machine next to it would have.
+    const args = withModelOverride(agent.args, assignment.task.model);
+    const configuredEffort =
+      agent.adapter === "claude" || agent.adapter === "gemini"
+        ? agent.effort
+        : undefined;
+    const effort = assignment.task.effort ?? configuredEffort;
     const repository = {
       id: assignment.repository.id,
       path: workspace.path,
@@ -891,7 +906,8 @@ export class Worker {
         workspaces,
         planningRoot: path.join(workspace.rootPath, "planning"),
         ...(agent.command === undefined ? {} : { command: agent.command }),
-        ...(agent.args === undefined ? {} : { args: agent.args }),
+        ...(args === undefined ? {} : { args }),
+        ...(effort === undefined ? {} : { effort }),
         ...(agent.planningTimeoutMs === undefined
           ? {}
           : { planningTimeoutMs: agent.planningTimeoutMs }),
@@ -921,6 +937,16 @@ export class Worker {
             "generic-cli agent for sandboxed execution, or remove the sandbox.",
         );
       }
+      if (
+        effort !== undefined &&
+        !(PROMPT_CLI_EFFORTS as readonly string[]).includes(effort)
+      ) {
+        throw new Error(
+          `Agent "${agentId}" was asked for reasoning effort "${effort}", but ` +
+            `${agent.adapter} accepts ${PROMPT_CLI_EFFORTS.join(", ")}`,
+        );
+      }
+      const promptEffort = effort as PromptCliEffort | undefined;
       const create =
         agent.adapter === "claude" ? createClaudeAdapter : createGeminiAdapter;
       return create({
@@ -934,14 +960,14 @@ export class Worker {
         workspaces,
         planningRoot: path.join(workspace.rootPath, "planning"),
         ...(agent.command === undefined ? {} : { command: agent.command }),
-        ...(agent.args === undefined ? {} : { args: agent.args }),
+        ...(args === undefined ? {} : { args }),
         ...(agent.planningTimeoutMs === undefined
           ? {}
           : { planningTimeoutMs: agent.planningTimeoutMs }),
         ...(agent.executionTimeoutMs === undefined
           ? {}
           : { executionTimeoutMs: agent.executionTimeoutMs }),
-        ...(agent.effort === undefined ? {} : { effort: agent.effort }),
+        ...(promptEffort === undefined ? {} : { effort: promptEffort }),
         ...(agent.env === undefined
           ? {}
           : { env: { ...process.env, ...agent.env } }),

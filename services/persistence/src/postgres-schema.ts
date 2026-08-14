@@ -763,4 +763,21 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE channel_messages ADD COLUMN pinned_by TEXT`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 30,
+    name: "channel-message-ended-elsewhere",
+    statements: [
+      `ALTER TABLE channel_messages ADD COLUMN ended_at TEXT`,
+    ],
+  },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 31,
+    name: "submitted-task-model-effort",
+    statements: [
+      `ALTER TABLE submitted_tasks ADD COLUMN model TEXT`,
+      `ALTER TABLE submitted_tasks ADD COLUMN effort TEXT`,
+    ],
+  },
 ];

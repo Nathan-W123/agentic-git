@@ -390,6 +390,18 @@ export interface AuthSessionRecord {
 export type SubmittedTaskStatus =
   | "submitted"
   | "claimed"
+  /**
+   * Planned, and waiting on a person before it may run.
+   *
+   * Distinct from `submitted` because that status means "queued to run", and
+   * every lease query is written against it. A `/plan` task parked as
+   * `submitted` was picked up by the next unrelated dispatch in the same
+   * repository — `leaseNextTask` takes the oldest queued row, not the one the
+   * caller had in mind — so work a person had explicitly not approved ran
+   * anyway, on their credential. Held work is a different thing from queued
+   * work and now says so.
+   */
+  | "planned"
   | "open"
   | "integrated"
   | "failed"
@@ -430,6 +442,27 @@ export interface SubmitTaskInput {
    * rather than by every caller remembering to close the last one.
    */
   conversationId?: string;
+  /**
+   * File this task as `planned` rather than `submitted`: intent recorded, and
+   * nothing may run it until a person releases it.
+   *
+   * Set at insert rather than by holding the row afterwards, because the gap
+   * between the two is exactly long enough for another dispatch's
+   * `runRepository` to lease it.
+   */
+  planOnly?: boolean;
+  /**
+   * What this one task should run with, overriding the agent's configured
+   * default. Set by a channel that has picked a model or a reasoning level
+   * for the agent it is talking to.
+   *
+   * Advisory in the sense that an adapter which cannot honour it says so at
+   * launch — `effort` is Claude and Codex only, and a model name is whatever
+   * the vendor CLI accepts — but it is not silently dropped, which is what
+   * happened while these lived only on the channel row.
+   */
+  model?: string;
+  effort?: string;
 }
 
 export interface SubmittedTask {
@@ -444,6 +477,9 @@ export interface SubmittedTask {
   context: string | undefined;
   /** See {@link SubmitTaskInput.conversationId}. Absent on one-shot tasks. */
   conversationId: string | undefined;
+  /** Per-task overrides of the agent's configured model / reasoning level. */
+  model: string | undefined;
+  effort: string | undefined;
   status: SubmittedTaskStatus;
   submittedAt: string;
   claimedAt: string | undefined;
@@ -770,6 +806,15 @@ export interface ChannelMessage {
    * of who flagged it, not a lock on who may clear it.
    */
   pinnedBy: UserId | undefined;
+  /**
+   * When this thread's task was given its ending outside the thread.
+   *
+   * A quick task ends as its own line in the channel rather than as a reply,
+   * which leaves the root looking like a thread that was never finished. This
+   * says otherwise, so the sweep that closes threads orphaned by a restart
+   * does not paste a second, canned ending under work that already reported.
+   */
+  endedAt: string | undefined;
 }
 
 /**
@@ -1255,6 +1300,16 @@ export interface CoordinationStore {
   /** Explicitly returns a claimed or failed task to the pending queue. */
   retrySubmittedTask(taskId: TaskId): Promise<SubmittedTask>;
   cancelSubmittedTask(taskId: TaskId): Promise<SubmittedTask>;
+  /**
+   * Releases a `planned` task into the queue, because a person said go.
+   *
+   * Returns undefined when the task is not held — already released, already
+   * running, gone — so an approval arriving twice, or arriving for work that
+   * was never held, is answered as ordinary conversation rather than starting
+   * something a second time. The status test and the write are one step for
+   * the same reason: two "go ahead"s racing must produce one run.
+   */
+  releasePlannedTask(taskId: TaskId): Promise<SubmittedTask | undefined>;
   completeSubmittedTask(
     taskId: TaskId,
     status: SubmittedTaskCompletionStatus,
@@ -1420,6 +1475,18 @@ export interface CoordinationStore {
     repositoryId: string,
     messageId: string,
     files: readonly ChannelChangedFile[],
+  ): Promise<void>;
+  /**
+   * Records that this thread's task was ended somewhere other than in it.
+   *
+   * Written by the narrator when a task finishes too small to deserve a
+   * thread, so the ending goes into the channel as its own line. Without it
+   * the root is indistinguishable from a thread whose watcher died, and the
+   * orphan sweep gives it an ending it already has.
+   */
+  markChannelMessageEnded(
+    repositoryId: string,
+    messageId: string,
   ): Promise<void>;
   /**
    * Records which task a thread is the story of.

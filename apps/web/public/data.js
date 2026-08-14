@@ -470,6 +470,79 @@ export async function loadProviders() {
   return state.providers;
 }
 
+/**
+ * The models a vendor actually reports, or nothing at all.
+ *
+ * Deliberately empty when the options have not loaded, or when the CLI could
+ * not tell us. Both pickers used to fall back to a hardcoded list at that
+ * point, which meant the commonest thing a person saw was two invented model
+ * names presented with the same confidence as the real ones — and no way to
+ * tell which they were looking at. An empty list plus the server's own
+ * explanation (`optionsNote`) is less useful and much more honest.
+ */
+export function providerModelOptions(providerId) {
+  const loaded = state.providerOptions[providerId];
+  // The account's own answer when there is one, and a curated list when there
+  // is not, so the control is always a populated dropdown. `suggestedModels`
+  // is sent only where `models` is absent, so these can never be mixed — the
+  // list is either entirely reported or entirely suggested, and
+  // `providerOptionsNote` says which.
+  const models = loaded?.models ?? loaded?.suggestedModels ?? [];
+  return models.map((model) => ({
+    value: model.id,
+    label: model.label ?? model.id,
+  }));
+}
+
+/**
+ * The reasoning levels available, for one model.
+ *
+ * Two shapes, because the vendors answer differently. Claude's levels are the
+ * same whichever model is picked, so they arrive provider-wide. Codex's vary
+ * per model — `supported_reasoning_levels` on each entry — so the provider
+ * answer is null and the levels ride on the model record. Reading only the
+ * first is why a Codex agent offered a generic low/medium/high that had
+ * nothing to do with the model selected beside it.
+ */
+export function providerEffortOptions(providerId, model) {
+  const loaded = state.providerOptions[providerId];
+  const efforts =
+    loaded?.efforts ??
+    loaded?.models?.find((entry) => entry.id === model)?.efforts ??
+    loaded?.suggestedEfforts ??
+    [];
+  return efforts.map((effort) => ({
+    value: effort,
+    label: effort.charAt(0).toUpperCase() + effort.slice(1),
+  }));
+}
+
+/**
+ * What the server said about why a list looks the way it does.
+ *
+ * The options response has always carried `notes` and `modelListSource` —
+ * "The Codex CLI has not cached a model list for this account yet", or which
+ * file the models were read from — and nothing in the browser had ever read
+ * either. The one component that knew why the list was empty was silent, and
+ * the screen invented a list instead.
+ */
+export function providerOptionsNote(providerId) {
+  const loaded = state.providerOptions[providerId];
+  if (loaded === undefined) {
+    return "";
+  }
+  if (loaded === null) {
+    return "This deployment could not report what models are available.";
+  }
+  const notes = Array.isArray(loaded.notes) ? loaded.notes : [];
+  return [
+    ...(loaded.models === null || loaded.models === undefined ? notes : []),
+    ...(typeof loaded.modelListSource === "string" && loaded.models
+      ? [loaded.modelListSource]
+      : []),
+  ].join(" ");
+}
+
 export async function loadProviderOptions(providerId) {
   if (state.providerOptions[providerId] !== undefined) {
     return state.providerOptions[providerId];
@@ -755,11 +828,18 @@ export function agentNameTaken(repositoryId, name, exceptAgentId) {
  * and treating it as such left the dots up long after a prompt finished.
  */
 // The statuses the tasks API actually emits are `submitted`, `claimed`,
-// `integrated`, `failed` and `cancelled`. This set used to hold five values of
-// which four never occur — run-level statuses from a different type — and not
-// `claimed`, which is the one a task holds for the whole time an agent is
-// actually working on it. So the dots retired the moment real work began and
-// persisted while a task merely sat in the queue: backwards on both ends.
+// `planned`, `open`, `integrated`, `failed` and `cancelled`. This set used to
+// hold five values of which four never occur — run-level statuses from a
+// different type — and not `claimed`, which is the one a task holds for the
+// whole time an agent is actually working on it. So the dots retired the
+// moment real work began and persisted while a task merely sat in the queue:
+// backwards on both ends.
+//
+// `planned` is deliberately absent. A `/plan` task is waiting on a person, and
+// the message beside it says in words that nothing is running — an agent shown
+// as thinking under that sentence contradicts it. `open` is absent for the
+// same reason: a landed conversational turn is waiting for the next message,
+// not working.
 const WORKING_STATUS = new Set(["submitted", "claimed"]);
 
 /** Backstop only — the task's own status is what really retires an entry. */
@@ -2555,7 +2635,7 @@ export function postChannelReply(repositoryId, messageId, text) {
  * exists to keep visible. Both copies flip when both exist, so the
  * transcript's pin button and the banner never disagree.
  */
-export function toggleChannelMessagePin(repositoryId, messageId) {
+export function toggleChannelMessagePin(repositoryId, messageId, rerender) {
   const pins = state.channelPins[repositoryId] ?? [];
   const message =
     findChannelMessage(repositoryId, messageId) ??
@@ -2566,23 +2646,43 @@ export function toggleChannelMessagePin(repositoryId, messageId) {
   const pinning = message.pinnedAt === undefined;
   const stamp = pinning ? new Date().toISOString() : undefined;
   const pinner = pinning ? currentUserId() || undefined : undefined;
-  for (const copy of [
-    findChannelMessage(repositoryId, messageId),
-    pins.find((entry) => entry.id === messageId),
-  ]) {
-    if (copy !== undefined) {
-      copy.pinnedAt = stamp;
-      copy.pinnedBy = pinner;
+  // What to put back if the server refuses. Read before the optimistic write,
+  // because after it there is nothing left to read.
+  const before = { at: message.pinnedAt, by: message.pinnedBy, pins };
+  const apply = (at, by, list) => {
+    for (const copy of [
+      findChannelMessage(repositoryId, messageId),
+      state.channelPins[repositoryId]?.find((entry) => entry.id === messageId),
+      message,
+    ]) {
+      if (copy !== undefined) {
+        copy.pinnedAt = at;
+        copy.pinnedBy = by;
+      }
     }
-  }
-  state.channelPins[repositoryId] = pinning
-    ? [...pins.filter((entry) => entry.id !== messageId), message]
-    : pins.filter((entry) => entry.id !== messageId);
+    state.channelPins[repositoryId] = list;
+  };
+  apply(
+    stamp,
+    pinner,
+    pinning
+      ? [...pins.filter((entry) => entry.id !== messageId), message]
+      : pins.filter((entry) => entry.id !== messageId),
+  );
   if (state.projectId && isServerChannelId(repositoryId, messageId)) {
     void api(
       channelPath(repositoryId, `/messages/${encodeURIComponent(messageId)}/pin`),
       { method: "POST", body: {} },
-    ).catch((error) => toast(`Pin did not save: ${error.message}`, "error"));
+    ).catch((error) => {
+      // Put it back. Leaving the optimistic write in place after a refusal
+      // left the banner advertising a pin the server did not have, and
+      // nothing reloads `channelPins` until somebody else posts in the
+      // channel — so the phantom outlived the toast that explained it, and
+      // survived navigating away and back.
+      apply(before.at, before.by, before.pins);
+      rerender?.();
+      toast(`Pin did not save: ${error.message}`, "error");
+    });
   }
 }
 

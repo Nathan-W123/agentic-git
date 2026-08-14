@@ -504,6 +504,15 @@ const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
  */
 const TERMINAL_STATUS_LINE: Record<string, string> = {
   integrated: CHANNEL_TERMINAL_EVENTS["canonical_promoted"] ?? "Done.",
+  // A landed conversational turn, which is finished work even though the task
+  // is not finished: `open` means the change is in canonical and the thread is
+  // waiting for the next message. Its absence here quietly retired this whole
+  // sweep for the case it was written for — every channel dispatch carries a
+  // conversation id, so every turn that succeeds settles as `open`, and an
+  // orphaned thread was skipped on every pass forever while its last word
+  // stayed a progress line. Failed and cancelled turns still settle
+  // terminally, which is why only the successful ones went quiet.
+  open: CHANNEL_TERMINAL_EVENTS["canonical_promoted"] ?? "Done.",
   failed: CHANNEL_TERMINAL_EVENTS["task_failed"] ?? "I could not finish this.",
   cancelled:
     CHANNEL_TERMINAL_EVENTS["task_cancelled"] ?? "This was cancelled.",
@@ -892,17 +901,29 @@ export function normalizeChannelAgentId(agentId: string, viewerId: string): stri
  * legacy bare-provider row that names every agent on the vendor.
  */
 export function resolveChannelAgentPresentation(
-  overrides: Record<string, { name?: string; role?: string } | undefined>,
+  overrides: Record<
+    string,
+    { name?: string; role?: string; model?: string; effort?: string } | undefined
+  >,
   agent: { userId: string; provider: string },
   defaultName: string,
-): { name: string; role: string } {
+): { name: string; role: string; model?: string; effort?: string } {
   const specific = overrides[`${agent.userId}:${agent.provider}`];
   const legacy = overrides[agent.provider];
+  // Model and effort travel with name and role because they are the same kind
+  // of fact — what this channel decided about this agent — and resolving them
+  // anywhere else would mean a second copy of the specific-beats-legacy rule.
+  // They used to be stored by the roster's pickers and read by nothing, so
+  // choosing a model changed a control and not one thing about the run.
+  const model = specific?.model ?? legacy?.model;
+  const effort = specific?.effort ?? legacy?.effort;
   return {
     name: specific?.name ?? legacy?.name ?? defaultName,
     // No vendor-guessed default: an agent is unlabeled until this channel
     // actually names its role.
     role: specific?.role ?? legacy?.role ?? "",
+    ...(model === undefined || model === "" ? {} : { model }),
+    ...(effort === undefined || effort === "" ? {} : { effort }),
   };
 }
 
@@ -935,6 +956,9 @@ type ChannelMentionCandidate = {
   name: string;
   /** This channel's declared role for the agent, or "" if unlabeled. */
   role: string;
+  /** What this channel picked for the agent, when it picked anything. */
+  model?: string;
+  effort?: string;
 };
 
 /* ------------------------------------------------- no-mention auto-claim --
@@ -1268,6 +1292,7 @@ const ROLES: readonly OrganizationRole[] = [
 const TASK_STATUSES: readonly SubmittedTaskStatus[] = [
   "submitted",
   "claimed",
+  "planned",
   "open",
   "integrated",
   "failed",
@@ -1378,6 +1403,23 @@ export interface ApiOperations {
      * turn. See docs/architecture/conversational-tasks.md.
      */
     conversationId?: string;
+    /**
+     * File this as held rather than queued: `/plan` records the intent and
+     * nothing may run it until a person says go.
+     *
+     * Carried into the insert rather than applied afterwards, because a task
+     * that is briefly `submitted` is briefly leasable — and the next
+     * dispatch in this repository leases the oldest queued row, which was
+     * how a held plan came to run on its author's credential without ever
+     * being approved.
+     */
+    planOnly?: boolean;
+    /**
+     * What this channel picked for the agent, overriding the deployment's
+     * configured default for this one task. See `SubmitTaskInput.model`.
+     */
+    model?: string;
+    effort?: string;
   }): Promise<SubmittedTask>;
   runRepository(input: {
     projectId: string;
@@ -7298,12 +7340,12 @@ export class ApiGateway {
       // of them chose.
       const defaultName =
         connection.callSign ?? `${label} (${firstWord(connection.userName)})`;
-      const { name, role } = resolveChannelAgentPresentation(
+      const presentation = resolveChannelAgentPresentation(
         overrides,
         connection,
         defaultName,
       );
-      return [{ ...connection, vendor, name, role }];
+      return [{ ...connection, vendor, ...presentation }];
     });
     return candidates.sort((a, b) => b.name.length - a.name.length);
   }
@@ -7921,6 +7963,16 @@ export class ApiGateway {
         // commissioning a stranger, and the coordinator keep the turn's
         // workspace warm for the next one.
         conversationId: threadRootId,
+        // What this channel picked for this agent, carried to the run rather
+        // than stopping at the roster row it was typed into.
+        ...(candidate.model === undefined ? {} : { model: candidate.model }),
+        ...(candidate.effort === undefined ? {} : { effort: candidate.effort }),
+        // Held from the moment it exists, not held after the fact. The
+        // branch below that stops and waits for a person is downstream of
+        // this; between the insert and that branch the row would otherwise
+        // be an ordinary queued task, and any concurrent dispatch's
+        // `runRepository` takes the oldest queued row in the repository.
+        ...(input.planOnly === true ? { planOnly: true } : {}),
       });
       await this.options.store.appendAudit(undefined, {
         type: "task_submitted",
@@ -7980,9 +8032,16 @@ export class ApiGateway {
       // before the run is paid for — every other approval reads a changeset,
       // by which point the execution has already been bought.
       //
-      // The queue does the waiting for free: a submitted task sits still
-      // until something asks the repository to run, so holding it costs no
-      // lease, no workspace and no clock.
+      // The waiting costs no lease, no workspace and no clock — but it is the
+      // `planned` status that does it, not the queue. This once relied on a
+      // submitted task sitting still "until something asks the repository to
+      // run", which is not what happens: any later dispatch in this
+      // repository asks, and `leaseNextTask` hands out the oldest queued row
+      // rather than the one that caller meant. A held plan was therefore
+      // executed by an unrelated mention — or by the next restart, which
+      // resumes everything queued — spending the plan author's credential on
+      // work nobody had approved, and leaving the thread still saying nothing
+      // was running.
       if (input.planOnly === true) {
         await this.appendChannelThreadReply({
           projectId,
@@ -8049,7 +8108,16 @@ export class ApiGateway {
         // its id, and the store filters by it rather than this scanning.
         cursor: 0,
         pending,
-        threaded: false,
+        // Whether a room already exists, not whether one is deserved. The
+        // held-narration rule is about sparing the channel a thread nobody
+        // needs — but when this dispatch joined an existing thread the room is
+        // already there, the acknowledgement is already in it, and the person
+        // who asked is reading it. Hardcoding `false` there sent the turn's
+        // ending to `appendChannelEntry` as a loose message at the foot of the
+        // channel, leaving the thread stopped dead after "On it." with its
+        // held title and reasoning discarded. `startPlannedTaskFor` has always
+        // passed `true` for exactly this reason.
+        threaded: continuing !== undefined,
       });
     } catch (error) {
       await this.appendChannelThreadReply({
@@ -9432,11 +9500,16 @@ export class ApiGateway {
   /**
    * Starts a task that has been planned and held, because a person said go.
    *
-   * Recognised by the task still sitting `submitted`: `/plan` deliberately
-   * files the work and does not ask the repository to run, so a queued task
-   * under a thread is one waiting on exactly this. Anything already claimed,
-   * failed or integrated is not waiting for permission, and falls through to
-   * being answered as an ordinary reply.
+   * Recognised by the task sitting `planned`, the status that exists to mean
+   * exactly this. It used to be recognised by `submitted` — which also means
+   * "queued to run", so the hold was indistinguishable from ordinary queued
+   * work and any dispatch in the repository would run it unasked. Anything
+   * claimed, failed or integrated is not waiting for permission, and falls
+   * through to being answered as an ordinary reply.
+   *
+   * The release is what decides, not the read before it: `releasePlannedTask`
+   * tests and writes the status in one step and returns undefined if it was
+   * not held, so two people saying "go ahead" at once start one run.
    *
    * Returns false when there is nothing held, so a "yes" in a thread that
    * has nothing to start still reads as conversation.
@@ -9456,12 +9529,10 @@ export class ApiGateway {
     if (root?.taskId === undefined || input.responder === undefined) {
       return false;
     }
-    const task = (
-      await this.options.store.listSubmittedTasks({
-        repositoryId: input.repositoryId,
-      })
-    ).find((entry) => entry.id === root.taskId);
-    if (task === undefined || task.status !== "submitted") {
+    // The release is the test. Reading the status first and acting on it
+    // afterwards would let two approvals both pass the read.
+    const task = await this.options.store.releasePlannedTask(root.taskId);
+    if (task === undefined) {
       return false;
     }
     const authorId = `${input.responder.userId}:${input.responder.provider}`;
@@ -10440,6 +10511,14 @@ export class ApiGateway {
           // A live watcher still owns this one and will close it itself.
           continue;
         }
+        if (message.endedAt !== undefined) {
+          // Already finished, just not in here: a task too small to deserve a
+          // thread ends as its own line in the channel. Without this the root
+          // reads as a thread that never got an ending, and this sweep gave
+          // it one — duplicating the outcome and opening the very room the
+          // narrator had decided against.
+          continue;
+        }
         const ending = TERMINAL_STATUS_LINE[byId.get(taskId)?.status ?? ""];
         if (ending === undefined) {
           continue;
@@ -10974,6 +11053,19 @@ export class ApiGateway {
                 // One line in the room reads as one line.
                 content: collapseWhitespace(line),
               });
+              // Said on the root, because the ending did not go there. A
+              // thread root carrying a task and no replies is otherwise
+              // indistinguishable from one whose watcher died mid-run, and
+              // `reconcileFinishedThreads` treated it as exactly that — 60
+              // seconds later it pasted a second, canned ending underneath,
+              // which both repeated the outcome and gave the task the room
+              // this branch exists to spare it.
+              await this.options.store
+                .markChannelMessageEnded(
+                  watched.repositoryId,
+                  watched.messageId,
+                )
+                .catch(() => undefined);
               this.watchedChannelTasks.delete(watched.taskId);
               break;
             }

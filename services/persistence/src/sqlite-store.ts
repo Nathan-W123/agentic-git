@@ -1642,7 +1642,9 @@ export class SqliteCoordinationStore implements CoordinationStore {
       submittedBy: input.submittedBy,
       context: input.context,
       conversationId: input.conversationId,
-      status: "submitted",
+      model: input.model,
+      effort: input.effort,
+      status: input.planOnly === true ? "planned" : "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,
       completedAt: undefined,
@@ -1670,8 +1672,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
           `INSERT INTO submitted_tasks
              (id, repository_id, project_id, objective, agent_id,
               validation_commands_json, submitted_by, status, submitted_at,
-              context, conversation_id)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              context, conversation_id, model, effort)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           task.id,
@@ -1685,6 +1687,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
           task.submittedAt,
           task.context ?? null,
           task.conversationId ?? null,
+          task.model ?? null,
+          task.effort ?? null,
         );
       this.db.exec("COMMIT");
     } catch (error) {
@@ -1792,7 +1796,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `UPDATE submitted_tasks
          SET status = 'cancelled', completed_at = ?
-         WHERE id = ? AND status IN ('submitted', 'claimed', 'open')`,
+         WHERE id = ? AND status IN ('submitted', 'claimed', 'planned', 'open')`,
       )
       .run(completedAt, taskId);
     if (result.changes === 0) {
@@ -1813,6 +1817,26 @@ export class SqliteCoordinationStore implements CoordinationStore {
       throw new Error(`Submitted task disappeared after cancellation: ${taskId}`);
     }
     return this.toSubmittedTask(row);
+  }
+
+  public async releasePlannedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    // One statement, so two "go ahead"s racing produce one release: the
+    // second finds no `planned` row to update and changes nothing.
+    const result = this.db
+      .prepare(
+        `UPDATE submitted_tasks SET status = 'submitted'
+         WHERE id = ? AND status = 'planned'`,
+      )
+      .run(taskId);
+    if (result.changes === 0) {
+      return undefined;
+    }
+    const row = this.db
+      .prepare("SELECT * FROM submitted_tasks WHERE id = ?")
+      .get(taskId) as Row | undefined;
+    return row === undefined ? undefined : this.toSubmittedTask(row);
   }
 
   public async completeSubmittedTask(
@@ -1908,6 +1932,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
       submittedBy: optionalText(row, "submitted_by"),
       context: optionalText(row, "context"),
       conversationId: optionalText(row, "conversation_id"),
+      model: optionalText(row, "model"),
+      effort: optionalText(row, "effort"),
       status: text(row, "status") as SubmittedTaskStatus,
       submittedAt: text(row, "submitted_at"),
       claimedAt: optionalText(row, "claimed_at"),
@@ -3077,6 +3103,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       changedFiles: undefined,
       pinnedAt: undefined,
       pinnedBy: undefined,
+      endedAt: undefined,
     };
   }
 
@@ -3211,6 +3238,20 @@ export class SqliteCoordinationStore implements CoordinationStore {
          WHERE id = ? AND repository_id = ?`,
       )
       .run(JSON.stringify(files), messageId, repositoryId);
+  }
+
+  public async markChannelMessageEnded(
+    repositoryId: string,
+    messageId: string,
+  ): Promise<void> {
+    // First ending wins: a re-narrated run must not restamp the row and make
+    // the mark look like it belongs to the later pass.
+    this.db
+      .prepare(
+        `UPDATE channel_messages SET ended_at = ?
+         WHERE id = ? AND repository_id = ? AND ended_at IS NULL`,
+      )
+      .run(new Date().toISOString(), messageId, repositoryId);
   }
 
   public async setChannelMessageTask(
@@ -3677,6 +3718,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
       pinnedAt: optionalText(row, "pinned_at"),
       pinnedBy: optionalText(row, "pinned_by"),
+      endedAt: optionalText(row, "ended_at"),
     };
   }
 
