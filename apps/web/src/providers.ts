@@ -554,11 +554,14 @@ const SUGGESTED_MODELS: Record<ProviderId, ProviderModelOption[]> = {
     { id: "claude-sonnet-5", label: "Sonnet 5" },
     { id: "claude-haiku-4-5", label: "Haiku 4.5" },
   ],
+  // Only the -codex ids. The bare ones are real models but not for this
+  // door: Codex on a ChatGPT account 400s them ("The 'gpt-5' model is not
+  // supported when using Codex with a ChatGPT account"), and a suggestion
+  // that stores a guaranteed failure is a trap with a label. API-key
+  // accounts get the CLI's own reported list and never see this fallback.
   openai: [
     { id: "gpt-5.1-codex", label: "GPT-5.1 Codex" },
     { id: "gpt-5.1-codex-mini", label: "GPT-5.1 Codex Mini" },
-    { id: "gpt-5.1", label: "GPT-5.1" },
-    { id: "gpt-5", label: "GPT-5" },
   ],
   google: [
     { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro" },
@@ -2660,19 +2663,28 @@ export class ProviderChatService {
         // at all. The value reaches `codex exec -m <model>` unaltered either
         // way, exactly as it does for Claude.
         allowCustomModel: models === undefined,
-        // Suggestions only where there is no real list to contradict.
+        // No suggested model names. A suggestion here is a guess about
+        // somebody else's account, and picking one from a list reads as
+        // picking something available — which is how "gpt-5" came to be
+        // selected on a ChatGPT-account Codex that answers
+        // `The 'gpt-5' model is not supported when using Codex with a ChatGPT
+        // account` and fails the task at planning time. A name nobody can
+        // check is worse offered than withheld: typing one is at least an
+        // explicit guess, and the field still accepts one.
+        //
+        // Reasoning levels are kept. They are fixed vocabulary the CLI defines
+        // rather than entitlements that vary by account, so suggesting them
+        // cannot mislead the same way.
         ...(models === undefined
-          ? {
-              suggestedModels: [...SUGGESTED_MODELS.openai],
-              suggestedEfforts: [...SUGGESTED_EFFORTS.openai],
-            }
+          ? { suggestedEfforts: [...SUGGESTED_EFFORTS.openai] }
           : {}),
         notes:
           models === undefined
             ? [
-                "The Codex CLI has not cached a model list for this account " +
-                  "yet, so these are suggested names rather than the ones it " +
-                  "reports.",
+                "No model list yet for this account. Codex writes one to " +
+                  "~/.codex/models_cache.json after it runs, so pick a model " +
+                  "once this agent has completed a task — or type a name you " +
+                  "know the account has.",
               ]
             : [],
       };
@@ -2775,7 +2787,27 @@ export class ProviderChatService {
     // validate against, so the only rules are that it is not blank and not an
     // essay. Clearing it back to the vendor label is done by sending an empty
     // string, the same way model and effort clear.
-    if (input.callSign !== undefined) {
+    if (input.model !== undefined && input.model !== "") {
+      // Refused rather than stored when the CLI's own list disagrees. A
+      // stored guess fails every future run with the vendor's 400 — Phoenix
+      // spent an afternoon refusing "gpt-5" — and the person who clicked it
+      // has no reason to connect the setting to the failure.
+      const known = await this.options({ provider: input.provider }).catch(
+        () => undefined,
+      );
+      const ids = (known?.models ?? known?.suggestedModels ?? []).map(
+        (model) => model.id,
+      );
+      if (ids.length > 0 && !ids.includes(input.model)) {
+        throw new ProviderChatError(
+          400,
+          "unknown_model",
+          `${PROVIDER_NAMES[input.provider]} does not report a model "${input.model}" — ` +
+            `choose one of: ${ids.join(", ")}`,
+        );
+      }
+    }
+        if (input.callSign !== undefined) {
       const trimmed = input.callSign.trim();
       if (trimmed.length > 40) {
         throw new ProviderChatError(
@@ -3247,7 +3279,15 @@ export class ProviderChatService {
             "read-only",
             "-C",
             scratch,
-            ...(settings.model === undefined ? [] : ["-m", settings.model]),
+            ...(settings.model === undefined ||
+            // Already stored before the suggestion list was fixed: bare gpt
+            // ids fail every ChatGPT-account run with the vendor's 400, and
+            // the person who once clicked "GPT-5" has no reason to connect a
+            // dead agent to a dropdown. Fall back to the CLI's own default
+            // rather than failing on a setting nobody can see.
+            /^gpt-5(\.\d+)?$/u.test(settings.model)
+              ? []
+              : ["-m", settings.model]),
             ...overrides,
             prompt,
           ];
