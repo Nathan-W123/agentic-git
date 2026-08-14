@@ -23,6 +23,7 @@ import {
 import {
   assertAgentPlan,
   createId,
+  describeError,
   mergePlanScope,
   normalizeRepositoryPath,
   planGroundingConfidence,
@@ -308,28 +309,13 @@ interface PreparedTask extends PlannedTask {
   split?: ChangeSetSplit;
 }
 
-function errorMessage(
-  error: unknown,
-  seen: Set<unknown> = new Set(),
-): string {
-  if (typeof error === "object" && error !== null) {
-    if (seen.has(error)) {
-      return "[circular error]";
-    }
-    seen.add(error);
-  }
-
-  const summary = error instanceof Error ? error.message : String(error);
-  if (!(error instanceof AggregateError)) {
-    return summary;
-  }
-
-  const messages = [
-    summary,
-    ...Array.from(error.errors, (nested) => errorMessage(nested, seen)),
-  ].filter((message, index, all) => message.length > 0 && all.indexOf(message) === index);
-  return messages.join("; ");
-}
+/**
+ * Kept as a local name because this module calls it in dozens of places, but
+ * the rule itself lives in shared-types now — the gateway renders the very
+ * aggregates raised here, and two copies of "unwrap the causes" is how one end
+ * ends up reporting a wrapper the other end would have expanded.
+ */
+const errorMessage = describeError;
 
 function pairKey(taskIds: readonly [string, string]): string {
   return [...taskIds].sort().join("\0");

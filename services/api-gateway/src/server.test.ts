@@ -80,7 +80,8 @@ interface TestRuntime {
   /** Where `canonicalHead` says canonical stands; mutated in place. */
   canonicalState: { head: string | undefined };
   /** Set `reason` to make `runRepository` reject, as a run that cannot start does. */
-  runFailure: { reason?: string };
+  /** `error` throws exactly what it holds, for failures with a shape. */
+  runFailure: { reason?: string; error?: unknown };
   /** Every rollback the gateway asked for, in order. */
   rollbacks: Array<{ repositoryId: string; targetRevision: string }>;
 }
@@ -368,6 +369,9 @@ async function startRuntime(
       });
     },
     async runRepository() {
+      if (runFailure.error !== undefined) {
+        throw runFailure.error;
+      }
       if (runFailure.reason !== undefined) {
         throw new Error(runFailure.reason);
       }
@@ -6130,6 +6134,53 @@ test("a run that cannot start says so, instead of an hour of silence", async (t)
   // The actual reason, not a generic apology — it is the only thing that
   // tells the reader what to do next.
   assert.match(said, /already mapped to a different canonical repository/u);
+});
+
+test("a planning failure names the cause, not just the wrapper", async (t) => {
+  // What a wave failing during planning actually rejects with. Its own message
+  // says only that something failed; which task and why are in `errors`, and
+  // reading `.message` dropped them — so the channel reported the shape of the
+  // failure and never its cause, and the one place the answer existed was a
+  // log nobody reading the thread can open.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "aggregatecause");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+  runtime.runFailure.error = new AggregateError(
+    [new Error("codex exited before writing a plan")],
+    "One or more tasks failed during planning",
+  );
+  const mention = `Codex (${String(session.user.displayName).split(" ")[0]})`;
+
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages`,
+    { method: "POST", body: { content: `@${mention} build the render half` } },
+  );
+
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(repo, ownerId);
+    return messages.some((message) =>
+      message.replies.some((reply) =>
+        reply.content.includes("I could not start this"),
+      ),
+    );
+  }, "the channel never said the run did not start");
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const said = messages
+    .flatMap((message) => message.replies)
+    .map((reply) => reply.content)
+    .join("\n");
+  // Both halves: the wrapper still orients the reader, and the cause is what
+  // they can actually act on.
+  assert.match(said, /One or more tasks failed during planning/u);
+  assert.match(said, /codex exited before writing a plan/u);
 });
 
 test("a finished thread carries its summary and its line counts", async (t) => {

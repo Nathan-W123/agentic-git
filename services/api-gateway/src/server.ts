@@ -50,6 +50,7 @@ import {
 import {
   assertProjectPolicy,
   createId,
+  describeError,
   projectBudgets,
   ROLE_CONTEXT_PREFIX,
   withoutRoleContext,
@@ -8067,8 +8068,13 @@ export class ApiGateway {
           actorId: candidate.userId,
         }),
       ).catch(async (error: unknown) => {
-        const reason =
-          error instanceof Error ? error.message : String(error);
+        // `describeError`, not `.message`: a run that fails while planning
+        // rejects with an AggregateError whose own message says only that one
+        // or more tasks failed, and the reasons — which agent, and why — are
+        // in `errors`. Reading `.message` reported the shape of the failure
+        // and never its cause, leaving the channel with a sentence nobody
+        // could act on and the log as the only place the answer existed.
+        const reason = describeError(error);
         process.stderr.write(
           `[channel] run failed for ${repositoryId}: ${reason}
 `,
@@ -8125,7 +8131,9 @@ export class ApiGateway {
         messageId: acknowledgement.id,
         authorId: `${candidate.userId}:${candidate.provider}`,
         content: `I could not start this: ${
-          error instanceof Error ? error.message : "the task could not be submitted"
+          error instanceof Error
+            ? describeError(error)
+            : "the task could not be submitted"
         }`,
         projectId,
       });

@@ -1049,6 +1049,46 @@ export function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort();
 }
 
+/**
+ * An error as a single line, with anything an `AggregateError` is carrying
+ * unwrapped into it.
+ *
+ * `error.message` on an aggregate is only the wrapper — "One or more tasks
+ * failed during planning" — and the reasons live in `errors`, which reading
+ * `.message` silently drops. A caller that does the obvious thing therefore
+ * reports the shape of the failure and never its cause, which is how a
+ * planning failure reached a channel saying nothing a reader could act on.
+ *
+ * Lives here because the coordinator raises these aggregates and the gateway
+ * renders them, and a second copy of this rule at either end is one that can
+ * drift from the other.
+ */
+export function describeError(
+  error: unknown,
+  seen: Set<unknown> = new Set(),
+): string {
+  if (typeof error === "object" && error !== null) {
+    if (seen.has(error)) {
+      return "[circular error]";
+    }
+    seen.add(error);
+  }
+
+  const summary = error instanceof Error ? error.message : String(error);
+  if (!(error instanceof AggregateError)) {
+    return summary;
+  }
+
+  const messages = [
+    summary,
+    ...Array.from(error.errors, (nested) => describeError(nested, seen)),
+  ].filter(
+    (message, index, all) =>
+      message.length > 0 && all.indexOf(message) === index,
+  );
+  return messages.join("; ");
+}
+
 function isStringArray(value: unknown): value is string[] {
   return Array.isArray(value) && value.every((entry) => typeof entry === "string");
 }
