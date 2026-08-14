@@ -69,6 +69,7 @@ import {
   relativeTime,
   searchBox,
   tabs,
+  toast,
 } from "./ui.js";
 
 /* ------------------------------------------------------------- options ---- */
@@ -973,7 +974,10 @@ function messageRow(
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
-  return `<div class="cmsg-row">
+  // The id is the jump target the pinned banner scrolls to. Gated on the
+  // channel copy only: the thread panel renders the same root with
+  // isReply, and one message must not put two ids in the document.
+  return `<div class="cmsg-row"${isReply ? "" : ` id="cmsg-${esc(entry.id)}"`}>
     <span class="cmsg-avatar">${
       author.agent !== undefined ? agentFace(author.agent, 32) : avatar(author.name, 32, author.name, author.name === currentUserName() ? myAvatar() : undefined)
     }</span>
@@ -1038,6 +1042,12 @@ function messageRow(
             })
       }
       ${iconButton("smile", { act: "channel-react", value: entry.id, title: "React", small: true })}
+      ${iconButton("pin", {
+        act: "channel-pin",
+        value: entry.id,
+        title: entry.pinnedAt === undefined ? "Pin" : "Unpin",
+        small: true,
+      })}
       ${
         // Anything the caller wants sitting beside the reply button — the
         // summary's simplify wand rides here, so the two read as one set of
@@ -1783,7 +1793,13 @@ function threadPanel(repositoryId) {
   if (messageId === undefined) {
     return "";
   }
-  const root = channelMessagesFor(repositoryId).find((entry) => entry.id === messageId);
+  // The banner's copy answers for a pinned thread whose transcript row has
+  // aged past the loaded page — its stored replies are what let it open.
+  const root =
+    channelMessagesFor(repositoryId).find((entry) => entry.id === messageId) ??
+    (state.channelPins[repositoryId] ?? []).find(
+      (entry) => entry.id === messageId,
+    );
   if (root === undefined) {
     return "";
   }
@@ -1796,6 +1812,11 @@ function threadPanel(repositoryId) {
     <header class="thread-head">
       <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
+      ${iconButton("pin", {
+        act: "channel-pin",
+        value: messageId,
+        title: root.pinnedAt === undefined ? "Pin thread" : "Unpin thread",
+      })}
       ${iconButton("reply", {
         act: "composer-thread-continue",
         value: messageId,
@@ -2288,6 +2309,7 @@ export function renderChats() {
     <div class="chan-main">
       ${chanHeader(repository, repositoryId)}
       ${chanSearchRow()}
+      ${pinnedBanner(repositoryId)}
       ${messageList(repositoryId)}
       ${composer(repositoryId)}
       ${state.termOpen ? terminalDrawer() : ""}
@@ -2340,6 +2362,20 @@ export function restoreChannelScroll() {
   const list = document.querySelector("#chan-messages");
   if (list === null) {
     return;
+  }
+  // A requested jump outranks following: the reader asked for one message,
+  // and snapping to the bottom over it would answer a different question.
+  // One-shot, and following turns off so the next arriving message does not
+  // yank them away mid-read; scrolling back down re-arms it as always.
+  if (state.scrollToMessage !== undefined) {
+    const target = document.getElementById(`cmsg-${state.scrollToMessage}`);
+    state.scrollToMessage = undefined;
+    if (target !== null) {
+      followingChannel = false;
+      target.scrollIntoView({ block: "center" });
+      return;
+    }
+    toast("That message is older than the loaded history", "error");
   }
   if (followingChannel) {
     list.scrollTop = list.scrollHeight;
@@ -2408,6 +2444,61 @@ export function submitComposerMessage(rerender) {
   markChannelRead(repositoryId);
   rerender();
   scrollChannel();
+}
+
+/**
+ * What this channel has decided not to lose, in a strip above the messages.
+ *
+ * The banner reads from the server-fed pinned list rather than the loaded
+ * transcript, because a pin exists precisely so a message survives the room
+ * moving on — a banner that only knew the current page would forget exactly
+ * the pins it was for. Collapsible to one line, because pins are a shelf,
+ * not a second conversation.
+ */
+function pinnedBanner(repositoryId) {
+  const pins = state.channelPins[repositoryId] ?? [];
+  if (pins.length === 0) {
+    // The same no-op the search row uses, so the column's child list keeps
+    // its shape whether or not anything is pinned.
+    return `<div hidden></div>`;
+  }
+  const open = state.pinsOpen === true;
+  return `<div class="chan-pins">
+    <button type="button" class="chan-pins-head" data-act="channel-pins-toggle"
+      aria-expanded="${open}">
+      ${icon("pin")}
+      <span>${pins.length} pinned</span>
+      <span class="spacer"></span>
+      ${icon(open ? "chevronUp" : "chevronDown")}
+    </button>
+    ${
+      !open
+        ? ""
+        : `<div class="chan-pins-list">${pins
+            .map((entry) => {
+              const title = threadTitle(entry) || "(no text)";
+              const pinner =
+                entry.pinnedBy === undefined
+                  ? "someone"
+                  : (memberName(entry.pinnedBy) ?? entry.pinnedBy);
+              return `<div class="chan-pin-row">
+                <button type="button" class="chan-pin-jump"
+                  data-act="channel-pin-jump" data-value="${esc(entry.id)}"
+                  title="Pinned by ${esc(pinner)}">
+                  <span class="cp-title">${esc(title)}</span>
+                  <span class="cp-time">${esc(clockTime(entry.at ?? entry.createdAt))}</span>
+                </button>
+                ${iconButton("close", {
+                  act: "channel-pin",
+                  value: entry.id,
+                  title: "Unpin",
+                  small: true,
+                })}
+              </div>`;
+            })
+            .join("")}</div>`
+    }
+  </div>`;
 }
 
 /**

@@ -192,6 +192,9 @@ export const ICONS = {
     '<circle cx="12" cy="12" r="9"/><path d="M8.3 14.2c1 1.3 2.3 2 3.7 2s2.7-.7 3.7-2"/><circle cx="8.7" cy="9.8" r="1" fill="currentColor" stroke="none"/><circle cx="15.3" cy="9.8" r="1" fill="currentColor" stroke="none"/>',
   ),
   reply: S('<path d="M9 8 4.5 12 9 16"/><path d="M4.5 12h9a6 6 0 0 1 6 6v1"/>'),
+  pin: S(
+    '<path d="M9.3 3.5h5.4l-.6 5.2 3.2 3.6H6.7l3.2-3.6z"/><path d="M12 12.3V20"/>',
+  ),
   hash: S(
     '<path d="M9.5 3.5 6.8 20.5M17.2 3.5l-2.7 17M4 8.5h16M3 15.5h16"/>',
   ),

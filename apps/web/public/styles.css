@@ -3954,8 +3954,85 @@ svg {
 
 .chan-main > .chan-head,
 .chan-main > .chan-search,
+.chan-main > .chan-pins,
 .chan-main > .chan-composer-wrap {
   flex: none;
+}
+
+/* What the channel decided not to lose: a slim shelf between the toolbar
+   and the messages. One header line collapsed; a bounded, scrollable list
+   open — many pins must never squeeze the conversation itself out. */
+.chan-pins {
+  border-bottom: 1px solid var(--border-soft);
+  background: var(--bg-card-2);
+}
+
+.chan-pins-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 14px;
+  background: none;
+  border: none;
+  color: var(--text-2);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.chan-pins-head svg {
+  width: 14px;
+  height: 14px;
+}
+
+.chan-pins-head .spacer {
+  flex: 1;
+}
+
+.chan-pins-list {
+  max-height: 132px;
+  overflow-y: auto;
+  padding: 0 8px 6px;
+}
+
+.chan-pin-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.chan-pin-jump {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 6px;
+  background: none;
+  border: none;
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 12.5px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.chan-pin-jump:hover {
+  background: var(--bg-hover);
+}
+
+.chan-pin-jump .cp-title {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.chan-pin-jump .cp-time {
+  margin-left: auto;
+  flex: none;
+  color: var(--text-4);
+  font-size: 11px;
 }
 
 .chan-head {

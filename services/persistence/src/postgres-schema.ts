@@ -754,4 +754,13 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
         ON submitted_tasks (conversation_id, status)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 29,
+    name: "channel-message-pins",
+    statements: [
+      `ALTER TABLE channel_messages ADD COLUMN pinned_at TEXT`,
+      `ALTER TABLE channel_messages ADD COLUMN pinned_by TEXT`,
+    ],
+  },
 ];

@@ -896,6 +896,23 @@ export const MIGRATIONS: readonly Migration[] = [
         ON submitted_tasks (conversation_id, status)`,
     ],
   },
+  {
+    // A pin is one fact about one message — at most one, channel-wide — so
+    // it is two nullable columns rather than the join table reactions need
+    // for their per-user-per-emoji shape. Columns also die with the row,
+    // which keeps every delete path exactly as it is.
+    //
+    // No index: the pinned set is read per channel through the already
+    // indexed repository_id, and a channel holds a handful of pins, not
+    // thousands. A partial index (WHERE pinned_at IS NOT NULL) is the
+    // upgrade if that ever stops being true.
+    version: 29,
+    name: "channel-message-pins",
+    statements: [
+      `ALTER TABLE channel_messages ADD COLUMN pinned_at TEXT`,
+      `ALTER TABLE channel_messages ADD COLUMN pinned_by TEXT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

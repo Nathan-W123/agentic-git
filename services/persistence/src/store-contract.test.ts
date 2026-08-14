@@ -2997,6 +2997,101 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: pinned channel messages toggle, survive paging, and die with the row`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_pins",
+        path: "/pins.git",
+        branch: "main",
+      });
+      const alice = await store.createUser({
+        email: "pin-alice@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+      const bob = await store.createUser({
+        email: "pin-bob@example.invalid",
+        displayName: "Bob",
+        passwordDigest: "unused",
+      });
+
+      const first = await store.appendChannelMessage({
+        repositoryId: "repo_pins",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "Decision: we ship on Friday.",
+      });
+      assert.equal(first.pinnedAt, undefined);
+      const pinned = await store.toggleChannelMessagePin(
+        "repo_pins",
+        first.id,
+        alice.id,
+      );
+      assert.ok(pinned.pinnedAt !== undefined);
+      assert.equal(pinned.pinnedBy, alice.id);
+
+      // Paging cannot lose a pin: the room moves on, the pin does not. The
+      // short gap keeps the timestamps from tying, as the pagination test
+      // below this one does.
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const second = await store.appendChannelMessage({
+        repositoryId: "repo_pins",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: bob.id,
+        content: "Later chatter.",
+      });
+      const newestOnly = await store.listChannelMessages("repo_pins", bob.id, {
+        limit: 1,
+      });
+      assert.deepEqual(
+        newestOnly.map((message) => message.id),
+        [second.id],
+      );
+      const shelf = await store.listPinnedChannelMessages("repo_pins", bob.id);
+      assert.deepEqual(
+        shelf.map((message) => message.id),
+        [first.id],
+      );
+      assert.equal(shelf[0]?.pinnedBy, alice.id);
+
+      // Anyone may unpin — a pin is shared attention, not a lock.
+      const cleared = await store.toggleChannelMessagePin(
+        "repo_pins",
+        first.id,
+        bob.id,
+      );
+      assert.equal(cleared.pinnedAt, undefined);
+      assert.equal(cleared.pinnedBy, undefined);
+      assert.deepEqual(
+        await store.listPinnedChannelMessages("repo_pins", bob.id),
+        [],
+      );
+
+      // Re-pinning records the new pinner, and deletion takes the pin with
+      // the row — the columns live and die with the message.
+      const repinned = await store.toggleChannelMessagePin(
+        "repo_pins",
+        first.id,
+        bob.id,
+      );
+      assert.equal(repinned.pinnedBy, bob.id);
+      await store.deleteChannelMessage("repo_pins", first.id);
+      assert.deepEqual(
+        await store.listPinnedChannelMessages("repo_pins", bob.id),
+        [],
+      );
+
+      await assert.rejects(
+        store.toggleChannelMessagePin("repo_pins", "chanmsg_missing", alice.id),
+        /Unknown channel message/u,
+      );
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a repository channel threads, reacts, and tracks per-viewer state`, async () => {
     const { store, cleanup } = await backend.open();
     try {

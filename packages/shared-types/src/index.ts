@@ -905,6 +905,13 @@ export type AuditEventType =
   | "channel_message_replied"
   /** A reaction on a channel message was added or removed. */
   | "channel_reaction_toggled"
+  /**
+   * A channel message was pinned to, or unpinned from, the channel's
+   * banner; `data.pinned` says which. The `channel_` prefix is load-bearing:
+   * the dashboard's reconcile re-reads any channel whose audit events start
+   * with it.
+   */
+  | "channel_message_pinned"
   /** An agent's per-channel display name, role, or model/effort setting changed. */
   | "channel_agent_overridden"
   /** A (user, provider) agent was added to or removed from a channel's opt-in roster. */

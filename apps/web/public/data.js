@@ -201,6 +201,19 @@ export const state = {
   dmDraft: "",
   /** Message/token totals per repository, for the info popover. */
   channelStats: {},
+  /**
+   * Pinned messages per repository — the banner's own list, server-fed.
+   *
+   * Banner-only read data, kept beside the transcript rather than folded
+   * into it: a pin can outlive the loaded page, and this list is what keeps
+   * it visible when the transcript copy has aged out. The pin toggle flips
+   * both copies when both exist.
+   */
+  channelPins: {},
+  /** Whether the pinned banner is unfolded. A reading preference, session-only. */
+  pinsOpen: true,
+  /** A one-shot message id the next channel render should scroll to. */
+  scrollToMessage: undefined,
   /** Everyone in each repository's room — org members plus repo grantees. */
   channelPeople: {},
   /**
@@ -2262,6 +2275,9 @@ async function loadChannel(repositoryId) {
   if (Array.isArray(response.slashCommands)) {
     state.channelSlashCommands[repositoryId] = response.slashCommands;
   }
+  if (Array.isArray(response.pinned)) {
+    state.channelPins[repositoryId] = response.pinned.map(withSentTime);
+  }
   if (response.readAt !== undefined) {
     state.channelRead[repositoryId] = Date.parse(response.readAt);
     window.localStorage.setItem("ag.chanread", JSON.stringify(state.channelRead));
@@ -2497,6 +2513,46 @@ export function postChannelReply(repositoryId, messageId, text) {
 }
 
 /** A single-emoji toggle, same idea as a Slack reaction — on, then off. */
+/**
+ * Pins or unpins one message, optimistically, then tells the server.
+ *
+ * The lookup falls back to the banner's own list because an old pin may have
+ * no transcript copy on the loaded page — without the fallback, the banner's
+ * unpin button would silently do nothing for exactly the pins the banner
+ * exists to keep visible. Both copies flip when both exist, so the
+ * transcript's pin button and the banner never disagree.
+ */
+export function toggleChannelMessagePin(repositoryId, messageId) {
+  const pins = state.channelPins[repositoryId] ?? [];
+  const message =
+    findChannelMessage(repositoryId, messageId) ??
+    pins.find((entry) => entry.id === messageId);
+  if (message === undefined) {
+    return;
+  }
+  const pinning = message.pinnedAt === undefined;
+  const stamp = pinning ? new Date().toISOString() : undefined;
+  const pinner = pinning ? currentUserId() || undefined : undefined;
+  for (const copy of [
+    findChannelMessage(repositoryId, messageId),
+    pins.find((entry) => entry.id === messageId),
+  ]) {
+    if (copy !== undefined) {
+      copy.pinnedAt = stamp;
+      copy.pinnedBy = pinner;
+    }
+  }
+  state.channelPins[repositoryId] = pinning
+    ? [...pins.filter((entry) => entry.id !== messageId), message]
+    : pins.filter((entry) => entry.id !== messageId);
+  if (state.projectId && isServerChannelId(repositoryId, messageId)) {
+    void api(
+      channelPath(repositoryId, `/messages/${encodeURIComponent(messageId)}/pin`),
+      { method: "POST", body: {} },
+    ).catch((error) => toast(`Pin did not save: ${error.message}`, "error"));
+  }
+}
+
 export function toggleChannelReaction(repositoryId, messageId, emoji = "👍") {
   const message = findChannelMessage(repositoryId, messageId);
   if (message === undefined) {
