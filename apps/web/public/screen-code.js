@@ -291,6 +291,47 @@ export async function openWorkspace(rerender) {
   }
 }
 
+/**
+ * Re-cuts the workspace at whatever canonical is now.
+ *
+ * The route has existed since overlays did and nothing in the interface has
+ * ever called it, so a workspace left behind by an advance — which is every
+ * workspace with an unsaved edit in it, since those are deliberately not moved
+ * automatically — could only be brought forward by someone willing to POST to
+ * the API by hand.
+ */
+export async function resetWorkspace(rerender) {
+  const repository = currentRepository();
+  if (repository === undefined || state.workspaceOpening === true) {
+    return;
+  }
+  state.workspaceOpening = true;
+  rerender();
+  try {
+    const project = encodeURIComponent(state.projectId);
+    const repo = encodeURIComponent(repository.id);
+    const reset = await api(
+      `/projects/${project}/repositories/${repo}/workspace/reset`,
+      { method: "POST", body: {} },
+    );
+    state.workspace = reset.workspace;
+    const files = await apiOptional(
+      `/projects/${project}/repositories/${repo}/workspace/files`,
+      { files: [] },
+    );
+    state.files = files.files ?? [];
+    // The tabs were opened against the old revision, and a file that is no
+    // longer there would sit as an unreadable tab.
+    state.openTabs = [];
+    toast(`Updated — ${state.files.length} files`, "ok");
+  } catch (error) {
+    toast(error.message, "error");
+  } finally {
+    state.workspaceOpening = false;
+    rerender();
+  }
+}
+
 /* ------------------------------------------------------------ toolbar ---- */
 
 function toolbar() {

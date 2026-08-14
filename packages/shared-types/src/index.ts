@@ -784,7 +784,17 @@ export function readsAsReportRequest(objective: string): boolean {
     // words — audit, analyse, diagnose — and missed the ordinary ones, so
     // "look at this repository and describe what it is" was not recognised as
     // a request to look at all.
-    /\b(audit|audits|audited|auditing|summar(?:y|ise|ize|ised|ized|ising|izing|ies)|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|analysis|inspect|inspects|inspected|inspecting|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|explain|explains|explained|explaining|describe|describes|described|describing|review|reviews|reviewed|reviewing|report|reports|reported|reporting|investigate|investigates|investigated|investigating|list|lists|listed|listing)\b/iu.test(
+    //
+    // `name`, `show`, `tell`, `enumerate`, `identify`, `print`, `display` and
+    // `count` are the same lesson a second time. "List all files in this repo"
+    // was a report and "name all files in this repo" was a failed task, which
+    // is not a distinction anybody typing either sentence intended to draw.
+    //
+    // Verbs that could as easily introduce a change stay out — "find a way to
+    // make this faster" asks for work and names nothing this could veto on, so
+    // reading it as a report would record an empty changeset as success and
+    // hide exactly the failure the empty-changeset check exists to catch.
+    /\b(audit|audits|audited|auditing|summar(?:y|ise|ize|ised|ized|ising|izing|ies)|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|analysis|inspect|inspects|inspected|inspecting|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|explain|explains|explained|explaining|describe|describes|described|describing|review|reviews|reviewed|reviewing|report|reports|reported|reporting|investigate|investigates|investigated|investigating|list|lists|listed|listing|name|names|named|naming|show|shows|showed|showing|shown|tell|tells|telling|told|enumerate|enumerates|enumerated|enumerating|identify|identifies|identified|identifying|print|prints|printed|printing|display|displays|displayed|displaying|count|counts|counted|counting)\b/iu.test(
       asked,
     ) ||
     // "Look at X and tell me Y" — the one that names no formal verb at all.
@@ -1047,6 +1057,46 @@ export function uniqueRepositoryPaths(values: readonly string[]): string[] {
 
 export function uniqueStrings(values: readonly string[]): string[] {
   return [...new Set(values.map((value) => value.trim()).filter(Boolean))].sort();
+}
+
+/**
+ * An error as a single line, with anything an `AggregateError` is carrying
+ * unwrapped into it.
+ *
+ * `error.message` on an aggregate is only the wrapper — "One or more tasks
+ * failed during planning" — and the reasons live in `errors`, which reading
+ * `.message` silently drops. A caller that does the obvious thing therefore
+ * reports the shape of the failure and never its cause, which is how a
+ * planning failure reached a channel saying nothing a reader could act on.
+ *
+ * Lives here because the coordinator raises these aggregates and the gateway
+ * renders them, and a second copy of this rule at either end is one that can
+ * drift from the other.
+ */
+export function describeError(
+  error: unknown,
+  seen: Set<unknown> = new Set(),
+): string {
+  if (typeof error === "object" && error !== null) {
+    if (seen.has(error)) {
+      return "[circular error]";
+    }
+    seen.add(error);
+  }
+
+  const summary = error instanceof Error ? error.message : String(error);
+  if (!(error instanceof AggregateError)) {
+    return summary;
+  }
+
+  const messages = [
+    summary,
+    ...Array.from(error.errors, (nested) => describeError(nested, seen)),
+  ].filter(
+    (message, index, all) =>
+      message.length > 0 && all.indexOf(message) === index,
+  );
+  return messages.join("; ");
 }
 
 function isStringArray(value: unknown): value is string[] {

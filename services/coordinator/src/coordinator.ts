@@ -23,6 +23,7 @@ import {
 import {
   assertAgentPlan,
   createId,
+  describeError,
   mergePlanScope,
   normalizeRepositoryPath,
   planGroundingConfidence,
@@ -37,6 +38,7 @@ import {
   type CanonicalVersion,
   type ChangeSet,
   type IntegrationResult,
+  type PlanAdmission,
   type ConflictAssessment,
   type CoordinationRunResult,
   type CoordinatorDecision,
@@ -65,12 +67,19 @@ import { ConflictDetector, relatedObjectives } from "./conflict-detector.js";
 import { seedContextForTask } from "./handoff-store.js";
 import { OwnershipService } from "./ownership-service.js";
 import {
+  type ChangeSetSplit,
+  splitChangeSet,
+} from "./partial-admission.js";
+import {
   approvedSchemaResources,
   structuralConflict,
 } from "./plan-admission.js";
 import { assessReplay } from "./replay.js";
 import { RunRecorder } from "./run-recorder.js";
-import { assertChangeSetWithinPlan } from "./scope-validator.js";
+import {
+  ScopeExpansionError,
+  assertChangeSetWithinPlan,
+} from "./scope-validator.js";
 
 export interface CoordinatedTask {
   task: TaskDefinition;
@@ -289,35 +298,24 @@ interface PlannedTask extends CoordinatedTask {
    * this workspace — there is no side table to remember to clear.
    */
   resumed?: OpenConversation;
+  /** Set when admission granted less than this task planned. */
+  admission?: PlanAdmission;
 }
 
 interface PreparedTask extends PlannedTask {
   workspace: TaskWorkspace;
   changeSet: ChangeSet;
+  /** The withheld half, kept so it can be queued once the granted half lands. */
+  split?: ChangeSetSplit;
 }
 
-function errorMessage(
-  error: unknown,
-  seen: Set<unknown> = new Set(),
-): string {
-  if (typeof error === "object" && error !== null) {
-    if (seen.has(error)) {
-      return "[circular error]";
-    }
-    seen.add(error);
-  }
-
-  const summary = error instanceof Error ? error.message : String(error);
-  if (!(error instanceof AggregateError)) {
-    return summary;
-  }
-
-  const messages = [
-    summary,
-    ...Array.from(error.errors, (nested) => errorMessage(nested, seen)),
-  ].filter((message, index, all) => message.length > 0 && all.indexOf(message) === index);
-  return messages.join("; ");
-}
+/**
+ * Kept as a local name because this module calls it in dozens of places, but
+ * the rule itself lives in shared-types now — the gateway renders the very
+ * aggregates raised here, and two copies of "unwrap the causes" is how one end
+ * ends up reporting a wrapper the other end would have expanded.
+ */
+const errorMessage = describeError;
 
 function pairKey(taskIds: readonly [string, string]): string {
   return [...taskIds].sort().join("\0");
@@ -485,6 +483,20 @@ export interface PlanAdmissionRequest {
    * widening is decided against every other holder first.
    */
   revising?: boolean;
+  /**
+   * Refuse rather than narrow: answer `deferred` where a partial grant would
+   * otherwise be offered.
+   *
+   * Set by the mid-execution callers. A partial admission is an answer to
+   * "what may this task start on", and both replan paths are past that — the
+   * agent is already running inside an approved plan. Handing one of them a
+   * narrower plan than it asked for means its contract, its ownership and the
+   * changeset it eventually returns are describing three different things,
+   * and the caller has no way to renegotiate with an agent mid-flight. A
+   * refusal is a real answer there: the agent keeps the plan it already had
+   * and carries on working inside it.
+   */
+  partialAdmission?: boolean;
 }
 
 export type PlanAuthorityDecision =
@@ -492,7 +504,20 @@ export type PlanAuthorityDecision =
    * The task may execute. `plan` is what it may execute — the same plan, or a
    * narrower one where only part of it was free.
    */
-  | { outcome: "admitted"; plan: AgentPlan }
+  | {
+      outcome: "admitted";
+      plan: AgentPlan;
+      /**
+       * The decision `plan` came out of, present when it narrowed the plan.
+       *
+       * Without it the executor knows only what it may touch, which is not
+       * enough to tell a deliberately withheld file apart from one nobody
+       * arbitrated: both look like a path outside the plan. The first is the
+       * expected shape of a partial admission and belongs in the deferred
+       * half; the second is a scope escape and fails the task.
+       */
+      admission?: PlanAdmission;
+    }
   /**
    * Something else holds what this plan wants. The coordinator waits
    * `retryAfterMs`, then reconsiders the task from the top of the wave loop —
@@ -516,6 +541,30 @@ export type PlanAuthorityDecision =
  */
 export interface PlanAuthority {
   admit(request: PlanAdmissionRequest): Promise<PlanAuthorityDecision>;
+  /**
+   * Turns the half a partial admission withheld into work of its own.
+   *
+   * Called only once the granted half is durably in canonical: a task asking
+   * for the remainder of something that never landed is worse than no task at
+   * all. Optional, because an authority that never returns a partial
+   * admission never has a remainder to queue.
+   *
+   * This lives on the authority rather than in the coordinator for the same
+   * reason `admit` does — it needs durable state across runs, which the
+   * coordinator deliberately has no reach into. Without it the deferred files
+   * are dropped in silence: the granted half integrates, the task is reported
+   * complete, and nobody ever writes the rest.
+   */
+  deferRemainder?(request: DeferredScopeRequest): Promise<void>;
+}
+
+/** The remainder of a partially admitted task, once its granted half landed. */
+export interface DeferredScopeRequest {
+  task: TaskDefinition;
+  repository: CanonicalRepository;
+  projectId?: string;
+  admission: PlanAdmission;
+  split: ChangeSetSplit;
 }
 
 /**
@@ -908,6 +957,12 @@ export class Coordinator {
             // is what keeps scope enforcement, the ownership grants and the
             // change set all describing the same piece of work.
             entry.plan = answer.plan;
+            // Kept because `plan` alone cannot say why a file is missing from
+            // it. Collection needs to tell "withheld, and somebody else is
+            // writing it" from "never arbitrated", and only the decision knows.
+            if (answer.admission !== undefined) {
+              entry.admission = answer.admission;
+            }
             admittedWave.push(entry);
             continue;
           }
@@ -1934,11 +1989,27 @@ export class Coordinator {
             ? {}
             : { projectId: input.projectId }),
           revising: true,
+          // All-or-nothing: this agent is mid-execution and its old plan is
+          // still in force, so a refusal leaves it somewhere workable. A
+          // narrower grant would not — see below.
+          partialAdmission: false,
         });
         if (answer.outcome !== "admitted") {
           throw new Error(
             `The proposed plan overlaps work running elsewhere in this ` +
               `repository: ${answer.explanation}`,
+          );
+        }
+        // An authority that narrowed anyway is refused rather than obeyed.
+        // `revisedPlan` is what ownership is taken on and what the changeset
+        // is later held to, so accepting a narrower grant here would leave the
+        // withheld file inside the plan the validator checks against — it
+        // would pass, and reach canonical while another task holds its lease.
+        // Silently promoting somebody else's file is worse than this refusal.
+        if (answer.admission !== undefined) {
+          throw new Error(
+            `The proposed plan overlaps work running elsewhere in this ` +
+              `repository: ${answer.admission.explanation}`,
           );
         }
       }
@@ -2280,7 +2351,7 @@ export class Coordinator {
           // Unpriced work still lands.
         }
       }
-      const changeSet = await entry.adapter.collectChanges(entry.session.id);
+      let changeSet = await entry.adapter.collectChanges(entry.session.id);
       if (
         changeSet.taskId !== entry.task.id ||
         changeSet.baseRevision !== waveVersion.revision ||
@@ -2290,7 +2361,28 @@ export class Coordinator {
           `Agent ${entry.task.agentId} returned a changeset for an unexpected task or base`,
         );
       }
-      assertChangeSetWithinPlan(entry.plan, changeSet);
+      // A partial admission hands the agent a narrower plan than it wrote, and
+      // agents do not reliably stay inside one — this one planned two files,
+      // was granted one, and wrote both. A file the admission deliberately
+      // withheld is not a scope escape: it is the half another task is holding,
+      // and it belongs in the deferred bucket rather than failing the whole
+      // task and losing the granted work with it. Only a path in neither
+      // bucket was never arbitrated at all, and that is still refused.
+      //
+      // The worker path has split like this since partial admission shipped.
+      // This one validated the raw changeset against the reduced plan, so the
+      // same run succeeded or failed on which executor happened to pick it up.
+      const split =
+        entry.admission === undefined ||
+        (entry.admission.deferredResources ?? []).length === 0
+          ? undefined
+          : splitChangeSet(entry.plan, entry.admission, changeSet);
+      if (split !== undefined && split.escaped.length > 0) {
+        throw new ScopeExpansionError(split.escaped);
+      }
+      const granted = split?.granted ?? changeSet;
+      assertChangeSetWithinPlan(entry.plan, granted);
+      changeSet = granted;
       await recorder?.changeSet(changeSet);
       await this.trace(
         recorder,
@@ -2335,7 +2427,12 @@ export class Coordinator {
           { changeSetId: changeSet.id },
         );
       }
-      return { ...entry, workspace, changeSet };
+      return {
+        ...entry,
+        workspace,
+        changeSet,
+        ...(split === undefined ? {} : { split }),
+      };
     } catch (error) {
       const failures = [errorMessage(error)];
       // A failed turn tears down completely, resumed conversation included.
@@ -2555,7 +2652,23 @@ export class Coordinator {
           // case the store lets a plan be rewritten — and only because the
           // rewrite has just been decided against every other holder.
           revising: true,
+          // The same all-or-nothing rule the comment above states for a
+          // deferral, applied to a narrower grant: both are "not the whole
+          // thing", and this caller can act on neither.
+          partialAdmission: false,
         });
+        if (answer.outcome === "admitted" && answer.admission !== undefined) {
+          // Refused for the reason the wave loop welcomes a partial grant and
+          // this path cannot: there, the reduced plan becomes the contract. On
+          // this path `revisedPlan` is what ownership is taken on and what the
+          // changeset is validated against, so a withheld file would sit
+          // inside the approved plan, pass the check, and land while another
+          // task holds its lease.
+          throw new Error(
+            `Scope expansion overlaps work running elsewhere in this ` +
+              `repository: ${answer.admission.explanation}`,
+          );
+        }
         if (answer.outcome !== "admitted") {
           throw new Error(
             `Scope expansion overlaps work running elsewhere in this ` +
@@ -3021,6 +3134,27 @@ export class Coordinator {
             files: result.changeSet.patches.map((patch) => patch.path),
           },
         );
+        // Only now, with the granted half durably in canonical, does the half
+        // that was withheld become work of its own. Queued earlier it would
+        // ask for the remainder of something that never landed; not queued at
+        // all — which is what happened here until now — the files this task
+        // planned and was refused are simply never written by anyone, and the
+        // task reports success having done part of the job.
+        if (
+          result.split !== undefined &&
+          result.admission !== undefined &&
+          this.planAuthority?.deferRemainder !== undefined
+        ) {
+          await this.planAuthority.deferRemainder({
+            task: result.task,
+            repository: input.repository,
+            ...(input.projectId === undefined
+              ? {}
+              : { projectId: input.projectId }),
+            admission: result.admission,
+            split: result.split,
+          });
+        }
       } else if (reported) {
         await this.trace(
           recorder,

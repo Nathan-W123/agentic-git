@@ -19,6 +19,7 @@ import {
   ROLE_CONTEXT_PREFIX,
   type AgentPlan,
   type ChangeSet,
+  type FilePatch,
   type ReplanRequest,
   type ScopeChangeDecision,
   type ScopeChangeRequest,
@@ -36,7 +37,10 @@ import {
 } from "@coord/workspace-manager";
 
 import { ApprovalPolicy } from "./approval-service.js";
-import { Coordinator } from "./coordinator.js";
+import {
+  Coordinator,
+  type DeferredScopeRequest,
+} from "./coordinator.js";
 import { buildTaskHandoff } from "./handoff.js";
 import { recordTaskHandoff } from "./handoff-store.js";
 
@@ -729,6 +733,196 @@ test("a proposed plan that reaches into work running elsewhere is refused", asyn
     // finishes inside it.
     assert.deepEqual(agent.answers[0]?.revisedPlan.expectedFiles, ["src/a.txt"]);
     assert.equal(result.tasks[0]?.status, "integrated");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a replan is refused rather than quietly narrowed", async () => {
+  // Partial admission is an answer to "what may this task start on", and a
+  // replan is past that: the agent is running inside an approved plan.
+  //
+  // Taking a narrower grant here would be worse than refusing. `revisedPlan`
+  // is what ownership is taken on and what the changeset is validated
+  // against, so a withheld file would sit *inside* the approved plan, pass
+  // the check, and reach canonical while another task held its lease. The
+  // authority is asked for all-or-nothing, and one that narrows anyway is
+  // refused rather than obeyed — which is what this stub does.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ReplanningAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      ["src/a.txt", "src/held.txt"],
+    );
+    const asked: (boolean | undefined)[] = [];
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      planAuthority: {
+        async admit(request) {
+          asked.push(request.partialAdmission);
+          if (!request.plan.expectedFiles.includes("src/held.txt")) {
+            return { outcome: "admitted", plan: request.plan };
+          }
+          // Ignores the all-or-nothing request on purpose.
+          return {
+            outcome: "admitted",
+            plan: { ...request.plan, expectedFiles: ["src/a.txt"] },
+            admission: {
+              status: "approved_with_constraints",
+              taskId: request.task.id,
+              planRevision: 1,
+              baseRevision: "b".repeat(40),
+              ownershipGrants: [],
+              constraints: [],
+              blockedBy: [],
+              conflicts: [],
+              deferredResources: [
+                {
+                  resourceType: "file",
+                  resourceId: "src/held.txt",
+                  heldBy: ["task_elsewhere"],
+                  reason: "held by task_elsewhere",
+                },
+              ],
+              explanation: "src/held.txt is leased to task_elsewhere",
+              decidedAt: new Date().toISOString(),
+            },
+          };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    // The replan asked for all-or-nothing rather than taking what it got.
+    assert.equal(asked.includes(false), true);
+    // Refused, so the agent stays on the plan it already had and finishes
+    // inside it — and src/held.txt never enters the approved plan at all.
+    assert.equal(agent.answers[0]?.decision, "rejected");
+    assert.match(agent.answers[0]?.explanation ?? "", /task_elsewhere/u);
+    assert.deepEqual(agent.answers[0]?.revisedPlan.expectedFiles, ["src/a.txt"]);
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(result.tasks[0]?.plan.expectedFiles.includes("src/held.txt"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/** Writes a file it was not granted, the way a real agent does under a split. */
+class OverreachingAgent extends TestAgent {
+  public constructor(
+    agentId: string,
+    plan: AgentPlan,
+    repository: CanonicalRepository,
+    workspaces: WorkspaceManager,
+    outputPath: string,
+    private readonly alsoWrites: string,
+  ) {
+    super(agentId, plan, repository, workspaces, outputPath);
+  }
+
+  public override async sendContext(
+    sessionId: string,
+    context: CoordinatorContext,
+  ): Promise<void> {
+    await super.sendContext(sessionId, context);
+    await writeFile(
+      path.join(context.workspacePath, this.alsoWrites),
+      "written without being granted\n",
+      "utf8",
+    );
+  }
+}
+
+test("a file the admission withheld is held back, not called a scope escape", async () => {
+  // Two halves of one job, sharing a file. The agent planned both, was granted
+  // one, and wrote both anyway — which is the ordinary case, not misbehaviour:
+  // it planned before it was told what it could have.
+  //
+  // The withheld file is somebody else's to write, so it is held back and
+  // becomes a task of its own. Failing the task over it would throw away the
+  // granted work too, which is what this path used to do while the worker path
+  // split correctly — the same run's outcome depended on which executor ran it.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new OverreachingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt", "src/shared.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      "src/shared.txt",
+    );
+    const remainders: DeferredScopeRequest[] = [];
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      planAuthority: {
+        async admit(request) {
+          return {
+            outcome: "admitted",
+            plan: { ...request.plan, expectedFiles: ["src/a.txt"] },
+            admission: {
+              status: "approved_with_constraints",
+              taskId: request.task.id,
+              planRevision: 1,
+              baseRevision: "b".repeat(40),
+              ownershipGrants: [],
+              constraints: [],
+              blockedBy: [],
+              conflicts: [],
+              deferredResources: [
+                {
+                  resourceType: "file",
+                  resourceId: "src/shared.txt",
+                  heldBy: ["task_elsewhere"],
+                  reason: "also declared by executing task task_elsewhere",
+                },
+              ],
+              explanation: "src/shared.txt is leased to task_elsewhere",
+              decidedAt: new Date().toISOString(),
+            },
+          };
+        },
+        async deferRemainder(request) {
+          remainders.push(request);
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    // Integrated rather than failed — the whole point. Before the split, the
+    // withheld file failed the task and took `src/a.txt` down with it.
+    assert.equal(result.tasks[0]?.status, "integrated");
+    // Queued as work of its own, and only after the granted half was durably
+    // promoted, so it is not silently gone either.
+    assert.equal(remainders.length, 1);
+    assert.deepEqual(
+      remainders[0]?.split.granted.patches.map(
+        (patch: FilePatch) => patch.path,
+      ),
+      ["src/a.txt"],
+    );
+    assert.deepEqual(
+      remainders[0]?.split.deferred.map((patch: FilePatch) => patch.path),
+      ["src/shared.txt"],
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

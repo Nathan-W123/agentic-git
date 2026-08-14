@@ -1335,23 +1335,23 @@ export class PromptCliAdapter implements AgentAdapter {
           `${this.profile.name} completed ${record.input.task.objective}`,
       },
     );
-    // The model reported success but touched nothing. For work meant to write,
-    // every known cause is a defect — an unauthenticated CLI answering
-    // conversationally is the common one — and an empty changeset must not
-    // enter the pipeline as a success.
+    // An empty changeset is reported, never thrown.
     //
-    // Asked to look rather than to change, that same result is the answer:
-    // an audit or a summary finishes by changing nothing. Decided from the
-    // request, on the same reading the integration path uses.
-    if (
-      changeSet.patches.length === 0 &&
-      !readsAsReportRequest(record.input.task.objective)
-    ) {
-      throw new Error(
-        `${this.profile.name} reported ${record.input.task.id} complete but changed no files. ` +
-          `Check that the ${this.command} CLI is authenticated and actually edited the workspace.`,
-      );
-    }
+    // This used to fail the task unless the objective read as a request to
+    // look, on the reasoning that work meant to write and writing nothing has
+    // a defect behind it. The reasoning holds; the test for it does not. It
+    // had to guess a person's intent from their words, and it guessed wrong
+    // often enough that ordinary requests — a one-word "GitHub", a question
+    // phrased as an instruction, an agent correctly answering that there was
+    // nothing to do — came back as failures with a message about broken
+    // authentication. Being told your CLI is unauthenticated when it is not
+    // sends you somewhere there is nothing to find.
+    //
+    // The empty result travels on and is narrated as what it is: finished
+    // without changing anything. A genuinely unauthenticated CLI still shows
+    // up — it just shows up as a task that did nothing, which is what the
+    // reader can see for themselves, rather than as a diagnosis this layer is
+    // not in a position to make.
     return changeSet;
   }
 

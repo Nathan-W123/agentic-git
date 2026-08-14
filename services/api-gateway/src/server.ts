@@ -50,6 +50,7 @@ import {
 import {
   assertProjectPolicy,
   createId,
+  describeError,
   projectBudgets,
   ROLE_CONTEXT_PREFIX,
   withoutRoleContext,
@@ -194,6 +195,54 @@ function summariseAuditData(data: Record<string, unknown>): string {
  * Both are validated rather than trusted: this decorates a thread, and an
  * event written by a newer version must cost the reader a dropdown at worst.
  */
+/**
+ * One file list from several tasks' worth of them.
+ *
+ * A run reports its whole changeset every time, so within one task the newest
+ * report replaces the last — that is why the stored list is written rather
+ * than accumulated. Across tasks it has to be a union: a thread that dispatched
+ * three turns is one piece of work, and storing only the newest turn's set left
+ * it claiming the one file the last turn touched.
+ *
+ * Counts add up; the status is the net effect, so a file added by one task and
+ * modified by the next reads as added, and one deleted last reads as deleted.
+ */
+function unionChangedFiles(
+  groups: readonly (readonly ChannelChangedFile[])[],
+): ChannelChangedFile[] {
+  const byPath = new Map<string, ChannelChangedFile>();
+  for (const group of groups) {
+    for (const file of group) {
+      const seen = byPath.get(file.path);
+      if (seen === undefined) {
+        byPath.set(file.path, { ...file });
+        continue;
+      }
+      const sum = (
+        left: number | undefined,
+        right: number | undefined,
+      ): number | undefined =>
+        left === undefined && right === undefined
+          ? undefined
+          : (left ?? 0) + (right ?? 0);
+      const added = sum(seen.added, file.added);
+      const removed = sum(seen.removed, file.removed);
+      byPath.set(file.path, {
+        ...seen,
+        ...(added === undefined ? {} : { added }),
+        ...(removed === undefined ? {} : { removed }),
+        status:
+          file.status === "deleted"
+            ? "deleted"
+            : seen.status === "added" || file.status === "added"
+              ? "added"
+              : seen.status,
+      });
+    }
+  }
+  return [...byPath.values()];
+}
+
 function changedFilesFrom(
   data: Record<string, unknown>,
 ): Array<{ path: string; status: FilePatchStatus }> {
@@ -749,19 +798,33 @@ export function narrateTaskEvent(
               (entry): entry is string => typeof entry === "string",
             )
           : [];
-        const deferred = Array.isArray(data["deferredResources"])
-          ? (data["deferredResources"] as unknown[]).filter(
-              (entry): entry is string => typeof entry === "string",
-            )
-          : [];
+        // `deferredResources` are records, not strings — `{resourceType,
+        // resourceId, heldBy, reason}`. Filtering them for strings kept
+        // nothing, every time, so this line has never once named the file it
+        // was holding: it always fell through to "the rest", which is the one
+        // thing the reader wanted it to say.
+        const deferred = (
+          Array.isArray(data["deferredResources"])
+            ? (data["deferredResources"] as unknown[])
+            : []
+        )
+          .map((entry) =>
+            typeof entry === "object" && entry !== null
+              ? (entry as { resourceId?: unknown }).resourceId
+              : entry,
+          )
+          .filter((entry): entry is string => typeof entry === "string");
         const clause = (files: string[]) =>
           files.slice(0, 3).join(", ") +
           (files.length > 3 ? ` and ${String(files.length - 3)} more` : "");
+        // First person, because this is the agent's own thread and the lines
+        // around it are too. The channel copy names both agents instead —
+        // there the reader is watching a room, here they are reading one
+        // worker's account of its own turn.
         return (
-          `⚖️ Starting on ${granted.length > 0 ? clause(granted) : "the free part"} now — ` +
+          `⚖️ Starting on ${granted.length > 0 ? clause(granted) : "the free part"} — ` +
           `${deferred.length > 0 ? clause(deferred) : "the rest"} is leased to ` +
-          "another task, so that part follows as its own task once the lease " +
-          "clears."
+          "another task and follows when that lands."
         );
       }
       return "Plan approved — starting on the code.";
@@ -835,12 +898,21 @@ export function narrateTaskEvent(
           ? `${written.slice(0, TERMINAL_SUMMARY_MAX).trimEnd()}…`
           : written;
       // The count, not the names — the reader who wants those is one click
-      // away, and an ending that lists a dozen paths stops being an ending.
-      return files.length === 0
-        ? summary
-        : `${summary} (${String(files.length)} file${
-            files.length === 1 ? "" : "s"
-          } changed)`;
+      // Named while there are few enough to name. "(1 file changed)" is the
+      // one fact about an ending that a reader cannot check and cannot use:
+      // it says something landed without saying what, so a thread reporting
+      // one file and a repository holding three cannot be reconciled from the
+      // channel at all — which is exactly the question this line kept being
+      // asked to answer and could not.
+      //
+      // Past two it goes back to a count, for the reason it always was one:
+      // an ending that lists a dozen paths stops being an ending.
+      if (files.length === 0) {
+        return summary;
+      }
+      return files.length <= 2
+        ? `${summary} (${files.join(", ")})`
+        : `${summary} (${String(files.length)} files changed)`;
     }
     case "task_reported": {
       // The agent's own words are the deliverable here — the report *is* the
@@ -2015,6 +2087,19 @@ export class ApiGateway {
   private readonly activeRuns = new Set<string>();
   /** Tasks whose progress is being narrated into a channel thread. */
   private readonly watchedChannelTasks = new Map<string, WatchedChannelTask>();
+  /**
+   * What each task in a thread has changed, by thread then by task.
+   *
+   * The stored list is one flat set per thread with no record of which task
+   * contributed what, so this is what lets a second dispatch add to a thread's
+   * summary instead of overwriting it. Held for as long as the process runs —
+   * one small map per thread that has reported work, which is the same
+   * lifetime the watchers themselves have.
+   */
+  private readonly threadChangedFiles = new Map<
+    string,
+    Map<string, ChannelChangedFile[]>
+  >();
   /**
    * Questions an agent is currently stopped on, by request id.
    *
@@ -8067,8 +8152,13 @@ export class ApiGateway {
           actorId: candidate.userId,
         }),
       ).catch(async (error: unknown) => {
-        const reason =
-          error instanceof Error ? error.message : String(error);
+        // `describeError`, not `.message`: a run that fails while planning
+        // rejects with an AggregateError whose own message says only that one
+        // or more tasks failed, and the reasons — which agent, and why — are
+        // in `errors`. Reading `.message` reported the shape of the failure
+        // and never its cause, leaving the channel with a sentence nobody
+        // could act on and the log as the only place the answer existed.
+        const reason = describeError(error);
         process.stderr.write(
           `[channel] run failed for ${repositoryId}: ${reason}
 `,
@@ -8125,7 +8215,9 @@ export class ApiGateway {
         messageId: acknowledgement.id,
         authorId: `${candidate.userId}:${candidate.provider}`,
         content: `I could not start this: ${
-          error instanceof Error ? error.message : "the task could not be submitted"
+          error instanceof Error
+            ? describeError(error)
+            : "the task could not be submitted"
         }`,
         projectId,
       });
@@ -10593,31 +10685,62 @@ export class ApiGateway {
     const tasks = await this.options.store.listSubmittedTasks({
       repositoryId: watched.repositoryId,
     });
-    const objectiveOf = (taskId: unknown): string => {
+    // Who, not what. A dispatched objective is the whole message somebody
+    // typed — several sentences of it — and quoting even the first 57
+    // characters put a truncated wall of prompt on both sides of every hold,
+    // twice in one sentence. The room already knows these agents by name, and
+    // the files are named in the same line, so the name is the whole of what a
+    // reader needs to place the hold.
+    //
+    // The objective survives only as the fallback for an agent with no name in
+    // this channel, and short: enough to tell two holds apart, not enough to
+    // read as a quotation.
+    const overrides = await this.options.store
+      .listChannelAgentOverrides(watched.repositoryId)
+      .catch(() => ({}) as Record<string, { name?: string }>);
+    // Overrides are keyed `${userId}:${provider}`, never by a task's agentId —
+    // so looking one up by agentId matched nothing, every time, and every hold
+    // fell through to quoting the objective it was supposed to stop quoting.
+    // The roster and every message author resolve a name through
+    // `resolveChannelAgentPresentation`; so does this now, which also means an
+    // agent nobody has renamed still gets its "Codex (Nathan)" default rather
+    // than a sentence of somebody's prompt.
+    const connections = await this
+      .channelAgentConnections(watched.projectId, watched.repositoryId)
+      .catch(() => []);
+    const describe = (taskId: unknown): string => {
       const found = tasks.find((candidate) => candidate.id === taskId);
+      const owned = connections.filter(
+        (connection) => connection.userId === found?.submittedBy,
+      );
+      const agentId = String(found?.agentId ?? "").toLowerCase();
+      // Matched on provider, never "the first one this person owns". That
+      // fallback named both sides of a conflict after whichever agent came
+      // first, so a hold read "@Juliett overlaps @Juliett" — which tells the
+      // reader nothing and looks like the coordinator arguing with itself.
+      // Better to fall through to the objective than to name the wrong agent
+      // confidently.
+      const connection = owned.find((candidate) =>
+        agentId.includes(candidate.provider.toLowerCase()),
+      );
+      if (connection !== undefined) {
+        return `@${
+          resolveChannelAgentPresentation(
+            overrides,
+            connection,
+            `${AGENT_LABEL[connection.provider] ?? connection.provider} (${firstWord(
+              connection.userName,
+            )})`,
+          ).name
+        }`;
+      }
       // The request, not the preamble a channel dispatch puts in front of it.
       // Otherwise every hold in a repository with roles set reads "Your role in
       // this repository: auditor" and names nothing.
       const first =
         withoutRoleContext(found?.objective ?? "another task").split("\n")[0] ??
         "";
-      return first.length > 60 ? `"${first.slice(0, 57)}…"` : `"${first}"`;
-    };
-    // "@Zephyrus's task" reads better than a quoted objective fragment, and
-    // the channel already knows what each agent is called in this room. The
-    // objective still rides along — two of one person's agents can hold work
-    // at once, and the name alone would not say which.
-    const overrides = await this.options.store
-      .listChannelAgentOverrides(watched.repositoryId)
-      .catch(() => ({}) as Record<string, { name?: string }>);
-    const describe = (taskId: unknown): string => {
-      const found = tasks.find((candidate) => candidate.id === taskId);
-      const agent = found?.agentId ?? "";
-      const name = overrides[agent]?.name;
-      const objective = objectiveOf(taskId);
-      return name === undefined || name === ""
-        ? `${objective}`
-        : `@${name}'s task ${objective}`;
+      return first.length > 40 ? `"${first.slice(0, 37)}…"` : `"${first}"`;
     };
     const held = describe(watched.taskId);
     const blockers = (Array.isArray(data["blockedBy"]) ? data["blockedBy"] : [])
@@ -10647,10 +10770,12 @@ export class ApiGateway {
             : entry,
         ),
       );
+      // Two agents and the files between them, in that order, because that is
+      // the shape of the fact: who is working, on what, and who has the rest.
       line =
-        `⚖️ Starting ${held} on ${granted.length > 0 ? clause(granted) : "the free part"} — ` +
-        `holding ${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"} ` +
-        `because ${blocker} has the lease; that part follows when it lands.`;
+        `⚖️ ${held} has ${granted.length > 0 ? clause(granted) : "the free part"}; ` +
+        `${blocker} has ${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"}. ` +
+        `${held} picks that up when the lease clears.`;
     } else if (approved) {
       // The hold clearing is as much news as the hold was — a room told
       // "it starts the moment that lands" deserves the moment. Only said
@@ -10670,14 +10795,14 @@ export class ApiGateway {
       if (!wasHeld) {
         return;
       }
-      line = `⚖️ Released — ${held} starts now; what it was waiting on has landed.`;
+      line = `⚖️ ${held} starts now — what it was waiting on has landed.`;
     } else if (status === "blocked") {
       line =
-        `⚖️ Holding ${held} — it overlaps ${blocker} too heavily to run ` +
-        `alongside it. Its agent is narrowing the plan.`;
+        `⚖️ ${held} overlaps ${blocker} too heavily to run alongside it, ` +
+        `so it is narrowing its plan.`;
     } else {
       line =
-        `⚖️ Holding ${held} — files it needs are leased to ${blocker}. ` +
+        `⚖️ ${held} is waiting — ${blocker} has the files it needs. ` +
         `It starts the moment that lands.`;
     }
     await this.appendChannelEntry({
@@ -10827,9 +10952,14 @@ export class ApiGateway {
           ? `"${objective.slice(0, 57)}…"`
           : `"${objective}"`;
       });
+      // File evidence only. Every kind was flattened together, so a symbol
+      // name landed in a sentence about files — "they both touch app.js,
+      // BARE and 332 more" — and the count was of symbols, not of files.
       const files = (Array.isArray(data["evidence"]) ? data["evidence"] : [])
         .flatMap((entry) =>
-          typeof entry === "object" && entry !== null
+          typeof entry === "object" &&
+          entry !== null &&
+          (entry as { kind?: unknown }).kind === "file_overlap"
             ? ((entry as { resources?: unknown }).resources as string[]) ?? []
             : [],
         )
@@ -10842,23 +10972,23 @@ export class ApiGateway {
             (files.length > shown.length
               ? ` and ${String(new Set(files).size - shown.length)} more`
               : "");
-      const explanation =
-        typeof data["explanation"] === "string" &&
-        data["explanation"].trim().length > 0
-          ? ` ${data["explanation"].trim()}`
-          : "";
+      // The detector's explanation is deliberately not appended. It is the
+      // full structural case — every overlapping file, every shared symbol,
+      // every dependency edge, with the score — and pasting it into the room
+      // produced a message thousands of words long listing variable names,
+      // for a reader whose question was "what is happening and what happens
+      // next". It is written to the audit record, which is where an argument
+      // that long belongs; the room gets the finding.
       const line =
         disposition === "sequence"
           ? `⚖️ ${named[0]} and ${named[1]} both touch ${fileClause}, so ` +
-            `they run one at a time — the second starts when the first ` +
-            `lands.${explanation}`
+            `they run one at a time — the second starts when the first lands.`
           : disposition === "block"
-            ? `⚖️ Holding ${named[1]} — it conflicts with ${named[0]} on ` +
-              `${fileClause} and needs a decision before both can ` +
-              `proceed.${explanation}`
+            ? `⚖️ Holding ${named[1]} — it overlaps ${named[0]} on ` +
+              `${fileClause}, so its agent is narrowing the plan.`
             : `⚖️ ${named[0]} and ${named[1]} overlap on ${fileClause} but ` +
               `can run together — flagging it so nobody is surprised by ` +
-              `nearby edits.${explanation}`;
+              `nearby edits.`;
       await this.appendChannelEntry({
         projectId,
         repositoryId,
@@ -10941,11 +11071,23 @@ export class ApiGateway {
           ) {
             const files = changedFilesFrom(data);
             if (files.length > 0) {
+              // Per task, then unioned. Replacing outright is right within one
+              // task and wrong across a thread: a second dispatch joining an
+              // existing thread wrote its own set over the first task's, so a
+              // conversation that had built three files reported whichever one
+              // the latest turn wrote. The reverting case the outright write
+              // protects against is still protected — this task's entry is
+              // replaced whole, so a file it stopped touching leaves with it.
+              const perTask =
+                this.threadChangedFiles.get(watched.messageId) ??
+                new Map<string, ChannelChangedFile[]>();
+              perTask.set(watched.taskId, files);
+              this.threadChangedFiles.set(watched.messageId, perTask);
               await this.options.store
                 .setChannelMessageChangedFiles(
                   watched.repositoryId,
                   watched.messageId,
-                  files,
+                  unionChangedFiles([...perTask.values()]),
                 )
                 .catch(() => undefined);
             }

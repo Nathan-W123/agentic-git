@@ -533,9 +533,37 @@ svg {
 
 .app {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr;
+  /* One column: the rail is gone, the channel sidebar is the navigation. */
+  grid-template-columns: 1fr;
   height: 100vh;
   overflow: hidden;
+}
+
+/* The brand, now the channel sidebar's crown. A button because it goes
+   somewhere (Settings); the gear on the right says so without a label. */
+.chan-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 14px 14px 10px;
+  width: 100%;
+  text-align: left;
+  color: var(--text);
+}
+
+.chan-brand .brand-text b {
+  font-size: 15px;
+}
+
+.chan-brand-gear {
+  width: 14px;
+  height: 14px;
+  margin-left: auto;
+  color: var(--text-4);
+}
+
+.chan-brand:hover .chan-brand-gear {
+  color: var(--text-2);
 }
 
 .app.no-sidebar {
@@ -926,6 +954,9 @@ svg {
 .page {
   padding: 34px 40px 48px;
   max-width: 1320px;
+  /* Centered. The cap used to lean against the rail; with the rail gone it
+     hugged the left edge of a full-width main. */
+  margin: 0 auto;
 }
 
 .page-head {
@@ -1801,6 +1832,26 @@ svg {
   overflow-y: auto;
   padding: 2px 8px 16px;
   min-height: 0;
+}
+
+/* Says the list below is out of date. Warning-toned rather than accent: this
+   is not a feature being offered, it is the panel admitting it is showing
+   history. */
+.tree-stale {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-card-2);
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.tree-stale .btn {
+  align-self: flex-start;
 }
 
 .tree-row {
@@ -3286,6 +3337,16 @@ svg {
   display: grid;
   gap: 16px;
   max-width: 720px;
+  /* The page centers itself, but a 720px block inside a 1320px page still
+     leans hard left. Centering here brings the cards to the middle… */
+  margin: 0 auto;
+}
+
+/* …and capping the settings page itself brings the heading with them, so
+   the title is not stranded at the far-left of a canvas twice as wide as
+   anything under it. */
+.page:has(.settings-grid) {
+  max-width: 800px;
 }
 
 .set-row {
@@ -3388,7 +3449,10 @@ svg {
   width: 268px;
   flex: none;
   display: grid;
-  grid-template-rows: auto auto 1fr;
+  /* Brand, search, channels, then the roster takes what remains — so Users
+     starts directly under the last channel instead of being shoved to the
+     floor by a stretched channel list. The list caps and scrolls instead. */
+  grid-template-rows: auto auto auto 1fr;
   min-height: 0;
   background: var(--bg-panel);
   border-right: 1px solid var(--border-soft);
@@ -3427,6 +3491,7 @@ svg {
 
 .chan-list {
   overflow-y: auto;
+  max-height: 38vh;
   padding: 2px 8px 10px;
   display: grid;
   gap: 2px;
@@ -4439,7 +4504,11 @@ svg {
   padding: 4px;
   display: grid;
   gap: 1px;
-  max-height: 220px;
+  /* A flat 220px was half the message list on a laptop, where the chat pane
+     is a good deal shorter than the window. Bounded by the viewport as well
+     as by a ceiling, so a short screen gets a short picker instead of one
+     sized for a screen it does not have. */
+  max-height: min(180px, 30vh);
   overflow-y: auto;
   z-index: 5;
 }
@@ -4449,7 +4518,7 @@ svg {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 7px 9px;
+  padding: 5px 8px;
   border-radius: 7px;
   font-size: 12.5px;
   color: var(--text-2);
@@ -4676,8 +4745,11 @@ svg {
   transition: transform 0.15s ease;
 }
 
+/* Up at rest, left when the tools are showing. A quarter turn rather than a
+   half, so the sweep reads as the arrow tipping over toward the row it
+   revealed instead of spinning in place. */
 .chan-tools-toggle.on svg {
-  transform: rotate(180deg);
+  transform: rotate(-90deg);
 }
 
 .preview-link {
@@ -5571,10 +5643,6 @@ dialog.modal::backdrop {
   .chan-head .spacer {
     flex: 1 0 100%;
     height: 0;
-  }
-
-  .chan-head .avatar-stack {
-    display: none;
   }
 
   /* Same shape of overflow as the header, and the same fix: the counts and

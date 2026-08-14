@@ -544,7 +544,9 @@ export class PlanAdmissionController {
       return undefined;
     }
     let partial =
-      deferred.length === 0 ? whole : this.decide(reduced, input, narrowed);
+      deferred.length === 0
+        ? whole
+        : this.decide(reduced, input, narrowed, true);
 
     // Dropping the contested files was not enough, or there were none to drop.
     // Withholding a symbol is only offered when every file still being granted
@@ -559,7 +561,7 @@ export class PlanAdmissionController {
       if (reduced.expectedFiles.length === 0) {
         return undefined;
       }
-      partial = this.decide(reduced, input, narrowed);
+      partial = this.decide(reduced, input, narrowed, true);
     }
     if (!planAdmissionApproved(partial) || deferred.length === 0) {
       return undefined;
@@ -1080,37 +1082,22 @@ export class PlanAdmissionController {
     input: PlanAdmissionInput,
     occupancy: FileOccupancy = () => undefined,
     /**
-     * Whether this plan's declared paths have already been made disjoint from
-     * every executing plan's, by withholding the ones that were not.
+     * Whether `plan` is what is left of a plan after every contested resource
+     * was withdrawn from it, rather than a plan as an agent submitted it.
      *
-     * Only {@link admitDeclaredPaths} sets it, and only for the reduced plan it
-     * built. What it switches off is the pair of unverifiability gates below,
-     * and the reason is that reduction has already answered the question those
-     * gates ask. They exist because an unverifiable plan's declarations might
-     * be fiction, so overlap cannot be judged from them and two plans talking
-     * about the same subject have to be serialised. But this splitter is only
-     * ever reached when at least one declared path *did* collide — the
-     * declarations were informative enough to overlap — and what is left after
-     * withholding those paths is a claim on files nobody else named.
+     * The objective-relatedness gates below exist because an unverifiable
+     * plan's declarations say nothing trustworthy, leaving the objective as
+     * the only signal about what it will really touch. A reduction supplies
+     * something better: `contested` drops every path that any executing plan
+     * declares or holds a lease on, so what remains is disjoint by
+     * construction — a direct answer where the objective was a proxy for one.
      *
-     * Leaving the gates on made that unreachable rather than merely strict.
-     * `admit` calls `decide` first, so a greenfield pair whose intents share a
-     * word is sequenced before the split is considered; the split is then
-     * re-decided by this same method, hits the same gate on the same unchanged
-     * intent, and is discarded. The gate strictly dominated the splitter, and
-     * since both have the same precondition — an ungrounded candidate — the
-     * splitter could not fire for any pair the gate caught. The run that showed
-     * this had two greenfield tasks sharing one file of three, whose intents
-     * shared the words "shared" and "helper".
-     *
-     * Nothing is taken on trust in exchange. A declaration that turns out to be
-     * fiction is caught where it always was: the result is a set of file
-     * patches, and `splitChangeSet` refuses any patch on a path this admission
-     * did not grant, whether the plan was verifiable or not. That holds for the
-     * executing holder too, which is why its own unverifiability stops being a
-     * reason to make this plan wait.
+     * Left applying, those gates make the reduction pointless. They are
+     * whole-plan judgements and narrowing the file set cannot clear them, so
+     * the reduced plan is refused for the same reason the whole plan was and
+     * partial admission can never succeed against related work.
      */
-    pathsProvenDisjoint = false,
+    reduced = false,
   ): PlanAdmission {
     const taskId = plan.taskId;
     const retryAfterMs = input.retryAfterMs ?? DEFAULT_PLAN_RETRY_MS;
@@ -1135,7 +1122,7 @@ export class PlanAdmissionController {
     // keeps its concurrency. The same rule holds from the other side, against
     // executing plans that could not be verified.
     if (
-      !pathsProvenDisjoint &&
+      !reduced &&
       others.length > 0 &&
       planGroundingConfidence(plan) === "ungrounded"
     ) {
@@ -1161,7 +1148,7 @@ export class PlanAdmissionController {
         };
       }
     }
-    const ungroundedActive = pathsProvenDisjoint
+    const ungroundedActive = reduced
       ? []
       : others.filter(
           (entry) =>

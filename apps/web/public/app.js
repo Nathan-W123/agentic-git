@@ -113,6 +113,7 @@ import {
   invalidateCode,
   openFile,
   openWorkspace,
+  resetWorkspace,
   runTests,
   setDiffMode,
   summaryPopoverHtml,
@@ -630,17 +631,14 @@ function topbar() {
   const unread = unreadCount();
   const user = currentUserName();
   return `<header class="topbar">
-    <button class="icon-btn menu-btn" data-act="nav-toggle" title="Menu"
-      aria-label="Menu">${icon("menu")}</button>
-    <!-- Folds the nav rail away on a wide screen. The button above is the
-         phone's drawer handle and stays that; this one is the only way back
-         once the rail is hidden, so it lives outside the thing it hides. -->
-    <button class="icon-btn wide-only" data-act="nav-collapse-toggle"
-      title="${state.navCollapsed ? "Show the sidebar" : "Hide the sidebar"}"
-      aria-pressed="${state.navCollapsed === true}"
-      aria-label="${state.navCollapsed ? "Show the sidebar" : "Hide the sidebar"}">${icon(
-        "columns",
-      )}</button>
+    ${
+      // Off the Chats screen there is no channel sidebar and so no brand to
+      // click home with — this is the way back.
+      state.route === "chats"
+        ? ""
+        : `<button class="icon-btn" data-act="nav" data-value="chats"
+             title="Back to chats" aria-label="Back to chats">${icon("chatBubble")}</button>`
+    }
     <span class="spacer"></span>
     ${
       // Same reasoning as the sidebar's line: a status that is always the same
@@ -649,10 +647,6 @@ function topbar() {
         ? `<span class="health"><span class="dot grey"></span>Control plane unreachable</span>`
         : ""
     }
-    <button class="icon-btn bell" data-act="nav" data-value="notifications"
-      title="Notifications" aria-label="Notifications">
-      ${icon("bell")}${unread > 0 ? `<span class="dot-badge">${unread}</span>` : ""}
-    </button>
     <button data-act="user-menu" title="${esc(user)}">${avatar(user, 32, user, myAvatar())}</button>
   </header>`;
 }
@@ -2296,8 +2290,12 @@ function renderNow() {
     classes.push("nav-collapsed");
   }
   const editorCaret = captureEditor();
+  // No rail. The channel sidebar is the navigation now — channels are the
+  // app — and everything the rail held moved: the brand into that sidebar
+  // (clicking it opens Settings), the account block into the topbar avatar,
+  // and the failure-only health line to the sidebar's foot. `sidebar()` and
+  // the nav drawer stay in the file, unrendered, until the next sweep.
   root.innerHTML = `<div class="${classes.join(" ")}">
-    ${sidebar()}
     <div class="main${BARE.has(state.route) ? " bare" : ""}${
       state.loadError === undefined ? "" : " has-banner"
     }">
@@ -2305,7 +2303,6 @@ function renderNow() {
       ${BARE.has(state.route) ? "" : topbar()}
       ${screen()}
     </div>
-    ${state.navOpen ? '<div class="nav-scrim" data-act="nav-close"></div>' : ""}
   </div>`;
 
   // Chats owns this now: the inline file and diff blocks in the transcript are
@@ -3041,6 +3038,21 @@ document.addEventListener("click", (event) => {
     case "workspace-open":
       void openWorkspace(render);
       return;
+    case "workspace-reset":
+      // Re-cuts the workspace at current canonical. Confirmed only when there
+      // is something to lose: a clean workspace being moved forward is not a
+      // decision anybody needs to be asked about, and asking would make the
+      // ordinary case feel dangerous.
+      if (
+        (state.workspace?.dirtyFiles ?? []).length > 0 &&
+        !window.confirm(
+          "Update to the latest version of the repository? Your unsaved edits in this workspace will be discarded.",
+        )
+      ) {
+        return;
+      }
+      void resetWorkspace(render);
+      return;
     case "retry-load":
       void refresh();
       return;
@@ -3300,10 +3312,18 @@ document.addEventListener("click", (event) => {
       // was clicked: `showMenu` closes the open popover first, which detaches
       // that item, and an anchor no longer in the document positions the new
       // menu against the corner of the screen instead of the channel.
-      const anchor =
-        document.querySelector(
-          `[data-act="channel-menu"][data-value="${CSS.escape(value)}"]`,
-        ) ?? node;
+      // Anchor to what was actually clicked when it will still be in the
+      // document: the roster's "Add an agent" button opens this too, and
+      // anchoring that click to the channel row's dots button floated the
+      // list up beside the channels, nowhere near the hand that asked. Only
+      // a click from inside a popover — which `showMenu` detaches before
+      // positioning — falls back to the channel's own button.
+      const fromPopover = node.closest(".pop-layer") !== null;
+      const anchor = !fromPopover
+        ? node
+        : (document.querySelector(
+            `[data-act="channel-menu"][data-value="${CSS.escape(value)}"]`,
+          ) ?? node);
       // Only trust membership once the roster for *this* repository has
       // actually been fetched. Before that `channelAgentsFor` shows every
       // connected agent provisionally, which would read as "already here" and
@@ -4071,6 +4091,18 @@ async function boot() {
       if (line !== undefined) {
         popupBanner(line);
       }
+    }
+    // Canonical moved, so the file tree on screen is history now.
+    //
+    // `refresh` below already runs on every frame, but `ensureCodeData` keeps
+    // what it loaded until something invalidates it and nothing ever did for
+    // an advance. So the channel's Files panel went on showing the tree as it
+    // was when the channel was first opened, however many tasks landed after —
+    // a repository with three files in it displaying the one that existed when
+    // somebody happened to open the tab, with a refresh button as the only way
+    // to find out.
+    if (frame?.type === "audit" && frame.event?.type === "canonical_promoted") {
+      invalidateCode();
     }
     // The stream tells us something changed; the store stays the source of
     // truth, so re-read rather than patching state from the frame.

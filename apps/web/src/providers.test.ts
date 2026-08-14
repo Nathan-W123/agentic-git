@@ -261,7 +261,10 @@ test("a sign-in's model list is kept, so the account's own models replace the su
   // Before: nothing reported, so the picker runs on suggestions.
   const before = await service.options({ provider: "openai" });
   assert.equal(before.models, null);
-  assert.ok((before.suggestedModels ?? []).length > 0);
+  // Nothing offered before the account reports one — a suggested model name
+  // is a guess about someone else's entitlements, and the point of this test
+  // is what replaces it, not that a placeholder was there first.
+  assert.equal((before.suggestedModels ?? []).length, 0);
 
   // A sign-in leaves a model list behind in its throwaway home.
   const flowHome = path.join(harness.home, "throwaway-device-home");
@@ -334,12 +337,14 @@ test("openai with no cached model list stays usable instead of refusing everythi
   assert.equal(options.models, null);
   assert.equal(options.allowCustomModel, true);
   // And it says why, rather than leaving the screen to invent a list.
-  assert.match(options.notes.join(" "), /has not cached a model list/u);
-  // Names worth offering, carried in their own field so nothing can render
-  // them as though the account had reported them. Both lists are non-empty,
-  // because a picker that suggests nothing is the bare text box this exists
-  // to avoid.
-  assert.ok((options.suggestedModels ?? []).length > 0);
+  assert.match(options.notes.join(" "), /No model list yet for this account/u);
+  // No suggested model names at all. A suggestion here is a guess about
+  // somebody else's entitlements, and offering it in a picker reads as
+  // offering something available — which is how a ChatGPT-account Codex came
+  // to be set to a model it answers 400 for and fails at planning time.
+  assert.equal((options.suggestedModels ?? []).length, 0);
+  // Reasoning levels stay: fixed vocabulary the CLI defines, not entitlements
+  // that vary by account, so suggesting them cannot mislead the same way.
   assert.ok((options.suggestedEfforts ?? []).length > 0);
   // Every suggestion must be a value the validator will actually accept —
   // offering one that saves as a 400 is worse than offering none.
@@ -394,6 +399,15 @@ test("every provider offers a model list to pick from, cached or not", async () 
   for (const provider of ["anthropic", "openai", "google"] as const) {
     const options = await service.options({ provider });
     const models = options.models ?? options.suggestedModels ?? [];
+    // Codex is the exception, and deliberately: with no cached list there is
+    // nothing to offer that is not a guess about this account's entitlements,
+    // and a guess presented as a choice is how an account was set to a model
+    // it answers 400 for. It gets a free-text field and a note instead.
+    if (provider === "openai" && options.models === null) {
+      assert.equal(options.allowCustomModel, true);
+      assert.ok(options.notes.length > 0);
+      continue;
+    }
     assert.ok(
       models.length > 0,
       `${provider} offers no models at all: ${JSON.stringify(options)}`,

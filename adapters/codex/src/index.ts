@@ -969,28 +969,14 @@ export class CodexAdapter implements AgentAdapter {
         `Codex completed ${record.input.task.objective}`,
     });
 
-    // Codex reported the task done, yet the workspace is untouched. For work
-    // that was meant to write, every known cause is a defect — a denied write,
-    // a sandbox that dropped the edits, or a model that answered without
-    // acting — and letting it through would put a no-op into the pipeline as a
-    // successful task.
-    //
-    // Asked to look rather than to change, the same result is the answer. An
-    // audit, a summary or a question about the code succeeds precisely by
-    // changing nothing, and this refusal was what turned each of those into
-    // "complete but changed no files" — a failure reported for work that had
-    // been done. The request decides which it is, on the same reading the
-    // integration path uses, so the two ends cannot disagree.
-    if (
-      changeSet.patches.length === 0 &&
-      !readsAsReportRequest(record.input.task.objective)
-    ) {
-      throw new Error(
-        `Codex reported ${record.input.task.id} complete but changed no files. ` +
-          "The edit phase produced nothing; check that the execution sandbox " +
-          "permits writes before treating this as an empty task.",
-      );
-    }
+    // An empty changeset is reported, never thrown. The old guard failed the
+    // task unless the objective read as a request to look, and that test had
+    // to infer intent from wording — so ordinary requests came back as
+    // failures claiming the sandbox had denied writes, which sent people
+    // looking for a fault that was not there. A run that did nothing is
+    // narrated as having done nothing, which the reader can judge; whether a
+    // sandbox is broken is not a call this layer can make from one empty
+    // result. See the same change in the prompt-cli adapter.
     return changeSet;
   }
 

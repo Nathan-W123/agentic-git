@@ -8,8 +8,10 @@ import {
   BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
   DEFAULT_PLAN_RETRY_MS,
   PlanAdmissionController,
+  deferredScopeObjective,
   isDeferredScopeFollowUp,
   type ActivePlan,
+  type DeferredScopeRequest,
   type PlanAdmissionRequest,
   type PlanAuthority,
   type PlanAuthorityDecision,
@@ -180,7 +182,15 @@ export class LeasePlanAuthority implements PlanAuthority {
       // A task that exists because an earlier admission was partial is decided
       // whole: one split per lineage is what stops a task shedding scope round
       // after round, paying for another agent run each time.
-      partialAdmission: !isDeferredScopeFollowUp(request.task.objective),
+      // The caller's veto first: a mid-execution replan cannot act on a
+      // narrower plan than it asked for, and offering one would write a
+      // reduced contract to the lease that the running agent knows nothing
+      // about. Then the lineage rule — one split per task, so a task cannot
+      // shed scope round after round, each round costing another agent run.
+      partialAdmission:
+        request.partialAdmission === false
+          ? false
+          : !isDeferredScopeFollowUp(request.task.objective),
       resourcesInFile: (file) => this.intelligence.resourcesInFile(index, file),
       symbolRangesInFile: (file) =>
         this.intelligence.symbolRangesInFile(index, file),
@@ -284,7 +294,13 @@ export class LeasePlanAuthority implements PlanAuthority {
 
     if (approved) {
       this.waitingSince.delete(request.task.id);
-      return { outcome: "admitted", plan: grantedPlan };
+      return {
+        outcome: "admitted",
+        plan: grantedPlan,
+        // Carried only when it narrowed the plan. The executor needs it to
+        // tell a file this decision withheld from one nobody arbitrated.
+        ...(planAdmissionPartial(admission) ? { admission } : {}),
+      };
     }
     if (forced) {
       // Let through without an approved contract on the lease: the record
@@ -316,6 +332,80 @@ export class LeasePlanAuthority implements PlanAuthority {
    * becoming partial, a different blocker, the wait finally ending — is worth
    * a line, and each of those is.
    */
+  /**
+   * Queues the files this task planned, was granted, and had withheld.
+   *
+   * The agent's own patches for those files are deliberately not carried
+   * forward. They were written against a revision another task is in the
+   * middle of rewriting, so replaying them later would apply a diff to a base
+   * that no longer exists. The paths are recorded; the content is not
+   * resurrected — the follow-up is planned fresh against whatever canonical
+   * looks like once the holder is done.
+   */
+  public async deferRemainder(request: DeferredScopeRequest): Promise<void> {
+    const deferred = request.admission.deferredResources ?? [];
+    if (deferred.length === 0) {
+      return;
+    }
+    // The submitted row, not the definition the coordinator runs on. A
+    // `TaskDefinition` carries neither `submittedBy` nor the model and effort
+    // a channel picked, and a follow-up without the first cannot resolve
+    // credentials at all — it would be queued and then never able to run.
+    const original = (
+      await this.store.listSubmittedTasks({
+        repositoryId: request.repository.id,
+      })
+    ).find((candidate) => candidate.id === request.task.id);
+    const followUp = await this.store.submitTask({
+      repositoryId: request.repository.id,
+      ...(request.projectId === undefined
+        ? {}
+        : { projectId: request.projectId }),
+      objective: deferredScopeObjective(
+        request.task.objective,
+        deferred,
+        // A granted file whose patch was held back for reaching a withheld
+        // symbol lost its other edits with it. The follow-up covers those, or
+        // that work is gone as quietly as the deferred files would have been.
+        Object.keys(request.split.withheldSymbols).sort(),
+      ),
+      agentId: request.task.agentId,
+      validationCommands: request.task.validationCommands,
+      // Whose account this spends. The original's owner, never a default:
+      // this is the same work, so it is the same person paying for it.
+      ...(original?.submittedBy === undefined
+        ? {}
+        : { submittedBy: original.submittedBy }),
+      // What the channel chose for this agent. Dropping them would run the
+      // remainder of one request on different settings from the rest of it.
+      ...(original?.model === undefined ? {} : { model: original.model }),
+      ...(original?.effort === undefined ? {} : { effort: original.effort }),
+      // Whatever conversation the original was asked inside is as much the
+      // follow-up's background as it was its own. `conversationId` is
+      // deliberately not carried: submitting a turn settles the conversation's
+      // previous turn, and this is the same turn finishing, not the next one.
+      ...(request.task.context === undefined
+        ? {}
+        : { context: request.task.context }),
+    });
+    await this.store.appendAudit(undefined, {
+      type: "task_submitted",
+      taskId: followUp.id,
+      data: {
+        ...(request.projectId === undefined
+          ? {}
+          : { projectId: request.projectId }),
+        repositoryId: request.repository.id,
+        objective: followUp.objective,
+        deferredFrom: request.task.id,
+        deferredResources: deferred,
+        discardedPatches: request.split.deferred
+          .map((patch) => patch.path)
+          .sort(),
+      },
+    });
+  }
+
   private async record(
     request: PlanAdmissionRequest,
     event: {

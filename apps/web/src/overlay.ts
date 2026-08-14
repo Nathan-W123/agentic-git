@@ -27,6 +27,7 @@ import {
   assertAgentPlan,
   createId,
   planAdmissionApproved,
+  summariseChangedFiles,
   type AgentPlan,
   type CanonicalVersion,
   type CoordinatorDecision,
@@ -441,7 +442,7 @@ export class OverlayWorkspaceService {
   private async statusUnlocked(scope: OverlayScope): Promise<OverlayStatus> {
     const repository = await this.repository(scope);
     const canonical = await this.repositories.getCanonicalVersion(repository);
-    const meta = await this.readMeta(scope);
+    let meta = await this.readMeta(scope);
     const sandbox = await this.sandboxStatus();
     if (meta === undefined) {
       return {
@@ -461,6 +462,27 @@ export class OverlayWorkspaceService {
       // A broken worktree should not blank the status; the client offers
       // discard/reset either way.
     }
+    // An overlay is created at whatever canonical was that day and then never
+    // moved, because `open` returns early once one exists. So the file tree
+    // the browser calls "the repository" went on showing the revision the
+    // overlay was cut from while tasks advanced canonical past it — three
+    // files in the repository, one of them on screen, and no way to tell from
+    // the view that it was looking at history.
+    //
+    // Only when there is nothing to lose. A clean overlay holds no work, so
+    // moving it forward costs the reader nothing and is what they meant by
+    // "the files". A dirty one is somebody's unfinished edit and is left
+    // exactly where it is — `dirtyFiles` and the two revisions are already on
+    // this status for a client that wants to say so.
+    if (
+      dirtyFiles.length === 0 &&
+      meta.baseVersion.revision !== canonical.revision
+    ) {
+      const advanced = await this.advanceCleanOverlay(scope, canonical);
+      if (advanced !== undefined) {
+        meta = advanced;
+      }
+    }
     return {
       exists: true,
       baseRevision: meta.baseVersion.revision,
@@ -469,6 +491,38 @@ export class OverlayWorkspaceService {
       dirtyFiles,
       sandbox,
     };
+  }
+
+  /**
+   * Moves an overlay with no edits in it onto the current canonical revision.
+   *
+   * Failure is swallowed and reported as "not moved" rather than thrown: this
+   * runs inside `status`, which every view calls, and a worktree too broken to
+   * check out is exactly when a reader most needs the status to still render
+   * and offer them discard.
+   */
+  private async advanceCleanOverlay(
+    scope: OverlayScope,
+    canonical: CanonicalVersion,
+  ): Promise<OverlayMeta | undefined> {
+    const directory = this.overlayDirectory(scope);
+    const metadataPath = this.metaPath(scope);
+    const staged = `${metadataPath}.${createId("tmp")}`;
+    try {
+      const git = this.repositories.getGitClient();
+      await git.run(["-C", directory, "checkout", "--detach", canonical.revision]);
+      const existing = await this.readMeta(scope);
+      if (existing === undefined) {
+        return undefined;
+      }
+      const meta: OverlayMeta = { ...existing, baseVersion: canonical };
+      await writeFile(staged, `${JSON.stringify(meta, undefined, 2)}\n`, "utf8");
+      await rename(staged, metadataPath);
+      return meta;
+    } catch {
+      await rm(staged, { force: true });
+      return undefined;
+    }
   }
 
   private async changedFiles(
@@ -1021,6 +1075,7 @@ export class OverlayWorkspaceService {
           projectId: scope.projectId,
           changeSetId: changeSet.id,
           files: changeSet.patches.map((patch) => patch.path),
+          changedFiles: summariseChangedFiles(changeSet.patches),
         },
       });
 

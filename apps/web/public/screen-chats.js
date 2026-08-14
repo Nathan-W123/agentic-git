@@ -60,8 +60,8 @@ import {
 } from "./code-view.js";
 import {
   agentFace,
+  brandMark,
   avatar,
-  avatarStack,
   chime,
   clockTime,
   esc,
@@ -550,6 +550,11 @@ function chanSidebar(activeRepositoryId) {
       : (state.members ?? []);
 
   return `<aside class="chan-sidebar">
+    <button type="button" class="chan-brand" data-act="nav" data-value="settings"
+      title="Settings">
+      ${brandMark(26)}
+      <span class="brand-text"><b>Lattice</b></span>
+    </button>
     <div class="chan-sidebar-head">
       ${searchBox("Search channels...", state.chatQuery, "channel-search")}
       <button type="button" class="chan-new" data-act="channel-new" title="New chat">
@@ -585,24 +590,6 @@ function chanSidebar(activeRepositoryId) {
       </button>
       <div class="chan-list-label">Agents</div>
       ${
-        // The broadcast address, listed with the agents it reaches so it is
-        // discoverable from the roster and not only from typing "@". Clicking
-        // it starts the message rather than sending one — the person still
-        // says what they want asked.
-        roster.length < 2
-          ? ""
-          : `<div class="roster-row" role="button" tabindex="0"
-               data-act="mention-agents-insert">
-               <div class="roster-row-main">
-                 <span class="rr-avatar">${icon("users")}</span>
-                 <span class="rr-body">
-                   <div class="rr-name">@agents</div>
-                   <div class="rr-role">Ask every agent at once</div>
-                 </span>
-               </div>
-             </div>`
-      }
-      ${
         // No empty state. The "Add an agent" button sits directly beneath and
         // already says what the absence means; a sentence saying the same
         // thing above it is a line to read before reaching the thing to click.
@@ -615,6 +602,11 @@ function chanSidebar(activeRepositoryId) {
         ${icon("plus")}<span>Add an agent</span>
       </button>
     </div>
+    ${
+      state.health === undefined
+        ? `<div class="sys-line"><span class="dot grey"></span>Control plane unreachable</div>`
+        : ""
+    }
   </aside>`;
 }
 
@@ -705,7 +697,6 @@ function previewLink(repositoryId) {
 function chanHeader(repository, repositoryId) {
   const roster = channelAgentsFor(repositoryId);
   const people = collaborators();
-  const faces = roster.slice(0, 3).map((agent) => agentFace(agent, 24)).join("");
   return `<header class="chan-head">
     <button type="button" class="icon-btn menu-btn" data-act="nav-toggle"
       title="Menu" aria-label="Menu">${icon("menu")}</button>
@@ -758,7 +749,9 @@ function chanHeader(repository, repositoryId) {
       // your app is up.
       previewLink(repositoryId)
     }
-    <span class="avatar-stack">${faces}${avatarStack(people, 3, 24)}</span>
+    <!-- No faces here. Six cropped circles said "some agents and some people
+         are in this room", which the two counts beside the branch name
+         already say exactly, in less space and without the guessing. -->
     ${
       // Six controls sat permanently in a header that is 44 pixels tall on a
       // phone, and on any given visit a reader wants none of them. Behind one
@@ -786,7 +779,15 @@ function chanHeader(repository, repositoryId) {
       state.chanToolsOpen === true ? " on" : ""
     }" data-act="chan-tools-toggle"
       title="${state.chanToolsOpen === true ? "Hide tools" : "Show tools"}"
-      aria-expanded="${state.chanToolsOpen === true}">${icon("chevronDown")}</button>
+      aria-expanded="${
+        state.chanToolsOpen === true
+      }">${
+        // Points up when the tools are away and left when they are out: the
+        // arrow indicates the direction they went, not the direction of the
+        // fold. Closed it stands up on its own; open it lies down pointing
+        // back along the row it just laid out.
+        icon("chevronUp")
+      }</button>
   </header>`;
 }
 
@@ -1316,7 +1317,12 @@ function channelMentionCandidates(repositoryId) {
       .filter(
         (entry) => query === "" || entry.name.toLowerCase().includes(query),
       ),
-  ].slice(0, 7);
+    // Five, not seven. The picker opens upward from the composer and covers
+    // the conversation you are replying to, so every extra row is a line of
+    // context taken away at the moment you most want it. Five is enough to
+    // recognise a name; past that you are reading a directory, and typing
+    // one more character narrows it faster than scanning does.
+  ].slice(0, 5);
 }
 
 /**
@@ -1363,10 +1369,10 @@ function mentionPopover(candidates) {
       }" data-act="channel-mention-pick" data-value="${esc(entry.name)}">
         ${
           entry.kind === "broadcast"
-            ? icon("users")
+            ? icon("users", 'width="20" height="20"')
             : entry.kind === "agent"
-              ? agentFace(entry.agent, 20)
-              : avatar(entry.name, 20)
+              ? agentFace(entry.agent, 18)
+              : avatar(entry.name, 18)
         }
         <span>${esc(entry.name)}</span>
         <span class="mi-kind">${
@@ -1547,6 +1553,34 @@ function chanTreePanel(repositoryId) {
       ${iconButton("close", { act: "chan-tree-close", title: "Close" })}
     </header>
     <div class="thread-body tree-body">
+      ${
+        // The workspace this lists is cut from canonical once and only moves
+        // forward on its own while it is clean. A dirty one is somebody's
+        // unfinished edit and is deliberately left where it is — but then this
+        // panel is showing an old revision of the repository with nothing to
+        // say so, which is how a repository with three files in it reads as a
+        // repository with one. The endpoint that re-cuts it has existed all
+        // along with nothing in the interface calling it.
+        state.workspace?.exists === true &&
+        typeof state.workspace.baseRevision === "string" &&
+        typeof state.workspace.canonicalRevision === "string" &&
+        state.workspace.baseRevision !== state.workspace.canonicalRevision
+          ? `<div class="tree-stale">
+               <span>These files are from an earlier version of the repository${
+                 (state.workspace.dirtyFiles ?? []).length > 0
+                   ? `, held back because you have unsaved edits in ${String(
+                       (state.workspace.dirtyFiles ?? []).length,
+                     )} file(s)`
+                   : ""
+               }.</span>
+               <button class="btn btn-primary" type="button" data-act="workspace-reset">Update${
+                 (state.workspace.dirtyFiles ?? []).length > 0
+                   ? " and discard"
+                   : ""
+               }</button>
+             </div>`
+          : ""
+      }
       ${
         paths.length === 0
           ? // A freshly imported repository has a canonical full of files and

@@ -112,8 +112,17 @@ Consequences worth stating:
 
 ## First actions
 
-Two, and deliberately only two:
+Three:
 
+- `push` — publishes **canonical** to the repository's recorded remote, on a
+  new branch, and answers with the branch and revision. Canonical rather than
+  the task's workspace: the workspace holds work that has not been integrated
+  or validated, and publishing that would put the agent's version somewhere a
+  reader would take for the project's. It refuses rather than forces when the
+  branch already exists or the upstream has moved, and refuses with a specific
+  reason when the repository has no remote or the deployment has no
+  `GITHUB_TOKEN`. Pushing a branch is not a merge: it puts work where somebody
+  can look at it, which is the whole of what "push to GitHub" is asking for.
 - `preview_start` — runs the task's **own workspace** (see below, not canonical)
   and answers with the loopback URL, or with the boot output if it did not come
   up. Everything it needs exists: the command resolution, the dependency

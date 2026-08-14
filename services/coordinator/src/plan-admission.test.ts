@@ -737,15 +737,48 @@ test("an ungrounded plan splits along declared paths it does not share", () => {
   );
 });
 
-test("a shared word in two greenfield intents does not cost the split", () => {
-  // The run this was written from: two deliberately unrelated greenfield tasks
-  // sharing one file of three, whose agent-written intents happened to share
-  // "shared" and "helper". `admit` decides the whole plan first, so the
-  // unverifiability gate answered before the split was considered — and then
-  // answered again, identically, when the reduced plan was re-decided, because
-  // reduction does not touch the intent. The gate strictly dominated the
-  // splitter, and both have the same precondition, so no greenfield pair the
-  // gate caught could ever be split.
+test("an ungrounded plan splits along declared paths even when the objectives are related", () => {
+  // Two halves of one small tool, handed out separately: an ingest half and a
+  // render half, sharing exactly one file. This is the shape somebody reaches
+  // for to watch partial admission work, and it is the shape that did not.
+  //
+  // The split above passes only because those two objectives share no words.
+  // Here they do — they are halves of the same tool, so of course they do —
+  // and relatedness is a whole-plan judgement that narrowing the file set
+  // cannot clear. Withdrawing the one contested file has to be enough: the
+  // remaining paths are disjoint by declaration, and scope enforcement holds
+  // the agent to them whether or not the objectives sound alike.
+  const admission = admit(
+    ungrounded(
+      plan("task_render", {
+        objective: "align terminal display width for the python data tool",
+        expectedFiles: ["src/tool/render.py", "src/tool/shared.py"],
+        expectedSymbols: [],
+      }),
+    ),
+    [
+      plan("task_ingest", {
+        objective: "parse comma separated input rows for the python data tool",
+        expectedFiles: ["src/tool/ingest.py", "src/tool/shared.py"],
+        expectedSymbols: [],
+      }),
+    ],
+  );
+
+  assert.equal(admission.status, "approved_with_constraints");
+  assert.deepEqual(
+    (admission.deferredResources ?? []).map((entry) => entry.resourceId),
+    ["src/tool/shared.py"],
+  );
+});
+
+test("the split survives a shared word in two agent-written intents", () => {
+  // The same shape as above with both halves unverifiable, which is what a
+  // greenfield repository actually produces — nothing exists yet, so nothing
+  // grounds on either side. And the text the gate reads is not the objective
+  // here but `intent`, the field the planning schema requires of the agent:
+  // the run this was written from shared "shared" and "helper" there, and one
+  // shared word is the whole test.
   const candidate = ungrounded(
     plan("task_a", {
       objective: "Align terminal display width",
@@ -764,7 +797,7 @@ test("a shared word in two greenfield intents does not cost the split", () => {
   );
   // The precondition the test rests on: these two really are "related", so the
   // gate really does fire on the whole plan. Without this the test would pass
-  // for the wrong reason the moment someone changed the word list.
+  // for the wrong reason the moment somebody changed the word list.
   assert.equal(relatedObjectives(candidate, holder), true);
 
   const admission = admit(candidate, [holder]);
