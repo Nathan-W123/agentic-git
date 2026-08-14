@@ -80,22 +80,30 @@ async function removeStaleLock(lockPath: string): Promise<boolean> {
   // to start — a permanent crash loop on redeploy, cleared only by deleting
   // the file by hand.
   //
-  // Only a *stated* other host disables the pid check. A lock with no hostname
-  // predates this field and was almost certainly written here, so it keeps the
-  // old behaviour rather than being held for the grace period on the strength
-  // of a missing key.
+  // A lock with no hostname is the case that matters most, because it is the
+  // one already sitting on the volume: it was written by the build that had
+  // this bug. Assuming it came from this machine sends exactly that lock back
+  // down the path that crashes, so the pid is not trusted there either.
+  //
+  // What a pid can still settle is the negative. A pid that is *not* running
+  // means the holder is gone whatever wrote it, and the lock is safe to clear.
+  // Only "the pid is alive" is ambiguous without a hostname, and that falls
+  // through to age below.
   const foreignHost =
-    owner?.hostname !== undefined && owner.hostname !== os.hostname();
-  if (owner !== undefined && !foreignHost && processIsRunning(owner.pid)) {
+    owner === undefined || owner.hostname !== os.hostname();
+  const trustPid = owner !== undefined && owner.hostname === os.hostname();
+  if (owner !== undefined && trustPid && processIsRunning(owner.pid)) {
     throw new Error(
       `A coordinator control plane is already running for this project ` +
         `(PID ${owner.pid}, started ${owner.startedAt})`,
     );
   }
-  if (owner !== undefined && foreignHost) {
-    // Another machine's lock. It cannot be probed, so age decides: a holder
-    // that is still alive rewrites this file as it runs, and one that is gone
-    // leaves it to go stale.
+  if (owner !== undefined && foreignHost && processIsRunning(owner.pid)) {
+    // The pid looks alive but nothing says it belongs to this machine, so it
+    // proves nothing — a fresh container answers for its own pid 1. Age
+    // decides instead, and a lock older than the grace window is treated as
+    // abandoned. Reclaiming one that is genuinely held is a smaller failure
+    // than refusing to start forever, which is what the alternative was.
     const metadata = await stat(lockPath).catch(() => undefined);
     if (
       metadata !== undefined &&
