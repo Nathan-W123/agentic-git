@@ -451,6 +451,18 @@ export interface SubmitTaskInput {
    * `runRepository` to lease it.
    */
   planOnly?: boolean;
+  /**
+   * What this one task should run with, overriding the agent's configured
+   * default. Set by a channel that has picked a model or a reasoning level
+   * for the agent it is talking to.
+   *
+   * Advisory in the sense that an adapter which cannot honour it says so at
+   * launch — `effort` is Claude and Codex only, and a model name is whatever
+   * the vendor CLI accepts — but it is not silently dropped, which is what
+   * happened while these lived only on the channel row.
+   */
+  model?: string;
+  effort?: string;
 }
 
 export interface SubmittedTask {
@@ -465,6 +477,9 @@ export interface SubmittedTask {
   context: string | undefined;
   /** See {@link SubmitTaskInput.conversationId}. Absent on one-shot tasks. */
   conversationId: string | undefined;
+  /** Per-task overrides of the agent's configured model / reasoning level. */
+  model: string | undefined;
+  effort: string | undefined;
   status: SubmittedTaskStatus;
   submittedAt: string;
   claimedAt: string | undefined;

@@ -901,17 +901,29 @@ export function normalizeChannelAgentId(agentId: string, viewerId: string): stri
  * legacy bare-provider row that names every agent on the vendor.
  */
 export function resolveChannelAgentPresentation(
-  overrides: Record<string, { name?: string; role?: string } | undefined>,
+  overrides: Record<
+    string,
+    { name?: string; role?: string; model?: string; effort?: string } | undefined
+  >,
   agent: { userId: string; provider: string },
   defaultName: string,
-): { name: string; role: string } {
+): { name: string; role: string; model?: string; effort?: string } {
   const specific = overrides[`${agent.userId}:${agent.provider}`];
   const legacy = overrides[agent.provider];
+  // Model and effort travel with name and role because they are the same kind
+  // of fact — what this channel decided about this agent — and resolving them
+  // anywhere else would mean a second copy of the specific-beats-legacy rule.
+  // They used to be stored by the roster's pickers and read by nothing, so
+  // choosing a model changed a control and not one thing about the run.
+  const model = specific?.model ?? legacy?.model;
+  const effort = specific?.effort ?? legacy?.effort;
   return {
     name: specific?.name ?? legacy?.name ?? defaultName,
     // No vendor-guessed default: an agent is unlabeled until this channel
     // actually names its role.
     role: specific?.role ?? legacy?.role ?? "",
+    ...(model === undefined || model === "" ? {} : { model }),
+    ...(effort === undefined || effort === "" ? {} : { effort }),
   };
 }
 
@@ -944,6 +956,9 @@ type ChannelMentionCandidate = {
   name: string;
   /** This channel's declared role for the agent, or "" if unlabeled. */
   role: string;
+  /** What this channel picked for the agent, when it picked anything. */
+  model?: string;
+  effort?: string;
 };
 
 /* ------------------------------------------------- no-mention auto-claim --
@@ -1399,6 +1414,12 @@ export interface ApiOperations {
      * being approved.
      */
     planOnly?: boolean;
+    /**
+     * What this channel picked for the agent, overriding the deployment's
+     * configured default for this one task. See `SubmitTaskInput.model`.
+     */
+    model?: string;
+    effort?: string;
   }): Promise<SubmittedTask>;
   runRepository(input: {
     projectId: string;
@@ -7319,12 +7340,12 @@ export class ApiGateway {
       // of them chose.
       const defaultName =
         connection.callSign ?? `${label} (${firstWord(connection.userName)})`;
-      const { name, role } = resolveChannelAgentPresentation(
+      const presentation = resolveChannelAgentPresentation(
         overrides,
         connection,
         defaultName,
       );
-      return [{ ...connection, vendor, name, role }];
+      return [{ ...connection, vendor, ...presentation }];
     });
     return candidates.sort((a, b) => b.name.length - a.name.length);
   }
@@ -7942,6 +7963,10 @@ export class ApiGateway {
         // commissioning a stranger, and the coordinator keep the turn's
         // workspace warm for the next one.
         conversationId: threadRootId,
+        // What this channel picked for this agent, carried to the run rather
+        // than stopping at the roster row it was typed into.
+        ...(candidate.model === undefined ? {} : { model: candidate.model }),
+        ...(candidate.effort === undefined ? {} : { effort: candidate.effort }),
         // Held from the moment it exists, not held after the fact. The
         // branch below that stops and waits for a person is downstream of
         // this; between the insert and that branch the row would otherwise

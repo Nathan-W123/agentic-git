@@ -5,8 +5,10 @@ import path from "node:path";
 import { CodexAdapter } from "@coord/adapter-codex";
 import { GenericCliAdapter } from "@coord/adapter-generic-cli";
 import {
+  PROMPT_CLI_EFFORTS,
   createClaudeAdapter,
   createGeminiAdapter,
+  type PromptCliEffort,
 } from "@coord/adapter-prompt-cli";
 import type { AgentAdapter } from "@coord/agent-protocol";
 import {
@@ -478,6 +480,12 @@ export interface TaskSubmitOptions {
    * the persistence store.
    */
   planOnly?: boolean;
+  /**
+   * Per-task overrides of the agent's configured model / reasoning level. See
+   * `SubmitTaskInput.model` in the persistence store.
+   */
+  model?: string;
+  effort?: string;
 }
 
 export async function taskSubmit(
@@ -512,6 +520,12 @@ export async function taskSubmit(
       ? {}
       : { conversationId: options.conversationId }),
     ...(options.planOnly === true ? { planOnly: true } : {}),
+    ...(options.model === undefined || options.model.trim() === ""
+      ? {}
+      : { model: options.model.trim() }),
+    ...(options.effort === undefined || options.effort.trim() === ""
+      ? {}
+      : { effort: options.effort.trim() }),
   });
 }
 
@@ -563,6 +577,32 @@ export function codexExecutionSandbox(
   return configured;
 }
 
+/**
+ * The agent's configured args with a per-task model swapped in.
+ *
+ * Replaces rather than appends: both adapters accept only `--model <id>`
+ * pairs, and prompt-cli accepts exactly one, so adding a second would throw
+ * at construction instead of overriding anything.
+ */
+export function withModelOverride(
+  args: readonly string[] | undefined,
+  model: string | undefined,
+): readonly string[] | undefined {
+  if (model === undefined || model.trim() === "") {
+    return args;
+  }
+  const kept: string[] = [];
+  const existing = args ?? [];
+  for (let index = 0; index < existing.length; index += 2) {
+    const flag = existing[index];
+    if (flag !== "--model" && flag !== "-m") {
+      const value = existing[index + 1];
+      kept.push(...(value === undefined ? [flag as string] : [flag as string, value]));
+    }
+  }
+  return [...kept, "--model", model.trim()];
+}
+
 function createAdapter(
   agent: AgentConfig,
   agentId: string,
@@ -577,7 +617,24 @@ function createAdapter(
    * behaviour of running under the host's own CLI login.
    */
   baseEnv: NodeJS.ProcessEnv = process.env,
+  /**
+   * What this one task asked to run with, from the channel that dispatched
+   * it. Beats the agent's configured default, because it is the more specific
+   * statement: deployment config says how this agent usually runs, and a room
+   * that picked a model is saying how this request should.
+   */
+  override: { model?: string | undefined; effort?: string | undefined } = {},
 ): AgentAdapter {
+  const args = withModelOverride(agent.args, override.model);
+  // Config carries `effort` only on the prompt-cli agents, which is where the
+  // setting has always been expressible. A per-task override reaches Codex
+  // too, because the channel can now ask for one and the adapter can now
+  // honour it — deployment config catching up is a separate change.
+  const configuredEffort =
+    agent.adapter === "claude" || agent.adapter === "gemini"
+      ? agent.effort
+      : undefined;
+  const effort = override.effort ?? configuredEffort;
   // The agent's own env block still wins: it is deployment configuration,
   // whereas the credential environment is per task.
   const launchEnv =
@@ -604,7 +661,8 @@ function createAdapter(
       workspaces,
       planningRoot,
       ...(agent.command === undefined ? {} : { command: agent.command }),
-      ...(agent.args === undefined ? {} : { args: agent.args }),
+      ...(args === undefined ? {} : { args }),
+      ...(effort === undefined ? {} : { effort }),
       ...(agent.planningTimeoutMs === undefined
         ? {}
         : { planningTimeoutMs: agent.planningTimeoutMs }),
@@ -629,6 +687,21 @@ function createAdapter(
           "is adapter wiring. See docs/architecture/vendor-cli-sandboxing.md",
       );
     }
+    // Refused here rather than narrowed away, because a level this CLI does
+    // not take is a request that cannot be honoured, and silently running at
+    // the default would answer a question about reasoning depth with a
+    // different answer than the one asked for. The message names the
+    // vocabulary; the channel surfaces it as "I could not start this".
+    if (
+      effort !== undefined &&
+      !(PROMPT_CLI_EFFORTS as readonly string[]).includes(effort)
+    ) {
+      throw new Error(
+        `Agent "${agentId}" was asked for reasoning effort "${effort}", but ` +
+          `${agent.adapter} accepts ${PROMPT_CLI_EFFORTS.join(", ")}`,
+      );
+    }
+    const promptEffort = effort as PromptCliEffort | undefined;
     const create =
       agent.adapter === "claude" ? createClaudeAdapter : createGeminiAdapter;
     return create({
@@ -637,14 +710,14 @@ function createAdapter(
       workspaces,
       planningRoot,
       ...(agent.command === undefined ? {} : { command: agent.command }),
-      ...(agent.args === undefined ? {} : { args: agent.args }),
+      ...(args === undefined ? {} : { args }),
       ...(agent.planningTimeoutMs === undefined
         ? {}
         : { planningTimeoutMs: agent.planningTimeoutMs }),
       ...(agent.executionTimeoutMs === undefined
         ? {}
         : { executionTimeoutMs: agent.executionTimeoutMs }),
-      ...(agent.effort === undefined ? {} : { effort: agent.effort }),
+      ...(promptEffort === undefined ? {} : { effort: promptEffort }),
       ...(launchEnv === undefined ? {} : { env: launchEnv }),
     });
   }
@@ -975,6 +1048,8 @@ export async function runPendingTasks(
           agentSandbox,
           project.planningRoot,
           home?.env ?? process.env,
+          // The room's choice, if the room made one.
+          { model: task.model, effort: task.effort },
         ),
         // One turn of a conversation, when the row says so: the coordinator
         // resumes whatever the registry still holds for this id, and starts

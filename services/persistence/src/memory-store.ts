@@ -1152,6 +1152,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       submittedBy: input.submittedBy,
       context: input.context,
       conversationId: input.conversationId,
+      model: input.model,
+      effort: input.effort,
       status: input.planOnly === true ? "planned" : "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,
