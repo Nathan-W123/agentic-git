@@ -9692,10 +9692,15 @@ export class ApiGateway {
       await this.appendChannelEntry({
         projectId,
         repositoryId,
-        kind: "system",
-        authorId: "coordinator",
+        // From the auditor, not from the coordinator. A system line is the
+        // deployment speaking in its own name, which is right for "a run could
+        // not start" and wrong for this: an audit is an agent's own reading of
+        // a change, and attributing it to the machinery made the one agent
+        // that works unprompted the only one with no face in the room.
+        kind: "agent",
+        authorId,
         content:
-          `⚖️ Audit of ${String(diff.files.length)} file` +
+          `Audit of ${String(diff.files.length)} file` +
           `${diff.files.length === 1 ? "" : "s"} found ` +
           `${String(findings.length)} issue` +
           `${findings.length === 1 ? "" : "s"}` +

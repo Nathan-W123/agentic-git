@@ -1010,7 +1010,14 @@ function messageRow(
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
-  return `<div class="cmsg-row">
+  return `<div class="cmsg-row${
+    // The auditor reads every merge without being asked, so its lines arrive
+    // among work nobody is looking at yet. Drawn in the accent so they are
+    // recognisable as the unprompted ones — and in *the reader's* accent
+    // rather than a colour of their own, because a second meaning-carrying
+    // colour in a room that already has one is just noise.
+    isAuditor(author.agent ?? {}) ? " cmsg-auditor" : ""
+  }">
     <span class="cmsg-avatar">${
       author.agent !== undefined ? agentFace(author.agent, 32) : avatar(author.name, 32, author.name, author.name === currentUserName() ? myAvatar() : undefined)
     }</span>

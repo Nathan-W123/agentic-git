@@ -4557,6 +4557,18 @@ svg {
   padding-left: 6px;
 }
 
+/* The auditor's own lines, in whatever accent the reader chose. Applied to the
+   body rather than the whole row so the name, time and reactions keep their
+   ordinary treatment — the point is to mark what it said, not to restyle a
+   message into something that reads as a different component. */
+.cmsg-row.cmsg-auditor .cmsg-text {
+  color: var(--accent-bright);
+}
+
+.cmsg-row.cmsg-auditor .cmsg-text .rt-head {
+  color: var(--accent);
+}
+
 /* The header's tools, revealed together. Laid out as one group so they read
    as a tray that opened rather than as controls that appeared one by one. */
 .chan-tools {
