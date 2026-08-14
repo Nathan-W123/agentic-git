@@ -630,17 +630,14 @@ function topbar() {
   const unread = unreadCount();
   const user = currentUserName();
   return `<header class="topbar">
-    <button class="icon-btn menu-btn" data-act="nav-toggle" title="Menu"
-      aria-label="Menu">${icon("menu")}</button>
-    <!-- Folds the nav rail away on a wide screen. The button above is the
-         phone's drawer handle and stays that; this one is the only way back
-         once the rail is hidden, so it lives outside the thing it hides. -->
-    <button class="icon-btn wide-only" data-act="nav-collapse-toggle"
-      title="${state.navCollapsed ? "Show the sidebar" : "Hide the sidebar"}"
-      aria-pressed="${state.navCollapsed === true}"
-      aria-label="${state.navCollapsed ? "Show the sidebar" : "Hide the sidebar"}">${icon(
-        "columns",
-      )}</button>
+    ${
+      // Off the Chats screen there is no channel sidebar and so no brand to
+      // click home with — this is the way back.
+      state.route === "chats"
+        ? ""
+        : `<button class="icon-btn" data-act="nav" data-value="chats"
+             title="Back to chats" aria-label="Back to chats">${icon("chatBubble")}</button>`
+    }
     <span class="spacer"></span>
     ${
       // Same reasoning as the sidebar's line: a status that is always the same
@@ -2296,8 +2293,12 @@ function renderNow() {
     classes.push("nav-collapsed");
   }
   const editorCaret = captureEditor();
+  // No rail. The channel sidebar is the navigation now — channels are the
+  // app — and everything the rail held moved: the brand into that sidebar
+  // (clicking it opens Settings), the account block into the topbar avatar,
+  // and the failure-only health line to the sidebar's foot. `sidebar()` and
+  // the nav drawer stay in the file, unrendered, until the next sweep.
   root.innerHTML = `<div class="${classes.join(" ")}">
-    ${sidebar()}
     <div class="main${BARE.has(state.route) ? " bare" : ""}${
       state.loadError === undefined ? "" : " has-banner"
     }">
@@ -2305,7 +2306,6 @@ function renderNow() {
       ${BARE.has(state.route) ? "" : topbar()}
       ${screen()}
     </div>
-    ${state.navOpen ? '<div class="nav-scrim" data-act="nav-close"></div>' : ""}
   </div>`;
 
   // Chats owns this now: the inline file and diff blocks in the transcript are

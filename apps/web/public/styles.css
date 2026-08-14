@@ -527,9 +527,37 @@ svg {
 
 .app {
   display: grid;
-  grid-template-columns: var(--sidebar-w) 1fr;
+  /* One column: the rail is gone, the channel sidebar is the navigation. */
+  grid-template-columns: 1fr;
   height: 100vh;
   overflow: hidden;
+}
+
+/* The brand, now the channel sidebar's crown. A button because it goes
+   somewhere (Settings); the gear on the right says so without a label. */
+.chan-brand {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 14px 14px 10px;
+  width: 100%;
+  text-align: left;
+  color: var(--text);
+}
+
+.chan-brand .brand-text b {
+  font-size: 15px;
+}
+
+.chan-brand-gear {
+  width: 14px;
+  height: 14px;
+  margin-left: auto;
+  color: var(--text-4);
+}
+
+.chan-brand:hover .chan-brand-gear {
+  color: var(--text-2);
 }
 
 .app.no-sidebar {

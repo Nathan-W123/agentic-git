@@ -60,6 +60,7 @@ import {
 } from "./code-view.js";
 import {
   agentFace,
+  brandMark,
   avatar,
   chime,
   clockTime,
@@ -549,6 +550,12 @@ function chanSidebar(activeRepositoryId) {
       : (state.members ?? []);
 
   return `<aside class="chan-sidebar">
+    <button type="button" class="chan-brand" data-act="nav" data-value="settings"
+      title="Settings">
+      ${brandMark(26)}
+      <span class="brand-text"><b>Lattice</b></span>
+      ${icon("gear", 'class="chan-brand-gear"')}
+    </button>
     <div class="chan-sidebar-head">
       ${searchBox("Search channels...", state.chatQuery, "channel-search")}
       <button type="button" class="chan-new" data-act="channel-new" title="New chat">
@@ -614,6 +621,11 @@ function chanSidebar(activeRepositoryId) {
         ${icon("plus")}<span>Add an agent</span>
       </button>
     </div>
+    ${
+      state.health === undefined
+        ? `<div class="sys-line"><span class="dot grey"></span>Control plane unreachable</div>`
+        : ""
+    }
   </aside>`;
 }
 
