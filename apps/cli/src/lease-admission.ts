@@ -339,6 +339,15 @@ export class LeasePlanAuthority implements PlanAuthority {
     if (deferred.length === 0) {
       return;
     }
+    // The submitted row, not the definition the coordinator runs on. A
+    // `TaskDefinition` carries neither `submittedBy` nor the model and effort
+    // a channel picked, and a follow-up without the first cannot resolve
+    // credentials at all — it would be queued and then never able to run.
+    const original = (
+      await this.store.listSubmittedTasks({
+        repositoryId: request.repository.id,
+      })
+    ).find((candidate) => candidate.id === request.task.id);
     const followUp = await this.store.submitTask({
       repositoryId: request.repository.id,
       ...(request.projectId === undefined
@@ -354,8 +363,19 @@ export class LeasePlanAuthority implements PlanAuthority {
       ),
       agentId: request.task.agentId,
       validationCommands: request.task.validationCommands,
+      // Whose account this spends. The original's owner, never a default:
+      // this is the same work, so it is the same person paying for it.
+      ...(original?.submittedBy === undefined
+        ? {}
+        : { submittedBy: original.submittedBy }),
+      // What the channel chose for this agent. Dropping them would run the
+      // remainder of one request on different settings from the rest of it.
+      ...(original?.model === undefined ? {} : { model: original.model }),
+      ...(original?.effort === undefined ? {} : { effort: original.effort }),
       // Whatever conversation the original was asked inside is as much the
-      // follow-up's background as it was its own.
+      // follow-up's background as it was its own. `conversationId` is
+      // deliberately not carried: submitting a turn settles the conversation's
+      // previous turn, and this is the same turn finishing, not the next one.
       ...(request.task.context === undefined
         ? {}
         : { context: request.task.context }),
