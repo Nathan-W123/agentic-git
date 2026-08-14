@@ -599,7 +599,7 @@ function chanSidebar(activeRepositoryId) {
           : `<div class="roster-row" role="button" tabindex="0"
                data-act="mention-agents-insert">
                <div class="roster-row-main">
-                 <span class="rr-avatar">${icon("users")}</span>
+                 <span class="rr-avatar">${icon("users", 'width="30" height="30"')}</span>
                  <span class="rr-body">
                    <div class="rr-name">@agents</div>
                    <div class="rr-role">Ask every agent at once</div>
@@ -1360,7 +1360,7 @@ function mentionPopover(candidates) {
       }" data-act="channel-mention-pick" data-value="${esc(entry.name)}">
         ${
           entry.kind === "broadcast"
-            ? icon("users")
+            ? icon("users", 'width="20" height="20"')
             : entry.kind === "agent"
               ? agentFace(entry.agent, 18)
               : avatar(entry.name, 18)
