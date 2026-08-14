@@ -4634,6 +4634,36 @@ svg {
   padding-left: 6px;
 }
 
+/* The auditor's own lines, in whatever accent the reader chose. Applied to the
+   body rather than the whole row so the name, time and reactions keep their
+   ordinary treatment — the point is to mark what it said, not to restyle a
+   message into something that reads as a different component. */
+.cmsg-row.cmsg-auditor .cmsg-text {
+  color: var(--accent-bright);
+}
+
+.cmsg-row.cmsg-auditor .cmsg-text .rt-head {
+  color: var(--accent);
+}
+
+/* The header's tools, revealed together. Laid out as one group so they read
+   as a tray that opened rather than as controls that appeared one by one. */
+.chan-tools {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* The arrow turns to point at what it opened, which is the only thing telling
+   a reader the header has more in it than they can see. */
+.chan-tools-toggle svg {
+  transition: transform 0.15s ease;
+}
+
+.chan-tools-toggle.on svg {
+  transform: rotate(180deg);
+}
+
 .preview-link {
   font-size: 12px;
   font-family: var(--mono, ui-monospace, monospace);
@@ -4644,6 +4674,16 @@ svg {
 
 .preview-link:hover {
   text-decoration: underline;
+}
+
+/* Header and tabs as one grid row, so the body still gets the stretching one.
+   The panel's three rows are header / body / composer, and a fourth top-level
+   child does not extend that — it takes the body's row and pushes everything
+   after it into an implicit one. */
+.agent-panel-head {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
 }
 
 /* One agent's work in this repository. Sits in the middle row of

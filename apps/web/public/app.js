@@ -2775,6 +2775,10 @@ document.addEventListener("click", (event) => {
       state.simplifyShown[value] = !(state.simplifyShown[value] === true);
       render();
       return;
+    case "chan-tools-toggle":
+      state.chanToolsOpen = !(state.chanToolsOpen === true);
+      render();
+      return;
     case "preview-start":
       void startPreviewAction(value);
       return;

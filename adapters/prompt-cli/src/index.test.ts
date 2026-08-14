@@ -28,6 +28,8 @@ import {
   type PromptCliProcessRunner,
   parseClaudeSessionId,
   parseClaudeUsage,
+  claudeResultEnvelope,
+  readClaudeNarration,
 } from "./index.js";
 
 const TASK: TaskDefinition = {
@@ -685,4 +687,91 @@ test("a task asked to look finishes with an empty changeset instead of failing",
   assert.equal(changeSet.patches.length, 0);
   // And it carries the model's own words, which are the deliverable here.
   assert.ok(changeSet.agentExplanation.length > 0);
+});
+
+test("a streamed run is read from its result event, in either format", () => {
+  // Execution streams and planning does not, so both formats reach the same
+  // reader. One envelope on its own is still one envelope.
+  const buffered = JSON.stringify({ type: "result", result: "done" });
+  assert.deepEqual(claudeResultEnvelope(buffered), {
+    type: "result",
+    result: "done",
+  });
+
+  const streamed = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "assistant", message: { content: [] } }),
+    JSON.stringify({ type: "result", result: "done", usage: { input_tokens: 5 } }),
+  ].join("\n");
+  assert.equal(
+    (claudeResultEnvelope(streamed) as { result?: string }).result,
+    "done",
+  );
+  // Billed the same either way, so streaming does not quietly stop recording
+  // what a run cost.
+  assert.equal(parseClaudeUsage(streamed)?.inputTokens, 5);
+});
+
+test("a stream that ends without a result is an error, not an empty answer", () => {
+  // The failure this has to be loudest about. A run that did the work and
+  // reported nothing looks exactly like a run that did nothing, and silence
+  // is what the whole change exists to end.
+  const truncated = [
+    JSON.stringify({ type: "system", subtype: "init" }),
+    JSON.stringify({ type: "assistant", message: { content: [] } }),
+  ].join("\n");
+  assert.throws(() => claudeResultEnvelope(truncated), /streamed no result/u);
+  // Usage is not worth failing a run over, so it answers nothing instead.
+  assert.equal(parseClaudeUsage(truncated), undefined);
+});
+
+test("a line that is not JSON does not break the stream around it", () => {
+  // A CLI may print whatever it likes alongside its events, and a warning on
+  // stdout must not cost the run its result.
+  const noisy = [
+    "warning: something the vendor felt like saying",
+    JSON.stringify({ type: "result", result: "done" }),
+  ].join("\n");
+  assert.equal(
+    (claudeResultEnvelope(noisy) as { result?: string }).result,
+    "done",
+  );
+});
+
+test("narration is what the agent said, not what it did", () => {
+  // Assistant text only. Tool calls and their results are the noise a reader
+  // does not want, and there is far more of that than there is of this.
+  assert.equal(
+    readClaudeNarration({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "text", text: "The pieces are pink and angular; changing them now." },
+        ],
+      },
+    }),
+    "The pieces are pink and angular; changing them now.",
+  );
+  assert.equal(
+    readClaudeNarration({
+      type: "assistant",
+      message: { content: [{ type: "tool_use", name: "Edit", input: {} }] },
+    }),
+    undefined,
+  );
+  assert.equal(readClaudeNarration({ type: "result", result: "done" }), undefined);
+  assert.equal(readClaudeNarration({ type: "assistant" }), undefined);
+  assert.equal(readClaudeNarration("not an object"), undefined);
+});
+
+test("execution streams and planning does not", () => {
+  // Planning is one answer that arrives at the end either way, so streaming it
+  // would buy nothing and put the schema parse behind a second format.
+  assert.ok(CLAUDE_PROFILE.executionArgs(undefined, undefined, undefined).includes("stream-json"));
+  assert.ok(CLAUDE_PROFILE.executionArgs(undefined, undefined, undefined).includes("--verbose"));
+  assert.ok(CLAUDE_PROFILE.planningArgs(undefined, undefined, undefined).includes("json"));
+  assert.equal(
+    CLAUDE_PROFILE.planningArgs(undefined, undefined, undefined).includes("stream-json"),
+    false,
+  );
 });

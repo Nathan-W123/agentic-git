@@ -1241,6 +1241,45 @@ export class RepositoryService {
       "core.logAllRefUpdates",
       "true",
     ]);
+    await this.preserveLineEndings(repositoryPath);
+  }
+
+  /**
+   * Stops git rewriting the bytes an agent wrote.
+   *
+   * Git for Windows ships `core.autocrlf=true` at system level, so a file
+   * written with LF, committed, and checked back out comes back with CRLF.
+   * That is a reasonable default for a person editing files on Windows and a
+   * bad one here: this system's whole contract is that a change set is what
+   * the agent produced. An agent that writes a file and reads it back after
+   * landing was seeing different bytes than it wrote, which shows up as
+   * spurious diff noise and — where an agent compares its own work — as work
+   * that appears not to have been done.
+   *
+   * Set on the canonical repository, which is where it takes effect: a
+   * worktree shares the config of the repository it belongs to, so every
+   * workspace cut from this one inherits it.
+   *
+   * Deliberately independent of the host. A repository that round-trips
+   * exactly on Linux and not on Windows is a repository whose behaviour
+   * depends on which machine the control plane happens to be running, which
+   * is not a difference anybody should have to know about.
+   */
+  private async preserveLineEndings(repositoryPath: string): Promise<void> {
+    await this.git.run([
+      `--git-dir=${repositoryPath}`,
+      "config",
+      "--local",
+      "core.autocrlf",
+      "false",
+    ]);
+    await this.git.run([
+      `--git-dir=${repositoryPath}`,
+      "config",
+      "--local",
+      "core.eol",
+      "lf",
+    ]);
   }
 
   private async discoverDefaultBranch(repositoryPath: string): Promise<string> {

@@ -632,17 +632,35 @@ function chanSidebar(activeRepositoryId) {
  * offers a link that will not open, and it says where it points rather than
  * pretending otherwise.
  */
+function previewRunning(repositoryId) {
+  const preview = state.previews[repositoryId];
+  return preview !== null && preview !== undefined && preview.exited === undefined
+    ? preview
+    : undefined;
+}
+
+/** The control, which lives in the tool tray with its siblings. */
 function previewControl(repositoryId) {
   if (!repositoryId) {
     return "";
   }
-  const preview = state.previews[repositoryId];
-  const running = preview !== null && preview !== undefined &&
-    preview.exited === undefined;
-  if (!running) {
-    return `<button type="button" class="icon-btn" data-act="preview-start"
-      data-value="${esc(repositoryId)}" title="Run this app and open it">
-      ${icon("play")}</button>`;
+  return previewRunning(repositoryId) === undefined
+    ? `<button type="button" class="icon-btn" data-act="preview-start"
+        data-value="${esc(repositoryId)}" title="Run this app and open it">
+        ${icon("play")}</button>`
+    : `<button type="button" class="icon-btn on" data-act="preview-stop"
+        data-value="${esc(repositoryId)}" title="Stop the running app">
+        ${icon("close")}</button>`;
+}
+
+/** The address, which stays in the header because it is state, not a control. */
+function previewLink(repositoryId) {
+  if (!repositoryId) {
+    return "";
+  }
+  const preview = previewRunning(repositoryId);
+  if (preview === undefined) {
+    return "";
   }
   // Through this deployment rather than at the preview's own address. The
   // app binds loopback and nothing opens a port, so its own URL only works on
@@ -652,12 +670,11 @@ function previewControl(repositoryId) {
   const proxied =
     `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
     `/repositories/${encodeURIComponent(repositoryId)}/preview/app/`;
+  // No stop control beside it: stopping is a tool and lives with the tools.
   return `<span class="preview-live">
     <a class="preview-link" href="${esc(proxied)}" target="_blank"
       rel="noopener noreferrer" title="${esc(preview.label)} — ${esc(preview.url)}">
       ${esc(preview.url.replace("http://", ""))}</a>
-    <button type="button" class="icon-btn sm" data-act="preview-stop"
-      data-value="${esc(repositoryId)}" title="Stop it">${icon("close")}</button>
   </span>`;
 }
 
@@ -710,21 +727,42 @@ function chanHeader(repository, repositoryId) {
       </div>
     </div>
     <span class="spacer"></span>
-    ${previewControl(repositoryId)}
+    ${
+      // A running preview's address is not a control, so it stays out of the
+      // fold. The point of hiding the tools is a quieter header; hiding the
+      // one live thing in it would mean expanding a menu to find out whether
+      // your app is up.
+      previewLink(repositoryId)
+    }
     <span class="avatar-stack">${faces}${avatarStack(people, 3, 24)}</span>
-    <button type="button" class="icon-btn${state.chanTree === true ? " on" : ""}"
-      data-act="chan-tree-toggle" title="Files"
-      aria-pressed="${state.chanTree === true}">${icon("folder")}</button>
-    <button type="button" class="icon-btn${state.chanThreadList === true ? " on" : ""}"
-      data-act="channel-threads-toggle" title="Threads"
-      aria-pressed="${state.chanThreadList === true}">${icon("reply")}</button>
-    <button type="button" class="icon-btn${state.termOpen ? " on" : ""}"
-      data-act="chan-term-toggle" title="Terminal"
-      aria-pressed="${state.termOpen}">${icon("terminal")}</button>
-    <button type="button" class="icon-btn${state.chanMsgSearchOpen ? " on" : ""}"
-      data-act="channel-msg-search-toggle" title="Search messages"
-      aria-pressed="${state.chanMsgSearchOpen}">${icon("search")}</button>
-    ${iconButton("info", { act: "channel-info", value: repositoryId ?? "", title: "Channel info" })}
+    ${
+      // Six controls sat permanently in a header that is 44 pixels tall on a
+      // phone, and on any given visit a reader wants none of them. Behind one
+      // arrow they are a menu; in front of it they were the header.
+      state.chanToolsOpen !== true
+        ? ""
+        : `<span class="chan-tools">
+            ${previewControl(repositoryId)}
+            <button type="button" class="icon-btn${state.chanTree === true ? " on" : ""}"
+              data-act="chan-tree-toggle" title="Files"
+              aria-pressed="${state.chanTree === true}">${icon("folder")}</button>
+            <button type="button" class="icon-btn${state.chanThreadList === true ? " on" : ""}"
+              data-act="channel-threads-toggle" title="Threads"
+              aria-pressed="${state.chanThreadList === true}">${icon("reply")}</button>
+            <button type="button" class="icon-btn${state.termOpen ? " on" : ""}"
+              data-act="chan-term-toggle" title="Terminal"
+              aria-pressed="${state.termOpen}">${icon("terminal")}</button>
+            <button type="button" class="icon-btn${state.chanMsgSearchOpen ? " on" : ""}"
+              data-act="channel-msg-search-toggle" title="Search messages"
+              aria-pressed="${state.chanMsgSearchOpen}">${icon("search")}</button>
+            ${iconButton("info", { act: "channel-info", value: repositoryId ?? "", title: "Channel info" })}
+          </span>`
+    }
+    <button type="button" class="icon-btn chan-tools-toggle${
+      state.chanToolsOpen === true ? " on" : ""
+    }" data-act="chan-tools-toggle"
+      title="${state.chanToolsOpen === true ? "Hide tools" : "Show tools"}"
+      aria-expanded="${state.chanToolsOpen === true}">${icon("chevronDown")}</button>
   </header>`;
 }
 
@@ -974,10 +1012,19 @@ function messageRow(
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
-  // The id is the jump target the pinned banner scrolls to. Gated on the
-  // channel copy only: the thread panel renders the same root with
-  // isReply, and one message must not put two ids in the document.
-  return `<div class="cmsg-row"${isReply ? "" : ` id="cmsg-${esc(entry.id)}"`}>
+  return `<div class="cmsg-row${
+    // The auditor reads every merge without being asked, so its lines arrive
+    // among work nobody is looking at yet. Drawn in the accent so they are
+    // recognisable as the unprompted ones — and in *the reader's* accent
+    // rather than a colour of their own, because a second meaning-carrying
+    // colour in a room that already has one is just noise.
+    isAuditor(author.agent ?? {}) ? " cmsg-auditor" : ""
+  }"${
+    // The id is the jump target the pinned banner scrolls to. Gated on the
+    // channel copy only: the thread panel renders the same root with
+    // isReply, and one message must not put two ids in the document.
+    isReply ? "" : ` id="cmsg-${esc(entry.id)}"`
+  }>
     <span class="cmsg-avatar">${
       author.agent !== undefined ? agentFace(author.agent, 32) : avatar(author.name, 32, author.name, author.name === currentUserName() ? myAvatar() : undefined)
     }</span>
@@ -1621,6 +1668,35 @@ function agentHistoryRows(agent, repositoryId) {
     }));
 }
 
+/**
+ * What was actually asked for, with any role preamble taken off.
+ *
+ * A channel dispatch prepends "Your role in this repository: …" to every
+ * objective it submits, so the first line of a dispatched task's objective is
+ * the operator describing the agent — not the request. A history that took
+ * the first line rendered every entry as the same sentence, and an agent that
+ * had done forty different things looked like it had done one thing forty
+ * times.
+ *
+ * Mirrors `withoutRoleContext` in shared-types, which the browser cannot
+ * import. Kept deliberately identical, including leaving a preamble with
+ * nothing behind it alone rather than reducing it to nothing.
+ */
+const ROLE_CONTEXT_PREFIX = "Your role in this repository:";
+
+function withoutRolePreamble(objective) {
+  const trimmed = String(objective ?? "").trimStart();
+  if (!trimmed.startsWith(ROLE_CONTEXT_PREFIX)) {
+    return trimmed;
+  }
+  const separator = /\n[^\S\n]*\n/u.exec(trimmed);
+  if (separator === null) {
+    return trimmed;
+  }
+  const request = trimmed.slice(separator.index + separator[0].length);
+  return request.trim() === "" ? trimmed : request;
+}
+
 const TASK_GLYPH = {
   integrated: "✓",
   failed: "✕",
@@ -1642,7 +1718,13 @@ function agentHistory(agent, repositoryId) {
   return `<div class="agent-history scroll">${rows
     .map(({ task, message }) => {
       const glyph = TASK_GLYPH[task.status] ?? "•";
-      const line = String(task.objective ?? "").split(/\r?\n/u)[0] ?? "";
+      // The first line of the request, not of the objective: those differ by a
+      // role preamble on everything a channel dispatched.
+      const line =
+        withoutRolePreamble(task.objective)
+          .split(/\r?\n/u)
+          .map((entry) => entry.trim())
+          .find((entry) => entry.length > 0) ?? "(no description)";
       const open =
         message === undefined
           ? ""
@@ -1672,33 +1754,45 @@ function agentPanel() {
     return "";
   }
   const repositoryId = activeChannelId();
-  // A private chat is only ever with your own agent; somebody else's has a
-  // history and nothing else, so it gets no tab strip to choose between one
-  // thing.
-  const tab = agent.mine === true ? (state.agentPanelTab ?? "history") : "history";
+  // A private chat is only ever with a personal agent of your own. Somebody
+  // else's has a history and nothing else, and so does an org-wide agent —
+  // the whole point of publishing one is that its work happens where the team
+  // can see it, so a private side-channel with it would be a way around that
+  // rather than a convenience. The avatar shortcut already refuses for the
+  // same reason; this is the same rule where the tabs are drawn.
+  const canChatPrivately = agent.mine === true && agent.visibility !== "org";
+  const tab = canChatPrivately ? (state.agentPanelTab ?? "history") : "history";
   const status = agentStatus(agent, activeChannelId());
+  // Header and tabs share the grid's first row. `.thread-panel` is three rows
+  // — header, a stretching body, composer — and an extra top-level child does
+  // not add a row to it: it takes the body's. The tab strip became the
+  // stretching element and sat in the vertical middle of the panel with the
+  // history pushed below it, which is what a fourth child gets in a grid that
+  // was drawn for three.
   return `<aside class="thread-panel">
     ${panelGrip()}
-    <header class="thread-head">
-      <span class="dm-head-name">
-        ${agentFace(agent, 20)}
-        ${esc(agent.name)}
-        ${statusDot(status, AGENT_STATUS_TITLE[status])}
-      </span>
-      <span class="spacer"></span>
-      ${iconButton("close", {
-        act: "agent-panel-close",
-        title: "Close this conversation",
-      })}
-    </header>
-    ${
-      agent.mine === true
-        ? tabs("agent-panel-tab", [
-            { value: "history", label: "History" },
-            { value: "chat", label: "Private chat" },
-          ], tab)
-        : ""
-    }
+    <div class="agent-panel-head">
+      <header class="thread-head">
+        <span class="dm-head-name">
+          ${agentFace(agent, 20)}
+          ${esc(agent.name)}
+          ${statusDot(status, AGENT_STATUS_TITLE[status])}
+        </span>
+        <span class="spacer"></span>
+        ${iconButton("close", {
+          act: "agent-panel-close",
+          title: "Close this conversation",
+        })}
+      </header>
+      ${
+        canChatPrivately
+          ? tabs("agent-panel-tab", [
+              { value: "history", label: "History" },
+              { value: "chat", label: "Private chat" },
+            ], tab)
+          : ""
+      }
+    </div>
     ${
       tab === "chat"
         ? // Progress and transcript share one row, as they do in `chatPanel`.

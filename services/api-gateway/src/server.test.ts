@@ -6439,9 +6439,14 @@ test("the auditor audits a canonical advance and posts what it finds", async (t)
   const message = posted.find((entry) =>
     String(entry.content).startsWith("Audit log"),
   );
+  // From the auditor rather than the deployment: an audit is an agent's own
+  // reading of a change, so it arrives with a face like anything else said in
+  // the room.
   const announced = posted.find((entry) =>
-    String(entry.content).startsWith("⚖️"),
+    String(entry.content).startsWith("Audit of"),
   );
+  assert.equal(announced?.kind, "agent");
+  assert.equal(announced?.authorId, `${ownerId}:openai`);
   assert.match(String(announced?.content), /1 issue \(1 high\)/u);
   assert.match(
     String(announced?.content),

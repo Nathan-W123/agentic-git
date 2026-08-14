@@ -52,6 +52,7 @@ import {
   createId,
   projectBudgets,
   ROLE_CONTEXT_PREFIX,
+  withoutRoleContext,
   type ApprovalStatus,
   type FilePatchStatus,
   type SequencedAuditEvent,
@@ -9265,6 +9266,10 @@ export class ApiGateway {
       messageId: input.messageId,
       authorId: `${investigator.userId}:${investigator.provider}`,
       content: formatFailureVerdict(verdict),
+      // Why the task failed is the answer somebody opened the thread for, and
+      // it arrives after the ending that prompted it. Unmarked it read as more
+      // of the run's own chatter and was folded away with it.
+      kind: "outcome",
     }).catch(() => undefined);
   }
 
@@ -9756,6 +9761,9 @@ export class ApiGateway {
               fileCount: diff.files.length,
               truncated: diff.truncated,
             }),
+      // Same reasoning as the findings below: an audit's report of itself is
+      // what the thread is for, not the run thinking aloud.
+      kind: "outcome",
     });
     for (const finding of findings) {
       await this.appendChannelThreadReply({
@@ -9764,6 +9772,13 @@ export class ApiGateway {
         messageId: root.id,
         authorId,
         content: formatFinding(finding),
+        // A finding is the thing the audit exists to produce, so it is an
+        // outcome and not commentary. Left unmarked it defaulted to `agent`,
+        // which the thread reads as the run talking to itself and folds away
+        // into the thinking block — burying the one part anybody opened the
+        // thread for, and denying it the fold and the simplify control every
+        // other summary gets.
+        kind: "outcome",
       });
     }
     // Findings get a line in the room; a clean audit does not.
@@ -9781,10 +9796,15 @@ export class ApiGateway {
       await this.appendChannelEntry({
         projectId,
         repositoryId,
-        kind: "system",
-        authorId: "coordinator",
+        // From the auditor, not from the coordinator. A system line is the
+        // deployment speaking in its own name, which is right for "a run could
+        // not start" and wrong for this: an audit is an agent's own reading of
+        // a change, and attributing it to the machinery made the one agent
+        // that works unprompted the only one with no face in the room.
+        kind: "agent",
+        authorId,
         content:
-          `⚖️ Audit of ${String(diff.files.length)} file` +
+          `Audit of ${String(diff.files.length)} file` +
           `${diff.files.length === 1 ? "" : "s"} found ` +
           `${String(findings.length)} issue` +
           `${findings.length === 1 ? "" : "s"}` +
@@ -10209,7 +10229,10 @@ export class ApiGateway {
     return taskIds
       .map((taskId) => objectiveOf.get(taskId))
       .filter((objective): objective is string => objective !== undefined)
-      .map((objective) => objective.replace(/\s+/gu, " ").trim())
+      // Without the role preamble: the auditor is being told what the work was
+      // asked to do, and "your role is auditor" is a sentence about a different
+      // agent entirely.
+      .map((objective) => withoutRoleContext(objective).replace(/\s+/gu, " ").trim())
       .filter((objective) => objective.length > 0);
   }
 
@@ -10520,7 +10543,12 @@ export class ApiGateway {
     });
     const objectiveOf = (taskId: unknown): string => {
       const found = tasks.find((candidate) => candidate.id === taskId);
-      const first = (found?.objective ?? "another task").split("\n")[0] ?? "";
+      // The request, not the preamble a channel dispatch puts in front of it.
+      // Otherwise every hold in a repository with roles set reads "Your role in
+      // this repository: auditor" and names nothing.
+      const first =
+        withoutRoleContext(found?.objective ?? "another task").split("\n")[0] ??
+        "";
       return first.length > 60 ? `"${first.slice(0, 57)}…"` : `"${first}"`;
     };
     // "@Zephyrus's task" reads better than a quoted objective fragment, and
