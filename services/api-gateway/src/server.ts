@@ -10637,11 +10637,36 @@ export class ApiGateway {
     const overrides = await this.options.store
       .listChannelAgentOverrides(watched.repositoryId)
       .catch(() => ({}) as Record<string, { name?: string }>);
+    // Overrides are keyed `${userId}:${provider}`, never by a task's agentId —
+    // so looking one up by agentId matched nothing, every time, and every hold
+    // fell through to quoting the objective it was supposed to stop quoting.
+    // The roster and every message author resolve a name through
+    // `resolveChannelAgentPresentation`; so does this now, which also means an
+    // agent nobody has renamed still gets its "Codex (Nathan)" default rather
+    // than a sentence of somebody's prompt.
+    const connections = await this
+      .channelAgentConnections(watched.projectId, watched.repositoryId)
+      .catch(() => []);
     const describe = (taskId: unknown): string => {
       const found = tasks.find((candidate) => candidate.id === taskId);
-      const name = overrides[found?.agentId ?? ""]?.name;
-      if (name !== undefined && name !== "") {
-        return `@${name}`;
+      const owned = connections.filter(
+        (connection) => connection.userId === found?.submittedBy,
+      );
+      const agentId = String(found?.agentId ?? "").toLowerCase();
+      const connection =
+        owned.find((candidate) =>
+          agentId.includes(candidate.provider.toLowerCase()),
+        ) ?? owned[0];
+      if (connection !== undefined) {
+        return `@${
+          resolveChannelAgentPresentation(
+            overrides,
+            connection,
+            `${AGENT_LABEL[connection.provider] ?? connection.provider} (${firstWord(
+              connection.userName,
+            )})`,
+          ).name
+        }`;
       }
       // The request, not the preamble a channel dispatch puts in front of it.
       // Otherwise every hold in a repository with roles set reads "Your role in
