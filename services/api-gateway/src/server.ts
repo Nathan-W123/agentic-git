@@ -836,12 +836,21 @@ export function narrateTaskEvent(
           ? `${written.slice(0, TERMINAL_SUMMARY_MAX).trimEnd()}…`
           : written;
       // The count, not the names — the reader who wants those is one click
-      // away, and an ending that lists a dozen paths stops being an ending.
-      return files.length === 0
-        ? summary
-        : `${summary} (${String(files.length)} file${
-            files.length === 1 ? "" : "s"
-          } changed)`;
+      // Named while there are few enough to name. "(1 file changed)" is the
+      // one fact about an ending that a reader cannot check and cannot use:
+      // it says something landed without saying what, so a thread reporting
+      // one file and a repository holding three cannot be reconciled from the
+      // channel at all — which is exactly the question this line kept being
+      // asked to answer and could not.
+      //
+      // Past two it goes back to a count, for the reason it always was one:
+      // an ending that lists a dozen paths stops being an ending.
+      if (files.length === 0) {
+        return summary;
+      }
+      return files.length <= 2
+        ? `${summary} (${files.join(", ")})`
+        : `${summary} (${String(files.length)} files changed)`;
     }
     case "task_reported": {
       // The agent's own words are the deliverable here — the report *is* the

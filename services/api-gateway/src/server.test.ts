@@ -3754,15 +3754,25 @@ test("a finished task says what it did, not that the pipeline worked", () => {
       files: ["a.py", "b.py"],
     }),
     "Repointed six test imports at their new modules; collection passes. " +
-      "(2 files changed)",
+      "(a.py, b.py)",
   );
-  // Singular reads as English, not as "1 files".
+  // Named while there are few enough to name: "(1 file changed)" says
+  // something landed without saying what, which is the one thing a reader
+  // cannot check against the repository in front of them.
   assert.match(
     narrateTaskEvent("canonical_promoted", {
       agentExplanation: "Raised the retry ceiling to five.",
       files: ["retry.ts"],
     }) ?? "",
-    /\(1 file changed\)$/u,
+    /\(retry\.ts\)$/u,
+  );
+  // Past two, a count again — an ending that lists a dozen paths is not one.
+  assert.match(
+    narrateTaskEvent("canonical_promoted", {
+      agentExplanation: "Split the module.",
+      files: ["a.py", "b.py", "c.py"],
+    }) ?? "",
+    /\(3 files changed\)$/u,
   );
   // No files recorded is not a reason to withhold the summary.
   assert.equal(
