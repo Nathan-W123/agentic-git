@@ -55,6 +55,8 @@ interface TestRuntime {
     context?: string;
     /** The thread root's id — the conversation every dispatch from it shares. */
     conversationId?: string;
+    /** Whether the dispatch asked for the work to be held, not queued. */
+    planOnly?: boolean;
   }>;
   /**
    * Every prompt the fake `complete` was asked, and what it should answer —
@@ -336,6 +338,7 @@ async function startRuntime(
         ...(input.conversationId === undefined
           ? {}
           : { conversationId: input.conversationId }),
+        ...(input.planOnly === undefined ? {} : { planOnly: input.planOnly }),
       });
       return await store.submitTask({
         projectId: input.projectId,
@@ -345,6 +348,10 @@ async function startRuntime(
         ...(input.conversationId === undefined
           ? {}
           : { conversationId: input.conversationId }),
+        // Carried through, because holding the row is the behaviour under
+        // test: a fixture that dropped this would file every plan as
+        // ordinary queued work and quietly pass.
+        ...(input.planOnly === true ? { planOnly: true } : {}),
         // A real deployment resolves `vendor` to one of its own configured
         // agent ids (see `resolveAgentIdForVendor` in apps/web/src/index.ts);
         // the fixture only needs a stable, distinguishable id back.
@@ -4427,10 +4434,12 @@ test("a command and a mention work together, and /plan holds the run", async (t)
   assert.match(runtime.submittedTasks[0]?.objective ?? "", /rework the retry loop/u);
   assert.doesNotMatch(runtime.submittedTasks[0]?.objective ?? "", /\/plan/u);
 
-  // Filed, and deliberately not started: the queue does the waiting, so a
-  // held plan costs no lease, no workspace and no clock.
+  // Filed as held, and deliberately not started. `planned` rather than
+  // `submitted` is the whole point: `submitted` means "queued to run", which
+  // is what every lease query selects on, so a hold spelled that way was
+  // indistinguishable from ordinary queued work.
   const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
-  assert.equal(task?.status, "submitted");
+  assert.equal(task?.status, "planned");
   const root = (
     await runtime.store.listChannelMessages(repositoryId, ownerId)
   ).find((message) => message.kind === "agent");
@@ -4453,6 +4462,83 @@ test("a command and a mention work together, and /plan holds the run", async (t)
       /Starting now/u.test(reply.content),
     );
   }, "the approved plan never started");
+});
+
+test("an unrelated mention does not run somebody's held plan", async (t) => {
+  // The approval that comes *before* the work is paid for is the only one of
+  // its kind in the system, and it was being spent by strangers. A held plan
+  // sat in `submitted` — the status every lease query selects on — and
+  // `leaseNextTask` hands out the oldest queued row in the repository, not the
+  // one the caller had in mind. So the next person to mention any agent in the
+  // channel fired `runRepository`, which leased the older held plan and ran
+  // it, against its author's credential, with nobody having said go.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "held-plan");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  assert.equal(
+    (
+      await owner.request(`${base}/messages`, {
+        method: "POST",
+        body: { content: "/plan @Claude (Owner) rewrite the auth module" },
+      })
+    ).status,
+    201,
+  );
+  const held = (await runtime.store.listSubmittedTasks({ repositoryId }))[0];
+  assert.equal(held?.status, "planned");
+
+  // Somebody else's ordinary request, in the same channel, later.
+  assert.equal(
+    (
+      await owner.request(`${base}/messages`, {
+        method: "POST",
+        body: { content: "@Claude (Owner) fix the typo in the README" },
+      })
+    ).status,
+    201,
+  );
+  await waitFor(
+    async () =>
+      (await runtime.store.listSubmittedTasks({ repositoryId })).length === 2,
+    "the second mention never dispatched",
+  );
+
+  // The queue may hand out the typo fix. It must not hand out the plan: a
+  // lease naming the held task is the bypass itself.
+  const worker = await runtime.store.registerWorker({
+    userId: ownerId,
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    name: "queue-probe",
+    adapters: [],
+    version: "1",
+  });
+  const leased = await runtime.store.leaseNextTask({
+    workerId: worker.id,
+    repositoryId,
+    baseRevision: "rev_1",
+    ttlMs: 60_000,
+  });
+  assert.notEqual(
+    leased?.task.id,
+    held?.id,
+    "a held plan was leased without anybody approving it",
+  );
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId })).find(
+      (task) => task.id === held?.id,
+    )?.status,
+    "planned",
+    "the held plan left the held status without an approval",
+  );
 });
 
 test("a slash inside a sentence is left alone, and /help answers", async (t) => {

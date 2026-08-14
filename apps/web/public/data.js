@@ -746,11 +746,18 @@ export function agentNameTaken(repositoryId, name, exceptAgentId) {
  * and treating it as such left the dots up long after a prompt finished.
  */
 // The statuses the tasks API actually emits are `submitted`, `claimed`,
-// `integrated`, `failed` and `cancelled`. This set used to hold five values of
-// which four never occur — run-level statuses from a different type — and not
-// `claimed`, which is the one a task holds for the whole time an agent is
-// actually working on it. So the dots retired the moment real work began and
-// persisted while a task merely sat in the queue: backwards on both ends.
+// `planned`, `open`, `integrated`, `failed` and `cancelled`. This set used to
+// hold five values of which four never occur — run-level statuses from a
+// different type — and not `claimed`, which is the one a task holds for the
+// whole time an agent is actually working on it. So the dots retired the
+// moment real work began and persisted while a task merely sat in the queue:
+// backwards on both ends.
+//
+// `planned` is deliberately absent. A `/plan` task is waiting on a person, and
+// the message beside it says in words that nothing is running — an agent shown
+// as thinking under that sentence contradicts it. `open` is absent for the
+// same reason: a landed conversational turn is waiting for the next message,
+// not working.
 const WORKING_STATUS = new Set(["submitted", "claimed"]);
 
 /** Backstop only — the task's own status is what really retires an entry. */

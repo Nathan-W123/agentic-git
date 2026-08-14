@@ -1377,6 +1377,17 @@ export interface ApiOperations {
      * turn. See docs/architecture/conversational-tasks.md.
      */
     conversationId?: string;
+    /**
+     * File this as held rather than queued: `/plan` records the intent and
+     * nothing may run it until a person says go.
+     *
+     * Carried into the insert rather than applied afterwards, because a task
+     * that is briefly `submitted` is briefly leasable — and the next
+     * dispatch in this repository leases the oldest queued row, which was
+     * how a held plan came to run on its author's credential without ever
+     * being approved.
+     */
+    planOnly?: boolean;
   }): Promise<SubmittedTask>;
   runRepository(input: {
     projectId: string;
@@ -7920,6 +7931,12 @@ export class ApiGateway {
         // commissioning a stranger, and the coordinator keep the turn's
         // workspace warm for the next one.
         conversationId: threadRootId,
+        // Held from the moment it exists, not held after the fact. The
+        // branch below that stops and waits for a person is downstream of
+        // this; between the insert and that branch the row would otherwise
+        // be an ordinary queued task, and any concurrent dispatch's
+        // `runRepository` takes the oldest queued row in the repository.
+        ...(input.planOnly === true ? { planOnly: true } : {}),
       });
       await this.options.store.appendAudit(undefined, {
         type: "task_submitted",
@@ -7979,9 +7996,16 @@ export class ApiGateway {
       // before the run is paid for — every other approval reads a changeset,
       // by which point the execution has already been bought.
       //
-      // The queue does the waiting for free: a submitted task sits still
-      // until something asks the repository to run, so holding it costs no
-      // lease, no workspace and no clock.
+      // The waiting costs no lease, no workspace and no clock — but it is the
+      // `planned` status that does it, not the queue. This once relied on a
+      // submitted task sitting still "until something asks the repository to
+      // run", which is not what happens: any later dispatch in this
+      // repository asks, and `leaseNextTask` hands out the oldest queued row
+      // rather than the one that caller meant. A held plan was therefore
+      // executed by an unrelated mention — or by the next restart, which
+      // resumes everything queued — spending the plan author's credential on
+      // work nobody had approved, and leaving the thread still saying nothing
+      // was running.
       if (input.planOnly === true) {
         await this.appendChannelThreadReply({
           projectId,
@@ -9427,11 +9451,16 @@ export class ApiGateway {
   /**
    * Starts a task that has been planned and held, because a person said go.
    *
-   * Recognised by the task still sitting `submitted`: `/plan` deliberately
-   * files the work and does not ask the repository to run, so a queued task
-   * under a thread is one waiting on exactly this. Anything already claimed,
-   * failed or integrated is not waiting for permission, and falls through to
-   * being answered as an ordinary reply.
+   * Recognised by the task sitting `planned`, the status that exists to mean
+   * exactly this. It used to be recognised by `submitted` — which also means
+   * "queued to run", so the hold was indistinguishable from ordinary queued
+   * work and any dispatch in the repository would run it unasked. Anything
+   * claimed, failed or integrated is not waiting for permission, and falls
+   * through to being answered as an ordinary reply.
+   *
+   * The release is what decides, not the read before it: `releasePlannedTask`
+   * tests and writes the status in one step and returns undefined if it was
+   * not held, so two people saying "go ahead" at once start one run.
    *
    * Returns false when there is nothing held, so a "yes" in a thread that
    * has nothing to start still reads as conversation.
@@ -9451,12 +9480,10 @@ export class ApiGateway {
     if (root?.taskId === undefined || input.responder === undefined) {
       return false;
     }
-    const task = (
-      await this.options.store.listSubmittedTasks({
-        repositoryId: input.repositoryId,
-      })
-    ).find((entry) => entry.id === root.taskId);
-    if (task === undefined || task.status !== "submitted") {
+    // The release is the test. Reading the status first and acting on it
+    // afterwards would let two approvals both pass the read.
+    const task = await this.options.store.releasePlannedTask(root.taskId);
+    if (task === undefined) {
       return false;
     }
     const authorId = `${input.responder.userId}:${input.responder.provider}`;

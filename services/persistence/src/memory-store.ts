@@ -1150,7 +1150,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       submittedBy: input.submittedBy,
       context: input.context,
       conversationId: input.conversationId,
-      status: "submitted",
+      status: input.planOnly === true ? "planned" : "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,
       completedAt: undefined,
@@ -1222,6 +1222,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     if (
       task.status !== "submitted" &&
       task.status !== "claimed" &&
+      // Dropping a plan you decided against is the ordinary way one ends.
+      task.status !== "planned" &&
       // "That's it, we're done" is exactly how an open conversation ends.
       task.status !== "open"
     ) {
@@ -1231,6 +1233,17 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     }
     task.status = "cancelled";
     task.completedAt = new Date().toISOString();
+    return copy(task);
+  }
+
+  public async releasePlannedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    const task = this.submitted.get(taskId);
+    if (task === undefined || task.status !== "planned") {
+      return undefined;
+    }
+    task.status = "submitted";
     return copy(task);
   }
 

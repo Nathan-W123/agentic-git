@@ -1642,7 +1642,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       submittedBy: input.submittedBy,
       context: input.context,
       conversationId: input.conversationId,
-      status: "submitted",
+      status: input.planOnly === true ? "planned" : "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,
       completedAt: undefined,
@@ -1792,7 +1792,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `UPDATE submitted_tasks
          SET status = 'cancelled', completed_at = ?
-         WHERE id = ? AND status IN ('submitted', 'claimed', 'open')`,
+         WHERE id = ? AND status IN ('submitted', 'claimed', 'planned', 'open')`,
       )
       .run(completedAt, taskId);
     if (result.changes === 0) {
@@ -1813,6 +1813,26 @@ export class SqliteCoordinationStore implements CoordinationStore {
       throw new Error(`Submitted task disappeared after cancellation: ${taskId}`);
     }
     return this.toSubmittedTask(row);
+  }
+
+  public async releasePlannedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    // One statement, so two "go ahead"s racing produce one release: the
+    // second finds no `planned` row to update and changes nothing.
+    const result = this.db
+      .prepare(
+        `UPDATE submitted_tasks SET status = 'submitted'
+         WHERE id = ? AND status = 'planned'`,
+      )
+      .run(taskId);
+    if (result.changes === 0) {
+      return undefined;
+    }
+    const row = this.db
+      .prepare("SELECT * FROM submitted_tasks WHERE id = ?")
+      .get(taskId) as Row | undefined;
+    return row === undefined ? undefined : this.toSubmittedTask(row);
   }
 
   public async completeSubmittedTask(

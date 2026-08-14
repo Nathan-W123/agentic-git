@@ -1657,7 +1657,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       submittedBy: input.submittedBy,
       context: input.context,
       conversationId: input.conversationId,
-      status: "submitted",
+      status: input.planOnly === true ? "planned" : "submitted",
       submittedAt: new Date().toISOString(),
       claimedAt: undefined,
       completedAt: undefined,
@@ -1800,7 +1800,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
     const result = await this.query(
       `UPDATE submitted_tasks
        SET status = 'cancelled', completed_at = $1
-       WHERE id = $2 AND status IN ('submitted', 'claimed', 'open')`,
+       WHERE id = $2 AND status IN ('submitted', 'claimed', 'planned', 'open')`,
       [completedAt, taskId],
     );
     if ((result.rowCount ?? 0) === 0) {
@@ -1825,6 +1825,20 @@ export class PostgresCoordinationStore implements CoordinationStore {
       );
     }
     return this.toSubmittedTask(row);
+  }
+
+  public async releasePlannedTask(
+    taskId: TaskId,
+  ): Promise<SubmittedTask | undefined> {
+    // Returning the row from the UPDATE itself, so the release and the read
+    // of what was released cannot straddle another writer.
+    const row = await this.row(
+      `UPDATE submitted_tasks SET status = 'submitted'
+       WHERE id = $1 AND status = 'planned'
+       RETURNING *`,
+      [taskId],
+    );
+    return row === undefined ? undefined : this.toSubmittedTask(row);
   }
 
   public async completeSubmittedTask(

@@ -671,6 +671,101 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a planned task is unleasable until it is released`, async () => {
+    // The hold has to live in the status, because the status is what every
+    // lease query selects on. Parked as `submitted` it was ordinary queued
+    // work, and `leaseNextTask` takes the oldest queued row in a repository
+    // rather than the one its caller meant — so an unrelated dispatch ran
+    // work a person had explicitly declined to start.
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "planholder@example.com",
+        displayName: "Planner",
+        passwordDigest: "digest",
+      });
+      const worker = await store.registerWorker({
+        userId: user.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "worker-plan",
+        adapters: ["codex"],
+        version: "1",
+      });
+      await store.saveRepository(REPOSITORY);
+      const held = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "rewrite the auth module",
+        agentId: "codex",
+        validationCommands: [],
+        planOnly: true,
+      });
+      assert.equal(held.status, "planned");
+
+      // The queue cannot see it, even when it is the only task there is.
+      assert.equal(
+        await store.leaseNextTask({
+          workerId: worker.id,
+          repositoryId: REPOSITORY.id,
+          baseRevision: "rev_1",
+          ttlMs: 60_000,
+        }),
+        undefined,
+      );
+      // Nor by name: naming a task is not the same as approving it.
+      assert.equal(
+        await store.leaseNextTask({
+          workerId: worker.id,
+          taskId: held.id,
+          baseRevision: "rev_1",
+          ttlMs: 60_000,
+        }),
+        undefined,
+      );
+      assert.equal(
+        (await store.listSubmittedTasks({ status: "submitted" })).length,
+        0,
+      );
+
+      const released = await store.releasePlannedTask(held.id);
+      assert.equal(released?.status, "submitted");
+      // Releasing is the test as well as the write, so a second approval —
+      // two people saying "go ahead" at once — starts nothing further.
+      assert.equal(await store.releasePlannedTask(held.id), undefined);
+      assert.equal(await store.releasePlannedTask("task_missing"), undefined);
+
+      const leased = await store.leaseNextTask({
+        workerId: worker.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: "rev_1",
+        ttlMs: 60_000,
+      });
+      assert.equal(leased?.task.id, held.id);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a plan nobody approved can still be cancelled`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository(REPOSITORY);
+      const held = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "a plan thought better of",
+        agentId: "codex",
+        validationCommands: [],
+        planOnly: true,
+      });
+      const cancelled = await store.cancelSubmittedTask(held.id);
+      assert.equal(cancelled.status, "cancelled");
+      assert.equal(await store.releasePlannedTask(held.id), undefined);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: an open task is not requeued when its turn's lease ends`, async () => {
     // The lease is released at the end of each turn while the task stays
     // open — the released arm's requeue must not flip an open task back to

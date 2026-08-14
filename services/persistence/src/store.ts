@@ -390,6 +390,18 @@ export interface AuthSessionRecord {
 export type SubmittedTaskStatus =
   | "submitted"
   | "claimed"
+  /**
+   * Planned, and waiting on a person before it may run.
+   *
+   * Distinct from `submitted` because that status means "queued to run", and
+   * every lease query is written against it. A `/plan` task parked as
+   * `submitted` was picked up by the next unrelated dispatch in the same
+   * repository — `leaseNextTask` takes the oldest queued row, not the one the
+   * caller had in mind — so work a person had explicitly not approved ran
+   * anyway, on their credential. Held work is a different thing from queued
+   * work and now says so.
+   */
+  | "planned"
   | "open"
   | "integrated"
   | "failed"
@@ -430,6 +442,15 @@ export interface SubmitTaskInput {
    * rather than by every caller remembering to close the last one.
    */
   conversationId?: string;
+  /**
+   * File this task as `planned` rather than `submitted`: intent recorded, and
+   * nothing may run it until a person releases it.
+   *
+   * Set at insert rather than by holding the row afterwards, because the gap
+   * between the two is exactly long enough for another dispatch's
+   * `runRepository` to lease it.
+   */
+  planOnly?: boolean;
 }
 
 export interface SubmittedTask {
@@ -1255,6 +1276,16 @@ export interface CoordinationStore {
   /** Explicitly returns a claimed or failed task to the pending queue. */
   retrySubmittedTask(taskId: TaskId): Promise<SubmittedTask>;
   cancelSubmittedTask(taskId: TaskId): Promise<SubmittedTask>;
+  /**
+   * Releases a `planned` task into the queue, because a person said go.
+   *
+   * Returns undefined when the task is not held — already released, already
+   * running, gone — so an approval arriving twice, or arriving for work that
+   * was never held, is answered as ordinary conversation rather than starting
+   * something a second time. The status test and the write are one step for
+   * the same reason: two "go ahead"s racing must produce one run.
+   */
+  releasePlannedTask(taskId: TaskId): Promise<SubmittedTask | undefined>;
   completeSubmittedTask(
     taskId: TaskId,
     status: SubmittedTaskCompletionStatus,
