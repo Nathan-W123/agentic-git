@@ -3296,10 +3296,18 @@ document.addEventListener("click", (event) => {
       // was clicked: `showMenu` closes the open popover first, which detaches
       // that item, and an anchor no longer in the document positions the new
       // menu against the corner of the screen instead of the channel.
-      const anchor =
-        document.querySelector(
-          `[data-act="channel-menu"][data-value="${CSS.escape(value)}"]`,
-        ) ?? node;
+      // Anchor to what was actually clicked when it will still be in the
+      // document: the roster's "Add an agent" button opens this too, and
+      // anchoring that click to the channel row's dots button floated the
+      // list up beside the channels, nowhere near the hand that asked. Only
+      // a click from inside a popover — which `showMenu` detaches before
+      // positioning — falls back to the channel's own button.
+      const fromPopover = node.closest(".pop-layer") !== null;
+      const anchor = !fromPopover
+        ? node
+        : (document.querySelector(
+            `[data-act="channel-menu"][data-value="${CSS.escape(value)}"]`,
+          ) ?? node);
       // Only trust membership once the roster for *this* repository has
       // actually been fetched. Before that `channelAgentsFor` shows every
       // connected agent provisionally, which would read as "already here" and
