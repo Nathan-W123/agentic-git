@@ -113,6 +113,7 @@ import {
   invalidateCode,
   openFile,
   openWorkspace,
+  resetWorkspace,
   runTests,
   setDiffMode,
   summaryPopoverHtml,
@@ -3036,6 +3037,21 @@ document.addEventListener("click", (event) => {
       return;
     case "workspace-open":
       void openWorkspace(render);
+      return;
+    case "workspace-reset":
+      // Re-cuts the workspace at current canonical. Confirmed only when there
+      // is something to lose: a clean workspace being moved forward is not a
+      // decision anybody needs to be asked about, and asking would make the
+      // ordinary case feel dangerous.
+      if (
+        (state.workspace?.dirtyFiles ?? []).length > 0 &&
+        !window.confirm(
+          "Update to the latest version of the repository? Your unsaved edits in this workspace will be discarded.",
+        )
+      ) {
+        return;
+      }
+      void resetWorkspace(render);
       return;
     case "retry-load":
       void refresh();

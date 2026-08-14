@@ -1828,6 +1828,26 @@ svg {
   min-height: 0;
 }
 
+/* Says the list below is out of date. Warning-toned rather than accent: this
+   is not a feature being offered, it is the panel admitting it is showing
+   history. */
+.tree-stale {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 6px 0 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius);
+  background: var(--bg-card-2);
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.tree-stale .btn {
+  align-self: flex-start;
+}
+
 .tree-row {
   display: flex;
   align-items: center;

@@ -1527,6 +1527,34 @@ function chanTreePanel(repositoryId) {
     </header>
     <div class="thread-body tree-body">
       ${
+        // The workspace this lists is cut from canonical once and only moves
+        // forward on its own while it is clean. A dirty one is somebody's
+        // unfinished edit and is deliberately left where it is — but then this
+        // panel is showing an old revision of the repository with nothing to
+        // say so, which is how a repository with three files in it reads as a
+        // repository with one. The endpoint that re-cuts it has existed all
+        // along with nothing in the interface calling it.
+        state.workspace?.exists === true &&
+        typeof state.workspace.baseRevision === "string" &&
+        typeof state.workspace.canonicalRevision === "string" &&
+        state.workspace.baseRevision !== state.workspace.canonicalRevision
+          ? `<div class="tree-stale">
+               <span>These files are from an earlier version of the repository${
+                 (state.workspace.dirtyFiles ?? []).length > 0
+                   ? `, held back because you have unsaved edits in ${String(
+                       (state.workspace.dirtyFiles ?? []).length,
+                     )} file(s)`
+                   : ""
+               }.</span>
+               <button class="btn btn-primary" type="button" data-act="workspace-reset">Update${
+                 (state.workspace.dirtyFiles ?? []).length > 0
+                   ? " and discard"
+                   : ""
+               }</button>
+             </div>`
+          : ""
+      }
+      ${
         paths.length === 0
           ? // A freshly imported repository has a canonical full of files and
             // no workspace, and files are only ever listed from a workspace.
