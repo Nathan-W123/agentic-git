@@ -836,13 +836,16 @@ const ALL_CREDENTIAL_VARIABLES = [
 ];
 
 /**
- * GitHub takes exactly one kind: a personal access token the user mints on
- * github.com. It is stored as `api_key` — a long-lived secret pasted once —
- * because the kind names how a secret is obtained and held, not what its
- * issuer calls it. There is no session file to capture and no OAuth flow this
- * deployment could drive, for the same reason the vendor header explains.
+ * Two ways a GitHub secret comes to exist, and the kind records which: a
+ * personal access token the user mints and pastes is `api_key`; the grant a
+ * device sign-in collects — GitHub is the one connectable service here whose
+ * vendor offers a real device flow this deployment can drive — is
+ * `oauth_token`. There is still no session file to capture.
  */
-const GITHUB_CREDENTIAL_KINDS: readonly UserCredentialKind[] = ["api_key"];
+const GITHUB_CREDENTIAL_KINDS: readonly UserCredentialKind[] = [
+  "api_key",
+  "oauth_token",
+];
 
 export function supportsUserCredential(
   service: CredentialService,

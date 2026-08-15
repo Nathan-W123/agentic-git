@@ -710,10 +710,13 @@ test("github rides in the store beside the vendor CLIs", async (t) => {
   assert.equal(await vault.get("user-1", "github"), undefined);
 });
 
-test("github accepts exactly one credential kind: a pasted token", () => {
-  assert.deepEqual(supportedCredentialKinds("github"), ["api_key"]);
+test("github accepts a pasted token or a device-flow grant, never a session file", () => {
+  assert.deepEqual(supportedCredentialKinds("github"), [
+    "api_key",
+    "oauth_token",
+  ]);
   assert.equal(supportsUserCredential("github", "api_key"), true);
-  assert.equal(supportsUserCredential("github", "oauth_token"), false);
+  assert.equal(supportsUserCredential("github", "oauth_token"), true);
   assert.equal(supportsUserCredential("github", "session_file"), false);
 });
 

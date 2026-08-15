@@ -897,8 +897,8 @@ function githubCard() {
                 "Pushes an agent runs for you authenticate as this token."
               : github === undefined
                 ? "Checking…"
-                : "When an agent pushes for you, it pushes as you. Connect a " +
-                  "personal access token to make that possible.",
+                : "When an agent pushes for you, it pushes as you. Connect " +
+                  "your GitHub account to make that possible.",
         )}</div>
       </span>
       <span class="sr-ctl">

@@ -11,14 +11,18 @@
 
 import {
   api,
+  cancelGitHubSignIn,
   cancelProviderSignIn,
   connectGitHub,
   connectProviderCredential,
+  gitHubSignInStatus,
   loadContext,
+  loadGitHub,
   loadProviders,
   myAgents,
   persist,
   providerSignInStatus,
+  startGitHubSignIn,
   startProviderSignIn,
   state,
   submitProviderSignInCode,
@@ -662,13 +666,138 @@ export async function connectAgent(providerId, rerender) {
 }
 
 /**
+ * The GitHub device sign-in, shaped like `signInAgent`'s approve mode:
+ * GitHub issues a short code, the person enters it at github.com in a tab
+ * of their own, and the poll finishes the moment they approve. Returns
+ * true when connected, false to fall back to the paste box, null when the
+ * person walked away.
+ */
+async function signInGitHub(rerender) {
+  // Claimed during the click, navigated once the URL is known — the same
+  // popup-blocker reasoning as `signInAgent`.
+  const tab = window.open("", "_blank");
+  let flow;
+  try {
+    flow = await startGitHubSignIn();
+  } catch (error) {
+    tab?.close();
+    toast(`GitHub sign-in unavailable — ${error.message}`, "error");
+    return false;
+  }
+  if (tab !== null && tab !== undefined) {
+    tab.opener = null;
+    tab.location.replace(flow.verificationUrl);
+  }
+
+  let finishedWhileOpen = false;
+  const watch = (async () => {
+    for (let attempt = 0; attempt < 240; attempt += 1) {
+      await pause(1500);
+      let current;
+      try {
+        current = await gitHubSignInStatus(flow.flowId);
+      } catch {
+        return undefined;
+      }
+      if (current.status !== "pending") {
+        if (current.status === "granted") {
+          finishedWhileOpen = true;
+          document.querySelector("#modal")?.close();
+        }
+        return current;
+      }
+    }
+    return undefined;
+  })();
+
+  const values = await showModal({
+    title: "Sign in to GitHub",
+    subtitle: "Your account; this deployment never sees your password.",
+    confirm: "I've approved it",
+    body: `<p class="modal-hint"><a class="link" target="_blank"
+        rel="noopener noreferrer" href="${esc(flow.verificationUrl)}">Open
+        the GitHub sign-in page</a> — it opens in a new tab.</p>
+      <p class="modal-code">${esc(flow.userCode ?? "")}</p>
+      <p class="modal-hint">Enter that code on the page, approve the
+        access, then come back here. Pushes an agent runs for you will
+        authenticate as this account.</p>`,
+  });
+
+  if (finishedWhileOpen) {
+    const settled = await watch;
+    toast(`GitHub connected as ${settled?.login ?? "you"}`, "ok");
+    await loadGitHub();
+    rerender();
+    return true;
+  }
+  if (values === undefined) {
+    await cancelGitHubSignIn(flow.flowId);
+    return null;
+  }
+  try {
+    // "I've approved it" — give the grant a moment to land, polling the
+    // same status the background watch reads.
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const current = await gitHubSignInStatus(flow.flowId);
+      if (current.status === "granted") {
+        toast(`GitHub connected as ${current.login ?? "you"}`, "ok");
+        await loadGitHub();
+        rerender();
+        return true;
+      }
+      if (current.status !== "pending") {
+        toast(current.detail ?? "GitHub sign-in did not complete", "error");
+        return false;
+      }
+      await pause(1000);
+    }
+    toast("GitHub sign-in timed out", "error");
+    await cancelGitHubSignIn(flow.flowId);
+    return false;
+  } catch (error) {
+    toast(error.message, "error");
+    return false;
+  }
+}
+
+/**
  * Connecting GitHub is connecting an identity, not enabling a feature: a
  * push an agent runs for you authenticates as this token, as you, and
  * reaches only what you can reach. There is deliberately no deployment-wide
  * token for it to borrow — until this is connected, an asked-for push is
  * refused by name.
+ *
+ * Sign-in first when the deployment offers it, exactly like the agents: a
+ * browser approval beats sending somebody off to mint a secret. The paste
+ * box remains for deployments without an OAuth App, and for anyone who
+ * wants a fine-grained token scoped tighter than the sign-in's `repo`
+ * grant.
  */
 export async function connectGitHubAccount(rerender) {
+  if (state.github?.signInAvailable === true) {
+    for (;;) {
+      const outcome = await signInGitHub(rerender);
+      if (outcome === true || outcome === null) {
+        return;
+      }
+      // Confirm retries; anything else — the paste button, Escape — falls
+      // through to the paste box below, which is also the way out of the
+      // loop for somebody done with dialogs (the paste box closes too).
+      const again = await showModal({
+        title: "Sign-in did not finish",
+        subtitle: "Nothing was saved, and nothing on your account changed.",
+        confirm: "Try again",
+        cancel: "Paste a token instead",
+        body: `<p class="modal-hint">This is usually the sign-in tab being
+          closed or the code expiring — starting again is normally all it
+          needs. A pasted personal access token works too, and can be
+          scoped to single repositories where the sign-in cannot.</p>`,
+      });
+      if (again === undefined) {
+        break;
+      }
+    }
+  }
   const values = await showModal({
     title: "Connect GitHub",
     subtitle: "Your token, spent only on pushes your own tasks ask for.",

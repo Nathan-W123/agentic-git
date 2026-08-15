@@ -154,8 +154,15 @@ async function serve(
   const providerChat = new ProviderChatService(project, { credentials });
   // Beside the agent connections and in the same store: a push runs as the
   // task's submitter, so their GitHub token is scoped, stored and shown
-  // exactly the way their agent credentials are.
-  const github = new GitHubConnectionService({ credentials });
+  // exactly the way their agent credentials are. With a GitHub OAuth App's
+  // client id configured, connecting is a browser sign-in like the Codex
+  // one; without it, a pasted personal access token.
+  const github = new GitHubConnectionService({
+    credentials,
+    ...(process.env["COORD_GITHUB_CLIENT_ID"] === undefined
+      ? {}
+      : { deviceClientId: process.env["COORD_GITHUB_CLIENT_ID"] }),
+  });
   // A deployment serving more than one person sets this so a task never
   // quietly bills the host owner for someone else's work.
   const credentialPolicy =
@@ -251,6 +258,11 @@ async function serve(
       status: (input) => github.status(input),
       connect: (input) => github.connect(input),
       disconnect: (input) => github.disconnect(input),
+      deviceAuth: {
+        start: (input) => github.startDeviceAuth(input),
+        status: (input) => github.deviceAuthStatus(input),
+        cancel: (input) => github.cancelDeviceAuth(input),
+      },
     },
     workspace: {
       status: (input) => overlays.status(input),
