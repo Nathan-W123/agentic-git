@@ -51,6 +51,7 @@ import type {
   AddChannelReplyInput,
   AppendChannelMessageInput,
   ApprovalFilter,
+  AgentCallSign,
   ArchiveAuditInput,
   ChangesetComment,
   ChannelAgentOverride,
@@ -3453,6 +3454,51 @@ export class PostgresCoordinationStore implements CoordinationStore {
       ],
     );
     return override;
+  }
+
+  public async listAgentCallSigns(): Promise<AgentCallSign[]> {
+    const rows = await this.rows(
+      "SELECT * FROM agent_call_signs ORDER BY assigned_at, user_id",
+      [],
+    );
+    return rows.map((row) => ({
+      userId: text(row, "user_id"),
+      provider: text(row, "provider"),
+      callSign: text(row, "call_sign"),
+      assignedAt: text(row, "assigned_at"),
+    }));
+  }
+
+  public async setAgentCallSign(
+    userId: string,
+    provider: string,
+    callSign: string,
+  ): Promise<AgentCallSign> {
+    const record: AgentCallSign = {
+      userId,
+      provider,
+      callSign,
+      assignedAt: new Date().toISOString(),
+    };
+    await this.query(
+      `INSERT INTO agent_call_signs (user_id, provider, call_sign, assigned_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (user_id, provider) DO UPDATE SET
+         call_sign = excluded.call_sign,
+         assigned_at = excluded.assigned_at`,
+      [userId, provider, callSign, record.assignedAt],
+    );
+    return record;
+  }
+
+  public async clearAgentCallSign(
+    userId: string,
+    provider: string,
+  ): Promise<void> {
+    await this.query(
+      "DELETE FROM agent_call_signs WHERE user_id = $1 AND provider = $2",
+      [userId, provider],
+    );
   }
 
   public async listChannelAgentMembers(

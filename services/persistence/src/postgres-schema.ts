@@ -780,4 +780,18 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE submitted_tasks ADD COLUMN effort TEXT`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 32,
+    name: "agent-call-signs",
+    statements: [
+      `CREATE TABLE agent_call_signs (
+        user_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        call_sign TEXT NOT NULL,
+        assigned_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, provider)
+      )`,
+    ],
+  },
 ];

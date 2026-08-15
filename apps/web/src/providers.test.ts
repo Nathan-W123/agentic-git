@@ -1501,6 +1501,109 @@ test("a connection made before call signs existed is named on the next read", as
   assert.equal(again, named);
 });
 
+/** The two-method slice of the coordination store, kept in memory. */
+function fakeCallSignStore() {
+  const rows = new Map<string, { userId: string; provider: string; callSign: string }>();
+  return {
+    rows,
+    async listAgentCallSigns() {
+      return [...rows.values()];
+    },
+    async setAgentCallSign(userId: string, provider: string, callSign: string) {
+      const record = { userId, provider, callSign };
+      rows.set(`${userId} ${provider}`, record);
+      return record;
+    },
+    async clearAgentCallSign(userId: string, provider: string) {
+      rows.delete(`${userId} ${provider}`);
+    },
+  };
+}
+
+test("a name survives losing the connections file", async () => {
+  // The reported bug: reload into Lattice and every agent in every channel is
+  // "Claude (Nathan)" again. The names only ever lived in
+  // `secrets/provider-connections.json`, on the control plane's own disk, so
+  // a deployment whose filesystem does not outlive a restart came back with
+  // them gone while the database still held the channels they were used in.
+  const harness = await createHarness();
+  const callSigns = fakeCallSignStore();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns,
+  });
+  const connected = await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-durable",
+  });
+  const assigned = connected.find((entry) => entry.id === "anthropic")?.callSign;
+  assert.ok(assigned !== undefined, "a connected account is given a name");
+
+  // The restart on a filesystem that did not keep the connections file. The
+  // credential (`user-credentials.json`) is what the deployment restores, so
+  // the agent is still connected — it is the name that went missing.
+  await writeFile(
+    path.join(harness.project.directory, "secrets", "provider-connections.json"),
+    "{}",
+    "utf8",
+  );
+  const afterRestart = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_OK),
+    callSigns,
+  });
+  assert.equal(
+    (await afterRestart.list({ userId: "u1", systemAdmin: true })).find(
+      (entry) => entry.id === "anthropic",
+    )?.callSign,
+    assigned,
+    "the agent comes back under the name the room learned",
+  );
+  // And the roster — the path a channel resolves every name through — agrees,
+  // which is where "Claude (Nathan)" was being shown.
+  const roster = await afterRestart.listConnectionsFor(["u1"]);
+  assert.equal(roster["u1"]?.[0]?.callSign, assigned);
+});
+
+test("a chosen name is written through, and clearing it forgets it", async () => {
+  const harness = await createHarness();
+  const callSigns = fakeCallSignStore();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+    callSigns,
+  });
+  await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-chosen",
+  });
+  await service.setSettings({
+    userId: "u1",
+    provider: "anthropic",
+    callSign: "Icarus",
+  });
+  assert.equal(
+    (await callSigns.listAgentCallSigns()).find(
+      (entry) => entry.userId === "u1",
+    )?.callSign,
+    "Icarus",
+  );
+
+  // Cleared here means cleared everywhere: a name that came back after a
+  // restart the user had deliberately removed is the same bug reversed.
+  await service.setSettings({
+    userId: "u1",
+    provider: "anthropic",
+    callSign: "",
+  });
+  assert.deepEqual(await callSigns.listAgentCallSigns(), []);
+});
+
 test("a teammate's older connection is named by the roster read too", async () => {
   // The roster is the only path that reads somebody else's connection, so an
   // agent belonging to a person who has not opened their own dashboard since

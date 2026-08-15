@@ -45,6 +45,7 @@ import type {
   AddChannelReplyInput,
   AppendChannelMessageInput,
   ApprovalFilter,
+  AgentCallSign,
   ArchiveAuditInput,
   ChangesetComment,
   ChannelAgentMember,
@@ -214,6 +215,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
   private readonly channelAgentOverrides = new Map<string, ChannelAgentOverride>();
   /** Keyed by `repositoryId\0userId\0provider`. */
   private readonly channelAgentMembers = new Map<string, ChannelAgentMember>();
+  /** Keyed by `userId\0provider` — the name an agent answers to everywhere. */
+  private readonly agentCallSigns = new Map<string, AgentCallSign>();
   /** Repository ids whose one-time membership backfill has already run. */
   private readonly channelMembershipBackfilled = new Set<string>();
   /** Keyed by `repositoryId\0userId`. */
@@ -2347,6 +2350,32 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     };
     this.channelAgentOverrides.set(key, override);
     return copy(override);
+  }
+
+  public async listAgentCallSigns(): Promise<AgentCallSign[]> {
+    return [...this.agentCallSigns.values()].map((sign) => copy(sign));
+  }
+
+  public async setAgentCallSign(
+    userId: string,
+    provider: string,
+    callSign: string,
+  ): Promise<AgentCallSign> {
+    const record: AgentCallSign = {
+      userId,
+      provider,
+      callSign,
+      assignedAt: new Date().toISOString(),
+    };
+    this.agentCallSigns.set(`${userId}\0${provider}`, record);
+    return copy(record);
+  }
+
+  public async clearAgentCallSign(
+    userId: string,
+    provider: string,
+  ): Promise<void> {
+    this.agentCallSigns.delete(`${userId}\0${provider}`);
   }
 
   public async listChannelAgentMembers(

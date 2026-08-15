@@ -7795,20 +7795,36 @@ export class ApiGateway {
       chatOperations?.connectionsFor === undefined
         ? {}
         : await chatOperations.connectionsFor(userIds);
+    // The durable copy of every agent's name, keyed the way an agent is
+    // identified account-wide. `connectionsFor` reads the control plane's own
+    // `provider-connections.json`, which sits on local disk beside the
+    // credentials: a deployment whose filesystem does not outlive a restart
+    // came back with that file empty and every roster reading
+    // "Claude (Nathan)" again, in channels the database remembered perfectly.
+    // The connection's own answer still wins — it is the one being edited —
+    // and this is what fills the gap when it has none.
+    const storedCallSigns = new Map<string, string>(
+      (await this.options.store.listAgentCallSigns().catch(() => [])).map(
+        (sign) => [`${sign.userId}\0${sign.provider}`, sign.callSign],
+      ),
+    );
     const reachable = userIds.flatMap((userId, index) => {
       const user = users[index];
       if (user === undefined) {
         return [];
       }
-      return (connections[userId] ?? []).map((connection) => ({
-        userId,
-        userName: user.displayName,
-        provider: connection.provider,
-        visibility: connection.visibility ?? "personal",
-        ...(connection.callSign === undefined
-          ? {}
-          : { callSign: connection.callSign }),
-      }));
+      return (connections[userId] ?? []).map((connection) => {
+        const callSign =
+          connection.callSign ??
+          storedCallSigns.get(`${userId}\0${connection.provider}`);
+        return {
+          userId,
+          userName: user.displayName,
+          provider: connection.provider,
+          visibility: connection.visibility ?? "personal",
+          ...(callSign === undefined ? {} : { callSign }),
+        };
+      });
     });
     if (!(await this.options.store.hasBackfilledChannelMembership(repositoryId))) {
       await Promise.all(

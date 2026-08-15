@@ -1023,6 +1023,43 @@ export interface ProviderChatServiceOptions {
    * openers racing on that would leave half the records unreadable.
    */
   credentials?: UserCredentialStore;
+  /**
+   * Where agent names outlive this machine.
+   *
+   * A call sign is handed out once, at connect, and then people learn it —
+   * it is how an agent is addressed in every channel and how an @mention is
+   * matched. It was kept only in `secrets/provider-connections.json`, on the
+   * control plane's own disk beside the credentials, so a deployment whose
+   * filesystem does not survive a restart came back with every name gone:
+   * rosters and past messages that had said "Athena" all week fell back to
+   * "Claude (Nathan)" while the database still held every channel they were
+   * said in.
+   *
+   * The coordination store is where the rest of that durable state already
+   * lives, so the names go there too. The file stays the fast path and is
+   * reconciled against this on every read; omit this and the service behaves
+   * exactly as it did before, file-only.
+   */
+  callSigns?: AgentCallSignStore;
+}
+
+/**
+ * The narrow slice of the coordination store this service needs for names.
+ *
+ * Declared structurally rather than imported as `CoordinationStore` so the
+ * tests can hand over a two-method fake, and so nothing here depends on the
+ * whole store surface to store one string.
+ */
+export interface AgentCallSignStore {
+  listAgentCallSigns(): Promise<
+    ReadonlyArray<{ userId: string; provider: string; callSign: string }>
+  >;
+  setAgentCallSign(
+    userId: string,
+    provider: string,
+    callSign: string,
+  ): Promise<unknown>;
+  clearAgentCallSign(userId: string, provider: string): Promise<void>;
 }
 
 function assertMessages(value: unknown): ChatMessage[] {
@@ -1122,11 +1159,14 @@ export class ProviderChatService {
   private readonly longRunningSpawner: LongRunningSpawner;
   private readonly deviceAuthFlows = new Map<string, DeviceAuthFlow>();
   private credentialStorePromise: Promise<UserCredentialStore> | undefined;
+  /** Durable home for call signs; absent means file-only, as before. */
+  private readonly callSignStore: AgentCallSignStore | undefined;
 
   public constructor(
     private readonly project: CoordinatorProject,
     options: ProviderChatServiceOptions = {},
   ) {
+    this.callSignStore = options.callSigns;
     this.runner = options.runner ?? runProcess;
     this.streamRunner = options.streamRunner ?? streamProcess;
     this.longRunningSpawner = options.longRunningSpawner ?? spawnLongRunning;
@@ -1203,13 +1243,22 @@ export class ProviderChatService {
    * then Poseidon, in that order forever: the name said which account
    * connected first and nothing else, and two deployments side by side were
    * the same three agents. A random draw makes the pantheon feel dealt out.
+   *
+   * Signs already taken — in the file, or in the durable store, which knows
+   * about names this machine's file has forgotten — are skipped. Returns the
+   * sign it dealt, so the caller can record it where restarts cannot reach.
    */
-  private assignCallSign(file: ConnectionFile, userId: string, provider: ProviderId): void {
+  private assignCallSign(
+    file: ConnectionFile,
+    userId: string,
+    provider: ProviderId,
+    alsoTaken: ReadonlySet<string> = new Set(),
+  ): string | undefined {
     const connection = file[userId]?.[provider];
     if (connection === undefined || connection.settings?.callSign !== undefined) {
-      return;
+      return undefined;
     }
-    const taken = new Set<string>();
+    const taken = new Set<string>(alsoTaken);
     for (const byProvider of Object.values(file)) {
       for (const entry of Object.values(byProvider ?? {})) {
         const sign = entry?.settings?.callSign;
@@ -1223,13 +1272,15 @@ export class ProviderChatService {
     );
     const sign = free[Math.floor(Math.random() * free.length)];
     if (sign === undefined) {
-      return;
+      return undefined;
     }
     connection.settings = { ...connection.settings, callSign: sign };
+    return sign;
   }
 
   /**
-   * This user's connections, with any that predate call signs given one.
+   * This user's connections, with any that predate call signs given one and
+   * any this machine has forgotten restored from the store.
    *
    * Naming happens at connect, and every route that reports a connection
    * reads through here, so an account connected before `assignCallSign`
@@ -1238,40 +1289,131 @@ export class ProviderChatService {
    * the browser used to hand out a name as an agent joined a channel, and
    * that is exactly the per-channel naming this replaced.
    *
-   * Written back only when a name was actually handed out, so the ordinary
-   * case — everything already named — touches no disk. `assignCallSign` never
-   * renames, so a second caller racing this one cannot change an answer
-   * somebody has already been shown.
+   * Written back only when something actually changed, so the ordinary case —
+   * everything already named and already agreed with the store — touches no
+   * disk. `assignCallSign` never renames, so a second caller racing this one
+   * cannot change an answer somebody has already been shown.
    */
   private async namedConnections(
     userId: string,
   ): Promise<Partial<Record<ProviderId, StoredConnection>>> {
     const file = await this.readConnections();
-    if (this.nameUnnamedConnections(file, [userId])) {
+    if (await this.nameUnnamedConnections(file, [userId])) {
       await this.writeConnections(file);
     }
     return file[userId] ?? {};
   }
 
   /**
-   * Names every one of these users' connections that has no name yet, in
-   * place. True when it named something, which is the caller's cue to write.
+   * Reconciles these users' names with the durable store and names whatever
+   * is still unnamed, in place. True when the file changed, which is the
+   * caller's cue to write it back.
+   *
+   * Three cases, in this order:
+   *
+   *  - the store knows a name this file does not — the file lost it (a
+   *    restart on a filesystem that did not outlive the container, a moved
+   *    project root), so it is restored rather than a *new* name being dealt
+   *    out. This is the whole point: an agent people have been calling
+   *    Athena comes back as Athena, not as "Claude (Nathan)" and not as
+   *    Vesta.
+   *  - the file knows a name the store does not, or a different one — the
+   *    file is what the routes edit, so it wins and is written through.
+   *  - neither knows one — a sign is dealt, avoiding everything taken on
+   *    either side, and recorded in both.
+   *
+   * Store failures are swallowed on purpose: naming must not be able to make
+   * connecting an account fail, and a name in the file alone is exactly the
+   * behaviour this deployment had before the store existed.
    */
-  private nameUnnamedConnections(
+  private async nameUnnamedConnections(
     file: ConnectionFile,
     userIds: readonly string[],
-  ): boolean {
-    let named = false;
+  ): Promise<boolean> {
+    const stored = await this.storedCallSigns();
+    const byAgent = new Map<string, string>(
+      stored.map((entry) => [
+        `${entry.userId}\0${entry.provider}`,
+        entry.callSign,
+      ]),
+    );
+    const taken = new Set(
+      stored.map((entry) => entry.callSign.trim().toLowerCase()),
+    );
+    let changed = false;
     for (const userId of userIds) {
       for (const id of PROVIDER_IDS) {
-        if (file[userId]?.[id]?.settings?.callSign !== undefined) {
+        const connection = file[userId]?.[id];
+        if (connection === undefined) {
           continue;
         }
-        this.assignCallSign(file, userId, id);
-        named ||= file[userId]?.[id]?.settings?.callSign !== undefined;
+        const current = connection.settings?.callSign;
+        const durable = byAgent.get(`${userId}\0${id}`);
+        if (current === undefined && durable !== undefined) {
+          connection.settings = { ...connection.settings, callSign: durable };
+          changed = true;
+          continue;
+        }
+        if (current !== undefined) {
+          if (durable !== current) {
+            await this.rememberCallSign(userId, id, current);
+          }
+          continue;
+        }
+        const assigned = this.assignCallSign(file, userId, id, taken);
+        if (assigned === undefined) {
+          continue;
+        }
+        taken.add(assigned.toLowerCase());
+        changed = true;
+        await this.rememberCallSign(userId, id, assigned);
       }
     }
-    return named;
+    return changed;
+  }
+
+  /** Every name this deployment has handed out, or none if it cannot ask. */
+  private async storedCallSigns(): Promise<
+    ReadonlyArray<{ userId: string; provider: string; callSign: string }>
+  > {
+    if (this.callSignStore === undefined) {
+      return [];
+    }
+    return await this.callSignStore.listAgentCallSigns().catch(() => []);
+  }
+
+  /** One account's remembered names, by provider. Empty when nothing is. */
+  private async callSignsFor(
+    userId: string,
+  ): Promise<Map<ProviderId, string>> {
+    const remembered = new Map<ProviderId, string>();
+    for (const entry of await this.storedCallSigns()) {
+      if (entry.userId === userId) {
+        remembered.set(entry.provider as ProviderId, entry.callSign);
+      }
+    }
+    return remembered;
+  }
+
+  /** Writes one name through to the store, best effort. */
+  private async rememberCallSign(
+    userId: string,
+    provider: ProviderId,
+    callSign: string,
+  ): Promise<void> {
+    await this.callSignStore
+      ?.setAgentCallSign(userId, provider, callSign)
+      .catch(() => undefined);
+  }
+
+  /** Forgets one name in the store, best effort. */
+  private async forgetCallSign(
+    userId: string,
+    provider: ProviderId,
+  ): Promise<void> {
+    await this.callSignStore
+      ?.clearAgentCallSign(userId, provider)
+      .catch(() => undefined);
   }
 
   private async readConnections(): Promise<ConnectionFile> {
@@ -1620,6 +1762,12 @@ export class ProviderChatService {
     systemAdmin: boolean;
   }): Promise<ProviderStatus[]> {
     const connections = await this.namedConnections(input.userId);
+    // What this deployment remembers, for the case the reconciler above
+    // cannot repair: a connections file that lost the *record* as well as the
+    // name, while the credential — and therefore the connection — survived.
+    // The agent is still connected and still has a name; only this machine's
+    // copy of the name is gone.
+    const remembered = await this.callSignsFor(input.userId);
     const store = await this.credentialStore();
     const statuses: ProviderStatus[] = [];
     for (const id of PROVIDER_IDS) {
@@ -1632,6 +1780,7 @@ export class ProviderChatService {
       const connected =
         own !== undefined ||
         (connection !== undefined && input.systemAdmin && cli.loggedIn);
+      const callSign = settings.callSign ?? remembered.get(id);
       statuses.push({
         id,
         name: PROVIDER_NAMES[id],
@@ -1647,9 +1796,7 @@ export class ProviderChatService {
         // a provider this account has never connected has none, and sending
         // that as an empty string is impossible to distinguish from "named
         // the empty string", so it is simply omitted.
-        ...(settings.callSign === undefined
-          ? {}
-          : { callSign: settings.callSign }),
+        ...(callSign === undefined ? {} : { callSign }),
         ...(SIGN_IN_FLOWS[id] === undefined
           ? {}
           : { signInFlow: SIGN_IN_FLOWS[id] }),
@@ -1713,9 +1860,19 @@ export class ProviderChatService {
     // appears in everybody else's roster, and this is the only path that
     // reads it.
     const connections = await this.readConnections();
-    if (this.nameUnnamedConnections(connections, userIds)) {
+    if (await this.nameUnnamedConnections(connections, userIds)) {
       await this.writeConnections(connections);
     }
+    // The durable copy, for the agent whose connections-file *record* went
+    // missing along with its name — the reconciler above can only repair a
+    // record that is still there. Without this the roster falls back to
+    // "Claude (Nathan)" for an agent everybody in the channel knows by name.
+    const remembered = new Map<string, string>(
+      (await this.storedCallSigns()).map((entry) => [
+        `${entry.userId}\0${entry.provider}`,
+        entry.callSign,
+      ]),
+    );
     const result: Record<
       string,
       Array<{
@@ -1734,7 +1891,9 @@ export class ProviderChatService {
           return [];
         }
         const provider = VENDOR_PROVIDERS[summary.vendor];
-        const callSign = connections[userId]?.[provider]?.settings?.callSign;
+        const callSign =
+          connections[userId]?.[provider]?.settings?.callSign ??
+          remembered.get(`${userId}\0${provider}`);
         return [
           {
             provider,
@@ -1858,7 +2017,11 @@ export class ProviderChatService {
           createdAt: new Date().toISOString(),
         },
       };
-      this.assignCallSign(file, input.userId, input.provider);
+      // Named through the reconciler rather than by `assignCallSign` alone,
+      // so a returning account gets back the name the store remembers for it
+      // instead of a fresh one from the pantheon — reconnecting must not
+      // rename an agent the room has learned.
+      await this.nameUnnamedConnections(file, [input.userId]);
       await this.writeConnections(file);
     }
 
@@ -2327,7 +2490,11 @@ export class ProviderChatService {
     await removeCredentialHome(flow.home);
   }
 
-  /** Creates the settings record a connection needs, if it has none yet. */
+  /**
+   * Creates the settings record a connection needs, if it has none yet, and
+   * gives it its name in the same breath — restored from the store when this
+   * account has been named before, dealt fresh when it has not.
+   */
   private async ensureConnectionRecord(
     userId: string,
     provider: ProviderId,
@@ -2338,6 +2505,7 @@ export class ProviderChatService {
         ...file[userId],
         [provider]: { kind: "account", createdAt: new Date().toISOString() },
       };
+      await this.nameUnnamedConnections(file, [userId]);
       await this.writeConnections(file);
     }
   }
@@ -2536,7 +2704,9 @@ export class ProviderChatService {
           : { settings: file[input.userId]?.[input.provider]?.settings }),
       },
     };
-    this.assignCallSign(file, input.userId, input.provider);
+    // Same reconciler the read paths use: a name the store already holds for
+    // this account is restored, and only a genuinely new agent is dealt one.
+    await this.nameUnnamedConnections(file, [input.userId]);
     await this.writeConnections(file);
     return await this.list(input);
   }
@@ -2878,7 +3048,7 @@ export class ProviderChatService {
         );
       }
     }
-        if (input.callSign !== undefined) {
+    if (input.callSign !== undefined) {
       const trimmed = input.callSign.trim();
       if (trimmed.length > 40) {
         throw new ProviderChatError(
@@ -2889,8 +3059,13 @@ export class ProviderChatService {
       }
       if (trimmed === "") {
         delete settings.callSign;
+        // Forgotten in the store too, or the next restart would restore the
+        // name this just cleared — the same complaint as a name that
+        // vanishes, pointed the other way.
+        await this.forgetCallSign(input.userId, input.provider);
       } else {
         settings.callSign = trimmed;
+        await this.rememberCallSign(input.userId, input.provider, trimmed);
       }
     }
     connection.settings = settings;

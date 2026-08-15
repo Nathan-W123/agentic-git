@@ -946,6 +946,34 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE submitted_tasks ADD COLUMN effort TEXT`,
     ],
   },
+  {
+    // The name each account's agent answers to, everywhere.
+    //
+    // It was kept only in the control plane's own
+    // `secrets/provider-connections.json`, beside the credentials, on local
+    // disk. A deployment whose filesystem does not survive a restart — a
+    // container without a mounted volume, a moved project root — came back
+    // with every call sign gone while the database still held the channels
+    // the names were used in, so every roster and every past message fell
+    // back to "Claude (Nathan)". Names live with the rest of the durable
+    // state now; the file stays the fast path and is reconciled against
+    // this on read.
+    //
+    // Keyed by (user, provider), which is what identifies an agent
+    // account-wide — the same key `${userId}:${provider}` that a channel
+    // override uses for the per-room rename layered on top.
+    version: 32,
+    name: "agent-call-signs",
+    statements: [
+      `CREATE TABLE agent_call_signs (
+        user_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        call_sign TEXT NOT NULL,
+        assigned_at TEXT NOT NULL,
+        PRIMARY KEY (user_id, provider)
+      )`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),
