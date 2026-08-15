@@ -2030,7 +2030,11 @@ export class PromptCliAdapter implements AgentAdapter {
         "accepted canonical state to its recorded remote on a fresh branch " +
         "— use it when asked to push or publish to GitHub; your own `git " +
         "push` cannot reach the remote from this workspace, so never try " +
-        'it. "preview_start" runs this repository\'s app and answers with ' +
+        'it. "pull" brings the platform\'s copy of this repository up to ' +
+        "date from its GitHub remote — use it when asked to pull, sync, or " +
+        "update from GitHub; a `git pull` in this workspace reaches only " +
+        "the platform's local mirror and updates nothing anyone else can " +
+        'see. "preview_start" runs this repository\'s app and answers with ' +
         'its URL; "preview_stop" stops it. The platform answers done or ' +
         "refused with an explanation either way. A refusal is final for " +
         "this run — do not retry it; finish with a completed outcome whose " +

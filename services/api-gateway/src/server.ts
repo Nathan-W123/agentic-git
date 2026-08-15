@@ -767,6 +767,19 @@ const IS_AUTH_FAILURE_RE =
   /OAuth session expired|could not be refreshed|Failed to authenticate|Not logged in|invalid_api_key|unauthorized|401/iu;
 
 /**
+ * Whether an error is the agent's own vendor sign-in failing — as opposed
+ * to some other credential the run touched. The push path fails in GitHub's
+ * name when the *submitter's* GitHub token is refused, and those failures
+ * speak the same auth vocabulary ("401", "unauthorized"); but "reconnect me
+ * from My Agents" is the wrong door for them — that fix lives in Settings →
+ * GitHub, and the push failure's own words already point there. Anything
+ * naming GitHub keeps those words.
+ */
+function isVendorSignInFailure(error: string): boolean {
+  return IS_AUTH_FAILURE_RE.test(error) && !/github/iu.test(error);
+}
+
+/**
  * What each integration outcome means, said plainly.
  *
  * The integration path records its outcome as a status and an explanation
@@ -792,7 +805,7 @@ const INTEGRATION_FAILURE_REASONS: Record<string, string> = {
  * a momentary model error read as abandoned work.
  */
 export function explainAnswerFailure(error?: string): string {
-  if (IS_AUTH_FAILURE_RE.test(error ?? "")) {
+  if (isVendorSignInFailure(error ?? "")) {
     return (
       "I could not answer that — my sign-in has expired. Reconnect me from " +
       "My Agents."
@@ -805,11 +818,7 @@ export function explainAnswerFailure(error?: string): string {
 }
 
 function explainTaskFailure(error: string, status?: string): string {
-  if (
-    /OAuth session expired|could not be refreshed|Failed to authenticate|invalid_api_key|Not logged in|401/iu.test(
-      error,
-    )
-  ) {
+  if (isVendorSignInFailure(error)) {
     return (
       "I could not finish this — my sign-in has expired. Reconnect me from " +
       "My Agents and send this again."
@@ -1535,6 +1544,24 @@ export interface ApiOperations {
     token?: string;
     actorId: string;
   }): Promise<StoredRepository>;
+  /**
+   * Brings canonical up to date with the GitHub remote it was imported
+   * from — the other half of export, and what unblocks a push refused
+   * because the remote moved. Optional the same way the GitHub connection
+   * is: a deployment without remote repositories has nothing to sync.
+   */
+  syncRepository?(input: {
+    projectId: string;
+    repositoryId: string;
+    actorId: string;
+  }): Promise<{
+    status: "already_current" | "fast_forwarded" | "merged";
+    remoteUrl: string;
+    upstreamBranch: string;
+    upstreamRevision: string;
+    previousRevision: string;
+    revision: string;
+  }>;
   submitTask(input: {
     projectId: string;
     repositoryId: string;
@@ -4357,6 +4384,47 @@ export class ApiGateway {
         },
       });
       this.sendJson(response, 201, { repository });
+      return;
+    }
+
+    // Syncing a repository from its GitHub origin. The same gate as import,
+    // because it is the same kind of act — repository management, moving the
+    // mirror rather than working inside it. The caller's own stored GitHub
+    // token authenticates the fetch when they have one; the operation itself
+    // writes the `repository_synced` audit record.
+    const syncMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/sync$`,
+        "u",
+      ),
+    );
+    if (syncMatch !== undefined && method === "POST") {
+      const [projectId = "", repositoryId = ""] = syncMatch;
+      await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "import_repository",
+      );
+      const syncRepository = this.options.operations.syncRepository;
+      if (syncRepository === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment does not support syncing from a remote",
+        );
+      }
+      const synced = await this.performOperation(
+        "repository_sync_failed",
+        async () =>
+          await syncRepository({
+            projectId,
+            repositoryId,
+            actorId: principal.user.id,
+          }),
+      );
+      this.sendJson(response, 200, { sync: synced });
       return;
     }
 
@@ -11951,7 +12019,11 @@ export class ApiGateway {
           if (
             record.event.type === "task_failed" &&
             typeof data["error"] === "string" &&
-            IS_AUTH_FAILURE_RE.test(data["error"])
+            // The vendor guard matters doubly here: this arm marks the
+            // agent's provider connection unusable, and a refused GitHub
+            // push token must not put "reconnect this agent" on a Claude
+            // or Codex row that works fine.
+            isVendorSignInFailure(data["error"])
           ) {
             // The run observed it; the provider list is what has to show it.
             await this.options.operations.chatProviders?.noteAuthFailure?.({

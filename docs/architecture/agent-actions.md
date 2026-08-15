@@ -64,12 +64,12 @@ agent, and the event dispatch in `handleAgentEvent`
 
 Since built, and wider than first staged: the coordinator dispatches the
 event and answers through the injected authority, and the prompt-CLI
-adapters (Claude, Gemini) emit and resolve the round trip themselves — their
-execution prompt names the actions, which is what makes them reachable at
-all. An agent asked to "push to GitHub" asks the platform, and a task whose
-whole deliverable was a performed action settles as done with the action's
-result as its report, not as "produced no repository changes". Codex's
-adapter still cannot ask.
+adapters (Claude, Gemini) and the Codex adapter emit and resolve the round
+trip themselves — their execution prompts name the actions, which is what
+makes them reachable at all. An agent asked to "push to GitHub" asks the
+platform, and a task whose whole deliverable was a performed action settles
+as done with the action's result as its report, not as "produced no
+repository changes".
 
 ### The coordinator cannot do this itself
 
@@ -121,7 +121,7 @@ Consequences worth stating:
 
 ## First actions
 
-Three:
+Four:
 
 - `push` — publishes **canonical** to the repository's recorded remote, on a
   new branch, and answers with the branch and revision. Canonical rather than
@@ -136,6 +136,21 @@ Three:
   token reached under its owner's name. Pushing a branch is not a merge: it
   puts work where somebody can look at it, which is the whole of what "push
   to GitHub" is asking for.
+- `pull` — brings **canonical** up to date with the GitHub remote it was
+  imported from, and moves the recorded import point so the next `push` is
+  allowed again. This is what "pull from GitHub" means on this platform — a
+  `git pull` inside the task's workspace reaches only the local mirror and
+  updates nothing anyone else can see, which is exactly the dead end an
+  agent improvised into before the action existed. Fast-forwards when only
+  GitHub moved; joins the histories with a true merge commit when both sides
+  did; refuses with the conflicting files named when they collide, leaving
+  canonical untouched. Refused while *other* tasks are executing in the
+  repository — a sync moves the ground under running work — with the asking
+  task itself exempt, since it is mid-run by definition and its own empty
+  changeset settles as a report. A pull is a read, so it needs no connected
+  GitHub account for a public repository; the submitter's stored token rides
+  along when they have one, and a private repository asks for the connection
+  by name.
 - `preview_start` — runs the task's **own workspace** (see below, not canonical)
   and answers with the loopback URL, or with the boot output if it did not come
   up. Everything it needs exists: the command resolution, the dependency

@@ -166,6 +166,48 @@ export class UpstreamChangedError extends Error {
   }
 }
 
+export class SyncDivergedError extends Error {
+  public constructor(
+    public readonly branch: string,
+    public readonly conflicts: readonly string[],
+  ) {
+    super(
+      `Canonical and the remote ${branch} branch have both changed the same ` +
+        `files, so a sync cannot merge them cleanly: ` +
+        `${conflicts.slice(0, 20).join(", ")}${
+          conflicts.length > 20 ? ", …" : ""
+        }. Resolve the overlap on one side — land or roll back the local ` +
+        "work, or adjust the branch on GitHub — then sync again. Nothing " +
+        "was changed.",
+    );
+    this.name = "SyncDivergedError";
+  }
+}
+
+export interface SyncFromRemoteOptions {
+  remoteUrl: string;
+  /** Remote branch to sync from. Defaults to the canonical branch. */
+  upstreamBranch?: string;
+  credentials?: RemoteRepositoryCredentials;
+  /**
+   * Where the merge worktree is created when both sides moved. Defaults to
+   * the system temp directory; callers with a project scratch area pass it
+   * so partial state never lands somewhere surprising.
+   */
+  workspaceRoot?: string;
+}
+
+export interface SyncFromRemoteResult {
+  status: "already_current" | "fast_forwarded" | "merged";
+  remoteUrl: string;
+  upstreamBranch: string;
+  /** The remote tip the mirror now records as its import point. */
+  upstreamRevision: string;
+  /** Canonical's tip before and after the sync. Equal on already_current. */
+  previousRevision: string;
+  revision: string;
+}
+
 export interface PushToRemoteOptions {
   remoteUrl: string;
   /** Branch to create on the remote. Defaults to a dated export branch. */
@@ -590,6 +632,266 @@ export class RepositoryService {
       upstreamRevision: currentUpstream,
       createdBranch: existingTarget === undefined,
     };
+  }
+
+  /**
+   * Brings canonical up to date with the remote it was imported from — the
+   * missing half of the export flow. Import happens once; after that, work
+   * merged on GitHub leaves the mirror behind, {@link pushToRemote} rightly
+   * refuses, and until this existed the only remedy was a fresh import under
+   * a new name.
+   *
+   * Three honest outcomes. The mirror may already contain the remote tip
+   * (`already_current`); the remote may simply be ahead (`fast_forwarded`);
+   * or both sides may have moved, in which case the histories are joined
+   * with a true merge commit (`merged`) so neither side's commits are
+   * rewritten or squashed away. A merge that would conflict is refused with
+   * the overlapping files named, and canonical is left exactly as it was —
+   * resolving a conflict is judgement, and this operation has none to offer.
+   *
+   * Every outcome ends by moving the recorded import point to the remote's
+   * current tip, which is precisely what lets the next push proceed.
+   *
+   * This moves `refs/heads/<branch>` outside the coordinated write path, so
+   * callers must hold it away from live work — the CLI layer refuses while
+   * tasks are executing in the repository. The fast-forward itself is a
+   * compare-and-swap on the old tip, so a promotion racing past it fails
+   * this sync rather than losing its own update.
+   */
+  public async syncFromRemote(
+    repository: CanonicalRepository,
+    options: SyncFromRemoteOptions,
+  ): Promise<SyncFromRemoteResult> {
+    const remoteUrl = normalizeRemoteUrl(options.remoteUrl);
+    const upstreamBranch = options.upstreamBranch ?? repository.branch;
+    await this.assertBranchName(upstreamBranch);
+    await this.assertBranchName(repository.branch);
+    const upstreamRef = `refs/coord/upstream/${upstreamBranch}`;
+    await this.assertRefName(upstreamRef);
+    const branchRef = `refs/heads/${repository.branch}`;
+
+    await this.git.run(
+      [
+        `--git-dir=${repository.path}`,
+        "fetch",
+        "--no-tags",
+        "--end-of-options",
+        remoteUrl,
+        // Forced on purpose: this ref mirrors whatever the remote says now,
+        // and the remote rewriting its branch must not wedge every future
+        // sync. Canonical's own branch is never the target here.
+        `+refs/heads/${upstreamBranch}:${upstreamRef}`,
+      ],
+      {
+        env: remoteEnvironment(options.credentials),
+        timeoutMs: 10 * 60 * 1000,
+        maxOutputBytes: 1024 * 1024,
+      },
+    );
+
+    try {
+      const [upstreamResolved, localResolved] = await Promise.all([
+        this.git.run([
+          `--git-dir=${repository.path}`,
+          "rev-parse",
+          "--verify",
+          "--end-of-options",
+          `${upstreamRef}^{commit}`,
+        ]),
+        this.git.run([
+          `--git-dir=${repository.path}`,
+          "rev-parse",
+          "--verify",
+          "--end-of-options",
+          `${branchRef}^{commit}`,
+        ]),
+      ]);
+      const upstreamRevision = upstreamResolved.stdout.trim();
+      const previousRevision = localResolved.stdout.trim();
+
+      const result: Omit<SyncFromRemoteResult, "status" | "revision"> = {
+        remoteUrl,
+        upstreamBranch,
+        upstreamRevision,
+        previousRevision,
+      };
+
+      if (await this.isAncestor(repository, upstreamRevision, previousRevision)) {
+        // Canonical already holds everything the remote has — including the
+        // equal case. The import point still moves: it is the recorded
+        // answer to "what upstream state has this mirror seen", and the
+        // whole reason a stale one blocks the push.
+        await this.recordImportPoint(repository, upstreamBranch, upstreamRevision);
+        return { ...result, status: "already_current", revision: previousRevision };
+      }
+
+      if (await this.isAncestor(repository, previousRevision, upstreamRevision)) {
+        // The compare-and-swap form: if canonical moved since it was read
+        // above, this fails rather than discarding that move.
+        await this.git.run([
+          `--git-dir=${repository.path}`,
+          "update-ref",
+          "--end-of-options",
+          branchRef,
+          upstreamRevision,
+          previousRevision,
+        ]);
+        await this.recordImportPoint(repository, upstreamBranch, upstreamRevision);
+        return { ...result, status: "fast_forwarded", revision: upstreamRevision };
+      }
+
+      const revision = await this.mergeUpstream(
+        repository,
+        upstreamRef,
+        upstreamRevision,
+        upstreamBranch,
+        options.workspaceRoot,
+      );
+      await this.recordImportPoint(repository, upstreamBranch, upstreamRevision);
+      return { ...result, status: "merged", revision };
+    } finally {
+      // Scaffolding, like a finished lease: the fetched ref has served its
+      // purpose, and `refs/coord/` should list only what still means
+      // something.
+      await this.git.run(
+        [`--git-dir=${repository.path}`, "update-ref", "-d", upstreamRef],
+        { allowFailure: true },
+      );
+    }
+  }
+
+  /** `git merge-base --is-ancestor`, with real errors kept distinct from "no". */
+  private async isAncestor(
+    repository: CanonicalRepository,
+    ancestor: string,
+    descendant: string,
+  ): Promise<boolean> {
+    const args = [
+      `--git-dir=${repository.path}`,
+      "merge-base",
+      "--is-ancestor",
+      "--end-of-options",
+      ancestor,
+      descendant,
+    ] as const;
+    const result = await this.git.run(args, { allowFailure: true });
+    if (result.exitCode === 0) {
+      return true;
+    }
+    if (result.exitCode === 1) {
+      return false;
+    }
+    throw new GitCommandError(args, result);
+  }
+
+  private async recordImportPoint(
+    repository: CanonicalRepository,
+    branch: string,
+    revision: string,
+  ): Promise<void> {
+    await this.git.run([
+      `--git-dir=${repository.path}`,
+      "update-ref",
+      `${IMPORT_REF_PREFIX}${branch}`,
+      "--end-of-options",
+      revision,
+    ]);
+  }
+
+  /**
+   * Joins diverged histories with a real merge commit, in a throwaway
+   * worktree because a bare mirror has nowhere to resolve trees. Conflicts
+   * abort the merge and throw {@link SyncDivergedError} with the files
+   * named; the worktree is removed either way.
+   */
+  private async mergeUpstream(
+    repository: CanonicalRepository,
+    upstreamRef: string,
+    upstreamRevision: string,
+    upstreamBranch: string,
+    workspaceRoot: string | undefined,
+  ): Promise<string> {
+    assertIdentity(this.identity);
+    const scratchRoot = workspaceRoot ?? os.tmpdir();
+    await mkdir(scratchRoot, { recursive: true });
+    const worktreePath = await mkdtemp(
+      path.join(scratchRoot, `${repository.id}-sync-`),
+    );
+    const emptyHooks = await mkdtemp(
+      path.join(os.tmpdir(), "coord-disabled-hooks-"),
+    );
+    let worktreeAdded = false;
+    try {
+      await this.git.run([
+        `--git-dir=${repository.path}`,
+        "worktree",
+        "add",
+        "--end-of-options",
+        worktreePath,
+        repository.branch,
+      ]);
+      worktreeAdded = true;
+      const mergeArgs = [
+        "-C",
+        worktreePath,
+        "-c",
+        `user.name=${this.identity.name}`,
+        "-c",
+        `user.email=${this.identity.email}`,
+        "-c",
+        `core.hooksPath=${emptyHooks}`,
+        "merge",
+        "--no-ff",
+        "--no-edit",
+        "--no-gpg-sign",
+        "--no-verify",
+        "-m",
+        `Sync ${upstreamBranch} from origin: merge ${upstreamRevision.slice(0, 12)} into canonical`,
+        "--end-of-options",
+        upstreamRef,
+      ] as const;
+      const merge = await this.git.run(mergeArgs, { allowFailure: true });
+      if (merge.exitCode !== 0) {
+        const conflicted = await this.git.run(
+          ["-C", worktreePath, "diff", "--name-only", "--diff-filter=U"],
+          { allowFailure: true },
+        );
+        const conflicts = conflicted.stdout
+          .split(/\r?\n/u)
+          .map((line) => line.trim())
+          .filter((line) => line.length > 0);
+        await this.git.run(["-C", worktreePath, "merge", "--abort"], {
+          allowFailure: true,
+        });
+        if (conflicts.length > 0) {
+          throw new SyncDivergedError(upstreamBranch, conflicts);
+        }
+        throw new GitCommandError(mergeArgs, merge);
+      }
+      const merged = await this.git.run([
+        "-C",
+        worktreePath,
+        "rev-parse",
+        "HEAD",
+      ]);
+      return merged.stdout.trim();
+    } finally {
+      if (worktreeAdded) {
+        await this.git.run(
+          [
+            `--git-dir=${repository.path}`,
+            "worktree",
+            "remove",
+            "--force",
+            "--end-of-options",
+            worktreePath,
+          ],
+          { allowFailure: true },
+        );
+      }
+      await rm(worktreePath, { recursive: true, force: true });
+      await rm(emptyHooks, { recursive: true, force: true });
+    }
   }
 
   public async assertBranchName(branch: string): Promise<void> {

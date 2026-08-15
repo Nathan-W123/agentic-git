@@ -17,6 +17,7 @@ import {
   runPendingTasks,
   taskSubmit,
 } from "@coord/cli/commands";
+import { repoSync } from "@coord/cli/repo-export";
 import { CoordinatorProject } from "@coord/cli/project";
 import { recoverCoordinationState } from "@coord/cli/recovery";
 import { rollbackCanonical } from "@coord/cli/rollback";
@@ -34,6 +35,7 @@ import { GitHubConnectionService } from "./github-connection.js";
 import { OverlayWorkspaceService } from "./overlay.js";
 import { PreviewService } from "./preview.js";
 import { ProviderChatService, type ProviderId } from "./providers.js";
+import { pullCanonical } from "./pull-canonical.js";
 import { pushCanonical } from "./push-canonical.js";
 import {
   UserCredentialStore,
@@ -306,6 +308,20 @@ async function serve(
         ...(input.actorId === undefined ? {} : { createdBy: input.actorId }),
       });
     },
+    async syncRepository(input) {
+      // The caller's own stored GitHub token, when they have connected one —
+      // a public repository syncs without any. Same identity rule as a push,
+      // relaxed only because a fetch reads rather than writes.
+      const connection = await github.tokenFor(input.actorId);
+      return await repoSync(project, store, {
+        repositoryId: input.repositoryId,
+        projectId: input.projectId,
+        actorId: input.actorId,
+        ...(connection === undefined
+          ? {}
+          : { credentials: { token: connection.token } }),
+      });
+    },
     async submitTask(input) {
       // `agentId` names one of this project's own configured agents and
       // wins when given explicitly (the ordinary submission path, where the
@@ -395,12 +411,19 @@ async function serve(
               // and "the project's version" must not be confused.
               return await pushCanonical(project, store, github, request);
             }
+            if (request.action === "pull") {
+              // Canonical again, and for the matching reason: "pull from
+              // GitHub" means the platform's copy of the repository, not the
+              // agent's checkout — a fetch inside the workspace reaches only
+              // the local mirror and updates nothing anyone else can see.
+              return await pullCanonical(project, store, github, request);
+            }
             if (request.action !== "preview_start") {
               return {
                 outcome: "refused",
                 explanation:
                   `"${request.action}" is not something this deployment does. ` +
-                  "Available actions: preview_start, preview_stop, push.",
+                  "Available actions: preview_start, preview_stop, push, pull.",
               };
             }
             // The task's own workspace, never canonical. An agent looking at

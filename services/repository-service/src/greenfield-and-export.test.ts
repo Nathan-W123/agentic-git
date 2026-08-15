@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { GitClient, type GitRunOptions } from "./git-client.js";
 import type { ProcessOutput } from "./process-runner.js";
-import { RepositoryService } from "./repository-service.js";
+import { RepositoryService, SyncDivergedError } from "./repository-service.js";
 
 /* -------------------------------------------------------------------------
  * Greenfield initialization
@@ -192,11 +192,15 @@ async function pushFixture(): Promise<PushFixture> {
 }
 
 /** Adds a coordinator commit on top of canonical, as an integration would. */
-async function advanceCanonical(fixture: PushFixture): Promise<string> {
+async function advanceCanonical(
+  fixture: PushFixture,
+  file = "b.txt",
+  content = "two\n",
+): Promise<string> {
   const git = new GitClient();
   const work = path.join(fixture.root, `work-${Math.random().toString(36).slice(2, 8)}`);
   await git.run(["clone", "--branch", "main", fixture.remotePath, work]);
-  await writeFile(path.join(work, "b.txt"), "two\n", "utf8");
+  await writeFile(path.join(work, file), content, "utf8");
   await fixture.repositories.commitAll(work, "coordinator work");
   await git.run([
     `--git-dir=${fixture.canonical.path}`,
@@ -205,6 +209,25 @@ async function advanceCanonical(fixture: PushFixture): Promise<string> {
     "HEAD:refs/heads/main",
     "--force",
   ]);
+  const head = await git.run(["-C", work, "rev-parse", "HEAD"]);
+  return head.stdout.trim();
+}
+
+/** Lands a commit on the origin's main, as a merged GitHub PR would. */
+async function advanceRemote(
+  fixture: PushFixture,
+  file = "c.txt",
+  content = "three\n",
+): Promise<string> {
+  const git = new GitClient();
+  const work = path.join(
+    fixture.root,
+    `remote-${Math.random().toString(36).slice(2, 8)}`,
+  );
+  await git.run(["clone", "--branch", "main", fixture.remotePath, work]);
+  await writeFile(path.join(work, file), content, "utf8");
+  await fixture.repositories.commitAll(work, "github work");
+  await git.run(["-C", work, "push", "origin", "main"]);
   const head = await git.run(["-C", work, "rev-parse", "HEAD"]);
   return head.stdout.trim();
 }
@@ -440,6 +463,161 @@ test("a push token never reaches the argument list or the repository", async () 
     // And nothing on disk in the canonical mirror records it.
     const config = await readFile(path.join(fixture.canonical.path, "config"), "utf8");
     assert.ok(!config.includes("ghp_supersecret_value"));
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+/* -------------------------------------------------------------------------
+ * Sync from remote
+ *
+ * The missing half of export: work merged on GitHub leaves the mirror
+ * behind, push rightly refuses, and until sync existed the only remedy was
+ * a fresh import under a new name.
+ * ---------------------------------------------------------------------- */
+
+test("a remote that moved ahead fast-forwards canonical and unblocks push", async () => {
+  const fixture = await pushFixture();
+  try {
+    const remoteTip = await advanceRemote(fixture);
+
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+    });
+    assert.equal(synced.status, "fast_forwarded");
+    assert.equal(synced.revision, remoteTip);
+    assert.equal(
+      (await fixture.repositories.getCanonicalVersion(fixture.canonical)).revision,
+      remoteTip,
+    );
+    // The import point moved with it — which is exactly what lets the next
+    // push proceed.
+    assert.equal(
+      await fixture.repositories.importedRevision(fixture.canonical, "main"),
+      remoteTip,
+    );
+    await fixture.repositories.pushToRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+    });
+
+    // Nothing left behind in refs/coord beyond the import point.
+    const refs = await new GitClient().run([
+      `--git-dir=${fixture.canonical.path}`,
+      "for-each-ref",
+      "refs/coord/upstream/",
+    ]);
+    assert.equal(refs.stdout.trim(), "");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a sync with nothing new reports already_current", async () => {
+  const fixture = await pushFixture();
+  try {
+    const before = await fixture.repositories.getCanonicalVersion(fixture.canonical);
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+    });
+    assert.equal(synced.status, "already_current");
+    assert.equal(synced.revision, before.revision);
+    assert.equal(
+      (await fixture.repositories.getCanonicalVersion(fixture.canonical)).revision,
+      before.revision,
+    );
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("diverged histories are joined with a merge, and push works after", async () => {
+  const fixture = await pushFixture();
+  try {
+    // The reported shape: agents landed work in canonical, and the person
+    // merged pull requests on GitHub — both sides moved.
+    const localTip = await advanceCanonical(fixture);
+    const remoteTip = await advanceRemote(fixture);
+
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+    });
+    assert.equal(synced.status, "merged");
+    assert.equal(synced.upstreamRevision, remoteTip);
+    assert.equal(synced.previousRevision, localTip);
+
+    // Both histories survive beneath the merge — nothing squashed away.
+    const git = new GitClient();
+    for (const parent of [localTip, remoteTip]) {
+      const contains = await git.run(
+        [
+          `--git-dir=${fixture.canonical.path}`,
+          "merge-base",
+          "--is-ancestor",
+          parent,
+          synced.revision,
+        ],
+        { allowFailure: true },
+      );
+      assert.equal(contains.exitCode, 0, `${parent} lost in the merge`);
+    }
+    const version = await fixture.repositories.getCanonicalVersion(fixture.canonical);
+    assert.equal(version.revision, synced.revision);
+    assert.deepEqual(
+      (await fixture.repositories.listFiles(fixture.canonical, version.revision)).sort(),
+      ["a.txt", "b.txt", "c.txt"],
+    );
+
+    const pushed = await fixture.repositories.pushToRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+    });
+    assert.equal(pushed.revision, synced.revision);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a conflicting sync refuses, names the files, and changes nothing", async () => {
+  const fixture = await pushFixture();
+  try {
+    const localTip = await advanceCanonical(fixture, "a.txt", "local change\n");
+    await advanceRemote(fixture, "a.txt", "github change\n");
+    const baselineBefore = await fixture.repositories.importedRevision(
+      fixture.canonical,
+      "main",
+    );
+
+    await assert.rejects(
+      fixture.repositories.syncFromRemote(fixture.canonical, {
+        remoteUrl: LOOPBACK_HOST,
+        workspaceRoot: fixture.root,
+      }),
+      (error: unknown) => {
+        assert.ok(error instanceof SyncDivergedError);
+        assert.deepEqual(error.conflicts, ["a.txt"]);
+        assert.match(error.message, /Nothing was changed/u);
+        return true;
+      },
+    );
+
+    // Canonical and the import point are exactly as they were: push stays
+    // refused until a person resolves the overlap on one side.
+    assert.equal(
+      (await fixture.repositories.getCanonicalVersion(fixture.canonical)).revision,
+      localTip,
+    );
+    assert.equal(
+      await fixture.repositories.importedRevision(fixture.canonical, "main"),
+      baselineBefore,
+    );
+    await assert.rejects(
+      fixture.repositories.pushToRemote(fixture.canonical, {
+        remoteUrl: LOOPBACK_HOST,
+      }),
+      /has moved since import/u,
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

@@ -3,6 +3,7 @@ import {
   RepositoryService,
   type PushToRemoteResult,
   type RemoteRepositoryCredentials,
+  type SyncFromRemoteResult,
 } from "@coord/repository-service";
 
 import type { CoordinatorProject } from "./project.js";
@@ -94,4 +95,110 @@ export async function repoPush(
       ...(credentials === undefined ? {} : { credentials }),
     },
   );
+}
+
+export interface RepoSyncOptions {
+  repositoryId?: string;
+  /** Overrides the remote recorded at import. */
+  remoteUrl?: string;
+  /**
+   * Authenticates the fetch. The dashboard passes the requester's own stored
+   * GitHub token when they have connected one; a public repository syncs
+   * without any.
+   */
+  credentials?: RemoteRepositoryCredentials;
+  projectId?: string;
+  /** Who asked, for the audit trail. */
+  actorId?: string;
+  /**
+   * The task asking for this sync, exempted from the executing-work guard.
+   * A sync requested as an agent action arrives from inside a run, so the
+   * asking task is itself claimed and holds a lease — counting it would
+   * refuse every pull ever asked for. Its own settle is safe under a moved
+   * base: a pull task changes no files, and an empty changeset reports
+   * rather than integrates.
+   */
+  excludeTaskId?: string;
+}
+
+/**
+ * Brings canonical up to date with its GitHub origin — the other half of
+ * {@link repoPush}. Work merged on GitHub after import leaves the mirror
+ * behind and the push safety check rightly refusing; a sync moves the mirror
+ * (fast-forward, or a true merge when both sides advanced) and the recorded
+ * import point forward, after which pushing works again.
+ *
+ * Refused while tasks are executing in the repository: a sync moves
+ * `refs/heads/<branch>` outside the coordinated write path, and the one safe
+ * time for that is between runs — which is also the only time anybody
+ * actually asks for it.
+ */
+export async function repoSync(
+  project: CoordinatorProject,
+  store: CoordinationStore,
+  options: RepoSyncOptions = {},
+  repositories = new RepositoryService(),
+): Promise<SyncFromRemoteResult> {
+  const repository = await resolveRepository(project, store, options.repositoryId);
+
+  const remoteUrl = options.remoteUrl ?? repository.remoteUrl;
+  if (remoteUrl === undefined || remoteUrl.length === 0) {
+    throw new Error(
+      `${repository.id} has no remote recorded. Import it with ` +
+        "`coord repo github <owner/name>`, or pass an explicit remote to sync from.",
+    );
+  }
+
+  const [leases, claimed] = await Promise.all([
+    store.listWorkLeases({ status: "active", repositoryId: repository.id }),
+    store.listSubmittedTasks({ repositoryId: repository.id, status: "claimed" }),
+  ]);
+  const otherLeases = leases.filter(
+    (lease) => lease.taskId !== options.excludeTaskId,
+  );
+  const otherClaimed = claimed.filter(
+    (task) => task.id !== options.excludeTaskId,
+  );
+  if (otherLeases.length > 0 || otherClaimed.length > 0) {
+    throw new Error(
+      `Tasks are executing in ${repository.id} right now, and a sync would ` +
+        "move the repository underneath them. Wait for the work to land, or " +
+        "stop it, then sync again.",
+    );
+  }
+
+  const canonical = {
+    id: repository.id,
+    path: repository.path,
+    branch: repository.branch,
+  };
+  const result = await repositories.syncFromRemote(canonical, {
+    remoteUrl,
+    workspaceRoot: project.workspaceRoot,
+    ...(options.credentials === undefined
+      ? {}
+      : { credentials: options.credentials }),
+  });
+
+  if (result.status !== "already_current") {
+    await store.saveCanonicalVersion(
+      repository.id,
+      await repositories.getCanonicalVersion(canonical),
+    );
+  }
+  await store.appendAudit(undefined, {
+    type: "repository_synced",
+    data: {
+      repositoryId: repository.id,
+      ...(options.projectId === undefined
+        ? {}
+        : { projectId: options.projectId }),
+      ...(options.actorId === undefined ? {} : { actorId: options.actorId }),
+      status: result.status,
+      previousRevision: result.previousRevision,
+      revision: result.revision,
+      upstreamRevision: result.upstreamRevision,
+    },
+  });
+  return result;
 }

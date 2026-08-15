@@ -144,6 +144,14 @@ evidence survive process and browser restarts in the coordination store.
   submitter's own connected GitHub account (Settings → GitHub) and is refused
   when they have not connected one. Either way the token is passed only as a
   request header in the child environment.
+- Sync brings canonical back up to date with the imported remote after work
+  merges on GitHub — the state the moved-since-import refusal points at.
+  Fast-forward when only GitHub moved, a true merge commit when both sides
+  did, a refusal naming the conflicting files when they collide; every
+  success moves the recorded import point, which is what re-arms the push.
+  Offered as "Sync from GitHub" on the repository's menu and as the `pull`
+  agent action, and refused while other tasks are executing in the
+  repository.
 
 ## Remote Execution
 
@@ -261,8 +269,11 @@ The following are intentionally not represented as complete:
 - Broad language-server coverage, cross-repository planning, learned
   scheduling, and automatic semantic conflict resolution.
 - Continuous external Git synchronization, release/tag management, pull-request
-  creation, and complete GitHub replacement behavior. One-way export exists;
-  fetching upstream changes back into canonical does not.
+  creation, and complete GitHub replacement behavior. Export exists, and an
+  explicit sync brings upstream changes back into canonical (fast-forward or
+  merge, refusing on conflicts) — as a repository action in the dashboard and
+  as the `pull` agent action. What does not exist is anything *continuous*:
+  both directions move only when a person or their task asks.
 
 These items belong to Phases 2-4 in `instructions.md`; they are not required to
 operate or verify the coordinator as implemented.

@@ -14,6 +14,7 @@ import {
   agentIdentity,
   ApiGateway,
   describeTaskState,
+  explainAnswerFailure,
   narrateTaskEvent,
   summariseObjective,
   type ApiOperations,
@@ -4002,6 +4003,35 @@ test("a failed task says why, whichever shape the failure was recorded in", () =
   assert.equal(
     narrateTaskEvent("task_failed", {}),
     "I could not finish this.",
+  );
+});
+
+test("a refused GitHub push keeps GitHub's remedy, not the agent's", () => {
+  // The push path fails in GitHub's name when the *submitter's* token is
+  // refused. It speaks the same auth vocabulary — "401", "unauthorized" —
+  // but "Reconnect me from My Agents" is the wrong door: it sends somebody
+  // off to reconnect an agent that is working fine, while the actual fix
+  // lives in Settings → GitHub and the failure's own words point there.
+  const said = String(
+    narrateTaskEvent("task_failed", {
+      error:
+        "GitHub refused the stored token during the push (401). " +
+        "Reconnect GitHub in Settings and ask again.",
+    }),
+  );
+  assert.doesNotMatch(said, /Reconnect me from My Agents/u);
+  assert.match(said, /Reconnect GitHub in Settings/u);
+
+  // The same guard where a question failed rather than a task.
+  assert.doesNotMatch(
+    explainAnswerFailure("GitHub answered 401 for the stored token"),
+    /My Agents/u,
+  );
+
+  // And a genuine vendor sign-in failure still gets its remedy.
+  assert.match(
+    explainAnswerFailure("OAuth session expired and could not be refreshed"),
+    /Reconnect me from My Agents/u,
   );
 });
 

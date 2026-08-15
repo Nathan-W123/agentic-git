@@ -795,7 +795,7 @@ export class Coordinator {
             input.repository,
             initialVersion.revision,
           );
-    const planned = await this.planTasks(
+    const { planned, failed: planningFailures } = await this.planTasks(
       input,
       initialVersion,
       initialIndex,
@@ -803,18 +803,20 @@ export class Coordinator {
       runAudit,
     );
     const pending = [...planned];
-    const taskResults: TaskExecutionResult[] = [];
+    // Tasks that failed planning are already settled results: their status
+    // and audit trail were written where they failed, and seeding them here
+    // is what lets the survivors' run still return one row per task.
+    const taskResults: TaskExecutionResult[] = [...planningFailures];
     const latestAssessments = new Map<string, ConflictAssessment>();
     const recordedConflictFingerprints = new Set<string>();
     /** Consecutive waves in which the plan authority admitted nothing. */
     let deferredWaves = 0;
 
     // From here every task has a live session an outside stop must be able
-    // to reach. Registered after planning on purpose: planning failures are
-    // collective — one thrown plan fails the whole run — so aborting a
-    // single task's planning would take everyone else's work with it. A
-    // stop that lands during planning is recorded and honoured at the first
-    // wave boundary below instead.
+    // to reach. Registered after planning on purpose: a task that fails
+    // planning tears itself down inside planTasks and leaves no session to
+    // abort. A stop that lands during planning is recorded and honoured at
+    // the first wave boundary below instead.
     for (const entry of planned) {
       this.cancellations?.register(entry.task.id, async () => {
         await entry.adapter.cancel(entry.session.id);
@@ -1181,7 +1183,7 @@ export class Coordinator {
     index: RepositoryIndex | undefined,
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
-  ): Promise<PlannedTask[]> {
+  ): Promise<{ planned: PlannedTask[]; failed: TaskExecutionResult[] }> {
     const results = await Promise.allSettled(
       input.tasks.map(async (entry): Promise<PlannedTask> => {
         // Taken before the first await, so of two turns naming one
@@ -1431,43 +1433,52 @@ export class Coordinator {
       }),
     );
 
-    const failures = results.filter(
-      (result): result is PromiseRejectedResult => result.status === "rejected",
-    );
-    if (failures.length > 0) {
-      const cleanupFailures: unknown[] = [];
-      for (const result of results) {
-        if (result.status !== "fulfilled") {
-          continue;
-        }
-        try {
-          await result.value.adapter.cancel(result.value.session.id);
-          // A cancelled turn ends its conversation like a failed one: the
-          // resumed workspace was popped at planning and nothing else will
-          // ever destroy it.
-          if (result.value.resumed !== undefined) {
-            await this.workspaces.destroy(result.value.resumed.workspace);
-          }
-          await recorder?.status(
-            result.value.task.id,
-            "cancelled",
-            "Cancelled because another task failed during planning",
-          );
-        } catch (error) {
-          cleanupFailures.push(error);
-        }
+    // One task's planning failure is its own. The tasks in a run are
+    // independent requests — often different agents, often different people —
+    // and this used to be all-or-nothing: any thrown plan cancelled every
+    // healthy sibling and aborted the run, so one agent's dead sign-in read
+    // as "Session … was cancelled" on work that was going fine. The failed
+    // task has already recorded its ending and torn its session down inside
+    // its own catch above; here it becomes a failed result in the summary,
+    // and the survivors carry on into the waves.
+    const planned: PlannedTask[] = [];
+    const failed: TaskExecutionResult[] = [];
+    results.forEach((result, position) => {
+      if (result.status === "fulfilled") {
+        planned.push(result.value);
+        return;
       }
-      throw new AggregateError(
-        [...failures.map((result) => result.reason), ...cleanupFailures],
-        "One or more tasks failed during planning",
-      );
-    }
-    return results.map((result) => {
-      if (result.status !== "fulfilled") {
-        throw new Error("Unreachable rejected planning result");
+      const entry = input.tasks[position];
+      if (entry === undefined) {
+        throw new Error("Planning results out of step with the tasks planned");
       }
-      return result.value;
+      failed.push({
+        task: entry.task,
+        // It failed before a plan existed; the placeholders say only that,
+        // so the summary keeps its shape without inventing declarations.
+        plan: {
+          taskId: entry.task.id,
+          objective: entry.task.objective,
+          expectedFiles: [],
+          expectedSymbols: [],
+          dependencies: [],
+          commands: [],
+          externalAccess: [],
+          riskLevel: "low",
+        },
+        decision: {
+          decision: "rejected",
+          taskId: entry.task.id,
+          ownershipGrants: [],
+          constraints: [],
+          blockedBy: [],
+          explanation: "Planning failed before arbitration",
+        },
+        status: "failed",
+        explanation: errorMessage(result.reason),
+      });
     });
+    return { planned, failed };
   }
 
   /**
@@ -2375,6 +2386,14 @@ export class Coordinator {
         recorder,
         runAudit,
       );
+      // Held rather than thrown: when an event handler fails, its catch
+      // cancels this session, and what rejects out of `sendContext` is the
+      // echo of that teardown — "Session … was cancelled" — not the cause.
+      // Throwing it here skipped the event-error aggregation below on
+      // exactly the runs that had one, which is how a thread ended up
+      // naming the cancel and never the reason for it.
+      let contextFailure: unknown;
+      let contextFailed = false;
       try {
         await entry.adapter.sendContext(entry.session.id, {
           decision: entry.decision,
@@ -2382,15 +2401,21 @@ export class Coordinator {
           workspacePath: workspace.path,
           planRevision: entry.planRevision,
         });
+      } catch (error) {
+        contextFailure = error;
+        contextFailed = true;
       } finally {
         await watching.stop();
       }
       await eventChain;
       if (eventErrors.length > 0) {
         throw new AggregateError(
-          eventErrors,
+          contextFailed ? [...eventErrors, contextFailure] : eventErrors,
           `Agent events failed for task ${entry.task.id}`,
         );
+      }
+      if (contextFailed) {
+        throw contextFailure;
       }
 
       // What the run spent, written where the budget throttle and the room's

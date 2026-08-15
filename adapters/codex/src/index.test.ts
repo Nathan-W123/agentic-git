@@ -227,6 +227,108 @@ test("runs structured read-only planning then workspace-write execution", async 
   }
 });
 
+test("a requested platform action round-trips and replays into the next round", async () => {
+  const fixture = await createFixture();
+  const executionInputs: string[] = [];
+  const emptyScope = {
+    additionalFiles: [],
+    additionalSymbols: [],
+    additionalApis: [],
+    additionalSchemas: [],
+    additionalConfigKeys: [],
+    additionalTests: [],
+    additionalServices: [],
+    reason: "",
+  };
+  const runner: CodexProcessRunner = async (_executable, args, options = {}) => {
+    const sandbox = args[args.indexOf("--sandbox") + 1];
+    if (sandbox === "read-only") {
+      return output(JSON.stringify(PLAN));
+    }
+    executionInputs.push(options.input ?? "");
+    if (executionInputs.length === 1) {
+      // The task is a push, which only the platform can perform: the round
+      // ends on the request instead of on a changeset.
+      return output(
+        JSON.stringify({
+          outcome: "action_requested",
+          requestId: "act_1",
+          action: "push",
+          symbolsChanged: [],
+          explanation: "The push is the platform's to run",
+          ...emptyScope,
+        }),
+      );
+    }
+    return output(
+      JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: [],
+        explanation: "Pushed: published as coord/export-1",
+        requestId: "",
+        action: "",
+        ...emptyScope,
+      }),
+    );
+  };
+
+  try {
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      runner,
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const session = await adapter.startTask({
+      task: TASK,
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+    });
+    const events: AgentEvent[] = [];
+    await adapter.streamEvents(session.id, (event) => {
+      events.push(event);
+      // Standing in for the coordinator, which always answers an action.
+      if (event.event === "action_requested") {
+        void adapter.resolveAction(session.id, {
+          requestId: event.requestId ?? "",
+          action: event.action,
+          outcome: "done",
+          explanation: "Published revision abc123 on coord/export-1",
+        });
+      }
+    });
+    await adapter.requestPlan(session.id);
+    const workspace = await fixture.workspaces.create({
+      taskId: TASK.id,
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    await adapter.sendContext(session.id, contextFor(workspace));
+
+    // Two execution rounds: the first taught the actions and asked for one,
+    // the second was told what the platform did and finished on it.
+    assert.equal(executionInputs.length, 2);
+    assert.match(
+      executionInputs[0] ?? "",
+      /platform can perform a small fixed set of actions/iu,
+    );
+    assert.match(executionInputs[1] ?? "", /Published revision abc123/u);
+    const kinds = events.map((event) => event.event);
+    assert.ok(kinds.includes("action_requested"), kinds.join(", "));
+    assert.equal(kinds.at(-1), "completed");
+
+    await fixture.workspaces.destroy(workspace);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
 test("a conversational turn drops --ephemeral and resumes its thread", async () => {
   // The trade the conversational flag names: hermetic execution for a task
   // that runs once, a persisted thread for a turn whose next turn wants it

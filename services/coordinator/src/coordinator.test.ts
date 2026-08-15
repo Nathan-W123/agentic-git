@@ -390,7 +390,7 @@ test("honors transitive blocker order and isolates each run's audit", async () =
   }
 });
 
-test("cancels every started session when planning fails", async () => {
+test("a planning failure fails that task alone; the wave runs on", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
 
   try {
@@ -420,20 +420,28 @@ test("cancels every started session when planning fails", async () => {
       ),
     );
 
-    await assert.rejects(
-      coordinator.run({
-        repository: fixture.repository,
-        workspaceRoot: path.join(root, "workspaces"),
-        integrationRoot: path.join(root, "integration"),
-        tasks: [
-          { task: task("task_a"), adapter: healthy },
-          { task: task("task_b"), adapter: failing },
-        ],
-      }),
-      /failed during planning/u,
+    // The tasks are independent requests, so one agent failing to plan —
+    // a dead sign-in, most days — must not abort the other's healthy run.
+    const result = await coordinator.run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        { task: task("task_a"), adapter: healthy },
+        { task: task("task_b"), adapter: failing },
+      ],
+    });
+
+    const outcomes = new Map(
+      result.tasks.map((entry) => [entry.task.id, entry]),
     );
-    assert.equal(healthy.cancelCount, 1);
-    assert.equal(failing.cancelCount, 1);
+    assert.equal(outcomes.get("task_a")?.status, "integrated");
+    assert.equal(outcomes.get("task_b")?.status, "failed");
+    // The failure keeps its causes, not just the wrapper's shape.
+    assert.match(
+      outcomes.get("task_b")?.explanation ?? "",
+      /provider authentication failed/u,
+    );
     const [run] = await store.listRuns(1);
     assert.ok(run);
     const detail = await store.getRun(run.id);
@@ -1878,6 +1886,53 @@ test("a stop from outside aborts the live session and the task ends cancelled", 
     assert.ok(
       !result.audit.some((event) => event.type === "task_failed"),
       result.audit.map((event) => event.type).join(", "),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an event handler failure names its cause, not the cancel's echo", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    // A store that refuses the one write the scope event needs — standing in
+    // for any event handler failing mid-run. The handler's catch cancels the
+    // session; the edit phase then rejects with that cancel's echo, and the
+    // echo used to be the whole explanation the thread got.
+    class RefusingStore extends InMemoryCoordinationStore {
+      public override async saveScopeChange(
+        _runId: string,
+        _request: ScopeChangeRequest,
+      ): Promise<void> {
+        throw new Error("scope audit write refused");
+      }
+    }
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      false,
+      "src/extra.txt",
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store: new RefusingStore(),
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "failed");
+    assert.match(
+      result.tasks[0]?.explanation ?? "",
+      /scope audit write refused/u,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
