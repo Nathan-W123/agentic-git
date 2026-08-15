@@ -819,3 +819,38 @@ test("no agent call sign is a prefix of another", async () => {
   );
   assert.deepEqual(collisions, []);
 });
+
+test("an agent's reply to a person is shown, not folded into the thinking block", async () => {
+  // Reported as "they start on the task but they don't respond and confirm".
+  // The server does post an acknowledgement when work is asked for inside a
+  // thread — before the task is even submitted — but it is a reply carrying
+  // the default `agent` kind, and the transcript treated any such reply as run
+  // chatter and hoisted it into a fold that renders closed once a thread has
+  // an ending. The reader saw their request and then nothing.
+  const source = await publicFile("screen-chats.js");
+  const start = source.indexOf("function isThreadThinking");
+  const body = source.slice(start, source.indexOf("\n}", start));
+  // The server's own mark, and nothing else. Guessing from the kind is what
+  // swallowed every sentence an agent addresses to a person.
+  assert.match(body, /reply\.kind === "progress"/u);
+  assert.equal(
+    /reply\.kind === "agent"/u.test(body),
+    false,
+    "an `agent` reply is the agent talking to a person and must stay visible",
+  );
+});
+
+test("the working dots come back for the next turn in a finished thread", async () => {
+  // The same turn, silent twice: a thread whose earlier turn ended is exactly
+  // where the next request is made, and asking whether the thread had *ever*
+  // ended meant the dots never returned for it.
+  const source = await publicFile("screen-chats.js");
+  const start = source.indexOf("function threadTyping");
+  const body = source.slice(start, source.indexOf("\n}", start));
+  assert.equal(
+    /replies\.some\(\(reply\) => isThreadEnding\(reply\)\)/u.test(body),
+    false,
+    "the dots must key on the last reply, not on any reply ever",
+  );
+  assert.match(body, /replies\[replies\.length - 1\]/u);
+});
