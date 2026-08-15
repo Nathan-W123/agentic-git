@@ -298,6 +298,45 @@ const CHANNEL_PROGRESS_INTERVAL_MS = 2000;
  * is not itself the cost of answering.
  */
 const CHANNEL_ANSWER_CONTEXT = 8;
+
+/**
+ * A task's state in words, for the agent being asked how its work is going.
+ *
+ * The status column is a scheduler's vocabulary and it is read here by
+ * something that speaks English. `open` is the one that matters: it means the
+ * work landed and the conversation is still warm for a follow-up, and it is
+ * only ever reached *from* a successful integration —
+ * `store.openSubmittedTask` refuses any row that is not `claimed`, and the
+ * only caller runs inside the `integrated` branch of the settlement loop. To a
+ * reader, "open" says the opposite of all of that.
+ *
+ * That is not a hypothetical misreading. Asked for a status report, agents
+ * reported work they had finished, summarised and posted about as still
+ * outstanding — which is the correct answer to what they were shown. Handing a
+ * model a raw enum and expecting it to know the local meaning of a word that
+ * already has a plain one is asking it to guess; these are the same states,
+ * said properly.
+ */
+export function describeTaskState(status: string): string {
+  switch (status) {
+    case "submitted":
+      return "queued, not started yet";
+    case "claimed":
+      return "running now";
+    case "planned":
+      return "planned, waiting for a person to approve it";
+    case "open":
+      return "done — finished and landed, thread still open for follow-ups";
+    case "integrated":
+      return "done — finished and landed";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return status;
+  }
+}
 /**
  * An "@" that is addressing somebody, rather than one inside a word.
  *
@@ -8350,7 +8389,9 @@ export class ApiGateway {
         "repository checked out. So describe what your work is doing from " +
         "the list below, and never say the work cannot continue, is blocked, " +
         "or cannot be completed merely because this conversation cannot see " +
-        "the files — that is true of the chat and false of the task.\n\n" +
+        "the files — that is true of the chat and false of the task. Each " +
+        "task below is labelled with what has actually happened to it; a task " +
+        "labelled done is finished, whatever else you remember about it.\n\n" +
         (await this.agentWorkContext(repositoryId, candidate)) +
         `\n\nThe message: ${question}`,
       QUESTION_TIMEOUT_MS,
@@ -8402,11 +8443,22 @@ export class ApiGateway {
         : mine
             .map(
               (task) =>
-                `- [${task.status}] ${task.objective.replace(/\s+/gu, " ").slice(0, 160)}`,
+                `- [${describeTaskState(task.status)}] ${task.objective
+                  .replace(/\s+/gu, " ")
+                  .slice(0, 160)}`,
             )
             .join("\n");
+    // Threads included, not just the lines that opened them. What an agent
+    // says when it finishes is a reply inside its own thread, so a context
+    // built from root messages alone contains the request and never the
+    // answer — which is how an agent came to report work it had finished and
+    // summarised as still outstanding.
     const recent = messages
-      .map((message) => message.content.replace(/\s+/gu, " ").trim())
+      .flatMap((message) => [
+        message.content,
+        ...message.replies.map((reply) => reply.content),
+      ])
+      .map((line) => line.replace(/\s+/gu, " ").trim())
       .filter((line) => line.length > 0)
       .slice(-CHANNEL_ANSWER_CONTEXT)
       .map((line) => `- ${line.slice(0, 200)}`)

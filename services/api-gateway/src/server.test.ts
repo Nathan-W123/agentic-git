@@ -13,6 +13,7 @@ import {
 import {
   agentIdentity,
   ApiGateway,
+  describeTaskState,
   narrateTaskEvent,
   summariseObjective,
   type ApiOperations,
@@ -7218,4 +7219,31 @@ test("a collaborator cannot promote an auditor, but can still set a plain role",
     body: { role: "auditor" },
   });
   assert.equal(promotion.status === 200, false, "a guest must not promote");
+});
+
+/**
+ * Asked for a status report, agents called finished work outstanding.
+ *
+ * They were right about what they were shown. A conversational turn that
+ * lands is set to `open` — the work is in canonical and the thread stays warm
+ * for a follow-up — and the status list handed the model that word raw. "Open"
+ * has a plain English meaning and it is the opposite of the one intended.
+ */
+test("a landed conversational task is described as done, not as open", () => {
+  assert.match(describeTaskState("open"), /^done\b/u);
+  assert.match(describeTaskState("integrated"), /^done\b/u);
+  // The word itself must not survive into the sentence: it is the whole bug.
+  assert.doesNotMatch(describeTaskState("open"), /^open$/u);
+
+  // And the states that genuinely are not finished must not read as done.
+  for (const status of ["submitted", "claimed", "planned", "failed", "cancelled"]) {
+    assert.doesNotMatch(
+      describeTaskState(status),
+      /^done\b/u,
+      `${status} must not be reported as finished`,
+    );
+  }
+  // A status this function has not been taught is passed through rather than
+  // guessed at: a wrong plain-English gloss would be worse than the raw word.
+  assert.equal(describeTaskState("something_new"), "something_new");
 });
