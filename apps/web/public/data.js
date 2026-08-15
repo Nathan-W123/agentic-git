@@ -234,6 +234,8 @@ export const state = {
    * between states on every render.
    */
   previews: {},
+  /** Images being uploaded from the composer right now, for the note beside it. */
+  attaching: 0,
   /** The project whose inbox has been fetched, so it is fetched once. */
   dmLoadedProject: undefined,
   /** When the inbox was last fetched, for the refresh floor. */
@@ -326,8 +328,12 @@ export async function api(path, options = {}) {
   const method = options.method ?? "GET";
   const headers = new Headers(options.headers ?? {});
   headers.set("Accept", "application/json");
+  // A caller that names its own content type is sending bytes, not a record —
+  // an image upload is the only one today. Its body goes up untouched;
+  // everything else is still JSON, which is what every other endpoint takes.
+  const raw = options.contentType !== undefined;
   if (options.body !== undefined) {
-    headers.set("Content-Type", "application/json");
+    headers.set("Content-Type", raw ? options.contentType : "application/json");
   }
   if (!["GET", "HEAD", "OPTIONS"].includes(method)) {
     headers.set("X-CSRF-Token", csrfToken());
@@ -338,7 +344,7 @@ export async function api(path, options = {}) {
     headers,
     ...(options.body === undefined
       ? {}
-      : { body: JSON.stringify(options.body) }),
+      : { body: raw ? options.body : JSON.stringify(options.body) }),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -2955,6 +2961,28 @@ export async function loadPreview(repositoryId) {
     state.previews[repositoryId] = null;
   }
   return state.previews[repositoryId];
+}
+
+/**
+ * Stores one image and answers with the reference a message carries.
+ *
+ * The bytes go up as the body with their own content type — no multipart, no
+ * form encoding — because the endpoint takes one image and the browser
+ * already knows what it is. What comes back is inserted into the draft as
+ * `![name](attachment:<id>)`, which is the one pattern the transcript renders
+ * and the one the gateway rewrites into a path an agent can open.
+ */
+export async function uploadAttachment(repositoryId, file) {
+  const response = await api(repositoryPath(repositoryId, "/attachments"), {
+    method: "POST",
+    body: file,
+    contentType: file.type,
+  });
+  const id = response?.id;
+  if (typeof id !== "string" || id === "") {
+    throw new Error("The image was not stored");
+  }
+  return id;
 }
 
 export async function startPreview(repositoryId) {

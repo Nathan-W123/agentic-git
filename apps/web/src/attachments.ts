@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 /**
@@ -69,6 +69,32 @@ export class AttachmentStore {
     const id = `${randomBytes(16).toString("hex")}.${extension}`;
     await writeFile(path.join(this.directory, id), bytes);
     return id;
+  }
+
+  /**
+   * Where one image sits on disk, or nothing.
+   *
+   * For handing an agent something it can open. A task runs with a checkout
+   * and a filesystem, so the shortest path from "somebody pasted a
+   * screenshot" to "the agent looked at it" is the path itself — no copy, no
+   * new column, no bytes travelling through an objective.
+   *
+   * The same strict pattern as `read`, for the same reason: the id is chosen
+   * by this class, but it comes back through a URL and a message body, and
+   * those are where a `..` gets in. Existence is checked, so a caller is
+   * never handed a path to nothing.
+   */
+  public async pathFor(id: string): Promise<string | undefined> {
+    if (!/^[0-9a-f]{32}\.(png|jpg|gif|webp)$/u.test(id)) {
+      return undefined;
+    }
+    const full = path.join(this.directory, id);
+    try {
+      await access(full);
+      return full;
+    } catch {
+      return undefined;
+    }
   }
 
   /**

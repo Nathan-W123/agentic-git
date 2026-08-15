@@ -503,6 +503,9 @@ async function serve(
     async attachmentSave(input) {
       return await attachments.save(input.bytes, input.contentType);
     },
+    async attachmentPath(id) {
+      return await attachments.pathFor(id);
+    },
     async attachmentRead(id) {
       return await attachments.read(id);
     },

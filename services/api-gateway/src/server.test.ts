@@ -468,6 +468,13 @@ async function startRuntime(
     async canonicalHead() {
       return canonicalState.head;
     },
+    async attachmentPath(id: string) {
+      // Only the ids a test stored; anything else is genuinely missing, which
+      // is the case the second attachment test covers.
+      return /^a{32}\.(png|jpg|gif|webp)$/u.test(id)
+        ? `/var/data/.coordinator/attachments/${id}`
+        : undefined;
+    },
     async rollbackRepository(input) {
       rollbacks.push({
         repositoryId: input.repositoryId,
@@ -7864,4 +7871,70 @@ test("the work is queued without waiting for the thread's opening thoughts", asy
     Date.now() - startedAt < 1_000,
     "starting the work waited on a model call rather than on none",
   );
+});
+
+test("an image in a request reaches the agent as a file it can open", async (t) => {
+  // The point of attaching one. The channel writes `![alt](attachment:<id>)`,
+  // which the dashboard turns into an <img> and an agent could only read as
+  // punctuation — so the objective names the path instead, and the bytes are
+  // already on the filesystem the task runs on.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic", visibility: "org" }]);
+  const repositoryId = await invitableRepository(owner, "attachment-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const agents = await owner.request(`${base}/agents`);
+  const name = (agents.data.agents as { name: string }[])[0]?.name ?? "";
+
+  const id = "a".repeat(32) + ".png";
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: `@${name} fix the header spacing to match this ![screenshot](attachment:${id})`,
+    },
+  });
+
+  await waitFor(async () => {
+    const listed = await runtime.store.listSubmittedTasks({ repositoryId });
+    return listed.length > 0;
+  }, "the mention never became a task");
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  // The path the stub answers with, not the upload id.
+  assert.match(task!.objective, /\/attachments\/a{32}\.png/u);
+  assert.match(task!.objective, /open this file to see it/u);
+  // And the markdown is gone, because an agent cannot do anything with it.
+  assert.doesNotMatch(task!.objective, /attachment:/u);
+});
+
+test("an image the deployment cannot place is left as it was written", async (t) => {
+  // A wrong path is worse than a visible id: one is a puzzle, the other is a
+  // lie about a file. An unknown id keeps its reference.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic", visibility: "org" }]);
+  const repositoryId = await invitableRepository(owner, "attachment-missing-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const agents = await owner.request(`${base}/agents`);
+  const name = (agents.data.agents as { name: string }[])[0]?.name ?? "";
+
+  const missing = "b".repeat(32) + ".png";
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: `@${name} update the button styling to match ![gone](attachment:${missing})`,
+    },
+  });
+
+  await waitFor(async () => {
+    const listed = await runtime.store.listSubmittedTasks({ repositoryId });
+    return listed.length > 0;
+  }, "the mention never became a task");
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.match(task!.objective, /attachment:b{32}\.png/u);
 });
