@@ -4764,6 +4764,15 @@ svg {
   text-decoration: underline;
 }
 
+/* Running but not answering yet. Deliberately not a link: the address exists
+   and does not work, and offering it reads as the preview being broken. */
+.preview-starting {
+  font-size: 12px;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--text-3);
+  white-space: nowrap;
+}
+
 /* Header and tabs as one grid row, so the body still gets the stretching one.
    The panel's three rows are header / body / composer, and a fourth top-level
    child does not extend that — it takes the body's row and pushes everything

@@ -15,6 +15,7 @@
   },
   "scripts": {
     "start": "node apps/web/dist/index.js",
+    "dev": "npm run web",
     "build": "turbo run build",
     "typecheck": "turbo run typecheck",
     "test": "turbo run test",
