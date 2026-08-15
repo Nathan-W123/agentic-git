@@ -2460,7 +2460,15 @@ svg {
 .pop-layer {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  /* Above every drawer and panel, below only the toasts (90). A popover is
+     the answer to the most recent tap, and that tap can come from *inside*
+     a phone drawer — the channel drawer's "+" and the roster's "Add agent"
+     both open menus. At 60 this layer sat under the whole phone stack
+     (chat pane 70, thread panel 72, channel drawer 76, nav drawer 80), so
+     the bottom sheet those buttons opened appeared behind the very drawer
+     that launched it, dimmed by its own scrim and untappable. Desktop has
+     nothing between the old value and this one, so only phones change. */
+  z-index: 85;
 }
 
 .pop-scrim {
