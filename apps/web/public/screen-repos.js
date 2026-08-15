@@ -4,7 +4,11 @@
  * The product is cloud-based: a repository is attached to the control plane
  * once and everyone works against that same canonical copy. So this screen
  * lists what the project already has and offers the two ways to add one; it
- * deliberately has no clone, pull, or fetch affordance.
+ * deliberately has no clone or per-user fetch affordance. The one remote
+ * operation it does offer is "Sync from GitHub", and that is repository
+ * management rather than a working-copy pull: it moves the shared canonical
+ * copy up to date with the origin it was imported from, which is what
+ * unblocks pushing after pull requests merge on GitHub.
  */
 
 import {
@@ -293,6 +297,32 @@ export async function connectRepository(rerender) {
       },
     );
     toast("Repository connected", "ok");
+    await loadContext();
+    rerender();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+export async function syncRepositoryFromGitHub(repositoryId, rerender) {
+  toast("Syncing from GitHub…");
+  try {
+    const result = await api(
+      `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/sync`,
+      { method: "POST", body: {} },
+    );
+    const sync = result.sync ?? {};
+    const moved = `${String(sync.previousRevision ?? "").slice(0, 8)} → ${String(
+      sync.revision ?? "",
+    ).slice(0, 8)}`;
+    toast(
+      sync.status === "already_current"
+        ? "Already up to date with GitHub"
+        : sync.status === "fast_forwarded"
+          ? `Synced from GitHub (${moved})`
+          : `Synced from GitHub — local work and GitHub's merged (${moved})`,
+      "ok",
+    );
     await loadContext();
     rerender();
   } catch (error) {

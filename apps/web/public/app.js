@@ -111,6 +111,7 @@ import {
   connectRepository,
   createRepository,
   openRepository,
+  syncRepositoryFromGitHub,
 } from "./screen-repos.js";
 import {
   closeFile,
@@ -2743,6 +2744,12 @@ document.addEventListener("click", (event) => {
     case "repo-menu":
       showMenu(node, [
         { act: "open-repo", value, label: "Open", iconName: "arrowRight" },
+        // Only for repositories that actually have a GitHub origin — a menu
+        // must never offer what the platform cannot do for this repository.
+        ...(state.repositories.find((repo) => repo.id === value)?.provider ===
+        "github"
+          ? [{ act: "repo-sync", value, label: "Sync from GitHub", iconName: "sync" }]
+          : []),
         { act: "invite-repo", value, label: "Invite to this repository…", iconName: "users" },
         {
           act: "star",
@@ -2753,6 +2760,9 @@ document.addEventListener("click", (event) => {
         { separator: true },
         { act: "copy-id", value, label: "Copy repository id", iconName: "file" },
       ]);
+      return;
+    case "repo-sync":
+      void syncRepositoryFromGitHub(value, render);
       return;
     /* Chats */
     case "channel-new":

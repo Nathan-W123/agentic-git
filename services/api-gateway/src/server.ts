@@ -1534,6 +1534,24 @@ export interface ApiOperations {
     token?: string;
     actorId: string;
   }): Promise<StoredRepository>;
+  /**
+   * Brings canonical up to date with the GitHub remote it was imported
+   * from — the other half of export, and what unblocks a push refused
+   * because the remote moved. Optional the same way the GitHub connection
+   * is: a deployment without remote repositories has nothing to sync.
+   */
+  syncRepository?(input: {
+    projectId: string;
+    repositoryId: string;
+    actorId: string;
+  }): Promise<{
+    status: "already_current" | "fast_forwarded" | "merged";
+    remoteUrl: string;
+    upstreamBranch: string;
+    upstreamRevision: string;
+    previousRevision: string;
+    revision: string;
+  }>;
   submitTask(input: {
     projectId: string;
     repositoryId: string;
@@ -4327,6 +4345,47 @@ export class ApiGateway {
         },
       });
       this.sendJson(response, 201, { repository });
+      return;
+    }
+
+    // Syncing a repository from its GitHub origin. The same gate as import,
+    // because it is the same kind of act — repository management, moving the
+    // mirror rather than working inside it. The caller's own stored GitHub
+    // token authenticates the fetch when they have one; the operation itself
+    // writes the `repository_synced` audit record.
+    const syncMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/sync$`,
+        "u",
+      ),
+    );
+    if (syncMatch !== undefined && method === "POST") {
+      const [projectId = "", repositoryId = ""] = syncMatch;
+      await authorizeProject(
+        this.options.store,
+        principal,
+        projectId,
+        "import_repository",
+      );
+      const syncRepository = this.options.operations.syncRepository;
+      if (syncRepository === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment does not support syncing from a remote",
+        );
+      }
+      const synced = await this.performOperation(
+        "repository_sync_failed",
+        async () =>
+          await syncRepository({
+            projectId,
+            repositoryId,
+            actorId: principal.user.id,
+          }),
+      );
+      this.sendJson(response, 200, { sync: synced });
       return;
     }
 

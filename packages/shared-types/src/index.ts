@@ -834,6 +834,12 @@ export type AuditEventType =
   | "project_changed"
   | "repository_created"
   | "repository_imported"
+  /**
+   * Canonical was brought up to date with its GitHub origin — the other
+   * half of export. Records how far it moved and which upstream tip the
+   * mirror now considers its import point.
+   */
+  | "repository_synced"
   | "task_submitted"
   /**
    * One submitted objective was queued as several narrower tasks. Written at

@@ -1520,12 +1520,17 @@ export class CodexAdapter implements AgentAdapter {
         "publishes this repository's accepted canonical state to its " +
         "recorded remote on a fresh branch — use it when asked to push or " +
         "publish to GitHub; your own `git push` cannot reach the remote " +
-        'from this workspace, so never try it. "preview_start" runs this ' +
-        'repository\'s app and answers with its URL; "preview_stop" stops ' +
-        "it. The platform answers done or refused with an explanation " +
-        "either way. A refusal is final for this run — do not retry it; " +
-        "finish with outcome=completed and an explanation relaying the " +
-        "refusal's reason, so the person who asked can act on it.",
+        'from this workspace, so never try it. "pull" brings the ' +
+        "platform's copy of this repository up to date from its GitHub " +
+        "remote — use it when asked to pull, sync, or update from GitHub; " +
+        "a `git pull` in this workspace reaches only the platform's local " +
+        'mirror and updates nothing anyone else can see. "preview_start" ' +
+        "runs this repository's app and answers with its URL; " +
+        '"preview_stop" stops it. The platform answers done or refused ' +
+        "with an explanation either way. A refusal is final for this run " +
+        "— do not retry it; finish with outcome=completed and an " +
+        "explanation relaying the refusal's reason, so the person who " +
+        "asked can act on it.",
       "When an action's result is the whole of what was asked for — a " +
         "requested push, for example — finish with outcome=completed and " +
         "an explanation reporting the action's own result, even though you " +
