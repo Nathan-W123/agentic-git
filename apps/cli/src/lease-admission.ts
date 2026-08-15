@@ -318,21 +318,6 @@ export class LeasePlanAuthority implements PlanAuthority {
   }
 
   /**
-   * Appends an admission event, unless it would repeat the last one.
-   *
-   * A task waiting its turn is re-decided every retry interval for as long as
-   * the holder runs, and each pass reaches the same answer — that is the
-   * mechanism working, not news. Writing it every time turned one arbitration
-   * into a message every fifteen seconds in the room, for the whole of a
-   * holder's execution.
-   *
-   * The comparison is against the durable record rather than something held in
-   * memory, so a task deferred by one run and reconsidered by the next is not
-   * announced twice either. Only a decision that actually changed — sequenced
-   * becoming partial, a different blocker, the wait finally ending — is worth
-   * a line, and each of those is.
-   */
-  /**
    * Queues the files this task planned, was granted, and had withheld.
    *
    * The agent's own patches for those files are deliberately not carried
@@ -406,6 +391,21 @@ export class LeasePlanAuthority implements PlanAuthority {
     });
   }
 
+  /**
+   * Appends an admission event, unless it would repeat the last one.
+   *
+   * A task waiting its turn is re-decided every retry interval for as long as
+   * the holder runs, and each pass reaches the same answer — that is the
+   * mechanism working, not news. Writing it every time turned one arbitration
+   * into a message every fifteen seconds in the room, for the whole of a
+   * holder's execution.
+   *
+   * The comparison is against the durable record rather than something held in
+   * memory, so a task deferred by one run and reconsidered by the next is not
+   * announced twice either. Only a decision that actually changed — sequenced
+   * becoming partial, a different blocker, the wait finally ending — is worth
+   * a line, and each of those is.
+   */
   private async record(
     request: PlanAdmissionRequest,
     event: {

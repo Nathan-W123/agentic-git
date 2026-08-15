@@ -124,10 +124,10 @@ Three constants keep a refused plan from replanning forever.
 "plan again, narrower" before the task is sequenced instead — the first refusal
 is news to the agent, the second establishes that knowing did not help.
 `BLOCKED_ADMISSION_LIFETIME_CAP` (4) is the backstop for refusals spaced far
-enough apart never to form a run. Both are liveness bounds, not safety valves:
-each one can only convert a refusal into a wait behind the holder, which is a
-stricter promise about ordering than the refusal was. Neither can admit
-anything.
+enough apart never to form a run. Both caps are liveness bounds, not safety
+valves: each one can only convert a refusal into a wait behind the holder,
+which is a stricter promise about ordering than the refusal was. Neither can
+admit anything.
 
 ## Narrating Arbitration
 
@@ -154,7 +154,7 @@ sentence shape: the two agents, and the order they run in.**
 | `sequence` | `⚖️ A and B have conflicting files — B starts once A is done.` |
 | `block` | `⚖️ A and B have conflicting files — B is narrowing its plan.` |
 | notification | `⚖️ A and B have conflicting files but can run together.` |
-| partial admission | `⚖️ A and B have conflicting files — A starts on `*granted files*` now, `*deferred files*` once B is done.` |
+| partial admission | `⚖️ A and B have conflicting files — A starts on <granted files> now, <deferred files> once B is done.` |
 | a hold clearing | `⚖️ A starts now — what it was waiting on is done.` |
 
 Four rules hold that shape in place, each of them a regression somebody
@@ -185,8 +185,9 @@ reported:
 `narrateConflicts` is polled from the channel-progress pump (2-second cadence,
 so the line lands while the arbitration is still news) and advances a
 `conflictSequence` cursor over the audit log. Events written before
-`conflict_detected` carried a repository, or naming anything other than exactly
-two tasks, are skipped: there is nowhere to route them and no order to state.
+`conflict_detected` carried a project and repository, or naming anything other
+than exactly two tasks, are skipped: there is nowhere to route them and no
+order to state.
 
 ## Replanning
 
