@@ -7938,3 +7938,179 @@ test("an image the deployment cannot place is left as it was written", async (t)
   const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
   assert.match(task!.objective, /attachment:b{32}\.png/u);
 });
+
+test("SCRATCH repro: work asked as a thread reply confirms in the thread", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "scratch-thread-repo");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Keeper" },
+    })).status,
+    200,
+  );
+
+  runtime.chatAnswer.text = "On it — updating the retry helper.";
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Keeper please update the retry helper in src/retry.ts" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never dispatched a task",
+  );
+  const threadRoot = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.kind === "agent");
+  assert.ok(threadRoot !== undefined, "the dispatch never opened a thread");
+  console.log("ROOT after dispatch:", JSON.stringify({
+    content: threadRoot.content,
+    taskId: threadRoot.taskId,
+    replies: threadRoot.replies.map((r) => ({ kind: r.kind, authorId: r.authorId, content: r.content })),
+  }, null, 1));
+
+  // Root task settled (NOT open): the "integrated" case a finished first turn
+  // leaves behind.
+  await runtime.store.claimSubmittedTasks(repositoryId);
+  const tasksBefore = await runtime.store.listSubmittedTasks({ repositoryId });
+  console.log("TASKS:", tasksBefore.map((task) => ({ id: task.id, status: task.status })));
+
+  runtime.chatAnswer.text = "On it — adding the config loader change.";
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(threadRoot.id)}/replies`,
+    { method: "POST", body: { content: "now update the config loader the same way" } },
+  );
+  assert.equal(replied.status, 201);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  console.log("SUBMITTED COUNT:", runtime.submittedTasks.length);
+  const after = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.id === threadRoot.id);
+  console.log("ROOT after reply:", JSON.stringify({
+    content: after?.content,
+    replies: (after?.replies ?? []).map((r) => ({ kind: r.kind, authorId: r.authorId, content: r.content })),
+  }, null, 1));
+  const all = await runtime.store.listChannelMessages(repositoryId, ownerId);
+  console.log("ALL MESSAGES:", JSON.stringify(all.map((m) => ({ id: m.id, kind: m.kind, authorId: m.authorId, content: m.content.slice(0, 80) })), null, 1));
+});
+
+test("a thread opens while the agent is working, not once it has finished", async (t) => {
+  // Reported as: threads do not appear until the task completes, which is
+  // backwards for a room whose purpose is watching the work happen. The agent's
+  // own progress message is the first thing about *this* run rather than about
+  // every run, so it is what opens the thread — and the held preamble flushes
+  // in above it.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic", visibility: "org" }]);
+  const repositoryId = await invitableRepository(owner, "live-thread-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const agents = await owner.request(`${base}/agents`);
+  const name = (agents.data.agents as { name: string }[])[0]?.name ?? "";
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: `@${name} rework the retry loop` },
+  });
+  await waitFor(async () => {
+    const listed = await runtime.store.listSubmittedTasks({ repositoryId });
+    return listed.length > 0;
+  }, "the mention never became a task");
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+
+  // The run says what it is doing. Nothing has ended.
+  await runtime.store.appendAudit(undefined, {
+    type: "agent_progress",
+    taskId: task!.id,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      message: "Reading retry.ts and mapping every caller",
+    },
+  });
+
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    const thread = (listed.data.messages as { taskId?: string; replies: unknown[] }[])
+      .find((message) => message.taskId === task!.id);
+    const replies = (thread?.replies ?? []) as { content: string }[];
+    return replies.some((reply) => reply.content.includes("mapping every caller"));
+  }, "the thread stayed empty while the agent was working");
+});
+
+test("SCRATCH repro OPEN: work asked as a reply in an open thread", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "scratch-open-repo");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  assert.equal(
+    (await owner.request(`${base}/agents/anthropic`, {
+      method: "POST",
+      body: { name: "Keeper" },
+    })).status,
+    200,
+  );
+
+  runtime.chatAnswer.text = "On it — updating the retry helper.";
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Keeper please update the retry helper in src/retry.ts" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never dispatched a task",
+  );
+  const threadRoot = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.kind === "agent");
+  assert.ok(threadRoot !== undefined, "the dispatch never opened a thread");
+  console.log("ROOT after dispatch:", JSON.stringify({
+    content: threadRoot.content,
+    taskId: threadRoot.taskId,
+    replies: threadRoot.replies.map((r) => ({ kind: r.kind, authorId: r.authorId, content: r.content })),
+  }, null, 1));
+
+  // Root task settled (NOT open): the "integrated" case a finished first turn
+  // leaves behind.
+  await runtime.store.claimSubmittedTasks(repositoryId);
+  await runtime.store.openSubmittedTask(threadRoot.taskId!);
+  const tasksBefore = await runtime.store.listSubmittedTasks({ repositoryId });
+  console.log("TASKS:", tasksBefore.map((task) => ({ id: task.id, status: task.status })));
+
+  runtime.chatAnswer.text = "On it — adding the config loader change.";
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(threadRoot.id)}/replies`,
+    { method: "POST", body: { content: "now update the config loader the same way" } },
+  );
+  assert.equal(replied.status, 201);
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  console.log("SUBMITTED COUNT:", runtime.submittedTasks.length);
+  const after = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.id === threadRoot.id);
+  console.log("ROOT after reply:", JSON.stringify({
+    content: after?.content,
+    replies: (after?.replies ?? []).map((r) => ({ kind: r.kind, authorId: r.authorId, content: r.content })),
+  }, null, 1));
+  const all = await runtime.store.listChannelMessages(repositoryId, ownerId);
+  console.log("ALL MESSAGES:", JSON.stringify(all.map((m) => ({ id: m.id, kind: m.kind, authorId: m.authorId, content: m.content.slice(0, 80) })), null, 1));
+});

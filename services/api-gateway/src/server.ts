@@ -562,9 +562,28 @@ const CHANNEL_PROGRESS_MAX_MS = 60 * 60 * 1000;
  * order, so the reasoning is there for the one run in ten that needs
  * explaining.
  */
+/**
+ * Lines that are true of every run, and so say nothing about this one.
+ *
+ * Held until something notable opens the thread, which is what stops "change
+ * this 1 to a 2" getting a room of its own.
+ *
+ * Two things that used to be in here are not any more, and the distinction is
+ * the whole point of the list: `agent_progress` carries the agent's *own*
+ * message, and `workspace_changed` names the files it is editing right now.
+ * Neither is boilerplate — they are the only things in a run that are about
+ * this run — and holding them meant the thread stayed empty for the entire
+ * time the work was happening and appeared, complete, once it was over. A
+ * room whose purpose is watching somebody think is no use delivered as a
+ * transcript afterwards.
+ *
+ * The cost is honest and was chosen deliberately: a task that narrates
+ * anything at all now opens a thread, so most real work gets one. Only a run
+ * that says nothing of its own between starting and ending still lands as a
+ * single line in the channel.
+ */
 const CHANNEL_CEREMONIAL_EVENTS = new Set([
   "task_started",
-  "agent_progress",
   // Every planned run has a plan, so saying it has one distinguishes nothing.
   // Its absence from this set quietly made the whole feature inert: the
   // coordinator traces `plan_received` on every planned turn
@@ -586,7 +605,6 @@ const CHANNEL_CEREMONIAL_EVENTS = new Set([
   // flush in order into whichever thread a *notable* line opens: a question,
   // a hold, a failure, a replan, an approval gate. A run none of those touch
   // ends as two lines in the channel, which is what a quick task is.
-  "workspace_changed",
   "changeset_collected",
   "validation_completed",
 ]);
