@@ -62,6 +62,15 @@ The adapter half is already written twice over: `sendScopeDecision`
 agent, and the event dispatch in `handleAgentEvent`
 (`services/coordinator/src/coordinator.ts:1519`) is where the new case goes.
 
+Since built, and wider than first staged: the coordinator dispatches the
+event and answers through the injected authority, and the prompt-CLI
+adapters (Claude, Gemini) emit and resolve the round trip themselves — their
+execution prompt names the actions, which is what makes them reachable at
+all. An agent asked to "push to GitHub" asks the platform, and a task whose
+whole deliverable was a performed action settles as done with the action's
+result as its report, not as "produced no repository changes". Codex's
+adapter still cannot ask.
+
 ### The coordinator cannot do this itself
 
 `PreviewService` lives in `apps/web`; the coordinator is a service and knows

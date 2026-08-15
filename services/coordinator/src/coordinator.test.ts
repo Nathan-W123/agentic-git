@@ -985,6 +985,103 @@ test("an agent can ask the platform to act, and is told what happened", async ()
   }
 });
 
+test("a task whose deliverable was a performed action ends done, not empty", async () => {
+  // "Push to GitHub" leaves no diff by design: the push happens in the
+  // platform, not the workspace. This used to settle as failed — "The agent
+  // produced no repository changes" — with the push done and the branch name
+  // discarded in favour of that sentence.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ActionAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      // Writes nothing: the action is the whole of the work.
+      "",
+      false,
+      undefined,
+      "Pushed abc1234 to coord/export-test as octocat.",
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store: new InMemoryCoordinationStore(),
+      actionAuthority: {
+        async perform() {
+          return {
+            outcome: "done",
+            explanation: "Pushed abc1234 to coord/export-test.",
+          };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "integrated");
+    // The agent's account of the action is the deliverable, not the generic
+    // no-changes sentence.
+    assert.equal(
+      result.tasks[0]?.explanation,
+      "Pushed abc1234 to coord/export-test as octocat.",
+    );
+    const types = result.audit.map((event) => event.type);
+    assert.ok(types.includes("task_reported"), types.join(", "));
+    assert.ok(!types.includes("task_failed"), types.join(", "));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a refused action does not launder an empty run into a success", async () => {
+  // The refusal costs the agent a round trip and nothing else changed, so an
+  // empty changeset still means what it always meant: nothing was done.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ActionAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "",
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store: new InMemoryCoordinationStore(),
+      actionAuthority: {
+        async perform() {
+          return {
+            outcome: "refused",
+            explanation: "You haven't connected GitHub.",
+          };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "failed");
+    assert.match(
+      result.tasks[0]?.explanation ?? "",
+      /produced no repository changes/u,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a deployment that performs no actions says so, and the task carries on", async () => {
   // The agent is blocked waiting and holds an approved plan it can still work
   // inside, so a refusal costs it one round trip. An exception would cost the

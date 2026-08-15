@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 
 import {
+  type AgentActionResult,
   type AgentAdapter,
   type AgentCapabilities,
   type AgentEvent,
@@ -491,6 +492,25 @@ interface QuestionAsked {
   explanation: string;
 }
 
+/**
+ * The agent asking the platform, not a person, to do something from the
+ * fixed action list — publish canonical, start or stop its preview. The
+ * round trip mirrors `question_asked`: the round ends on the request, the
+ * platform's answer comes back through {@link PromptCliAdapter.resolveAction},
+ * and the next round's prompt carries the result. This variant is what
+ * makes "push to GitHub" possible for a prompt-CLI agent at all: its own
+ * `git push` has no credential and no remote it is allowed to reach, so
+ * before this the request was simply impossible from the two adapters most
+ * channels run.
+ */
+interface ActionRequested {
+  outcome: "action_requested";
+  requestId: string;
+  action: string;
+  symbolsChanged: string[];
+  explanation: string;
+}
+
 interface ScopeChange {
   outcome: "scope_change_requested";
   requestId: string;
@@ -506,7 +526,7 @@ interface ScopeChange {
   explanation: string;
 }
 
-type ExecutionResult = Completion | ScopeChange | QuestionAsked;
+type ExecutionResult = Completion | ScopeChange | QuestionAsked | ActionRequested;
 
 interface PromptCliSession {
   session: AgentSession;
@@ -554,6 +574,22 @@ interface PromptCliSession {
       reject: (error: Error) => void;
     }
   >;
+  /**
+   * Actions asked of the platform and not yet answered. Its own map for the
+   * same reason the two above are separate: the platform answers in however
+   * long the action takes — a push is seconds, a preview boot longer — and
+   * the answer arrives through its own resolver.
+   */
+  pendingAction: Map<
+    string,
+    {
+      promise: Promise<AgentActionResult>;
+      resolve: (result: AgentActionResult) => void;
+      reject: (error: Error) => void;
+    }
+  >;
+  /** What the platform did and said, for the prompt of the round after. */
+  actionResults: AgentActionResult[];
   cancelled: boolean;
 }
 
@@ -669,6 +705,21 @@ function assertExecutionResult(
     }
     return;
   }
+  if (completion.outcome === "action_requested") {
+    // The name is all the platform needs; whether it is an action this
+    // deployment performs is the authority's decision, answered as done or
+    // refused rather than validated here.
+    if (
+      typeof completion.requestId !== "string" ||
+      typeof completion.action !== "string" ||
+      completion.action.trim().length === 0
+    ) {
+      throw new TypeError(
+        "An action request must carry a requestId and the action's name",
+      );
+    }
+    return;
+  }
   if (
     completion.outcome !== "scope_change_requested" ||
     typeof completion.requestId !== "string" ||
@@ -698,12 +749,13 @@ const PLAN_SHAPE_INSTRUCTIONS = [
 
 const COMPLETION_SHAPE_INSTRUCTIONS = [
   "When you are done (or blocked), answer with exactly one JSON object and nothing else:",
-  '  outcome ("completed", "scope_change_requested" or "question_asked"), symbolsChanged, explanation,',
+  '  outcome ("completed", "scope_change_requested", "question_asked" or "action_requested"), symbolsChanged, explanation,',
   "  requestId, additionalFiles, additionalSymbols, additionalApis, additionalSchemas,",
   "  additionalConfigKeys, additionalTests, additionalServices, reason,",
-  "  question, options",
+  "  question, options, action",
   "For completed, use empty scope fields. For scope_change_requested, fill every scope field.",
   'For question_asked, set requestId, question, and options (at least two); leave the scope fields empty.',
+  "For action_requested, set requestId and action; leave the scope fields empty.",
 ].join("\n");
 
 const STRING_ARRAY_JSON_SCHEMA = {
@@ -769,7 +821,12 @@ const COMPLETION_JSON_SCHEMA = JSON.stringify({
   properties: {
     outcome: {
       type: "string",
-      enum: ["completed", "scope_change_requested", "question_asked"],
+      enum: [
+        "completed",
+        "scope_change_requested",
+        "question_asked",
+        "action_requested",
+      ],
     },
     symbolsChanged: STRING_ARRAY_JSON_SCHEMA,
     explanation: { type: "string" },
@@ -779,6 +836,8 @@ const COMPLETION_JSON_SCHEMA = JSON.stringify({
     // question to satisfy it.
     question: { type: "string" },
     options: STRING_ARRAY_JSON_SCHEMA,
+    // Present only for `action_requested`, optional for the same reason.
+    action: { type: "string" },
     additionalFiles: STRING_ARRAY_JSON_SCHEMA,
     additionalSymbols: STRING_ARRAY_JSON_SCHEMA,
     additionalApis: STRING_ARRAY_JSON_SCHEMA,
@@ -975,6 +1034,8 @@ export class PromptCliAdapter implements AgentAdapter {
       pendingScope: new Map(),
       pendingQuestion: new Map(),
       answers: [],
+      pendingAction: new Map(),
+      actionResults: [],
       resume: undefined,
       cancelled: false,
     });
@@ -1043,6 +1104,8 @@ export class PromptCliAdapter implements AgentAdapter {
       pendingScope: new Map(),
       pendingQuestion: new Map(),
       answers: [],
+      pendingAction: new Map(),
+      actionResults: [],
       resume,
       cancelled: false,
     });
@@ -1220,6 +1283,32 @@ export class PromptCliAdapter implements AgentAdapter {
         });
         continue;
       }
+
+      if (execution.outcome === "action_requested") {
+        const askId = execution.requestId.trim() || createId("action");
+        const waiting = this.createActionWaiter(record, askId);
+        this.emit(record, {
+          event: "action_requested",
+          requestId: askId,
+          action: execution.action,
+          occurredAt: new Date().toISOString(),
+        });
+        // The platform always answers — done or refused, never silence (see
+        // `handleActionRequest` in the coordinator) — so unlike a question
+        // there is no deadline to fall on. A refusal is a real answer: the
+        // next round's prompt carries it, and the agent finishes by
+        // reporting it rather than by retrying.
+        const result = await waiting;
+        record.actionResults.push(structuredClone(result));
+        this.emit(record, {
+          event: "progress",
+          message:
+            `Platform ${result.outcome === "done" ? "performed" : "refused"} ` +
+            `${execution.action}: ${result.explanation}`,
+          occurredAt: new Date().toISOString(),
+        });
+        continue;
+      }
       const requestId = execution.requestId.trim() || createId("scope");
       const pending = this.createScopeWaiter(record, requestId);
       this.emit(record, {
@@ -1288,6 +1377,19 @@ export class PromptCliAdapter implements AgentAdapter {
       pending.reject(new Error(`Session ${sessionId} was cancelled`));
     }
     record.pendingScope.clear();
+    // Questions and actions wait between rounds, where no process is running
+    // for the abort controller to kill. Left pending they would hold the
+    // execution loop's await open after the session is gone — a stop that
+    // lands mid-question would take until the question's own deadline to be
+    // felt, and one mid-action until the action returned.
+    for (const pending of record.pendingQuestion.values()) {
+      pending.reject(new Error(`Session ${sessionId} was cancelled`));
+    }
+    record.pendingQuestion.clear();
+    for (const pending of record.pendingAction.values()) {
+      pending.reject(new Error(`Session ${sessionId} was cancelled`));
+    }
+    record.pendingAction.clear();
     record.controller?.abort();
     const active = record.active;
     if (active !== undefined) {
@@ -1673,6 +1775,42 @@ export class PromptCliAdapter implements AgentAdapter {
     pending.resolve(structuredClone(answer));
   }
 
+  private createActionWaiter(
+    record: PromptCliSession,
+    requestId: string,
+  ): Promise<AgentActionResult> {
+    if (record.pendingAction.has(requestId)) {
+      throw new Error(
+        `${this.profile.name} repeated pending action ${requestId}`,
+      );
+    }
+    let resolvePromise: (result: AgentActionResult) => void = () => undefined;
+    let rejectPromise: (error: Error) => void = () => undefined;
+    const promise = new Promise<AgentActionResult>((resolve, reject) => {
+      resolvePromise = resolve;
+      rejectPromise = reject;
+    });
+    record.pendingAction.set(requestId, {
+      promise,
+      resolve: resolvePromise,
+      reject: rejectPromise,
+    });
+    return promise;
+  }
+
+  public async resolveAction(
+    sessionId: string,
+    result: AgentActionResult,
+  ): Promise<void> {
+    const record = this.requireSession(sessionId);
+    const pending = record.pendingAction.get(result.requestId);
+    if (pending === undefined) {
+      throw new Error(`Unknown action ${result.requestId}`);
+    }
+    record.pendingAction.delete(result.requestId);
+    pending.resolve(structuredClone(result));
+  }
+
   private createScopeWaiter(
     record: PromptCliSession,
     requestId: string,
@@ -1879,6 +2017,30 @@ export class PromptCliAdapter implements AgentAdapter {
         "something like that, do not ask — answer with a failed outcome " +
         "explaining exactly what is missing, so the person can fix it and " +
         "resubmit.",
+      // The platform's own verbs, distinct from questions: a question goes
+      // to a person, an action goes to the machinery. Without this
+      // paragraph the actions existed and no prompt-CLI agent had any way
+      // to learn so — "push to GitHub" was a request the two most common
+      // agents could not satisfy by any route, including the git they hold:
+      // the workspace's remote is the local canonical mirror, and no
+      // credential for anything beyond it is ever in their environment.
+      "The platform can perform a small fixed set of actions for you. To " +
+        "ask, answer with an action_requested outcome carrying requestId " +
+        'and action. The actions: "push" publishes this repository\'s ' +
+        "accepted canonical state to its recorded remote on a fresh branch " +
+        "— use it when asked to push or publish to GitHub; your own `git " +
+        "push` cannot reach the remote from this workspace, so never try " +
+        'it. "preview_start" runs this repository\'s app and answers with ' +
+        'its URL; "preview_stop" stops it. The platform answers done or ' +
+        "refused with an explanation either way. A refusal is final for " +
+        "this run — do not retry it; finish with a completed outcome whose " +
+        "explanation relays the refusal's reason, so the person who asked " +
+        "can act on it.",
+      "When an action's result is the whole of what was asked for — a " +
+        "requested push, for example — finish with a completed outcome " +
+        "whose explanation reports the action's own result, even though " +
+        "you changed no files. Changing files is not the goal of such a " +
+        "task; the action was.",
       "Do not modify files outside expectedFiles without first answering with a scope_change_requested outcome.",
       "Do not change Git metadata.",
       `Task: ${record.input.task.objective}`,
@@ -1889,6 +2051,9 @@ export class PromptCliAdapter implements AgentAdapter {
       // again — the CLI is re-invoked per round and remembers nothing of the
       // last one.
       `Answers you already have: ${JSON.stringify(record.answers)}`,
+      // Same replay for actions: the round after a push has to know the push
+      // happened — and where it landed — or it would ask again.
+      `Platform actions already performed: ${JSON.stringify(record.actionResults)}`,
       `Canonical revision: ${context.canonicalVersion.revision}`,
       `Coordinator validation labels (do not execute): ${JSON.stringify(validationLabels)}`,
       COMPLETION_SHAPE_INSTRUCTIONS,

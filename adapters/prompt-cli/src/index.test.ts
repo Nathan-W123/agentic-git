@@ -223,6 +223,104 @@ test("claude: plan-mode planning, skip-permissions execution, collected diff", a
   assert.deepEqual(changeSet.symbolsChanged, ["value"]);
 });
 
+test("claude: an action round trip — the platform acts, the next round knows", async () => {
+  // "Push to GitHub" through the adapter's own machinery: round one is told
+  // what the platform can do and asks for the push; the platform answers
+  // through resolveAction; round two's prompt carries the result and the
+  // agent finishes by reporting it, with nothing in the diff.
+  const fixture = await createFixture();
+  const executionInputs: string[] = [];
+  const runner: PromptCliProcessRunner = async (_executable, args, options = {}) => {
+    if (args.includes("--permission-mode")) {
+      return output(claudeEnvelope(JSON.stringify(PLAN)));
+    }
+    executionInputs.push(String(options.input));
+    if (executionInputs.length === 1) {
+      return output(
+        claudeEnvelope(
+          JSON.stringify({
+            ...COMPLETION,
+            outcome: "action_requested",
+            requestId: "act_1",
+            action: "push",
+            symbolsChanged: [],
+            explanation: "",
+          }),
+        ),
+      );
+    }
+    return output(
+      claudeEnvelope(
+        JSON.stringify({
+          ...COMPLETION,
+          symbolsChanged: [],
+          explanation: "Pushed abc1234 to coord/export-test as octocat.",
+        }),
+      ),
+    );
+  };
+
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+
+  const seen: string[] = [];
+  await adapter.streamEvents(session.id, (event) => {
+    seen.push(event.event);
+    if (event.event === "action_requested") {
+      assert.equal(event.action, "push");
+      // The platform's half of the round trip, as the coordinator does it.
+      void adapter.resolveAction(session.id, {
+        requestId: event.requestId ?? "",
+        action: "push",
+        outcome: "done",
+        detail: { url: "https://github.example/x/y" },
+        explanation: "Pushed abc1234 to coord/export-test.",
+      });
+    }
+  });
+
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+  await adapter.sendContext(session.id, contextFor(workspace));
+
+  // Round one was told what it may ask for; round two was told the answer.
+  assert.match(executionInputs[0] ?? "", /"push" publishes/u);
+  assert.match(
+    executionInputs[1] ?? "",
+    /Platform actions already performed/u,
+  );
+  assert.match(executionInputs[1] ?? "", /coord\/export-test/u);
+  assert.ok(seen.includes("action_requested"), seen.join(", "));
+
+  // The action is the deliverable; the diff is honestly empty.
+  const changes = await adapter.collectChanges(session.id);
+  assert.equal(changes.patches.length, 0);
+  assert.equal(
+    changes.agentExplanation,
+    "Pushed abc1234 to coord/export-test as octocat.",
+  );
+});
+
 test("claude: the vendor session id chains --resume across execs and instances", async () => {
   // Warm continuation, adapter side: the envelope's session_id is captured
   // after every exec, rides the next one as --resume, and — handed over as
