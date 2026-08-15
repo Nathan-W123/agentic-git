@@ -42,6 +42,22 @@ through the settings route is cleared in both. The `/channel/agents` roster
 also reads the store directly (`channelAgentConnections` in server.ts) for the
 case the file lost the connection record along with the name.
 
+**Where it was still lost (2026-08-15, later).** Storing the name durably was
+only half of item 2 above: the `/channel/agents` roster route carried the call
+sign as far as `connection.callSign` and then threw it away, building
+`${AGENT_LABEL} (${owner})` as the default it handed
+`resolveChannelAgentPresentation`. Only the mention matcher had been changed.
+Because the browser treats the roster's resolved name as the single authority —
+`channelAgentsFor` in `data.js` overwrites even the viewer's own
+`myAgents()` name with it — every channel showed "Claude (Nathan)" and
+"Codex (Nathan)" while the settings screen, which reads the connection itself,
+showed the real name. All three sites now call one function,
+`defaultChannelAgentName` (server.ts, beside `AGENT_LABEL`): the roster route,
+`resolveChannelMentionCandidates`, and `channelAgentNamer`. A per-channel
+rename override still beats it. If a fourth place ever needs an agent's default
+name, it belongs there too — two copies of this rule is exactly how the screen
+and the matcher came to disagree.
+
 ### The pool (Greek + Roman, ready to paste)
 
 ```ts

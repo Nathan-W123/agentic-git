@@ -120,6 +120,35 @@ function firstWord(name: string): string {
 }
 
 /**
+ * What an agent is called in a channel before any per-channel rename.
+ *
+ * The call sign wins: it is handed out once, when the account connects, and
+ * is the agent's name everywhere — every channel, every screen, and the text
+ * an @mention is matched against. The vendor label plus its owner is only the
+ * fallback for a connection made before agents were named.
+ *
+ * It lives in one function because three callers need the same answer and one
+ * of them did not have it: the roster route rebuilt the vendor label directly
+ * and never looked at `callSign`, so a deployment came back from a restart
+ * showing "Claude (Nathan)" and "Codex (Nathan)" in every channel while the
+ * settings screen — which reads the connection itself — still showed Athena.
+ * The browser takes the roster's resolved name as the single authority
+ * (`channelAgentsFor` in data.js), so that one omission renamed every agent in
+ * every room, including the viewer's own.
+ */
+function defaultChannelAgentName(connection: {
+  userName: string;
+  provider: string;
+  callSign?: string;
+}): string {
+  const label = AGENT_LABEL[connection.provider] ?? connection.provider;
+  // No owner in brackets on a call sign: it is already unique across the
+  // deployment, and "Athena (Bob)" reads as a disambiguation of something that
+  // was never ambiguous.
+  return connection.callSign ?? `${label} (${firstWord(connection.userName)})`;
+}
+
+/**
  * A task whose progress is being narrated into a channel thread.
  *
  * The channel shows one line per request — the agent's own answer — and
@@ -6221,12 +6250,16 @@ export class ApiGateway {
         // same overrides twice, in two places, is how the screen came to show
         // one name while the server answered to another, so that a rename
         // produced silence and an old name still worked.
+        //
+        // The default comes from `defaultChannelAgentName`, the same function
+        // the mention matcher reads, so the account's call sign is what this
+        // roster reports. Rebuilding the vendor label here instead is what
+        // made every reload lose every name: the browser trusts this answer
+        // over the call sign it already holds for the viewer's own agents.
         ...resolveChannelAgentPresentation(
           rosterOverrides,
           connection,
-          `${AGENT_LABEL[connection.provider] ?? connection.provider} (${firstWord(
-            connection.userName,
-          )})`,
+          defaultChannelAgentName(connection),
         ),
         // Whether anyone besides its owner may @mention it into real work —
         // see `CredentialVisibility`. Metadata, not a secret; safe for every
@@ -7883,19 +7916,15 @@ export class ApiGateway {
         // should not crash the roster).
         return [];
       }
-      const label = AGENT_LABEL[connection.provider] ?? connection.provider;
-      // The account's own name wins over the vendor label, and needs no owner
-      // in brackets: a call sign is already unique across the deployment, and
-      // "Athena (Bob)" reads as a disambiguation of something that was never
-      // ambiguous. A channel override still beats both — that is the
-      // exception, for the day two people's agents collide in a room neither
-      // of them chose.
-      const defaultName =
-        connection.callSign ?? `${label} (${firstWord(connection.userName)})`;
+      // The account's own name wins over the vendor label — see
+      // `defaultChannelAgentName`, which the roster route reads too, so what a
+      // mention resolves against and what the screen shows cannot drift apart.
+      // A channel override still beats both — that is the exception, for the
+      // day two people's agents collide in a room neither of them chose.
       const presentation = resolveChannelAgentPresentation(
         overrides,
         connection,
-        defaultName,
+        defaultChannelAgentName(connection),
       );
       return [{ ...connection, vendor, ...presentation }];
     });
@@ -11725,18 +11754,17 @@ export class ApiGateway {
       });
       if (connection !== undefined) {
         // The call sign first, exactly as the roster and every @mention
-        // resolve it: an agent connects, is named once from the pantheon, and
-        // keeps that name in every channel. Naming it "@Claude (Nathan)" here
-        // while the room has been calling it "@Athena" all morning describes
-        // two different agents to a reader who only knows one.
-        const defaultName =
-          connection.callSign ??
-          `${AGENT_LABEL[connection.provider] ?? connection.provider} (${firstWord(
-            connection.userName,
-          )})`;
+        // resolve it (`defaultChannelAgentName`): an agent connects, is named
+        // once from the pantheon, and keeps that name in every channel. Naming
+        // it "@Claude (Nathan)" here while the room has been calling it
+        // "@Athena" all morning describes two different agents to a reader who
+        // only knows one.
         return `@${
-          resolveChannelAgentPresentation(overrides, connection, defaultName)
-            .name
+          resolveChannelAgentPresentation(
+            overrides,
+            connection,
+            defaultChannelAgentName(connection),
+          ).name
         }`;
       }
       // The request, not the preamble a channel dispatch puts in front of it.

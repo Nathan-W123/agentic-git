@@ -33,13 +33,19 @@ interface TestRuntime {
    * The vendors each user has "connected", for the `channel/agents` roster
    * route to read back through `chatProviders.connectionsFor`. A real
    * deployment backs this with `UserCredentialStore`; the test fixture only
-   * needs the same safe shape — vendor and visibility, and nothing else —
-   * since that route never reads a secret in the first place. `visibility`
-   * defaults to "personal" when a test omits it, same as the real store.
+   * needs the same safe shape — vendor, visibility and the account's call
+   * sign, and nothing else — since that route never reads a secret in the
+   * first place. `visibility` defaults to "personal" when a test omits it,
+   * same as the real store, and `callSign` is absent for a connection made
+   * before agents were named.
    */
   chatConnections: Map<
     string,
-    Array<{ provider: string; visibility?: "personal" | "org" }>
+    Array<{
+      provider: string;
+      visibility?: "personal" | "org";
+      callSign?: string;
+    }>
   >;
   /**
    * Every call the fake `submitTask` operation received, in order — for
@@ -338,13 +344,23 @@ async function startRuntime(
       async connectionsFor(userIds) {
         const result: Record<
           string,
-          Array<{ provider: string; visibility: "personal" | "org" }>
+          Array<{
+            provider: string;
+            visibility: "personal" | "org";
+            callSign?: string;
+          }>
         > = {};
         for (const userId of userIds) {
           result[userId] = (chatConnections.get(userId) ?? []).map(
             (connection) => ({
               provider: connection.provider,
               visibility: connection.visibility ?? "personal",
+              // Omitted rather than sent undefined, exactly as the real
+              // service does: a connection with no name has no key, which is
+              // what the roster's fallback keys off.
+              ...(connection.callSign === undefined
+                ? {}
+                : { callSign: connection.callSign }),
             }),
           );
         }
@@ -7445,6 +7461,46 @@ test("the roster falls back to the stored call sign, not the vendor label", asyn
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`,
   );
   assert.equal(afterRename.data.agents[0].name, "Scout");
+});
+
+test("the roster reports the connection's own call sign, and that name answers", async (t) => {
+  // The half the store's copy could not fix: the roster route rebuilt
+  // `${AGENT_LABEL} (${owner})` for every agent and never looked at the name
+  // the connection carries, so a deployment that still *had* every name showed
+  // "Claude (Owner)" in every channel while the settings screen showed Athena.
+  // The browser takes this route's answer as the single authority for what an
+  // agent is called (`channelAgentsFor` in data.js), so this is the name.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "call-signs");
+  runtime.chatConnections.set(session.user.id, [
+    { provider: "anthropic", visibility: "personal", callSign: "Athena" },
+    // Never named — the pre-call-sign connection whose fallback must stay.
+    { provider: "openai", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const roster = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/agents`,
+  );
+  assert.equal(roster.status, 200, JSON.stringify(roster.data));
+  const agents = roster.data.agents as any[];
+  const named = agents.find((agent) => agent.provider === "anthropic");
+  const unnamed = agents.find((agent) => agent.provider === "openai");
+  assert.equal(named?.name, "Athena");
+  assert.equal(unnamed?.name, "Codex (Owner)");
+
+  // And the matcher agrees with the screen: the name the roster reports is
+  // the name a mention resolves against, or people @mention what they can see
+  // and nothing answers.
+  const posted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages`,
+    { method: "POST", body: { content: "@Athena please fix the login bug" } },
+  );
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 1);
+  assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
 });
 
 test("the auditor audits a canonical advance and posts what it finds", async (t) => {
