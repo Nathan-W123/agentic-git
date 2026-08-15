@@ -14,6 +14,7 @@ import {
   api,
   closeSocket,
   connectSocket,
+  ensureSocketAlive,
   TYPING_SWEEP_MS,
   noteAgentBusy,
   noteDirectMessage,
@@ -2088,6 +2089,48 @@ window.addEventListener("resize", () => {
    header keeps the shape of the width it last rendered at. */
 window.matchMedia("(max-width: 600px)").addEventListener("change", () => {
   render();
+});
+
+/**
+ * Catching back up, at the moments a phone actually returns: the tab coming
+ * to the foreground, the page coming back out of the back-forward cache,
+ * the network reappearing. A backgrounded phone tab loses its socket and
+ * has its timers frozen, so everything an agent said in the meantime — a
+ * reply, its thinking, the outcome — was invisible until a manual reload.
+ * Reconnecting replays the missed events through the hub's own cursor; the
+ * explicit channel refresh covers the transcript on screen without waiting
+ * a round trip for the replay to name it.
+ */
+function resumeLiveUpdates() {
+  if (state.principal === undefined) {
+    return;
+  }
+  ensureSocketAlive();
+  void refresh({ quiet: true });
+  const channel = activeChannelId();
+  if (state.route === "chats" && channel) {
+    void refreshChannelMessages(channel).then(() => {
+      if (!renameFieldFocused()) {
+        render();
+      }
+    });
+  }
+}
+
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    resumeLiveUpdates();
+  }
+});
+// `persisted` means the page was thawed from the back-forward cache rather
+// than loaded — the one return path visibilitychange does not always cover.
+window.addEventListener("pageshow", (event) => {
+  if (event.persisted) {
+    resumeLiveUpdates();
+  }
+});
+window.addEventListener("online", () => {
+  resumeLiveUpdates();
 });
 
 /* The soft keyboard shrinks the visual viewport, and the transcript above

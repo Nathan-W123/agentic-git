@@ -717,9 +717,36 @@ export async function cancelProviderSignIn(providerId, flowId) {
 
 /* ------------------------------------------------------------- socket ---- */
 
+/**
+ * The live stream's will-to-live. `socketHandler` is set while the app wants
+ * a stream and cleared by `closeSocket`, which is how a deliberate close
+ * (logout, switching projects) is told apart from the closes that just
+ * happen to a phone: the browser drops the socket the moment the app is
+ * backgrounded, the network changes on the walk to the train, a proxy times
+ * the connection out. Those used to be permanent — nothing reconnected, so
+ * the screen silently froze at its last frame and stayed frozen until a
+ * manual reload, which on a phone was every time.
+ *
+ * Reconnects back off (1s doubling to 30s) and reset once a connection
+ * opens. The `after` cursor makes reconnection lossless: the hub replays
+ * every audit event past it, so the messages that arrived while the socket
+ * was down flow through the same handler they would have live.
+ */
+let socketHandler;
+let socketRetryTimer;
+let socketRetryMs = 1_000;
+const SOCKET_RETRY_MAX_MS = 30_000;
+
 export function connectSocket(onEvent) {
   closeSocket();
-  if (!state.projectId) {
+  socketHandler = onEvent;
+  socketRetryMs = 1_000;
+  openEventSocket();
+}
+
+function openEventSocket() {
+  const onEvent = socketHandler;
+  if (onEvent === undefined || !state.projectId) {
     return;
   }
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
@@ -732,6 +759,9 @@ export function connectSocket(onEvent) {
   try {
     const socket = new WebSocket(url);
     state.socket = socket;
+    socket.addEventListener("open", () => {
+      socketRetryMs = 1_000;
+    });
     socket.addEventListener("message", (message) => {
       try {
         onEvent(JSON.parse(message.data));
@@ -743,10 +773,48 @@ export function connectSocket(onEvent) {
       if (state.socket === socket) {
         state.socket = undefined;
       }
+      scheduleSocketRetry();
     });
   } catch {
     state.socket = undefined;
+    scheduleSocketRetry();
   }
+}
+
+function scheduleSocketRetry() {
+  if (socketHandler === undefined) {
+    return;
+  }
+  window.clearTimeout(socketRetryTimer);
+  socketRetryTimer = window.setTimeout(() => {
+    if (socketHandler !== undefined && state.socket === undefined) {
+      openEventSocket();
+    }
+  }, socketRetryMs);
+  socketRetryMs = Math.min(socketRetryMs * 2, SOCKET_RETRY_MAX_MS);
+}
+
+/**
+ * Reconnects now if the stream is wanted and not alive — the impatient
+ * sibling of the backoff above, for the moments that deserve immediacy:
+ * the app returning to the foreground, the network coming back. A timer
+ * counting out its backoff in a suspended tab is no use to somebody who
+ * just opened it to see what their agent did.
+ */
+export function ensureSocketAlive() {
+  if (socketHandler === undefined || !state.projectId) {
+    return;
+  }
+  const alive =
+    state.socket !== undefined &&
+    (state.socket.readyState === WebSocket.CONNECTING ||
+      state.socket.readyState === WebSocket.OPEN);
+  if (alive) {
+    return;
+  }
+  window.clearTimeout(socketRetryTimer);
+  socketRetryMs = 1_000;
+  openEventSocket();
 }
 
 /* ------------------------------------------------------------- typing ---- */
@@ -1008,6 +1076,10 @@ export function clearTyping(repositoryId, threadId, userId) {
 }
 
 export function closeSocket() {
+  // Closing on purpose: clear the intent first so the close event below
+  // does not schedule the reconnect it schedules for accidental closes.
+  socketHandler = undefined;
+  window.clearTimeout(socketRetryTimer);
   if (state.socket !== undefined) {
     try {
       state.socket.close();
