@@ -898,6 +898,23 @@ test("the working dots come back for the next turn in a finished thread", async 
     "the dots must key on the last reply, not on any reply ever",
   );
   assert.match(body, /replies\[replies\.length - 1\]/u);
+
+  // The dots are only half of the live state. A finished turn normally leaves
+  // its Thinking disclosure closed; extending it must open that same thread's
+  // disclosure before new streamed reasoning arrives.
+  const app = await browserSource();
+  const resetStart = app.indexOf("function beginThreadTurn");
+  const reset = app.slice(resetStart, app.indexOf("\n}", resetStart));
+  assert.notEqual(resetStart, -1);
+  assert.match(reset, /state\.thinkingOpen\[messageId\] = true/u);
+  assert.match(
+    app,
+    /case "channel-submit":[\s\S]{0,140}beginThreadTurn\(state\.composerThreadId/u,
+  );
+  assert.match(
+    app,
+    /case "channel-thread-submit":[\s\S]{0,140}beginThreadTurn\(state\.activeChannelThread/u,
+  );
 });
 
 test("the colour wheel's marker and its click land on the same colour", async () => {

@@ -3792,6 +3792,22 @@ document.addEventListener("click", (event) => {
   }
 });
 
+/**
+ * Restores the live-turn view before a human extends a finished thread.
+ *
+ * `threadTyping` already keys its dots on the last reply, so the optimistic
+ * human reply brings those back. The thinking disclosure also remembers the
+ * reader's last state, though, and a finished turn is normally collapsed. A
+ * new turn must open it again or fresh provider reasoning arrives correctly
+ * and looks like it never happened.
+ */
+function beginThreadTurn(messageId, draft) {
+  if (typeof messageId !== "string" || String(draft ?? "").trim() === "") {
+    return;
+  }
+  state.thinkingOpen[messageId] = true;
+}
+
 document.addEventListener("submit", (event) => {
   const form = event.target.closest("[data-act]");
   if (form === null) {
@@ -3845,12 +3861,14 @@ document.addEventListener("submit", (event) => {
       return;
     }
     case "channel-submit":
+      beginThreadTurn(state.composerThreadId, state.chatDraft);
       submitComposerMessage(render);
       return;
     case "chan-term-submit":
       void runTerminalCommand(render);
       return;
     case "channel-thread-submit":
+      beginThreadTurn(state.activeChannelThread, state.threadDraft);
       submitThreadReply(render);
       return;
     case "channel-rename-form": {

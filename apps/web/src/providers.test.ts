@@ -954,6 +954,64 @@ test("redacted CLI thinking becomes hidden reasoning with real token counts", ()
   assert.equal(reply.usage.thinkingTokens, 85);
 });
 
+test("provider stream parsing resets thinking and completion state between turns", () => {
+  const claudeFirst = parseClaudeStreamJson(
+    [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [{ type: "thinking", thinking: "First turn reasoning." }],
+        },
+      }),
+      JSON.stringify({
+        type: "result",
+        is_error: false,
+        result: "first",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    ].join("\n"),
+    "claude-test",
+  );
+  assert.equal(claudeFirst.thinking, "First turn reasoning.");
+
+  const claudeSecond = parseClaudeStreamJson(
+    [
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "second" }] },
+      }),
+      JSON.stringify({
+        type: "result",
+        is_error: false,
+        result: "second",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    ].join("\n"),
+    "claude-test",
+  );
+  assert.equal(claudeSecond.thinking, undefined);
+  assert.equal(claudeSecond.thinkingHidden, undefined);
+
+  const completedCodexTurn = [
+    JSON.stringify({ type: "thread.started", thread_id: "turn-one" }),
+    JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: "first" },
+    }),
+    JSON.stringify({ type: "turn.completed", usage: {} }),
+  ].join("\n");
+  assert.equal(parseCodexJsonl(completedCodexTurn, "codex-test").text, "first");
+  assert.throws(
+    () =>
+      parseCodexJsonl(
+        JSON.stringify({ type: "thread.started", thread_id: "turn-two" }),
+        "codex-test",
+      ),
+    /no completed turn/u,
+    "a completed prior turn must not make a truncated next turn complete",
+  );
+});
+
 test("codex jsonl failures and truncated streams are loud", () => {
   assert.throws(
     () => parseCodexJsonl("", "m"),

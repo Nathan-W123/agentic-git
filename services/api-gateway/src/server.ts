@@ -1921,7 +1921,7 @@ export interface ChatProviderOperations {
       messages: unknown;
       cliSessionId?: string;
     },
-    onEvent: (event: unknown) => void,
+    onEvent: (event: ChatStreamEvent) => void,
   ): Promise<unknown>;
   /**
    * Which vendors a set of *other* users have connected, for the repository
@@ -1953,6 +1953,23 @@ export interface ChatProviderOperations {
     >
   >;
 }
+
+/**
+ * The provider events a channel turn can render while the model is working.
+ *
+ * Kept structurally identical to `apps/web/src/providers.ts` rather than
+ * importing the provider implementation into the gateway. The gateway is a
+ * package boundary; it only needs the public stream contract, not the CLI
+ * adapters that produce it.
+ */
+export type ChatStreamEvent =
+  | { type: "status"; status: string }
+  | { type: "reasoning_start"; hidden: boolean }
+  | { type: "reasoning"; text: string }
+  | { type: "reasoning_tokens"; tokens: number }
+  | { type: "text"; delta: string }
+  | { type: "done"; reply: unknown }
+  | { type: "error"; message: string; code: string };
 
 /** Everything a worker needs to execute one task without further lookups. */
 export interface WorkAssignment {
@@ -9407,37 +9424,182 @@ export class ApiGateway {
     projectId: string;
     repositoryId: string;
     messageId: string;
-    root: { content: string; replies: Array<{ content: string }> };
+    root: {
+      content: string;
+      replies: Array<{ content: string; kind?: string }>;
+    };
     candidate: ChannelMentionCandidate;
     question: string;
   }): Promise<void> {
     const { root, candidate, question } = input;
-    // The reply just stored is the question being asked, so it is left off the
-    // end of the transcript rather than repeated to the model twice.
+    // The reply route stores the person's question before starting this turn.
+    // Remove that one reply from the history so the model gets it once, in the
+    // explicit question slot below. Looking for the last matching human reply
+    // instead of blindly dropping the last entry keeps a progress line that
+    // may have arrived between the store write and this read.
+    const priorReplies = [...root.replies];
+    for (let index = priorReplies.length - 1; index >= 0; index -= 1) {
+      const reply = priorReplies[index];
+      if (
+        reply?.kind === "user" &&
+        collapseWhitespace(reply.content) === collapseWhitespace(question)
+      ) {
+        priorReplies.splice(index, 1);
+        break;
+      }
+    }
     const history = [
       root.content,
-      ...root.replies.map((reply) => reply.content),
+      ...priorReplies.map((reply) => reply.content),
     ]
       .map((line) => collapseWhitespace(line))
       .filter((line) => line.length > 0)
       .slice(-THREAD_CONTEXT_LINES);
-    const answer = await this.askAgent(
-      candidate,
+    const prompt =
       `${agentIdentity(candidate)}\n\n` +
-        "You are answering a follow-up question inside the thread for a task " +
-        "you worked on. This chat has no checkout, but the task itself ran " +
-        "with the repository — so answer from the thread below, and never say " +
-        "the work is blocked or cannot continue merely because this " +
-        "conversation cannot see the files. Below is that " +
-        "thread so far, oldest first. Answer the question directly and " +
-        "briefly — three sentences at most, no markdown headings, no " +
-        "preamble. If the thread shows the work did not finish, say plainly " +
-        "how far it got and what stopped it. Do not invent progress the " +
-        "thread does not show.\n\nThread so far:\n" +
-        history.map((line) => `- ${line}`).join("\n") +
-        `\n\nThe question: ${question}`,
+      "You are answering a follow-up question inside the thread for a task " +
+      "you worked on. This chat has no checkout, but the task itself ran " +
+      "with the repository — so answer from the thread below, and never say " +
+      "the work is blocked or cannot continue merely because this " +
+      "conversation cannot see the files. Below is that " +
+      "thread so far, oldest first. Answer the question directly and " +
+      "briefly — three sentences at most, no markdown headings, no " +
+      "preamble. If the thread shows the work did not finish, say plainly " +
+      "how far it got and what stopped it. Do not invent progress the " +
+      "thread does not show.\n\nThread so far:\n" +
+      history.map((line) => `- ${line}`).join("\n") +
+      `\n\nThe question: ${question}`;
+
+    const authorId = `${candidate.userId}:${candidate.provider}`;
+    let deliveries = Promise.resolve();
+    let activityAnnounced = false;
+    let hiddenReasoningAnnounced = false;
+    let streamedText = "";
+    let streamedReply: unknown;
+    let streamFailure: string | undefined;
+    let acceptingEvents = true;
+    const progressSeen = new Set<string>();
+
+    // Provider callbacks are synchronous, while writing a channel reply is
+    // asynchronous. Queue the writes to preserve the provider's order and
+    // wait for the queue before writing the terminal reply. A failed progress
+    // write must not poison the rest of the turn; the final answer is still
+    // worth delivering.
+    const announceProgress = (value: string): void => {
+      const content = value.trim().slice(0, 4_000);
+      if (content.length === 0 || progressSeen.has(content)) {
+        return;
+      }
+      progressSeen.add(content);
+      activityAnnounced = true;
+      deliveries = deliveries
+        .then(async () => {
+          await this.appendChannelThreadReply({
+            projectId: input.projectId,
+            repositoryId: input.repositoryId,
+            messageId: input.messageId,
+            authorId,
+            content,
+            kind: "progress",
+          });
+        })
+        .catch((error: unknown) => {
+          process.stderr.write(
+            `[channel] thread progress failed for ${input.messageId}: ${
+              error instanceof Error ? error.message : String(error)
+            }\n`,
+          );
+        });
+    };
+
+    const turn = await this.performChat(
+      candidate,
+      prompt,
       QUESTION_TIMEOUT_MS,
+      (event) => {
+        if (!acceptingEvents) {
+          return;
+        }
+        switch (event.type) {
+          case "status": {
+            const status = collapseWhitespace(event.status);
+            if (status.length > 0) {
+              announceProgress(
+                status.toLowerCase() === "working" ? "Working…" : status,
+              );
+            }
+            break;
+          }
+          case "reasoning_start":
+            if (event.hidden && !hiddenReasoningAnnounced) {
+              hiddenReasoningAnnounced = true;
+              announceProgress("Thinking…");
+            }
+            break;
+          case "reasoning":
+            announceProgress(event.text);
+            break;
+          case "reasoning_tokens":
+            if (event.tokens > 0 && !hiddenReasoningAnnounced) {
+              hiddenReasoningAnnounced = true;
+              // The provider disclosed that reasoning happened, not what it
+              // contained. Say exactly that without fabricating its content
+              // or turning the channel into a token counter.
+              announceProgress("Thinking…");
+            }
+            break;
+          case "text":
+            streamedText += event.delta;
+            break;
+          case "error":
+            streamFailure = event.message;
+            break;
+          case "done":
+            // The returned reply is canonical for the built-in providers,
+            // while an adapter may instead finish through the stream event.
+            // Keep that payload as a fallback but write one terminal channel
+            // reply either way.
+            streamedReply = event.reply;
+            break;
+        }
+      },
     );
+    acceptingEvents = false;
+    await deliveries;
+
+    const reply = (turn.reply ?? streamedReply) as
+      | {
+          text?: unknown;
+          content?: unknown;
+          thinking?: unknown;
+          thinkingHidden?: unknown;
+          usage?: { thinkingTokens?: unknown };
+        }
+      | undefined;
+    const finalThinking =
+      typeof reply?.thinking === "string" ? reply.thinking.trim() : "";
+    if (finalThinking.length > 0 && !progressSeen.has(finalThinking)) {
+      announceProgress(finalThinking);
+    } else if (
+      (reply?.thinkingHidden === true ||
+        (typeof reply?.usage?.thinkingTokens === "number" &&
+          reply.usage.thinkingTokens > 0)) &&
+      !hiddenReasoningAnnounced
+    ) {
+      hiddenReasoningAnnounced = true;
+      announceProgress("Thinking…");
+    }
+    // A deployment without streaming still gets the same turn shape. This is
+    // an activity marker, not invented chain-of-thought; it says only that the
+    // provider worked before it answered.
+    if (!activityAnnounced) {
+      announceProgress("Thinking…");
+    }
+    await deliveries;
+
+    const returnedText = String(reply?.text ?? reply?.content ?? "").trim();
+    const finalText =
+      returnedText.length > 0 ? returnedText : streamedText.trim();
     await this.appendChannelThreadReply({
       projectId: input.projectId,
       repositoryId: input.repositoryId,
@@ -9445,9 +9607,72 @@ export class ApiGateway {
       // The answering agent, not the thread's owner: with several agents in
       // one thread, attributing every reply to whoever started it would put
       // one agent's words under another's name.
-      authorId: `${candidate.userId}:${candidate.provider}`,
-      content: answer.text ?? explainAnswerFailure(answer.error),
+      authorId,
+      content:
+        finalText.length > 0
+          ? finalText
+          : explainAnswerFailure(turn.error ?? streamFailure),
+      // A provider turn has the same two visible phases as a repository turn:
+      // progress is thinking, and this is the terminal summary/reply. Marking
+      // the ending is what retires the working dots; the next human reply then
+      // becomes the last entry and starts a fresh turn again.
+      kind: "outcome",
     });
+  }
+
+  /**
+   * Performs exactly one provider turn, optionally using its streaming form.
+   *
+   * The account is always the candidate's owner. That is the credential the
+   * roster exposed and the same scope `askAgent` used before thread turns were
+   * streamed; a continuation must not fall back to whichever user happened to
+   * post the reply.
+   */
+  private async performChat(
+    candidate: ChannelMentionCandidate,
+    prompt: string,
+    timeoutMs: number,
+    onEvent?: (event: ChatStreamEvent) => void,
+  ): Promise<{ reply?: unknown; error?: string }> {
+    const providers = this.options.operations.chatProviders;
+    if (providers === undefined) {
+      return { error: "this deployment has no provider chat configured" };
+    }
+    const input = {
+      userId: candidate.userId,
+      systemAdmin: false,
+      provider: candidate.provider,
+      messages: [{ role: "user", content: prompt }],
+    };
+    const timedOut = Symbol("timeout");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const operation =
+        onEvent !== undefined && providers.completeStream !== undefined
+          ? providers.completeStream(input, onEvent)
+          : providers.complete(input);
+      const answer = await Promise.race([
+        operation,
+        new Promise<typeof timedOut>((resolve) => {
+          timer = setTimeout(() => resolve(timedOut), timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+      if (answer === timedOut) {
+        return {
+          error: `no answer within ${String(Math.round(timeoutMs / 1000))}s`,
+        };
+      }
+      return { reply: answer };
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
   }
 
   /**
@@ -9463,49 +9688,23 @@ export class ApiGateway {
     prompt: string,
     timeoutMs: number,
   ): Promise<{ text?: string; error?: string }> {
-    const complete = this.options.operations.chatProviders?.complete;
-    if (complete === undefined) {
-      return { error: "this deployment has no provider chat configured" };
+    const answer = await this.performChat(candidate, prompt, timeoutMs);
+    // `ChatReply.text` is the field the provider service actually fills.
+    // Reading `content` — the shape of the *request* — found nothing every
+    // time, so every dynamic line silently fell back to a fixed one.
+    const reply = answer.reply as
+      | { text?: unknown; content?: unknown }
+      | undefined;
+    const trimmed = String(reply?.text ?? reply?.content ?? "").trim();
+    if (trimmed.length > 0) {
+      return { text: trimmed };
     }
-    // A distinct value rather than `undefined`, so "the deadline passed" and
-    // "the model answered with nothing" stay separable. Collapsing them meant
-    // a reply that arrived fine but was read out of the wrong field reported
-    // itself as a timeout, which sent me looking at durations for something
-    // that was never slow.
-    const timedOut = Symbol("timeout");
-    try {
-      const answer = await Promise.race([
-        complete({
-          userId: candidate.userId,
-          systemAdmin: false,
-          provider: candidate.provider,
-          messages: [{ role: "user", content: prompt }],
-        }),
-        new Promise<typeof timedOut>((resolve) =>
-          setTimeout(() => resolve(timedOut), timeoutMs).unref?.(),
-        ),
-      ]);
-      if (answer === timedOut) {
-        return {
-          error: `no answer within ${String(Math.round(timeoutMs / 1000))}s`,
-        };
-      }
-      // `ChatReply.text` is the field the provider service actually fills.
-      // Reading `content` — the shape of the *request* — found nothing every
-      // time, so every dynamic line silently fell back to a fixed one.
-      const reply = answer as { text?: unknown; content?: unknown };
-      const trimmed = String(reply?.text ?? reply?.content ?? "").trim();
-      return trimmed.length === 0
-        ? { error: "the model answered with nothing" }
-        : { text: trimmed };
-    } catch (error) {
+    return {
       // Carried rather than swallowed: "I could not reach my model" is true
       // and useless, and the reason is nearly always an expired sign-in the
       // reader is the only person who can fix.
-      return {
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
+      error: answer.error ?? "the model answered with nothing",
+    };
   }
 
   /**

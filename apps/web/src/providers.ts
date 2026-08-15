@@ -2941,27 +2941,36 @@ export class ProviderChatService {
     onEvent: (event: ChatStreamEvent) => void,
   ): Promise<ChatReply> {
     const prompt = await this.prepareCompletion(input);
-    return await this.withCompletionEnv(
-      input.userId,
-      input.provider,
-      prompt.credential,
-      async (env) =>
-        input.provider === "anthropic"
-          ? await this.streamViaClaudeCli(
-              prompt.text,
-              prompt.settings,
-              input.cliSessionId,
-              onEvent,
-              env,
-            )
-          : await this.streamViaCodexCli(
-              prompt.text,
-              prompt.settings,
-              input.cliSessionId,
-              onEvent,
-              env,
-            ),
-    );
+    try {
+      return await this.withCompletionEnv(
+        input.userId,
+        input.provider,
+        prompt.credential,
+        async (env) =>
+          input.provider === "anthropic"
+            ? await this.streamViaClaudeCli(
+                prompt.text,
+                prompt.settings,
+                input.cliSessionId,
+                onEvent,
+                env,
+              )
+            : await this.streamViaCodexCli(
+                prompt.text,
+                prompt.settings,
+                input.cliSessionId,
+                onEvent,
+                env,
+              ),
+      );
+    } catch (error) {
+      // Thread continuations use this path now, so an expired credential must
+      // be retired exactly as it is for a non-streaming completion. Otherwise
+      // the failed turn is visible but the same dead agent remains available
+      // for the next message.
+      await this.noteCredentialFailure(input.userId, input.provider, error);
+      throw error;
+    }
   }
 
   /**

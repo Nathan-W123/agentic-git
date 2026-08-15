@@ -68,7 +68,15 @@ interface TestRuntime {
    * that the thread's own history goes with it.
    */
   chatPrompts: Array<{ userId: string; provider: string; prompt: string }>;
-  chatAnswer: { text?: string; fail?: string; delayMs?: number };
+  chatAnswer: {
+    text?: string;
+    fail?: string;
+    delayMs?: number;
+    streamEvents?: Array<Record<string, unknown>>;
+    thinking?: string;
+    thinkingHidden?: boolean;
+    thinkingTokens?: number;
+  };
   /** Every canonical diff the auditor asked for, in order. */
   canonicalDiffs: Array<{
     projectId: string;
@@ -261,6 +269,40 @@ async function startRuntime(
     patch: "@@ -1 +1 @@\n-const ok = a && b;\n+const ok = a || b;",
     truncated: false,
   };
+  const performChat = async (
+    input: any,
+    onEvent?: (event: Record<string, unknown>) => void,
+  ): Promise<Record<string, unknown>> => {
+    chatPrompts.push({
+      userId: String(input?.userId ?? ""),
+      provider: String(input?.provider ?? ""),
+      prompt: String(input?.messages?.[0]?.content ?? ""),
+    });
+    for (const event of chatAnswer.streamEvents ?? []) {
+      onEvent?.(event);
+    }
+    if (chatAnswer.delayMs !== undefined) {
+      // A slow provider, which is the ordinary case this exists to test:
+      // anything the channel does *after* awaiting a completion is something
+      // a person is waiting on.
+      await new Promise((resolve) => setTimeout(resolve, chatAnswer.delayMs));
+    }
+    if (chatAnswer.fail !== undefined) {
+      throw new Error(chatAnswer.fail);
+    }
+    return {
+      ...(chatAnswer.text === undefined ? {} : { text: chatAnswer.text }),
+      ...(chatAnswer.thinking === undefined
+        ? {}
+        : { thinking: chatAnswer.thinking }),
+      ...(chatAnswer.thinkingHidden === undefined
+        ? {}
+        : { thinkingHidden: chatAnswer.thinkingHidden }),
+      ...(chatAnswer.thinkingTokens === undefined
+        ? {}
+        : { usage: { thinkingTokens: chatAnswer.thinkingTokens } }),
+    };
+  };
   const operations: ApiOperations = {
     chatProviders: {
       async list() {
@@ -283,23 +325,10 @@ async function startRuntime(
         return {};
       },
       async complete(input: any) {
-        chatPrompts.push({
-          userId: String(input?.userId ?? ""),
-          provider: String(input?.provider ?? ""),
-          prompt: String(input?.messages?.[0]?.content ?? ""),
-        });
-        if (chatAnswer.delayMs !== undefined) {
-          // A slow provider, which is the ordinary case this exists to test:
-          // anything the channel does *after* awaiting a completion is
-          // something a person is waiting on.
-          await new Promise((resolve) =>
-            setTimeout(resolve, chatAnswer.delayMs),
-          );
-        }
-        if (chatAnswer.fail !== undefined) {
-          throw new Error(chatAnswer.fail);
-        }
-        return chatAnswer.text === undefined ? {} : { text: chatAnswer.text };
+        return await performChat(input);
+      },
+      async completeStream(input: any, onEvent: (event: any) => void) {
+        return await performChat(input, onEvent);
       },
       async connectionsFor(userIds) {
         const result: Record<
@@ -4025,8 +4054,164 @@ test("a reply in an agent's thread is answered by that agent, with the thread as
   const answer = listed.data.messages
     .find((message: any) => message.id === root.id)
     ?.replies?.at(-1);
-  assert.equal(answer.kind, "agent");
+  assert.equal(answer.kind, "outcome");
   assert.equal(answer.authorId, `${ownerId}:anthropic`);
+});
+
+test("a human channel reply extending an agent thread starts exactly one provider turn", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "openai" }]);
+  const repositoryId = await invitableRepository(owner, "streamed-thread-reply");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:openai`,
+    content: "I updated the retry helper.",
+  });
+  await runtime.store.addChannelReply({
+    repositoryId,
+    messageId: root.id,
+    kind: "outcome",
+    authorId: `${ownerId}:openai`,
+    content: "The retry helper now backs off exponentially.",
+  });
+
+  runtime.chatAnswer.streamEvents = [
+    { type: "status", status: "working" },
+    { type: "reasoning_start", hidden: false },
+    { type: "reasoning", text: "Checking the earlier result." },
+    { type: "text", delta: "It still caps at five attempts." },
+  ];
+  runtime.chatAnswer.text = "It still caps at five attempts.";
+  const before = runtime.chatPrompts.length;
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "does it still cap the attempts?" } },
+  );
+  assert.equal(replied.status, 201);
+
+  await waitFor(async () => {
+    const thread = await runtime.store.getChannelMessage(
+      repositoryId,
+      root.id,
+      ownerId,
+    );
+    return (
+      thread?.replies.some(
+        (reply) =>
+          reply.kind === "outcome" &&
+          reply.content === "It still caps at five attempts.",
+      ) === true
+    );
+  }, "the resumed provider turn never wrote its terminal reply");
+
+  assert.equal(runtime.chatPrompts.length - before, 1);
+  const prompt = runtime.chatPrompts.at(-1);
+  assert.equal(prompt?.userId, ownerId);
+  assert.equal(prompt?.provider, "openai");
+  assert.match(prompt?.prompt ?? "", /backs off exponentially/u);
+  assert.equal(
+    (prompt?.prompt.match(/does it still cap the attempts\?/gu) ?? []).length,
+    1,
+    "the new prompt belongs in the provider turn once",
+  );
+
+  const thread = await runtime.store.getChannelMessage(
+    repositoryId,
+    root.id,
+    ownerId,
+  );
+  const humanReply = thread?.replies.findIndex(
+    (reply) => reply.content === "does it still cap the attempts?",
+  ) ?? -1;
+  const resumed = thread?.replies.slice(humanReply + 1) ?? [];
+  assert.deepEqual(
+    resumed.map((reply) => reply.kind),
+    ["progress", "progress", "outcome"],
+  );
+  assert.equal(resumed[0]?.content, "Working…");
+  assert.equal(resumed[1]?.content, "Checking the earlier result.");
+  assert.equal(resumed[2]?.content, "It still caps at five attempts.");
+});
+
+test("each resumed turn emits fresh hidden reasoning and a terminal reply without recursion", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "repeated-thread-turns");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "I finished the config migration.",
+  });
+
+  for (const [question, answer] of [
+    ["which key changed?", "The key is now retryLimit."],
+    ["what is its default?", "Its default is five."],
+  ] as const) {
+    runtime.chatAnswer.streamEvents = [
+      { type: "reasoning_start", hidden: true },
+      { type: "reasoning_tokens", tokens: 12 },
+      { type: "text", delta: answer },
+    ];
+    runtime.chatAnswer.text = answer;
+    const turnsBefore = runtime.chatPrompts.length;
+    const posted = await owner.request(
+      `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+      { method: "POST", body: { content: question } },
+    );
+    assert.equal(posted.status, 201);
+    await waitFor(async () => {
+      const thread = await runtime.store.getChannelMessage(
+        repositoryId,
+        root.id,
+        ownerId,
+      );
+      return thread?.replies.some(
+        (reply) => reply.kind === "outcome" && reply.content === answer,
+      ) === true;
+    }, `the turn for ${question} never finished`);
+    assert.equal(runtime.chatPrompts.length - turnsBefore, 1);
+  }
+
+  const thread = await runtime.store.getChannelMessage(
+    repositoryId,
+    root.id,
+    ownerId,
+  );
+  assert.equal(
+    thread?.replies.filter(
+      (reply) => reply.kind === "progress" && reply.content === "Thinking…",
+    ).length,
+    2,
+  );
+  assert.equal(
+    thread?.replies.filter((reply) => reply.kind === "outcome").length,
+    2,
+  );
+  const callsAfterAgentMessages = runtime.chatPrompts.length;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(
+    runtime.chatPrompts.length,
+    callsAfterAgentMessages,
+    "agent-authored progress and outcomes must not start provider turns",
+  );
+  assert.match(
+    runtime.chatPrompts.at(-1)?.prompt ?? "",
+    /The key is now retryLimit\./u,
+  );
 });
 
 /**
@@ -7391,9 +7576,16 @@ test("a reply to an agent's own ending is answered, not swallowed", async (t) =>
     const listed = await owner.request(`${base}/messages`);
     const thread = (listed.data.messages as { id: string; replies: unknown[] }[])
       .find((message) => message.id === root.id);
-    const replies = (thread?.replies ?? []) as { authorId: string }[];
-    // The agent answers in its own voice, in its own thread.
-    return replies.some((reply) => reply.authorId === `${ownerId}:anthropic`);
+    const replies = (thread?.replies ?? []) as Array<{
+      authorId: string;
+      kind: string;
+    }>;
+    // The agent answers in its own voice, in its own thread, and finishes the
+    // streamed turn rather than satisfying this wait with its progress line.
+    return replies.some(
+      (reply) =>
+        reply.authorId === `${ownerId}:anthropic` && reply.kind === "outcome",
+    );
   }, "the agent never answered a reply to its own outcome message");
 });
 
