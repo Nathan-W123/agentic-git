@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  type AgentActionResult,
   type AgentAdapter,
   type AgentCapabilities,
   type AgentEvent,
@@ -102,6 +103,7 @@ const COMPLETION_SCHEMA = {
     "symbolsChanged",
     "explanation",
     "requestId",
+    "action",
     "additionalFiles",
     "additionalSymbols",
     "additionalApis",
@@ -114,11 +116,16 @@ const COMPLETION_SCHEMA = {
   properties: {
     outcome: {
       type: "string",
-      enum: ["completed", "scope_change_requested"],
+      enum: ["completed", "scope_change_requested", "action_requested"],
     },
     symbolsChanged: { type: "array", items: { type: "string" } },
     explanation: { type: "string" },
     requestId: { type: "string" },
+    // Present only for action_requested: the name of the platform action
+    // being asked for. Required by the schema like everything else — Codex's
+    // structured output wants a closed shape — so the other outcomes send it
+    // empty.
+    action: { type: "string" },
     additionalFiles: { type: "array", items: { type: "string" } },
     additionalSymbols: { type: "array", items: { type: "string" } },
     additionalApis: { type: "array", items: { type: "string" } },
@@ -208,7 +215,27 @@ interface CodexScopeChange {
   explanation: string;
 }
 
-type CodexExecutionResult = CodexCompletion | CodexScopeChange;
+/**
+ * The agent asking the platform, not a person, for one of the fixed
+ * actions — publish canonical, start or stop a preview. Same round trip as
+ * the prompt-CLI adapters: the round ends on the request, the platform's
+ * answer arrives through {@link CodexAdapter.resolveAction}, and the next
+ * round's prompt replays the result. Before this, "push to GitHub" was a
+ * request a Codex agent could not satisfy by any route — its own `git push`
+ * has no credential and no reachable remote from the workspace.
+ */
+interface CodexActionRequest {
+  outcome: "action_requested";
+  requestId: string;
+  action: string;
+  symbolsChanged: string[];
+  explanation: string;
+}
+
+type CodexExecutionResult =
+  | CodexCompletion
+  | CodexScopeChange
+  | CodexActionRequest;
 
 interface CodexSession {
   session: AgentSession;
@@ -239,6 +266,21 @@ interface CodexSession {
       reject: (error: Error) => void;
     }
   >;
+  /**
+   * Actions asked of the platform and not yet answered. Its own map because
+   * the platform answers in however long the action takes — a push is
+   * seconds, a preview boot longer — through its own resolver.
+   */
+  pendingAction: Map<
+    string,
+    {
+      promise: Promise<AgentActionResult>;
+      resolve: (result: AgentActionResult) => void;
+      reject: (error: Error) => void;
+    }
+  >;
+  /** What the platform did and said, for the prompt of the round after. */
+  actionResults: AgentActionResult[];
   cancelled: boolean;
 }
 
@@ -440,6 +482,21 @@ function assertExecutionResult(
   if (completion.outcome === "completed") {
     return;
   }
+  if (completion.outcome === "action_requested") {
+    // The name is all the platform needs; whether it is an action the
+    // platform honours is the coordinator's call, not a schema's.
+    const request = completion as Partial<CodexActionRequest>;
+    if (
+      typeof request.requestId !== "string" ||
+      typeof request.action !== "string" ||
+      request.action.trim().length === 0
+    ) {
+      throw new TypeError(
+        "A Codex action request must carry a requestId and the action's name",
+      );
+    }
+    return;
+  }
   if (
     completion.outcome !== "scope_change_requested" ||
     typeof completion.requestId !== "string" ||
@@ -549,6 +606,8 @@ export class CodexAdapter implements AgentAdapter {
       scopeDecisions: [],
       tokenUsage: [],
       pendingScope: new Map(),
+      pendingAction: new Map(),
+      actionResults: [],
       resume: undefined,
       cancelled: false,
     };
@@ -613,6 +672,8 @@ export class CodexAdapter implements AgentAdapter {
       scopeDecisions: [],
       tokenUsage: existing?.tokenUsage ?? [],
       pendingScope: new Map(),
+      pendingAction: new Map(),
+      actionResults: [],
       resume,
       cancelled: false,
     };
@@ -810,6 +871,32 @@ export class CodexAdapter implements AgentAdapter {
         return;
       }
 
+      if (execution.outcome === "action_requested") {
+        const askId = execution.requestId.trim() || createId("action");
+        const waiting = this.createActionWaiter(record, askId);
+        this.emit(record, {
+          event: "action_requested",
+          requestId: askId,
+          action: execution.action,
+          occurredAt: new Date().toISOString(),
+        });
+        // The platform always answers — done or refused, never silence
+        // (see `handleActionRequest` in the coordinator) — so unlike a
+        // question there is no deadline to fall on. A refusal is a real
+        // answer: the next round's prompt carries it, and the agent
+        // finishes by reporting it rather than by retrying.
+        const result = await waiting;
+        record.actionResults.push(structuredClone(result));
+        this.emit(record, {
+          event: "progress",
+          message:
+            `Platform ${result.outcome === "done" ? "performed" : "refused"} ` +
+            `${execution.action}: ${result.explanation}`,
+          occurredAt: new Date().toISOString(),
+        });
+        continue;
+      }
+
       const requestId = execution.requestId.trim() || createId("scope");
       const pending = this.createScopeWaiter(record, requestId);
       this.emit(record, {
@@ -915,6 +1002,42 @@ export class CodexAdapter implements AgentAdapter {
     pending.resolve(structuredClone(decision));
   }
 
+  public async resolveAction(
+    sessionId: string,
+    result: AgentActionResult,
+  ): Promise<void> {
+    const record = this.requireSession(sessionId);
+    const pending = record.pendingAction.get(result.requestId);
+    if (pending === undefined) {
+      throw new Error(
+        `Codex session ${sessionId} has no pending action ${result.requestId}`,
+      );
+    }
+    record.pendingAction.delete(result.requestId);
+    pending.resolve(structuredClone(result));
+  }
+
+  private createActionWaiter(
+    record: CodexSession,
+    requestId: string,
+  ): Promise<AgentActionResult> {
+    if (record.pendingAction.has(requestId)) {
+      throw new Error(`Codex repeated pending action ${requestId}`);
+    }
+    let resolvePromise: (result: AgentActionResult) => void = () => undefined;
+    let rejectPromise: (error: Error) => void = () => undefined;
+    const promise = new Promise<AgentActionResult>((resolve, reject) => {
+      resolvePromise = resolve;
+      rejectPromise = reject;
+    });
+    record.pendingAction.set(requestId, {
+      promise,
+      resolve: resolvePromise,
+      reject: rejectPromise,
+    });
+    return promise;
+  }
+
   public async cancel(sessionId: string): Promise<void> {
     const record = this.requireSession(sessionId);
     record.cancelled = true;
@@ -923,6 +1046,10 @@ export class CodexAdapter implements AgentAdapter {
       pending.reject(new Error(`Session ${sessionId} was cancelled`));
     }
     record.pendingScope.clear();
+    for (const pending of record.pendingAction.values()) {
+      pending.reject(new Error(`Session ${sessionId} was cancelled`));
+    }
+    record.pendingAction.clear();
     record.controller?.abort();
     const active = record.active;
     if (active !== undefined) {
@@ -1381,10 +1508,41 @@ export class CodexAdapter implements AgentAdapter {
       "Return only the JSON object required by the output schema.",
       "For completed, set outcome=completed and use empty scope-change fields.",
       "When more scope is necessary, stop, set outcome=scope_change_requested, populate every scope field, and wait for the next invocation.",
+      // The platform's own verbs. Without this paragraph the actions
+      // existed and no Codex agent had any way to learn so — "push to
+      // GitHub" was a request it could not satisfy by any route, including
+      // the git it holds: the workspace's remote is the local canonical
+      // mirror, and no credential for anything beyond it is ever in its
+      // environment.
+      "The platform can perform a small fixed set of actions for you. To " +
+        "ask, stop and return outcome=action_requested with requestId and " +
+        'action set and every scope field empty. The actions: "push" ' +
+        "publishes this repository's accepted canonical state to its " +
+        "recorded remote on a fresh branch — use it when asked to push or " +
+        "publish to GitHub; your own `git push` cannot reach the remote " +
+        'from this workspace, so never try it. "preview_start" runs this ' +
+        'repository\'s app and answers with its URL; "preview_stop" stops ' +
+        "it. The platform answers done or refused with an explanation " +
+        "either way. A refusal is final for this run — do not retry it; " +
+        "finish with outcome=completed and an explanation relaying the " +
+        "refusal's reason, so the person who asked can act on it.",
+      "When an action's result is the whole of what was asked for — a " +
+        "requested push, for example — finish with outcome=completed and " +
+        "an explanation reporting the action's own result, even though you " +
+        "changed no files. Changing files is not the goal of such a task; " +
+        "the action was.",
+      "Never offer a person options the platform cannot carry out — " +
+        "provisioning credentials on this machine, changing the " +
+        "deployment, granting access. If the work is blocked on something " +
+        "like that, finish with outcome=completed and an explanation " +
+        "saying exactly what is missing.",
       `Task: ${record.input.task.objective}`,
       `Approved plan: ${JSON.stringify(approvedPlan)}`,
       `Coordinator decision: ${JSON.stringify(context.decision)}`,
       `Prior scope decisions: ${JSON.stringify(record.scopeDecisions)}`,
+      // Replay for actions: the round after a push has to know the push
+      // happened — and where it landed — or it would ask again.
+      `Platform actions already performed: ${JSON.stringify(record.actionResults)}`,
       `Canonical revision: ${context.canonicalVersion.revision}`,
       `Coordinator validation labels (do not execute): ${JSON.stringify(validationLabels)}`,
     ].join("\n");

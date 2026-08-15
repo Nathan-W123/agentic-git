@@ -64,12 +64,12 @@ agent, and the event dispatch in `handleAgentEvent`
 
 Since built, and wider than first staged: the coordinator dispatches the
 event and answers through the injected authority, and the prompt-CLI
-adapters (Claude, Gemini) emit and resolve the round trip themselves — their
-execution prompt names the actions, which is what makes them reachable at
-all. An agent asked to "push to GitHub" asks the platform, and a task whose
-whole deliverable was a performed action settles as done with the action's
-result as its report, not as "produced no repository changes". Codex's
-adapter still cannot ask.
+adapters (Claude, Gemini) and the Codex adapter emit and resolve the round
+trip themselves — their execution prompts name the actions, which is what
+makes them reachable at all. An agent asked to "push to GitHub" asks the
+platform, and a task whose whole deliverable was a performed action settles
+as done with the action's result as its report, not as "produced no
+repository changes".
 
 ### The coordinator cannot do this itself
 
