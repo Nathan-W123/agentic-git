@@ -771,6 +771,24 @@ export class Worker {
             });
             return;
           }
+          if (event.event === "action_requested") {
+            // Same hazard, same answer. The worker holds no action
+            // authority to forward to, and now that the prompt-CLI agents
+            // can ask, dropping the event would park their waiter until
+            // the execution timeout. Refused immediately, exactly as the
+            // coordinator answers when no authority is configured — a
+            // refusal is a real answer the agent finishes on.
+            await adapter.resolveAction?.(sessionId, {
+              requestId: event.requestId ?? "",
+              action: event.action,
+              outcome: "refused",
+              explanation:
+                "This worker cannot perform platform actions. Carry on " +
+                "within the plan you already have, or report what is " +
+                "missing.",
+            });
+            return;
+          }
           if (event.event !== "scope_change_requested") {
             return;
           }

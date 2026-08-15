@@ -1052,6 +1052,14 @@ test("a refused action does not launder an empty run into a success", async () =
       fixture.repository,
       fixture.workspaces,
       "",
+      false,
+      undefined,
+      // What a well-behaved agent writes after a refusal: the relay the
+      // prompt asks for. The ending must carry it — this exact sentence
+      // sitting unread while the thread said "produced no repository
+      // changes" is how a missing GitHub connection was undiagnosable
+      // from the channel.
+      "The push was refused: you haven't connected GitHub.",
     );
     const result = await new Coordinator({
       repositories: fixture.repositories,
@@ -1073,9 +1081,19 @@ test("a refused action does not launder an empty run into a success", async () =
     });
 
     assert.equal(result.tasks[0]?.status, "failed");
+    // Both halves: the alarm leads, the agent's reason follows.
     assert.match(
       result.tasks[0]?.explanation ?? "",
       /produced no repository changes/u,
+    );
+    assert.match(
+      result.tasks[0]?.explanation ?? "",
+      /you haven't connected GitHub/u,
+    );
+    const failure = result.audit.find((event) => event.type === "task_failed");
+    assert.match(
+      String((failure?.data as Record<string, unknown>)["explanation"] ?? ""),
+      /you haven't connected GitHub/u,
     );
   } finally {
     await rm(root, { recursive: true, force: true });
