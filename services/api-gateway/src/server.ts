@@ -11550,48 +11550,29 @@ export class ApiGateway {
   }
 
   /**
-   * Says out loud what the coordinator decided when two tasks collided.
+   * Resolves a task id to the name the room already knows its agent by.
    *
-   * The detector has always written `conflict_detected` — task ids, the
-   * overlapping files, a disposition and its own explanation — and none of it
-   * ever reached a person: the event carried no repository, so nothing could
-   * route it to a channel, and `narrateTaskEvent` had no case for it. The one
-   * thing this product does that a pile of uncoordinated agents cannot was
-   * invisible in the room where people watch the agents work; the only
-   * symptom of an arbitration was one task mysteriously waiting.
+   * Who, not what. A dispatched objective is the whole message somebody typed
+   * — several sentences of it — and quoting even the first 57 characters put a
+   * truncated wall of prompt on both sides of every hold, twice in one
+   * sentence. The room already knows these agents by name, so the name is the
+   * whole of what a reader needs to place the collision.
    *
-   * Spoken by the room, not by an agent. Neither agent decided this — the
-   * coordinator did, and putting the sentence in an agent's mouth would make
-   * it look like agents negotiate with each other.
+   * The objective survives only as the fallback for an agent with no name in
+   * this channel, and short: enough to tell two holds apart, not enough to
+   * read as a quotation.
+   *
+   * Shared by both room-level narrators. `narrateConflicts` used to quote
+   * objectives while `announceArbitration` named agents, so the same collision
+   * was announced two different ways depending on which event arrived.
    */
-  /**
-   * The room-level announcement of one admission decision.
-   *
-   * Named by objective rather than task id, because "task_4ef5f1b waits for
-   * task_a89c9a4" tells a reader nothing they can act on and both names are
-   * one lookup away. The blocker may have finished between the event and this
-   * lookup — the announcement still stands, it just reads as history.
-   */
-  private async announceArbitration(
-    watched: { projectId: string; repositoryId: string; taskId: string },
-    data: Record<string, unknown>,
-  ): Promise<void> {
+  private async channelAgentNamer(
+    projectId: string,
+    repositoryId: string,
+  ): Promise<(taskId: unknown) => string> {
     const tasks = await this.options.store.listSubmittedTasks({
-      repositoryId: watched.repositoryId,
+      repositoryId,
     });
-    // Who, not what. A dispatched objective is the whole message somebody
-    // typed — several sentences of it — and quoting even the first 57
-    // characters put a truncated wall of prompt on both sides of every hold,
-    // twice in one sentence. The room already knows these agents by name, and
-    // the files are named in the same line, so the name is the whole of what a
-    // reader needs to place the hold.
-    //
-    // The objective survives only as the fallback for an agent with no name in
-    // this channel, and short: enough to tell two holds apart, not enough to
-    // read as a quotation.
-    const overrides = await this.options.store
-      .listChannelAgentOverrides(watched.repositoryId)
-      .catch(() => ({}) as Record<string, { name?: string }>);
     // Overrides are keyed `${userId}:${provider}`, never by a task's agentId —
     // so looking one up by agentId matched nothing, every time, and every hold
     // fell through to quoting the objective it was supposed to stop quoting.
@@ -11599,33 +11580,51 @@ export class ApiGateway {
     // `resolveChannelAgentPresentation`; so does this now, which also means an
     // agent nobody has renamed still gets its "Codex (Nathan)" default rather
     // than a sentence of somebody's prompt.
-    const connections = await this
-      .channelAgentConnections(watched.projectId, watched.repositoryId)
-      .catch(() => []);
-    const describe = (taskId: unknown): string => {
+    const overrides = await this.options.store
+      .listChannelAgentOverrides(repositoryId)
+      .catch(() => ({}) as Record<string, { name?: string }>);
+    const connections = await this.channelAgentConnections(
+      projectId,
+      repositoryId,
+    ).catch(() => []);
+    return (taskId: unknown): string => {
       const found = tasks.find((candidate) => candidate.id === taskId);
       const owned = connections.filter(
         (connection) => connection.userId === found?.submittedBy,
       );
       const agentId = String(found?.agentId ?? "").toLowerCase();
-      // Matched on provider, never "the first one this person owns". That
-      // fallback named both sides of a conflict after whichever agent came
-      // first, so a hold read "@Juliett overlaps @Juliett" — which tells the
-      // reader nothing and looks like the coordinator arguing with itself.
-      // Better to fall through to the objective than to name the wrong agent
-      // confidently.
-      const connection = owned.find((candidate) =>
-        agentId.includes(candidate.provider.toLowerCase()),
-      );
+      // Matched on the vendor, then the provider id, but never "the first one
+      // this person owns". That last fallback named both sides of a conflict
+      // after whichever agent came first, so a hold read "@Juliett overlaps
+      // @Juliett" — which tells the reader nothing and looks like the
+      // coordinator arguing with itself. Better to fall through to the
+      // objective than to name the wrong agent confidently.
+      //
+      // The vendor is the half that actually matches. A task's `agentId` is
+      // one of the deployment's own configured agents, resolved from a vendor
+      // by adapter (`resolveAgentIdForVendor`), so it is named "claude-1" —
+      // never "anthropic-1". Matching the provider id alone therefore missed
+      // every real task, and every hold in the room quoted the truncated
+      // objective it was written to stop quoting.
+      const connection = owned.find((candidate) => {
+        const provider = candidate.provider.toLowerCase();
+        const vendor = PROVIDER_TO_VENDOR[candidate.provider] ?? provider;
+        return agentId.includes(vendor) || agentId.includes(provider);
+      });
       if (connection !== undefined) {
+        // The call sign first, exactly as the roster and every @mention
+        // resolve it: an agent connects, is named once from the pantheon, and
+        // keeps that name in every channel. Naming it "@Claude (Nathan)" here
+        // while the room has been calling it "@Athena" all morning describes
+        // two different agents to a reader who only knows one.
+        const defaultName =
+          connection.callSign ??
+          `${AGENT_LABEL[connection.provider] ?? connection.provider} (${firstWord(
+            connection.userName,
+          )})`;
         return `@${
-          resolveChannelAgentPresentation(
-            overrides,
-            connection,
-            `${AGENT_LABEL[connection.provider] ?? connection.provider} (${firstWord(
-              connection.userName,
-            )})`,
-          ).name
+          resolveChannelAgentPresentation(overrides, connection, defaultName)
+            .name
         }`;
       }
       // The request, not the preamble a channel dispatch puts in front of it.
@@ -11636,6 +11635,30 @@ export class ApiGateway {
         "";
       return first.length > 40 ? `"${first.slice(0, 37)}…"` : `"${first}"`;
     };
+  }
+
+  /**
+   * The room-level announcement of one admission decision.
+   *
+   * Spoken by the room, not by an agent. Neither agent decided this — the
+   * coordinator did, and putting the sentence in an agent's mouth would make
+   * it look like agents negotiate with each other.
+   *
+   * One sentence: the two agents, and what happens next. Every earlier version
+   * spent a second and third clause justifying the decision — "so it is
+   * narrowing its plan", "It starts the moment that lands" — which read as the
+   * coordinator explaining itself to a room that only wanted to know the
+   * order. The blocker may have finished between the event and this lookup —
+   * the announcement still stands, it just reads as history.
+   */
+  private async announceArbitration(
+    watched: { projectId: string; repositoryId: string; taskId: string },
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const describe = await this.channelAgentNamer(
+      watched.projectId,
+      watched.repositoryId,
+    );
     const held = describe(watched.taskId);
     const blockers = (Array.isArray(data["blockedBy"]) ? data["blockedBy"] : [])
       .slice(0, 2)
@@ -11664,12 +11687,14 @@ export class ApiGateway {
             : entry,
         ),
       );
-      // Two agents and the files between them, in that order, because that is
-      // the shape of the fact: who is working, on what, and who has the rest.
+      // The one case where the files earn their place in the line: a split is
+      // only legible if the room can see which half started. Still one
+      // sentence, and still the two agents first.
       line =
-        `⚖️ ${held} has ${granted.length > 0 ? clause(granted) : "the free part"}; ` +
-        `${blocker} has ${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"}. ` +
-        `${held} picks that up when the lease clears.`;
+        `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts on ` +
+        `${granted.length > 0 ? clause(granted) : "the free part"} now, ` +
+        `${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"} once ` +
+        `${blocker} is done.`;
     } else if (approved) {
       // The hold clearing is as much news as the hold was — a room told
       // "it starts the moment that lands" deserves the moment. Only said
@@ -11689,15 +11714,15 @@ export class ApiGateway {
       if (!wasHeld) {
         return;
       }
-      line = `⚖️ ${held} starts now — what it was waiting on has landed.`;
+      line = `⚖️ ${held} starts now — what it was waiting on is done.`;
     } else if (status === "blocked") {
       line =
-        `⚖️ ${held} overlaps ${blocker} too heavily to run alongside it, ` +
-        `so it is narrowing its plan.`;
+        `⚖️ ${held} and ${blocker} have conflicting files — ${held} is ` +
+        `narrowing its plan.`;
     } else {
       line =
-        `⚖️ ${held} is waiting — ${blocker} has the files it needs. ` +
-        `It starts the moment that lands.`;
+        `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts ` +
+        `once ${blocker} is done.`;
     }
     await this.appendChannelEntry({
       projectId: watched.projectId,
@@ -11804,6 +11829,20 @@ export class ApiGateway {
     return people;
   }
 
+  /**
+   * Says out loud what the coordinator decided when two tasks collided.
+   *
+   * The detector has always written `conflict_detected` — task ids, the
+   * overlapping files, a disposition and its own explanation — and none of it
+   * ever reached a person: the event carried no repository, so nothing could
+   * route it to a channel, and `narrateTaskEvent` had no case for it. The one
+   * thing this product does that a pile of uncoordinated agents cannot was
+   * invisible in the room where people watch the agents work; the only
+   * symptom of an arbitration was one task mysteriously waiting.
+   *
+   * Spoken by the room, not by an agent, and in the same sentence shape as
+   * `announceArbitration`: two agent names and the order they run in.
+   */
   private async narrateConflicts(): Promise<void> {
     const events = await this.options.store.listAuditEvents({
       types: ["conflict_detected"],
@@ -11836,53 +11875,28 @@ export class ApiGateway {
       if (disposition === "concurrent") {
         continue;
       }
-      const tasks = await this.options.store.listSubmittedTasks({
-        repositoryId,
-      });
-      const named = taskIds.map((taskId) => {
-        const task = tasks.find((candidate) => candidate.id === taskId);
-        const objective = (task?.objective ?? "a task").split("\n")[0] ?? "";
-        return objective.length > 60
-          ? `"${objective.slice(0, 57)}…"`
-          : `"${objective}"`;
-      });
-      // File evidence only. Every kind was flattened together, so a symbol
-      // name landed in a sentence about files — "they both touch app.js,
-      // BARE and 332 more" — and the count was of symbols, not of files.
-      const files = (Array.isArray(data["evidence"]) ? data["evidence"] : [])
-        .flatMap((entry) =>
-          typeof entry === "object" &&
-          entry !== null &&
-          (entry as { kind?: unknown }).kind === "file_overlap"
-            ? ((entry as { resources?: unknown }).resources as string[]) ?? []
-            : [],
-        )
-        .filter((value): value is string => typeof value === "string");
-      const shown = [...new Set(files)].slice(0, 3);
-      const fileClause =
-        shown.length === 0
-          ? "the same files"
-          : shown.join(", ") +
-            (files.length > shown.length
-              ? ` and ${String(new Set(files).size - shown.length)} more`
-              : "");
-      // The detector's explanation is deliberately not appended. It is the
-      // full structural case — every overlapping file, every shared symbol,
-      // every dependency edge, with the score — and pasting it into the room
-      // produced a message thousands of words long listing variable names,
-      // for a reader whose question was "what is happening and what happens
-      // next". It is written to the audit record, which is where an argument
-      // that long belongs; the room gets the finding.
+      // The same resolver `announceArbitration` uses. This path used to quote
+      // the first 57 characters of both objectives, so one collision read as a
+      // wall of somebody's prompt while the admission event for the very same
+      // pair read "@Ares and @Juno" — two voices for one decision.
+      const describe = await this.channelAgentNamer(projectId, repositoryId);
+      const named = taskIds.map(describe);
+      // The detector's explanation is deliberately not appended, and neither
+      // are the overlapping files. It is the full structural case — every
+      // overlapping file, every shared symbol, every dependency edge, with the
+      // score — and pasting it into the room produced a message thousands of
+      // words long listing variable names, for a reader whose question was
+      // "who is waiting on whom". It is written to the audit record, which is
+      // where an argument that long belongs; the room gets the order.
       const line =
         disposition === "sequence"
-          ? `⚖️ ${named[0]} and ${named[1]} both touch ${fileClause}, so ` +
-            `they run one at a time — the second starts when the first lands.`
+          ? `⚖️ ${named[0]} and ${named[1]} have conflicting files — ` +
+            `${named[1]} starts once ${named[0]} is done.`
           : disposition === "block"
-            ? `⚖️ Holding ${named[1]} — it overlaps ${named[0]} on ` +
-              `${fileClause}, so its agent is narrowing the plan.`
-            : `⚖️ ${named[0]} and ${named[1]} overlap on ${fileClause} but ` +
-              `can run together — flagging it so nobody is surprised by ` +
-              `nearby edits.`;
+            ? `⚖️ ${named[0]} and ${named[1]} have conflicting files — ` +
+              `${named[1]} is narrowing its plan.`
+            : `⚖️ ${named[0]} and ${named[1]} have conflicting files but can ` +
+              `run together.`;
       await this.appendChannelEntry({
         projectId,
         repositoryId,

@@ -6698,6 +6698,327 @@ test("a quick task ends as two lines in the room, with no thread at all", async 
   );
 });
 
+/**
+ * Puts one dispatched task in the room, which is what starts the fast pump.
+ *
+ * `narrateConflicts` rides on `pumpChannelProgress`, and that timer only
+ * exists while some task is being watched — so a conflict test needs a real
+ * mention dispatch before an appended `conflict_detected` can be narrated.
+ */
+async function roomWithTwoAgents(
+  runtime: TestRuntime,
+  client: TestClient,
+  repo: string,
+  ownerId: string,
+  firstName: string,
+): Promise<{ claude: string; codex: string }> {
+  runtime.chatAnswer.text = "On it.";
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel`;
+  const posted = await client.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: `@Claude (${firstName}) tidy the retry helper` },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never dispatched a task",
+  );
+  const [claude] = await runtime.store.listSubmittedTasks({
+    repositoryId: repo,
+  });
+  assert.ok(claude !== undefined, "the dispatch stored no task");
+  // The other side of every collision below. Submitted directly because only
+  // one watched task is needed to run the pump, and `agentId` is the fixture's
+  // own vendor-resolved id — the shape `resolveAgentIdForVendor` produces.
+  const codex = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    objective: "paste the 72 possible names an agent can get please",
+    agentId: "test-agent-codex",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  return { claude: claude.id, codex: codex.id };
+}
+
+test("a file collision is announced as two agent names and an order, not two quoted prompts", async (t) => {
+  // The bug this covers, in the words of the person who hit it: the room said
+  // '⚖️ "paste the 72 possible names an agent …" is waiting — "when a prompt
+  // gets added to a thread …" has the files it needs. It starts the moment
+  // that lands.' Two truncated walls of somebody's own prompt and three
+  // clauses of justification, to say that one agent goes after another.
+  //
+  // Two separate faults produced that. `narrateConflicts` never resolved a
+  // name at all, and the resolver `announceArbitration` did use matched a
+  // task's `agentId` against the *provider* id ("anthropic") when a real
+  // agentId is named after the vendor ("test-agent-claude") — so it missed
+  // every task and fell through to the objective it was written to replace.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "collisionroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "conflict_detected",
+    taskId: tasks.claude,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      taskIds: [tasks.claude, tasks.codex],
+      disposition: "sequence",
+      evidence: [
+        {
+          kind: "file_overlap",
+          resources: ["services/api-gateway/src/server.ts"],
+        },
+      ],
+      explanation: "file_overlap: services/api-gateway/src/server.ts (+20)",
+    },
+  });
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.authorId === "coordinator");
+    },
+    "the collision was never announced in the room",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const line = String(
+    messages.find((message) => message.authorId === "coordinator")?.content,
+  );
+  // Both agents by the name the room already calls them, and the order.
+  assert.equal(
+    line,
+    `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
+      `files — @Codex (${firstName}) starts once @Claude (${firstName}) is done.`,
+    `the collision line did not read as two names and an order: ${line}`,
+  );
+  // The specific things that made it unreadable, each named so a rewrite that
+  // reintroduces one fails here rather than in somebody's channel.
+  assert.doesNotMatch(
+    line,
+    /paste the 72 possible names/u,
+    "the line quoted a task's objective back at the room",
+  );
+  assert.doesNotMatch(
+    line,
+    /nobody is surprised|the moment that lands|one at a time|both touch/u,
+    "the line kept a justification clause",
+  );
+});
+
+test("a collision that can run together is one line, and one that cannot say so is silent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "advisoryroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  // Advisory intent overlap admits both tasks untouched, so this one is never
+  // spoken at all — saying "conflict" about work that is running anyway would
+  // teach readers to ignore the times it matters.
+  await runtime.store.appendAudit(undefined, {
+    type: "conflict_detected",
+    taskId: tasks.claude,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      taskIds: [tasks.claude, tasks.codex],
+      disposition: "concurrent",
+      evidence: [],
+    },
+  });
+  await runtime.store.appendAudit(undefined, {
+    type: "conflict_detected",
+    taskId: tasks.claude,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      taskIds: [tasks.claude, tasks.codex],
+      disposition: "concurrent_with_notification",
+      evidence: [
+        { kind: "file_overlap", resources: ["apps/web/public/app.js"] },
+      ],
+    },
+  });
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.authorId === "coordinator");
+    },
+    "the advisory collision was never announced",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const lines = messages
+    .filter((message) => message.authorId === "coordinator")
+    .map((message) => String(message.content));
+  // Exactly one: the `concurrent` event above is deliberately not narrated.
+  assert.deepEqual(
+    lines,
+    [
+      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
+        `files but can run together.`,
+    ],
+    `the advisory collision did not read as one short line: ${JSON.stringify(lines)}`,
+  );
+});
+
+test("a sequenced admission names both agents rather than quoting both prompts", async (t) => {
+  // The other half of the same complaint. This path already tried to resolve a
+  // name and always failed, so every hold in the room was two truncated
+  // prompts; and having resolved one it then spent two more clauses on why.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "holdroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation:
+        "Sequenced behind executing work on the same resources: " +
+        "services/api-gateway/src/server.ts",
+    },
+  });
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.authorId === "coordinator");
+    },
+    "the hold was never announced in the room",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const line = String(
+    messages.find((message) => message.authorId === "coordinator")?.content,
+  );
+  assert.equal(
+    line,
+    `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
+      `files — @Claude (${firstName}) starts once @Codex (${firstName}) is done.`,
+    `the hold did not read as two names and an order: ${line}`,
+  );
+  assert.doesNotMatch(
+    line,
+    /paste the 72 possible names|has the files it needs|the moment that lands/u,
+    "the hold kept the quoted objective or its justification clause",
+  );
+});
+
+test("an agent with no connection this channel knows still falls back to its objective", async (t) => {
+  // The fallback is the whole reason the resolver can be trusted: it names an
+  // agent or it says nothing confident. A task submitted by somebody with no
+  // matching connection has no name to use, and quoting a short objective
+  // beats naming the wrong agent.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "namelessroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "conflict_detected",
+    taskId: tasks.claude,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      taskIds: [tasks.claude, tasks.codex],
+      disposition: "sequence",
+      evidence: [],
+    },
+  });
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.authorId === "coordinator");
+    },
+    "the collision was never announced in the room",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const line = String(
+    messages.find((message) => message.authorId === "coordinator")?.content,
+  );
+  // The named agent is still named; only the one nobody is connected for
+  // falls back, and it falls back quoted and short rather than to a wrong name.
+  assert.match(line, new RegExp(`@Claude \\(${firstName}\\)`, "u"), line);
+  // 37 characters and an ellipsis — the exact shape the room was showing when
+  // this was reported, which is how the fallback was identified as the path
+  // every hold was taking.
+  assert.match(line, /"paste the 72 possible names an agent …"/u, line);
+  assert.doesNotMatch(
+    line,
+    new RegExp(`@Codex \\(${firstName}\\)`, "u"),
+    "an agent nobody is connected for was named anyway",
+  );
+});
+
 test("the sweep leaves a quiet task alone, and closes a thread its watcher abandoned", async (t) => {
   // Two halves of one confusion. The sweep decides a thread still needs an
   // ending from its replies, and a quick task's ending is deliberately not a
