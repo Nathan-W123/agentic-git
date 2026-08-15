@@ -7726,14 +7726,17 @@ export class ApiGateway {
    * Which agents an @mention in this channel could name, in the exact text a
    * mention resolves to.
    *
-   * The frontend inserts `@${name} ` where `name` is what `channelAgentsFor`
-   * in `data.js` computes: `"${AGENT_LABEL[provider]} (${firstWord(
-   * displayName)})"`, with any channel rename (`setChannelAgentOverride`)
-   * layered on top — see `withOverride` in `data.js`. This reconstructs the
-   * same string for every connected agent in the roster so a posted message
-   * can be matched against it server-side. Longest name first, so "Claude
-   * (Bob)" is tried before a coincidentally-shorter "Claude (Bo)" would
-   * falsely match as a prefix.
+   * The frontend inserts `@${name} `, where `name` is the account's call sign
+   * — the one it was given when it connected — falling back to
+   * `"${AGENT_LABEL[provider]} (${firstWord(displayName)})"` for a connection
+   * made before agents were named, with any channel rename
+   * (`setChannelAgentOverride`) layered on top. That rename is now the only
+   * thing that is per channel: the browser no longer names an agent as it is
+   * added to one, so the same agent answers to the same name everywhere.
+   * This reconstructs the same string for every connected agent in the roster
+   * so a posted message can be matched against it server-side. Longest name
+   * first, so "Claude (Bob)" is tried before a coincidentally-shorter "Claude
+   * (Bo)" would falsely match as a prefix.
    */
   private async resolveChannelMentionCandidates(
     projectId: string,

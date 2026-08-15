@@ -1397,3 +1397,81 @@ test("an account that already has a call sign is never renamed", async () => {
     "Icarus",
   );
 });
+
+/** Writes a connection the way a deployment older than call signs left one. */
+async function seedUnnamedConnection(
+  harness: Harness,
+  userId: string,
+): Promise<void> {
+  const secrets = path.join(harness.project.directory, "secrets");
+  await mkdir(secrets, { recursive: true });
+  await writeFile(
+    path.join(secrets, "provider-connections.json"),
+    JSON.stringify({
+      [userId]: {
+        anthropic: { kind: "account", createdAt: "2026-01-01T00:00:00.000Z" },
+      },
+    }),
+    "utf8",
+  );
+}
+
+test("a connection made before call signs existed is named on the next read", async () => {
+  // Naming happens at connect, and the browser no longer hands out a name as
+  // an agent joins a channel — so without this an account that connected
+  // earlier would read as "Claude (Nathan)" in every channel for good, with
+  // nothing left that could ever name it. Filling the gap on read names it
+  // once, by the same rule connect applies.
+  const harness = await createHarness();
+  await seedUnnamedConnection(harness, "u1");
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_OK),
+  });
+
+  const named = (await service.list({ userId: "u1", systemAdmin: true })).find(
+    (entry) => entry.id === "anthropic",
+  )?.callSign;
+  assert.ok(named !== undefined, "the older connection is given a name");
+  assert.ok(new Set<string>(AGENT_CALL_SIGNS).has(named));
+
+  // And it is the name from then on: a name that changed on every read would
+  // be worse than no name at all.
+  const again = (await service.list({ userId: "u1", systemAdmin: true })).find(
+    (entry) => entry.id === "anthropic",
+  )?.callSign;
+  assert.equal(again, named);
+});
+
+test("a teammate's older connection is named by the roster read too", async () => {
+  // The roster is the only path that reads somebody else's connection, so an
+  // agent belonging to a person who has not opened their own dashboard since
+  // is named here or nowhere.
+  const harness = await createHarness();
+  await seedUnnamedConnection(harness, "teammate");
+  // The roster is built from the credentials a person actually holds, so the
+  // teammate needs one for their agent to be in it at all.
+  const store = await UserCredentialStore.open(
+    path.join(harness.project.directory, "secrets"),
+  );
+  await store.put("teammate", "claude", {
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-teammates-own",
+  });
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_OK),
+    credentials: store,
+  });
+
+  const roster = await service.listConnectionsFor(["teammate"]);
+  const sign = roster["teammate"]?.[0]?.callSign;
+  assert.ok(sign !== undefined, "the teammate's agent is named");
+  // Their own dashboard reports the same name, in every channel, forever.
+  assert.equal(
+    (await service.list({ userId: "teammate", systemAdmin: true })).find(
+      (entry) => entry.id === "anthropic",
+    )?.callSign,
+    sign,
+  );
+});

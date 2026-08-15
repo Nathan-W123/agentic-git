@@ -1228,6 +1228,52 @@ export class ProviderChatService {
     connection.settings = { ...connection.settings, callSign: sign };
   }
 
+  /**
+   * This user's connections, with any that predate call signs given one.
+   *
+   * Naming happens at connect, and every route that reports a connection
+   * reads through here, so an account connected before `assignCallSign`
+   * existed is named the first time anything asks about it rather than
+   * staying "Claude (Nathan)" for good. Nothing else would ever name it now:
+   * the browser used to hand out a name as an agent joined a channel, and
+   * that is exactly the per-channel naming this replaced.
+   *
+   * Written back only when a name was actually handed out, so the ordinary
+   * case — everything already named — touches no disk. `assignCallSign` never
+   * renames, so a second caller racing this one cannot change an answer
+   * somebody has already been shown.
+   */
+  private async namedConnections(
+    userId: string,
+  ): Promise<Partial<Record<ProviderId, StoredConnection>>> {
+    const file = await this.readConnections();
+    if (this.nameUnnamedConnections(file, [userId])) {
+      await this.writeConnections(file);
+    }
+    return file[userId] ?? {};
+  }
+
+  /**
+   * Names every one of these users' connections that has no name yet, in
+   * place. True when it named something, which is the caller's cue to write.
+   */
+  private nameUnnamedConnections(
+    file: ConnectionFile,
+    userIds: readonly string[],
+  ): boolean {
+    let named = false;
+    for (const userId of userIds) {
+      for (const id of PROVIDER_IDS) {
+        if (file[userId]?.[id]?.settings?.callSign !== undefined) {
+          continue;
+        }
+        this.assignCallSign(file, userId, id);
+        named ||= file[userId]?.[id]?.settings?.callSign !== undefined;
+      }
+    }
+    return named;
+  }
+
   private async readConnections(): Promise<ConnectionFile> {
     try {
       return JSON.parse(
@@ -1573,7 +1619,7 @@ export class ProviderChatService {
     userId: string;
     systemAdmin: boolean;
   }): Promise<ProviderStatus[]> {
-    const connections = (await this.readConnections())[input.userId] ?? {};
+    const connections = await this.namedConnections(input.userId);
     const store = await this.credentialStore();
     const statuses: ProviderStatus[] = [];
     for (const id of PROVIDER_IDS) {
@@ -1596,9 +1642,11 @@ export class ProviderChatService {
             ? {}
             : { kind: "account" as const }),
         acceptedCredentialKinds: supportedCredentialKinds(PROVIDER_VENDORS[id]),
-        // Absent until the agent is named, which the dashboard does the
-        // moment it connects. Sent even when absent is impossible to
-        // distinguish from "named the empty string", so it is simply omitted.
+        // Present for every connection: naming happens at connect, and
+        // anything older is named on the way through `namedConnections`. Only
+        // a provider this account has never connected has none, and sending
+        // that as an empty string is impossible to distinguish from "named
+        // the empty string", so it is simply omitted.
         ...(settings.callSign === undefined
           ? {}
           : { callSign: settings.callSign }),
@@ -1659,7 +1707,15 @@ export class ProviderChatService {
     // built from this and has no other route to an account-level name. Without
     // it every agent fell back to its vendor label, which is why naming had to
     // be redone per room to have any effect at all.
+    //
+    // A teammate who connected before agents were named is named here rather
+    // than left waiting until they next open their own dashboard: their agent
+    // appears in everybody else's roster, and this is the only path that
+    // reads it.
     const connections = await this.readConnections();
+    if (this.nameUnnamedConnections(connections, userIds)) {
+      await this.writeConnections(connections);
+    }
     const result: Record<
       string,
       Array<{
