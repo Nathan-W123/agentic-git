@@ -386,6 +386,111 @@ export function vendorMark(kind) {
   }</svg>`;
 }
 
+/* -------------------------------------------------------- colour wheel ---- */
+
+/**
+ * Hex to HSL, and back.
+ *
+ * The wheel works in HSL because that is what a wheel *is* — angle is hue,
+ * radius is saturation — and everything the app stores is hex, because that
+ * is what a colour input and a CSS variable both understand. These two are
+ * the only translation between the picker and the record.
+ */
+export function hexToHsl(hex) {
+  const value = /^#([0-9a-f]{6})$/iu.exec(String(hex ?? "").trim());
+  if (value === null) {
+    return { h: 0, s: 0, l: 0.5 };
+  }
+  const int = Number.parseInt(value[1], 16);
+  const r = ((int >> 16) & 255) / 255;
+  const g = ((int >> 8) & 255) / 255;
+  const b = (int & 255) / 255;
+  const max = Math.max(r, g, b);
+  const min = Math.min(r, g, b);
+  const l = (max + min) / 2;
+  const span = max - min;
+  if (span === 0) {
+    return { h: 0, s: 0, l };
+  }
+  const s = span / (l > 0.5 ? 2 - max - min : max + min);
+  const h =
+    max === r
+      ? (g - b) / span + (g < b ? 6 : 0)
+      : max === g
+        ? (b - r) / span + 2
+        : (r - g) / span + 4;
+  return { h: h * 60, s, l };
+}
+
+export function hslToHex(h, s, l) {
+  const hue = ((h % 360) + 360) % 360;
+  const sat = Math.min(Math.max(s, 0), 1);
+  const light = Math.min(Math.max(l, 0), 1);
+  const c = (1 - Math.abs(2 * light - 1)) * sat;
+  const x = c * (1 - Math.abs(((hue / 60) % 2) - 1));
+  const m = light - c / 2;
+  const [r, g, b] =
+    hue < 60
+      ? [c, x, 0]
+      : hue < 120
+        ? [x, c, 0]
+        : hue < 180
+          ? [0, c, x]
+          : hue < 240
+            ? [0, x, c]
+            : hue < 300
+              ? [x, 0, c]
+              : [c, 0, x];
+  const byte = (value) =>
+    Math.round((value + m) * 255)
+      .toString(16)
+      .padStart(2, "0");
+  return `#${byte(r)}${byte(g)}${byte(b)}`;
+}
+
+/**
+ * A colour wheel, and the lightness the wheel cannot show.
+ *
+ * A disc rather than a row of swatches, because eight presets are somebody
+ * else's taste and the question "what colour is yours" has more than eight
+ * answers. Hue around, saturation out from the middle: the two things a
+ * wheel is for, drawn with a conic gradient and a radial white wash rather
+ * than a canvas, so it costs no script to paint and scales to any size.
+ *
+ * Lightness is a slider under it, because a flat disc has no third axis and
+ * pretending otherwise — the usual trick of dimming the whole wheel — makes
+ * the same click mean different things at different times.
+ *
+ * The native input stays, small, beside them. It is the only control here
+ * that can be typed into, pasted into, or driven by a screen reader, and a
+ * wheel that cannot accept "#3fa8b5" from somebody's brand guide is a toy.
+ */
+export function colorWheel(act, current) {
+  const { h, s, l } = hexToHsl(current);
+  // Marker position: hue is the angle, saturation the distance out. Measured
+  // from twelve o'clock to match the gradient's own zero.
+  const angle = ((h - 90) * Math.PI) / 180;
+  const left = 50 + Math.cos(angle) * s * 50;
+  const top = 50 + Math.sin(angle) * s * 50;
+  return `<div class="wheel-row">
+    <div class="wheel" data-act="${esc(act)}-wheel" role="presentation">
+      <span class="wheel-mark" style="left:${left.toFixed(2)}%;top:${top.toFixed(
+        2,
+      )}%;background:${esc(current)}"></span>
+    </div>
+    <div class="wheel-side">
+      <input type="range" class="wheel-light" min="12" max="88"
+        value="${Math.round(l * 100)}" data-act="${esc(act)}-light"
+        aria-label="Lightness">
+      <label class="wheel-exact">
+        <input type="color" value="${esc(current)}" data-act="${esc(act)}-exact"
+          aria-label="Exact colour">
+        <code>${esc(current)}</code>
+      </label>
+    </div>
+  </div>`;
+}
+
 /* ------------------------------------------------------------ avatars ---- */
 
 const AVATAR_HUES = [

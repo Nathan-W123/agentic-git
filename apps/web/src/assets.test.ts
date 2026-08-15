@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { loadStaticAssets } from "./assets.js";
 
@@ -853,4 +853,47 @@ test("the working dots come back for the next turn in a finished thread", async 
     "the dots must key on the last reply, not on any reply ever",
   );
   assert.match(body, /replies\[replies\.length - 1\]/u);
+});
+
+test("the colour wheel's marker and its click land on the same colour", async () => {
+  // The wheel draws a position from a colour and reads a colour from a
+  // position, in two different files. If those disagree the marker sits
+  // somewhere the click would not produce, which looks like a wheel that
+  // ignores you — so the two are held to being exact inverses.
+  const ui = (await import(
+    pathToFileURL(path.join(packageRoot, "public", "ui.js")).href
+  )) as {
+    hexToHsl: (hex: string) => { h: number; s: number; l: number };
+    hslToHex: (h: number, s: number, l: number) => string;
+    colorWheel: (act: string, current: string) => string;
+  };
+  // The inverse as `wheelColorAt` computes it, in app.js.
+  const colorAt = (left: number, top: number, l: number): string => {
+    const x = left / 100 - 0.5;
+    const y = top / 100 - 0.5;
+    return ui.hslToHex(
+      (Math.atan2(y, x) * 180) / Math.PI + 90,
+      Math.min(Math.hypot(x, y) * 2, 1),
+      l,
+    );
+  };
+  for (const hex of [
+    "#8b5cf6",
+    "#2fae7f",
+    "#e0663d",
+    "#4f8ef7",
+    "#3fa8b5",
+    "#ff0000",
+    "#00ff00",
+    "#0000ff",
+  ]) {
+    const marker = /left:([\d.]+)%;top:([\d.]+)%/u.exec(ui.colorWheel("x", hex));
+    assert.ok(marker, `no marker drawn for ${hex}`);
+    const back = colorAt(Number(marker[1]), Number(marker[2]), ui.hexToHsl(hex).l);
+    assert.equal(back, hex, `${hex} draws a marker that reads back as ${back}`);
+  }
+  // Red at twelve o'clock, which is where the conic gradient starts.
+  const red = /left:([\d.]+)%;top:([\d.]+)%/u.exec(ui.colorWheel("x", "#ff0000"));
+  assert.equal(Number(red![1]).toFixed(0), "50");
+  assert.equal(Number(red![2]).toFixed(0), "0");
 });

@@ -1529,9 +1529,49 @@ svg {
   border-color: var(--border-strong);
 }
 
+/*
+ * The primary way into the product, and until now "accent" here meant a
+ * hardcoded violet — so changing your colour moved every other accent in the
+ * interface and left this one behind, which is the one place a first-time
+ * reader is looking.
+ */
 .repo-action.accent {
   background: var(--accent-wash);
-  border-color: rgba(139, 92, 246, 0.32);
+  border-color: var(--accent-line);
+}
+
+.repo-action.accent:hover {
+  background: var(--accent-wash-strong, var(--accent-wash));
+  border-color: var(--accent);
+}
+
+/* The icon carries the colour, so the card reads as one thing rather than a
+   tinted box with a grey badge in it. */
+.repo-action.accent .ra-icon {
+  background: var(--accent-wash-strong, var(--accent-wash));
+  border-color: var(--accent-line);
+  color: var(--accent-bright, var(--accent));
+}
+
+.repo-action.accent .ra-chev {
+  color: var(--accent-bright, var(--accent));
+}
+
+/* Both cards lift on hover; only the accent one is coloured. Movement is what
+   says "this is a button", which a flat card in a grid does not. */
+.repo-action {
+  transform: translateY(0);
+}
+
+.repo-action:hover {
+  transform: translateY(-1px);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .repo-action,
+  .repo-action:hover {
+    transform: none;
+  }
 }
 
 .repo-action .ra-icon {
@@ -6887,4 +6927,81 @@ body.resizing-ns * {
 
 .thread-thinking .tt-body p:last-child {
   margin-bottom: 0;
+}
+
+/* --------------------------------------------------------- colour wheel ---- */
+
+.wheel-row {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  padding: 4px 0 2px;
+}
+
+/*
+ * Hue around, saturation out. Two gradients and no canvas: the conic paints
+ * the hues, the radial washes the middle to white, and the result is the
+ * standard HSL disc that `wheelColorAt` reads back with atan2 and hypot.
+ */
+.wheel {
+  position: relative;
+  width: 132px;
+  height: 132px;
+  border-radius: 50%;
+  flex: none;
+  cursor: crosshair;
+  border: 1px solid var(--border);
+  background:
+    radial-gradient(circle at 50% 50%, #fff 0%, rgba(255, 255, 255, 0) 70%),
+    conic-gradient(
+      from 0deg,
+      #f00 0deg, #ff0 60deg, #0f0 120deg,
+      #0ff 180deg, #00f 240deg, #f0f 300deg, #f00 360deg
+    );
+}
+
+.wheel-mark {
+  position: absolute;
+  width: 14px;
+  height: 14px;
+  margin: -7px 0 0 -7px;
+  border-radius: 50%;
+  border: 2px solid #fff;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.45);
+  pointer-events: none;
+}
+
+.wheel-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+}
+
+.wheel-light {
+  width: 168px;
+  accent-color: var(--accent);
+}
+
+.wheel-exact {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.wheel-exact input[type="color"] {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: none;
+  cursor: pointer;
+}
+
+.wheel-exact code {
+  font-family: var(--mono, ui-monospace, monospace);
+  text-transform: uppercase;
 }
