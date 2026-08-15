@@ -1502,6 +1502,22 @@ export interface CoordinationStore {
     messageId: string,
     taskId: TaskId,
   ): Promise<void>;
+  /**
+   * Replaces what a message says, leaving everything else about it alone.
+   *
+   * For a line that has to exist before it can be written well. An agent's
+   * acknowledgement is composed by a model, and waiting for that before
+   * posting anything meant the thread — the thing somebody watches to see
+   * that their request was heard — did not exist for as long as the call
+   * took. Posting first and rewriting when the words arrive is the way round
+   * that, and it keeps the message's identity, timestamp and thread intact
+   * so nothing downstream can tell the difference.
+   */
+  setChannelMessageContent(
+    repositoryId: string,
+    messageId: string,
+    content: string,
+  ): Promise<void>;
   addChannelReply(input: AddChannelReplyInput): Promise<ChannelReply>;
   getChannelMessage(
     repositoryId: string,

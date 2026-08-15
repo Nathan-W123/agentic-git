@@ -8268,17 +8268,24 @@ export class ApiGateway {
       return;
     }
 
-    // The agent answers first, in its own voice, before anything slow runs.
-    // Submitting a task reaches the coordinator and can take a moment; a
-    // person who has just asked for something needs to know it was heard
-    // inside a couple of seconds, not once the work has been queued. This
-    // message is also the thread everything about the task hangs off, so the
-    // channel keeps one line per request rather than a running commentary.
-    const acknowledgementText = await this.composeAcknowledgement(
-      candidate,
-      content,
-      claimMessage,
-    );
+    // The agent answers first, in its own voice — but the voice is bought
+    // with a model call, and this used to wait for it before posting
+    // anything. That call is allowed six seconds, and the message it produces
+    // is *the thread root*: until it landed there was no thread, no title and
+    // nothing to open, so somebody who had just asked for something watched an
+    // empty room for up to six seconds and reasonably concluded they had been
+    // ignored. `composeAcknowledgement`'s own comment says this line "only has
+    // to prove the request was heard, inside a couple of seconds, which is far
+    // less time than a model call takes" — which was true, and the code did
+    // the opposite.
+    //
+    // So the thread is posted now, saying the plain thing, and the composed
+    // sentence replaces it in place when it arrives. Same message, same id,
+    // same position; the wait buys better words rather than the existence of
+    // the thread. Everything downstream hangs off `threadRootId`, so the run
+    // can be queued and start narrating while the opening line is still being
+    // written.
+    const openingLine = claimMessage === undefined ? "On it." : `On it. ${claimMessage}`;
     // Asked inside a thread, or close enough to one that it belongs there.
     // The explicit half is a person saying "and now this too"; the automatic
     // half is `findThreadToContinue`, held to a high bar because a wrong
@@ -8335,9 +8342,34 @@ export class ApiGateway {
           repositoryId,
           kind: "agent",
           authorId: `${candidate.userId}:${candidate.provider}`,
-          content: acknowledgementText,
+          content: openingLine,
         })
       ).id;
+    // The agent's own wording, fetched now that the thread it belongs to is
+    // already on the screen. Not awaited: a slow model must not hold up
+    // queueing the work, and the only thing riding on it is how the first
+    // line reads.
+    const acknowledgement = this.composeAcknowledgement(
+      candidate,
+      content,
+      claimMessage,
+    ).then(async (text) => {
+      if (text === openingLine) {
+        return text;
+      }
+      if (continuing === undefined) {
+        await this.options.store
+          .setChannelMessageContent(repositoryId, threadRootId, text)
+          .catch(() => undefined);
+        await this.options.store
+          .appendAudit(undefined, {
+            type: "channel_message_posted",
+            data: { projectId, repositoryId, messageId: threadRootId },
+          })
+          .catch(() => undefined);
+      }
+      return text;
+    });
     if (continuing !== undefined) {
       // Back to the foot of the channel. Work joining an old thread would
       // otherwise land wherever that thread has scrolled to, which is the
@@ -8349,6 +8381,9 @@ export class ApiGateway {
         .catch(() => undefined);
     }
     if (continuing !== undefined) {
+      // Joining an existing thread, so there is no root to be waiting on and
+      // the composed line can simply be awaited before it is said.
+      const acknowledgementText = await acknowledgement;
       await this.appendChannelThreadReply({
         projectId,
         repositoryId,
@@ -8363,7 +8398,6 @@ export class ApiGateway {
             : acknowledgementText,
       });
     }
-    const acknowledgement = { id: threadRootId };
 
     try {
       const task = await this.options.operations.submitTask({
@@ -8451,42 +8485,46 @@ export class ApiGateway {
       // remembered, so the file summary hanging off it stays attributable
       // after the process that watched the run has gone.
       await this.options.store
-        .setChannelMessageTask(repositoryId, acknowledgement.id, task.id)
+        .setChannelMessageTask(repositoryId, threadRootId, task.id)
         .catch(() => undefined);
-      const opening = await this.planOpening(candidate, task.objective);
-      // Held rather than posted. Writing the title and reasoning here is what
-      // made every task a thread, including "change this 1 to a 2" — the
-      // reply existed before anyone knew whether there was anything to
-      // follow. It is written the moment the run says something substantive,
-      // and never if it does not.
-      const pending = [`Task: ${opening.title}`, ...opening.thoughts];
-      // Planned, and stopped there.
+      // Started against the queued task, not after the opening line is
+      // written. `planOpening` is a model call allowed two whole minutes, and
+      // awaiting it here meant the work did not begin until it returned: the
+      // task sat filed while somebody watched a thread that said it had been
+      // picked up. The opening is a caption on the run, so the run comes
+      // first and the caption catches up.
       //
-      // The intent is written into the thread and nothing else happens until
-      // somebody says go. It is the only review in this system that comes
-      // before the run is paid for — every other approval reads a changeset,
-      // by which point the execution has already been bought.
-      //
-      // The waiting costs no lease, no workspace and no clock — but it is the
-      // `planned` status that does it, not the queue. This once relied on a
-      // submitted task sitting still "until something asks the repository to
-      // run", which is not what happens: any later dispatch in this
-      // repository asks, and `leaseNextTask` hands out the oldest queued row
-      // rather than the one that caller meant. A held plan was therefore
-      // executed by an unrelated mention — or by the next restart, which
-      // resumes everything queued — spending the plan author's credential on
-      // work nobody had approved, and leaving the thread still saying nothing
-      // was running.
+      // `planOnly` is the exception and has to stay one: there the whole
+      // point is that nothing runs, so its plan really is worth waiting for.
+      const openingPromise = this.planOpening(candidate, task.objective);
       if (input.planOnly === true) {
+        // Planned, and stopped there.
+        //
+        // The intent is written into the thread and nothing else happens until
+        // somebody says go. It is the only review in this system that comes
+        // before the run is paid for — every other approval reads a changeset,
+        // by which point the execution has already been bought.
+        //
+        // The waiting costs no lease, no workspace and no clock — but it is
+        // the `planned` status that does it, not the queue. This once relied
+        // on a submitted task sitting still "until something asks the
+        // repository to run", which is not what happens: any later dispatch in
+        // this repository asks, and `leaseNextTask` hands out the oldest queued
+        // row rather than the one that caller meant. A held plan was therefore
+        // executed by an unrelated mention — or by the next restart, which
+        // resumes everything queued — spending the plan author's credential on
+        // work nobody had approved, and leaving the thread still saying nothing
+        // was running.
+        const planned = await openingPromise;
         await this.appendChannelThreadReply({
           projectId,
           repositoryId,
-          messageId: acknowledgement.id,
+          messageId: threadRootId,
           authorId: `${candidate.userId}:${candidate.provider}`,
           content:
-            `${pending.join("\n")}\n\nThat's the plan — nothing is running ` +
-            `yet. Reply "go ahead" and I'll start; say what to change and ` +
-            `I'll take it from there.`,
+            `${[`Task: ${planned.title}`, ...planned.thoughts].join("\n")}` +
+            `\n\nThat's the plan — nothing is running yet. Reply "go ahead" ` +
+            `and I'll start; say what to change and I'll take it from there.`,
         }).catch(() => undefined);
         return;
       }
@@ -8530,7 +8568,7 @@ export class ApiGateway {
         await this.appendChannelThreadReply({
           projectId,
           repositoryId,
-          messageId: acknowledgement.id,
+          messageId: threadRootId,
           authorId: `${candidate.userId}:${candidate.provider}`,
           content: `I could not start this: ${reason}`,
         }).catch(() => undefined);
@@ -8540,14 +8578,20 @@ export class ApiGateway {
         taskId: task.id,
         projectId,
         repositoryId,
-        messageId: acknowledgement.id,
+        messageId: threadRootId,
         authorId: `${candidate.userId}:${candidate.provider}`,
         ownerId: candidate.userId,
         provider: candidate.provider,
         // From zero: the task is new, so nothing already in the log carries
         // its id, and the store filters by it rather than this scanning.
         cursor: 0,
-        pending,
+        // Nothing held yet. The title and the agent's first thoughts are a
+        // caption on a run that has already started, and waiting for them here
+        // put a two-minute model call in front of the person who asked. They
+        // are pushed in below when they land; if the run says something
+        // substantive first, they simply arrive with the next line rather than
+        // holding one up.
+        pending: [],
         // Whether a room already exists, not whether one is deserved. The
         // held-narration rule is about sparing the channel a thread nobody
         // needs — but when this dispatch joined an existing thread the room is
@@ -8559,10 +8603,22 @@ export class ApiGateway {
         // passed `true` for exactly this reason.
         threaded: continuing !== undefined,
       });
+      // Filled in when the model gets round to it. `pending` is read at flush
+      // time, so a late arrival is still narrated in order — and one that
+      // never arrives costs the run nothing.
+      void openingPromise
+        .then((opening) => {
+          const watched = this.watchedChannelTasks.get(task.id);
+          watched?.pending.unshift(
+            `Task: ${opening.title}`,
+            ...opening.thoughts,
+          );
+        })
+        .catch(() => undefined);
     } catch (error) {
       await this.appendChannelThreadReply({
         repositoryId,
-        messageId: acknowledgement.id,
+        messageId: threadRootId,
         authorId: `${candidate.userId}:${candidate.provider}`,
         content: `I could not start this: ${
           error instanceof Error

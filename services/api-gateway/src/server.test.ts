@@ -68,7 +68,7 @@ interface TestRuntime {
    * that the thread's own history goes with it.
    */
   chatPrompts: Array<{ userId: string; provider: string; prompt: string }>;
-  chatAnswer: { text?: string; fail?: string };
+  chatAnswer: { text?: string; fail?: string; delayMs?: number };
   /** Every canonical diff the auditor asked for, in order. */
   canonicalDiffs: Array<{
     projectId: string;
@@ -83,6 +83,8 @@ interface TestRuntime {
   /** Set `reason` to make `runRepository` reject, as a run that cannot start does. */
   /** `error` throws exactly what it holds, for failures with a shape. */
   runFailure: { reason?: string; error?: unknown };
+  /** When the gateway asked the repository to run, so ordering can be read. */
+  runCalls: number[];
   /** Every rollback the gateway asked for, in order. */
   rollbacks: Array<{
     repositoryId: string;
@@ -244,6 +246,7 @@ async function startRuntime(
   const chatAnswer: TestRuntime["chatAnswer"] = {};
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
   const rollbacks: TestRuntime["rollbacks"] = [];
+  const runCalls: TestRuntime["runCalls"] = [];
   const cancelCalls: TestRuntime["cancelCalls"] = [];
   const attachmentBytes = new Map<
     string,
@@ -285,6 +288,14 @@ async function startRuntime(
           provider: String(input?.provider ?? ""),
           prompt: String(input?.messages?.[0]?.content ?? ""),
         });
+        if (chatAnswer.delayMs !== undefined) {
+          // A slow provider, which is the ordinary case this exists to test:
+          // anything the channel does *after* awaiting a completion is
+          // something a person is waiting on.
+          await new Promise((resolve) =>
+            setTimeout(resolve, chatAnswer.delayMs),
+          );
+        }
         if (chatAnswer.fail !== undefined) {
           throw new Error(chatAnswer.fail);
         }
@@ -383,6 +394,7 @@ async function startRuntime(
       });
     },
     async runRepository() {
+      runCalls.push(Date.now());
       if (runFailure.error !== undefined) {
         throw runFailure.error;
       }
@@ -597,6 +609,7 @@ async function startRuntime(
     chatAnswer,
     canonicalDiffs,
     rollbacks,
+    runCalls,
     cancelCalls,
     canonicalDiff,
     canonicalState,
@@ -7760,5 +7773,95 @@ test("an answer after the deadline is told it was late, not chatted at", async (
     runtime.chatPrompts.filter((entry) => entry.prompt.includes("The question: 1"))
       .length,
     0,
+  );
+});
+
+test("the thread exists before the agent's opening line has been written", async (t) => {
+  // Reported as "it usually takes a while for the thread to come up". The
+  // acknowledgement is composed by a model and *is* the thread root, so the
+  // thread did not exist until that call returned — up to six seconds of an
+  // empty room after somebody asked for something.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic", visibility: "org" }]);
+  const repositoryId = await invitableRepository(owner, "fast-thread-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const agents = await owner.request(`${base}/agents`);
+  const name = (agents.data.agents as { name: string }[])[0]?.name ?? "";
+
+  // Slower than anyone will wait, and far slower than the thread may take.
+  // Every completion pays it: the acknowledgement and the opening thoughts.
+  runtime.chatAnswer.delayMs = 1_500;
+  runtime.chatAnswer.text = "Picking this up — reading the retry loop first.";
+
+  // Measured across the POST, because the route awaits the whole dispatch —
+  // so anything the dispatch waits for is time the browser spends blocked
+  // before it can render anything at all.
+  const startedAt = Date.now();
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: `@${name} rework the retry loop` },
+  });
+  const posted = Date.now() - startedAt;
+
+  const listed = await owner.request(`${base}/messages`);
+  assert.ok(
+    (listed.data.messages as { kind: string }[]).some(
+      (message) => message.kind === "agent",
+    ),
+    "the thread did not exist by the time the post returned",
+  );
+  // No completion's worth of waiting at all. Both model calls this dispatch
+  // makes — the acknowledgement and the opening thoughts — now run behind the
+  // response rather than in front of it, so a slow provider cannot be felt
+  // here at all.
+  assert.ok(
+    posted < 1_000,
+    `posting waited ${String(posted)}ms — it is still blocked on a model call`,
+  );
+
+  // And the composed sentence still arrives, in place, on the same message.
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    return (listed.data.messages as { kind: string; content: string }[]).some(
+      (message) =>
+        message.kind === "agent" && message.content.startsWith("Picking this up"),
+    );
+  }, "the agent's own wording never replaced the placeholder");
+});
+
+test("the work is queued without waiting for the thread's opening thoughts", async (t) => {
+  // The second half of the same complaint. `planOpening` is a model call
+  // allowed two minutes, and the run used to start only after it returned —
+  // so a thread could say it had picked something up while nothing ran.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic", visibility: "org" }]);
+  const repositoryId = await invitableRepository(owner, "fast-start-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const agents = await owner.request(`${base}/agents`);
+  const name = (agents.data.agents as { name: string }[])[0]?.name ?? "";
+
+  runtime.chatAnswer.delayMs = 1_500;
+  runtime.chatAnswer.text = "On it.";
+
+  const startedAt = Date.now();
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: `@${name} rework the retry loop` },
+  });
+  await waitFor(
+    async () => runtime.runCalls.length > 0,
+    "the repository was never asked to run",
+  );
+  assert.ok(
+    Date.now() - startedAt < 1_000,
+    "starting the work waited on a model call rather than on none",
   );
 });

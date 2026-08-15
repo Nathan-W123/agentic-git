@@ -2000,6 +2000,18 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     message.taskId = taskId;
   }
 
+  public async setChannelMessageContent(
+    repositoryId: string,
+    messageId: string,
+    content: string,
+  ): Promise<void> {
+    const message = this.channelMessages.get(messageId);
+    if (message === undefined || message.repositoryId !== repositoryId) {
+      return;
+    }
+    message.content = content;
+  }
+
   private channelAgentKey(repositoryId: string, agentId: string): string {
     return `${repositoryId}\0${agentId}`;
   }

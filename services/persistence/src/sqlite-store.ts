@@ -3267,6 +3267,19 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .run(taskId, messageId, repositoryId);
   }
 
+  public async setChannelMessageContent(
+    repositoryId: string,
+    messageId: string,
+    content: string,
+  ): Promise<void> {
+    this.db
+      .prepare(
+        `UPDATE channel_messages SET content = ?
+         WHERE id = ? AND repository_id = ?`,
+      )
+      .run(content, messageId, repositoryId);
+  }
+
   public async addChannelReply(
     input: AddChannelReplyInput,
   ): Promise<ChannelReply> {

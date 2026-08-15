@@ -3637,6 +3637,18 @@ export class PostgresCoordinationStore implements CoordinationStore {
     );
   }
 
+  public async setChannelMessageContent(
+    repositoryId: string,
+    messageId: string,
+    content: string,
+  ): Promise<void> {
+    await this.query(
+      `UPDATE channel_messages SET content = $1
+       WHERE id = $2 AND repository_id = $3`,
+      [content, messageId, repositoryId],
+    );
+  }
+
   private toChannelReply(row: Row): ChannelReply {
     return {
       id: text(row, "id"),
