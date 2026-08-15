@@ -1517,6 +1517,16 @@ export interface ApiOperations {
     branch?: string;
     actorId: string;
   }): Promise<StoredRepository>;
+  /**
+   * Removes the canonical repository and its persisted coordination state.
+   * Older or store-only deployments may omit this and retain the persistence-
+   * only fallback used before repository filesystem lifecycle was exposed.
+   */
+  deleteRepository?(input: {
+    projectId: string;
+    repositoryId: string;
+    actorId: string;
+  }): Promise<void>;
   importGitHub(input: {
     projectId: string;
     repository: string;
@@ -4378,7 +4388,15 @@ export class ApiGateway {
         "manage_project",
       );
       await this.performOperation("repository_deletion_failed", async () => {
-        await this.options.store.removeRepository(repositoryId);
+        if (this.options.operations.deleteRepository === undefined) {
+          await this.options.store.removeRepository(repositoryId);
+          return;
+        }
+        await this.options.operations.deleteRepository({
+          projectId,
+          repositoryId,
+          actorId: principal.user.id,
+        });
       });
       await this.options.store.appendAudit(undefined, {
         type: "repository_deleted",

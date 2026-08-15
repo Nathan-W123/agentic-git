@@ -14,6 +14,7 @@ import { RepositoryService } from "@coord/repository-service";
 
 import {
   repoAdd,
+  repoRemove,
   runPendingTasks,
   taskSubmit,
 } from "./commands.js";
@@ -240,6 +241,35 @@ test("registering the same repository id twice is refused", async () => {
       }),
       /already registered/u,
     );
+  } finally {
+    await store.close();
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
+test("a deleted repository id can be registered again", async () => {
+  const harness = await createHarness();
+  const store = harness.project.openStore();
+  const mirrorPath = path.join(
+    harness.project.repositoriesPath,
+    "greeter.git",
+  );
+  try {
+    await repoAdd(harness.project, store, {
+      sourcePath: harness.sourcePath,
+      id: "greeter",
+    });
+
+    await repoRemove(harness.project, store, { id: "greeter" });
+    assert.equal(await store.getRepository("greeter"), undefined);
+    await assert.rejects(access(mirrorPath));
+
+    const recreated = await repoAdd(harness.project, store, {
+      sourcePath: harness.sourcePath,
+      id: "greeter",
+    });
+    assert.equal(recreated.id, "greeter");
+    await access(mirrorPath);
   } finally {
     await store.close();
     await rm(harness.root, { recursive: true, force: true });

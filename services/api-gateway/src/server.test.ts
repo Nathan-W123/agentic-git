@@ -256,6 +256,10 @@ async function startRuntime(
   const rollbacks: TestRuntime["rollbacks"] = [];
   const runCalls: TestRuntime["runCalls"] = [];
   const cancelCalls: TestRuntime["cancelCalls"] = [];
+  // Models canonical mirrors independently from persistence. Deleting only
+  // the store record must not make this name reusable in the fixture: the
+  // production bug was precisely that the mirror survived that deletion.
+  const canonicalRepositoryNames = new Set<string>();
   const attachmentBytes = new Map<
     string,
     { bytes: Buffer; contentType: string }
@@ -361,6 +365,9 @@ async function startRuntime(
       ];
     },
     async createRepository(input) {
+      if (canonicalRepositoryNames.has(input.id)) {
+        throw new Error(`A repository named ${input.id} is already registered`);
+      }
       const repository = {
         id: input.id,
         path: `/canonical/${input.id}.git`,
@@ -369,7 +376,12 @@ async function startRuntime(
       };
       await store.saveRepository(repository);
       await store.linkRepository(input.projectId, repository.id);
+      canonicalRepositoryNames.add(repository.id);
       return repository;
+    },
+    async deleteRepository(input) {
+      await store.removeRepository(input.repositoryId);
+      canonicalRepositoryNames.delete(input.repositoryId);
     },
     async importGitHub(input) {
       const repository = {
@@ -382,6 +394,7 @@ async function startRuntime(
       };
       await store.saveRepository(repository);
       await store.linkRepository(input.projectId, repository.id);
+      canonicalRepositoryNames.add(repository.id);
       return repository;
     },
     async submitTask(input) {
@@ -5436,6 +5449,50 @@ test("an organization admin can delete a repository they did not create", async 
     await runtime.store.getRepository("owner-created-repo"),
     undefined,
   );
+});
+
+test("an active repository name is unique and becomes reusable after deletion", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositories = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`;
+
+  const created = await owner.request(repositories, {
+    method: "POST",
+    body: { id: "reusable-repo" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+
+  const duplicate = await owner.request(repositories, {
+    method: "POST",
+    body: { id: "reusable-repo" },
+  });
+  assert.equal(duplicate.status, 422, JSON.stringify(duplicate.data));
+  assert.equal(duplicate.data.error.code, "repository_creation_failed");
+
+  const removed = await owner.request(`${repositories}/reusable-repo`, {
+    method: "DELETE",
+  });
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+
+  const recreated = await owner.request(repositories, {
+    method: "POST",
+    body: { id: "reusable-repo" },
+  });
+  assert.equal(recreated.status, 201, JSON.stringify(recreated.data));
+});
+
+test("deleting a missing repository still reports not found", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const missing = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/missing-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(missing.status, 404, JSON.stringify(missing.data));
+  assert.equal(missing.data.error.code, "not_found");
 });
 
 test("the auditor is told what the work was asked to do", async (t) => {
