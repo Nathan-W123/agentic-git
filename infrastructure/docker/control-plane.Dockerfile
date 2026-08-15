@@ -96,6 +96,16 @@ ENV NODE_ENV=production \
 # falls through to "continuing as root", which is the one outcome this
 # deployment must not reach silently.
 ENV PATH=/home/node/.local/bin:$PATH
+# The GitHub OAuth App this deployment signs users in through ("Sign in with
+# GitHub" on the connect screen — the device flow). A device-flow client id is
+# a public identifier, not a secret: it travels in every request the flow
+# makes and names the app on GitHub's own approval screen, which is why the
+# gh CLI ships its own in open source. The secret half of an OAuth App is
+# never used by the device grant, so nothing here unlocks anything. A
+# platform-level variable outranks this default, and a fork should register
+# its own OAuth App (with Enable Device Flow ticked) and replace the id —
+# compose deployments already mask it with whatever their .env says.
+ENV COORD_GITHUB_CLIENT_ID=Ov23liGI2B1T62b0ifdC
 WORKDIR /app
 COPY --from=build /app /app
 COPY infrastructure/docker/control-plane-entrypoint.sh /usr/local/bin/coord-control-plane
