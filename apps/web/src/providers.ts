@@ -152,16 +152,16 @@ export interface ProviderSettings {
 }
 
 /**
- * Names handed to newly connected accounts, in order.
+ * Names handed to newly connected accounts, drawn at random.
  *
- * Gods rather than things, and the distinction is not decoration. An agent
- * named after a product talks about itself as one: an agent called Apollo
- * once reported that "Apollo integration isn't installed" when asked about
- * itself. `agentIdentity()` counters that directly, and a name with no
+ * Greek and Roman gods, and the distinction from things is not decoration. An
+ * agent named after a product talks about itself as one: an agent called
+ * Apollo once reported that "Apollo integration isn't installed" when asked
+ * about itself. `agentIdentity()` counters that directly, and a name with no
  * software of the same name to be confused with does not start the argument.
  *
- * Order is the assignment order, so the first connections on a fresh
- * deployment get the names people recognise.
+ * Order carries no meaning: assignment picks uniformly from whatever is still
+ * free, so this reads as sections of a pantheon rather than as a queue.
  */
 export const AGENT_CALL_SIGNS = [
   // Olympians and kin
@@ -1197,6 +1197,12 @@ export class ProviderChatService {
    * Signs already in use anywhere on the deployment are skipped so two agents
    * in one room are not both Hermes. When the pool is exhausted the vendor
    * label stands, which is the behaviour every account had before this.
+   *
+   * The free signs are drawn from uniformly rather than taken in list order.
+   * Walking the list meant every fresh deployment produced Zeus, then Hera,
+   * then Poseidon, in that order forever: the name said which account
+   * connected first and nothing else, and two deployments side by side were
+   * the same three agents. A random draw makes the pantheon feel dealt out.
    */
   private assignCallSign(file: ConnectionFile, userId: string, provider: ProviderId): void {
     const connection = file[userId]?.[provider];
@@ -1212,13 +1218,60 @@ export class ProviderChatService {
         }
       }
     }
-    const free = AGENT_CALL_SIGNS.find(
+    const free = AGENT_CALL_SIGNS.filter(
       (sign) => !taken.has(sign.toLowerCase()),
     );
-    if (free === undefined) {
+    const sign = free[Math.floor(Math.random() * free.length)];
+    if (sign === undefined) {
       return;
     }
-    connection.settings = { ...connection.settings, callSign: free };
+    connection.settings = { ...connection.settings, callSign: sign };
+  }
+
+  /**
+   * This user's connections, with any that predate call signs given one.
+   *
+   * Naming happens at connect, and every route that reports a connection
+   * reads through here, so an account connected before `assignCallSign`
+   * existed is named the first time anything asks about it rather than
+   * staying "Claude (Nathan)" for good. Nothing else would ever name it now:
+   * the browser used to hand out a name as an agent joined a channel, and
+   * that is exactly the per-channel naming this replaced.
+   *
+   * Written back only when a name was actually handed out, so the ordinary
+   * case — everything already named — touches no disk. `assignCallSign` never
+   * renames, so a second caller racing this one cannot change an answer
+   * somebody has already been shown.
+   */
+  private async namedConnections(
+    userId: string,
+  ): Promise<Partial<Record<ProviderId, StoredConnection>>> {
+    const file = await this.readConnections();
+    if (this.nameUnnamedConnections(file, [userId])) {
+      await this.writeConnections(file);
+    }
+    return file[userId] ?? {};
+  }
+
+  /**
+   * Names every one of these users' connections that has no name yet, in
+   * place. True when it named something, which is the caller's cue to write.
+   */
+  private nameUnnamedConnections(
+    file: ConnectionFile,
+    userIds: readonly string[],
+  ): boolean {
+    let named = false;
+    for (const userId of userIds) {
+      for (const id of PROVIDER_IDS) {
+        if (file[userId]?.[id]?.settings?.callSign !== undefined) {
+          continue;
+        }
+        this.assignCallSign(file, userId, id);
+        named ||= file[userId]?.[id]?.settings?.callSign !== undefined;
+      }
+    }
+    return named;
   }
 
   private async readConnections(): Promise<ConnectionFile> {
@@ -1566,7 +1619,7 @@ export class ProviderChatService {
     userId: string;
     systemAdmin: boolean;
   }): Promise<ProviderStatus[]> {
-    const connections = (await this.readConnections())[input.userId] ?? {};
+    const connections = await this.namedConnections(input.userId);
     const store = await this.credentialStore();
     const statuses: ProviderStatus[] = [];
     for (const id of PROVIDER_IDS) {
@@ -1589,9 +1642,11 @@ export class ProviderChatService {
             ? {}
             : { kind: "account" as const }),
         acceptedCredentialKinds: supportedCredentialKinds(PROVIDER_VENDORS[id]),
-        // Absent until the agent is named, which the dashboard does the
-        // moment it connects. Sent even when absent is impossible to
-        // distinguish from "named the empty string", so it is simply omitted.
+        // Present for every connection: naming happens at connect, and
+        // anything older is named on the way through `namedConnections`. Only
+        // a provider this account has never connected has none, and sending
+        // that as an empty string is impossible to distinguish from "named
+        // the empty string", so it is simply omitted.
         ...(settings.callSign === undefined
           ? {}
           : { callSign: settings.callSign }),
@@ -1652,7 +1707,15 @@ export class ProviderChatService {
     // built from this and has no other route to an account-level name. Without
     // it every agent fell back to its vendor label, which is why naming had to
     // be redone per room to have any effect at all.
+    //
+    // A teammate who connected before agents were named is named here rather
+    // than left waiting until they next open their own dashboard: their agent
+    // appears in everybody else's roster, and this is the only path that
+    // reads it.
     const connections = await this.readConnections();
+    if (this.nameUnnamedConnections(connections, userIds)) {
+      await this.writeConnections(connections);
+    }
     const result: Record<
       string,
       Array<{
@@ -2878,27 +2941,36 @@ export class ProviderChatService {
     onEvent: (event: ChatStreamEvent) => void,
   ): Promise<ChatReply> {
     const prompt = await this.prepareCompletion(input);
-    return await this.withCompletionEnv(
-      input.userId,
-      input.provider,
-      prompt.credential,
-      async (env) =>
-        input.provider === "anthropic"
-          ? await this.streamViaClaudeCli(
-              prompt.text,
-              prompt.settings,
-              input.cliSessionId,
-              onEvent,
-              env,
-            )
-          : await this.streamViaCodexCli(
-              prompt.text,
-              prompt.settings,
-              input.cliSessionId,
-              onEvent,
-              env,
-            ),
-    );
+    try {
+      return await this.withCompletionEnv(
+        input.userId,
+        input.provider,
+        prompt.credential,
+        async (env) =>
+          input.provider === "anthropic"
+            ? await this.streamViaClaudeCli(
+                prompt.text,
+                prompt.settings,
+                input.cliSessionId,
+                onEvent,
+                env,
+              )
+            : await this.streamViaCodexCli(
+                prompt.text,
+                prompt.settings,
+                input.cliSessionId,
+                onEvent,
+                env,
+              ),
+      );
+    } catch (error) {
+      // Thread continuations use this path now, so an expired credential must
+      // be retired exactly as it is for a non-streaming completion. Otherwise
+      // the failed turn is visible but the same dead agent remains available
+      // for the next message.
+      await this.noteCredentialFailure(input.userId, input.provider, error);
+      throw error;
+    }
   }
 
   /**

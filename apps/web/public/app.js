@@ -55,7 +55,6 @@ import {
   saveChannelFile,
   ensureChannelMessages,
   ensureChannelRoster,
-  freeAgentCodeName,
   ensureProviderUsage,
   ensureRepositoryGrants,
   refreshChannelMessages,
@@ -1167,36 +1166,6 @@ async function saveAppearanceChoice(patch) {
  *   picker is replaced by a statement of fact — asking again is asking
  *   somebody to repeat themselves.
  */
-/**
- * Asks for a name when every call sign in the channel is spoken for.
- *
- * Only reachable once the list is exhausted, which takes seventy agents in
- * one channel — but the alternative is minting "Vesper 2", and a name nobody
- * chose that also reads as a duplicate is worse than a question. Empty means
- * they would rather keep the default, which is a legitimate answer.
- */
-async function promptForAgentName(repositoryId, agentId) {
-  const values = await showModal({
-    title: "Every call sign is taken",
-    subtitle:
-      "This channel is using all of them, so this agent needs a name of " +
-      "your choosing. It has to be one nobody here already answers to.",
-    confirm: "Name this agent",
-    body: `<label class="field">
-        <span>Name</span>
-        <input class="input" name="name" maxlength="120" placeholder="e.g. Vesper II">
-      </label>`,
-  });
-  const chosen = String(values?.name ?? "").trim();
-  if (chosen === "") {
-    return;
-  }
-  // `renameChannelAgent` refuses a duplicate and says so, so this does not
-  // need to check again — the same guard serves the form and this.
-  renameChannelAgent(repositoryId, agentId, chosen);
-  render();
-}
-
 async function inviteSomebody(rerender, repositoryId) {
   const fixed = typeof repositoryId === "string" && repositoryId.length > 0;
   const preselected = repositoryId ?? currentRepository()?.id ?? "";
@@ -3748,17 +3717,13 @@ document.addEventListener("click", (event) => {
       closePopover();
       render();
       refreshChannelInfoPopover();
-      // A call sign, so the roster reads as names rather than as vendors and
-      // owners. Chosen from the ones free in this channel, so it never lands
-      // on one already in use; if every one is taken the person is asked
-      // instead, since inventing "Vesper 2" is worse than saying so.
-      const callSign = freeAgentCodeName(repositoryId);
-      if (callSign !== undefined) {
-        renameChannelAgent(repositoryId, agentId, callSign);
-        render();
-      } else {
-        void promptForAgentName(repositoryId, agentId);
-      }
+      // No name is handed out here. An agent is named once, when its account
+      // connects (`assignCallSign` in `src/providers.ts`), and arrives already
+      // carrying that call sign — naming it again per channel is what made the
+      // same agent Athena in one room and Vesta in the next, since a name
+      // chosen here is stored as a channel override that outranks the
+      // account's own. Somebody can still rename it in one channel from the
+      // roster; that is a choice, not a side effect of adding it.
       // Visibility is a property of the credential, so this is the same
       // account-wide switch the roster offers — said at the moment somebody
       // is already deciding who the agent is for.
@@ -3827,6 +3792,22 @@ document.addEventListener("click", (event) => {
   }
 });
 
+/**
+ * Restores the live-turn view before a human extends a finished thread.
+ *
+ * `threadTyping` already keys its dots on the last reply, so the optimistic
+ * human reply brings those back. The thinking disclosure also remembers the
+ * reader's last state, though, and a finished turn is normally collapsed. A
+ * new turn must open it again or fresh provider reasoning arrives correctly
+ * and looks like it never happened.
+ */
+function beginThreadTurn(messageId, draft) {
+  if (typeof messageId !== "string" || String(draft ?? "").trim() === "") {
+    return;
+  }
+  state.thinkingOpen[messageId] = true;
+}
+
 document.addEventListener("submit", (event) => {
   const form = event.target.closest("[data-act]");
   if (form === null) {
@@ -3880,12 +3861,14 @@ document.addEventListener("submit", (event) => {
       return;
     }
     case "channel-submit":
+      beginThreadTurn(state.composerThreadId, state.chatDraft);
       submitComposerMessage(render);
       return;
     case "chan-term-submit":
       void runTerminalCommand(render);
       return;
     case "channel-thread-submit":
+      beginThreadTurn(state.activeChannelThread, state.threadDraft);
       submitThreadReply(render);
       return;
     case "channel-rename-form": {

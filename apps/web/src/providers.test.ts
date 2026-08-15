@@ -8,6 +8,7 @@ import { CoordinatorProject } from "@coord/cli/project";
 import { UserCredentialStore } from "@coord/workspace-manager";
 
 import {
+  AGENT_CALL_SIGNS,
   ProviderChatError,
   ProviderChatService,
   parseClaudeStreamJson,
@@ -953,6 +954,64 @@ test("redacted CLI thinking becomes hidden reasoning with real token counts", ()
   assert.equal(reply.usage.thinkingTokens, 85);
 });
 
+test("provider stream parsing resets thinking and completion state between turns", () => {
+  const claudeFirst = parseClaudeStreamJson(
+    [
+      JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [{ type: "thinking", thinking: "First turn reasoning." }],
+        },
+      }),
+      JSON.stringify({
+        type: "result",
+        is_error: false,
+        result: "first",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    ].join("\n"),
+    "claude-test",
+  );
+  assert.equal(claudeFirst.thinking, "First turn reasoning.");
+
+  const claudeSecond = parseClaudeStreamJson(
+    [
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "second" }] },
+      }),
+      JSON.stringify({
+        type: "result",
+        is_error: false,
+        result: "second",
+        usage: { input_tokens: 1, output_tokens: 1 },
+      }),
+    ].join("\n"),
+    "claude-test",
+  );
+  assert.equal(claudeSecond.thinking, undefined);
+  assert.equal(claudeSecond.thinkingHidden, undefined);
+
+  const completedCodexTurn = [
+    JSON.stringify({ type: "thread.started", thread_id: "turn-one" }),
+    JSON.stringify({
+      type: "item.completed",
+      item: { type: "agent_message", text: "first" },
+    }),
+    JSON.stringify({ type: "turn.completed", usage: {} }),
+  ].join("\n");
+  assert.equal(parseCodexJsonl(completedCodexTurn, "codex-test").text, "first");
+  assert.throws(
+    () =>
+      parseCodexJsonl(
+        JSON.stringify({ type: "thread.started", thread_id: "turn-two" }),
+        "codex-test",
+      ),
+    /no completed turn/u,
+    "a completed prior turn must not make a truncated next turn complete",
+  );
+});
+
 test("codex jsonl failures and truncated streams are loud", () => {
   assert.throws(
     () => parseCodexJsonl("", "m"),
@@ -1321,5 +1380,156 @@ test("a github connection never appears in the channel roster", async () => {
   assert.deepEqual(
     connections["user-1"]?.map((entry) => entry.provider),
     ["anthropic"],
+  );
+});
+
+test("call sign assignment picks randomly from the free Greek and Roman god names", async () => {
+  // Taking the first free name meant the pool was really a queue: the first
+  // account on any deployment was Zeus, the second Hera, the third Poseidon,
+  // and the name carried nothing but join order.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+  });
+
+  const signs: string[] = [];
+  for (let index = 0; index < 8; index += 1) {
+    const statuses = await service.connectOwnCredential({
+      userId: `u${index}`,
+      provider: "anthropic",
+      kind: "oauth_token",
+      secret: `sk-ant-oat01-user-${index}`,
+    });
+    const sign = statuses.find((entry) => entry.id === "anthropic")?.callSign;
+    assert.ok(sign !== undefined, "a connected account is given a name");
+    signs.push(sign);
+  }
+
+  const pantheon = new Set<string>(AGENT_CALL_SIGNS);
+  for (const sign of signs) {
+    assert.ok(pantheon.has(sign), `${sign} is not one of the gods`);
+  }
+  // Signs in use are still skipped, so a room cannot hold two Hermeses.
+  assert.equal(new Set(signs).size, signs.length, "every sign is distinct");
+  // Eight draws from seventy-two names land in list order roughly once in
+  // 10^14 runs, so this asserts the draw is random without being flaky.
+  assert.notDeepEqual(
+    signs,
+    [...AGENT_CALL_SIGNS].slice(0, signs.length),
+    "call signs must not be handed out in list order",
+  );
+});
+
+test("an account that already has a call sign is never renamed", async () => {
+  // Assignment only ever fills a gap: a name people have learned survives a
+  // reconnect, and a name somebody chose survives everything.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+  });
+
+  const first = await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-first",
+  });
+  const assigned = first.find((entry) => entry.id === "anthropic")?.callSign;
+  assert.ok(assigned !== undefined);
+
+  await service.setSettings({
+    userId: "u1",
+    provider: "anthropic",
+    callSign: "Icarus",
+  });
+  const again = await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-second",
+  });
+  assert.equal(
+    again.find((entry) => entry.id === "anthropic")?.callSign,
+    "Icarus",
+  );
+});
+
+/** Writes a connection the way a deployment older than call signs left one. */
+async function seedUnnamedConnection(
+  harness: Harness,
+  userId: string,
+): Promise<void> {
+  const secrets = path.join(harness.project.directory, "secrets");
+  await mkdir(secrets, { recursive: true });
+  await writeFile(
+    path.join(secrets, "provider-connections.json"),
+    JSON.stringify({
+      [userId]: {
+        anthropic: { kind: "account", createdAt: "2026-01-01T00:00:00.000Z" },
+      },
+    }),
+    "utf8",
+  );
+}
+
+test("a connection made before call signs existed is named on the next read", async () => {
+  // Naming happens at connect, and the browser no longer hands out a name as
+  // an agent joins a channel — so without this an account that connected
+  // earlier would read as "Claude (Nathan)" in every channel for good, with
+  // nothing left that could ever name it. Filling the gap on read names it
+  // once, by the same rule connect applies.
+  const harness = await createHarness();
+  await seedUnnamedConnection(harness, "u1");
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_OK),
+  });
+
+  const named = (await service.list({ userId: "u1", systemAdmin: true })).find(
+    (entry) => entry.id === "anthropic",
+  )?.callSign;
+  assert.ok(named !== undefined, "the older connection is given a name");
+  assert.ok(new Set<string>(AGENT_CALL_SIGNS).has(named));
+
+  // And it is the name from then on: a name that changed on every read would
+  // be worse than no name at all.
+  const again = (await service.list({ userId: "u1", systemAdmin: true })).find(
+    (entry) => entry.id === "anthropic",
+  )?.callSign;
+  assert.equal(again, named);
+});
+
+test("a teammate's older connection is named by the roster read too", async () => {
+  // The roster is the only path that reads somebody else's connection, so an
+  // agent belonging to a person who has not opened their own dashboard since
+  // is named here or nowhere.
+  const harness = await createHarness();
+  await seedUnnamedConnection(harness, "teammate");
+  // The roster is built from the credentials a person actually holds, so the
+  // teammate needs one for their agent to be in it at all.
+  const store = await UserCredentialStore.open(
+    path.join(harness.project.directory, "secrets"),
+  );
+  await store.put("teammate", "claude", {
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-teammates-own",
+  });
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_OK),
+    credentials: store,
+  });
+
+  const roster = await service.listConnectionsFor(["teammate"]);
+  const sign = roster["teammate"]?.[0]?.callSign;
+  assert.ok(sign !== undefined, "the teammate's agent is named");
+  // Their own dashboard reports the same name, in every channel, forever.
+  assert.equal(
+    (await service.list({ userId: "teammate", systemAdmin: true })).find(
+      (entry) => entry.id === "anthropic",
+    )?.callSign,
+    sign,
   );
 });

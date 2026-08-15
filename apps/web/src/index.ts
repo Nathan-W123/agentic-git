@@ -13,6 +13,7 @@ import {
   cancelTasks,
   repoCreate,
   repoImportGitHub,
+  repoRemove,
   runPendingTasks,
   taskSubmit,
 } from "@coord/cli/commands";
@@ -291,6 +292,9 @@ async function serve(
         ...(input.branch === undefined ? {} : { branch: input.branch }),
         ...(input.actorId === undefined ? {} : { createdBy: input.actorId }),
       });
+    },
+    async deleteRepository(input) {
+      await repoRemove(project, store, { id: input.repositoryId });
     },
     async importGitHub(input) {
       return await repoImportGitHub(project, store, {

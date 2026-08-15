@@ -1517,6 +1517,16 @@ export interface ApiOperations {
     branch?: string;
     actorId: string;
   }): Promise<StoredRepository>;
+  /**
+   * Removes the canonical repository and its persisted coordination state.
+   * Older or store-only deployments may omit this and retain the persistence-
+   * only fallback used before repository filesystem lifecycle was exposed.
+   */
+  deleteRepository?(input: {
+    projectId: string;
+    repositoryId: string;
+    actorId: string;
+  }): Promise<void>;
   importGitHub(input: {
     projectId: string;
     repository: string;
@@ -1921,7 +1931,7 @@ export interface ChatProviderOperations {
       messages: unknown;
       cliSessionId?: string;
     },
-    onEvent: (event: unknown) => void,
+    onEvent: (event: ChatStreamEvent) => void,
   ): Promise<unknown>;
   /**
    * Which vendors a set of *other* users have connected, for the repository
@@ -1953,6 +1963,23 @@ export interface ChatProviderOperations {
     >
   >;
 }
+
+/**
+ * The provider events a channel turn can render while the model is working.
+ *
+ * Kept structurally identical to `apps/web/src/providers.ts` rather than
+ * importing the provider implementation into the gateway. The gateway is a
+ * package boundary; it only needs the public stream contract, not the CLI
+ * adapters that produce it.
+ */
+export type ChatStreamEvent =
+  | { type: "status"; status: string }
+  | { type: "reasoning_start"; hidden: boolean }
+  | { type: "reasoning"; text: string }
+  | { type: "reasoning_tokens"; tokens: number }
+  | { type: "text"; delta: string }
+  | { type: "done"; reply: unknown }
+  | { type: "error"; message: string; code: string };
 
 /** Everything a worker needs to execute one task without further lookups. */
 export interface WorkAssignment {
@@ -4361,7 +4388,15 @@ export class ApiGateway {
         "manage_project",
       );
       await this.performOperation("repository_deletion_failed", async () => {
-        await this.options.store.removeRepository(repositoryId);
+        if (this.options.operations.deleteRepository === undefined) {
+          await this.options.store.removeRepository(repositoryId);
+          return;
+        }
+        await this.options.operations.deleteRepository({
+          projectId,
+          repositoryId,
+          actorId: principal.user.id,
+        });
       });
       await this.options.store.appendAudit(undefined, {
         type: "repository_deleted",
@@ -7726,14 +7761,17 @@ export class ApiGateway {
    * Which agents an @mention in this channel could name, in the exact text a
    * mention resolves to.
    *
-   * The frontend inserts `@${name} ` where `name` is what `channelAgentsFor`
-   * in `data.js` computes: `"${AGENT_LABEL[provider]} (${firstWord(
-   * displayName)})"`, with any channel rename (`setChannelAgentOverride`)
-   * layered on top — see `withOverride` in `data.js`. This reconstructs the
-   * same string for every connected agent in the roster so a posted message
-   * can be matched against it server-side. Longest name first, so "Claude
-   * (Bob)" is tried before a coincidentally-shorter "Claude (Bo)" would
-   * falsely match as a prefix.
+   * The frontend inserts `@${name} `, where `name` is the account's call sign
+   * — the one it was given when it connected — falling back to
+   * `"${AGENT_LABEL[provider]} (${firstWord(displayName)})"` for a connection
+   * made before agents were named, with any channel rename
+   * (`setChannelAgentOverride`) layered on top. That rename is now the only
+   * thing that is per channel: the browser no longer names an agent as it is
+   * added to one, so the same agent answers to the same name everywhere.
+   * This reconstructs the same string for every connected agent in the roster
+   * so a posted message can be matched against it server-side. Longest name
+   * first, so "Claude (Bob)" is tried before a coincidentally-shorter "Claude
+   * (Bo)" would falsely match as a prefix.
    */
   private async resolveChannelMentionCandidates(
     projectId: string,
@@ -9404,37 +9442,182 @@ export class ApiGateway {
     projectId: string;
     repositoryId: string;
     messageId: string;
-    root: { content: string; replies: Array<{ content: string }> };
+    root: {
+      content: string;
+      replies: Array<{ content: string; kind?: string }>;
+    };
     candidate: ChannelMentionCandidate;
     question: string;
   }): Promise<void> {
     const { root, candidate, question } = input;
-    // The reply just stored is the question being asked, so it is left off the
-    // end of the transcript rather than repeated to the model twice.
+    // The reply route stores the person's question before starting this turn.
+    // Remove that one reply from the history so the model gets it once, in the
+    // explicit question slot below. Looking for the last matching human reply
+    // instead of blindly dropping the last entry keeps a progress line that
+    // may have arrived between the store write and this read.
+    const priorReplies = [...root.replies];
+    for (let index = priorReplies.length - 1; index >= 0; index -= 1) {
+      const reply = priorReplies[index];
+      if (
+        reply?.kind === "user" &&
+        collapseWhitespace(reply.content) === collapseWhitespace(question)
+      ) {
+        priorReplies.splice(index, 1);
+        break;
+      }
+    }
     const history = [
       root.content,
-      ...root.replies.map((reply) => reply.content),
+      ...priorReplies.map((reply) => reply.content),
     ]
       .map((line) => collapseWhitespace(line))
       .filter((line) => line.length > 0)
       .slice(-THREAD_CONTEXT_LINES);
-    const answer = await this.askAgent(
-      candidate,
+    const prompt =
       `${agentIdentity(candidate)}\n\n` +
-        "You are answering a follow-up question inside the thread for a task " +
-        "you worked on. This chat has no checkout, but the task itself ran " +
-        "with the repository — so answer from the thread below, and never say " +
-        "the work is blocked or cannot continue merely because this " +
-        "conversation cannot see the files. Below is that " +
-        "thread so far, oldest first. Answer the question directly and " +
-        "briefly — three sentences at most, no markdown headings, no " +
-        "preamble. If the thread shows the work did not finish, say plainly " +
-        "how far it got and what stopped it. Do not invent progress the " +
-        "thread does not show.\n\nThread so far:\n" +
-        history.map((line) => `- ${line}`).join("\n") +
-        `\n\nThe question: ${question}`,
+      "You are answering a follow-up question inside the thread for a task " +
+      "you worked on. This chat has no checkout, but the task itself ran " +
+      "with the repository — so answer from the thread below, and never say " +
+      "the work is blocked or cannot continue merely because this " +
+      "conversation cannot see the files. Below is that " +
+      "thread so far, oldest first. Answer the question directly and " +
+      "briefly — three sentences at most, no markdown headings, no " +
+      "preamble. If the thread shows the work did not finish, say plainly " +
+      "how far it got and what stopped it. Do not invent progress the " +
+      "thread does not show.\n\nThread so far:\n" +
+      history.map((line) => `- ${line}`).join("\n") +
+      `\n\nThe question: ${question}`;
+
+    const authorId = `${candidate.userId}:${candidate.provider}`;
+    let deliveries = Promise.resolve();
+    let activityAnnounced = false;
+    let hiddenReasoningAnnounced = false;
+    let streamedText = "";
+    let streamedReply: unknown;
+    let streamFailure: string | undefined;
+    let acceptingEvents = true;
+    const progressSeen = new Set<string>();
+
+    // Provider callbacks are synchronous, while writing a channel reply is
+    // asynchronous. Queue the writes to preserve the provider's order and
+    // wait for the queue before writing the terminal reply. A failed progress
+    // write must not poison the rest of the turn; the final answer is still
+    // worth delivering.
+    const announceProgress = (value: string): void => {
+      const content = value.trim().slice(0, 4_000);
+      if (content.length === 0 || progressSeen.has(content)) {
+        return;
+      }
+      progressSeen.add(content);
+      activityAnnounced = true;
+      deliveries = deliveries
+        .then(async () => {
+          await this.appendChannelThreadReply({
+            projectId: input.projectId,
+            repositoryId: input.repositoryId,
+            messageId: input.messageId,
+            authorId,
+            content,
+            kind: "progress",
+          });
+        })
+        .catch((error: unknown) => {
+          process.stderr.write(
+            `[channel] thread progress failed for ${input.messageId}: ${
+              error instanceof Error ? error.message : String(error)
+            }\n`,
+          );
+        });
+    };
+
+    const turn = await this.performChat(
+      candidate,
+      prompt,
       QUESTION_TIMEOUT_MS,
+      (event) => {
+        if (!acceptingEvents) {
+          return;
+        }
+        switch (event.type) {
+          case "status": {
+            const status = collapseWhitespace(event.status);
+            if (status.length > 0) {
+              announceProgress(
+                status.toLowerCase() === "working" ? "Working…" : status,
+              );
+            }
+            break;
+          }
+          case "reasoning_start":
+            if (event.hidden && !hiddenReasoningAnnounced) {
+              hiddenReasoningAnnounced = true;
+              announceProgress("Thinking…");
+            }
+            break;
+          case "reasoning":
+            announceProgress(event.text);
+            break;
+          case "reasoning_tokens":
+            if (event.tokens > 0 && !hiddenReasoningAnnounced) {
+              hiddenReasoningAnnounced = true;
+              // The provider disclosed that reasoning happened, not what it
+              // contained. Say exactly that without fabricating its content
+              // or turning the channel into a token counter.
+              announceProgress("Thinking…");
+            }
+            break;
+          case "text":
+            streamedText += event.delta;
+            break;
+          case "error":
+            streamFailure = event.message;
+            break;
+          case "done":
+            // The returned reply is canonical for the built-in providers,
+            // while an adapter may instead finish through the stream event.
+            // Keep that payload as a fallback but write one terminal channel
+            // reply either way.
+            streamedReply = event.reply;
+            break;
+        }
+      },
     );
+    acceptingEvents = false;
+    await deliveries;
+
+    const reply = (turn.reply ?? streamedReply) as
+      | {
+          text?: unknown;
+          content?: unknown;
+          thinking?: unknown;
+          thinkingHidden?: unknown;
+          usage?: { thinkingTokens?: unknown };
+        }
+      | undefined;
+    const finalThinking =
+      typeof reply?.thinking === "string" ? reply.thinking.trim() : "";
+    if (finalThinking.length > 0 && !progressSeen.has(finalThinking)) {
+      announceProgress(finalThinking);
+    } else if (
+      (reply?.thinkingHidden === true ||
+        (typeof reply?.usage?.thinkingTokens === "number" &&
+          reply.usage.thinkingTokens > 0)) &&
+      !hiddenReasoningAnnounced
+    ) {
+      hiddenReasoningAnnounced = true;
+      announceProgress("Thinking…");
+    }
+    // A deployment without streaming still gets the same turn shape. This is
+    // an activity marker, not invented chain-of-thought; it says only that the
+    // provider worked before it answered.
+    if (!activityAnnounced) {
+      announceProgress("Thinking…");
+    }
+    await deliveries;
+
+    const returnedText = String(reply?.text ?? reply?.content ?? "").trim();
+    const finalText =
+      returnedText.length > 0 ? returnedText : streamedText.trim();
     await this.appendChannelThreadReply({
       projectId: input.projectId,
       repositoryId: input.repositoryId,
@@ -9442,9 +9625,72 @@ export class ApiGateway {
       // The answering agent, not the thread's owner: with several agents in
       // one thread, attributing every reply to whoever started it would put
       // one agent's words under another's name.
-      authorId: `${candidate.userId}:${candidate.provider}`,
-      content: answer.text ?? explainAnswerFailure(answer.error),
+      authorId,
+      content:
+        finalText.length > 0
+          ? finalText
+          : explainAnswerFailure(turn.error ?? streamFailure),
+      // A provider turn has the same two visible phases as a repository turn:
+      // progress is thinking, and this is the terminal summary/reply. Marking
+      // the ending is what retires the working dots; the next human reply then
+      // becomes the last entry and starts a fresh turn again.
+      kind: "outcome",
     });
+  }
+
+  /**
+   * Performs exactly one provider turn, optionally using its streaming form.
+   *
+   * The account is always the candidate's owner. That is the credential the
+   * roster exposed and the same scope `askAgent` used before thread turns were
+   * streamed; a continuation must not fall back to whichever user happened to
+   * post the reply.
+   */
+  private async performChat(
+    candidate: ChannelMentionCandidate,
+    prompt: string,
+    timeoutMs: number,
+    onEvent?: (event: ChatStreamEvent) => void,
+  ): Promise<{ reply?: unknown; error?: string }> {
+    const providers = this.options.operations.chatProviders;
+    if (providers === undefined) {
+      return { error: "this deployment has no provider chat configured" };
+    }
+    const input = {
+      userId: candidate.userId,
+      systemAdmin: false,
+      provider: candidate.provider,
+      messages: [{ role: "user", content: prompt }],
+    };
+    const timedOut = Symbol("timeout");
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const operation =
+        onEvent !== undefined && providers.completeStream !== undefined
+          ? providers.completeStream(input, onEvent)
+          : providers.complete(input);
+      const answer = await Promise.race([
+        operation,
+        new Promise<typeof timedOut>((resolve) => {
+          timer = setTimeout(() => resolve(timedOut), timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+      if (answer === timedOut) {
+        return {
+          error: `no answer within ${String(Math.round(timeoutMs / 1000))}s`,
+        };
+      }
+      return { reply: answer };
+    } catch (error) {
+      return {
+        error: error instanceof Error ? error.message : String(error),
+      };
+    } finally {
+      if (timer !== undefined) {
+        clearTimeout(timer);
+      }
+    }
   }
 
   /**
@@ -9460,49 +9706,23 @@ export class ApiGateway {
     prompt: string,
     timeoutMs: number,
   ): Promise<{ text?: string; error?: string }> {
-    const complete = this.options.operations.chatProviders?.complete;
-    if (complete === undefined) {
-      return { error: "this deployment has no provider chat configured" };
+    const answer = await this.performChat(candidate, prompt, timeoutMs);
+    // `ChatReply.text` is the field the provider service actually fills.
+    // Reading `content` — the shape of the *request* — found nothing every
+    // time, so every dynamic line silently fell back to a fixed one.
+    const reply = answer.reply as
+      | { text?: unknown; content?: unknown }
+      | undefined;
+    const trimmed = String(reply?.text ?? reply?.content ?? "").trim();
+    if (trimmed.length > 0) {
+      return { text: trimmed };
     }
-    // A distinct value rather than `undefined`, so "the deadline passed" and
-    // "the model answered with nothing" stay separable. Collapsing them meant
-    // a reply that arrived fine but was read out of the wrong field reported
-    // itself as a timeout, which sent me looking at durations for something
-    // that was never slow.
-    const timedOut = Symbol("timeout");
-    try {
-      const answer = await Promise.race([
-        complete({
-          userId: candidate.userId,
-          systemAdmin: false,
-          provider: candidate.provider,
-          messages: [{ role: "user", content: prompt }],
-        }),
-        new Promise<typeof timedOut>((resolve) =>
-          setTimeout(() => resolve(timedOut), timeoutMs).unref?.(),
-        ),
-      ]);
-      if (answer === timedOut) {
-        return {
-          error: `no answer within ${String(Math.round(timeoutMs / 1000))}s`,
-        };
-      }
-      // `ChatReply.text` is the field the provider service actually fills.
-      // Reading `content` — the shape of the *request* — found nothing every
-      // time, so every dynamic line silently fell back to a fixed one.
-      const reply = answer as { text?: unknown; content?: unknown };
-      const trimmed = String(reply?.text ?? reply?.content ?? "").trim();
-      return trimmed.length === 0
-        ? { error: "the model answered with nothing" }
-        : { text: trimmed };
-    } catch (error) {
+    return {
       // Carried rather than swallowed: "I could not reach my model" is true
       // and useless, and the reason is nearly always an expired sign-in the
       // reader is the only person who can fix.
-      return {
-        error: error instanceof Error ? error.message : String(error),
-      };
-    }
+      error: answer.error ?? "the model answered with nothing",
+    };
   }
 
   /**
@@ -11348,48 +11568,29 @@ export class ApiGateway {
   }
 
   /**
-   * Says out loud what the coordinator decided when two tasks collided.
+   * Resolves a task id to the name the room already knows its agent by.
    *
-   * The detector has always written `conflict_detected` — task ids, the
-   * overlapping files, a disposition and its own explanation — and none of it
-   * ever reached a person: the event carried no repository, so nothing could
-   * route it to a channel, and `narrateTaskEvent` had no case for it. The one
-   * thing this product does that a pile of uncoordinated agents cannot was
-   * invisible in the room where people watch the agents work; the only
-   * symptom of an arbitration was one task mysteriously waiting.
+   * Who, not what. A dispatched objective is the whole message somebody typed
+   * — several sentences of it — and quoting even the first 57 characters put a
+   * truncated wall of prompt on both sides of every hold, twice in one
+   * sentence. The room already knows these agents by name, so the name is the
+   * whole of what a reader needs to place the collision.
    *
-   * Spoken by the room, not by an agent. Neither agent decided this — the
-   * coordinator did, and putting the sentence in an agent's mouth would make
-   * it look like agents negotiate with each other.
+   * The objective survives only as the fallback for an agent with no name in
+   * this channel, and short: enough to tell two holds apart, not enough to
+   * read as a quotation.
+   *
+   * Shared by both room-level narrators. `narrateConflicts` used to quote
+   * objectives while `announceArbitration` named agents, so the same collision
+   * was announced two different ways depending on which event arrived.
    */
-  /**
-   * The room-level announcement of one admission decision.
-   *
-   * Named by objective rather than task id, because "task_4ef5f1b waits for
-   * task_a89c9a4" tells a reader nothing they can act on and both names are
-   * one lookup away. The blocker may have finished between the event and this
-   * lookup — the announcement still stands, it just reads as history.
-   */
-  private async announceArbitration(
-    watched: { projectId: string; repositoryId: string; taskId: string },
-    data: Record<string, unknown>,
-  ): Promise<void> {
+  private async channelAgentNamer(
+    projectId: string,
+    repositoryId: string,
+  ): Promise<(taskId: unknown) => string> {
     const tasks = await this.options.store.listSubmittedTasks({
-      repositoryId: watched.repositoryId,
+      repositoryId,
     });
-    // Who, not what. A dispatched objective is the whole message somebody
-    // typed — several sentences of it — and quoting even the first 57
-    // characters put a truncated wall of prompt on both sides of every hold,
-    // twice in one sentence. The room already knows these agents by name, and
-    // the files are named in the same line, so the name is the whole of what a
-    // reader needs to place the hold.
-    //
-    // The objective survives only as the fallback for an agent with no name in
-    // this channel, and short: enough to tell two holds apart, not enough to
-    // read as a quotation.
-    const overrides = await this.options.store
-      .listChannelAgentOverrides(watched.repositoryId)
-      .catch(() => ({}) as Record<string, { name?: string }>);
     // Overrides are keyed `${userId}:${provider}`, never by a task's agentId —
     // so looking one up by agentId matched nothing, every time, and every hold
     // fell through to quoting the objective it was supposed to stop quoting.
@@ -11397,33 +11598,51 @@ export class ApiGateway {
     // `resolveChannelAgentPresentation`; so does this now, which also means an
     // agent nobody has renamed still gets its "Codex (Nathan)" default rather
     // than a sentence of somebody's prompt.
-    const connections = await this
-      .channelAgentConnections(watched.projectId, watched.repositoryId)
-      .catch(() => []);
-    const describe = (taskId: unknown): string => {
+    const overrides = await this.options.store
+      .listChannelAgentOverrides(repositoryId)
+      .catch(() => ({}) as Record<string, { name?: string }>);
+    const connections = await this.channelAgentConnections(
+      projectId,
+      repositoryId,
+    ).catch(() => []);
+    return (taskId: unknown): string => {
       const found = tasks.find((candidate) => candidate.id === taskId);
       const owned = connections.filter(
         (connection) => connection.userId === found?.submittedBy,
       );
       const agentId = String(found?.agentId ?? "").toLowerCase();
-      // Matched on provider, never "the first one this person owns". That
-      // fallback named both sides of a conflict after whichever agent came
-      // first, so a hold read "@Juliett overlaps @Juliett" — which tells the
-      // reader nothing and looks like the coordinator arguing with itself.
-      // Better to fall through to the objective than to name the wrong agent
-      // confidently.
-      const connection = owned.find((candidate) =>
-        agentId.includes(candidate.provider.toLowerCase()),
-      );
+      // Matched on the vendor, then the provider id, but never "the first one
+      // this person owns". That last fallback named both sides of a conflict
+      // after whichever agent came first, so a hold read "@Juliett overlaps
+      // @Juliett" — which tells the reader nothing and looks like the
+      // coordinator arguing with itself. Better to fall through to the
+      // objective than to name the wrong agent confidently.
+      //
+      // The vendor is the half that actually matches. A task's `agentId` is
+      // one of the deployment's own configured agents, resolved from a vendor
+      // by adapter (`resolveAgentIdForVendor`), so it is named "claude-1" —
+      // never "anthropic-1". Matching the provider id alone therefore missed
+      // every real task, and every hold in the room quoted the truncated
+      // objective it was written to stop quoting.
+      const connection = owned.find((candidate) => {
+        const provider = candidate.provider.toLowerCase();
+        const vendor = PROVIDER_TO_VENDOR[candidate.provider] ?? provider;
+        return agentId.includes(vendor) || agentId.includes(provider);
+      });
       if (connection !== undefined) {
+        // The call sign first, exactly as the roster and every @mention
+        // resolve it: an agent connects, is named once from the pantheon, and
+        // keeps that name in every channel. Naming it "@Claude (Nathan)" here
+        // while the room has been calling it "@Athena" all morning describes
+        // two different agents to a reader who only knows one.
+        const defaultName =
+          connection.callSign ??
+          `${AGENT_LABEL[connection.provider] ?? connection.provider} (${firstWord(
+            connection.userName,
+          )})`;
         return `@${
-          resolveChannelAgentPresentation(
-            overrides,
-            connection,
-            `${AGENT_LABEL[connection.provider] ?? connection.provider} (${firstWord(
-              connection.userName,
-            )})`,
-          ).name
+          resolveChannelAgentPresentation(overrides, connection, defaultName)
+            .name
         }`;
       }
       // The request, not the preamble a channel dispatch puts in front of it.
@@ -11434,6 +11653,30 @@ export class ApiGateway {
         "";
       return first.length > 40 ? `"${first.slice(0, 37)}…"` : `"${first}"`;
     };
+  }
+
+  /**
+   * The room-level announcement of one admission decision.
+   *
+   * Spoken by the room, not by an agent. Neither agent decided this — the
+   * coordinator did, and putting the sentence in an agent's mouth would make
+   * it look like agents negotiate with each other.
+   *
+   * One sentence: the two agents, and what happens next. Every earlier version
+   * spent a second and third clause justifying the decision — "so it is
+   * narrowing its plan", "It starts the moment that lands" — which read as the
+   * coordinator explaining itself to a room that only wanted to know the
+   * order. The blocker may have finished between the event and this lookup —
+   * the announcement still stands, it just reads as history.
+   */
+  private async announceArbitration(
+    watched: { projectId: string; repositoryId: string; taskId: string },
+    data: Record<string, unknown>,
+  ): Promise<void> {
+    const describe = await this.channelAgentNamer(
+      watched.projectId,
+      watched.repositoryId,
+    );
     const held = describe(watched.taskId);
     const blockers = (Array.isArray(data["blockedBy"]) ? data["blockedBy"] : [])
       .slice(0, 2)
@@ -11462,12 +11705,14 @@ export class ApiGateway {
             : entry,
         ),
       );
-      // Two agents and the files between them, in that order, because that is
-      // the shape of the fact: who is working, on what, and who has the rest.
+      // The one case where the files earn their place in the line: a split is
+      // only legible if the room can see which half started. Still one
+      // sentence, and still the two agents first.
       line =
-        `⚖️ ${held} has ${granted.length > 0 ? clause(granted) : "the free part"}; ` +
-        `${blocker} has ${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"}. ` +
-        `${held} picks that up when the lease clears.`;
+        `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts on ` +
+        `${granted.length > 0 ? clause(granted) : "the free part"} now, ` +
+        `${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"} once ` +
+        `${blocker} is done.`;
     } else if (approved) {
       // The hold clearing is as much news as the hold was — a room told
       // "it starts the moment that lands" deserves the moment. Only said
@@ -11487,15 +11732,15 @@ export class ApiGateway {
       if (!wasHeld) {
         return;
       }
-      line = `⚖️ ${held} starts now — what it was waiting on has landed.`;
+      line = `⚖️ ${held} starts now — what it was waiting on is done.`;
     } else if (status === "blocked") {
       line =
-        `⚖️ ${held} overlaps ${blocker} too heavily to run alongside it, ` +
-        `so it is narrowing its plan.`;
+        `⚖️ ${held} and ${blocker} have conflicting files — ${held} is ` +
+        `narrowing its plan.`;
     } else {
       line =
-        `⚖️ ${held} is waiting — ${blocker} has the files it needs. ` +
-        `It starts the moment that lands.`;
+        `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts ` +
+        `once ${blocker} is done.`;
     }
     await this.appendChannelEntry({
       projectId: watched.projectId,
@@ -11602,6 +11847,20 @@ export class ApiGateway {
     return people;
   }
 
+  /**
+   * Says out loud what the coordinator decided when two tasks collided.
+   *
+   * The detector has always written `conflict_detected` — task ids, the
+   * overlapping files, a disposition and its own explanation — and none of it
+   * ever reached a person: the event carried no repository, so nothing could
+   * route it to a channel, and `narrateTaskEvent` had no case for it. The one
+   * thing this product does that a pile of uncoordinated agents cannot was
+   * invisible in the room where people watch the agents work; the only
+   * symptom of an arbitration was one task mysteriously waiting.
+   *
+   * Spoken by the room, not by an agent, and in the same sentence shape as
+   * `announceArbitration`: two agent names and the order they run in.
+   */
   private async narrateConflicts(): Promise<void> {
     const events = await this.options.store.listAuditEvents({
       types: ["conflict_detected"],
@@ -11634,53 +11893,28 @@ export class ApiGateway {
       if (disposition === "concurrent") {
         continue;
       }
-      const tasks = await this.options.store.listSubmittedTasks({
-        repositoryId,
-      });
-      const named = taskIds.map((taskId) => {
-        const task = tasks.find((candidate) => candidate.id === taskId);
-        const objective = (task?.objective ?? "a task").split("\n")[0] ?? "";
-        return objective.length > 60
-          ? `"${objective.slice(0, 57)}…"`
-          : `"${objective}"`;
-      });
-      // File evidence only. Every kind was flattened together, so a symbol
-      // name landed in a sentence about files — "they both touch app.js,
-      // BARE and 332 more" — and the count was of symbols, not of files.
-      const files = (Array.isArray(data["evidence"]) ? data["evidence"] : [])
-        .flatMap((entry) =>
-          typeof entry === "object" &&
-          entry !== null &&
-          (entry as { kind?: unknown }).kind === "file_overlap"
-            ? ((entry as { resources?: unknown }).resources as string[]) ?? []
-            : [],
-        )
-        .filter((value): value is string => typeof value === "string");
-      const shown = [...new Set(files)].slice(0, 3);
-      const fileClause =
-        shown.length === 0
-          ? "the same files"
-          : shown.join(", ") +
-            (files.length > shown.length
-              ? ` and ${String(new Set(files).size - shown.length)} more`
-              : "");
-      // The detector's explanation is deliberately not appended. It is the
-      // full structural case — every overlapping file, every shared symbol,
-      // every dependency edge, with the score — and pasting it into the room
-      // produced a message thousands of words long listing variable names,
-      // for a reader whose question was "what is happening and what happens
-      // next". It is written to the audit record, which is where an argument
-      // that long belongs; the room gets the finding.
+      // The same resolver `announceArbitration` uses. This path used to quote
+      // the first 57 characters of both objectives, so one collision read as a
+      // wall of somebody's prompt while the admission event for the very same
+      // pair read "@Ares and @Juno" — two voices for one decision.
+      const describe = await this.channelAgentNamer(projectId, repositoryId);
+      const named = taskIds.map(describe);
+      // The detector's explanation is deliberately not appended, and neither
+      // are the overlapping files. It is the full structural case — every
+      // overlapping file, every shared symbol, every dependency edge, with the
+      // score — and pasting it into the room produced a message thousands of
+      // words long listing variable names, for a reader whose question was
+      // "who is waiting on whom". It is written to the audit record, which is
+      // where an argument that long belongs; the room gets the order.
       const line =
         disposition === "sequence"
-          ? `⚖️ ${named[0]} and ${named[1]} both touch ${fileClause}, so ` +
-            `they run one at a time — the second starts when the first lands.`
+          ? `⚖️ ${named[0]} and ${named[1]} have conflicting files — ` +
+            `${named[1]} starts once ${named[0]} is done.`
           : disposition === "block"
-            ? `⚖️ Holding ${named[1]} — it overlaps ${named[0]} on ` +
-              `${fileClause}, so its agent is narrowing the plan.`
-            : `⚖️ ${named[0]} and ${named[1]} overlap on ${fileClause} but ` +
-              `can run together — flagging it so nobody is surprised by ` +
-              `nearby edits.`;
+            ? `⚖️ ${named[0]} and ${named[1]} have conflicting files — ` +
+              `${named[1]} is narrowing its plan.`
+            : `⚖️ ${named[0]} and ${named[1]} have conflicting files but can ` +
+              `run together.`;
       await this.appendChannelEntry({
         projectId,
         repositoryId,

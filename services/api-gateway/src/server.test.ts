@@ -68,7 +68,15 @@ interface TestRuntime {
    * that the thread's own history goes with it.
    */
   chatPrompts: Array<{ userId: string; provider: string; prompt: string }>;
-  chatAnswer: { text?: string; fail?: string; delayMs?: number };
+  chatAnswer: {
+    text?: string;
+    fail?: string;
+    delayMs?: number;
+    streamEvents?: Array<Record<string, unknown>>;
+    thinking?: string;
+    thinkingHidden?: boolean;
+    thinkingTokens?: number;
+  };
   /** Every canonical diff the auditor asked for, in order. */
   canonicalDiffs: Array<{
     projectId: string;
@@ -248,6 +256,10 @@ async function startRuntime(
   const rollbacks: TestRuntime["rollbacks"] = [];
   const runCalls: TestRuntime["runCalls"] = [];
   const cancelCalls: TestRuntime["cancelCalls"] = [];
+  // Models canonical mirrors independently from persistence. Deleting only
+  // the store record must not make this name reusable in the fixture: the
+  // production bug was precisely that the mirror survived that deletion.
+  const canonicalRepositoryNames = new Set<string>();
   const attachmentBytes = new Map<
     string,
     { bytes: Buffer; contentType: string }
@@ -260,6 +272,40 @@ async function startRuntime(
     files: ["src/server.ts"],
     patch: "@@ -1 +1 @@\n-const ok = a && b;\n+const ok = a || b;",
     truncated: false,
+  };
+  const performChat = async (
+    input: any,
+    onEvent?: (event: Record<string, unknown>) => void,
+  ): Promise<Record<string, unknown>> => {
+    chatPrompts.push({
+      userId: String(input?.userId ?? ""),
+      provider: String(input?.provider ?? ""),
+      prompt: String(input?.messages?.[0]?.content ?? ""),
+    });
+    for (const event of chatAnswer.streamEvents ?? []) {
+      onEvent?.(event);
+    }
+    if (chatAnswer.delayMs !== undefined) {
+      // A slow provider, which is the ordinary case this exists to test:
+      // anything the channel does *after* awaiting a completion is something
+      // a person is waiting on.
+      await new Promise((resolve) => setTimeout(resolve, chatAnswer.delayMs));
+    }
+    if (chatAnswer.fail !== undefined) {
+      throw new Error(chatAnswer.fail);
+    }
+    return {
+      ...(chatAnswer.text === undefined ? {} : { text: chatAnswer.text }),
+      ...(chatAnswer.thinking === undefined
+        ? {}
+        : { thinking: chatAnswer.thinking }),
+      ...(chatAnswer.thinkingHidden === undefined
+        ? {}
+        : { thinkingHidden: chatAnswer.thinkingHidden }),
+      ...(chatAnswer.thinkingTokens === undefined
+        ? {}
+        : { usage: { thinkingTokens: chatAnswer.thinkingTokens } }),
+    };
   };
   const operations: ApiOperations = {
     chatProviders: {
@@ -283,23 +329,10 @@ async function startRuntime(
         return {};
       },
       async complete(input: any) {
-        chatPrompts.push({
-          userId: String(input?.userId ?? ""),
-          provider: String(input?.provider ?? ""),
-          prompt: String(input?.messages?.[0]?.content ?? ""),
-        });
-        if (chatAnswer.delayMs !== undefined) {
-          // A slow provider, which is the ordinary case this exists to test:
-          // anything the channel does *after* awaiting a completion is
-          // something a person is waiting on.
-          await new Promise((resolve) =>
-            setTimeout(resolve, chatAnswer.delayMs),
-          );
-        }
-        if (chatAnswer.fail !== undefined) {
-          throw new Error(chatAnswer.fail);
-        }
-        return chatAnswer.text === undefined ? {} : { text: chatAnswer.text };
+        return await performChat(input);
+      },
+      async completeStream(input: any, onEvent: (event: any) => void) {
+        return await performChat(input, onEvent);
       },
       async connectionsFor(userIds) {
         const result: Record<
@@ -332,6 +365,9 @@ async function startRuntime(
       ];
     },
     async createRepository(input) {
+      if (canonicalRepositoryNames.has(input.id)) {
+        throw new Error(`A repository named ${input.id} is already registered`);
+      }
       const repository = {
         id: input.id,
         path: `/canonical/${input.id}.git`,
@@ -340,7 +376,12 @@ async function startRuntime(
       };
       await store.saveRepository(repository);
       await store.linkRepository(input.projectId, repository.id);
+      canonicalRepositoryNames.add(repository.id);
       return repository;
+    },
+    async deleteRepository(input) {
+      await store.removeRepository(input.repositoryId);
+      canonicalRepositoryNames.delete(input.repositoryId);
     },
     async importGitHub(input) {
       const repository = {
@@ -353,6 +394,7 @@ async function startRuntime(
       };
       await store.saveRepository(repository);
       await store.linkRepository(input.projectId, repository.id);
+      canonicalRepositoryNames.add(repository.id);
       return repository;
     },
     async submitTask(input) {
@@ -4025,8 +4067,164 @@ test("a reply in an agent's thread is answered by that agent, with the thread as
   const answer = listed.data.messages
     .find((message: any) => message.id === root.id)
     ?.replies?.at(-1);
-  assert.equal(answer.kind, "agent");
+  assert.equal(answer.kind, "outcome");
   assert.equal(answer.authorId, `${ownerId}:anthropic`);
+});
+
+test("a human channel reply extending an agent thread starts exactly one provider turn", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "openai" }]);
+  const repositoryId = await invitableRepository(owner, "streamed-thread-reply");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:openai`,
+    content: "I updated the retry helper.",
+  });
+  await runtime.store.addChannelReply({
+    repositoryId,
+    messageId: root.id,
+    kind: "outcome",
+    authorId: `${ownerId}:openai`,
+    content: "The retry helper now backs off exponentially.",
+  });
+
+  runtime.chatAnswer.streamEvents = [
+    { type: "status", status: "working" },
+    { type: "reasoning_start", hidden: false },
+    { type: "reasoning", text: "Checking the earlier result." },
+    { type: "text", delta: "It still caps at five attempts." },
+  ];
+  runtime.chatAnswer.text = "It still caps at five attempts.";
+  const before = runtime.chatPrompts.length;
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "does it still cap the attempts?" } },
+  );
+  assert.equal(replied.status, 201);
+
+  await waitFor(async () => {
+    const thread = await runtime.store.getChannelMessage(
+      repositoryId,
+      root.id,
+      ownerId,
+    );
+    return (
+      thread?.replies.some(
+        (reply) =>
+          reply.kind === "outcome" &&
+          reply.content === "It still caps at five attempts.",
+      ) === true
+    );
+  }, "the resumed provider turn never wrote its terminal reply");
+
+  assert.equal(runtime.chatPrompts.length - before, 1);
+  const prompt = runtime.chatPrompts.at(-1);
+  assert.equal(prompt?.userId, ownerId);
+  assert.equal(prompt?.provider, "openai");
+  assert.match(prompt?.prompt ?? "", /backs off exponentially/u);
+  assert.equal(
+    (prompt?.prompt.match(/does it still cap the attempts\?/gu) ?? []).length,
+    1,
+    "the new prompt belongs in the provider turn once",
+  );
+
+  const thread = await runtime.store.getChannelMessage(
+    repositoryId,
+    root.id,
+    ownerId,
+  );
+  const humanReply = thread?.replies.findIndex(
+    (reply) => reply.content === "does it still cap the attempts?",
+  ) ?? -1;
+  const resumed = thread?.replies.slice(humanReply + 1) ?? [];
+  assert.deepEqual(
+    resumed.map((reply) => reply.kind),
+    ["progress", "progress", "outcome"],
+  );
+  assert.equal(resumed[0]?.content, "Working…");
+  assert.equal(resumed[1]?.content, "Checking the earlier result.");
+  assert.equal(resumed[2]?.content, "It still caps at five attempts.");
+});
+
+test("each resumed turn emits fresh hidden reasoning and a terminal reply without recursion", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "repeated-thread-turns");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "I finished the config migration.",
+  });
+
+  for (const [question, answer] of [
+    ["which key changed?", "The key is now retryLimit."],
+    ["what is its default?", "Its default is five."],
+  ] as const) {
+    runtime.chatAnswer.streamEvents = [
+      { type: "reasoning_start", hidden: true },
+      { type: "reasoning_tokens", tokens: 12 },
+      { type: "text", delta: answer },
+    ];
+    runtime.chatAnswer.text = answer;
+    const turnsBefore = runtime.chatPrompts.length;
+    const posted = await owner.request(
+      `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+      { method: "POST", body: { content: question } },
+    );
+    assert.equal(posted.status, 201);
+    await waitFor(async () => {
+      const thread = await runtime.store.getChannelMessage(
+        repositoryId,
+        root.id,
+        ownerId,
+      );
+      return thread?.replies.some(
+        (reply) => reply.kind === "outcome" && reply.content === answer,
+      ) === true;
+    }, `the turn for ${question} never finished`);
+    assert.equal(runtime.chatPrompts.length - turnsBefore, 1);
+  }
+
+  const thread = await runtime.store.getChannelMessage(
+    repositoryId,
+    root.id,
+    ownerId,
+  );
+  assert.equal(
+    thread?.replies.filter(
+      (reply) => reply.kind === "progress" && reply.content === "Thinking…",
+    ).length,
+    2,
+  );
+  assert.equal(
+    thread?.replies.filter((reply) => reply.kind === "outcome").length,
+    2,
+  );
+  const callsAfterAgentMessages = runtime.chatPrompts.length;
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  assert.equal(
+    runtime.chatPrompts.length,
+    callsAfterAgentMessages,
+    "agent-authored progress and outcomes must not start provider turns",
+  );
+  assert.match(
+    runtime.chatPrompts.at(-1)?.prompt ?? "",
+    /The key is now retryLimit\./u,
+  );
 });
 
 /**
@@ -5251,6 +5449,50 @@ test("an organization admin can delete a repository they did not create", async 
     await runtime.store.getRepository("owner-created-repo"),
     undefined,
   );
+});
+
+test("an active repository name is unique and becomes reusable after deletion", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositories = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`;
+
+  const created = await owner.request(repositories, {
+    method: "POST",
+    body: { id: "reusable-repo" },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+
+  const duplicate = await owner.request(repositories, {
+    method: "POST",
+    body: { id: "reusable-repo" },
+  });
+  assert.equal(duplicate.status, 422, JSON.stringify(duplicate.data));
+  assert.equal(duplicate.data.error.code, "repository_creation_failed");
+
+  const removed = await owner.request(`${repositories}/reusable-repo`, {
+    method: "DELETE",
+  });
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+
+  const recreated = await owner.request(repositories, {
+    method: "POST",
+    body: { id: "reusable-repo" },
+  });
+  assert.equal(recreated.status, 201, JSON.stringify(recreated.data));
+});
+
+test("deleting a missing repository still reports not found", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+
+  const missing = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/missing-repo`,
+    { method: "DELETE" },
+  );
+  assert.equal(missing.status, 404, JSON.stringify(missing.data));
+  assert.equal(missing.data.error.code, "not_found");
 });
 
 test("the auditor is told what the work was asked to do", async (t) => {
@@ -6513,6 +6755,327 @@ test("a quick task ends as two lines in the room, with no thread at all", async 
   );
 });
 
+/**
+ * Puts one dispatched task in the room, which is what starts the fast pump.
+ *
+ * `narrateConflicts` rides on `pumpChannelProgress`, and that timer only
+ * exists while some task is being watched — so a conflict test needs a real
+ * mention dispatch before an appended `conflict_detected` can be narrated.
+ */
+async function roomWithTwoAgents(
+  runtime: TestRuntime,
+  client: TestClient,
+  repo: string,
+  ownerId: string,
+  firstName: string,
+): Promise<{ claude: string; codex: string }> {
+  runtime.chatAnswer.text = "On it.";
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel`;
+  const posted = await client.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: `@Claude (${firstName}) tidy the retry helper` },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never dispatched a task",
+  );
+  const [claude] = await runtime.store.listSubmittedTasks({
+    repositoryId: repo,
+  });
+  assert.ok(claude !== undefined, "the dispatch stored no task");
+  // The other side of every collision below. Submitted directly because only
+  // one watched task is needed to run the pump, and `agentId` is the fixture's
+  // own vendor-resolved id — the shape `resolveAgentIdForVendor` produces.
+  const codex = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    objective: "paste the 72 possible names an agent can get please",
+    agentId: "test-agent-codex",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  return { claude: claude.id, codex: codex.id };
+}
+
+test("a file collision is announced as two agent names and an order, not two quoted prompts", async (t) => {
+  // The bug this covers, in the words of the person who hit it: the room said
+  // '⚖️ "paste the 72 possible names an agent …" is waiting — "when a prompt
+  // gets added to a thread …" has the files it needs. It starts the moment
+  // that lands.' Two truncated walls of somebody's own prompt and three
+  // clauses of justification, to say that one agent goes after another.
+  //
+  // Two separate faults produced that. `narrateConflicts` never resolved a
+  // name at all, and the resolver `announceArbitration` did use matched a
+  // task's `agentId` against the *provider* id ("anthropic") when a real
+  // agentId is named after the vendor ("test-agent-claude") — so it missed
+  // every task and fell through to the objective it was written to replace.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "collisionroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "conflict_detected",
+    taskId: tasks.claude,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      taskIds: [tasks.claude, tasks.codex],
+      disposition: "sequence",
+      evidence: [
+        {
+          kind: "file_overlap",
+          resources: ["services/api-gateway/src/server.ts"],
+        },
+      ],
+      explanation: "file_overlap: services/api-gateway/src/server.ts (+20)",
+    },
+  });
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.authorId === "coordinator");
+    },
+    "the collision was never announced in the room",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const line = String(
+    messages.find((message) => message.authorId === "coordinator")?.content,
+  );
+  // Both agents by the name the room already calls them, and the order.
+  assert.equal(
+    line,
+    `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
+      `files — @Codex (${firstName}) starts once @Claude (${firstName}) is done.`,
+    `the collision line did not read as two names and an order: ${line}`,
+  );
+  // The specific things that made it unreadable, each named so a rewrite that
+  // reintroduces one fails here rather than in somebody's channel.
+  assert.doesNotMatch(
+    line,
+    /paste the 72 possible names/u,
+    "the line quoted a task's objective back at the room",
+  );
+  assert.doesNotMatch(
+    line,
+    /nobody is surprised|the moment that lands|one at a time|both touch/u,
+    "the line kept a justification clause",
+  );
+});
+
+test("a collision that can run together is one line, and one that cannot say so is silent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "advisoryroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  // Advisory intent overlap admits both tasks untouched, so this one is never
+  // spoken at all — saying "conflict" about work that is running anyway would
+  // teach readers to ignore the times it matters.
+  await runtime.store.appendAudit(undefined, {
+    type: "conflict_detected",
+    taskId: tasks.claude,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      taskIds: [tasks.claude, tasks.codex],
+      disposition: "concurrent",
+      evidence: [],
+    },
+  });
+  await runtime.store.appendAudit(undefined, {
+    type: "conflict_detected",
+    taskId: tasks.claude,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      taskIds: [tasks.claude, tasks.codex],
+      disposition: "concurrent_with_notification",
+      evidence: [
+        { kind: "file_overlap", resources: ["apps/web/public/app.js"] },
+      ],
+    },
+  });
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.authorId === "coordinator");
+    },
+    "the advisory collision was never announced",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const lines = messages
+    .filter((message) => message.authorId === "coordinator")
+    .map((message) => String(message.content));
+  // Exactly one: the `concurrent` event above is deliberately not narrated.
+  assert.deepEqual(
+    lines,
+    [
+      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
+        `files but can run together.`,
+    ],
+    `the advisory collision did not read as one short line: ${JSON.stringify(lines)}`,
+  );
+});
+
+test("a sequenced admission names both agents rather than quoting both prompts", async (t) => {
+  // The other half of the same complaint. This path already tried to resolve a
+  // name and always failed, so every hold in the room was two truncated
+  // prompts; and having resolved one it then spent two more clauses on why.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "holdroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation:
+        "Sequenced behind executing work on the same resources: " +
+        "services/api-gateway/src/server.ts",
+    },
+  });
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.authorId === "coordinator");
+    },
+    "the hold was never announced in the room",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const line = String(
+    messages.find((message) => message.authorId === "coordinator")?.content,
+  );
+  assert.equal(
+    line,
+    `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
+      `files — @Claude (${firstName}) starts once @Codex (${firstName}) is done.`,
+    `the hold did not read as two names and an order: ${line}`,
+  );
+  assert.doesNotMatch(
+    line,
+    /paste the 72 possible names|has the files it needs|the moment that lands/u,
+    "the hold kept the quoted objective or its justification clause",
+  );
+});
+
+test("an agent with no connection this channel knows still falls back to its objective", async (t) => {
+  // The fallback is the whole reason the resolver can be trusted: it names an
+  // agent or it says nothing confident. A task submitted by somebody with no
+  // matching connection has no name to use, and quoting a short objective
+  // beats naming the wrong agent.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "namelessroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "conflict_detected",
+    taskId: tasks.claude,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      taskIds: [tasks.claude, tasks.codex],
+      disposition: "sequence",
+      evidence: [],
+    },
+  });
+
+  await waitFor(
+    async () => {
+      const messages = await runtime.store.listChannelMessages(repo, ownerId);
+      return messages.some((message) => message.authorId === "coordinator");
+    },
+    "the collision was never announced in the room",
+    8_000,
+  );
+
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const line = String(
+    messages.find((message) => message.authorId === "coordinator")?.content,
+  );
+  // The named agent is still named; only the one nobody is connected for
+  // falls back, and it falls back quoted and short rather than to a wrong name.
+  assert.match(line, new RegExp(`@Claude \\(${firstName}\\)`, "u"), line);
+  // 37 characters and an ellipsis — the exact shape the room was showing when
+  // this was reported, which is how the fallback was identified as the path
+  // every hold was taking.
+  assert.match(line, /"paste the 72 possible names an agent …"/u, line);
+  assert.doesNotMatch(
+    line,
+    new RegExp(`@Codex \\(${firstName}\\)`, "u"),
+    "an agent nobody is connected for was named anyway",
+  );
+});
+
 test("the sweep leaves a quiet task alone, and closes a thread its watcher abandoned", async (t) => {
   // Two halves of one confusion. The sweep decides a thread still needs an
   // ending from its replies, and a quick task's ending is deliberately not a
@@ -7391,9 +7954,16 @@ test("a reply to an agent's own ending is answered, not swallowed", async (t) =>
     const listed = await owner.request(`${base}/messages`);
     const thread = (listed.data.messages as { id: string; replies: unknown[] }[])
       .find((message) => message.id === root.id);
-    const replies = (thread?.replies ?? []) as { authorId: string }[];
-    // The agent answers in its own voice, in its own thread.
-    return replies.some((reply) => reply.authorId === `${ownerId}:anthropic`);
+    const replies = (thread?.replies ?? []) as Array<{
+      authorId: string;
+      kind: string;
+    }>;
+    // The agent answers in its own voice, in its own thread, and finishes the
+    // streamed turn rather than satisfying this wait with its progress line.
+    return replies.some(
+      (reply) =>
+        reply.authorId === `${ownerId}:anthropic` && reply.kind === "outcome",
+    );
   }, "the agent never answered a reply to its own outcome message");
 });
 

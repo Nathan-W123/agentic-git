@@ -1,4 +1,5 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, mkdtemp, rename, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -199,6 +200,10 @@ export interface RepoCreateOptions {
   createdBy?: string;
 }
 
+export interface RepoRemoveOptions {
+  id: string;
+}
+
 /**
  * Creates a greenfield canonical repository with an empty initial commit.
  *
@@ -229,6 +234,69 @@ export async function repoCreate(
     });
   } finally {
     await rm(sourcePath, { recursive: true, force: true });
+  }
+}
+
+/**
+ * Removes both halves of a registered repository: its canonical mirror and
+ * its persisted coordination state.
+ *
+ * The mirror is moved out of its name before the store is changed. That makes
+ * the original name immediately reusable once persistence deletion succeeds,
+ * while still allowing the mirror to be put back if that deletion fails.
+ */
+export async function repoRemove(
+  project: CoordinatorProject,
+  store: CoordinationStore,
+  options: RepoRemoveOptions,
+): Promise<void> {
+  const id = assertRepositoryId(options.id);
+  const repository = await store.getRepository(id);
+  if (repository === undefined) {
+    throw new Error(`Unknown repository: ${id}`);
+  }
+
+  const repositoriesPath = path.resolve(project.repositoriesPath);
+  const canonicalPath = path.resolve(repository.path);
+  if (path.dirname(canonicalPath) !== repositoriesPath) {
+    throw new Error(
+      `Refusing to remove repository outside ${repositoriesPath}: ${canonicalPath}`,
+    );
+  }
+
+  const retiredPath = path.join(
+    repositoriesPath,
+    `.${id}.deleting-${randomUUID()}`,
+  );
+  let mirrorMoved = false;
+  try {
+    await rename(canonicalPath, retiredPath);
+    mirrorMoved = true;
+  } catch (error) {
+    // A stale registration whose mirror is already gone should still be
+    // removable; clearing it is what lets the same id be created again.
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw error;
+    }
+  }
+  try {
+    await store.removeRepository(id);
+  } catch (error) {
+    if (mirrorMoved) {
+      try {
+        await rename(retiredPath, canonicalPath);
+      } catch (restoreError) {
+        throw new AggregateError(
+          [error, restoreError],
+          `Repository deletion and canonical mirror restoration both failed for ${id}`,
+        );
+      }
+    }
+    throw error;
+  }
+
+  if (mirrorMoved) {
+    await rm(retiredPath, { recursive: true, force: true });
   }
 }
 

@@ -907,59 +907,18 @@ export const TYPING_SWEEP_MS = TYPING_TTL_MS + 250;
 
 /* ---------------------------------------------------------- code names ---- */
 
-/**
- * Call signs for agents in a channel.
+/*
+ * No call sign list lives here any more.
  *
- * "Claude (Nathan)" says which vendor and whose account, which is exactly
- * what nobody needs while reading a conversation — and it collides the moment
- * one person brings two agents. A call sign is short, distinct, and
- * pronounceable, which is what a name in a chat is actually for. Deliberately
- * a flat list rather than generated syllables: every one of these reads as a
- * name, and none of them will ever come out unpronounceable or unfortunate.
+ * An agent is named once, by the server, when its account connects —
+ * `AGENT_CALL_SIGNS` and `assignCallSign` in `src/providers.ts` — and that one
+ * name is what `/chat/providers` reports and what the channel roster resolves.
+ * The browser used to keep a mirrored copy of the pantheon and hand out a name
+ * of its own each time an agent was added to a channel, which stored a channel
+ * override: the same agent was then Athena in one room and Vesta in the next,
+ * the opposite of what a name is for. Naming happens in one place, so there is
+ * one name.
  */
-export const AGENT_CODE_NAMES = [
-  // The NATO alphabet, which exists precisely to stay unambiguous over a bad
-  // connection — the same job a name has in a busy channel.
-  "Alfa", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel",
-  "India", "Juliett", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa",
-  "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor", "Whiskey",
-  "Xray", "Yankee", "Zulu",
-  // Greek myth, for the same reason call signs have always borrowed from it:
-  // one word, already known, and nothing like a username.
-  "Achilles", "Aegis", "Ajax", "Andromeda", "Apollo", "Argus", "Artemis",
-  "Atlas", "Boreas", "Calypso", "Cassandra", "Castor", "Chiron", "Daedalus",
-  "Eos", "Erebus", "Gaia", "Hecate", "Helios", "Hermes", "Hestia", "Hydra",
-  "Hyperion", "Icarus", "Iris", "Kratos", "Leto", "Medea", "Morpheus",
-  "Nemesis", "Nereus", "Nike", "Notus", "Odysseus", "Orion", "Orpheus",
-  "Pallas", "Pandora", "Perseus", "Phoenix", "Pollux", "Poseidon",
-  "Prometheus", "Rhea", "Selene", "Thalia", "Theseus", "Triton", "Zephyrus",
-];
-
-/** Names already spoken for in this channel, however they were set. */
-function takenChannelNames(repositoryId) {
-  return new Set(channelAgentsFor(repositoryId).map((agent) => agent.name));
-}
-
-/**
- * A call sign nobody in this channel is using.
- *
- * Uniqueness is per channel because that is the scope a name has to be
- * unambiguous in: `@Vesper` is resolved against this channel's roster, so two
- * Vespers here would make a mention ambiguous, while a Vesper in another
- * channel is no trouble at all. `undefined` when the list is exhausted, which
- * is the caller's cue to ask rather than to invent something.
- */
-export function freeAgentCodeName(repositoryId, avoid = []) {
-  const taken = takenChannelNames(repositoryId);
-  for (const name of avoid) {
-    taken.add(name);
-  }
-  const free = AGENT_CODE_NAMES.filter((name) => !taken.has(name));
-  if (free.length === 0) {
-    return undefined;
-  }
-  return free[Math.floor(Math.random() * free.length)];
-}
 
 /** Whether this name would collide with somebody already in the channel. */
 export function agentNameTaken(repositoryId, name, exceptAgentId) {
@@ -1683,7 +1642,16 @@ export function myAgents() {
     return {
       id: provider.id,
       provider: provider.id,
-      name: `${AGENT_LABEL[provider.id] ?? provider.name ?? provider.id} (${shortUser()})`,
+      // The call sign the account was given when it connected, which is the
+      // agent's name everywhere — every channel, every screen. The vendor and
+      // owner are the fallback for a connection made before agents were
+      // named, and the same order the server resolves in
+      // (`resolveChannelMentionCandidates` in api-gateway): reading it the
+      // other way round here would paint "Claude (Nathan)" for a moment and
+      // then flip to Athena once the roster answered.
+      name:
+        provider.callSign ??
+        `${AGENT_LABEL[provider.id] ?? provider.name ?? provider.id} (${shortUser()})`,
       // No default label. An agent is unlabeled until someone in a given
       // channel actually names its role there — see `withOverride` — rather
       // than inheriting a vendor-guessed title like "Lead Developer" it never

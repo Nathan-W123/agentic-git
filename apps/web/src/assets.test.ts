@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { loadStaticAssets } from "./assets.js";
+import { AGENT_CALL_SIGNS } from "./providers.js";
 
 /* ------------------------------------------------------------- assets ---- */
 
@@ -827,13 +828,8 @@ test("the invite screen names the product, not only the team", async () => {
  * from one sentence. Nothing about adding a name to the list makes that
  * visible, so it is asserted here rather than left to be noticed in a channel.
  */
-test("no agent call sign is a prefix of another", async () => {
-  const source = await publicFile("data.js");
-  const block = /export const AGENT_CODE_NAMES = \[([\s\S]*?)\n\];/u.exec(source);
-  assert.notEqual(block, null);
-  const names = [...(block?.[1] ?? "").matchAll(/"([^"]+)"/gu)].map(
-    (match) => match[1] as string,
-  );
+test("no agent call sign is a prefix of another", () => {
+  const names = [...AGENT_CALL_SIGNS];
   assert.ok(names.length >= 30, `only ${names.length} call signs`);
   assert.equal(new Set(names).size, names.length, "call signs must be unique");
   const collisions = names.flatMap((shorter) =>
@@ -842,6 +838,31 @@ test("no agent call sign is a prefix of another", async () => {
       .map((longer) => `${shorter} is a prefix of ${longer}`),
   );
   assert.deepEqual(collisions, []);
+});
+
+/**
+ * One pantheon, one code path.
+ *
+ * The browser used to keep its own copy of the list and name an agent as it
+ * was added to a channel, on top of the name the server had already given the
+ * account at connect. That made the name a property of the room: the same
+ * agent was Athena in one channel and Vesta in the next, and the copies could
+ * drift apart besides. Naming lives on the server alone now, so the browser
+ * holding any list of gods at all is the regression.
+ */
+test("the browser does not name agents", async () => {
+  const data = await publicFile("data.js");
+  assert.equal(data.includes("AGENT_CODE_NAMES"), false);
+  assert.equal(data.includes("freeAgentCodeName"), false);
+  const app = await publicFile("app.js");
+  assert.equal(app.includes("freeAgentCodeName"), false);
+  // Adding an agent to a channel adds it and nothing else. A rename from the
+  // roster is still a thing somebody can choose to do.
+  const start = app.indexOf('case "channel-agent-add-to"');
+  assert.notEqual(start, -1);
+  const handler = app.slice(start, app.indexOf("\n    }", start));
+  assert.equal(handler.includes("renameChannelAgent"), false);
+  assert.ok(app.includes("renameChannelAgent("), "manual rename must remain");
 });
 
 test("an agent's reply to a person is shown, not folded into the thinking block", async () => {
@@ -877,6 +898,23 @@ test("the working dots come back for the next turn in a finished thread", async 
     "the dots must key on the last reply, not on any reply ever",
   );
   assert.match(body, /replies\[replies\.length - 1\]/u);
+
+  // The dots are only half of the live state. A finished turn normally leaves
+  // its Thinking disclosure closed; extending it must open that same thread's
+  // disclosure before new streamed reasoning arrives.
+  const app = await browserSource();
+  const resetStart = app.indexOf("function beginThreadTurn");
+  const reset = app.slice(resetStart, app.indexOf("\n}", resetStart));
+  assert.notEqual(resetStart, -1);
+  assert.match(reset, /state\.thinkingOpen\[messageId\] = true/u);
+  assert.match(
+    app,
+    /case "channel-submit":[\s\S]{0,140}beginThreadTurn\(state\.composerThreadId/u,
+  );
+  assert.match(
+    app,
+    /case "channel-thread-submit":[\s\S]{0,140}beginThreadTurn\(state\.activeChannelThread/u,
+  );
 });
 
 test("the colour wheel's marker and its click land on the same colour", async () => {
