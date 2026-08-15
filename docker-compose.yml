@@ -32,6 +32,13 @@ services:
       COORD_BOOTSTRAP_TOKEN: ${COORD_BOOTSTRAP_TOKEN:?set COORD_BOOTSTRAP_TOKEN (min 24 chars)}
       COORD_SECURE_COOKIES: ${COORD_SECURE_COOKIES:-false}
       COORD_ALLOWED_ORIGINS: ${COORD_ALLOWED_ORIGINS:-}
+      # Compose forwards only what is listed here, so every optional knob the
+      # control plane reads must appear or a value in .env silently does
+      # nothing. Empty means each one's own default.
+      COORD_CREDENTIAL_KEY: ${COORD_CREDENTIAL_KEY:-}
+      COORD_CREDENTIAL_POLICY: ${COORD_CREDENTIAL_POLICY:-}
+      COORD_GITHUB_CLIENT_ID: ${COORD_GITHUB_CLIENT_ID:-}
+      COORD_REPOSITORY_PARALLELISM: ${COORD_REPOSITORY_PARALLELISM:-}
     ports:
       - "${COORD_PORT:-4317}:4317"
     volumes:
