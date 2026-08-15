@@ -5114,65 +5114,75 @@ body.resizing-panel {
  * is nobody home. That mapping is the whole reason to animate these at all: a
  * roster of thirty that all move identically says nothing.
  */
-.agent-face[data-kind="anthropic"] svg {
+/*
+ * Off. Every rule below is scoped to an attribute nothing sets, so the marks
+ * hold still until somebody decides otherwise — at which point
+ * `document.documentElement.dataset.markMotion = "on"` is the whole switch.
+ *
+ * Kept rather than deleted because the motion was wanted and may be again,
+ * and because what it encodes is not decoration: the speeds below are the
+ * difference between an agent working and an agent waiting, which is a fact
+ * worth keeping the shape of even while it is not being drawn.
+ */
+[data-mark-motion="on"] .agent-face[data-kind="anthropic"] svg {
   animation: vm-turn 60s linear infinite;
 }
 
-.agent-face[data-kind="openai"] svg {
+[data-mark-motion="on"] .agent-face[data-kind="openai"] svg {
   animation: vm-turn-back 75s linear infinite;
 }
 
-.agent-face[data-kind="google"] svg {
+[data-mark-motion="on"] .agent-face[data-kind="google"] svg {
   animation: vm-twinkle 12s ease-in-out infinite;
 }
 
-.agent-face[data-kind="deepseek"] svg {
+[data-mark-motion="on"] .agent-face[data-kind="deepseek"] svg {
   animation: vm-swim 9s ease-in-out infinite;
 }
 
-.agent-face[data-kind="xai"] svg,
-.agent-face[data-kind="cursor"] svg,
-.agent-face[data-kind="generic"] svg {
+[data-mark-motion="on"] .agent-face[data-kind="xai"] svg,
+[data-mark-motion="on"] .agent-face[data-kind="cursor"] svg,
+[data-mark-motion="on"] .agent-face[data-kind="generic"] svg {
   animation: vm-breathe 9s ease-in-out infinite;
 }
 
 /* Working. The same motion as waiting, at the speed of somebody doing it. */
-.agent-face[data-presence="online"][data-kind="anthropic"] svg {
+[data-mark-motion="on"] .agent-face[data-presence="online"][data-kind="anthropic"] svg {
   animation-duration: 9s;
 }
 
-.agent-face[data-presence="online"][data-kind="openai"] svg {
+[data-mark-motion="on"] .agent-face[data-presence="online"][data-kind="openai"] svg {
   animation-duration: 12s;
 }
 
-.agent-face[data-presence="online"][data-kind="google"] svg {
+[data-mark-motion="on"] .agent-face[data-presence="online"][data-kind="google"] svg {
   animation-duration: 4.5s;
 }
 
-.agent-face[data-presence="online"][data-kind="deepseek"] svg {
+[data-mark-motion="on"] .agent-face[data-presence="online"][data-kind="deepseek"] svg {
   animation-duration: 3.6s;
 }
 
-.agent-face[data-presence="online"][data-kind="xai"] svg,
-.agent-face[data-presence="online"][data-kind="cursor"] svg,
-.agent-face[data-presence="online"][data-kind="generic"] svg {
+[data-mark-motion="on"] .agent-face[data-presence="online"][data-kind="xai"] svg,
+[data-mark-motion="on"] .agent-face[data-presence="online"][data-kind="cursor"] svg,
+[data-mark-motion="on"] .agent-face[data-presence="online"][data-kind="generic"] svg {
   animation-duration: 3.2s;
 }
 
 /* Each on its own clock, so a roster never pulses in unison. */
-.agent-face[data-kind="openai"] svg {
+[data-mark-motion="on"] .agent-face[data-kind="openai"] svg {
   animation-delay: -1.1s;
 }
 
-.agent-face[data-kind="google"] svg {
+[data-mark-motion="on"] .agent-face[data-kind="google"] svg {
   animation-delay: -2.3s;
 }
 
-.agent-face[data-kind="xai"] svg {
+[data-mark-motion="on"] .agent-face[data-kind="xai"] svg {
   animation-delay: -0.7s;
 }
 
-.agent-face[data-kind="deepseek"] svg {
+[data-mark-motion="on"] .agent-face[data-kind="deepseek"] svg {
   animation-delay: -1.8s;
 }
 
