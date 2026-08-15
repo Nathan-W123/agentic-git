@@ -152,6 +152,7 @@ import {
   readInvitation,
   revokeInvitation,
   saveAppearance,
+  signInForInvitation,
 } from "./data.js";
 import {
   channelInfoPopoverHtml,
@@ -281,15 +282,28 @@ function minutesValue(milliseconds) {
 /* --------------------------------------------------------------- auth ---- */
 
 let authMode = "login";
+/**
+ * Which half of the invite screen is showing: "join" creates the account the
+ * invitation names, "signin" claims it as an account that already exists.
+ *
+ * Undefined until the recipient chooses, so the answer from the server —
+ * whether the address already has an account — decides the first view and a
+ * later choice overrides it rather than being overwritten on every re-render.
+ */
+let inviteMode;
 /** Pending re-render that takes stale typing dots down once their TTL passes. */
 let typingSweep;
 
 /**
  * The screen somebody lands on when they open an invite link.
  *
- * Rendered on the auth shell because the recipient usually has no account
- * yet — that is what an invitation is for — so it has to work before there is
- * anything to sign in to.
+ * Rendered on the auth shell because the recipient may have no account yet —
+ * that is what an invitation is for — so it has to work before there is
+ * anything to sign in to. It cannot only work that way, though: an
+ * invitation sent to somebody who is already on Lattice is the ordinary case
+ * for a second team or a second repository, and offering that person nothing
+ * but "choose a password" is a dead end, because the address is taken and the
+ * only account it could belong to is theirs.
  */
 function renderInvite() {
   const invite = state.invite;
@@ -314,6 +328,14 @@ function renderInvite() {
       <p class="auth-foot">Ask whoever invited you to send a new one.</p>
     </div></main>`;
   }
+  // The server says whether the address already has an account, so the first
+  // view is the one that can actually succeed. Whoever the invitation names
+  // is the only person who could sign in as it, so this is a shortcut rather
+  // than a decision taken away: the other form is one link below either way.
+  const signIn =
+    inviteMode === undefined
+      ? invite.accountExists === true
+      : inviteMode === "signin";
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">${brandMark(54)}
@@ -325,28 +347,44 @@ function renderInvite() {
                unless the product says so itself. -->
           <p>You have been invited to
             <b>${esc(invite.organizationName)}</b> on Lattice as a
-            ${esc(invite.role)}. Choose a password and you are in.</p>
+            ${esc(invite.role)}. ${
+              signIn
+                ? "Sign in and the invitation is yours."
+                : "Choose a password and you are in."
+            }</p>
         </div>
       </div>
-      <form class="auth-card" data-act="invite-accept">
+      <form class="auth-card" data-act="${
+        signIn ? "invite-signin" : "invite-accept"
+      }">
         <label class="field">
           <span>Email address</span>
           <input class="input" value="${esc(invite.email)}" disabled>
         </label>
-        <label class="field">
+        ${
+          signIn
+            ? ""
+            : `<label class="field">
           <span>Your name</span>
           <input class="input" name="displayName" autocomplete="name" required>
-        </label>
+        </label>`
+        }
         <label class="field">
-          <span>Choose a password</span>
+          <span>${signIn ? "Your password" : "Choose a password"}</span>
           <input class="input" name="password" type="password" minlength="12"
-            autocomplete="new-password" required placeholder="••••••••••••">
+            autocomplete="${signIn ? "current-password" : "new-password"}"
+            required placeholder="••••••••••••">
         </label>
         <button class="btn btn-primary btn-wide" type="submit">
-          Accept and join
+          ${signIn ? "Sign in and join" : "Accept and join"}
         </button>
         <p class="form-msg" id="auth-msg" role="alert"></p>
       </form>
+      <p class="auth-foot">${
+        signIn
+          ? `No account for ${esc(invite.email)} yet? <a class="link-muted" href="#" data-act="invite-mode" data-value="join">Create one</a>.`
+          : `Already have a Lattice account? <a class="link-muted" href="#" data-act="invite-mode" data-value="signin">Sign in instead</a>.`
+      }</p>
     </div>
   </main>`;
 }
@@ -526,6 +564,69 @@ async function submitRegister(form) {
     await boot();
   } catch (error) {
     $("#auth-msg").textContent = error.message;
+  }
+}
+
+/** Where both invite forms land once the invitation is theirs. */
+async function enterAfterInvitation() {
+  state.invite = undefined;
+  state.inviteToken = undefined;
+  inviteMode = undefined;
+  window.location.hash = "#chats";
+  await boot();
+  toast("Welcome aboard", "ok");
+}
+
+function inviteError(error) {
+  const message = $("#auth-msg");
+  if (message !== null) {
+    message.textContent = error.message;
+  }
+}
+
+/** Creates the account the invitation names, then claims it. */
+async function submitInviteAccept(form) {
+  const data = new FormData(form);
+  try {
+    await acceptInvitation(
+      state.inviteToken,
+      String(data.get("displayName") ?? ""),
+      String(data.get("password") ?? ""),
+    );
+    await enterAfterInvitation();
+  } catch (error) {
+    // The address turned out to be taken — the preview was read before the
+    // account existed, or a stale tab is being submitted. Nothing typed here
+    // can succeed, so move to the form that can rather than repeat a refusal.
+    if (error.code === "account_exists") {
+      inviteMode = "signin";
+      showInvite();
+      inviteError(error);
+      return;
+    }
+    inviteError(error);
+  }
+}
+
+/**
+ * Signs in as the invited address and claims the invitation with that session.
+ *
+ * Two requests rather than one endpoint that takes a password: accepting
+ * already trusts a session over anything in the body — precisely because the
+ * link is not proof of who is holding it — and a second way to check a
+ * password is a second place for that check to be wrong.
+ */
+async function submitInviteSignIn(form) {
+  const data = new FormData(form);
+  try {
+    await signInForInvitation(
+      state.invite?.email ?? "",
+      String(data.get("password") ?? ""),
+    );
+    await acceptInvitation(state.inviteToken);
+    await enterAfterInvitation();
+  } catch (error) {
+    inviteError(error);
   }
 }
 
@@ -2749,6 +2850,11 @@ document.addEventListener("click", (event) => {
       authMode = value;
       $("#auth-root").innerHTML = renderAuth();
       return;
+    case "invite-mode":
+      event.preventDefault();
+      inviteMode = value;
+      showInvite();
+      return;
     case "forgot":
       event.preventDefault();
       toast("Ask your organization owner to reset the password.");
@@ -3837,28 +3943,12 @@ document.addEventListener("submit", (event) => {
     case "policy-save":
       void savePolicy(form);
       return;
-    case "invite-accept": {
-      const data = new FormData(form);
-      void acceptInvitation(
-        state.inviteToken,
-        String(data.get("displayName") ?? ""),
-        String(data.get("password") ?? ""),
-      )
-        .then(async () => {
-          state.invite = undefined;
-          state.inviteToken = undefined;
-          window.location.hash = "#chats";
-          await boot();
-          toast("Welcome aboard", "ok");
-        })
-        .catch((error) => {
-          const message = $("#auth-msg");
-          if (message !== null) {
-            message.textContent = error.message;
-          }
-        });
+    case "invite-accept":
+      void submitInviteAccept(form);
       return;
-    }
+    case "invite-signin":
+      void submitInviteSignIn(form);
+      return;
     case "chat-submit": {
       const input = $("[data-act='chat-input']", form);
       const agent = currentAgent();
@@ -4339,6 +4429,9 @@ async function handleInviteLink() {
   }
   state.inviteToken = match[1];
   state.invite = undefined;
+  // A fresh link decides its own first view; a choice made on the previous
+  // one says nothing about this recipient.
+  inviteMode = undefined;
   showInvite();
   try {
     const response = await readInvitation(state.inviteToken);

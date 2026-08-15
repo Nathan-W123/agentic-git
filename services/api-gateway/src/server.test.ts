@@ -2278,6 +2278,87 @@ test("an invitation brings in somebody who has no account yet", async (t) => {
   const me = await anonymous.request("/api/v1/auth/me");
   assert.equal(me.status, 200);
   assert.equal(me.data.user.email, "newcomer@example.com");
+  // Nobody could have had an account for that address before this test made
+  // one, which is what the preview said.
+  assert.equal(preview.data.invitation.accountExists, false);
+});
+
+/**
+ * Somebody already on Lattice, invited to a second repository.
+ *
+ * The account exists, so the invitation is not proof of who is holding the
+ * link and a password in the body would only be a second way to be wrong
+ * about that. Signing in is the proof, and the preview says which of the two
+ * forms the recipient should be shown before they type anything into either.
+ */
+test("an invitation is claimed by an existing account by signing in", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner);
+
+  const member = new TestClient(runtime.origin);
+  const registered = await member.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "returning@example.com",
+      displayName: "Returning",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(registered.status, 201, JSON.stringify(registered.data));
+
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    { method: "POST", body: inviteBody("returning@example.com", "developer", repo) },
+  );
+  assert.equal(invited.status, 201, JSON.stringify(invited.data));
+  const token = invited.data.token as string;
+
+  // The preview tells the screen to offer sign-in rather than "choose a
+  // password", which for a taken address can only ever fail.
+  const anonymous = new TestClient(runtime.origin);
+  const preview = await anonymous.request(`/api/v1/invitations/${token}`);
+  assert.equal(preview.status, 200);
+  assert.equal(preview.data.invitation.accountExists, true);
+
+  // Holding the link is still not enough on its own.
+  const unauthenticated = await anonymous.request(
+    `/api/v1/invitations/${token}/accept`,
+    { method: "POST", body: { displayName: "Impostor", password: "NotTheirs123!" } },
+  );
+  assert.equal(unauthenticated.status, 409);
+  assert.equal(unauthenticated.data.error.code, "account_exists");
+
+  // Signing in as the invited address is, and the accept needs nothing in the
+  // body: the session says who this is.
+  const joiner = new TestClient(runtime.origin);
+  const signedIn = await joiner.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "returning@example.com", password: PASSWORD },
+  });
+  assert.equal(signedIn.status, 200, JSON.stringify(signedIn.data));
+  const accepted = await joiner.request(`/api/v1/invitations/${token}/accept`, {
+    method: "POST",
+    body: {},
+  });
+  assert.equal(accepted.status, 200, JSON.stringify(accepted.data));
+  assert.equal(accepted.data.user.email, "returning@example.com");
+  assert.equal(accepted.data.user.id, registered.data.user.id);
+
+  // The repository they were invited to is now reachable, and no second
+  // account was made for the address.
+  const reachable = await joiner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories`,
+  );
+  assert.equal(reachable.status, 200);
+  assert.equal(
+    reachable.data.repositories.some((entry: { id: string }) => entry.id === repo),
+    true,
+  );
+  const me = await joiner.request("/api/v1/auth/me");
+  assert.equal(me.status, 200);
+  assert.equal(me.data.user.id, registered.data.user.id);
 });
 
 test("an invitation works once and stops working when revoked", async (t) => {
