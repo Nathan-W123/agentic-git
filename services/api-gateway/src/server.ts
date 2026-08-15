@@ -297,6 +297,26 @@ const CHANNEL_PROGRESS_INTERVAL_MS = 2000;
  * working on" and "what did you make of that", short enough that the context
  * is not itself the cost of answering.
  */
+/**
+ * Root message kinds an agent writes under its own `${userId}:${provider}` id.
+ *
+ * A thread is answered by the agent whose thread it is, and which agent that
+ * is has always been read from the root's *kind*. That worked for the
+ * acknowledgement a dispatch posts, which is `agent`, and quietly failed for
+ * everything else the same agent writes.
+ *
+ * `outcome` is the one that mattered. A task that ends without being
+ * thread-worthy — the ordinary single-file change whose account fits in a
+ * sentence — has its ending posted as a top-level channel message of that
+ * kind, authored by the agent. The dashboard offers a reply on every message,
+ * so replying to an agent's last visible word opened a thread the server then
+ * classified as a conversation between people, and every follow-up typed
+ * there was stored and answered by nobody. The author was right there in
+ * `root.authorId` the whole time, in exactly the form the code ten lines
+ * below parses.
+ */
+const AGENT_AUTHORED_ROOT_KINDS = new Set(["agent", "outcome", "progress"]);
+
 const CHANNEL_ANSWER_CONTEXT = 8;
 
 /**
@@ -8532,7 +8552,7 @@ export class ApiGateway {
     // many times it was asked. Threads open from a reply button on every
     // message, so a person's own request growing a thread is the common case,
     // not the exception.
-    if (root.kind !== "agent") {
+    if (!AGENT_AUTHORED_ROOT_KINDS.has(root.kind)) {
       const candidates = await this.resolveChannelMentionCandidates(
         input.projectId,
         input.repositoryId,
@@ -8559,6 +8579,17 @@ export class ApiGateway {
           candidate.userId === input.viewerId,
       );
       if (named.length === 0) {
+        // A thread between people, where silence is the right answer — unless
+        // it is hanging off something an agent produced, in which case the
+        // reader had every reason to expect one and a bare return is the
+        // failure this method's own comments are written against.
+        if (root.taskId !== undefined || root.kind !== "user") {
+          await this.sayThreadIsUnanswered(
+            input,
+            "No agent is named in this thread, so nobody here picked that " +
+              "up. Mention an agent by name in your reply and it will.",
+          );
+        }
         return;
       }
       // An instruction goes to one agent even when several were named — two

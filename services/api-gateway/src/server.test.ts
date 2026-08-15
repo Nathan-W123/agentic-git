@@ -7247,3 +7247,81 @@ test("a landed conversational task is described as done, not as open", () => {
   // guessed at: a wrong plain-English gloss would be worse than the raw word.
   assert.equal(describeTaskState("something_new"), "something_new");
 });
+
+test("a reply to an agent's own ending is answered, not swallowed", async (t) => {
+  // Reported as "if I send an additional message in a thread the agent never
+  // responds". A task that ends without being thread-worthy — the ordinary
+  // one-file change whose account fits in a sentence — has its ending posted
+  // as a top-level channel message of kind `outcome`, authored by the agent.
+  // The dashboard offers a reply on every message, so replying to an agent's
+  // last visible word opened a thread the server classified as a conversation
+  // between people, and every follow-up was stored and answered by nobody.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "outcome-thread-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    // The kind the gateway itself writes for a task that ended quietly.
+    kind: "outcome",
+    authorId: `${ownerId}:anthropic`,
+    content: "Renamed the helper and updated its one caller. (1 file changed)",
+  });
+
+  runtime.chatAnswer.text = "Yes — it was only used in the one place.";
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "did anything else use it?" } },
+  );
+  assert.equal(replied.status, 201);
+
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    const thread = (listed.data.messages as { id: string; replies: unknown[] }[])
+      .find((message) => message.id === root.id);
+    const replies = (thread?.replies ?? []) as { authorId: string }[];
+    // The agent answers in its own voice, in its own thread.
+    return replies.some((reply) => reply.authorId === `${ownerId}:anthropic`);
+  }, "the agent never answered a reply to its own outcome message");
+});
+
+test("a reply to an agent's thread naming nobody is told why, not ignored", async (t) => {
+  // The other half: a root an agent produced but that resolves to no reachable
+  // agent must still say something. Storing a reply and returning silently is
+  // indistinguishable, from the outside, from the product being broken.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "unowned-thread-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // Kind `user`, but carrying a task — so it is work somebody is following,
+  // not a standup note between people.
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "user",
+    authorId: bootstrapped.user.id,
+    content: "Tracking the migration here.",
+    taskId: "task_missing",
+  });
+
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "any progress?" } },
+  );
+  assert.equal(replied.status, 201);
+
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    const thread = (listed.data.messages as { id: string; replies: unknown[] }[])
+      .find((message) => message.id === root.id);
+    return ((thread?.replies ?? []) as unknown[]).length > 1;
+  }, "a reply on a task thread nobody owns was stored with no explanation");
+});
