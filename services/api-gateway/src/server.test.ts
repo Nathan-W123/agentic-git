@@ -252,10 +252,13 @@ async function startRuntime(
   } = {},
 ): Promise<TestRuntime> {
   const store = new InMemoryCoordinationStore();
-  const chatConnections = new Map<
-    string,
-    Array<{ provider: string; visibility?: "personal" | "org" }>
-  >();
+  // Typed off `TestRuntime` rather than spelled out a second time, like every
+  // fixture field below it. The shape was written twice, and adding
+  // `callSign` to the interface left this copy behind: tests write through
+  // the interface, `connectionsFor` reads through this map, and the build
+  // broke on a field one had and the other did not. One declaration cannot
+  // drift from itself.
+  const chatConnections: TestRuntime["chatConnections"] = new Map();
   const submittedTasks: TestRuntime["submittedTasks"] = [];
   const chatPrompts: TestRuntime["chatPrompts"] = [];
   const chatAnswer: TestRuntime["chatAnswer"] = {};

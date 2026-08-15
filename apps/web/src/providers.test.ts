@@ -1568,7 +1568,7 @@ test("a name survives losing the connections file", async () => {
   assert.equal(roster["u1"]?.[0]?.callSign, assigned);
 });
 
-test("a chosen name is written through, and clearing it forgets it", async () => {
+test("a chosen name is written through, and clearing it deals a new one", async () => {
   const harness = await createHarness();
   const callSigns = fakeCallSignStore();
   const service = new ProviderChatService(harness.project, {
@@ -1601,7 +1601,22 @@ test("a chosen name is written through, and clearing it forgets it", async () =>
     provider: "anthropic",
     callSign: "",
   });
-  assert.deepEqual(await callSigns.listAgentCallSigns(), []);
+  const after = await callSigns.listAgentCallSigns();
+  assert.ok(
+    after.every((entry) => entry.callSign !== "Icarus"),
+    "the removed name is gone from the store",
+  );
+  // And gone is not the same as nameless. There is no "deliberately unnamed"
+  // state in this design and there should not be: an agent with no call sign
+  // is one the channels label "Claude (Nathan)" again, which is the whole
+  // complaint this naming exists to answer. So clearing a chosen name deals a
+  // fresh one — from the pantheon, which "Icarus" is not a member of — and
+  // records it, rather than leaving the agent to fall back.
+  assert.equal(after.length, 1, "the agent is still named");
+  assert.ok(
+    new Set<string>(AGENT_CALL_SIGNS).has(after[0]?.callSign ?? ""),
+    `a dealt sign, not ${String(after[0]?.callSign)}`,
+  );
 });
 
 test("a teammate's older connection is named by the roster read too", async () => {
