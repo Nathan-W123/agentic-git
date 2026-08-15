@@ -559,6 +559,7 @@ async function serve(
         actorId: input.actorId,
         projectId: input.projectId,
         ...(input.reason === undefined ? {} : { reason: input.reason }),
+        ...(input.files === undefined ? {} : { files: input.files }),
       });
     },
     ...workerOperations(project, store),

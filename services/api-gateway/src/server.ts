@@ -1658,6 +1658,12 @@ export interface ApiOperations {
     targetRevision: string;
     actorId: string;
     reason?: string;
+    /**
+     * Restore only these paths. `/stop` uses it to undo one task without
+     * taking work other agents landed since; omitted, the whole tree goes
+     * back, which is what the manual rollback endpoint means.
+     */
+    files?: readonly string[];
   }): Promise<{ status: string; explanation: string }>;
   dockerStatus?(): Promise<{
     available: boolean;
@@ -7543,6 +7549,15 @@ export class ApiGateway {
       );
       return true;
     }
+    if (input.command.name === "stop") {
+      await this.runStopCommand({
+        projectId,
+        repositoryId,
+        senderId: input.senderId,
+        rest: input.rest,
+      });
+      return true;
+    }
     // `/retry` and `/cancel` act on the task a thread is following, and a
     // message in the channel is not in a thread. Said plainly rather than
     // ignored, because typing it in the wrong place is the obvious mistake.
@@ -11541,6 +11556,177 @@ export class ApiGateway {
   }
 
   /** A coordinator-authored line in the channel, broadcast the same way a real post is. */
+  /**
+   * Stops agents and undoes what their work changed.
+   *
+   * `/cancel` already existed and is a different, smaller thing: it acts on
+   * the one task a thread is following and marks the row cancelled. This is
+   * the one somebody reaches for when a run is going wrong in front of them —
+   * it takes whoever is named, or everyone if nobody is, and it puts the code
+   * back.
+   *
+   * **What "back" means is deliberately narrow.** Canonical is shared. Between
+   * the task being stopped and now, other agents may have landed work of their
+   * own, and restoring the whole tree to the moment before this task would
+   * take theirs with it without saying so. So the revert is scoped to the
+   * files this task actually promoted, restored to their content at the
+   * revision immediately before its first promotion — both of which the
+   * `canonical_promoted` audit records per task. A stop undoes its own task
+   * and nothing else.
+   *
+   * It also goes through `rollbackRepository`, which submits the revert as an
+   * ordinary change — planned, arbitrated, validated, promoted by
+   * compare-and-swap. That means it can be refused while another task holds
+   * those files, and being refused is the correct answer rather than a reason
+   * to force it: an uncoordinated write to a repository other agents are
+   * working in is the failure this whole system exists to prevent.
+   */
+  private async runStopCommand(input: {
+    projectId: string;
+    repositoryId: string;
+    senderId: string;
+    rest: string;
+  }): Promise<void> {
+    const { projectId, repositoryId } = input;
+    const candidates = await this.resolveChannelMentionCandidates(
+      projectId,
+      repositoryId,
+    );
+    const visible = candidates.filter(
+      (candidate) =>
+        candidate.visibility !== "personal" ||
+        candidate.userId === input.senderId,
+    );
+    const named = visible.filter((candidate) =>
+      input.rest.includes(`@${candidate.name}`),
+    );
+    // No name is "everyone", which is what somebody typing `/stop` on its own
+    // into a room means. It is the blunt instrument and it should be the easy
+    // one to reach.
+    const targets = named.length > 0 ? named : visible;
+    if (targets.length === 0) {
+      await this.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        "There are no agents here to stop.",
+      );
+      return;
+    }
+
+    const tasks = await this.options.store.listSubmittedTasks({ repositoryId });
+    const owners = new Set(targets.map((candidate) => candidate.userId));
+    const stoppable = tasks.filter(
+      (task) =>
+        owners.has(task.submittedBy ?? "") &&
+        (task.status === "submitted" ||
+          task.status === "claimed" ||
+          task.status === "planned" ||
+          task.status === "open"),
+    );
+    if (stoppable.length === 0) {
+      await this.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        `Nothing to stop — ${
+          named.length > 0 ? "that agent has" : "no agent here has"
+        } work in flight.`,
+      );
+      return;
+    }
+
+    const lines: string[] = [];
+    for (const task of stoppable) {
+      const objective = summariseObjective(withoutRoleContext(task.objective));
+      try {
+        await this.options.store.cancelSubmittedTask(task.id);
+      } catch (error) {
+        lines.push(
+          `- ${objective} — could not be stopped: ${
+            error instanceof Error ? error.message : "the task refused"
+          }`,
+        );
+        continue;
+      }
+      // Nothing left narrating a run nobody is waiting for.
+      this.watchedChannelTasks.delete(task.id);
+      const undone = await this.undoTask(projectId, repositoryId, task.id, input.senderId);
+      lines.push(`- ${objective} — stopped${undone === "" ? "" : `; ${undone}`}`);
+    }
+    await this.postChannelSystemMessage(
+      projectId,
+      repositoryId,
+      `Stopped ${String(stoppable.length)} task(s).\n${lines.join("\n")}`,
+    );
+  }
+
+  /**
+   * Puts back what one task promoted, or says why it could not.
+   *
+   * An empty string means there was nothing to put back — the ordinary case,
+   * because a task stopped while it is running has not promoted anything yet.
+   * Work only reaches canonical at settlement, so a cancelled run's edits die
+   * with its workspace and no revert is needed or wanted.
+   */
+  private async undoTask(
+    projectId: string,
+    repositoryId: string,
+    taskId: string,
+    actorId: string,
+  ): Promise<string> {
+    const promotions = (
+      await this.options.store.listAuditEvents({
+        taskId,
+        types: ["canonical_promoted"],
+      })
+    ).filter((entry) => entry.event.data["repositoryId"] === repositoryId);
+    if (promotions.length === 0) {
+      return "";
+    }
+    // The revision before this task touched canonical at all: the *first*
+    // promotion's predecessor, since a conversational task can land several
+    // turns and stopping it undoes the lot.
+    const before = promotions[0]?.event.data["previousRevision"];
+    const files = [
+      ...new Set(
+        promotions.flatMap((entry) => {
+          const named = entry.event.data["files"];
+          return Array.isArray(named) ? named.map(String) : [];
+        }),
+      ),
+    ];
+    if (typeof before !== "string" || before === "" || files.length === 0) {
+      // The promotion is on the record but not in enough detail to undo
+      // precisely, and a rollback wider than the task is not this command's to
+      // make. Said out loud rather than guessed at.
+      return "its changes are already in canonical and could not be undone automatically — roll back by hand if you need to";
+    }
+    const rollback = this.options.operations.rollbackRepository;
+    if (rollback === undefined) {
+      return "its changes are already in canonical; this deployment cannot roll back";
+    }
+    try {
+      const result = await rollback({
+        projectId,
+        repositoryId,
+        targetRevision: before,
+        actorId,
+        files,
+        reason: `Stopped by request; undoing task ${taskId}`,
+      });
+      if (result.status === "noop") {
+        return "nothing of it had reached canonical";
+      }
+      if (result.status === "promoted" || result.status === "integrated") {
+        return `reverted ${String(files.length)} file(s)`;
+      }
+      return `its changes could not be undone: ${result.explanation}`;
+    } catch (error) {
+      return `its changes could not be undone: ${
+        error instanceof Error ? error.message : "the rollback failed"
+      }`;
+    }
+  }
+
   private async postChannelSystemMessage(
     projectId: string,
     repositoryId: string,

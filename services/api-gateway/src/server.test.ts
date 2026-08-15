@@ -84,7 +84,11 @@ interface TestRuntime {
   /** `error` throws exactly what it holds, for failures with a shape. */
   runFailure: { reason?: string; error?: unknown };
   /** Every rollback the gateway asked for, in order. */
-  rollbacks: Array<{ repositoryId: string; targetRevision: string }>;
+  rollbacks: Array<{
+    repositoryId: string;
+    targetRevision: string;
+    files?: readonly string[];
+  }>;
 }
 
 class TestClient {
@@ -388,6 +392,9 @@ async function startRuntime(
       rollbacks.push({
         repositoryId: input.repositoryId,
         targetRevision: input.targetRevision,
+        // Forwarded so a test can hold `/stop` to undoing its own task rather
+        // than the whole tree.
+        ...(input.files === undefined ? {} : { files: input.files }),
       });
       return {
         status: "integrated",
@@ -7324,4 +7331,91 @@ test("a reply to an agent's thread naming nobody is told why, not ignored", asyn
       .find((message) => message.id === root.id);
     return ((thread?.replies ?? []) as unknown[]).length > 1;
   }, "a reply on a task thread nobody owns was stored with no explanation");
+});
+
+test("/stop cancels an agent's work and undoes only what that task promoted", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic", visibility: "org" }]);
+  const repositoryId = await invitableRepository(owner, "stop-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "rework the retry loop",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  // Work that already reached canonical, recorded the way a promotion is.
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: task.id,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+      files: ["src/retry.ts"],
+    },
+  });
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/stop" },
+  });
+  assert.equal(posted.status, 201);
+
+  await waitFor(async () => {
+    const listed = await runtime.store.listSubmittedTasks({ repositoryId });
+    return listed.find((entry) => entry.id === task.id)?.status === "cancelled";
+  }, "/stop did not cancel the in-flight task");
+
+  const rolled = runtime.rollbacks.at(-1);
+  assert.ok(rolled, "/stop did not ask for the task's changes to be undone");
+  // Back to the revision before this task, and scoped to its own files — not a
+  // whole-tree revert that would take other agents' work with it.
+  assert.equal(rolled.targetRevision, "a".repeat(40));
+  assert.deepEqual([...(rolled.files ?? [])], ["src/retry.ts"]);
+});
+
+test("/stop on a task that changed nothing cancels without a rollback", async (t) => {
+  // The ordinary case: work only reaches canonical at settlement, so a task
+  // stopped while running has nothing to put back and must not ask for one.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic", visibility: "org" }]);
+  const repositoryId = await invitableRepository(owner, "stop-clean-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "look at the flaky test",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  const before = runtime.rollbacks.length;
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/stop" },
+  });
+  await waitFor(async () => {
+    const listed = await runtime.store.listSubmittedTasks({ repositoryId });
+    return listed.find((entry) => entry.id === task.id)?.status === "cancelled";
+  }, "/stop did not cancel the task");
+  assert.equal(
+    runtime.rollbacks.length,
+    before,
+    "a task that promoted nothing must not trigger a rollback",
+  );
 });
