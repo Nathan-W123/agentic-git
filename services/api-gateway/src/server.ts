@@ -1800,6 +1800,17 @@ export interface GitHubCredentialOperations {
   status(input: { userId: string }): Promise<unknown>;
   connect(input: { userId: string; token: string }): Promise<unknown>;
   disconnect(input: { userId: string }): Promise<void>;
+  /**
+   * The device sign-in — GitHub's own "enter this code in your browser"
+   * flow — for deployments with an OAuth App configured. Absent (or
+   * answering that it is unconfigured), the paste-a-token route above is
+   * the whole story.
+   */
+  deviceAuth?: {
+    start(input: { userId: string }): Promise<unknown>;
+    status(input: { userId: string; flowId: string }): Promise<unknown>;
+    cancel(input: { userId: string; flowId: string }): Promise<void>;
+  };
 }
 
 /**
@@ -6880,7 +6891,10 @@ export class ApiGateway {
     // touches projects or repositories. It is the identity a push of this
     // user's tasks will authenticate as, which is nobody's business but
     // their own.
-    if (path === `${API_PREFIX}/github/credential`) {
+    if (
+      path === `${API_PREFIX}/github/credential` ||
+      path === `${API_PREFIX}/github/credential/device-auth`
+    ) {
       const githubOperations = this.options.operations.githubCredential;
       if (githubOperations === undefined) {
         throw new HttpError(
@@ -6907,6 +6921,54 @@ export class ApiGateway {
           throw error;
         }
       };
+      if (path === `${API_PREFIX}/github/credential/device-auth`) {
+        const deviceAuth = githubOperations.deviceAuth;
+        if (deviceAuth === undefined) {
+          throw new HttpError(
+            501,
+            "unsupported",
+            "This deployment does not support GitHub sign-in",
+          );
+        }
+        // The flow id travels in the query string, same as the provider
+        // device-auth family and for the same reason: one route shape, an
+        // opaque id, scoped to the caller server-side regardless.
+        const flowId =
+          stringField(
+            new URL(request.url ?? "", "http://localhost").searchParams.get(
+              "flow",
+            ) ?? undefined,
+            "flow",
+            { max: 64, optional: true },
+          ) ?? "";
+        if (method === "POST") {
+          this.sendJson(response, 200, {
+            deviceAuth: await performGitHub(() =>
+              deviceAuth.start({ userId: principal.user.id }),
+            ),
+          });
+          return;
+        }
+        if (flowId.length === 0) {
+          throw new HttpError(400, "invalid_request", "flow is required");
+        }
+        if (method === "GET") {
+          this.sendJson(response, 200, {
+            deviceAuth: await performGitHub(() =>
+              deviceAuth.status({ userId: principal.user.id, flowId }),
+            ),
+          });
+          return;
+        }
+        if (method === "DELETE") {
+          await performGitHub(() =>
+            deviceAuth.cancel({ userId: principal.user.id, flowId }),
+          );
+          this.sendJson(response, 200, { cancelled: true });
+          return;
+        }
+        throw new HttpError(405, "method_not_allowed", "Unsupported method");
+      }
       if (method === "GET") {
         this.sendJson(
           response,

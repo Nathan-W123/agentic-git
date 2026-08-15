@@ -173,13 +173,28 @@ So GitHub is a fourth thing a user can connect, stored per user in the same
 encrypted vault (`CredentialService` widens `VendorCliKind` with `github`).
 It differs from the vendor rows only in delivery: nothing ever launches a
 CLI with it or stages a credential home — the push path reads the stored
-secret and sends it as HTTP auth to the remote. The token is a personal
-access token the user mints and pastes once; connecting verifies it against
-`api.github.com/user` first and keeps the verified login as the
-connection's label, so Settings can say *who* a push will run as. A push
-asked of an agent resolves the task's `submittedBy` — the same field that
-decides whose account pays for the run — and refuses by name ("you haven't
-connected GitHub") when nothing is stored. There is deliberately no
+secret and sends it as HTTP auth to the remote.
+
+The credential arrives one of two ways, and either way it is verified
+against `api.github.com/user` before anything is stored, keeping the
+verified login as the connection's label so Settings can say *who* a push
+will run as:
+
+- **Sign in with GitHub** — the device flow, the same "enter this code in
+  your browser" shape the Codex connection uses. Offered when the
+  deployment has a GitHub OAuth App configured: the owner creates one once
+  (github.com → Settings → Developer settings → OAuth Apps) with **Enable
+  Device Flow** ticked, and sets `COORD_GITHUB_CLIENT_ID` to its client id.
+  The device grant needs no client secret and no redirect URL. It carries
+  the `repo` scope, which an OAuth App cannot narrow per repository.
+- **Paste a personal access token** — always available, and the whole story
+  when no OAuth App is configured. Also the right choice for anyone who
+  wants a fine-grained token scoped to specific repositories, which the
+  sign-in's `repo` grant cannot be.
+
+A push asked of an agent resolves the task's `submittedBy` — the same field
+that decides whose account pays for the run — and refuses by name ("you
+haven't connected GitHub") when nothing is stored. There is deliberately no
 environment fallback on that path.
 
 A GitHub connection is a push credential, not an agent: `listConnectionsFor`

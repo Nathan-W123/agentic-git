@@ -180,3 +180,163 @@ test("a push auth failure surfaces on the connection instead of hiding in a task
   assert.equal(status.connected, true);
   assert.match(status.credential?.unusableReason ?? "", /refused this token/u);
 });
+
+/** A GitHub whose OAuth endpoints answer from a script. */
+function githubDeviceAnswering(script: {
+  tokenAnswers: Array<Record<string, unknown>>;
+  interval?: number;
+}): { fetchImpl: typeof fetch; calls: string[] } {
+  const calls: string[] = [];
+  const fetchImpl: typeof fetch = async (input) => {
+    const url = String(input);
+    calls.push(url);
+    if (url.includes("/login/device/code")) {
+      return new Response(
+        JSON.stringify({
+          device_code: "dev_123",
+          user_code: "ABCD-1234",
+          verification_uri: "https://github.com/login/device",
+          expires_in: 900,
+          interval: script.interval ?? 0,
+        }),
+        { status: 200 },
+      );
+    }
+    if (url.includes("/login/oauth/access_token")) {
+      const answer = script.tokenAnswers.shift() ?? {
+        error: "authorization_pending",
+      };
+      return new Response(JSON.stringify(answer), { status: 200 });
+    }
+    return new Response(JSON.stringify({ login: "octocat" }), { status: 200 });
+  };
+  return { fetchImpl, calls };
+}
+
+test("the device sign-in stores a verified grant, like a pasted token", async (t) => {
+  const { credentials } = await harness(t);
+  const github = githubDeviceAnswering({
+    tokenAnswers: [
+      { error: "authorization_pending" },
+      { access_token: "gho_granted", token_type: "bearer", scope: "repo" },
+    ],
+  });
+  const service = new GitHubConnectionService({
+    credentials,
+    deviceClientId: "Iv1_client",
+    fetchImpl: github.fetchImpl,
+  });
+
+  assert.equal((await service.status({ userId: "user-1" })).signInAvailable, true);
+
+  const started = await service.startDeviceAuth({ userId: "user-1" });
+  assert.equal(started.userCode, "ABCD-1234");
+  assert.match(started.verificationUrl, /github\.com\/login\/device/u);
+
+  const first = await service.deviceAuthStatus({
+    userId: "user-1",
+    flowId: started.flowId,
+  });
+  assert.equal(first.status, "pending");
+
+  const second = await service.deviceAuthStatus({
+    userId: "user-1",
+    flowId: started.flowId,
+  });
+  assert.equal(second.status, "granted");
+  assert.equal(second.login, "octocat");
+
+  const stored = await credentials.get("user-1", "github");
+  assert.equal(stored?.secret, "gho_granted");
+  assert.equal(stored?.kind, "oauth_token");
+  assert.equal(stored?.label, "octocat");
+
+  // The UI runs two watchers over one flow; the one that asks second must
+  // still hear "granted". Only a third asker is told to start fresh.
+  const replay = await service.deviceAuthStatus({
+    userId: "user-1",
+    flowId: started.flowId,
+  });
+  assert.equal(replay.status, "granted");
+  assert.equal(replay.login, "octocat");
+  await assert.rejects(
+    () =>
+      service.deviceAuthStatus({ userId: "user-1", flowId: started.flowId }),
+    (error: unknown) =>
+      error instanceof GitHubConnectionError && error.code === "unknown_flow",
+  );
+});
+
+test("a declined sign-in stores nothing and says it was declined", async (t) => {
+  const { credentials } = await harness(t);
+  const github = githubDeviceAnswering({
+    tokenAnswers: [{ error: "access_denied" }],
+  });
+  const service = new GitHubConnectionService({
+    credentials,
+    deviceClientId: "Iv1_client",
+    fetchImpl: github.fetchImpl,
+  });
+
+  const started = await service.startDeviceAuth({ userId: "user-1" });
+  const settled = await service.deviceAuthStatus({
+    userId: "user-1",
+    flowId: started.flowId,
+  });
+  assert.equal(settled.status, "failed");
+  assert.match(settled.detail ?? "", /declined/u);
+  assert.equal(await credentials.get("user-1", "github"), undefined);
+
+  // The second watcher hears the same refusal, not "unknown flow".
+  const replay = await service.deviceAuthStatus({
+    userId: "user-1",
+    flowId: started.flowId,
+  });
+  assert.equal(replay.status, "failed");
+  assert.match(replay.detail ?? "", /declined/u);
+});
+
+test("polls are paced by GitHub's interval, not the browser's", async (t) => {
+  const { credentials } = await harness(t);
+  const github = githubDeviceAnswering({
+    tokenAnswers: [{ access_token: "gho_early" }],
+    interval: 5,
+  });
+  const service = new GitHubConnectionService({
+    credentials,
+    deviceClientId: "Iv1_client",
+    fetchImpl: github.fetchImpl,
+  });
+
+  const started = await service.startDeviceAuth({ userId: "user-1" });
+  const early = await service.deviceAuthStatus({
+    userId: "user-1",
+    flowId: started.flowId,
+  });
+  // Answered pending from memory: within the interval GitHub was not asked.
+  assert.equal(early.status, "pending");
+  assert.equal(
+    github.calls.filter((url) => url.includes("access_token")).length,
+    0,
+  );
+});
+
+test("without an OAuth App the sign-in refuses and points at both fixes", async (t) => {
+  const { credentials } = await harness(t);
+  const service = new GitHubConnectionService({
+    credentials,
+    fetchImpl: githubAnswering(() => new Error("must not be called")),
+  });
+
+  assert.equal(
+    (await service.status({ userId: "user-1" })).signInAvailable,
+    false,
+  );
+  await assert.rejects(
+    () => service.startDeviceAuth({ userId: "user-1" }),
+    (error: unknown) =>
+      error instanceof GitHubConnectionError &&
+      error.code === "signin_unconfigured" &&
+      /COORD_GITHUB_CLIENT_ID/u.test(error.message),
+  );
+});

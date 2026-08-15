@@ -522,9 +522,39 @@ export async function connectGitHub(token) {
 }
 
 export async function disconnectGitHub() {
+  const signInAvailable = state.github?.signInAvailable === true;
   await api("/github/credential", { method: "DELETE" });
-  state.github = { connected: false };
+  state.github = { connected: false, signInAvailable };
   return state.github;
+}
+
+/**
+ * The GitHub device sign-in: start it, poll it, abandon it. The same
+ * conversation shape as the provider sign-ins — GitHub shows the person a
+ * short code, they enter it at github.com on any browser of theirs, and
+ * the poll comes back granted with the account it signed in as.
+ */
+export async function startGitHubSignIn() {
+  const response = await api("/github/credential/device-auth", {
+    method: "POST",
+  });
+  return response.deviceAuth;
+}
+
+export async function gitHubSignInStatus(flowId) {
+  const response = await api(
+    `/github/credential/device-auth?flow=${encodeURIComponent(flowId)}`,
+  );
+  return response.deviceAuth;
+}
+
+export async function cancelGitHubSignIn(flowId) {
+  await api(
+    `/github/credential/device-auth?flow=${encodeURIComponent(flowId)}`,
+    { method: "DELETE" },
+  ).catch(() => {
+    /* Abandoning a sign-in that already ended is not an error. */
+  });
 }
 
 /**
