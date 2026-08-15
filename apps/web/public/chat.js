@@ -150,6 +150,7 @@ export function chatComposer(agent, placeholder = "Ask your agent to do anything
 
   return `<form class="composer" data-act="chat-submit">
     <textarea data-act="chat-input" rows="1" spellcheck="true"
+      enterkeyhint="send"
       placeholder="${esc(placeholder)}"${busy || !ready ? " disabled" : ""}></textarea>
     <div class="composer-bar">
       <button type="button" class="icon-btn" disabled

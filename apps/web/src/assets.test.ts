@@ -13,6 +13,30 @@ test("loads every control-room asset with an explicit content type", async () =>
   assert.equal(assets.get("/index.html")?.contentType, "text/html; charset=utf-8");
   assert.equal(assets.get("/styles.css")?.contentType, "text/css; charset=utf-8");
   assert.equal(assets.get("/mark.svg")?.contentType, "image/svg+xml");
+  assert.equal(
+    assets.get("/manifest.webmanifest")?.contentType,
+    "application/manifest+json",
+  );
+  // The home-screen icons: iOS reads only the apple-touch link, Android's
+  // maskable shape comes from the manifest, and both need real PNGs.
+  for (const icon of ["/apple-touch-icon.png", "/icon-192.png", "/icon-512.png"]) {
+    assert.equal(
+      assets.get(icon)?.contentType,
+      "image/png",
+      `${icon} should be served`,
+    );
+    // A PNG that is not a PNG (a stray text file, a bad regeneration) would
+    // ship silently; the signature is cheap to pin.
+    const body = assets.get(icon)?.body;
+    assert.equal(Buffer.isBuffer(body), true, `${icon} should be bytes`);
+    assert.equal(
+      Buffer.isBuffer(body)
+        ? body.subarray(0, 8).toString("hex")
+        : undefined,
+      "89504e470d0a1a0a",
+      `${icon} should be a real PNG`,
+    );
+  }
   for (const module of [
     "/app.js",
     "/ui.js",

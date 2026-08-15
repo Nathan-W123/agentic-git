@@ -92,6 +92,7 @@ import {
   esc,
   icon,
   iconButton,
+  imeComposing,
   emptyState,
   closePopover,
   showMenu,
@@ -1707,9 +1708,21 @@ function applyTheme() {
   // a colour means editing the colour rather than hunting for the assignment
   // that overrides it.
   document.documentElement.dataset.theme = light ? "light" : "dark";
-  document
-    .querySelector('meta[name="theme-color"]')
-    ?.setAttribute("content", accent);
+  // The browser chrome around the page — a phone's status bar, the installed
+  // app's title bar — sits flush against the header, so it follows the page
+  // ground, not the accent. Painting it with the accent put a saturated band
+  // above a neutral surface on every phone, which is the opposite of the
+  // seam this meta exists to hide. Read back from the stylesheet after the
+  // theme attribute lands, so the chrome can never disagree with the ramp
+  // the CSS actually resolved.
+  const ground = getComputedStyle(document.documentElement)
+    .getPropertyValue("--bg")
+    .trim();
+  if (ground !== "") {
+    document
+      .querySelector('meta[name="theme-color"]')
+      ?.setAttribute("content", ground);
+  }
 }
 
 function channels(hex) {
@@ -2067,6 +2080,27 @@ window.addEventListener("resize", () => {
     setPanelWidth($(".thread-panel").offsetWidth);
   }
 });
+
+/* The soft keyboard shrinks the visual viewport, and the transcript above
+   the composer loses its bottom edge — the message being replied to slides
+   up behind the keyboard, and typing means typing at a conversation that is
+   no longer visible. The layout viewport (and so `resize`) does not always
+   move on iOS; `visualViewport` is the surface that actually tracks the
+   keyboard. Re-pinning is `restoreChannelScroll`'s existing job — it only
+   acts while the reader is following the bottom, so scrolled-back reading
+   is never yanked. Debounced past the keyboard animation rather than run
+   per frame. */
+if (window.visualViewport !== undefined) {
+  let keyboardSettle;
+  window.visualViewport.addEventListener("resize", () => {
+    clearTimeout(keyboardSettle);
+    keyboardSettle = setTimeout(() => {
+      if (state.route === "chats") {
+        restoreChannelScroll();
+      }
+    }, 120);
+  });
+}
 
 /**
  * Usage is fetched the first time a pointer rests on a roster entry, not with
@@ -3864,7 +3898,9 @@ document.addEventListener("keydown", (event) => {
   if (node?.dataset?.act !== "chat-input") {
     return;
   }
-  if (event.key === "Enter" && !event.shiftKey) {
+  // Not when an IME is committing a candidate — that Enter belongs to the
+  // composition, and sending on it posts a half-composed message.
+  if (event.key === "Enter" && !event.shiftKey && !imeComposing(event)) {
     event.preventDefault();
     node.closest("form")?.requestSubmit();
   }
@@ -3904,7 +3940,7 @@ document.addEventListener("keydown", (event) => {
   if (node?.dataset?.act !== "channel-thread-input") {
     return;
   }
-  if (event.key === "Enter" && !event.shiftKey) {
+  if (event.key === "Enter" && !event.shiftKey && !imeComposing(event)) {
     event.preventDefault();
     node.closest("form")?.requestSubmit();
   }
@@ -3920,7 +3956,8 @@ document.addEventListener("keydown", (event) => {
   const act = node?.dataset?.act;
   if (
     (act === "channel-rename-input" || act === "channel-role-input") &&
-    event.key === "Enter"
+    event.key === "Enter" &&
+    !imeComposing(event)
   ) {
     event.preventDefault();
     node.closest("form")?.requestSubmit();

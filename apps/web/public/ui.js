@@ -33,6 +33,21 @@ export function cx(...parts) {
   return parts.filter(Boolean).join(" ");
 }
 
+/**
+ * Whether this keydown is an IME committing a composition, not a keystroke
+ * aimed at the app.
+ *
+ * Japanese, Chinese and Korean keyboards — and some Android predictive
+ * ones — accept their current candidate with Enter. That press belongs to
+ * the composition; an "Enter sends" handler that acts on it posts the
+ * half-composed message mid-word. Every such handler checks here first.
+ * `keyCode === 229` is the legacy spelling of the same fact, still what
+ * some mobile engines report on every composing keystroke.
+ */
+export function imeComposing(event) {
+  return event.isComposing === true || event.keyCode === 229;
+}
+
 /* -------------------------------------------------------------- icons ---- */
 
 /**

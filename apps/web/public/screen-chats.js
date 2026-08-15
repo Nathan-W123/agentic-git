@@ -67,6 +67,7 @@ import {
   esc,
   icon,
   iconButton,
+  imeComposing,
   emptyState,
   miniSelect,
   relativeTime,
@@ -512,10 +513,11 @@ function rosterRow(agent, canModerate) {
       renaming
         ? `<form class="roster-rename" data-act="channel-rename-form" data-value="${esc(agent.id)}">
             <input data-act="channel-rename-input" data-value="${esc(agent.id)}"
-              value="${esc(agent.name)}" placeholder="${esc(agent.name)}" autocomplete="off">
+              value="${esc(agent.name)}" placeholder="${esc(agent.name)}"
+              autocomplete="off" enterkeyhint="done">
             <input data-act="channel-role-input" data-value="${esc(agent.id)}"
               value="${esc(agent.role ?? "")}" placeholder="Role in this channel"
-              list="channel-role-options" autocomplete="off">
+              list="channel-role-options" autocomplete="off" enterkeyhint="done">
             <datalist id="channel-role-options">
               <!-- Every other role is free text that reaches the agent as a
                    sentence and nothing else, so there is nothing to offer.
@@ -1453,6 +1455,7 @@ function composer(repositoryId) {
     ${composerThreadChip(repositoryId)}
     <form class="composer" data-act="channel-submit">
       <textarea data-act="channel-input" rows="1" spellcheck="true"
+        enterkeyhint="send"
         placeholder="${
           state.composerThreadId === undefined
             ? `Message #${esc(repositoryId ?? "")}`
@@ -2005,6 +2008,7 @@ function threadPanel(repositoryId) {
     </div>
     <form class="composer" data-act="channel-thread-submit" style="margin:0 12px 12px">
       <textarea data-act="channel-thread-input" rows="1"
+        enterkeyhint="send"
         placeholder="Reply in thread...">${esc(state.threadDraft)}</textarea>
       <div class="composer-bar">
         <span class="spacer"></span>
@@ -2868,6 +2872,7 @@ export function startTerminalResize(event, rerender) {
   const onUp = () => {
     window.removeEventListener("pointermove", onMove);
     window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
     document.body.classList.remove("resizing-ns");
     state.termHeight = Math.round(drawer.getBoundingClientRect().height);
     persist("ag.termHeight", state.termHeight);
@@ -2876,6 +2881,12 @@ export function startTerminalResize(event, rerender) {
   document.body.classList.add("resizing-ns");
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
+  // A touch drag can end in a cancel rather than an up — the browser takes
+  // the pointer for scrolling, a palm hits the edge, a call arrives — and
+  // without this the move/up listeners and the resize cursor class all
+  // outlive the gesture. The panel grip has always done this; the drawer's
+  // grip predates it.
+  window.addEventListener("pointercancel", onUp);
 }
 
 /** Keyboard equivalent of the drag, so the grip is not mouse-only. */
@@ -3009,6 +3020,12 @@ export function handleTerminalKeydown(event, rerender) {
 }
 
 export function handleComposerKeydown(event, rerender) {
+  // An IME accepting a candidate is not input to the composer: acting on
+  // that Enter sends the message mid-word, and the same press steered the
+  // pickers below too. Checked before anything else claims a key.
+  if (imeComposing(event)) {
+    return;
+  }
   // The same four keys as the mention picker, because they are the same
   // gesture — a list under the cursor that Up/Down move through, Enter or Tab
   // accepts, and Escape dismisses. Handled first, and only one picker is ever
