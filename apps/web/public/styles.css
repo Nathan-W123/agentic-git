@@ -5826,6 +5826,45 @@ dialog.modal::backdrop {
     min-height: 44px;
   }
 
+  /* The outer nav drawer — Chats / My Agents / Notifications — is not part
+     of the phone product: the channel drawer already carries the channels,
+     the users and the agents, and Settings is a tap on the brand inside it.
+     A hamburger whose menu duplicates the drawer beside it was one more
+     thing to mis-tap. `!important` because the 900px tier above turns this
+     button on the same way. */
+  .menu-btn {
+    display: none !important;
+  }
+
+  /* The tools are pinned open on a phone (chanHeader renders them without
+     asking `chanToolsOpen` below the breakpoint), so the chevron would
+     toggle nothing. */
+  .chan-tools-toggle {
+    display: none;
+  }
+
+  /* The pinned tools become the header's own bottom row: full width, spread
+     to the phone's edges, each control thumb-sized. On desktop this same
+     group is a 30px tray folded behind the chevron; here it is the way the
+     room's tools are reached, so it gets the space a hand needs. */
+  .chan-tools {
+    display: flex;
+    flex: 1 0 100%;
+    order: 10;
+    justify-content: space-between;
+    gap: 4px;
+  }
+
+  .chan-tools .icon-btn {
+    width: 44px;
+    height: 44px;
+  }
+
+  .chan-tools .icon-btn svg {
+    width: 19px;
+    height: 19px;
+  }
+
   /* My Agents' list header: four filter tabs, a spacer, and a 190px-wide
      search box, all on one row on desktop. The tabs alone can run past a
      phone's width before the search box is even considered, so the whole
