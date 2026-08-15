@@ -10,7 +10,6 @@
  */
 
 import {
-  PALETTE,
   api,
   closeSocket,
   connectSocket,
@@ -89,6 +88,9 @@ import {
   $,
   $$,
   vendorMark,
+  colorWheel,
+  hexToHsl,
+  hslToHex,
   agentLabelOf,
   avatar,
   brandMark,
@@ -984,16 +986,6 @@ function agentsCard() {
 function appearanceCard() {
   const accent = myAccent();
   const agentColor = myAgentColor();
-  const swatches = (act, current) =>
-    PALETTE.map(
-      (entry) => `<button type="button" class="swatch${
-        entry.value === current ? " on" : ""
-      }" data-act="${act}" data-value="${esc(entry.value)}"
-        style="--swatch:${esc(entry.value)}" title="${esc(entry.label)}"
-        aria-pressed="${entry.value === current}"
-        aria-label="${esc(entry.label)}"></button>`,
-    ).join("");
-
   return `<section class="card">
     <div class="panel-head"><div><h3>Appearance</h3>
       <p>How Lattice looks to you, and how your agents look to everyone</p></div></div>
@@ -1048,7 +1040,7 @@ function appearanceCard() {
       </span>
     </div>
     <div style="padding:0 17px 16px">
-      <div class="swatches">${swatches("set-accent", accent)}</div>
+      ${colorWheel("set-accent", accent)}
     </div>
 
     <div class="set-row">
@@ -1060,7 +1052,7 @@ function appearanceCard() {
       </span>
     </div>
     <div style="padding:0 17px 16px">
-      <div class="swatches">${swatches("set-agent-color", agentColor)}</div>
+      ${colorWheel("set-agent-color", agentColor)}
       <div class="doodle-preview" style="color:${esc(agentColor)}">
         ${["anthropic", "cursor", "openai", "google", "xai", "deepseek"]
           .map(
@@ -1073,6 +1065,33 @@ function appearanceCard() {
       </div>
     </div>
   </section>`;
+}
+
+/**
+ * Which colour a point on the wheel is.
+ *
+ * Angle from the centre is hue, distance is saturation, and anything past the
+ * rim is clamped to the rim rather than ignored — a click that lands a pixel
+ * outside a circle is a click on the edge of it, and refusing it reads as a
+ * dead control.
+ */
+function wheelColorAt(node, event, current) {
+  const box = node.getBoundingClientRect();
+  const x = (event.clientX - box.left) / box.width - 0.5;
+  const y = (event.clientY - box.top) / box.height - 0.5;
+  const hue = (Math.atan2(y, x) * 180) / Math.PI + 90;
+  const saturation = Math.min(Math.hypot(x, y) * 2, 1);
+  return hslToHex(hue, saturation, hexToHsl(current).l);
+}
+
+/** The appearance field a wheel's `data-act` belongs to. */
+const WHEEL_FIELD = {
+  "set-accent": "accent",
+  "set-agent-color": "agentColor",
+};
+
+function currentWheelColor(field) {
+  return field === "accent" ? myAccent() : myAgentColor();
 }
 
 async function saveAppearanceChoice(patch) {
@@ -3707,12 +3726,14 @@ document.addEventListener("click", (event) => {
       setMyAvatar(undefined);
       render();
       return;
-    case "set-accent":
-      void saveAppearanceChoice({ accent: value });
+    case "set-accent-wheel":
+    case "set-agent-color-wheel": {
+      const field = WHEEL_FIELD[act.replace(/-wheel$/u, "")];
+      void saveAppearanceChoice({
+        [field]: wheelColorAt(node, event, currentWheelColor(field)),
+      });
       return;
-    case "set-agent-color":
-      void saveAppearanceChoice({ agentColor: value });
-      return;
+    }
     case "toggle": {
       const field = node.dataset.field;
       const input = node.parentElement?.querySelector(`input[name="${field}"]`);
@@ -3874,6 +3895,23 @@ document.addEventListener("change", (event) => {
   }
   const { node, act } = found;
   switch (act) {
+    case "set-accent-light":
+    case "set-agent-color-light": {
+      // On `change`, not `input`: dragging a slider would otherwise be one
+      // save per pixel, and the value is stored on the account.
+      const field = WHEEL_FIELD[act.replace(/-light$/u, "")];
+      const { h, s: saturation } = hexToHsl(currentWheelColor(field));
+      void saveAppearanceChoice({
+        [field]: hslToHex(h, saturation, Number(node.value) / 100),
+      });
+      return;
+    }
+    case "set-accent-exact":
+    case "set-agent-color-exact": {
+      const field = WHEEL_FIELD[act.replace(/-exact$/u, "")];
+      void saveAppearanceChoice({ [field]: node.value });
+      return;
+    }
     case "repo-sort":
       state.repoSort = node.value;
       render();

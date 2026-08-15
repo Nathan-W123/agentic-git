@@ -8414,22 +8414,29 @@ export class ApiGateway {
         .catch(() => undefined);
     }
     if (continuing !== undefined) {
-      // Joining an existing thread, so there is no root to be waiting on and
-      // the composed line can simply be awaited before it is said.
-      const acknowledgementText = await acknowledgement;
-      await this.appendChannelThreadReply({
-        projectId,
-        repositoryId,
-        messageId: continuing,
-        authorId: `${candidate.userId}:${candidate.provider}`,
-        content:
-          input.threadMessageId === undefined
-            ? // Auto-merged. Said out loud, because the reader did not ask
-              // for this thread and needs to know why their request landed
-              // in it rather than somewhere new.
-              `${acknowledgementText}\n\n(Adding this to the thread above — it looks like the same piece of work.)`
-            : acknowledgementText,
-      });
+      // Not awaited, for the same reason the root is not. Joining a thread
+      // needs no message created before the work can be queued, and awaiting
+      // the composed line here left a continuation waiting up to the
+      // acknowledgement timeout before its task was even submitted — the
+      // silence this whole reordering exists to remove, surviving on exactly
+      // the turn somebody is most likely to be watching.
+      void acknowledgement
+        .then(async (acknowledgementText) => {
+          await this.appendChannelThreadReply({
+            projectId,
+            repositoryId,
+            messageId: continuing,
+            authorId: `${candidate.userId}:${candidate.provider}`,
+            content:
+              input.threadMessageId === undefined
+                ? // Auto-merged. Said out loud, because the reader did not ask
+                  // for this thread and needs to know why their request landed
+                  // in it rather than somewhere new.
+                  `${acknowledgementText}\n\n(Adding this to the thread above — it looks like the same piece of work.)`
+                : acknowledgementText,
+          });
+        })
+        .catch(() => undefined);
     }
 
     try {

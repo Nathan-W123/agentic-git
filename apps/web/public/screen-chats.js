@@ -1298,16 +1298,27 @@ function isThreadEnding(reply) {
 /**
  * Whether a reply is the run talking to itself rather than to the reader.
  *
- * `progress` is the server's mark. The content test behind it is for replies
- * written before that mark existed, which are indistinguishable otherwise —
- * and it must not be applied to a marked ending, which is the bug the
- * `outcome` kind was added to fix.
+ * `progress` is the server's mark, and it is the whole test. The fallback that
+ * used to sit behind it — treat any `agent` reply that is not an ending as
+ * narration — was written for replies stored before that mark existed, and it
+ * swallowed every sentence an agent addresses to a person inside a thread.
+ *
+ * That is what "they start on the task but they don't respond and confirm"
+ * was. Asking for more work in a thread does get an acknowledgement, posted
+ * before the task is even submitted — but it is a reply rather than a root, it
+ * carries the default `agent` kind, and so it was filed as run chatter and
+ * hoisted into a "Thinking" fold that renders closed once a thread has an
+ * ending. The reader saw their request and then nothing. The same fold ate
+ * "Starting now.", "Queued again — I'll report back here.", the held plan, and
+ * every answer an agent gives to a question asked in a thread.
+ *
+ * The cost is threads older than the `progress` mark, whose narration is
+ * stored as `agent` and now renders inline instead of folded. That is a couple
+ * of days of history reading slightly long, against every agent reply since
+ * being visible at all.
  */
 function isThreadThinking(reply) {
-  return (
-    reply.kind === "progress" ||
-    (reply.kind === "agent" && !isThreadEnding(reply))
-  );
+  return reply.kind === "progress";
 }
 
 /**
@@ -2199,10 +2210,14 @@ function summaryBlock(reply, repositoryId) {
 /** The dots belong where the work is, which is inside the thread. */
 function threadTyping(root) {
   const replies = root.replies ?? [];
+  // The *last* reply, not any of them. A thread whose earlier turn ended is
+  // exactly where somebody asks for the next one, and asking whether the
+  // thread has ever ended meant the dots never came back for it — the same
+  // turn whose acknowledgement was being folded away, so it went quiet twice.
   if (
     root.kind !== "agent" ||
     replies.length === 0 ||
-    replies.some((reply) => isThreadEnding(reply))
+    isThreadEnding(replies[replies.length - 1])
   ) {
     return "";
   }
