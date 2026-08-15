@@ -12,6 +12,7 @@
 import {
   api,
   cancelProviderSignIn,
+  connectGitHub,
   connectProviderCredential,
   loadContext,
   loadProviders,
@@ -654,6 +655,47 @@ export async function connectAgent(providerId, rerender) {
       values.visibility === "org" ? "org" : "personal",
     );
     toast(`${providerId} connected`, "ok");
+    rerender();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Connecting GitHub is connecting an identity, not enabling a feature: a
+ * push an agent runs for you authenticates as this token, as you, and
+ * reaches only what you can reach. There is deliberately no deployment-wide
+ * token for it to borrow — until this is connected, an asked-for push is
+ * refused by name.
+ */
+export async function connectGitHubAccount(rerender) {
+  const values = await showModal({
+    title: "Connect GitHub",
+    subtitle: "Your token, spent only on pushes your own tasks ask for.",
+    confirm: "Connect",
+    body: `
+      <p class="modal-hint">Create a personal access token on github.com
+        (Settings &rarr; Developer settings) with write access to the
+        repositories you want published to, and paste it here. It is
+        verified against GitHub before it is stored.</p>
+      <label class="field"><span>Personal access token</span>
+        <input class="input" name="token" type="password" autocomplete="off"
+          placeholder="ghp_&hellip; or github_pat_&hellip;" required></label>
+      <p class="modal-hint">Stored encrypted, never shown again, and never
+        shared with anyone else on this deployment. Pushes run as this token
+        and reach only what it can.</p>`,
+  });
+  if (values === undefined) {
+    return;
+  }
+  const token = String(values.token ?? "").trim();
+  if (token === "") {
+    toast("A token is required", "error");
+    return;
+  }
+  try {
+    const status = await connectGitHub(token);
+    toast(`GitHub connected as ${status.login ?? "you"}`, "ok");
     rerender();
   } catch (error) {
     toast(error.message, "error");

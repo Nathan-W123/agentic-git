@@ -89,6 +89,14 @@ interface TestRuntime {
     targetRevision: string;
     files?: readonly string[];
   }>;
+  /** Every stop the gateway asked for, in order — scope, words and all. */
+  cancelCalls: Array<{
+    repositoryId: string;
+    taskIds?: string[];
+    vendor?: string;
+    reason: string;
+    actorId: string;
+  }>;
 }
 
 class TestClient {
@@ -236,6 +244,7 @@ async function startRuntime(
   const chatAnswer: TestRuntime["chatAnswer"] = {};
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
   const rollbacks: TestRuntime["rollbacks"] = [];
+  const cancelCalls: TestRuntime["cancelCalls"] = [];
   const attachmentBytes = new Map<
     string,
     { bytes: Buffer; contentType: string }
@@ -380,6 +389,65 @@ async function startRuntime(
       if (runFailure.reason !== undefined) {
         throw new Error(runFailure.reason);
       }
+    },
+    async cancelTasks(input) {
+      cancelCalls.push({
+        repositoryId: input.repositoryId,
+        ...(input.taskIds === undefined ? {} : { taskIds: [...input.taskIds] }),
+        ...(input.vendor === undefined ? {} : { vendor: input.vendor }),
+        reason: input.reason,
+        actorId: input.actorId,
+      });
+      // The store half of the real implementation (apps/cli's `cancelTasks`),
+      // which is everything the gateway's own behavior depends on: rows go
+      // terminal, and the audit events the channel narrates from land.
+      const agentId =
+        input.vendor === undefined ? undefined : `test-agent-${input.vendor}`;
+      const explicit =
+        input.taskIds === undefined ? undefined : new Set(input.taskIds);
+      const cancellable = new Set(["submitted", "claimed", "planned", "open"]);
+      const cancelled: Array<{
+        id: string;
+        agentId: string;
+        objective: string;
+        was: "running" | "queued" | "held" | "waiting";
+      }> = [];
+      for (const task of await store.listSubmittedTasks({
+        repositoryId: input.repositoryId,
+      })) {
+        if (!cancellable.has(task.status)) {
+          continue;
+        }
+        if (
+          explicit !== undefined
+            ? !explicit.has(task.id)
+            : task.status === "open" ||
+              (agentId !== undefined && task.agentId !== agentId)
+        ) {
+          continue;
+        }
+        const was =
+          task.status === "claimed"
+            ? ("running" as const)
+            : task.status === "planned"
+              ? ("held" as const)
+              : task.status === "open"
+                ? ("waiting" as const)
+                : ("queued" as const);
+        await store.cancelSubmittedTask(task.id);
+        await store.appendAudit(undefined, {
+          type: "task_cancelled",
+          taskId: task.id,
+          data: { actorId: input.actorId, reason: input.reason },
+        });
+        cancelled.push({
+          id: task.id,
+          agentId: task.agentId,
+          objective: task.objective,
+          was,
+        });
+      }
+      return { cancelled };
     },
     async canonicalDiff(input) {
       canonicalDiffs.push(input);
@@ -529,6 +597,7 @@ async function startRuntime(
     chatAnswer,
     canonicalDiffs,
     rollbacks,
+    cancelCalls,
     canonicalDiff,
     canonicalState,
     runFailure,
@@ -7417,5 +7486,279 @@ test("/stop on a task that changed nothing cancels without a rollback", async (t
     runtime.rollbacks.length,
     before,
     "a task that promoted nothing must not trigger a rollback",
+  );
+});
+
+test("'/cancel' in the channel stops the room's work and says so", async (t) => {
+  // The failure mode this exists for: agents running, and nothing a person
+  // could type that reached them. The channel verb has to stop the work AND
+  // say what it stopped — a silent stop is indistinguishable from a stop
+  // that never happened.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const repo = await invitableRepository(owner, "stoppable");
+
+  const first = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    objective: "first job",
+    agentId: "test-agent-codex",
+    validationCommands: [],
+    submittedBy: session.user.id,
+  });
+  const second = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    objective: "second job",
+    agentId: "test-agent-claude",
+    validationCommands: [],
+    submittedBy: session.user.id,
+  });
+
+  const posted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages`,
+    { method: "POST", body: { content: "/cancel" } },
+  );
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(
+      repo,
+      session.user.id,
+    );
+    return messages.some((message) =>
+      message.content.includes("Stopped 2 queued tasks in this channel."),
+    );
+  }, "the channel never reported the stop");
+
+  assert.equal(runtime.cancelCalls.length, 1);
+  assert.equal(runtime.cancelCalls[0]?.actorId, session.user.id);
+  assert.equal(runtime.cancelCalls[0]?.vendor, undefined);
+  const statuses = new Map(
+    (
+      await runtime.store.listSubmittedTasks({ repositoryId: repo })
+    ).map((task) => [task.id, task.status]),
+  );
+  assert.equal(statuses.get(first.id), "cancelled");
+  assert.equal(statuses.get(second.id), "cancelled");
+});
+
+test("'/cancel @agent' stops that agent's work and nobody else's", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "scoped-stop");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const mention = `Codex (${String(session.user.displayName).split(" ")[0]})`;
+
+  const codexTask = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    objective: "codex job",
+    agentId: "test-agent-codex",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  const claudeTask = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    objective: "claude job",
+    agentId: "test-agent-claude",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+
+  const posted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages`,
+    { method: "POST", body: { content: `/cancel @${mention}` } },
+  );
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(repo, ownerId);
+    return messages.some((message) =>
+      message.content.includes(`Stopped 1 queued task for @${mention}.`),
+    );
+  }, "the channel never reported the scoped stop");
+
+  assert.equal(runtime.cancelCalls[0]?.vendor, "codex");
+  const statuses = new Map(
+    (
+      await runtime.store.listSubmittedTasks({ repositoryId: repo })
+    ).map((task) => [task.id, task.status]),
+  );
+  assert.equal(statuses.get(codexTask.id), "cancelled");
+  assert.equal(statuses.get(claudeTask.id), "submitted");
+});
+
+test("'/cancel' for a name nobody answers to stops nothing and says who it could", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "misnamed-stop");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+
+  const task = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    objective: "still wanted",
+    agentId: "test-agent-codex",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages`,
+    { method: "POST", body: { content: "/cancel @Nobody" } },
+  );
+
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(repo, ownerId);
+    return messages.some((message) =>
+      message.content.includes('Nobody here answers to "Nobody"'),
+    );
+  }, "the channel never explained the unknown name");
+
+  assert.equal(runtime.cancelCalls.length, 0);
+  const [row] = await runtime.store.listSubmittedTasks({ repositoryId: repo });
+  assert.equal(row?.id, task.id);
+  assert.equal(row?.status, "submitted");
+});
+
+test("a reply naming an option routes back to the waiting question", async (t) => {
+  // The round trip the owner could not verify: "1" typed in the thread must
+  // reach the paused coordinator as a chosen index, not as conversation.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "asked-and-answered");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+  const mention = `Codex (${String(session.user.displayName).split(" ")[0]})`;
+
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages`,
+    { method: "POST", body: { content: `@${mention} please fix the retry loop` } },
+  );
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never became work",
+  );
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId: repo });
+  assert.notEqual(task, undefined);
+
+  // The acknowledgement message is the thread the question will be asked in.
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(repo, ownerId);
+    return messages.some((message) => message.taskId === task?.id);
+  }, "the dispatch never acknowledged in the channel");
+  const ack = (
+    await runtime.store.listChannelMessages(repo, ownerId)
+  ).find((message) => message.taskId === task?.id);
+  assert.notEqual(ack, undefined);
+
+  const waiting = runtime.gateway.awaitAgentAnswer({
+    requestId: "q-route",
+    taskId: task?.id ?? "",
+    repositoryId: repo,
+    projectId: DEFAULT_PROJECT_ID,
+    question: "Which approach?",
+    options: ["Both modules", "One and a shim"],
+    deadlineMs: 4_000,
+  });
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(repo, ownerId);
+    return messages.some((message) =>
+      message.replies.some((reply) => reply.content.includes("Which approach?")),
+    );
+  }, "the question never reached the thread");
+
+  const replied = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages/${ack?.id}/replies`,
+    { method: "POST", body: { content: "1" } },
+  );
+  assert.equal(replied.status, 201, JSON.stringify(replied.data));
+
+  assert.deepEqual(await waiting, { chosen: 0 });
+});
+
+test("an answer after the deadline is told it was late, not chatted at", async (t) => {
+  // The undiagnosable half of the incident: the owner answered "1", nothing
+  // happened, and nothing recorded whether the reply failed to route or the
+  // question had already cancelled. Now the late reply gets the account.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "answered-late");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+  const mention = `Codex (${String(session.user.displayName).split(" ")[0]})`;
+
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages`,
+    { method: "POST", body: { content: `@${mention} please fix the retry loop` } },
+  );
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never became work",
+  );
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId: repo });
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(repo, ownerId);
+    return messages.some((message) => message.taskId === task?.id);
+  }, "the dispatch never acknowledged in the channel");
+  const ack = (
+    await runtime.store.listChannelMessages(repo, ownerId)
+  ).find((message) => message.taskId === task?.id);
+
+  // The deadline lapses with nobody answering.
+  const lapsed = await runtime.gateway.awaitAgentAnswer({
+    requestId: "q-late",
+    taskId: task?.id ?? "",
+    repositoryId: repo,
+    projectId: DEFAULT_PROJECT_ID,
+    question: "Which approach?",
+    options: ["Both modules", "One and a shim"],
+    deadlineMs: 30,
+  });
+  assert.equal(lapsed, undefined);
+
+  // The answer arrives late — the exact shape of the incident.
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages/${ack?.id}/replies`,
+    { method: "POST", body: { content: "1" } },
+  );
+
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(repo, ownerId);
+    return messages.some((message) =>
+      message.replies.some((reply) =>
+        reply.content.includes("after the question's deadline"),
+      ),
+    );
+  }, "the late answer was never told what happened to it");
+  // And it never fell through to the chat model as a question about "1":
+  // the only prompt the fixture saw is the dispatch acknowledgement.
+  assert.equal(
+    runtime.chatPrompts.filter((entry) => entry.prompt.includes("The question: 1"))
+      .length,
+    0,
   );
 });

@@ -1663,14 +1663,22 @@ export class ProviderChatService {
     > = {};
     for (const userId of userIds) {
       const summaries = await store.list(userId);
-      result[userId] = summaries.map((summary) => {
+      result[userId] = summaries.flatMap((summary) => {
+        if (summary.vendor === "github") {
+          // A GitHub connection is a push credential, not an agent anybody
+          // could @mention; a roster that listed it would offer a teammate a
+          // name that can never answer.
+          return [];
+        }
         const provider = VENDOR_PROVIDERS[summary.vendor];
         const callSign = connections[userId]?.[provider]?.settings?.callSign;
-        return {
-          provider,
-          visibility: summary.visibility,
-          ...(callSign === undefined ? {} : { callSign }),
-        };
+        return [
+          {
+            provider,
+            visibility: summary.visibility,
+            ...(callSign === undefined ? {} : { callSign }),
+          },
+        ];
       });
     }
     return result;

@@ -1558,6 +1558,33 @@ export interface ApiOperations {
     actorId: string;
   }): Promise<void>;
   /**
+   * Stops work: exact tasks, one agent's, or a whole repository's.
+   *
+   * The full job, not a row flip — the implementation marks the rows
+   * cancelled, aborts live in-process sessions, releases work leases (which
+   * is what stops a remote worker), and appends the `task_cancelled` audit
+   * events the channel narrates from. `vendor` mirrors `submitTask`'s: the
+   * channel knows which vendor an agent runs, never the deployment's
+   * internal agent ids. Absent on deployments that cannot reach running
+   * work, where cancel degrades to the store-only row flip.
+   */
+  cancelTasks?(input: {
+    projectId: string;
+    repositoryId: string;
+    taskIds?: string[];
+    agentId?: string;
+    vendor?: "claude" | "codex" | "gemini";
+    reason: string;
+    actorId: string;
+  }): Promise<{
+    cancelled: Array<{
+      id: string;
+      agentId: string;
+      objective: string;
+      was: "running" | "queued" | "held" | "waiting";
+    }>;
+  }>;
+  /**
    * The unified diff between two canonical revisions.
    *
    * The auditor's whole input. It is an operation rather than a direct
@@ -1722,6 +1749,24 @@ export interface ApiOperations {
   workspace?: WorkspaceOperations;
   /** Direct provider chat (Anthropic/OpenAI/Google); absent when unsupported. */
   chatProviders?: ChatProviderOperations;
+  /**
+   * The caller's own GitHub connection, spent when a task of theirs pushes.
+   * Absent on a deployment that cannot push anywhere.
+   */
+  githubCredential?: GitHubCredentialOperations;
+}
+
+/**
+ * A user's GitHub token, stored beside their agent connections so a push
+ * runs as whoever submitted the task. The gateway only routes, authenticates
+ * and validates shape; verifying the token against GitHub and storing it
+ * encrypted live in the implementation, and the token itself is never echoed
+ * back in any response.
+ */
+export interface GitHubCredentialOperations {
+  status(input: { userId: string }): Promise<unknown>;
+  connect(input: { userId: string; token: string }): Promise<unknown>;
+  disconnect(input: { userId: string }): Promise<void>;
 }
 
 /**
@@ -2180,6 +2225,20 @@ export class ApiGateway {
       optionCount: number;
       settle: (chosen: number) => void;
     }
+  >();
+  /**
+   * Questions whose deadline lapsed, by thread root, so a late answer is
+   * told it was late instead of being handed to the chat model as prose.
+   *
+   * This exists because of one incident that could not even be diagnosed: a
+   * person answered "1", the task never responded, and nothing recorded
+   * whether the reply failed to route or had simply arrived after the
+   * question's own cancel. In-memory and bounded like the pending map — a
+   * restart forgets, and the fall-through then behaves as it always did.
+   */
+  private readonly lapsedAgentQuestions = new Map<
+    string,
+    { optionCount: number; lapsedAtMs: number }
   >();
   private channelProgressTimer: NodeJS.Timeout | undefined;
   private auditorTimer: NodeJS.Timeout | undefined;
@@ -4560,18 +4619,32 @@ export class ApiGateway {
         "run_task",
       );
       const runKey = `${task.projectId}\0${task.repositoryId}`;
-      if (this.activeRuns.has(runKey)) {
-        throw new HttpError(
-          409,
-          "run_in_progress",
-          `Task ${action} is unavailable while its repository run is active`,
-        );
+      if (action === "retry") {
+        if (this.activeRuns.has(runKey)) {
+          throw new HttpError(
+            409,
+            "run_in_progress",
+            "Task retry is unavailable while its repository run is active",
+          );
+        }
+        this.sendJson(response, 200, {
+          task: await this.options.store.retrySubmittedTask(taskId),
+        });
+        return;
       }
-      const updated =
-        action === "retry"
-          ? await this.options.store.retrySubmittedTask(taskId)
-          : await this.options.store.cancelSubmittedTask(taskId);
-      if (action === "cancel") {
+      const cancelOperation = this.options.operations.cancelTasks;
+      if (cancelOperation === undefined) {
+        // Store-only cancel cannot reach a live run, so refusing during one
+        // is the honest answer — the row would flip while the agent worked
+        // on, which is the silence this button exists to end.
+        if (this.activeRuns.has(runKey)) {
+          throw new HttpError(
+            409,
+            "run_in_progress",
+            "Task cancel is unavailable while its repository run is active",
+          );
+        }
+        const updated = await this.options.store.cancelSubmittedTask(taskId);
         await this.options.store.appendAudit(undefined, {
           type: "task_cancelled",
           taskId,
@@ -4580,8 +4653,31 @@ export class ApiGateway {
             actorId: principal.user.id,
           },
         });
+        this.sendJson(response, 200, { task: updated });
+        return;
       }
-      this.sendJson(response, 200, { task: updated });
+      // The full stop — row, live session, lease, audit — which is exactly
+      // what pressing cancel during a run means, so no run guard here.
+      const { cancelled } = await cancelOperation({
+        projectId: task.projectId,
+        repositoryId: task.repositoryId,
+        taskIds: [taskId],
+        reason: "Stopped from the dashboard",
+        actorId: principal.user.id,
+      });
+      if (cancelled.length === 0) {
+        throw new HttpError(
+          409,
+          "not_cancellable",
+          `Task ${taskId} has already finished`,
+        );
+      }
+      const updated = (
+        await this.options.store.listSubmittedTasks({
+          repositoryId: task.repositoryId,
+        })
+      ).find((entry) => entry.id === taskId);
+      this.sendJson(response, 200, { task: updated ?? task });
       return;
     }
 
@@ -6734,6 +6830,73 @@ export class ApiGateway {
       throw new HttpError(404, "not_found", "Route was not found");
     }
 
+    // ---- The caller's own GitHub connection (Settings) --------------------
+    // Per authenticated user, exactly like provider chat: nothing here
+    // touches projects or repositories. It is the identity a push of this
+    // user's tasks will authenticate as, which is nobody's business but
+    // their own.
+    if (path === `${API_PREFIX}/github/credential`) {
+      const githubOperations = this.options.operations.githubCredential;
+      if (githubOperations === undefined) {
+        throw new HttpError(
+          501,
+          "not_supported",
+          "This deployment does not support GitHub connections",
+        );
+      }
+      const performGitHub = async <T>(
+        operation: () => Promise<T>,
+      ): Promise<T> => {
+        try {
+          return await operation();
+        } catch (error) {
+          const status = (error as { status?: unknown }).status;
+          const code = (error as { code?: unknown }).code;
+          if (
+            error instanceof Error &&
+            typeof status === "number" &&
+            typeof code === "string"
+          ) {
+            throw new HttpError(status, code, error.message);
+          }
+          throw error;
+        }
+      };
+      if (method === "GET") {
+        this.sendJson(
+          response,
+          200,
+          await performGitHub(() =>
+            githubOperations.status({ userId: principal.user.id }),
+          ),
+        );
+        return;
+      }
+      if (method === "POST") {
+        const body = objectBody(await this.readJson(request));
+        // Read but never echoed: the response is the same connection status
+        // the GET returns, so nothing that reaches a log or a browser
+        // carries the token.
+        const token = stringField(body["token"], "token", { max: 512 }) ?? "";
+        this.sendJson(
+          response,
+          200,
+          await performGitHub(() =>
+            githubOperations.connect({ userId: principal.user.id, token }),
+          ),
+        );
+        return;
+      }
+      if (method === "DELETE") {
+        await performGitHub(() =>
+          githubOperations.disconnect({ userId: principal.user.id }),
+        );
+        this.sendJson(response, 200, { disconnected: true });
+        return;
+      }
+      throw new HttpError(405, "method_not_allowed", "Unsupported method");
+    }
+
     const runsMatch = matchPath(
       path,
       new RegExp(`^${API_PREFIX}/projects/([^/]+)/runs$`, "u"),
@@ -7550,27 +7713,140 @@ export class ApiGateway {
       return true;
     }
     if (input.command.name === "stop") {
-      await this.runStopCommand({
-        projectId,
-        repositoryId,
-        senderId: input.senderId,
-        rest: input.rest,
-      });
+      // `/cancel` with the code put back. Stopping is entirely its job — the
+      // same operation, the same targeting, the same summary — and the only
+      // thing this adds is undoing what the stopped tasks had already landed.
+      await this.cancelFromChannel({ ...input, undo: true });
       return true;
     }
-    // `/retry` and `/cancel` act on the task a thread is following, and a
-    // message in the channel is not in a thread. Said plainly rather than
-    // ignored, because typing it in the wrong place is the obvious mistake.
-    if (input.command.name === "retry" || input.command.name === "cancel") {
+    // `/retry` acts on the task a thread is following, and a message in the
+    // channel is not in a thread. Said plainly rather than ignored, because
+    // typing it in the wrong place is the obvious mistake.
+    if (input.command.name === "retry") {
       await this.postChannelSystemMessage(
         projectId,
         repositoryId,
-        `\`/${input.command.name}\` works inside a task's thread — open the ` +
-          `thread for the run you mean and say it there.`,
+        "`/retry` works inside a task's thread — open the thread for the " +
+          "run you mean and say it there.",
       );
       return true;
     }
+    if (input.command.name === "cancel") {
+      await this.cancelFromChannel(input);
+      return true;
+    }
     return false;
+  }
+
+  /**
+   * `/cancel` in the channel root: stop this repository's work — all of it,
+   * or one agent's when a name follows the command. (Inside a thread the
+   * same word stops that thread's task; see `runThreadCommand`.)
+   *
+   * This is the whole reason stopping exists as a channel verb: the owner
+   * watching agents run had no way to say "stop" that reached anything. The
+   * summary line below is deliberate — a stop that happens silently is
+   * indistinguishable from one that did not happen — and each stopped task's
+   * own thread gets its ending from the `task_cancelled` audit event the
+   * operation appends, narrated by the ordinary progress pump.
+   */
+  private async cancelFromChannel(input: {
+    projectId: string;
+    repositoryId: string;
+    senderId: string;
+    rest: string;
+    /** `/stop`: also put back whatever the stopped tasks had landed. */
+    undo?: boolean;
+  }): Promise<void> {
+    const { projectId, repositoryId } = input;
+    const operation = this.options.operations.cancelTasks;
+    if (operation === undefined) {
+      await this.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        "This deployment cannot stop tasks from the channel.",
+      );
+      return;
+    }
+    const target = input.rest.trim().replace(/^@/u, "");
+    let vendor: "claude" | "codex" | "gemini" | undefined;
+    let scope = "in this channel";
+    if (target !== "") {
+      const candidates = await this.resolveChannelMentionCandidates(
+        projectId,
+        repositoryId,
+      );
+      const named = candidates.find(
+        (candidate) => candidate.name.toLowerCase() === target.toLowerCase(),
+      );
+      if (named === undefined) {
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          candidates.length === 0
+            ? "Nobody here answers to that, and this channel has no agents " +
+                "to stop."
+            : `Nobody here answers to "${target}". You can stop ` +
+                `${candidates
+                  .map((candidate) => `@${candidate.name}`)
+                  .join(", ")} — or plain \`/cancel\` for everything here.`,
+        );
+        return;
+      }
+      vendor = named.vendor;
+      scope = `for @${named.name}`;
+    }
+    const { cancelled } = await operation({
+      projectId,
+      repositoryId,
+      ...(vendor === undefined ? {} : { vendor }),
+      reason: "Stopped from the channel",
+      actorId: input.senderId,
+    });
+    if (cancelled.length === 0) {
+      await this.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        `Nothing to stop ${scope} — no task is running or queued.`,
+      );
+      return;
+    }
+    const running = cancelled.filter((entry) => entry.was === "running").length;
+    const waiting = cancelled.length - running;
+    const counts = [
+      ...(running > 0 ? [`${running} running`] : []),
+      ...(waiting > 0 ? [`${waiting} queued`] : []),
+    ].join(" and ");
+    const undone =
+      input.undo !== true
+        ? []
+        : (
+            await Promise.all(
+              cancelled.map(async (entry) => {
+                const put = await this.undoTask(
+                  projectId,
+                  repositoryId,
+                  entry.id,
+                  input.senderId,
+                );
+                return put === ""
+                  ? undefined
+                  : `- ${summariseObjective(
+                      withoutRoleContext(entry.objective),
+                    )} — ${put}`;
+              }),
+            )
+          ).filter((line): line is string => line !== undefined);
+    await this.postChannelSystemMessage(
+      projectId,
+      repositoryId,
+      `Stopped ${counts} task${cancelled.length === 1 ? "" : "s"} ${scope}.` +
+        (undone.length === 0
+          ? input.undo === true
+            ? " Nothing of it had reached canonical, so there was nothing to put back."
+            : ""
+          : `\n${undone.join("\n")}`),
+    );
   }
 
   private async dispatchChannelMentions(input: {
@@ -8534,6 +8810,11 @@ export class ApiGateway {
     // Read before anything else: a bare "2" carries no verb and would
     // otherwise be handed to the agent as a question about the number.
     if (this.answerPendingQuestion(input.messageId, question)) {
+      return;
+    }
+    // The same digit after the deadline is not conversation either — see
+    // `answerLapsedQuestion` for why silence here was worse than useless.
+    if (await this.answerLapsedQuestion({ ...input, reply: question })) {
       return;
     }
     // `/retry` and `/cancel` are the thread's own commands: they act on the
@@ -9566,6 +9847,20 @@ export class ApiGateway {
       },
     );
     if (answer === undefined) {
+      // Remembered so a "1" typed after this moment gets an honest account
+      // of what happened to it, rather than the chat model's best guess at
+      // a lone digit. Bounded: these entries are only ever read by a late
+      // reply, and most threads never produce one.
+      this.lapsedAgentQuestions.set(watched.messageId, {
+        optionCount: input.options.length,
+        lapsedAtMs: Date.now(),
+      });
+      for (const key of this.lapsedAgentQuestions.keys()) {
+        if (this.lapsedAgentQuestions.size <= 200) {
+          break;
+        }
+        this.lapsedAgentQuestions.delete(key);
+      }
       await this.appendChannelThreadReply({
         projectId: watched.projectId,
         repositoryId: watched.repositoryId,
@@ -9577,6 +9872,60 @@ export class ApiGateway {
       }).catch(() => undefined);
     }
     return answer;
+  }
+
+  /**
+   * Tells a late answer that it was late.
+   *
+   * The reply parses as an option of a question this thread was holding, but
+   * the deadline has already cancelled the task. Falling through to the chat
+   * model here is how "1" got answered with conversation about the number
+   * one — worse than useless, because it also destroyed the evidence of
+   * *why* nothing happened. Saying what happened is the only useful reply,
+   * and it names the fix: ask again.
+   */
+  private async answerLapsedQuestion(input: {
+    projectId: string;
+    repositoryId: string;
+    messageId: string;
+    viewerId: string;
+    reply: string;
+  }): Promise<boolean> {
+    const lapsed = this.lapsedAgentQuestions.get(input.messageId);
+    if (
+      lapsed === undefined ||
+      optionChosenBy(input.reply, lapsed.optionCount) === undefined
+    ) {
+      return false;
+    }
+    this.lapsedAgentQuestions.delete(input.messageId);
+    const minutesLate = Math.max(
+      1,
+      Math.round((Date.now() - lapsed.lapsedAtMs) / 60_000),
+    );
+    const root = await this.options.store.getChannelMessage(
+      input.repositoryId,
+      input.messageId,
+      input.viewerId,
+    );
+    const content =
+      `That answer arrived about ${minutesLate} minute${
+        minutesLate === 1 ? "" : "s"
+      } after the question's deadline — I'd already cancelled the task ` +
+      "rather than guess, so there is nothing left holding your choice. " +
+      "Ask again and I'll start over knowing it.";
+    if (root?.kind === "agent") {
+      await this.appendChannelThreadReply({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        messageId: input.messageId,
+        authorId: root.authorId,
+        content,
+      }).catch(() => undefined);
+    } else {
+      await this.sayThreadIsUnanswered(input, content);
+    }
+    return true;
   }
 
   /**
@@ -9659,10 +10008,37 @@ export class ApiGateway {
     }
     try {
       if (input.name === "cancel") {
-        await this.options.store.cancelSubmittedTask(task.id);
-        await say("Cancelled.");
-        // Stop narrating a run nobody is waiting for.
+        const operation = this.options.operations.cancelTasks;
+        if (operation === undefined) {
+          // Store-only deployments keep the old shape: the row flips, and a
+          // run that happens to hold the task fights it out at settle time.
+          await this.options.store.cancelSubmittedTask(task.id);
+          await say("Cancelled.");
+          this.watchedChannelTasks.delete(task.id);
+          return;
+        }
+        // The watcher goes first: this reply is the thread's ending, and the
+        // progress pump narrating the operation's own task_cancelled event
+        // on top of it would close the same thread twice.
         this.watchedChannelTasks.delete(task.id);
+        const { cancelled } = await operation({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          taskIds: [task.id],
+          reason: "Stopped from its thread",
+          actorId: input.viewerId,
+        });
+        if (cancelled.length === 0) {
+          await say(
+            "There's nothing left to stop — this task already finished.",
+          );
+          return;
+        }
+        await say(
+          cancelled[0]?.was === "running"
+            ? "Stopped — the agent's session was cancelled mid-run."
+            : "Cancelled.",
+        );
         return;
       }
       await this.options.store.retrySubmittedTask(task.id);
@@ -11556,109 +11932,6 @@ export class ApiGateway {
   }
 
   /** A coordinator-authored line in the channel, broadcast the same way a real post is. */
-  /**
-   * Stops agents and undoes what their work changed.
-   *
-   * `/cancel` already existed and is a different, smaller thing: it acts on
-   * the one task a thread is following and marks the row cancelled. This is
-   * the one somebody reaches for when a run is going wrong in front of them —
-   * it takes whoever is named, or everyone if nobody is, and it puts the code
-   * back.
-   *
-   * **What "back" means is deliberately narrow.** Canonical is shared. Between
-   * the task being stopped and now, other agents may have landed work of their
-   * own, and restoring the whole tree to the moment before this task would
-   * take theirs with it without saying so. So the revert is scoped to the
-   * files this task actually promoted, restored to their content at the
-   * revision immediately before its first promotion — both of which the
-   * `canonical_promoted` audit records per task. A stop undoes its own task
-   * and nothing else.
-   *
-   * It also goes through `rollbackRepository`, which submits the revert as an
-   * ordinary change — planned, arbitrated, validated, promoted by
-   * compare-and-swap. That means it can be refused while another task holds
-   * those files, and being refused is the correct answer rather than a reason
-   * to force it: an uncoordinated write to a repository other agents are
-   * working in is the failure this whole system exists to prevent.
-   */
-  private async runStopCommand(input: {
-    projectId: string;
-    repositoryId: string;
-    senderId: string;
-    rest: string;
-  }): Promise<void> {
-    const { projectId, repositoryId } = input;
-    const candidates = await this.resolveChannelMentionCandidates(
-      projectId,
-      repositoryId,
-    );
-    const visible = candidates.filter(
-      (candidate) =>
-        candidate.visibility !== "personal" ||
-        candidate.userId === input.senderId,
-    );
-    const named = visible.filter((candidate) =>
-      input.rest.includes(`@${candidate.name}`),
-    );
-    // No name is "everyone", which is what somebody typing `/stop` on its own
-    // into a room means. It is the blunt instrument and it should be the easy
-    // one to reach.
-    const targets = named.length > 0 ? named : visible;
-    if (targets.length === 0) {
-      await this.postChannelSystemMessage(
-        projectId,
-        repositoryId,
-        "There are no agents here to stop.",
-      );
-      return;
-    }
-
-    const tasks = await this.options.store.listSubmittedTasks({ repositoryId });
-    const owners = new Set(targets.map((candidate) => candidate.userId));
-    const stoppable = tasks.filter(
-      (task) =>
-        owners.has(task.submittedBy ?? "") &&
-        (task.status === "submitted" ||
-          task.status === "claimed" ||
-          task.status === "planned" ||
-          task.status === "open"),
-    );
-    if (stoppable.length === 0) {
-      await this.postChannelSystemMessage(
-        projectId,
-        repositoryId,
-        `Nothing to stop — ${
-          named.length > 0 ? "that agent has" : "no agent here has"
-        } work in flight.`,
-      );
-      return;
-    }
-
-    const lines: string[] = [];
-    for (const task of stoppable) {
-      const objective = summariseObjective(withoutRoleContext(task.objective));
-      try {
-        await this.options.store.cancelSubmittedTask(task.id);
-      } catch (error) {
-        lines.push(
-          `- ${objective} — could not be stopped: ${
-            error instanceof Error ? error.message : "the task refused"
-          }`,
-        );
-        continue;
-      }
-      // Nothing left narrating a run nobody is waiting for.
-      this.watchedChannelTasks.delete(task.id);
-      const undone = await this.undoTask(projectId, repositoryId, task.id, input.senderId);
-      lines.push(`- ${objective} — stopped${undone === "" ? "" : `; ${undone}`}`);
-    }
-    await this.postChannelSystemMessage(
-      projectId,
-      repositoryId,
-      `Stopped ${String(stoppable.length)} task(s).\n${lines.join("\n")}`,
-    );
-  }
-
   /**
    * Puts back what one task promoted, or says why it could not.
    *

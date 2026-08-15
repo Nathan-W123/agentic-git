@@ -27,7 +27,9 @@ import {
   currentRepository,
   currentUserId,
   currentUserName,
+  disconnectGitHub,
   loadContext,
+  loadGitHub,
   loadHealth,
   loadProviders,
   markRead,
@@ -123,6 +125,7 @@ import {
 import {
   cancelTask,
   connectAgent,
+  connectGitHubAccount,
   renderAgents,
   retryTask,
   selectAgent,
@@ -836,6 +839,8 @@ function settingsScreen() {
         }
       </section>
 
+      ${githubCard()}
+
       <section class="card">
         <div class="panel-head"><div><h3>Account</h3></div></div>
         <div class="set-row">
@@ -850,6 +855,57 @@ function settingsScreen() {
       </section>
     </div>
   </div></div>`;
+}
+
+/**
+ * The user's own GitHub connection, beside their agents because it is the
+ * same kind of thing: a personal identity a task of theirs spends. When an
+ * agent is asked to push, the push authenticates as this token — as this
+ * person, reaching only what they can reach — and until one is connected an
+ * asked-for push is refused by name. There is deliberately no
+ * deployment-wide token behind it.
+ */
+function githubCard() {
+  const github = state.github;
+  if (github === null) {
+    // The deployment answered that it offers no GitHub connections; a card
+    // for a thing that cannot be done here would only invite a dead click.
+    return "";
+  }
+  const credential = github?.credential;
+  const broken = credential?.unusableReason;
+  const connected = github?.connected === true;
+  return `<section class="card">
+    <div class="panel-head"><div><h3>GitHub</h3>
+      <p>The account a push of your tasks runs as</p></div></div>
+    <div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">${
+          connected
+            ? `Connected as ${esc(github.login ?? "you")}`
+            : "Not connected"
+        }</div>
+        <div class="sr-sub${broken ? " sr-warn" : ""}">${esc(
+          broken
+            ? broken
+            : connected
+              ? `Personal access token ending …${credential?.hint ?? ""}. ` +
+                "Pushes an agent runs for you authenticate as this token."
+              : github === undefined
+                ? "Checking…"
+                : "When an agent pushes for you, it pushes as you. Connect a " +
+                  "personal access token to make that possible.",
+        )}</div>
+      </span>
+      <span class="sr-ctl">
+        <button class="btn btn-sm" data-act="${
+          connected && !broken ? "github-disconnect" : "github-connect"
+        }">
+          ${broken ? "Reconnect" : connected ? "Disconnect" : "Connect"}
+        </button>
+      </span>
+    </div>
+  </section>`;
 }
 
 /**
@@ -3183,6 +3239,17 @@ document.addEventListener("click", (event) => {
     case "agent-connect":
       void connectAgent(value, render);
       return;
+    case "github-connect":
+      void connectGitHubAccount(render);
+      return;
+    case "github-disconnect":
+      void disconnectGitHub()
+        .then(() => {
+          toast("GitHub disconnected", "ok");
+          render();
+        })
+        .catch((error) => toast(error.message, "error"));
+      return;
     case "agent-add": {
       // Which agent to connect is the user's decision. Silently picking the
       // first unconnected provider made "Add Agent" a lottery on a screen
@@ -4055,6 +4122,11 @@ async function boot() {
   render();
 
   void loadProviders().then(() => render());
+  void loadGitHub().then(() => {
+    if (state.route === "settings") {
+      render();
+    }
+  });
   void loadInvitations().then(() => {
     if (state.route === "settings") {
       render();

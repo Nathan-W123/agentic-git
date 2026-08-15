@@ -84,6 +84,20 @@ import type { VendorCliKind } from "./vendor-credentials.js";
 export type UserCredentialKind = "oauth_token" | "api_key" | "session_file";
 
 /**
+ * Everything a personal credential can authenticate to.
+ *
+ * The vendor CLIs came first and gave this store its shape. GitHub joins them
+ * because a push must run as whoever submitted the task — the same property
+ * per-user CLI credentials exist for, wanting the same storage: submitter
+ * scoping, encryption at rest, and the stored-versus-usable bookkeeping. The
+ * difference is confined to delivery: a GitHub token never launches a CLI and
+ * never stages a credential home ({@link openCredentialHome} still takes only
+ * a {@link VendorCliKind}); the push path reads the secret and sends it as
+ * HTTP auth to the remote.
+ */
+export type CredentialService = VendorCliKind | "github";
+
+/**
  * Why a session file is second-best, stated once so every caller can quote it.
  *
  * A session file contains the same *rotating refresh token* the user's own
@@ -135,7 +149,13 @@ export interface UserCredentialInput {
 
 /** Everything but the secret. Safe to return to a browser. */
 export interface UserCredentialSummary {
-  vendor: VendorCliKind;
+  /**
+   * Named for the three CLIs the store began with; `github` is the one
+   * service here that is not a CLI vendor. Kept as `vendor` because it is a
+   * stored field and a wire field, and renaming it would strand every
+   * existing record and client for a word.
+   */
+  vendor: CredentialService;
   kind: UserCredentialKind;
   label: string | undefined;
   origin: CredentialOrigin;
@@ -183,7 +203,7 @@ interface StoredRecord {
 
 interface StoredFile {
   version: 1;
-  users: Record<string, Partial<Record<VendorCliKind, StoredRecord>>>;
+  users: Record<string, Partial<Record<CredentialService, StoredRecord>>>;
 }
 
 const KEY_BYTES = 32;
@@ -393,7 +413,7 @@ export class UserCredentialStore {
 
   public async put(
     userId: string,
-    vendor: VendorCliKind,
+    vendor: CredentialService,
     input: UserCredentialInput,
   ): Promise<UserCredentialSummary> {
     const secret = input.secret.trim();
@@ -436,7 +456,7 @@ export class UserCredentialStore {
    */
   public async markUnusable(
     userId: string,
-    vendor: VendorCliKind,
+    vendor: CredentialService,
     reason: string,
   ): Promise<void> {
     const file = await this.read();
@@ -461,7 +481,7 @@ export class UserCredentialStore {
    */
   public async setVisibility(
     userId: string,
-    vendor: VendorCliKind,
+    vendor: CredentialService,
     visibility: CredentialVisibility,
   ): Promise<UserCredentialSummary> {
     const file = await this.read();
@@ -479,7 +499,7 @@ export class UserCredentialStore {
 
   public async markVerified(
     userId: string,
-    vendor: VendorCliKind,
+    vendor: CredentialService,
     label?: string,
   ): Promise<void> {
     const file = await this.read();
@@ -498,7 +518,7 @@ export class UserCredentialStore {
 
   public async get(
     userId: string,
-    vendor: VendorCliKind,
+    vendor: CredentialService,
   ): Promise<UserCredential | undefined> {
     const record = (await this.read()).users[userId]?.[vendor];
     if (record === undefined) {
@@ -509,7 +529,7 @@ export class UserCredentialStore {
 
   public async summary(
     userId: string,
-    vendor: VendorCliKind,
+    vendor: CredentialService,
   ): Promise<UserCredentialSummary | undefined> {
     const record = (await this.read()).users[userId]?.[vendor];
     return record === undefined ? undefined : summarize(vendor, record);
@@ -517,7 +537,7 @@ export class UserCredentialStore {
 
   public async list(userId: string): Promise<UserCredentialSummary[]> {
     const connections = (await this.read()).users[userId] ?? {};
-    return (Object.keys(connections) as VendorCliKind[])
+    return (Object.keys(connections) as CredentialService[])
       .map((vendor) => {
         const record = connections[vendor];
         return record === undefined ? undefined : summarize(vendor, record);
@@ -525,7 +545,7 @@ export class UserCredentialStore {
       .filter((entry): entry is UserCredentialSummary => entry !== undefined);
   }
 
-  public async delete(userId: string, vendor: VendorCliKind): Promise<void> {
+  public async delete(userId: string, vendor: CredentialService): Promise<void> {
     const file = await this.read();
     const connections = file.users[userId];
     if (connections?.[vendor] === undefined) {
@@ -537,7 +557,7 @@ export class UserCredentialStore {
 }
 
 function summarize(
-  vendor: VendorCliKind,
+  vendor: CredentialService,
   record: StoredRecord,
 ): UserCredentialSummary {
   return {
@@ -692,7 +712,7 @@ export async function restoreClaudeSession(
 }
 
 export function assertSessionFile(
-  vendor: VendorCliKind,
+  vendor: CredentialService,
   secret: string,
 ): void {
   let parsed: unknown;
@@ -815,11 +835,23 @@ const ALL_CREDENTIAL_VARIABLES = [
   "GOOGLE_API_KEY",
 ];
 
+/**
+ * GitHub takes exactly one kind: a personal access token the user mints on
+ * github.com. It is stored as `api_key` — a long-lived secret pasted once —
+ * because the kind names how a secret is obtained and held, not what its
+ * issuer calls it. There is no session file to capture and no OAuth flow this
+ * deployment could drive, for the same reason the vendor header explains.
+ */
+const GITHUB_CREDENTIAL_KINDS: readonly UserCredentialKind[] = ["api_key"];
+
 export function supportsUserCredential(
-  vendor: VendorCliKind,
+  service: CredentialService,
   kind: UserCredentialKind,
 ): boolean {
-  return DELIVERY[vendor][kind] !== undefined;
+  if (service === "github") {
+    return GITHUB_CREDENTIAL_KINDS.includes(kind);
+  }
+  return DELIVERY[service][kind] !== undefined;
 }
 
 /**
@@ -845,10 +877,13 @@ const CAPTURE_ONLY_KINDS: Partial<
 
 /** The kinds the connect UI offers, in the order it should offer them. */
 export function supportedCredentialKinds(
-  vendor: VendorCliKind,
+  service: CredentialService,
 ): UserCredentialKind[] {
-  const captureOnly = new Set(CAPTURE_ONLY_KINDS[vendor] ?? []);
-  return (Object.keys(DELIVERY[vendor]) as UserCredentialKind[]).filter(
+  if (service === "github") {
+    return [...GITHUB_CREDENTIAL_KINDS];
+  }
+  const captureOnly = new Set(CAPTURE_ONLY_KINDS[service] ?? []);
+  return (Object.keys(DELIVERY[service]) as UserCredentialKind[]).filter(
     (kind) => !captureOnly.has(kind),
   );
 }

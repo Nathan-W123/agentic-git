@@ -190,3 +190,61 @@ test("a greenfield project can be created, registered, and pushed", async () => 
     await rm(harness.root, { recursive: true, force: true });
   }
 });
+
+test("an explicit per-user credential wins over the environment token", async () => {
+  const harness = await createHarness();
+  const previousToken = process.env["GITHUB_TOKEN"];
+  process.env["GITHUB_TOKEN"] = "ghp_deployment_wide";
+  try {
+    await harness.store.saveRepository({
+      id: "origin",
+      path: path.join(harness.root, "unused.git"),
+      branch: "main",
+      provider: "github",
+      remoteUrl: LOOPBACK_HOST,
+    });
+    harness.project.config.defaultRepository = "origin";
+    await harness.project.save();
+
+    // Capturing at the service boundary: what matters is which credential
+    // reaches the push, not whether git accepts it.
+    const captured: Array<{ credentials?: { token: string } }> = [];
+    const recording = {
+      pushToRemote: async (
+        _repository: unknown,
+        options: { credentials?: { token: string } },
+      ) => {
+        captured.push(options);
+        return {
+          remoteUrl: LOOPBACK_HOST,
+          targetBranch: "coord/x",
+          revision: "0".repeat(40),
+          upstreamBranch: "main",
+          upstreamRevision: undefined,
+          createdBranch: true,
+        };
+      },
+    } as unknown as RepositoryService;
+
+    // The dashboard's shape: the submitter's own stored token is handed in,
+    // and the deployment's environment must not answer instead.
+    await repoPush(
+      harness.project,
+      harness.store,
+      { credentials: { token: "ghp_submitters_own" } },
+      recording,
+    );
+    assert.equal(captured[0]?.credentials?.token, "ghp_submitters_own");
+
+    // The CLI's shape: nothing passed, the operator's own environment pays.
+    await repoPush(harness.project, harness.store, {}, recording);
+    assert.equal(captured[1]?.credentials?.token, "ghp_deployment_wide");
+  } finally {
+    if (previousToken === undefined) {
+      delete process.env["GITHUB_TOKEN"];
+    } else {
+      process.env["GITHUB_TOKEN"] = previousToken;
+    }
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});

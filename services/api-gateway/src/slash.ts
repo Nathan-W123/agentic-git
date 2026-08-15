@@ -54,8 +54,12 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: "cancel",
-    summary: "Stop the task this thread is following",
-    usage: "/cancel",
+    // Context decides the target: in a thread it stops that thread's task;
+    // in the channel it stops everything here, or one agent's tasks when a
+    // name follows. Running work included — the session is aborted, not
+    // merely the queue row.
+    summary: "Stop work — this thread's task, one agent's, or all of it",
+    usage: "/cancel [@agent]",
     takesObjective: false,
   },
   {
