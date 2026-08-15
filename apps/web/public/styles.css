@@ -99,6 +99,12 @@
 html,
 body {
   height: 100%;
+  /* The document never scrolls — the shell is a fixed-height grid and every
+     scroller is inside it — so anything the browser does with document
+     overscroll is pure accident: rubber-banding the whole app, or
+     pull-to-refresh tearing down a live channel because a finger flicked at
+     the top of the message list. Scroll stays where it started. */
+  overscroll-behavior: none;
 }
 
 body {
@@ -3582,6 +3588,50 @@ svg {
   .rr-usage {
     max-width: calc(100vw - 32px);
   }
+
+  /* The platform's tap flash is a grey-blue rectangle in somebody else's
+     palette, drawn over rows that already have hover treatments in ours.
+     Zeroed only here, where the :active states below take over the job —
+     a finger still sees every press, in the theme's own colours. */
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  /* The same surfaces the hover rules paint, pressed. Transparent-backed
+     rows show the hover ground; `.btn` keeps its own background (primary
+     buttons are accent-filled, and a grey wash over those reads as broken)
+     and darkens in place instead. */
+  .chan-row:active,
+  .menu-item:active,
+  .mention-item:active,
+  .agent-row:active,
+  .tree-row:active,
+  .roster-row-main:active,
+  .icon-btn:active,
+  .send-btn:active {
+    background: var(--bg-hover);
+  }
+
+  .btn:active {
+    filter: brightness(0.9);
+  }
+
+  /* A 30px square is a precise mouse target and a near-miss for a thumb.
+     The drawn size is part of the toolbars' density, so the *hit* area
+     grows instead: a pseudo-element catches taps a few pixels past every
+     edge without moving a pixel of layout. Grid placement ignores the
+     absolutely positioned box, so the glyph stays centred. */
+  .icon-btn,
+  .send-btn {
+    position: relative;
+  }
+
+  .icon-btn::after,
+  .send-btn::after {
+    content: "";
+    position: absolute;
+    inset: -7px;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -4232,7 +4282,8 @@ svg {
   transition: opacity 0.12s ease;
 }
 
-.cmsg-row:hover .cmsg-actions {
+.cmsg-row:hover .cmsg-actions,
+.cmsg-row:focus-within .cmsg-actions {
   opacity: 1;
   pointer-events: auto;
 }
@@ -6582,6 +6633,15 @@ body.resizing-ns * {
   padding-top: var(--safe-top);
 }
 
+/* The generic screen header — Settings, Repositories, Agents. It sat out
+   the first safe-area pass because browser chrome kept it clear; installed
+   to a home screen (standalone, translucent status bar) the page draws
+   under the clock on every screen, not only the chat ones. */
+.topbar {
+  height: calc(58px + var(--safe-top));
+  padding-top: var(--safe-top);
+}
+
 /* Fixed full-height surfaces. Each is its own stacking context pinned to the
    viewport, so a container's padding cannot reach them. */
 .sidebar {
@@ -6638,13 +6698,26 @@ body.resizing-ns * {
    `.app`/`#auth-root` prefixes are here to outrank the per-component sizes
    (`.composer textarea`, `.tree-search input`, `.roster-rename input`), which
    are all one class deep; a bare element selector loses to every one of them
-   and would silently do nothing. */
+   and would silently do nothing.
+
+   The modal and the popover layer are siblings of `#app-root`, not children
+   (see index.html), so `.app`-prefixed rules never reached them — which is
+   why connecting an agent, the one flow that is nothing but a modal with a
+   secret field in it, still zoomed. They get the same treatment by their
+   own roots. */
 @media (max-width: 600px) {
   .app input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
   .app textarea,
   .app select,
   #auth-root input,
-  #auth-root textarea {
+  #auth-root textarea,
+  #auth-root select,
+  .modal input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  .modal textarea,
+  .modal select,
+  #layer-root input,
+  #layer-root textarea,
+  #layer-root select {
     font-size: 16px;
   }
 }
@@ -6667,6 +6740,34 @@ body.resizing-ns * {
 
 .auth-shell {
   min-height: 100dvh;
+}
+
+/* The two `vh` stragglers, for the same reason as the shell above. The
+   channel drawer's list mis-sized by its share of the URL-bar delta, which
+   on a phone is the difference between the last channel being reachable
+   and being under the composer. */
+.chan-list {
+  max-height: 38dvh;
+}
+
+.agent-panel {
+  height: calc(100dvh - 320px);
+}
+
+/* A flick that reaches the end of a drawer or the transcript must stop
+   there, not hand its momentum to whatever scroller is behind it — a
+   drawer over the message list otherwise scrolls the conversation the
+   moment the channel list runs out, which reads as the app losing the
+   user's place for no reason. */
+#chan-messages,
+.chan-list,
+.chan-sidebar,
+.sidebar,
+.tree-pane,
+.thread-panel,
+.file-panel,
+.chat-pane {
+  overscroll-behavior: contain;
 }
 
 /* ------------------------------------------------- thread summary ---- */
