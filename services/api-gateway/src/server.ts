@@ -2930,11 +2930,21 @@ export class ApiGateway {
       const state = publicInvitation(invitation).status;
 
       if (method === "GET" && action === undefined) {
+        // Whether the address already has an account decides which form the
+        // recipient is shown — "choose a password" or "sign in" — and getting
+        // that wrong strands exactly the people an invitation is meant to
+        // bring in. Saying so here discloses nothing the same response does
+        // not already: it names the address, and it takes the link's secret
+        // to reach at all, so this cannot be used to test addresses.
+        const existing = await this.options.store.getUserByEmail(
+          invitation.email,
+        );
         this.sendJson(response, 200, {
           invitation: {
             email: invitation.email,
             role: invitation.role,
             status: state,
+            accountExists: existing !== undefined,
             organizationName: organization?.name ?? "this organization",
             ...(invitation.repositoryId === undefined
               ? {}
@@ -2975,8 +2985,8 @@ export class ApiGateway {
             throw new HttpError(
               409,
               "account_exists",
-              "An account already uses that address. Sign in as " +
-                `${invitation.email} and open this link again.`,
+              `An account already uses ${invitation.email}. ` +
+                "Sign in as that account to accept this invitation.",
             );
           }
         }

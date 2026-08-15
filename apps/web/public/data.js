@@ -1168,10 +1168,36 @@ export async function readInvitation(token) {
   return await api(`/invitations/${encodeURIComponent(token)}`);
 }
 
+/**
+ * Claims an invitation.
+ *
+ * A name and password create the account the invitation is for. Somebody who
+ * already has that account signs in first and calls this with neither: the
+ * session is then the proof of who is holding the link, and sending a
+ * password the server would ignore only invites the reader to think their
+ * existing one is being changed.
+ */
 export async function acceptInvitation(token, displayName, password) {
   return await api(`/invitations/${encodeURIComponent(token)}/accept`, {
     method: "POST",
-    body: { displayName, password },
+    body:
+      displayName === undefined && password === undefined
+        ? {}
+        : { displayName, password },
+  });
+}
+
+/**
+ * Signs in from the invite screen.
+ *
+ * The same endpoint the ordinary sign-in form uses — the point is only that
+ * the invite screen does not have to know how a session is established, and
+ * that the address is the invitation's rather than one that was typed.
+ */
+export async function signInForInvitation(email, password) {
+  return await api("/auth/login", {
+    method: "POST",
+    body: { email, password },
   });
 }
 

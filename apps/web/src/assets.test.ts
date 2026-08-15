@@ -820,6 +820,33 @@ test("the invite screen names the product, not only the team", async () => {
 });
 
 /**
+ * An invitation sent to somebody who is already on Lattice — a second team, a
+ * second repository — must not dead-end on a form that cannot succeed.
+ *
+ * The address is taken, so "choose a password" can only ever be refused with
+ * `account_exists`. The screen therefore reads `accountExists` from the
+ * preview to open on the sign-in form instead, keeps both forms reachable
+ * from the footer link, and falls back to sign-in if an accept is refused
+ * that way anyway — a preview read before the account existed.
+ */
+test("the invite screen lets an existing account sign in instead", async () => {
+  const app = await browserSource();
+  const start = app.indexOf("function renderInvite");
+  const body = app.slice(start, app.indexOf("\nfunction renderAuth", start));
+  assert.match(body, /accountExists/u);
+  assert.match(body, /"invite-signin"/u);
+  assert.match(body, /data-act="invite-mode" data-value="signin"/u);
+  assert.match(body, /data-act="invite-mode" data-value="join"/u);
+  // The sign-in field is the password they already have, so the browser must
+  // not be told to offer a new one.
+  assert.match(body, /current-password/u);
+  // Both forms are wired up, and a refusal on the join form moves the person
+  // to the one that can work rather than repeating itself.
+  assert.match(app, /case "invite-signin":/u);
+  assert.match(app, /account_exists/u);
+});
+
+/**
  * A call sign has one job: to be the only thing it could refer to.
  *
  * Mentions are matched with `content.includes("@" + name)` against every
