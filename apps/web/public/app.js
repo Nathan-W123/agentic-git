@@ -85,7 +85,7 @@ import {
 import {
   $,
   $$,
-  agentDoodle,
+  brandGlyph,
   agentLabelOf,
   avatar,
   brandMark,
@@ -1053,20 +1053,17 @@ function appearanceCard() {
         <div class="sr-title">Your agents' colour</div>
         <div class="sr-sub">Every agent you connect is drawn in this colour, on
           shared views too — so your teammates can tell your agents from
-          theirs. The doodle says which agent; the colour says whose.</div>
+          theirs. Every agent wears the same mark; the colour is what says
+          whose.</div>
       </span>
     </div>
     <div style="padding:0 17px 16px">
       <div class="swatches">${swatches("set-agent-color", agentColor)}</div>
       <div class="doodle-preview" style="color:${esc(agentColor)}">
-        ${["anthropic", "cursor", "openai", "google", "xai", "deepseek"]
-          .map(
-            (kind) => `<span class="doodle-chip">
-              <span class="doodle">${agentDoodle(kind)}</span>
-              <b>${esc(agentLabelOf(kind))}</b>
-            </span>`,
-          )
-          .join("")}
+        <span class="doodle-chip">
+          <span class="doodle">${brandGlyph()}</span>
+          <b>Your agents</b>
+        </span>
       </div>
     </div>
   </section>`;
@@ -2256,35 +2253,81 @@ document.addEventListener(
  * does nothing at all — closing the panel and switching to the diff both throw
  * the draft away.
  */
+const FOCUSABLE_FIELDS = new Set(["INPUT", "TEXTAREA"]);
+
 /**
- * Where the caret was in the editor, across a render it did not ask for.
+ * Where focus and the caret were, across a render nobody asked for.
  *
- * Typing does not re-render, but arriving messages do, and a message landing
- * while somebody edits a file must not move their cursor to the end of it.
+ * Every render is one `innerHTML` assignment over the whole app, so the field
+ * being typed into is destroyed and rebuilt. The text survives — it is drawn
+ * from state — but the element does not, and with it go focus, the caret, and
+ * any height the composer had grown to. What that looks like from the outside
+ * is a chat box that deselects itself mid-sentence.
+ *
+ * It only ever happened on renders the typist did not cause, which is what
+ * made it feel random: a handler that renders on purpose puts focus back
+ * itself, and there are seven things that render on their own schedule — a
+ * thirty-second poll, an audit frame, somebody else's typing indicator, an
+ * agent's busy dots, a direct message, a channel reconcile, and the refetches
+ * `renderNow` itself kicks off.
+ *
+ * This used to save exactly one element, the file editor, and only on the
+ * chats route. Keyed on `data-act` instead, it covers every field in the app
+ * for nothing extra: `data-value` disambiguates the per-row fields, and the
+ * restore is a no-op when nothing was focused.
  */
-function captureEditor() {
-  const editor = $("[data-act='chan-file-edit']");
-  if (editor === null || document.activeElement !== editor) {
+function captureFocus() {
+  const node = document.activeElement;
+  const act = node?.dataset?.act;
+  if (act === undefined || !FOCUSABLE_FIELDS.has(node.tagName)) {
     return undefined;
   }
+  let start;
+  let end;
+  try {
+    start = node.selectionStart;
+    end = node.selectionEnd;
+  } catch {
+    // A number or email input has no caret to read, and asking throws. Focus
+    // alone is the whole restore for those.
+    start = undefined;
+  }
   return {
-    start: editor.selectionStart,
-    end: editor.selectionEnd,
-    top: editor.scrollTop,
+    act,
+    value: node.dataset.value,
+    start,
+    end,
+    height: node.style.height,
+    top: node.scrollTop,
   };
 }
 
-function restoreEditor(saved) {
+function restoreFocus(saved) {
   if (saved === undefined) {
     return;
   }
-  const editor = $("[data-act='chan-file-edit']");
-  if (editor === null) {
+  const next = [...document.querySelectorAll(`[data-act="${saved.act}"]`)].find(
+    (candidate) => (candidate.dataset.value ?? "") === (saved.value ?? ""),
+  );
+  if (next === undefined || next === document.activeElement) {
     return;
   }
-  editor.focus();
-  editor.setSelectionRange(saved.start, saved.end);
-  editor.scrollTop = saved.top;
+  // `preventScroll`, or refocusing would undo the transcript scroll restored
+  // a moment earlier.
+  next.focus({ preventScroll: true });
+  if (saved.start !== undefined && saved.start !== null) {
+    try {
+      next.setSelectionRange(saved.start, saved.end);
+    } catch {
+      // Not a field with a selection. Focus is enough.
+    }
+  }
+  if (saved.height !== "") {
+    // The composer grows by having its height set imperatively, which is not
+    // in the markup and so does not survive the rebuild on its own.
+    next.style.height = saved.height;
+  }
+  next.scrollTop = saved.top;
 }
 
 function confirmDiscardEdit() {
@@ -2379,7 +2422,7 @@ function renderNow() {
   if (state.navCollapsed) {
     classes.push("nav-collapsed");
   }
-  const editorCaret = captureEditor();
+  const focusedField = captureFocus();
   // No rail. The channel sidebar is the navigation now — channels are the
   // app — and everything the rail held moved: the brand into that sidebar
   // (clicking it opens Settings), the account block into the topbar avatar,
@@ -2402,10 +2445,12 @@ function renderNow() {
     // The transcript is replaced on every render, which resets it to the top.
     // Put it back where the reader had it before anything else runs.
     restoreChannelScroll();
-    restoreEditor(editorCaret);
     void ensureCodeData(render);
     scrollThread();
   }
+  // Outside the chats branch: a search box on any screen loses focus the same
+  // way. After `restoreChannelScroll`, so the refocus does not fight it.
+  restoreFocus(focusedField);
   void ensureAgentOptions(state.selectedAgent, () => {
     if (state.route === "code" || state.route === "agents") {
       render();
@@ -3478,9 +3523,16 @@ document.addEventListener("click", (event) => {
       const split = value.indexOf("|");
       const repositoryId = value.slice(0, split);
       const agentId = value.slice(split + 1);
+      // The button that opened the agent list, so this menu lands where the
+      // last one was rather than beside the channels. It cannot be `node`:
+      // `showPopover` closes the open popover before measuring, which detaches
+      // the item just clicked, and a detached node measures as all zeroes and
+      // puts the menu in the corner of the screen. Re-querying is the way
+      // round that — the previous menu already does it — and this picked the
+      // channel row's dots button, which is halfway up the sidebar.
       const anchor =
         document.querySelector(
-          `[data-act="channel-menu"][data-value="${CSS.escape(repositoryId)}"]`,
+          `[data-act="channel-agent-menu"][data-value="${CSS.escape(repositoryId)}"]`,
         ) ?? node;
       showMenu(anchor, [
         {
@@ -3870,15 +3922,16 @@ document.addEventListener("input", (event) => {
     // Scoped to the open thread, so typing a reply raises dots inside that
     // thread and leaves the channel behind it quiet.
     sendTyping(activeChannelId(), state.activeChannelThread, node.value);
+    // Held without re-rendering, like the channel and DM composers beside it.
+    // This one kept the old behaviour and paid the old price: the draft is
+    // read in two places — the textarea's own value and the submit — so a
+    // render here rebuilt the whole app, threw away the transcript, the
+    // sidebar and the roster, and reparsed the lot to redraw a character the
+    // textarea was already showing. Then it hunted down the replacement
+    // textarea to put the caret back, and `restoreChannelScroll` forced a
+    // layout of the freshly parsed transcript. Once per keystroke.
     state.threadDraft = node.value;
-    const focused = document.activeElement === node;
-    const selStart = node.selectionStart;
-    render();
-    if (focused) {
-      const next = $("[data-act='channel-thread-input']");
-      next?.focus();
-      next?.setSelectionRange(selStart, selStart);
-    }
+    return;
   }
 });
 

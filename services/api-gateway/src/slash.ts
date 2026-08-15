@@ -63,6 +63,12 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     takesObjective: false,
   },
   {
+    name: "stop",
+    summary: "Stop an agent now and undo what its task changed",
+    usage: "/stop @agent, or /stop on its own for everyone",
+    takesObjective: false,
+  },
+  {
     name: "help",
     summary: "List what you can type here",
     usage: "/help",

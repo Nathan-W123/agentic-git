@@ -13,6 +13,7 @@ import {
 import {
   agentIdentity,
   ApiGateway,
+  describeTaskState,
   narrateTaskEvent,
   summariseObjective,
   type ApiOperations,
@@ -83,7 +84,11 @@ interface TestRuntime {
   /** `error` throws exactly what it holds, for failures with a shape. */
   runFailure: { reason?: string; error?: unknown };
   /** Every rollback the gateway asked for, in order. */
-  rollbacks: Array<{ repositoryId: string; targetRevision: string }>;
+  rollbacks: Array<{
+    repositoryId: string;
+    targetRevision: string;
+    files?: readonly string[];
+  }>;
   /** Every stop the gateway asked for, in order — scope, words and all. */
   cancelCalls: Array<{
     repositoryId: string;
@@ -455,6 +460,9 @@ async function startRuntime(
       rollbacks.push({
         repositoryId: input.repositoryId,
         targetRevision: input.targetRevision,
+        // Forwarded so a test can hold `/stop` to undoing its own task rather
+        // than the whole tree.
+        ...(input.files === undefined ? {} : { files: input.files }),
       });
       return {
         status: "integrated",
@@ -7287,6 +7295,198 @@ test("a collaborator cannot promote an auditor, but can still set a plain role",
     body: { role: "auditor" },
   });
   assert.equal(promotion.status === 200, false, "a guest must not promote");
+});
+
+/**
+ * Asked for a status report, agents called finished work outstanding.
+ *
+ * They were right about what they were shown. A conversational turn that
+ * lands is set to `open` — the work is in canonical and the thread stays warm
+ * for a follow-up — and the status list handed the model that word raw. "Open"
+ * has a plain English meaning and it is the opposite of the one intended.
+ */
+test("a landed conversational task is described as done, not as open", () => {
+  assert.match(describeTaskState("open"), /^done\b/u);
+  assert.match(describeTaskState("integrated"), /^done\b/u);
+  // The word itself must not survive into the sentence: it is the whole bug.
+  assert.doesNotMatch(describeTaskState("open"), /^open$/u);
+
+  // And the states that genuinely are not finished must not read as done.
+  for (const status of ["submitted", "claimed", "planned", "failed", "cancelled"]) {
+    assert.doesNotMatch(
+      describeTaskState(status),
+      /^done\b/u,
+      `${status} must not be reported as finished`,
+    );
+  }
+  // A status this function has not been taught is passed through rather than
+  // guessed at: a wrong plain-English gloss would be worse than the raw word.
+  assert.equal(describeTaskState("something_new"), "something_new");
+});
+
+test("a reply to an agent's own ending is answered, not swallowed", async (t) => {
+  // Reported as "if I send an additional message in a thread the agent never
+  // responds". A task that ends without being thread-worthy — the ordinary
+  // one-file change whose account fits in a sentence — has its ending posted
+  // as a top-level channel message of kind `outcome`, authored by the agent.
+  // The dashboard offers a reply on every message, so replying to an agent's
+  // last visible word opened a thread the server classified as a conversation
+  // between people, and every follow-up was stored and answered by nobody.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "outcome-thread-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    // The kind the gateway itself writes for a task that ended quietly.
+    kind: "outcome",
+    authorId: `${ownerId}:anthropic`,
+    content: "Renamed the helper and updated its one caller. (1 file changed)",
+  });
+
+  runtime.chatAnswer.text = "Yes — it was only used in the one place.";
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "did anything else use it?" } },
+  );
+  assert.equal(replied.status, 201);
+
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    const thread = (listed.data.messages as { id: string; replies: unknown[] }[])
+      .find((message) => message.id === root.id);
+    const replies = (thread?.replies ?? []) as { authorId: string }[];
+    // The agent answers in its own voice, in its own thread.
+    return replies.some((reply) => reply.authorId === `${ownerId}:anthropic`);
+  }, "the agent never answered a reply to its own outcome message");
+});
+
+test("a reply to an agent's thread naming nobody is told why, not ignored", async (t) => {
+  // The other half: a root an agent produced but that resolves to no reachable
+  // agent must still say something. Storing a reply and returning silently is
+  // indistinguishable, from the outside, from the product being broken.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "unowned-thread-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // Kind `user`, but carrying a task — so it is work somebody is following,
+  // not a standup note between people.
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "user",
+    authorId: bootstrapped.user.id,
+    content: "Tracking the migration here.",
+    taskId: "task_missing",
+  });
+
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "any progress?" } },
+  );
+  assert.equal(replied.status, 201);
+
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    const thread = (listed.data.messages as { id: string; replies: unknown[] }[])
+      .find((message) => message.id === root.id);
+    return ((thread?.replies ?? []) as unknown[]).length > 1;
+  }, "a reply on a task thread nobody owns was stored with no explanation");
+});
+
+test("/stop cancels an agent's work and undoes only what that task promoted", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic", visibility: "org" }]);
+  const repositoryId = await invitableRepository(owner, "stop-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "rework the retry loop",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  // Work that already reached canonical, recorded the way a promotion is.
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: task.id,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      previousRevision: "a".repeat(40),
+      revision: "b".repeat(40),
+      files: ["src/retry.ts"],
+    },
+  });
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/stop" },
+  });
+  assert.equal(posted.status, 201);
+
+  await waitFor(async () => {
+    const listed = await runtime.store.listSubmittedTasks({ repositoryId });
+    return listed.find((entry) => entry.id === task.id)?.status === "cancelled";
+  }, "/stop did not cancel the in-flight task");
+
+  const rolled = runtime.rollbacks.at(-1);
+  assert.ok(rolled, "/stop did not ask for the task's changes to be undone");
+  // Back to the revision before this task, and scoped to its own files — not a
+  // whole-tree revert that would take other agents' work with it.
+  assert.equal(rolled.targetRevision, "a".repeat(40));
+  assert.deepEqual([...(rolled.files ?? [])], ["src/retry.ts"]);
+});
+
+test("/stop on a task that changed nothing cancels without a rollback", async (t) => {
+  // The ordinary case: work only reaches canonical at settlement, so a task
+  // stopped while running has nothing to put back and must not ask for one.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic", visibility: "org" }]);
+  const repositoryId = await invitableRepository(owner, "stop-clean-repo");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "look at the flaky test",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  const before = runtime.rollbacks.length;
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/stop" },
+  });
+  await waitFor(async () => {
+    const listed = await runtime.store.listSubmittedTasks({ repositoryId });
+    return listed.find((entry) => entry.id === task.id)?.status === "cancelled";
+  }, "/stop did not cancel the task");
+  assert.equal(
+    runtime.rollbacks.length,
+    before,
+    "a task that promoted nothing must not trigger a rollback",
+  );
 });
 
 test("'/cancel' in the channel stops the room's work and says so", async (t) => {

@@ -261,6 +261,32 @@ export function brandMark(size = 34) {
   </svg>`;
 }
 
+/**
+ * The company mark, sized by whatever contains it.
+ *
+ * The same knot {@link brandMark} draws, with the three things that make that
+ * one unusable inside a small box removed: the `brand-mark` class, whose
+ * stylesheet rule pins it to 34px and beats the element's own width and
+ * height; those width and height attributes; and the weave mask.
+ *
+ * The mask is dropped rather than kept because its `id` is a constant. One
+ * page holds one agent face per roster row, per message author and per thread
+ * — thirty of them is an ordinary channel — and thirty elements declaring the
+ * same `id` is a document where every `url(#…)` resolves to whichever came
+ * first. It happens to look right, because the masks are identical, and it is
+ * the kind of thing that stops looking right for reasons nobody can find. At
+ * these sizes the interlace was never visible anyway: two crossed loops read
+ * as two crossed loops from sixteen pixels up.
+ */
+export function brandGlyph() {
+  return `<svg viewBox="0 0 48 48" fill="none" aria-hidden="true">
+    <rect x="6" y="15.5" width="36" height="17" rx="8.5"
+      transform="rotate(45 24 24)" stroke="currentColor" stroke-width="3.4"/>
+    <rect x="6" y="15.5" width="36" height="17" rx="8.5"
+      transform="rotate(-45 24 24)" stroke="currentColor" stroke-width="3.4"/>
+  </svg>`;
+}
+
 /* ------------------------------------------------------------ avatars ---- */
 
 const AVATAR_HUES = [
@@ -641,8 +667,15 @@ export function agentFace(agent, size = 34) {
   const kind = agentKindOf(agent?.provider ?? agent?.id);
   const presence = agent?.presence ?? "offline";
   const color = safeColor(agent?.color) ?? "var(--accent)";
-  // The kind and presence are on the element so the stylesheet can give each
-  // character its own tempo and hold a disconnected one perfectly still.
+  // One mark for every agent now, rather than a character per vendor. Which
+  // vendor is behind an agent is a fact about our plumbing, and it was the
+  // loudest thing on the screen; whose agent it is, which the colour says, is
+  // what a reader in a shared channel actually needs.
+  //
+  // The kind stays on the element even though nothing draws from it any more:
+  // it is what the stylesheet holds a disconnected agent still by, and it
+  // costs an attribute.
+  //
   // The size travels as a custom property rather than as an `sz-${size}`
   // class. The class only ever worked for sizes somebody had hand-written a
   // rule for — 28, 34 and 40 — and callers ask for 20, 24, 30 and 32 as well.
@@ -654,7 +687,7 @@ export function agentFace(agent, size = 34) {
     data-presence="${presence}" style="color:${color};--face-size:${Number(size)}px"
     title="${esc(
       agent?.name ?? AGENTS[kind].label,
-    )}">${agentDoodle(kind)}<i class="presence presence-${presence}"></i></span>`;
+    )}">${brandGlyph()}<i class="presence presence-${presence}"></i></span>`;
 }
 
 /**

@@ -51,6 +51,20 @@ export interface RollbackInput {
   actorId: string;
   projectId?: string;
   reason?: string;
+  /**
+   * Restore only these paths, leaving the rest of canonical where it is.
+   *
+   * Without it a rollback restores the whole tree, which is right when the
+   * question is "put the repository back as it was" and wrong when it is
+   * "undo what that task did". Canonical is shared: between the task being
+   * undone and now, other agents may have landed work of their own, and a
+   * whole-tree revert would silently take theirs with it. `/stop` asks for
+   * exactly the files its own task promoted, so what it undoes is its own.
+   *
+   * Paths the target revision does not have are deleted rather than skipped —
+   * a file the task created is part of what it did.
+   */
+  files?: readonly string[];
 }
 
 export type RollbackStatus =
@@ -176,11 +190,18 @@ export async function rollbackCanonical(
       revision: current.revision,
     };
   }
-  const files = await repositories.listChangedFiles(
+  const changed = await repositories.listChangedFiles(
     repository,
     current.revision,
     target.revision,
   );
+  // Narrowed to what was asked for, and only ever narrowed: a path that did
+  // not change between the two revisions has nothing to restore, and naming it
+  // must not conjure one.
+  const wanted =
+    input.files === undefined ? undefined : new Set(input.files);
+  const files =
+    wanted === undefined ? changed : changed.filter((file) => wanted.has(file));
   if (files.length === 0) {
     return {
       status: "noop",
@@ -297,9 +318,30 @@ export async function rollbackCanonical(
     // while the workspace stays based on current canonical. Collecting the
     // diff then yields an ordinary changeset that happens to undo things,
     // rather than a privileged operation on canonical.
-    await repositories
-      .getGitClient()
-      .run(["-C", workspace.path, "read-tree", "-u", "--reset", target.revision]);
+    const git = repositories.getGitClient();
+    if (input.files === undefined) {
+      await git.run([
+        "-C",
+        workspace.path,
+        "read-tree",
+        "-u",
+        "--reset",
+        target.revision,
+      ]);
+    } else {
+      // Path by path, because the two halves are different operations: a file
+      // the target has is checked out over the current one, and a file it does
+      // not have is one this task created, which is undone by removing it.
+      for (const file of files) {
+        const exists = await git
+          .run(["-C", workspace.path, "cat-file", "-e", `${target.revision}:${file}`])
+          .then(() => true)
+          .catch(() => false);
+        await (exists
+          ? git.run(["-C", workspace.path, "checkout", target.revision, "--", file])
+          : git.run(["-C", workspace.path, "rm", "-f", "--ignore-unmatch", file]));
+      }
+    }
     const changeSet = await workspaces.collectChangeSet(workspace, {
       symbolsChanged: [],
       riskAssessment: {
@@ -307,6 +349,9 @@ export async function rollbackCanonical(
         reasons: [
           `Reverts canonical to ${target.revision.slice(0, 12)}`,
           `Discards changes across ${files.length} file(s)`,
+          ...(input.files === undefined
+            ? []
+            : ["Scoped to the files named, not the whole tree"]),
         ],
       },
       agentExplanation: objective,

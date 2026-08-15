@@ -64,3 +64,15 @@ test("help lists every command, so the picker and the text cannot drift", () => 
     assert.ok(help.includes(command.summary), command.summary);
   }
 });
+
+test("/stop is a channel command that names agents rather than an objective", () => {
+  const parsed = parseSlashCommand("/stop @Papa");
+  assert.equal(parsed?.command.name, "stop");
+  assert.equal(parsed?.rest, "@Papa");
+  // Bare, it means everyone — so it must parse with nothing after it.
+  assert.equal(parseSlashCommand("/stop")?.command.name, "stop");
+  // It takes no objective: the rest of the line is who, not what.
+  assert.equal(parsed?.command.takesObjective, false);
+  // And it is offered while somebody is still typing it.
+  assert.ok(slashCommandsMatching("/st").some((entry) => entry.name === "stop"));
+});

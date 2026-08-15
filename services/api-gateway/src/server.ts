@@ -297,7 +297,66 @@ const CHANNEL_PROGRESS_INTERVAL_MS = 2000;
  * working on" and "what did you make of that", short enough that the context
  * is not itself the cost of answering.
  */
+/**
+ * Root message kinds an agent writes under its own `${userId}:${provider}` id.
+ *
+ * A thread is answered by the agent whose thread it is, and which agent that
+ * is has always been read from the root's *kind*. That worked for the
+ * acknowledgement a dispatch posts, which is `agent`, and quietly failed for
+ * everything else the same agent writes.
+ *
+ * `outcome` is the one that mattered. A task that ends without being
+ * thread-worthy — the ordinary single-file change whose account fits in a
+ * sentence — has its ending posted as a top-level channel message of that
+ * kind, authored by the agent. The dashboard offers a reply on every message,
+ * so replying to an agent's last visible word opened a thread the server then
+ * classified as a conversation between people, and every follow-up typed
+ * there was stored and answered by nobody. The author was right there in
+ * `root.authorId` the whole time, in exactly the form the code ten lines
+ * below parses.
+ */
+const AGENT_AUTHORED_ROOT_KINDS = new Set(["agent", "outcome", "progress"]);
+
 const CHANNEL_ANSWER_CONTEXT = 8;
+
+/**
+ * A task's state in words, for the agent being asked how its work is going.
+ *
+ * The status column is a scheduler's vocabulary and it is read here by
+ * something that speaks English. `open` is the one that matters: it means the
+ * work landed and the conversation is still warm for a follow-up, and it is
+ * only ever reached *from* a successful integration —
+ * `store.openSubmittedTask` refuses any row that is not `claimed`, and the
+ * only caller runs inside the `integrated` branch of the settlement loop. To a
+ * reader, "open" says the opposite of all of that.
+ *
+ * That is not a hypothetical misreading. Asked for a status report, agents
+ * reported work they had finished, summarised and posted about as still
+ * outstanding — which is the correct answer to what they were shown. Handing a
+ * model a raw enum and expecting it to know the local meaning of a word that
+ * already has a plain one is asking it to guess; these are the same states,
+ * said properly.
+ */
+export function describeTaskState(status: string): string {
+  switch (status) {
+    case "submitted":
+      return "queued, not started yet";
+    case "claimed":
+      return "running now";
+    case "planned":
+      return "planned, waiting for a person to approve it";
+    case "open":
+      return "done — finished and landed, thread still open for follow-ups";
+    case "integrated":
+      return "done — finished and landed";
+    case "failed":
+      return "failed";
+    case "cancelled":
+      return "cancelled";
+    default:
+      return status;
+  }
+}
 /**
  * An "@" that is addressing somebody, rather than one inside a word.
  *
@@ -1626,6 +1685,12 @@ export interface ApiOperations {
     targetRevision: string;
     actorId: string;
     reason?: string;
+    /**
+     * Restore only these paths. `/stop` uses it to undo one task without
+     * taking work other agents landed since; omitted, the whole tree goes
+     * back, which is what the manual rollback endpoint means.
+     */
+    files?: readonly string[];
   }): Promise<{ status: string; explanation: string }>;
   dockerStatus?(): Promise<{
     available: boolean;
@@ -7647,6 +7712,13 @@ export class ApiGateway {
       );
       return true;
     }
+    if (input.command.name === "stop") {
+      // `/cancel` with the code put back. Stopping is entirely its job — the
+      // same operation, the same targeting, the same summary — and the only
+      // thing this adds is undoing what the stopped tasks had already landed.
+      await this.cancelFromChannel({ ...input, undo: true });
+      return true;
+    }
     // `/retry` acts on the task a thread is following, and a message in the
     // channel is not in a thread. Said plainly rather than ignored, because
     // typing it in the wrong place is the obvious mistake.
@@ -7683,6 +7755,8 @@ export class ApiGateway {
     repositoryId: string;
     senderId: string;
     rest: string;
+    /** `/stop`: also put back whatever the stopped tasks had landed. */
+    undo?: boolean;
   }): Promise<void> {
     const { projectId, repositoryId } = input;
     const operation = this.options.operations.cancelTasks;
@@ -7743,10 +7817,35 @@ export class ApiGateway {
       ...(running > 0 ? [`${running} running`] : []),
       ...(waiting > 0 ? [`${waiting} queued`] : []),
     ].join(" and ");
+    const undone =
+      input.undo !== true
+        ? []
+        : (
+            await Promise.all(
+              cancelled.map(async (entry) => {
+                const put = await this.undoTask(
+                  projectId,
+                  repositoryId,
+                  entry.id,
+                  input.senderId,
+                );
+                return put === ""
+                  ? undefined
+                  : `- ${summariseObjective(
+                      withoutRoleContext(entry.objective),
+                    )} — ${put}`;
+              }),
+            )
+          ).filter((line): line is string => line !== undefined);
     await this.postChannelSystemMessage(
       projectId,
       repositoryId,
-      `Stopped ${counts} task${cancelled.length === 1 ? "" : "s"} ${scope}.`,
+      `Stopped ${counts} task${cancelled.length === 1 ? "" : "s"} ${scope}.` +
+        (undone.length === 0
+          ? input.undo === true
+            ? " Nothing of it had reached canonical, so there was nothing to put back."
+            : ""
+          : `\n${undone.join("\n")}`),
     );
   }
 
@@ -8601,7 +8700,9 @@ export class ApiGateway {
         "repository checked out. So describe what your work is doing from " +
         "the list below, and never say the work cannot continue, is blocked, " +
         "or cannot be completed merely because this conversation cannot see " +
-        "the files — that is true of the chat and false of the task.\n\n" +
+        "the files — that is true of the chat and false of the task. Each " +
+        "task below is labelled with what has actually happened to it; a task " +
+        "labelled done is finished, whatever else you remember about it.\n\n" +
         (await this.agentWorkContext(repositoryId, candidate)) +
         `\n\nThe message: ${question}`,
       QUESTION_TIMEOUT_MS,
@@ -8653,11 +8754,22 @@ export class ApiGateway {
         : mine
             .map(
               (task) =>
-                `- [${task.status}] ${task.objective.replace(/\s+/gu, " ").slice(0, 160)}`,
+                `- [${describeTaskState(task.status)}] ${task.objective
+                  .replace(/\s+/gu, " ")
+                  .slice(0, 160)}`,
             )
             .join("\n");
+    // Threads included, not just the lines that opened them. What an agent
+    // says when it finishes is a reply inside its own thread, so a context
+    // built from root messages alone contains the request and never the
+    // answer — which is how an agent came to report work it had finished and
+    // summarised as still outstanding.
     const recent = messages
-      .map((message) => message.content.replace(/\s+/gu, " ").trim())
+      .flatMap((message) => [
+        message.content,
+        ...message.replies.map((reply) => reply.content),
+      ])
+      .map((line) => line.replace(/\s+/gu, " ").trim())
       .filter((line) => line.length > 0)
       .slice(-CHANNEL_ANSWER_CONTEXT)
       .map((line) => `- ${line.slice(0, 200)}`)
@@ -8736,7 +8848,7 @@ export class ApiGateway {
     // many times it was asked. Threads open from a reply button on every
     // message, so a person's own request growing a thread is the common case,
     // not the exception.
-    if (root.kind !== "agent") {
+    if (!AGENT_AUTHORED_ROOT_KINDS.has(root.kind)) {
       const candidates = await this.resolveChannelMentionCandidates(
         input.projectId,
         input.repositoryId,
@@ -8763,6 +8875,17 @@ export class ApiGateway {
           candidate.userId === input.viewerId,
       );
       if (named.length === 0) {
+        // A thread between people, where silence is the right answer — unless
+        // it is hanging off something an agent produced, in which case the
+        // reader had every reason to expect one and a bare return is the
+        // failure this method's own comments are written against.
+        if (root.taskId !== undefined || root.kind !== "user") {
+          await this.sayThreadIsUnanswered(
+            input,
+            "No agent is named in this thread, so nobody here picked that " +
+              "up. Mention an agent by name in your reply and it will.",
+          );
+        }
         return;
       }
       // An instruction goes to one agent even when several were named — two
@@ -11809,6 +11932,74 @@ export class ApiGateway {
   }
 
   /** A coordinator-authored line in the channel, broadcast the same way a real post is. */
+  /**
+   * Puts back what one task promoted, or says why it could not.
+   *
+   * An empty string means there was nothing to put back — the ordinary case,
+   * because a task stopped while it is running has not promoted anything yet.
+   * Work only reaches canonical at settlement, so a cancelled run's edits die
+   * with its workspace and no revert is needed or wanted.
+   */
+  private async undoTask(
+    projectId: string,
+    repositoryId: string,
+    taskId: string,
+    actorId: string,
+  ): Promise<string> {
+    const promotions = (
+      await this.options.store.listAuditEvents({
+        taskId,
+        types: ["canonical_promoted"],
+      })
+    ).filter((entry) => entry.event.data["repositoryId"] === repositoryId);
+    if (promotions.length === 0) {
+      return "";
+    }
+    // The revision before this task touched canonical at all: the *first*
+    // promotion's predecessor, since a conversational task can land several
+    // turns and stopping it undoes the lot.
+    const before = promotions[0]?.event.data["previousRevision"];
+    const files = [
+      ...new Set(
+        promotions.flatMap((entry) => {
+          const named = entry.event.data["files"];
+          return Array.isArray(named) ? named.map(String) : [];
+        }),
+      ),
+    ];
+    if (typeof before !== "string" || before === "" || files.length === 0) {
+      // The promotion is on the record but not in enough detail to undo
+      // precisely, and a rollback wider than the task is not this command's to
+      // make. Said out loud rather than guessed at.
+      return "its changes are already in canonical and could not be undone automatically — roll back by hand if you need to";
+    }
+    const rollback = this.options.operations.rollbackRepository;
+    if (rollback === undefined) {
+      return "its changes are already in canonical; this deployment cannot roll back";
+    }
+    try {
+      const result = await rollback({
+        projectId,
+        repositoryId,
+        targetRevision: before,
+        actorId,
+        files,
+        reason: `Stopped by request; undoing task ${taskId}`,
+      });
+      if (result.status === "noop") {
+        return "nothing of it had reached canonical";
+      }
+      if (result.status === "promoted" || result.status === "integrated") {
+        return `reverted ${String(files.length)} file(s)`;
+      }
+      return `its changes could not be undone: ${result.explanation}`;
+    } catch (error) {
+      return `its changes could not be undone: ${
+        error instanceof Error ? error.message : "the rollback failed"
+      }`;
+    }
+  }
+
   private async postChannelSystemMessage(
     projectId: string,
     repositoryId: string,
