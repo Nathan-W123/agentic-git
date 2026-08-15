@@ -5095,30 +5095,135 @@ body.resizing-panel {
   animation: sp-blink 7s linear infinite;
 }
 
-/* The whole character lifts a quarter-pixel while it is actually working. */
-.agent-face[data-presence="online"] svg {
-  animation: sp-breathe 2.8s ease-in-out infinite;
+/* --------------------------------------------------- vendor mark motion ---- */
+
+/*
+ * The marks move, and what they do is chosen per vendor rather than applied as
+ * one house effect: these are somebody else's logos, and the motion has to
+ * read as the logo behaving rather than as our animation running on top of it.
+ * Claude's burst turns, because a radial mark is what rotation was invented
+ * for. The OpenAI knot turns the other way and slower, so a row holding both
+ * does not look geared together. The rest are barely-there, since a channel
+ * roster is thirty of these at once and the point is life, not a light show.
+ *
+ * Transforms only — no filters, no repaints of the path itself — so thirty of
+ * them cost the compositor and nothing else.
+ */
+
+.agent-face svg {
+  transform-origin: 50% 50%;
+  transform-box: fill-box;
 }
 
-/* Each character on its own clock, so a row of them never pulses together. */
-.agent-face[data-kind="cursor"] svg .sp-blink,
-.agent-face[data-kind="cursor"] svg .sp-glow {
-  animation-duration: 5.2s;
+@keyframes vm-turn {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
-.agent-face[data-kind="codex"] svg * {
+@keyframes vm-turn-back {
+  to {
+    transform: rotate(-360deg);
+  }
+}
+
+@keyframes vm-twinkle {
+  0%,
+  100% {
+    transform: scale(1) rotate(0deg);
+  }
+  50% {
+    transform: scale(1.12) rotate(12deg);
+  }
+}
+
+@keyframes vm-swim {
+  0%,
+  100% {
+    transform: translateY(0) rotate(0deg);
+  }
+  50% {
+    transform: translateY(-0.6px) rotate(-3deg);
+  }
+}
+
+@keyframes vm-breathe {
+  0%,
+  100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+}
+
+/*
+ * The three states mean different things and the motion says which. `online`
+ * is not "connected", it is *running a task right now* — see the presence
+ * derivation in `data.js`, where connected-but-not-running is `idle`. So the
+ * mark turning is the agent working, a slow drift is it waiting, and stillness
+ * is nobody home. That mapping is the whole reason to animate these at all: a
+ * roster of thirty that all move identically says nothing.
+ */
+.agent-face[data-kind="anthropic"] svg {
+  animation: vm-turn 60s linear infinite;
+}
+
+.agent-face[data-kind="openai"] svg {
+  animation: vm-turn-back 75s linear infinite;
+}
+
+.agent-face[data-kind="google"] svg {
+  animation: vm-twinkle 12s ease-in-out infinite;
+}
+
+.agent-face[data-kind="deepseek"] svg {
+  animation: vm-swim 9s ease-in-out infinite;
+}
+
+.agent-face[data-kind="xai"] svg,
+.agent-face[data-kind="cursor"] svg,
+.agent-face[data-kind="generic"] svg {
+  animation: vm-breathe 9s ease-in-out infinite;
+}
+
+/* Working. The same motion as waiting, at the speed of somebody doing it. */
+.agent-face[data-presence="online"][data-kind="anthropic"] svg {
+  animation-duration: 9s;
+}
+
+.agent-face[data-presence="online"][data-kind="openai"] svg {
+  animation-duration: 12s;
+}
+
+.agent-face[data-presence="online"][data-kind="google"] svg {
+  animation-duration: 4.5s;
+}
+
+.agent-face[data-presence="online"][data-kind="deepseek"] svg {
+  animation-duration: 3.6s;
+}
+
+.agent-face[data-presence="online"][data-kind="xai"] svg,
+.agent-face[data-presence="online"][data-kind="cursor"] svg,
+.agent-face[data-presence="online"][data-kind="generic"] svg {
+  animation-duration: 3.2s;
+}
+
+/* Each on its own clock, so a roster never pulses in unison. */
+.agent-face[data-kind="openai"] svg {
   animation-delay: -1.1s;
 }
 
-.agent-face[data-kind="gemini"] svg * {
+.agent-face[data-kind="google"] svg {
   animation-delay: -2.3s;
 }
 
-.agent-face[data-kind="grok"] svg * {
+.agent-face[data-kind="xai"] svg {
   animation-delay: -0.7s;
 }
 
-.agent-face[data-kind="deepseek"] svg * {
+.agent-face[data-kind="deepseek"] svg {
   animation-delay: -1.8s;
 }
 
@@ -5126,6 +5231,13 @@ body.resizing-panel {
 .agent-face[data-presence="offline"] svg,
 .agent-face[data-presence="offline"] svg * {
   animation: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-face svg,
+  .agent-face svg * {
+    animation: none;
+  }
 }
 
 /* --------------------------------------------------------------- menu ---- */
