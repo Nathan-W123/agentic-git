@@ -56,6 +56,16 @@
   --accent-wash-strong: rgba(139, 92, 246, 0.2);
   --accent-line: rgba(139, 92, 246, 0.38);
 
+  /* The second colour, for the other half of a pair. Overwritten by
+     `applyTheme` from the account, like the primary above it; these are the
+     values the stylesheet stands up with on its own. Not a semantic colour —
+     green still means running and amber still means waiting, and neither of
+     those follows anybody's taste. */
+  --accent-2: #3fa8b5;
+  --accent-2-bright: #6fc7d2;
+  --accent-2-wash: rgba(63, 168, 181, 0.12);
+  --accent-2-line: rgba(63, 168, 181, 0.38);
+
   --green: #4ade80;
   --green-wash: rgba(74, 222, 128, 0.12);
   --red: #f87171;
@@ -1236,11 +1246,15 @@ svg {
   flex: 1;
 }
 
+/* A bar has two ends, so it is drawn in both colours: the fill leaves in the
+   primary and arrives in the secondary. A flat fill says how far; a fill that
+   changes along its length says which way. The semantic fills below keep their
+   one colour — green means passing and nothing about taste changes that. */
 .bar > i {
   display: block;
   height: 100%;
   border-radius: 3px;
-  background: var(--accent);
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
   transition: width 0.4s ease;
 }
 
@@ -1557,6 +1571,31 @@ svg {
   color: var(--accent-bright, var(--accent));
 }
 
+/*
+ * The other way in, in the other colour. These two cards are a pair — one
+ * creates a repository, one connects one — and colouring only the first said
+ * the second was an afterthought. Held one step quieter than the primary
+ * (line, not wash, until hover) so the pair still has a first choice in it.
+ */
+.repo-action.accent-2 {
+  border-color: var(--accent-2-line);
+}
+
+.repo-action.accent-2:hover {
+  background: var(--accent-2-wash);
+  border-color: var(--accent-2);
+}
+
+.repo-action.accent-2 .ra-icon {
+  background: var(--accent-2-wash);
+  border-color: var(--accent-2-line);
+  color: var(--accent-2-bright, var(--accent-2));
+}
+
+.repo-action.accent-2 .ra-chev {
+  color: var(--accent-2-bright, var(--accent-2));
+}
+
 /* Both cards lift on hover; only the accent one is coloured. Movement is what
    says "this is a button", which a flat card in a grid does not. */
 .repo-action {
@@ -1584,12 +1623,6 @@ svg {
   border: 1px solid var(--border);
   color: var(--text-2);
   flex: none;
-}
-
-.repo-action.accent .ra-icon {
-  background: var(--accent-wash);
-  border-color: rgba(139, 92, 246, 0.3);
-  color: var(--accent-bright);
 }
 
 .repo-action .ra-icon svg {
@@ -4528,17 +4561,19 @@ svg {
   display: block;
   height: 100%;
   border-radius: 2px;
-  background: var(--accent);
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
   transition: width 0.4s ease;
 }
 
+/* The way into the thread, in the thread's colour rather than the interface's,
+   so a channel full of primary-accented chrome does not swallow it. */
 .cmsg-thread-link {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   margin-top: 7px;
   font-size: 12px;
-  color: var(--accent-bright);
+  color: var(--accent-2-bright);
 }
 
 .cmsg-thread-link:hover {
@@ -4659,10 +4694,12 @@ svg {
 }
 
 /* The request itself, at the top of the thinking it produced. Set apart from
-   the steps because it is the one line in there that somebody else wrote. */
+   the steps because it is the one line in there that somebody else wrote.
+   In the second colour, with the thread link below: a thread is the other
+   surface beside the channel, and the pair marks where one ends. */
 .tt-body .tt-task {
   color: var(--text-2, #a6a6a6);
-  border-left: 2px solid var(--accent-line);
+  border-left: 2px solid var(--accent-2-line);
   padding-left: 8px;
   margin-bottom: 8px;
 }
@@ -6978,9 +7015,12 @@ body.resizing-ns * {
   min-width: 0;
 }
 
+/* The track is coloured inline, in the colour this wheel is editing — it used
+   to be `var(--accent)`, which was right while there was one wheel and wrong
+   the moment there were three: the slider for your secondary was drawn in your
+   primary. */
 .wheel-light {
   width: 168px;
-  accent-color: var(--accent);
 }
 
 .wheel-exact {
@@ -7004,4 +7044,29 @@ body.resizing-ns * {
 .wheel-exact code {
   font-family: var(--mono, ui-monospace, monospace);
   text-transform: uppercase;
+}
+
+/* The row when the wheel is shut: the colour itself, and the way in. */
+.colour-pick {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.colour-dot {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  flex: none;
+  /* The rim is the same off-white in both themes rather than `--border`,
+     because a dark swatch on a dark card and a light one on a light card both
+     lose their edge otherwise, and a colour with no edge reads as a hole. */
+  box-shadow: 0 0 0 1px rgba(255, 255, 255, 0.22), 0 0 0 2px rgba(0, 0, 0, 0.3);
+}
+
+/* Opened by the button above it, so it hangs off that row rather than sitting
+   in the card's own rhythm. */
+.wheel-drop {
+  padding: 4px 17px 18px;
+  border-bottom: 1px solid var(--border-soft);
 }

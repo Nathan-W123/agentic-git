@@ -2134,7 +2134,7 @@ test("a member's agent colour is readable by the colleagues it identifies", asyn
   assert.equal(listed.user.appearance.agentColor, "#e05f9e");
 });
 
-test("changing one colour leaves the other one alone", async (t) => {
+test("changing one colour leaves the others alone", async (t) => {
   const runtime = await startRuntime(t);
   const client = new TestClient(runtime.origin);
   await bootstrap(client);
@@ -2143,15 +2143,21 @@ test("changing one colour leaves the other one alone", async (t) => {
     method: "PATCH",
     body: { accent: "#2fae7f" },
   });
-  // A PATCH names only what it changes; the accent picked a moment ago must
-  // survive a later choice of agent colour.
-  const second = await client.request("/api/v1/auth/me/appearance", {
+  await client.request("/api/v1/auth/me/appearance", {
+    method: "PATCH",
+    body: { accentSecondary: "#D7A13B" },
+  });
+  // A PATCH names only what it changes; the colours picked a moment ago must
+  // survive a later choice of agent colour. Three of them now, and each is
+  // written by its own wheel, so one wheel must not clear the other two.
+  const third = await client.request("/api/v1/auth/me/appearance", {
     method: "PATCH",
     body: { agentColor: "#e05f9e" },
   });
-  assert.equal(second.status, 200);
-  assert.deepEqual(second.data.user.appearance, {
+  assert.equal(third.status, 200);
+  assert.deepEqual(third.data.user.appearance, {
     accent: "#2fae7f",
+    accentSecondary: "#d7a13b",
     agentColor: "#e05f9e",
   });
 });
@@ -2162,18 +2168,22 @@ test("an agent colour must be a plain hex triple", async (t) => {
   await bootstrap(client);
 
   // The value is written into a style attribute, so a CSS colour that happens
-  // to carry a second declaration must not survive the edge.
-  for (const value of [
-    "red;background:url(https://x)",
-    "rgb(1,2,3)",
-    "#fff",
-    "javascript:alert(1)",
-  ]) {
-    const rejected = await client.request("/api/v1/auth/me/appearance", {
-      method: "PATCH",
-      body: { agentColor: value },
-    });
-    assert.equal(rejected.status, 400, `${value} should be refused`);
+  // to carry a second declaration must not survive the edge. Every colour
+  // field, not just the agent one: they all reach a style attribute, and a
+  // field that skipped the check would be the one somebody found.
+  for (const field of ["accent", "accentSecondary", "agentColor"]) {
+    for (const value of [
+      "red;background:url(https://x)",
+      "rgb(1,2,3)",
+      "#fff",
+      "javascript:alert(1)",
+    ]) {
+      const rejected = await client.request("/api/v1/auth/me/appearance", {
+        method: "PATCH",
+        body: { [field]: value },
+      });
+      assert.equal(rejected.status, 400, `${field}: ${value} should be refused`);
+    }
   }
 });
 

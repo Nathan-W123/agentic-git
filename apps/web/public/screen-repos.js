@@ -144,7 +144,7 @@ export function renderRepositories() {
         </span>
         <span class="ra-chev">${icon("chevronRight")}</span>
       </button>
-      <button class="repo-action" data-act="repo-connect">
+      <button class="repo-action accent-2" data-act="repo-connect">
         <span class="ra-icon">${icon("link")}</span>
         <span>
           <b>Connect external repository</b>

@@ -81,6 +81,14 @@ export const state = {
 
   invitations: [],
 
+  /**
+   * Which colour wheel is open in Appearance, by its `data-act` prefix, or
+   * `undefined` for none. One at a time: two discs on screen at once invite
+   * dragging on the wrong one, and a settings card that is mostly pickers
+   * hides the settings.
+   */
+  openWheel: undefined,
+
   /* Filters */
   repoQuery: "",
   repoSort: "recent",
@@ -1099,6 +1107,14 @@ export async function acceptInvitation(token, displayName, password) {
 /* --------------------------------------------------------- appearance ---- */
 
 export const DEFAULT_ACCENT = "#8b5cf6";
+/**
+ * The second colour, when nobody has chosen one.
+ *
+ * A teal rather than a near-violet: the pair only earns its keep if the two
+ * are told apart at a glance, and a secondary that reads as "the primary,
+ * slightly off" is worse than having none.
+ */
+export const DEFAULT_ACCENT_SECONDARY = "#3fa8b5";
 
 /**
  * The palette offered in settings.
@@ -1190,6 +1206,21 @@ function rememberAccent(accent) {
     // Storage can be full or blocked outright. A colour is not worth failing
     // a sign-in over; the default is a perfectly good colour.
   }
+}
+
+/**
+ * The second interface colour.
+ *
+ * No remembering across sign-outs, unlike `myAccent`. The primary is what the
+ * signed-out screens are painted in and a stranger seeing the last person's
+ * choice there is a real leak of taste; the secondary appears nowhere until
+ * somebody is signed in, so it has nothing to remember.
+ */
+export function myAccentSecondary() {
+  return (
+    validColor(state.principal?.user?.appearance?.accentSecondary) ??
+    DEFAULT_ACCENT_SECONDARY
+  );
 }
 
 export function myAccent() {
