@@ -95,6 +95,99 @@ If a producer fails planning, execution, validation, approval, or integration,
 its explicit dependency descendants are cancelled rather than run against a
 contract that never became canonical.
 
+### Admission from a single candidate
+
+The wave scheduler decides from above: it holds every plan at once. A remote
+worker, and the in-process runner, hold one plan and know nothing about the
+others, so the same question has to be answerable from one candidate plus the
+set of plans currently executing. `PlanAdmissionController`
+(`services/coordinator/src/plan-admission.ts`) is that shape. It re-implements
+nothing — the plan pair is scored by the same `ConflictDetector` and ownership
+is taken through the same `OwnershipService`, evaluated from scratch on each
+call so an in-memory lease table cannot drift from the store's. The active-plan
+set (`ActivePlan`) reaches it through the leases each runner claims *before*
+publishing its plan; `apps/cli/src/lease-admission.ts` is that bridge, and
+`docs/handoff/lease-referee.md` records what the arbitration looked like during
+the period when the local runner skipped it.
+
+The answer is all-or-nothing first, because that answer needs no qualification.
+Only a wholly refused plan is asked the finer question — is *some* of it free? —
+and it is answered by re-deciding a reduced plan rather than waving the
+remainder through. Plans the index cannot vouch for
+(`planGroundingConfidence` = `ungrounded`, which is every plan in an empty
+repository) split on whole declared paths only: no line ranges, no symbol
+claims, because both are statements about contents this path cannot read.
+
+Three constants keep a refused plan from replanning forever.
+`DEFAULT_PLAN_RETRY_MS` (15s) spaces resubmission so it is not a busy-wait.
+`BLOCKED_ATTEMPTS_BEFORE_SEQUENCING` (2) is the consecutive refusals spent on
+"plan again, narrower" before the task is sequenced instead — the first refusal
+is news to the agent, the second establishes that knowing did not help.
+`BLOCKED_ADMISSION_LIFETIME_CAP` (4) is the backstop for refusals spaced far
+enough apart never to form a run. Both are liveness bounds, not safety valves:
+each one can only convert a refusal into a wait behind the holder, which is a
+stricter promise about ordering than the refusal was. Neither can admit
+anything.
+
+## Narrating Arbitration
+
+An arbitration is the one thing this platform does that a pile of uncoordinated
+agents cannot, and for a long time it was invisible: the only symptom in the
+room was one agent mysteriously waiting. It is now announced twice, in two
+different voices, and the distinction is deliberate.
+
+**In the thread, the agent speaks for itself.** `narrateTaskEvent`
+(`services/api-gateway/src/server.ts`) turns this task's own `plan_admitted`
+into a first-person line — waiting its turn, narrowing its plan, or starting on
+the part it was granted — because a thread whose agent says "working on it" and
+then goes silent is indistinguishable from a hang.
+
+**In the room, the coordinator speaks.** Neither agent decided the order, so
+putting the sentence in an agent's mouth would read as agents negotiating with
+each other. Both room-level narrators — `narrateConflicts` for
+`conflict_detected` and `announceArbitration` for `plan_admitted` — append a
+`system` channel entry authored by `coordinator`, and both emit the **same
+sentence shape: the two agents, and the order they run in.**
+
+| Situation | The room hears |
+| --- | --- |
+| `sequence` | `⚖️ A and B have conflicting files — B starts once A is done.` |
+| `block` | `⚖️ A and B have conflicting files — B is narrowing its plan.` |
+| notification | `⚖️ A and B have conflicting files but can run together.` |
+| partial admission | `⚖️ A and B have conflicting files — A starts on `*granted files*` now, `*deferred files*` once B is done.` |
+| a hold clearing | `⚖️ A starts now — what it was waiting on is done.` |
+
+Four rules hold that shape in place, each of them a regression somebody
+reported:
+
+- **Names, not prompts.** Both sides are resolved through
+  `channelAgentNamer`, which reads the same roster presentation every @mention
+  and message author uses — so an agent named once from the pantheon at connect
+  time is called that here too, in every channel. Only when no connection
+  matches does the line fall through to a truncated quote of the objective, and
+  the quote is the fallback rather than the format. Matching is on the *vendor*
+  (`claude-1`), not the provider id (`anthropic`), and never on "the first agent
+  this person owns" — that fallback once produced `@Juliett overlaps @Juliett`.
+- **One clause, not three.** No "so it is narrowing its plan", no "flagging it
+  so nobody is surprised", no "It starts the moment that lands". The room wants
+  the order, not the coordinator's reasoning.
+- **No evidence dump.** The detector's explanation is the full structural case —
+  every overlapping file, symbol and dependency edge, with the score. It goes
+  to the audit record, which is where an argument that long belongs. Only a
+  partial admission names files, because a split is illegible without them, and
+  then at most four with `and N more`.
+- **Silence where there is no decision.** A `concurrent` disposition admits both
+  plans untouched and is not announced at all; announcing it would teach readers
+  to ignore the times it matters. An approval is announced only when it releases
+  a hold this task's own `plan_admitted` history shows was announced, so
+  ordinary approvals do not ring the bell.
+
+`narrateConflicts` is polled from the channel-progress pump (2-second cadence,
+so the line lands while the arbitration is still news) and advances a
+`conflictSequence` cursor over the audit log. Events written before
+`conflict_detected` carried a repository, or naming anything other than exactly
+two tasks, are skipped: there is nowhere to route them and no order to state.
+
 ## Replanning
 
 Before a sequenced task executes, the coordinator compares its planning
