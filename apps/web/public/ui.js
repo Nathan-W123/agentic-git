@@ -496,6 +496,7 @@ export function colorWheel(act, current) {
     <div class="wheel-side">
       <input type="range" class="wheel-light" min="12" max="88"
         value="${Math.round(l * 100)}" data-act="${esc(act)}-light"
+        style="accent-color:${esc(current)}"
         aria-label="Lightness">
       <label class="wheel-exact">
         <input type="color" value="${esc(current)}" data-act="${esc(act)}-exact"

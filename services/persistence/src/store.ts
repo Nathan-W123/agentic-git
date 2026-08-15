@@ -161,6 +161,12 @@ export interface InvitationRecord {
 
 export interface UserAppearance {
   accent?: string;
+  /**
+   * The second interface colour, used where a surface needs to be marked
+   * without competing with the primary — see `--accent-2` in `styles.css`.
+   * Personal, like `accent`, and absent until somebody picks one.
+   */
+  accentSecondary?: string;
   agentColor?: string;
 }
 

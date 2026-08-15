@@ -2199,7 +2199,11 @@ function publicUser(user: {
   systemAdmin: boolean;
   disabled: boolean;
   createdAt: string;
-  appearance?: { accent?: string; agentColor?: string };
+  appearance?: {
+    accent?: string;
+    accentSecondary?: string;
+    agentColor?: string;
+  };
 }): Omit<typeof user, "passwordDigest"> {
   return {
     id: user.id,
@@ -3012,6 +3016,14 @@ export class ApiGateway {
         ...(body["accent"] === undefined
           ? {}
           : { accent: hexColorField(body["accent"], "accent") }),
+        ...(body["accentSecondary"] === undefined
+          ? {}
+          : {
+              accentSecondary: hexColorField(
+                body["accentSecondary"],
+                "accentSecondary",
+              ),
+            }),
         ...(body["agentColor"] === undefined
           ? {}
           : { agentColor: hexColorField(body["agentColor"], "agentColor") }),

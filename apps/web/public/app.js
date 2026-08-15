@@ -35,6 +35,7 @@ import {
   phoneLayout,
   markRead,
   myAccent,
+  myAccentSecondary,
   myAgentColor,
   myAvatar,
   setMyAvatar,
@@ -1032,28 +1033,31 @@ function appearanceCard() {
       </span>
     </div>
 
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">Primary colour</div>
-        <div class="sr-sub">Accents, highlights, and the active state across the
-          interface. Only you see this.</div>
-      </span>
-    </div>
-    <div style="padding:0 17px 16px">
-      ${colorWheel("set-accent", accent)}
-    </div>
+    ${colourRow(
+      "set-accent",
+      "Primary colour",
+      `Accents, highlights, and the active state across the interface. Only
+       you see this.`,
+      accent,
+    )}
 
-    <div class="set-row">
-      <span class="sr-body">
-        <div class="sr-title">Your agents' colour</div>
-        <div class="sr-sub">Every agent you connect is drawn in this colour, on
-          shared views too — so your teammates can tell your agents from
-          theirs. The mark says which vendor; the colour says whose.</div>
-      </span>
-    </div>
-    <div style="padding:0 17px 16px">
-      ${colorWheel("set-agent-color", agentColor)}
-      <div class="doodle-preview" style="color:${esc(agentColor)}">
+    ${colourRow(
+      "set-accent-secondary",
+      "Secondary colour",
+      `The other half of a pair: the second way into a repository, the far end
+       of a progress bar, the thread beside a channel. Somewhere the interface
+       shows two things and only one of them was coloured.`,
+      myAccentSecondary(),
+    )}
+
+    ${colourRow(
+      "set-agent-color",
+      "Your agents' colour",
+      `Every agent you connect is drawn in this colour, on shared views too —
+       so your teammates can tell your agents from theirs. The mark says which
+       vendor; the colour says whose.`,
+      agentColor,
+      `<div class="doodle-preview" style="color:${esc(agentColor)}">
         ${["anthropic", "cursor", "openai", "google", "xai", "deepseek"]
           .map(
             (kind) => `<span class="doodle-chip">
@@ -1062,9 +1066,43 @@ function appearanceCard() {
             </span>`,
           )
           .join("")}
-      </div>
-    </div>
+      </div>`,
+    )}
   </section>`;
+}
+
+/**
+ * One colour: a swatch, and a button that opens the wheel.
+ *
+ * The wheel used to sit open under every colour, which meant three discs and
+ * three sliders in a card whose other rows are one line each — the settings
+ * were the small part of the settings screen. A swatch already answers "what
+ * colour is this"; the wheel is only wanted by somebody who came to change it,
+ * so it waits behind the press that says so.
+ *
+ * `state.openWheel` holds one act at a time, so opening a second wheel closes
+ * the first rather than stacking them.
+ */
+function colourRow(act, title, sub, current, extra = "") {
+  const open = state.openWheel === act;
+  return `<div class="set-row">
+      <span class="sr-body">
+        <div class="sr-title">${title}</div>
+        <div class="sr-sub">${sub}</div>
+      </span>
+      <span class="sr-ctl colour-pick">
+        <span class="colour-dot" style="background:${esc(current)}"></span>
+        <button type="button" class="btn btn-quiet" data-act="wheel-open"
+          data-value="${esc(act)}" aria-expanded="${open}">
+          ${open ? "Done" : "Change colour"}
+        </button>
+      </span>
+    </div>
+    ${
+      open
+        ? `<div class="wheel-drop">${colorWheel(act, current)}${extra}</div>`
+        : ""
+    }`;
 }
 
 /**
@@ -1087,11 +1125,19 @@ function wheelColorAt(node, event, current) {
 /** The appearance field a wheel's `data-act` belongs to. */
 const WHEEL_FIELD = {
   "set-accent": "accent",
+  "set-accent-secondary": "accentSecondary",
   "set-agent-color": "agentColor",
 };
 
+/** What each of those fields currently reads as. */
+const WHEEL_VALUE = {
+  accent: myAccent,
+  accentSecondary: myAccentSecondary,
+  agentColor: myAgentColor,
+};
+
 function currentWheelColor(field) {
-  return field === "accent" ? myAccent() : myAgentColor();
+  return (WHEEL_VALUE[field] ?? myAccent)();
 }
 
 async function saveAppearanceChoice(patch) {
@@ -1750,6 +1796,19 @@ function applyTheme() {
     withAlpha(accent, light ? 0.28 : 0.2),
   );
   root.setProperty("--accent-line", withAlpha(accent, light ? 0.5 : 0.38));
+  // The second colour, derived exactly as the first is so the two behave
+  // identically under both themes. Fewer variants, deliberately: a secondary
+  // that grew its own dim, bright and strong-wash would be a second theme
+  // rather than a second colour, and every surface would then have to decide
+  // which one it belonged to.
+  const second = myAccentSecondary();
+  root.setProperty("--accent-2", second);
+  root.setProperty(
+    "--accent-2-bright",
+    light ? readableOn(second, "#e8e2d4", 4.5) : mix(second, "#ffffff", 0.32),
+  );
+  root.setProperty("--accent-2-wash", withAlpha(second, light ? 0.17 : 0.12));
+  root.setProperty("--accent-2-line", withAlpha(second, light ? 0.5 : 0.38));
   // Surfaces are the stylesheet's business, and only the stylesheet's.
   //
   // This used to overwrite every background, border and text colour from here,
@@ -3726,7 +3785,15 @@ document.addEventListener("click", (event) => {
       setMyAvatar(undefined);
       render();
       return;
+    case "wheel-open":
+      // Toggle, and only one open: pressing the button under an open wheel is
+      // "done", and pressing another colour's swaps rather than stacks.
+      state.openWheel =
+        state.openWheel === node.dataset.value ? undefined : node.dataset.value;
+      render();
+      return;
     case "set-accent-wheel":
+    case "set-accent-secondary-wheel":
     case "set-agent-color-wheel": {
       const field = WHEEL_FIELD[act.replace(/-wheel$/u, "")];
       void saveAppearanceChoice({
@@ -3896,6 +3963,7 @@ document.addEventListener("change", (event) => {
   const { node, act } = found;
   switch (act) {
     case "set-accent-light":
+    case "set-accent-secondary-light":
     case "set-agent-color-light": {
       // On `change`, not `input`: dragging a slider would otherwise be one
       // save per pixel, and the value is stored on the account.
@@ -3907,6 +3975,7 @@ document.addEventListener("change", (event) => {
       return;
     }
     case "set-accent-exact":
+    case "set-accent-secondary-exact":
     case "set-agent-color-exact": {
       const field = WHEEL_FIELD[act.replace(/-exact$/u, "")];
       void saveAppearanceChoice({ [field]: node.value });
