@@ -3189,14 +3189,28 @@ export class Coordinator {
           },
         );
       }
+      const agentAccount = result.changeSet.agentExplanation.trim();
+      // An empty ending that is not a report still carries the agent's own
+      // account, appended to the alarm rather than replacing it. That
+      // account is the only substantive evidence an empty run leaves —
+      // "the push was refused: GitHub is not connected" was written right
+      // there and then discarded, so the thread said "produced no
+      // repository changes" twice in a row while the reason sat unread in
+      // the changeset. The alarm still leads: an account can also be an
+      // excuse, and an empty run from a task meant to write stays a
+      // failure whatever it says for itself.
+      const failureExplanation =
+        integration.status === "empty" && agentAccount.length > 0
+          ? `${integration.explanation}. The agent's own account: ${agentAccount}`
+          : integration.explanation;
       const explanation = reported
         ? // The agent's own words are the deliverable here — there is no diff
           // to read instead, and the generic line says nothing a reader can
           // use.
-          result.changeSet.agentExplanation.trim().length > 0
-          ? result.changeSet.agentExplanation.trim()
+          agentAccount.length > 0
+          ? agentAccount
           : "Reported without changing any files."
-        : integration.explanation;
+        : failureExplanation;
       if (integration.status === "integrated") {
         await this.trace(
           recorder,
@@ -3269,7 +3283,10 @@ export class Coordinator {
           result.task.id,
           {
             status: integration.status,
-            explanation: integration.explanation,
+            // The enriched form, because this field is what the channel
+            // narrates: the generic sentence alone is exactly the ending
+            // that told a person nothing twice.
+            explanation: failureExplanation,
           },
         );
       }
