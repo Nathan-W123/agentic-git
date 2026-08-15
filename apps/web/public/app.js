@@ -32,6 +32,7 @@ import {
   loadGitHub,
   loadHealth,
   loadProviders,
+  phoneLayout,
   markRead,
   myAccent,
   myAgentColor,
@@ -2081,6 +2082,14 @@ window.addEventListener("resize", () => {
   }
 });
 
+/* Some markup is decided at render time by `phoneLayout()` — the channel
+   header renders its tools pinned open on a phone — so crossing the
+   breakpoint (a rotation, a resized window) has to re-render once or the
+   header keeps the shape of the width it last rendered at. */
+window.matchMedia("(max-width: 600px)").addEventListener("change", () => {
+  render();
+});
+
 /* The soft keyboard shrinks the visual viewport, and the transcript above
    the composer loses its bottom edge — the message being replied to slides
    up behind the keyboard, and typing means typing at a conversation that is
@@ -2130,18 +2139,20 @@ document.addEventListener("focusin", requestUsageForHoverTarget);
 
 /* -------------------------------------------------- phone swipe ---- */
 /*
- * Swipe in from the right edge to bring up the side panel, swipe right to put
- * it away.
+ * Each edge swipes in what lives on that side: from the right, the side
+ * panel (threads, files); from the left, the channel drawer with the
+ * channels, the users and the agents. Swiping back the way it came puts
+ * either away.
  *
- * Phone only, and only on the chats screen. On a wide window the panel is an
- * ordinary always-visible column and there is nothing to reveal; the header
+ * Phone only, and only on the chats screen. On a wide window both are
+ * ordinary always-visible columns and there is nothing to reveal; the header
  * buttons keep working at every width and this is an addition to them, not a
  * replacement — a gesture nobody can see is a poor sole route to a feature.
  *
- * The open gesture has to start near the right edge, because a leftward drag
- * from the middle of a transcript is how someone scrolls a wide code block or
- * swipes between browser tabs. The close gesture has no edge requirement: the
- * panel is full width once open, so anywhere on it is the panel.
+ * The open gestures have to start near their edge, because a drag from the
+ * middle of a transcript is how someone scrolls a wide code block or swipes
+ * between browser tabs. The close gestures have no edge requirement: an open
+ * surface is full width (or nearly), so anywhere on it is the surface.
  */
 const SWIPE_EDGE_PX = 28;
 const SWIPE_MIN_PX = 60;
@@ -2151,10 +2162,6 @@ const SWIPE_MIN_PX = 60;
 const SWIPE_MAX_SLOPE = 0.6;
 
 let swipeStart;
-
-function phoneLayout() {
-  return window.matchMedia("(max-width: 600px)").matches;
-}
 
 /** Whichever side panel is showing, closed the way its own button closes it. */
 function closeSidePanel() {
@@ -2233,7 +2240,14 @@ document.addEventListener(
       return;
     }
     if (dx < 0) {
-      // Leftward, from the right edge: bring the panel in. The thread list is
+      // Leftward: an open channel drawer goes back first — it came from
+      // this edge, so this is its dismissal whatever the finger started on.
+      if (state.chanSidebarOpen === true) {
+        state.chanSidebarOpen = false;
+        render();
+        return;
+      }
+      // From the right edge: bring the panel in. The thread list is
       // what it opens onto — the panel's own tabs move between that, the file
       // tree and an open file once it is showing.
       if (start.x >= window.innerWidth - SWIPE_EDGE_PX && !sidePanelOpen()) {
@@ -2242,7 +2256,15 @@ document.addEventListener(
       }
       return;
     }
+    // Rightward: whatever panel is out goes away first; with nothing out, the
+    // left edge pulls in the channel drawer — channels, users and agents —
+    // the same surface its header button opens.
     if (sidePanelOpen() && closeSidePanel()) {
+      render();
+      return;
+    }
+    if (start.x <= SWIPE_EDGE_PX && state.chanSidebarOpen !== true) {
+      state.chanSidebarOpen = true;
       render();
     }
   },

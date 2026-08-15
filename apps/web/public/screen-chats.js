@@ -39,6 +39,7 @@ api,
   myAvatar,
   persist,
   personOnline,
+  phoneLayout,
   postChannelReply,
   providerEffortOptions,
   providerModelOptions,
@@ -768,7 +769,14 @@ function chanHeader(repository, repositoryId) {
       // Six controls sat permanently in a header that is 44 pixels tall on a
       // phone, and on any given visit a reader wants none of them. Behind one
       // arrow they are a menu; in front of it they were the header.
-      state.chanToolsOpen !== true
+      //
+      // Except on a phone, where the header wraps and the tools get a full
+      // row of their own (see the 600px tier in styles.css): there the fold
+      // saved no space, and the toggle was one more tap in front of every
+      // tool. Pinned open below the breakpoint — the chevron is hidden by
+      // the same tier, and `chanToolsOpen` keeps meaning what it means on
+      // desktop.
+      state.chanToolsOpen !== true && !phoneLayout()
         ? ""
         : `<span class="chan-tools">
             ${previewControl(repositoryId)}

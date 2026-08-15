@@ -368,6 +368,16 @@ export async function apiOptional(path, fallback) {
   }
 }
 
+/**
+ * Whether the layout is in its phone tier — one definition, matching the
+ * 600px breakpoint styles.css calls "real phone widths", for every piece of
+ * JS that renders differently there (the pinned header tools, the edge
+ * swipes). A second number would drift from the stylesheet's.
+ */
+export function phoneLayout() {
+  return window.matchMedia("(max-width: 600px)").matches;
+}
+
 /* ------------------------------------------------------------- loading ---- */
 
 export async function loadHealth() {
