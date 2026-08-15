@@ -3421,6 +3421,35 @@ for (const backend of backends) {
       assert.equal(overrides["agent_1"]?.role, "Frontend Agent");
       assert.equal(Object.keys(overrides).length, 1);
 
+      // Call signs: the account-wide name an agent answers to in every
+      // channel, kept here so it outlives the control plane's local secrets
+      // file — losing that file is what made every roster fall back to
+      // "Claude (Nathan)" after a restart.
+      assert.deepEqual(await store.listAgentCallSigns(), []);
+      const dealt = await store.setAgentCallSign(alice.id, "anthropic", "Athena");
+      assert.equal(dealt.callSign, "Athena");
+      assert.equal(dealt.userId, alice.id);
+      assert.equal(dealt.provider, "anthropic");
+      await store.setAgentCallSign(bob.id, "openai", "Vesta");
+      // Keyed by (user, provider): renaming replaces rather than duplicates.
+      await store.setAgentCallSign(alice.id, "anthropic", "Icarus");
+      const signs = await store.listAgentCallSigns();
+      assert.equal(signs.length, 2);
+      assert.equal(
+        signs.find(
+          (sign) => sign.userId === alice.id && sign.provider === "anthropic",
+        )?.callSign,
+        "Icarus",
+      );
+      // Clearing forgets it, so a name deliberately removed does not come
+      // back on the next restart.
+      await store.clearAgentCallSign(alice.id, "anthropic");
+      const remaining = await store.listAgentCallSigns();
+      assert.equal(remaining.length, 1);
+      assert.equal(remaining[0]?.callSign, "Vesta");
+      await store.clearAgentCallSign(bob.id, "openai");
+      assert.deepEqual(await store.listAgentCallSigns(), []);
+
       // Opt-in channel membership: empty until explicitly added, additions
       // are per (repository, user, provider), and removal is symmetric.
       assert.deepEqual(

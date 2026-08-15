@@ -7410,6 +7410,43 @@ test("a personal agent cannot be made auditor, an org-wide one can", async (t) =
   assert.equal(orgWide.status, 200, JSON.stringify(orgWide.data));
 });
 
+test("the roster falls back to the stored call sign, not the vendor label", async (t) => {
+  // The reported bug: reload into Lattice and the channel roster calls every
+  // agent "Claude (Nathan)" again. Names lived only in the control plane's
+  // local `provider-connections.json` — the file `connectionsFor` reads — so
+  // a restart on a filesystem that did not keep it lost every name while the
+  // database still held the channel. The store remembers, so the roster does.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "named");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  await runtime.store.setAgentCallSign(ownerId, "anthropic", "Athena");
+
+  const roster = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`,
+  );
+  assert.equal(roster.status, 200, JSON.stringify(roster.data));
+  assert.equal(roster.data.agents.length, 1);
+  assert.equal(roster.data.agents[0].name, "Athena");
+
+  // A channel rename still wins over it: the per-room override is the one
+  // thing that is allowed to disagree with an agent's account-wide name.
+  const renamed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents/${ownerId}:anthropic`,
+    { method: "POST", body: { name: "Scout" } },
+  );
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+  const afterRename = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`,
+  );
+  assert.equal(afterRename.data.agents[0].name, "Scout");
+});
+
 test("the auditor audits a canonical advance and posts what it finds", async (t) => {
   const runtime = await startRuntime(t, { auditorPollIntervalMs: 20 });
   const owner = new TestClient(runtime.origin);

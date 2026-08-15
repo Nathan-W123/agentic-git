@@ -154,7 +154,15 @@ async function serve(
   const credentials = await UserCredentialStore.open(
     path.join(project.directory, "secrets"),
   );
-  const providerChat = new ProviderChatService(project, { credentials });
+  // The call signs go in the coordination store, not only in the secrets
+  // file beside the credentials: that file lives on this machine's disk, and
+  // a deployment whose filesystem does not outlive a restart came back with
+  // every agent name gone — rosters and old messages falling back to
+  // "Claude (Nathan)" in channels the database remembered perfectly.
+  const providerChat = new ProviderChatService(project, {
+    credentials,
+    callSigns: store,
+  });
   // Beside the agent connections and in the same store: a push runs as the
   // task's submitter, so their GitHub token is scoped, stored and shown
   // exactly the way their agent credentials are. With a GitHub OAuth App's

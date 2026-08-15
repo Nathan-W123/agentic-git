@@ -1064,6 +1064,29 @@ export interface ChannelAgentOverride {
 }
 
 /**
+ * The name one account's agent answers to everywhere — its call sign.
+ *
+ * Handed out once, when the account connects (`assignCallSign` in
+ * `apps/web/src/providers.ts`), and deliberately *not* per channel: the same
+ * agent is the same Athena in every room.
+ *
+ * It lives here, in the coordination store, rather than only in the control
+ * plane's local `secrets/provider-connections.json`. That file is beside the
+ * credentials on the control plane's own disk, so a deployment whose
+ * filesystem does not outlive a restart came back with every name gone and
+ * every roster reading "Claude (Nathan)" again — the vendor-label fallback —
+ * even though the database still held every channel, message and override.
+ * A name people have learned belongs with the rest of the durable state.
+ */
+export interface AgentCallSign {
+  userId: string;
+  /** A chat provider id — "anthropic", "openai", "google". */
+  provider: string;
+  callSign: string;
+  assignedAt: string;
+}
+
+/**
  * One (repository, user, provider) triple that is an actual member of a
  * channel — i.e. eligible to appear in its roster and be @mentioned there.
  *
@@ -1624,6 +1647,32 @@ export interface CoordinationStore {
     agentId: string,
     patch: { name?: string; role?: string; model?: string; effort?: string },
   ): Promise<ChannelAgentOverride>;
+  /**
+   * Every agent name this deployment has handed out, across all accounts.
+   *
+   * Read whole rather than per user because both readers need it whole: the
+   * roster resolves several people's agents at once, and handing out a new
+   * name has to know which signs are already taken deployment-wide so two
+   * agents in one room are not both Hermes.
+   */
+  listAgentCallSigns(): Promise<AgentCallSign[]>;
+  /**
+   * Records the name an account's agent answers to. Last write wins, which
+   * is what renaming through the settings route means; callers that must not
+   * rename (the automatic first naming) check for an existing row first.
+   */
+  setAgentCallSign(
+    userId: string,
+    provider: string,
+    callSign: string,
+  ): Promise<AgentCallSign>;
+  /**
+   * Forgets a name, so the agent falls back to its vendor label again. This
+   * is what clearing the name in the connection's settings means; without it
+   * a cleared name would reappear on the next restart, which is the same
+   * complaint as a name that vanishes, pointed the other way.
+   */
+  clearAgentCallSign(userId: string, provider: string): Promise<void>;
   /** Every (user, provider) that is currently an opted-in member of this channel. */
   listChannelAgentMembers(
     repositoryId: string,

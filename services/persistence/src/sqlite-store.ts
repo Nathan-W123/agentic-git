@@ -53,6 +53,7 @@ import type {
   AppendChannelMessageInput,
   ApprovalFilter,
   ChannelChangedFile,
+  AgentCallSign,
   ArchiveAuditInput,
   ChangesetComment,
   ChannelAgentOverride,
@@ -3573,6 +3574,50 @@ export class SqliteCoordinationStore implements CoordinationStore {
         override.updatedAt,
       );
     return override;
+  }
+
+  public async listAgentCallSigns(): Promise<AgentCallSign[]> {
+    const rows = this.db
+      .prepare("SELECT * FROM agent_call_signs ORDER BY assigned_at, user_id")
+      .all() as Row[];
+    return rows.map((row) => ({
+      userId: text(row, "user_id"),
+      provider: text(row, "provider"),
+      callSign: text(row, "call_sign"),
+      assignedAt: text(row, "assigned_at"),
+    }));
+  }
+
+  public async setAgentCallSign(
+    userId: string,
+    provider: string,
+    callSign: string,
+  ): Promise<AgentCallSign> {
+    const record: AgentCallSign = {
+      userId,
+      provider,
+      callSign,
+      assignedAt: new Date().toISOString(),
+    };
+    this.db
+      .prepare(
+        `INSERT INTO agent_call_signs (user_id, provider, call_sign, assigned_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(user_id, provider) DO UPDATE SET
+           call_sign = excluded.call_sign,
+           assigned_at = excluded.assigned_at`,
+      )
+      .run(userId, provider, callSign, record.assignedAt);
+    return record;
+  }
+
+  public async clearAgentCallSign(
+    userId: string,
+    provider: string,
+  ): Promise<void> {
+    this.db
+      .prepare("DELETE FROM agent_call_signs WHERE user_id = ? AND provider = ?")
+      .run(userId, provider);
   }
 
   public async listChannelAgentMembers(

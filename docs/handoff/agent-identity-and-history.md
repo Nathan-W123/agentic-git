@@ -29,6 +29,19 @@ To finish the user's ask:
 3. Stop assigning at channel-add once connect-time assignment exists — that
    code is in the other session's tree, not in committed history.
 
+**Where the name lives (2026-08-15).** A call sign is now written twice: to
+`secrets/provider-connections.json` as before, and to `agent_call_signs` in
+the coordination store (`listAgentCallSigns`/`setAgentCallSign`/
+`clearAgentCallSign`, migration 32). The file alone was not enough — it sits
+on the control plane's own disk, so a deployment whose filesystem does not
+outlive a restart came back with every name gone and every roster reading
+"Claude (Nathan)" in channels the database remembered perfectly. Reads
+reconcile the two: a name the store knows and the file has lost is *restored*
+rather than re-dealt, the file wins where both have one, and a name cleared
+through the settings route is cleared in both. The `/channel/agents` roster
+also reads the store directly (`channelAgentConnections` in server.ts) for the
+case the file lost the connection record along with the name.
+
 ### The pool (Greek + Roman, ready to paste)
 
 ```ts
