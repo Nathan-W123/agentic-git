@@ -317,6 +317,15 @@ const CHANNEL_PROGRESS_INTERVAL_MS = 2000;
  */
 const AGENT_AUTHORED_ROOT_KINDS = new Set(["agent", "outcome", "progress"]);
 
+/**
+ * An image in a message, in the one form the channel writes and reads.
+ *
+ * The id shape is checked here as well as in the store, because this match is
+ * what decides whether a filesystem path is pasted into an agent's objective.
+ */
+const ATTACHMENT_REFERENCE =
+  /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu;
+
 const CHANNEL_ANSWER_CONTEXT = 8;
 
 /**
@@ -553,9 +562,28 @@ const CHANNEL_PROGRESS_MAX_MS = 60 * 60 * 1000;
  * order, so the reasoning is there for the one run in ten that needs
  * explaining.
  */
+/**
+ * Lines that are true of every run, and so say nothing about this one.
+ *
+ * Held until something notable opens the thread, which is what stops "change
+ * this 1 to a 2" getting a room of its own.
+ *
+ * Two things that used to be in here are not any more, and the distinction is
+ * the whole point of the list: `agent_progress` carries the agent's *own*
+ * message, and `workspace_changed` names the files it is editing right now.
+ * Neither is boilerplate — they are the only things in a run that are about
+ * this run — and holding them meant the thread stayed empty for the entire
+ * time the work was happening and appeared, complete, once it was over. A
+ * room whose purpose is watching somebody think is no use delivered as a
+ * transcript afterwards.
+ *
+ * The cost is honest and was chosen deliberately: a task that narrates
+ * anything at all now opens a thread, so most real work gets one. Only a run
+ * that says nothing of its own between starting and ending still lands as a
+ * single line in the channel.
+ */
 const CHANNEL_CEREMONIAL_EVENTS = new Set([
   "task_started",
-  "agent_progress",
   // Every planned run has a plan, so saying it has one distinguishes nothing.
   // Its absence from this set quietly made the whole feature inert: the
   // coordinator traces `plan_received` on every planned turn
@@ -577,7 +605,6 @@ const CHANNEL_CEREMONIAL_EVENTS = new Set([
   // flush in order into whichever thread a *notable* line opens: a question,
   // a hold, a failure, a replan, an approval gate. A run none of those touch
   // ends as two lines in the channel, which is what a quick task is.
-  "workspace_changed",
   "changeset_collected",
   "validation_completed",
 ]);
@@ -1657,6 +1684,12 @@ export interface ApiOperations {
   attachmentRead?(
     id: string,
   ): Promise<{ bytes: Buffer; contentType: string } | undefined>;
+  /**
+   * Where an attached image sits on disk, for handing to an agent that can
+   * open it. Absent on a deployment that stores images somewhere a task
+   * cannot reach, where the reference stays a reference.
+   */
+  attachmentPath?(id: string): Promise<string | undefined>;
   /**
    * One file out of canonical, as bytes. Used to lift an image an agent
    * committed into the channel, where it can be looked at rather than
@@ -8414,7 +8447,10 @@ export class ApiGateway {
         // its objective are both in hand at once, so it is the one place
         // that can honestly say what the agent's role here is; a task
         // submitted outside a channel has no such pair to resolve.
-        objective: withRoleContext(candidate.role, withoutMentions(content) || content),
+        objective: withRoleContext(
+          candidate.role,
+          await this.describeAttachments(withoutMentions(content) || content),
+        ),
         vendor: candidate.vendor,
         // The mentioned (or auto-claiming) agent's owner, never the sender —
         // work someone else's agent takes must not spend the sender's own
@@ -9404,6 +9440,51 @@ export class ApiGateway {
    * no credential, a provider that is down, a model that rambles — falls back
    * to a fixed line rather than leaving the request unanswered.
    */
+  /**
+   * Rewrites the images in a request into something an agent can open.
+   *
+   * A pasted screenshot reaches the channel as `![alt](attachment:<id>)`,
+   * which the dashboard turns into an `<img>` and an agent could only read as
+   * punctuation. The bytes are already on the same filesystem the task runs
+   * on, so the shortest honest answer is to say where: the reference becomes
+   * the absolute path, and an agent that can read files can look at it.
+   *
+   * Left exactly as it was when the deployment cannot answer for a path, or
+   * when the id names nothing. A wrong path is worse than a visible id — one
+   * is a puzzle, the other is a lie about a file.
+   */
+  private async describeAttachments(objective: string): Promise<string> {
+    const resolve = this.options.operations.attachmentPath;
+    // A plain substring for the cheap check, deliberately not `.test()`: the
+    // pattern is global, `.test` advances its `lastIndex`, and `matchAll`
+    // copies that offset into the clone it iterates — so guarding with the
+    // regex made it skip the very match it had just found.
+    if (resolve === undefined || !objective.includes("](attachment:")) {
+      return objective;
+    }
+    const seen = new Map<string, string | undefined>();
+    let result = objective;
+    for (const match of objective.matchAll(ATTACHMENT_REFERENCE)) {
+      const id = match[2] ?? "";
+      if (!seen.has(id)) {
+        seen.set(
+          id,
+          await resolve(id).catch(() => undefined),
+        );
+      }
+      const full = seen.get(id);
+      if (full === undefined) {
+        continue;
+      }
+      const alt = (match[1] ?? "").trim();
+      result = result.replace(
+        match[0],
+        `[image${alt === "" ? "" : ` "${alt}"`}: ${full} — open this file to see it]`,
+      );
+    }
+    return result;
+  }
+
   private async composeAcknowledgement(
     candidate: ChannelMentionCandidate,
     request: string,

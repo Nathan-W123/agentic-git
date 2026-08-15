@@ -75,6 +75,7 @@ import {
   setPreviewCommand,
   simplifySummary,
   startPreview,
+  uploadAttachment,
   stopPreview,
   setRepositoryGrant,
   revokeRepositoryGrant,
@@ -1384,6 +1385,44 @@ async function simplifySummaryAction(repositoryId, replyId) {
     delete state.simplifying[replyId];
     render();
   }
+}
+
+/**
+ * Puts images in the draft, as the reference a message carries.
+ *
+ * Uploaded one at a time and appended as they land, so a slow one does not
+ * hold up the others and a failure loses only itself. The draft is written
+ * through `state` and re-rendered because the textarea is rebuilt on render
+ * anyway — this is one of the few places a composer render is the point
+ * rather than the cost.
+ */
+async function attachChannelImages(files) {
+  const repositoryId = activeChannelId();
+  const images = files.filter((file) => file.type.startsWith("image/"));
+  if (repositoryId === undefined || images.length === 0) {
+    if (files.length > 0) {
+      toast("Only images can be attached.", "error");
+    }
+    return;
+  }
+  state.attaching += images.length;
+  render();
+  for (const file of images) {
+    try {
+      const id = await uploadAttachment(repositoryId, file);
+      const alt = file.name.replace(/\.[^.]+$/u, "").slice(0, 60);
+      const draft = state.chatDraft ?? "";
+      state.chatDraft = `${draft}${
+        draft === "" || draft.endsWith("\n") ? "" : "\n"
+      }![${alt}](attachment:${id})\n`;
+    } catch (error) {
+      toast(error.message ?? "That image could not be attached.", "error");
+    } finally {
+      state.attaching -= 1;
+      render();
+    }
+  }
+  $("[data-act='channel-input']")?.focus();
 }
 
 async function startPreviewAction(repositoryId, asked = false) {
@@ -2725,6 +2764,13 @@ document.addEventListener("click", (event) => {
     case "channel-open":
       openChannel(value, render);
       return;
+    case "channel-attach": {
+      // Clicking the picker rather than being it: a bare file input cannot be
+      // styled into the composer bar, and wrapping the button in a label would
+      // swallow the click before the delegated handler saw it.
+      $("[data-act='channel-attach-input']")?.click();
+      return;
+    }
     case "channel-mention-key": {
       const input = $("[data-act='channel-input']");
       if (input === null) {
@@ -3813,6 +3859,13 @@ document.addEventListener("change", (event) => {
   const picker = event.target;
   if (picker?.dataset?.act === "avatar-pick") {
     void pickAvatarFile(picker.files?.[0]);
+    return;
+  }
+  if (picker?.dataset?.act === "channel-attach-input") {
+    void attachChannelImages([...(picker.files ?? [])]);
+    // Cleared, or picking the same file twice in a row fires no change event
+    // and the second attempt looks like a dead button.
+    picker.value = "";
     return;
   }
   const found = actionOf(event);

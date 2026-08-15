@@ -1470,7 +1470,19 @@ function composer(repositoryId) {
             : "Add to this thread..."
         }">${esc(state.chatDraft)}</textarea>
       <div class="composer-bar">
+        <!-- The input is the control; the button only clicks it. A bare file
+             input cannot be styled into this bar, and a label would take the
+             click before the delegated handler ever saw it. -->
+        <input type="file" data-act="channel-attach-input" accept="image/png,
+          image/jpeg,image/gif,image/webp" multiple hidden>
+        ${iconButton("paperclip", {
+          act: "channel-attach",
+          title: "Attach an image",
+        })}
         ${iconButton("at", { act: "channel-mention-key", title: "Mention someone" })}
+        ${state.attaching > 0
+          ? `<span class="composer-note">attaching ${esc(String(state.attaching))} image(s)…</span>`
+          : ""}
         <span class="spacer"></span>
         <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
       </div>
