@@ -246,30 +246,64 @@ export function brandMark(size = 34) {
   </svg>`;
 }
 
-/**
- * The company mark, sized by whatever contains it.
- *
- * The same knot {@link brandMark} draws, with the three things that make that
- * one unusable inside a small box removed: the `brand-mark` class, whose
- * stylesheet rule pins it to 34px and beats the element's own width and
- * height; those width and height attributes; and the weave mask.
- *
- * The mask is dropped rather than kept because its `id` is a constant. One
- * page holds one agent face per roster row, per message author and per thread
- * — thirty of them is an ordinary channel — and thirty elements declaring the
- * same `id` is a document where every `url(#…)` resolves to whichever came
- * first. It happens to look right, because the masks are identical, and it is
- * the kind of thing that stops looking right for reasons nobody can find. At
- * these sizes the interlace was never visible anyway: two crossed loops read
- * as two crossed loops from sixteen pixels up.
- */
-export function brandGlyph() {
-  return `<svg viewBox="0 0 48 48" fill="none" aria-hidden="true">
-    <rect x="6" y="15.5" width="36" height="17" rx="8.5"
-      transform="rotate(45 24 24)" stroke="currentColor" stroke-width="3.4"/>
-    <rect x="6" y="15.5" width="36" height="17" rx="8.5"
-      transform="rotate(-45 24 24)" stroke="currentColor" stroke-width="3.4"/>
-  </svg>`;
+const VENDOR_MARKS = {
+  // Claude's radiating burst.
+  anthropic: `<g stroke="currentColor" stroke-width="1.9" stroke-linecap="round">
+      <path d="M12 3.2v5"/><path d="M12 15.8v5"/>
+      <path d="M3.2 12h5"/><path d="M15.8 12h5"/>
+      <path d="m5.8 5.8 3.5 3.5"/><path d="m14.7 14.7 3.5 3.5"/>
+      <path d="m18.2 5.8-3.5 3.5"/><path d="m9.3 14.7-3.5 3.5"/>
+    </g>`,
+  // The OpenAI knot as a rosette: three long loops through one centre, sixty
+  // degrees apart. A hexagon was the first attempt and it was the wrong
+  // reading twice over — it is not the mark, and it was indistinguishable
+  // from Cursor's cube two rows below it.
+  openai: `<g stroke="currentColor" stroke-width="1.5" fill="none">
+      <ellipse cx="12" cy="12" rx="4" ry="9.2"/>
+      <ellipse cx="12" cy="12" rx="4" ry="9.2"
+        transform="rotate(60 12 12)"/>
+      <ellipse cx="12" cy="12" rx="4" ry="9.2"
+        transform="rotate(120 12 12)"/>
+    </g>`,
+  // Gemini's four-pointed star, concave on every side.
+  google: `<path d="M12 2.4c0 5.3 4.3 9.6 9.6 9.6-5.3 0-9.6 4.3-9.6 9.6
+      0-5.3-4.3-9.6-9.6-9.6 5.3 0 9.6-4.3 9.6-9.6z"
+      fill="currentColor"/>`,
+  // The xAI slash-X: two angled strokes, not a letter.
+  xai: `<g stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <path d="M4.5 4.5 19.5 19.5"/><path d="M19.5 4.5 13 12"/>
+      <path d="M11 12 4.5 19.5"/>
+    </g>`,
+  // DeepSeek's whale. Filled rather than stroked, because at sixteen pixels a
+  // stroked outline of this collapses into a crescent — which is what the
+  // first attempt did, and it read as a smile.
+  deepseek: `<g fill="currentColor">
+      <path d="M7.4 9.6c3.3-2.2 7.7-2.2 11.2-.1 1.5.9 2.7 2.1 3.6 3.6
+        -1.2 1.4-2.8 2.4-4.7 2.8-3.9.9-8-.6-10.6-3.8z"/>
+      <path d="M7.2 9.9 2.2 7.6l1.5 4.4-1.5 4.4 5-2.3z"/>
+      <circle cx="17.5" cy="11.4" r="0.95" fill="#000" opacity="0.55"/>
+    </g>`,
+  // Cursor's prism.
+  cursor: `<g stroke="currentColor" stroke-width="1.7" fill="none"
+      stroke-linejoin="round">
+      <path d="M12 2.8 20.5 7.6v9.6L12 21.2 3.5 17.2V7.6z"/>
+      <path d="M12 12 20.5 7.6"/><path d="M12 12v9.2"/><path d="M12 12 3.5 7.6"/>
+    </g>`,
+  // Anything this deployment can run but does not have a mark for.
+  generic: `<g stroke="currentColor" stroke-width="1.7" fill="none"
+      stroke-linecap="round" stroke-linejoin="round">
+      <rect x="4.5" y="8" width="15" height="11" rx="3"/>
+      <path d="M12 8V4.8"/><circle cx="12" cy="3.7" r="1.2"/>
+      <circle cx="9.4" cy="13" r="1.05" fill="currentColor" stroke="none"/>
+      <circle cx="14.6" cy="13" r="1.05" fill="currentColor" stroke="none"/>
+    </g>`,
+};
+
+/** One vendor's mark, sized by whatever contains it. */
+export function vendorMark(kind) {
+  return `<svg viewBox="0 0 24 24" fill="none" aria-hidden="true">${
+    VENDOR_MARKS[kind] ?? VENDOR_MARKS.generic
+  }</svg>`;
 }
 
 /* ------------------------------------------------------------ avatars ---- */
@@ -652,14 +686,11 @@ export function agentFace(agent, size = 34) {
   const kind = agentKindOf(agent?.provider ?? agent?.id);
   const presence = agent?.presence ?? "offline";
   const color = safeColor(agent?.color) ?? "var(--accent)";
-  // One mark for every agent now, rather than a character per vendor. Which
-  // vendor is behind an agent is a fact about our plumbing, and it was the
-  // loudest thing on the screen; whose agent it is, which the colour says, is
-  // what a reader in a shared channel actually needs.
-  //
-  // The kind stays on the element even though nothing draws from it any more:
-  // it is what the stylesheet holds a disconnected agent still by, and it
-  // costs an attribute.
+  // The vendor's own mark rather than a drawn character: an agent running on
+  // Claude shows Claude's, one running on Codex shows Codex's, and a reader
+  // recognises them without having to learn anything. The owner's colour still
+  // carries the mark, so one glyph says both things — the shape says which
+  // vendor, the colour says whose.
   //
   // The size travels as a custom property rather than as an `sz-${size}`
   // class. The class only ever worked for sizes somebody had hand-written a
@@ -672,7 +703,7 @@ export function agentFace(agent, size = 34) {
     data-presence="${presence}" style="color:${color};--face-size:${Number(size)}px"
     title="${esc(
       agent?.name ?? AGENTS[kind].label,
-    )}">${brandGlyph()}<i class="presence presence-${presence}"></i></span>`;
+    )}">${vendorMark(kind)}<i class="presence presence-${presence}"></i></span>`;
 }
 
 /**
