@@ -757,6 +757,20 @@ export class Worker {
     await adapter.streamEvents(sessionId, (event) => {
       eventChain = eventChain
         .then(async () => {
+          if (event.event === "question_asked") {
+            // A worker daemon has no channel and nobody watching, so an
+            // answer cannot arrive. This event used to be dropped on the
+            // floor, which left the adapter's waiter pending and the agent
+            // hanging until the execution timeout — an hour of silence for
+            // a question nothing could answer. Cancelled at once instead,
+            // exactly like the CLI with nobody to ask: the agent stops with
+            // its own "no answer" explanation, promptly and legibly.
+            await adapter.resolveQuestion?.(sessionId, {
+              requestId: event.requestId ?? "",
+              status: "cancelled",
+            });
+            return;
+          }
           if (event.event !== "scope_change_requested") {
             return;
           }

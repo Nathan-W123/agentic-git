@@ -682,3 +682,49 @@ test("a refreshed Gemini session is carried forward too", async (t) => {
   const { rotatedSecret } = await home.close();
   assert.equal(rotatedSecret, refreshed);
 });
+
+test("github rides in the store beside the vendor CLIs", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+
+  const summary = await vault.put("user-1", "github", {
+    kind: "api_key",
+    secret: "ghp_abcdefghijklmnop",
+    origin: "pasted",
+  });
+  assert.equal(summary.vendor, "github");
+  assert.equal(summary.hint, "mnop");
+  assert.ok(!JSON.stringify(summary).includes("ghp_abcdefghijklmnop"));
+
+  // The verified GitHub login lands in the label, which is what makes the
+  // connection read as an identity rather than an anonymous secret.
+  await vault.markVerified("user-1", "github", "octocat");
+  const stored = await vault.get("user-1", "github");
+  assert.equal(stored?.secret, "ghp_abcdefghijklmnop");
+  assert.equal(stored?.label, "octocat");
+
+  const listed = await vault.list("user-1");
+  assert.ok(listed.some((entry) => entry.vendor === "github"));
+
+  await vault.delete("user-1", "github");
+  assert.equal(await vault.get("user-1", "github"), undefined);
+});
+
+test("github accepts exactly one credential kind: a pasted token", () => {
+  assert.deepEqual(supportedCredentialKinds("github"), ["api_key"]);
+  assert.equal(supportsUserCredential("github", "api_key"), true);
+  assert.equal(supportsUserCredential("github", "oauth_token"), false);
+  assert.equal(supportsUserCredential("github", "session_file"), false);
+});
+
+test("a session file for github is refused at the door", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await assert.rejects(
+    () =>
+      vault.put("user-1", "github", { kind: "session_file", secret: "{}" }),
+    (error: unknown) =>
+      error instanceof UserCredentialError && error.code === "unsupported_kind",
+  );
+  assert.equal(await vault.get("user-1", "github"), undefined);
+});

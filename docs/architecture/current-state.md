@@ -38,7 +38,12 @@ The local Phase 1 product surface is complete:
 - Organization and project selection with owner, admin, developer, reviewer,
   and viewer RBAC.
 - Task submission, queue filtering, cancellation, retry, repository runs, and
-  live status.
+  live status. Cancellation is the whole stop, not a row flip: `/cancel` in a
+  task's thread, `/cancel [@agent]` in the channel, and the dashboard button
+  all mark the rows cancelled, abort a live in-process session through the
+  run's cancellation registry, release the work lease (which is what stops a
+  remote worker), and append the `task_cancelled` events the channel
+  narrates — so a stop is always visible where the work was.
 - Execution history and detail views for plans, conflicts, plan revisions, scope
   decisions, patches, validation, integrations, and audit events.
 - Approval queue, reasons, diff review, approve/reject decisions, and durable
@@ -134,8 +139,11 @@ evidence survive process and browser restarts in the coordination store.
 - Export publishes canonical state with `coord repo push`. It targets a
   dedicated `coord/export-*` branch rather than the imported branch, never
   force-pushes, and refuses outright when the remote has moved since import.
-  Credentials come from `GITHUB_TOKEN` and are passed only as a request header
-  in the child environment.
+  On the CLI, credentials come from `GITHUB_TOKEN` in the operator's own
+  shell; a push asked of an agent on the dashboard instead uses the task
+  submitter's own connected GitHub account (Settings → GitHub) and is refused
+  when they have not connected one. Either way the token is passed only as a
+  request header in the child environment.
 
 ## Remote Execution
 

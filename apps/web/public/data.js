@@ -47,6 +47,9 @@ export const state = {
   providers: [],
   providersLoaded: false,
   providerOptions: {},
+  /** The caller's own GitHub connection — the identity their pushes carry.
+   *  `undefined` until asked; `null` when this deployment offers none. */
+  github: undefined,
   selectedAgent: stored("ag.agent", "anthropic"),
   conversations: {},
   sending: {},
@@ -468,6 +471,36 @@ export async function loadProviders() {
       "";
   }
   return state.providers;
+}
+
+/**
+ * The caller's own GitHub connection, which is what a push of their tasks
+ * authenticates as. Personal like the provider connections: there is no
+ * deployment-wide token behind it, deliberately, so "connected" here always
+ * means "as you".
+ */
+export async function loadGitHub() {
+  state.github = await apiOptional("/github/credential", null);
+  return state.github;
+}
+
+/**
+ * The token goes up and never comes back: the response is the same status
+ * the GET returns — the verified login and a four-character hint — so
+ * nothing that reaches a log carries the secret.
+ */
+export async function connectGitHub(token) {
+  state.github = await api("/github/credential", {
+    method: "POST",
+    body: { token },
+  });
+  return state.github;
+}
+
+export async function disconnectGitHub() {
+  await api("/github/credential", { method: "DELETE" });
+  state.github = { connected: false };
+  return state.github;
 }
 
 /**

@@ -6,9 +6,11 @@ import path from "node:path";
 import { ApiGateway, type ApiOperations } from "@coord/api-gateway";
 import {
   ConversationRegistry,
+  TaskCancellationRegistry,
   computeCoordinationMetrics,
 } from "@coord/coordinator";
 import {
+  cancelTasks,
   repoCreate,
   repoImportGitHub,
   runPendingTasks,
@@ -17,10 +19,8 @@ import {
 import { CoordinatorProject } from "@coord/cli/project";
 import { recoverCoordinationState } from "@coord/cli/recovery";
 import { rollbackCanonical } from "@coord/cli/rollback";
-import { pushCredentials, repoPush } from "@coord/cli/repo-export";
 import { workerOperations } from "@coord/cli/worker-operations";
 import type { CoordinationStore } from "@coord/persistence";
-import { describeError } from "@coord/shared-types";
 import { RepositoryService, runProcess } from "@coord/repository-service";
 
 import { loadStaticAssets } from "./assets.js";
@@ -29,9 +29,11 @@ import {
   type ControlPlaneLock,
 } from "./control-plane-lock.js";
 import { AttachmentStore } from "./attachments.js";
+import { GitHubConnectionService } from "./github-connection.js";
 import { OverlayWorkspaceService } from "./overlay.js";
 import { PreviewService } from "./preview.js";
 import { ProviderChatService, type ProviderId } from "./providers.js";
+import { pushCanonical } from "./push-canonical.js";
 import {
   UserCredentialStore,
   type UserCredentialKind,
@@ -77,72 +79,6 @@ function resolveAgentIdForVendor(
     }
   }
   return undefined;
-}
-
-/**
- * Publishes canonical to the repository's recorded remote, as an agent action.
- *
- * Pushes to a *new* branch by default and refuses to update one that already
- * exists — `allowExistingTarget` stays off. An agent asking to publish is
- * asking to put work somewhere a person will look at it, which a branch does;
- * overwriting a branch somebody else is using is a different act, and not one
- * to grant on the strength of a sentence in an objective. `pushToRemote` also
- * refuses when the upstream has moved under the revision being published.
- *
- * The credential comes from `GITHUB_TOKEN` in the deployment's environment,
- * never from the store or a config file — see `pushCredentials`. A deployment
- * without one refuses rather than half-succeeding, and says which of the two
- * things it is missing, because "push failed" sends somebody to the wrong
- * place half the time.
- */
-async function pushCanonical(
-  project: CoordinatorProject,
-  store: CoordinationStore,
-  request: {
-    repository: { id: string; path: string; branch: string };
-    task: { objective: string };
-  },
-): Promise<{
-  outcome: "done" | "refused";
-  detail?: { url?: string; output?: string[] };
-  explanation: string;
-}> {
-  const stored = await store.getRepository(request.repository.id);
-  const remoteUrl = stored?.remoteUrl ?? "";
-  if (remoteUrl.length === 0) {
-    return {
-      outcome: "refused",
-      explanation:
-        `${request.repository.id} has no remote recorded, so there is ` +
-        "nowhere to push it. Connect it to a GitHub repository first.",
-    };
-  }
-  if (pushCredentials() === undefined) {
-    return {
-      outcome: "refused",
-      explanation:
-        "This deployment has no GITHUB_TOKEN set, so it cannot authenticate " +
-        "to the remote. Nothing was pushed.",
-    };
-  }
-  try {
-    const pushed = await repoPush(project, store, {
-      repositoryId: request.repository.id,
-    });
-    return {
-      outcome: "done",
-      detail: { url: pushed.remoteUrl },
-      explanation:
-        `Pushed ${pushed.revision.slice(0, 8)} to ${pushed.targetBranch} on ` +
-        `${pushed.remoteUrl}. Open a pull request from that branch when you ` +
-        "want it reviewed.",
-    };
-  } catch (error) {
-    return {
-      outcome: "refused",
-      explanation: `The push did not go through: ${describeError(error)}`,
-    };
-  }
 }
 
 async function main(): Promise<void> {
@@ -216,6 +152,10 @@ async function serve(
     path.join(project.directory, "secrets"),
   );
   const providerChat = new ProviderChatService(project, { credentials });
+  // Beside the agent connections and in the same store: a push runs as the
+  // task's submitter, so their GitHub token is scoped, stored and shown
+  // exactly the way their agent credentials are.
+  const github = new GitHubConnectionService({ credentials });
   // A deployment serving more than one person sets this so a task never
   // quietly bills the host owner for someone else's work.
   const credentialPolicy =
@@ -230,6 +170,10 @@ async function serve(
   // sessions on entry, but a deployment with no runs would otherwise hold
   // its conversation processes until the next dispatch.
   const conversations = new ConversationRegistry();
+  // Where a person's "stop" reaches a running session. One per process for
+  // the same reason: the gateway that hears the stop and the run that holds
+  // the session only meet through this.
+  const cancellations = new TaskCancellationRegistry();
   const conversationSweep = setInterval(() => {
     void conversations.closeIdleSessions().catch(() => undefined);
   }, 60_000);
@@ -303,6 +247,11 @@ async function serve(
           provider: input.provider as ProviderId,
         }),
     },
+    githubCredential: {
+      status: (input) => github.status(input),
+      connect: (input) => github.connect(input),
+      disconnect: (input) => github.disconnect(input),
+    },
     workspace: {
       status: (input) => overlays.status(input),
       open: (input) => overlays.open(input),
@@ -374,6 +323,35 @@ async function serve(
         ...(input.effort === undefined ? {} : { effort: input.effort }),
       });
     },
+    async cancelTasks(input) {
+      // Same resolution as submitTask, because the channel names agents the
+      // same way in both directions: it knows the mentioned agent's vendor,
+      // never this deployment's internal agent ids.
+      const agentId =
+        input.agentId ??
+        (input.vendor === undefined
+          ? undefined
+          : resolveAgentIdForVendor(project, input.vendor));
+      if (
+        input.agentId === undefined &&
+        input.vendor !== undefined &&
+        agentId === undefined
+      ) {
+        // A vendor nothing is configured for can have no tasks; "nothing
+        // stopped" is the honest answer and the caller words it.
+        return { cancelled: [] };
+      }
+      const cancelled = await cancelTasks(store, {
+        repositoryId: input.repositoryId,
+        projectId: input.projectId,
+        ...(input.taskIds === undefined ? {} : { taskIds: input.taskIds }),
+        ...(agentId === undefined ? {} : { agentId }),
+        reason: input.reason,
+        ...(input.actorId === undefined ? {} : { actorId: input.actorId }),
+        cancellations,
+      });
+      return { cancelled };
+    },
     async runRepository(input) {
       await runPendingTasks(project, store, {
         projectId: input.projectId,
@@ -381,6 +359,7 @@ async function serve(
         credentials,
         credentialPolicy,
         conversations,
+        cancellations,
         // What an agent may ask this deployment to do. A fixed list, not a
         // command channel: an agent may only ask for what its submitter could
         // do themselves on this repository, and an open channel would let it
@@ -398,7 +377,7 @@ async function serve(
               // publishing it would put work on a remote that this repository
               // has not accepted — the one place where "the agent's version"
               // and "the project's version" must not be confused.
-              return await pushCanonical(project, store, request);
+              return await pushCanonical(project, store, github, request);
             }
             if (request.action !== "preview_start") {
               return {

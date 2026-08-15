@@ -76,6 +76,7 @@ import {
 } from "./plan-admission.js";
 import { assessReplay } from "./replay.js";
 import { RunRecorder } from "./run-recorder.js";
+import { TaskCancellationRegistry } from "./task-cancellation.js";
 import {
   ScopeExpansionError,
   assertChangeSetWithinPlan,
@@ -426,6 +427,16 @@ export interface CoordinatorDependencies {
    * one; see docs/architecture/agent-actions.md.
    */
   actionAuthority?: ActionAuthority;
+  /**
+   * Where a person's "stop" reaches this run.
+   *
+   * Absent by default — a benchmark or a CLI run has nobody to stop it
+   * mid-flight, and behaves exactly as before. A long-lived host makes one
+   * registry per process, hands it to every run and to its API surface, and
+   * a cancel then aborts the named task's live session and is honoured at
+   * the run's own checkpoints. See {@link TaskCancellationRegistry}.
+   */
+  cancellations?: TaskCancellationRegistry;
 }
 
 /**
@@ -644,6 +655,7 @@ export class Coordinator {
   private readonly conversations: ConversationRegistry;
   private readonly planAuthority: PlanAuthority | undefined;
   private readonly actionAuthority: ActionAuthority | undefined;
+  private readonly cancellations: TaskCancellationRegistry | undefined;
   /** Where each task is working, for an action that needs to reach it. */
   private readonly taskWorkspacePaths = new Map<string, string>();
   /** Actions each task has spent, for the cap. */
@@ -681,6 +693,7 @@ export class Coordinator {
       });
     this.planAuthority = dependencies.planAuthority;
     this.actionAuthority = dependencies.actionAuthority;
+    this.cancellations = dependencies.cancellations;
     this.store = dependencies.store;
     this.approvals =
       dependencies.approvals ??
@@ -787,8 +800,54 @@ export class Coordinator {
     /** Consecutive waves in which the plan authority admitted nothing. */
     let deferredWaves = 0;
 
+    // From here every task has a live session an outside stop must be able
+    // to reach. Registered after planning on purpose: planning failures are
+    // collective — one thrown plan fails the whole run — so aborting a
+    // single task's planning would take everyone else's work with it. A
+    // stop that lands during planning is recorded and honoured at the first
+    // wave boundary below instead.
+    for (const entry of planned) {
+      this.cancellations?.register(entry.task.id, async () => {
+        await entry.adapter.cancel(entry.session.id);
+      });
+    }
+
     try {
       while (pending.length > 0) {
+        // A stopped task leaves before it costs anything more — no replan,
+        // no admission, no workspace. Its row and lease were settled by
+        // whoever stopped it; what is owed here is the session teardown and
+        // an honest result naming the ending.
+        if (this.cancellations !== undefined) {
+          for (const entry of [...pending]) {
+            const reason = this.cancellations.reasonFor(entry.task.id);
+            if (reason === undefined) {
+              continue;
+            }
+            pending.splice(pending.indexOf(entry), 1);
+            const cleanupFailure = await this.cleanupTask(
+              entry,
+              entry.resumed?.workspace,
+              recorder,
+              runAudit,
+            );
+            const explanation =
+              cleanupFailure === undefined
+                ? reason
+                : `${reason}; ${cleanupFailure}`;
+            await recorder?.status(entry.task.id, "cancelled", explanation);
+            taskResults.push({
+              task: entry.task,
+              plan: entry.plan,
+              decision: entry.decision,
+              status: "cancelled",
+              explanation,
+            });
+          }
+          if (pending.length === 0) {
+            break;
+          }
+        }
         const waveVersion = await this.repositories.getCanonicalVersion(
           input.repository,
         );
@@ -1055,6 +1114,11 @@ export class Coordinator {
         }
       }
     } catch (error) {
+      // The collapse ends every pending session, so no live abort remains
+      // for a later cancel to deliver.
+      for (const entry of pending) {
+        this.cancellations?.release(entry.task.id);
+      }
       const cleanup = await Promise.allSettled(
         // Sessions and any resumed conversations' workspaces alike: a run
         // that throws ends every pending turn, and an ended turn ends its
@@ -2448,6 +2512,21 @@ export class Coordinator {
       if (cleanupFailure !== undefined) {
         failures.push(cleanupFailure);
       }
+      // A stop delivered mid-session surfaces here as whatever error the
+      // torn-down session produced. That ending is not a failure: whoever
+      // stopped the task already settled its row and its audit trail, and a
+      // task_failed on top would hand the thread two contradictory endings.
+      const stopReason = this.cancellations?.reasonFor(entry.task.id);
+      if (stopReason !== undefined) {
+        await recorder?.status(entry.task.id, "cancelled", stopReason);
+        return {
+          task: entry.task,
+          plan: entry.plan,
+          decision: entry.decision,
+          status: "cancelled",
+          explanation: stopReason,
+        };
+      }
       const explanation = failures.join("; ");
       await recorder?.status(entry.task.id, "failed", explanation);
       await this.trace(recorder, runAudit, "task_failed", entry.task.id, {
@@ -3378,6 +3457,10 @@ export class Coordinator {
   ): Promise<string | undefined> {
     const taskId = entry.task.id;
     const failures: string[] = [];
+    // The session is closing, so there is no live abort left to deliver.
+    // Only the handler goes; any recorded stop reason stays readable, since
+    // the paths that ran this cleanup still consult it to name the ending.
+    this.cancellations?.release(taskId);
     // Closed, not dropped. Settlement is the one moment the coordinator
     // knows the session has no further use — the change set is collected,
     // and any conflict repair that wanted the agent again has already run.
