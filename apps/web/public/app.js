@@ -83,7 +83,7 @@ import {
 import {
   $,
   $$,
-  agentDoodle,
+  brandGlyph,
   agentLabelOf,
   avatar,
   brandMark,
@@ -996,20 +996,17 @@ function appearanceCard() {
         <div class="sr-title">Your agents' colour</div>
         <div class="sr-sub">Every agent you connect is drawn in this colour, on
           shared views too — so your teammates can tell your agents from
-          theirs. The doodle says which agent; the colour says whose.</div>
+          theirs. Every agent wears the same mark; the colour is what says
+          whose.</div>
       </span>
     </div>
     <div style="padding:0 17px 16px">
       <div class="swatches">${swatches("set-agent-color", agentColor)}</div>
       <div class="doodle-preview" style="color:${esc(agentColor)}">
-        ${["anthropic", "cursor", "openai", "google", "xai", "deepseek"]
-          .map(
-            (kind) => `<span class="doodle-chip">
-              <span class="doodle">${agentDoodle(kind)}</span>
-              <b>${esc(agentLabelOf(kind))}</b>
-            </span>`,
-          )
-          .join("")}
+        <span class="doodle-chip">
+          <span class="doodle">${brandGlyph()}</span>
+          <b>Your agents</b>
+        </span>
       </div>
     </div>
   </section>`;
