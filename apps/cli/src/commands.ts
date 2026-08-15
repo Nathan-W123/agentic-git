@@ -14,6 +14,7 @@ import type { AgentAdapter } from "@coord/agent-protocol";
 import {
   Coordinator,
   ConversationRegistry,
+  TaskCancellationRegistry,
   approvalPolicyForProject,
   type ActionAuthority,
   type CoordinatedTask,
@@ -549,6 +550,135 @@ export async function taskCancel(
   return await store.cancelSubmittedTask(taskId);
 }
 
+export interface CancelTasksInput {
+  repositoryId: string;
+  projectId?: string;
+  /** Stop exactly these tasks. Wins over `agentId` when both are given. */
+  taskIds?: string[];
+  /** Stop every active task dispatched to this agent. */
+  agentId?: string;
+  /** Why, in the canceller's words — recorded on the lease and the audit. */
+  reason: string;
+  /** Who asked, for the audit trail. */
+  actorId?: string;
+  /** The live-run bridge; absent on a bare CLI, where nothing is running. */
+  cancellations?: TaskCancellationRegistry;
+}
+
+export interface CancelledTaskReport {
+  id: string;
+  agentId: string;
+  objective: string;
+  /** What the task was doing when it was stopped. */
+  was: "running" | "queued" | "held" | "waiting";
+}
+
+const CANCELLED_WAS: Record<string, CancelledTaskReport["was"]> = {
+  claimed: "running",
+  submitted: "queued",
+  planned: "held",
+  open: "waiting",
+};
+
+/**
+ * Stops work: one task, an agent's tasks, or a whole repository's.
+ *
+ * One function on purpose. Cancellation used to exist three times — a store
+ * flip in the thread command, a store flip behind the REST route, nothing at
+ * all for a running session — and each did a different fraction of the job.
+ * The whole job is four steps, in an order that closes the races:
+ *
+ * 1. the queue row goes `cancelled`, so nothing can lease it afresh;
+ * 2. the live session, if this process holds one, is aborted through the
+ *    {@link TaskCancellationRegistry};
+ * 3. the active work lease, if any, is released — which is the established
+ *    kill switch for a remote worker (its heartbeat answers `lease_lost`
+ *    and it cancels its own session), and releases the plans arbitration
+ *    was sequencing behind either way. Releasing cannot requeue the task:
+ *    every store guards that on the row still being `claimed`;
+ * 4. a `task_cancelled` audit event, which is what the channel narrates
+ *    from — a task that stops silently is the failure mode this exists for.
+ *
+ * A task that settles mid-flight — integrated or failed between the listing
+ * and the write — is skipped rather than fought over: its ending already
+ * happened, and reporting it stopped would be a lie.
+ */
+export async function cancelTasks(
+  store: CoordinationStore,
+  input: CancelTasksInput,
+): Promise<CancelledTaskReport[]> {
+  const explicit = input.taskIds === undefined ? undefined : new Set(input.taskIds);
+  const candidates = (
+    await store.listSubmittedTasks({
+      repositoryId: input.repositoryId,
+      ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+    })
+  ).filter((task) => {
+    if (CANCELLED_WAS[task.status] === undefined) {
+      return false;
+    }
+    if (explicit !== undefined) {
+      return explicit.has(task.id);
+    }
+    // An open conversation is not burning anything — it is a thread waiting
+    // for its person to reply — so a sweep leaves it alone. Ending one is a
+    // deliberate act on that one task, which is the explicit-ids shape.
+    if (task.status === "open") {
+      return false;
+    }
+    return input.agentId === undefined || task.agentId === input.agentId;
+  });
+  if (candidates.length === 0) {
+    return [];
+  }
+
+  const activeLeases = candidates.some((task) => task.status === "claimed")
+    ? await store.listWorkLeases({
+        repositoryId: input.repositoryId,
+        status: "active",
+      })
+    : [];
+
+  const reports: CancelledTaskReport[] = [];
+  for (const task of candidates) {
+    try {
+      await store.cancelSubmittedTask(task.id);
+    } catch {
+      // Settled between the listing and now. Its ending already happened.
+      continue;
+    }
+    await input.cancellations?.cancel(task.id, input.reason);
+    const lease = activeLeases.find(
+      (candidate) => candidate.taskId === task.id,
+    );
+    if (lease !== undefined) {
+      await store.finishWorkLease(
+        lease.id,
+        "released",
+        new Date().toISOString(),
+        input.reason,
+      );
+    }
+    await store.appendAudit(undefined, {
+      type: "task_cancelled",
+      taskId: task.id,
+      data: {
+        repositoryId: input.repositoryId,
+        ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
+        ...(input.actorId === undefined ? {} : { actorId: input.actorId }),
+        reason: input.reason,
+      },
+    });
+    reports.push({
+      id: task.id,
+      agentId: task.agentId,
+      objective: task.objective,
+      was: CANCELLED_WAS[task.status] ?? "queued",
+    });
+  }
+  return reports;
+}
+
 /**
  * Which sandbox Codex's edit phase runs under, with the deployment allowed
  * the last word.
@@ -797,6 +927,15 @@ export interface RunOptions {
    * and a conversation's next turn simply starts cold from the thread.
    */
   conversations?: ConversationRegistry;
+  /**
+   * Where a person's "stop" reaches this run's live sessions.
+   *
+   * Same lifecycle as `conversations`: one per process on a long-lived
+   * host, shared between the API surface that hears the stop and the run
+   * that holds the session. Absent on the CLI, where ^C already stops
+   * everything this would.
+   */
+  cancellations?: TaskCancellationRegistry;
 }
 
 /**
@@ -890,6 +1029,8 @@ export interface RunSummary {
   runId: string | undefined;
   integrated: number;
   failed: number;
+  /** Stopped by a person mid-run, which is neither of the other two. */
+  cancelled: number;
   finalRevision: string;
   conflicts: number;
 }
@@ -970,6 +1111,7 @@ export async function runPendingTasks(
       runId: undefined,
       integrated: 0,
       failed: 0,
+      cancelled: 0,
       conflicts: 0,
       finalRevision: version.revision,
     };
@@ -1093,6 +1235,9 @@ export async function runPendingTasks(
       ...(options.conversations === undefined
         ? {}
         : { conversations: options.conversations }),
+      ...(options.cancellations === undefined
+        ? {}
+        : { cancellations: options.cancellations }),
     });
     const result = await coordinator.run({
       repository: canonical,
@@ -1104,7 +1249,17 @@ export async function runPendingTasks(
 
     let integrated = 0;
     let failed = 0;
+    let cancelled = 0;
     for (const entry of result.tasks) {
+      if (entry.status === "cancelled") {
+        // Whoever stopped it already settled the row and released the lease
+        // — that is how the run came to notice at all. Writing a completion
+        // here would throw against the terminal row, and re-finishing the
+        // lease is refused as inactive; the run only stops tracking it.
+        cancelled += 1;
+        leases.delete(entry.task.id);
+        continue;
+      }
       const status = entry.status === "integrated" ? "integrated" : "failed";
       if (status === "integrated") {
         integrated += 1;
@@ -1114,13 +1269,23 @@ export async function runPendingTasks(
       const source = claimed.find(
         (candidate) => candidate.id === entry.task.id,
       );
-      if (status === "integrated" && source?.conversationId !== undefined) {
-        // A conversational turn that landed leaves its task open — waiting
-        // for the next message, not finished. Before the lease settles, so
-        // no released arm can catch the row still claimed and requeue it.
-        await store.openSubmittedTask(entry.task.id, result.runId);
-      } else {
-        await store.completeSubmittedTask(entry.task.id, status, result.runId);
+      try {
+        if (status === "integrated" && source?.conversationId !== undefined) {
+          // A conversational turn that landed leaves its task open — waiting
+          // for the next message, not finished. Before the lease settles, so
+          // no released arm can catch the row still claimed and requeue it.
+          await store.openSubmittedTask(entry.task.id, result.runId);
+        } else {
+          await store.completeSubmittedTask(entry.task.id, status, result.runId);
+        }
+      } catch (error) {
+        // The one legitimate loser here is a cancel that landed while this
+        // task was already past the point of stopping: its row is terminal,
+        // the person's answer stands, and throwing would strand every later
+        // task's row in `claimed`. Anything else is still an error.
+        if (options.cancellations?.reasonFor(entry.task.id) === undefined) {
+          throw error;
+        }
       }
       const lease = leases.get(entry.task.id);
       if (lease !== undefined) {
@@ -1144,6 +1309,7 @@ export async function runPendingTasks(
       runId: result.runId,
       integrated,
       failed,
+      cancelled,
       conflicts: result.conflicts.length,
       finalRevision: result.canonicalVersion.revision,
     };
@@ -1178,6 +1344,14 @@ export async function runPendingTasks(
   } finally {
     if (heartbeat !== undefined) {
       clearInterval(heartbeat);
+    }
+    // Whatever path ended the run, no live abort may outlive it: the
+    // sessions are gone, and a handler kept past this point would hold the
+    // dead adapter — and everything it closes over — for the process's life.
+    if (options.cancellations !== undefined) {
+      for (const task of claimed) {
+        options.cancellations.release(task.id);
+      }
     }
     // Any lease still held here belongs to a task that never reached an
     // outcome. Settling them is what stops a failed run from blocking the

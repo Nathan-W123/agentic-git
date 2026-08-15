@@ -161,6 +161,31 @@ connected no account:
   charging the host owner for someone else's work, which is the exact
   confusion this feature exists to remove.
 
+## GitHub rides in the same store
+
+The push action has the same identity problem the vendor CLIs had, and the
+owner rejected the deployment-wide answer to it outright: a shared
+`GITHUB_TOKEN` is a confused deputy — any user's task could push to any
+repository the token reached, and every commit carried the token owner's
+identity.
+
+So GitHub is a fourth thing a user can connect, stored per user in the same
+encrypted vault (`CredentialService` widens `VendorCliKind` with `github`).
+It differs from the vendor rows only in delivery: nothing ever launches a
+CLI with it or stages a credential home — the push path reads the stored
+secret and sends it as HTTP auth to the remote. The token is a personal
+access token the user mints and pastes once; connecting verifies it against
+`api.github.com/user` first and keeps the verified login as the
+connection's label, so Settings can say *who* a push will run as. A push
+asked of an agent resolves the task's `submittedBy` — the same field that
+decides whose account pays for the run — and refuses by name ("you haven't
+connected GitHub") when nothing is stored. There is deliberately no
+environment fallback on that path.
+
+A GitHub connection is a push credential, not an agent: `listConnectionsFor`
+excludes it from the channel roster, so nobody is offered a name that can
+never answer an @mention.
+
 ## What each path does now
 
 - **Provider chat.** A user's own credential is used whenever one exists, and

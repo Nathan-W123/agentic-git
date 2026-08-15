@@ -43,6 +43,7 @@ import {
 } from "./coordinator.js";
 import { buildTaskHandoff } from "./handoff.js";
 import { recordTaskHandoff } from "./handoff-store.js";
+import { TaskCancellationRegistry } from "./task-cancellation.js";
 
 interface TestSession {
   input: StartTaskInput;
@@ -1679,6 +1680,127 @@ test("an answered question is handed back and the run continues", async () => {
     assert.deepEqual(agent.answers, [{ requestId: "q1", status: "answered", chosen: 1 }]);
     const types = result.audit.map((event) => event.type);
     assert.ok(types.includes("question_answered"), JSON.stringify(types));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * An agent whose edit phase runs until somebody stops it — the shape of the
+ * task the owner could not stop: a session mid-work, returning nothing, with
+ * nothing user-facing able to reach it.
+ */
+class StoppableAgent extends TestAgent {
+  /** Resolves once the edit phase has begun waiting, so a test can stop it. */
+  public readonly startedWorking: Promise<void>;
+  private noteStarted!: () => void;
+  private interrupt: ((error: Error) => void) | undefined;
+
+  public constructor(
+    agentId: string,
+    plan: AgentPlan,
+    repository: CanonicalRepository,
+    workspaces: WorkspaceManager,
+  ) {
+    super(agentId, plan, repository, workspaces, "");
+    this.startedWorking = new Promise((resolve) => {
+      this.noteStarted = resolve;
+    });
+  }
+
+  public override async sendContext(): Promise<void> {
+    await new Promise<void>((_resolve, reject) => {
+      this.interrupt = reject;
+      this.noteStarted();
+    });
+  }
+
+  public override async cancel(sessionId: string): Promise<void> {
+    await super.cancel(sessionId);
+    // What a real adapter's abort does: the in-flight operation rejects.
+    this.interrupt?.(new Error("The session was cancelled"));
+    this.interrupt = undefined;
+  }
+}
+
+test("a stop from outside aborts the live session and the task ends cancelled", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new StoppableAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const cancellations = new TaskCancellationRegistry();
+    const running = new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store: new InMemoryCoordinationStore(),
+      cancellations,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    await agent.startedWorking;
+    const reachedLive = await cancellations.cancel(
+      "task_a",
+      "Stopped from the channel",
+    );
+    assert.equal(reachedLive, true, "the live session must be reachable");
+
+    const result = await running;
+    assert.equal(result.tasks[0]?.status, "cancelled");
+    assert.equal(result.tasks[0]?.explanation, "Stopped from the channel");
+    assert.ok(agent.cancelCount >= 1, "the agent session was never aborted");
+    // A stop is not a failure: task_failed here would hand the thread a
+    // second, contradictory ending after "This was cancelled."
+    assert.ok(
+      !result.audit.some((event) => event.type === "task_failed"),
+      result.audit.map((event) => event.type).join(", "),
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a stop recorded before the wave starts removes the task unrun", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+    );
+    const cancellations = new TaskCancellationRegistry();
+    // The stop lands while the task is still queued — before the run was
+    // even dispatched, from the run's point of view.
+    await cancellations.cancel("task_a", "Stopped before it started");
+
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store: new InMemoryCoordinationStore(),
+      cancellations,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "cancelled");
+    // The edit phase never ran: the drain caught it at the wave boundary.
+    assert.equal(agent.executionVersions.length, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

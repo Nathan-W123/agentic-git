@@ -13,5 +13,6 @@ export * from "./plan-admission.js";
 export * from "./replay.js";
 export * from "./scope-estimation.js";
 export * from "./scope-validator.js";
+export * from "./task-cancellation.js";
 export * from "./task-decomposition.js";
 export * from "./task-intake.js";

@@ -1865,6 +1865,20 @@ export class PromptCliAdapter implements AgentAdapter {
         "and at least two concrete options. Somebody has a limited time to " +
         "answer; if nobody does, the task is cancelled, so ask once and ask " +
         "for the thing that actually blocks you.",
+      // The incident behind this sentence: an agent blocked on credentials
+      // offered "have the operator provision credentials to the runner",
+      // waited, got an answer — and nothing anywhere could act on it. An
+      // answer is one word back into this same session; anything that needs
+      // hands other than yours cannot happen no matter what is chosen.
+      "Every option must be something you can do yourself, in this " +
+        "workspace, once the answer arrives — choosing an option changes " +
+        "nothing outside this session. Never offer actions that need " +
+        "somebody else to do something (provision credentials, change the " +
+        "deployment, grant access, install software on the host): nobody " +
+        "can, and the answer would be wasted. If the task is blocked on " +
+        "something like that, do not ask — answer with a failed outcome " +
+        "explaining exactly what is missing, so the person can fix it and " +
+        "resubmit.",
       "Do not modify files outside expectedFiles without first answering with a scope_change_requested outcome.",
       "Do not change Git metadata.",
       `Task: ${record.input.task.objective}`,

@@ -66,6 +66,19 @@ failure modes to watch, both prompt-wording fixes in one file
 - **It asks about trivia.** Worse, because every question holds the
   workspace and the ownership leases while other work queues behind it.
 
+A third failure mode stopped being hypothetical and is now fenced in the
+same prompt: **it offers options the platform cannot honour.** A real run
+blocked on credentials offered "have the operator provision credentials to
+the runner", waited out the answer, and could do nothing with it — nothing
+anywhere provisions credentials on request. The prompt now requires every
+option to be an action the agent itself can take in its own workspace once
+the answer arrives, and tells it to fail with a precise explanation instead
+of asking when the blocker needs somebody else's hands. Late answers are
+also no longer silent: the gateway remembers a lapsed question per thread
+and tells a "1" that arrives after the deadline exactly what happened to it
+(`answerLapsedQuestion` in server.ts), which is the record the original
+incident lacked.
+
 **Do this before porting to Codex.** If the wording needs tuning, better to
 find out in one adapter than to have copied it into two.
 

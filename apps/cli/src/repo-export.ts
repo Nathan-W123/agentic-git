@@ -2,6 +2,7 @@ import type { CoordinationStore } from "@coord/persistence";
 import {
   RepositoryService,
   type PushToRemoteResult,
+  type RemoteRepositoryCredentials,
 } from "@coord/repository-service";
 
 import type { CoordinatorProject } from "./project.js";
@@ -24,6 +25,15 @@ export interface RepoPushOptions {
   allowExistingTarget?: boolean;
   allowUnverifiedUpstream?: boolean;
   expectedUpstreamRevision?: string;
+  /**
+   * Authenticates the push as a specific person, overriding the environment.
+   *
+   * The dashboard passes the task submitter's own stored GitHub token here,
+   * so a push runs as whoever asked for it and reaches only what they can
+   * reach. The environment fallback below is for the local CLI only, where
+   * the operator's shell *is* the identity.
+   */
+  credentials?: RemoteRepositoryCredentials;
 }
 
 /**
@@ -31,6 +41,11 @@ export interface RepoPushOptions {
  *
  * Kept out of configuration files and out of the store: a token in
  * `.coordinator/config.json` would be committed by accident sooner or later.
+ *
+ * This is the single-operator CLI's path and only that. The dashboard never
+ * consults it — a deployment-wide token would let any user's task push
+ * wherever the token reaches, under the token owner's name, which is the
+ * confused deputy per-user GitHub connections exist to remove.
  */
 export function pushCredentials(
   env: NodeJS.ProcessEnv = process.env,
@@ -55,7 +70,7 @@ export async function repoPush(
     );
   }
 
-  const credentials = pushCredentials();
+  const credentials = options.credentials ?? pushCredentials();
   return await repositories.pushToRemote(
     {
       id: repository.id,

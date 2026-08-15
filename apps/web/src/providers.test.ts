@@ -5,6 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { CoordinatorProject } from "@coord/cli/project";
+import { UserCredentialStore } from "@coord/workspace-manager";
 
 import {
   ProviderChatError,
@@ -1292,5 +1293,33 @@ test("a vendor that cannot take a credential per user says so", async () => {
     }),
     (error: unknown) =>
       error instanceof ProviderChatError && error.code === "unsupported_kind",
+  );
+});
+
+test("a github connection never appears in the channel roster", async () => {
+  const harness = await createHarness();
+  const store = await UserCredentialStore.open(
+    path.join(harness.project.directory, "secrets"),
+  );
+  await store.put("user-1", "claude", {
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-agent-token",
+  });
+  // Same store, different kind of thing: a push credential, not an agent.
+  // The roster is a list of names a teammate can @mention into work, and a
+  // GitHub token can never answer one.
+  await store.put("user-1", "github", {
+    kind: "api_key",
+    secret: "ghp_pushtoken",
+  });
+
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    credentials: store,
+  });
+  const connections = await service.listConnectionsFor(["user-1"]);
+  assert.deepEqual(
+    connections["user-1"]?.map((entry) => entry.provider),
+    ["anthropic"],
   );
 });
