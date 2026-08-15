@@ -660,6 +660,15 @@ export class Coordinator {
   private readonly taskWorkspacePaths = new Map<string, string>();
   /** Actions each task has spent, for the cap. */
   private readonly actionsUsed = new Map<string, number>();
+  /**
+   * Tasks the platform actually did something for. Read where an empty
+   * changeset is judged: "changed no files" is failure for "fix the retry
+   * loop" and the expected shape of "push to GitHub" — the push happened
+   * out here, not in the workspace, and there is nothing for the diff to
+   * show. Only performed actions count; a refused one changes nothing and
+   * must not launder an empty run into a success.
+   */
+  private readonly actionsDone = new Set<string>();
 
   public constructor(dependencies: CoordinatorDependencies = {}) {
     this.repositories = dependencies.repositories ?? new RepositoryService();
@@ -2213,6 +2222,9 @@ export class Coordinator {
                 explanation: `The action failed: ${errorMessage(error)}`,
               }));
 
+    if (answer.outcome === "done") {
+      this.actionsDone.add(entry.task.id);
+    }
     await this.trace(recorder, runAudit, "action_performed", entry.task.id, {
       requestId,
       action,
@@ -3138,7 +3150,14 @@ export class Coordinator {
       // layers can disagree about what one empty changeset meant.
       const reported =
         integration.status === "empty" &&
-        readsAsReportRequest(result.task.objective);
+        (readsAsReportRequest(result.task.objective) ||
+          // The task's deliverable was a platform action that happened —
+          // a push, a preview — and an action leaves no diff by design.
+          // "The agent produced no repository changes" was exactly how a
+          // successfully pushed "push to GitHub" used to end: failed, with
+          // the push done and the branch name discarded. The agent's own
+          // explanation carries the action's result instead.
+          this.actionsDone.has(result.task.id));
       // Nothing was validated because nothing was changed, and there is no
       // gate here to have passed or failed. Saying "validation came back
       // empty" in front of a finished report is the same false alarm this
