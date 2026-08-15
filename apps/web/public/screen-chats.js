@@ -678,6 +678,16 @@ function previewLink(repositoryId) {
   if (preview === undefined) {
     return "";
   }
+  // A running preview is not necessarily a reachable one: a command that builds
+  // before it serves is healthy for minutes while answering nothing. Offering
+  // the address then is offering something that does not work, and whoever
+  // clicks it concludes the preview is broken rather than slow.
+  if (preview.ready === false) {
+    return `<span class="preview-live">
+      <span class="preview-starting" title="${esc(preview.label)} — ${esc(preview.url)}">
+        starting…</span>
+    </span>`;
+  }
   // Through this deployment rather than at the preview's own address. The
   // app binds loopback and nothing opens a port, so its own URL only works on
   // the machine running the control plane — this path works from anywhere the

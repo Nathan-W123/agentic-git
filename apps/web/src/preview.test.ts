@@ -193,7 +193,176 @@ test("a preview whose command exits immediately is reported, not called running"
       );
       // And nothing is left claiming to run, so the control does not offer a
       // stop button for a process that is gone.
-      assert.equal(previews.status(repository.id), undefined);
+      assert.equal(await previews.status(repository.id), undefined);
+    } finally {
+      await previews.close();
+    }
+  } finally {
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * A repository whose "app" only reports the environment it was started in.
+ *
+ * The point under test is not that a server binds a port — it is *which*
+ * project a previewed app is pointed at. A control plane previewing itself
+ * inherits `COORD_PROJECT_ROOT` unless something stops it, and then either
+ * refuses to start (the running control plane holds the lock) or becomes a
+ * second writer on one SQLite file. Neither is a preview.
+ */
+async function environmentReportingRepository(scripts: {
+  dev: string;
+}): Promise<{ root: string; sourcePath: string; project: CoordinatorProject }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "preview-env-"));
+  const sourcePath = path.join(root, "src-repo");
+  const repositories = new RepositoryService();
+  await repositories.initializeWorkingRepository(sourcePath);
+  await writeFile(
+    path.join(sourcePath, "package.json"),
+    `${JSON.stringify({
+      name: "reporter",
+      private: true,
+      type: "module",
+      scripts,
+    })}\n`,
+    "utf8",
+  );
+  // Prints what it was handed, then serves, so the test can read the
+  // environment out of the preview's own captured output.
+  await writeFile(
+    path.join(sourcePath, "server.mjs"),
+    [
+      'import { createServer } from "node:http";',
+      'const say = (name) => console.log(name + "=" + (process.env[name] ?? ""));',
+      'say("COORD_PROJECT_ROOT");',
+      'say("COORD_HOST");',
+      'say("SECRET_FROM_CONFIG");',
+      'say("COORD_BOOTSTRAP_TOKEN");',
+      'createServer((_, response) => response.end("ok")).listen(',
+      '  Number(process.env["PORT"]), "127.0.0.1");',
+      "",
+    ].join("\n"),
+    "utf8",
+  );
+  await repositories.commitAll(sourcePath, "seed reporter");
+
+  const projectRoot = path.join(root, "proj");
+  await mkdir(projectRoot, { recursive: true });
+  const project = await CoordinatorProject.init(projectRoot);
+  return { root, sourcePath, project };
+}
+
+/** Waits for a line matching `name=value` in a preview's captured output. */
+async function reported(
+  previews: PreviewService,
+  repositoryId: string,
+  name: string,
+): Promise<string | undefined> {
+  const deadline = Date.now() + 20_000;
+  while (Date.now() < deadline) {
+    const line = ((await previews.status(repositoryId))?.recentOutput ?? []).find(
+      (entry) => entry.startsWith(`${name}=`),
+    );
+    if (line !== undefined) {
+      return line.slice(name.length + 1);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return undefined;
+}
+
+test("a previewed app is given its own project, not the control plane's", async () => {
+  const { root, sourcePath, project } = await environmentReportingRepository({
+    dev: "node server.mjs",
+  });
+  const store = project.openStore();
+  // What the control plane itself was started with. Inheriting this is the bug.
+  const inherited = path.join(root, "live-project");
+  process.env["COORD_PROJECT_ROOT"] = inherited;
+  process.env["COORD_BOOTSTRAP_TOKEN"] = "not-for-the-child";
+  try {
+    const repository = await repoAdd(project, store, {
+      sourcePath,
+      id: "reporter",
+    });
+    const previews = new PreviewService(project, store);
+    try {
+      const status = await previews.start({ repositoryId: repository.id });
+      assert.equal(status.ready, true);
+
+      const projectRoot = await reported(
+        previews,
+        repository.id,
+        "COORD_PROJECT_ROOT",
+      );
+      assert.notEqual(projectRoot, inherited);
+      assert.ok(
+        projectRoot !== undefined && projectRoot.length > 0,
+        "the child was given no project at all, so it has nothing to open",
+      );
+      // And it is a real project: the app can open it rather than being told
+      // to run `coord init` in a directory that is about to be deleted.
+      await CoordinatorProject.open(projectRoot!);
+
+      // The control plane's own secrets do not travel either.
+      assert.equal(
+        await reported(previews, repository.id, "COORD_BOOTSTRAP_TOKEN"),
+        "",
+      );
+      // Loopback is the promise this class makes, and a set PORT is what makes
+      // apps/web bind every interface unless COORD_HOST says otherwise.
+      assert.equal(
+        await reported(previews, repository.id, "COORD_HOST"),
+        "127.0.0.1",
+      );
+
+      const response = await fetch(status.url);
+      assert.equal(response.status, 200);
+      assert.equal(await response.text(), "ok");
+    } finally {
+      await previews.close();
+    }
+  } finally {
+    delete process.env["COORD_PROJECT_ROOT"];
+    delete process.env["COORD_BOOTSTRAP_TOKEN"];
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a repository can supply its own configuration, and it wins", async () => {
+  const { root, sourcePath, project } = await environmentReportingRepository({
+    dev: "node server.mjs",
+  });
+  const store = project.openStore();
+  try {
+    const repository = await repoAdd(project, store, {
+      sourcePath,
+      id: "reporter",
+    });
+    // The gap that made the button useless for an app needing configuration:
+    // detection can find the command, and nothing could supply the value that
+    // is deliberately not in the repository.
+    project.config.previewCommands = {
+      [repository.id]: {
+        executable: process.execPath,
+        args: ["server.mjs"],
+        label: "reporter",
+        env: { SECRET_FROM_CONFIG: "from-config", COORD_HOST: "127.0.0.1" },
+      },
+    };
+    await project.save();
+
+    const previews = new PreviewService(project, store);
+    try {
+      const status = await previews.start({ repositoryId: repository.id });
+      assert.equal(status.label, "reporter");
+      assert.equal(
+        await reported(previews, repository.id, "SECRET_FROM_CONFIG"),
+        "from-config",
+      );
     } finally {
       await previews.close();
     }

@@ -496,7 +496,7 @@ async function serve(
       return await previews.start({ repositoryId: input.repositoryId });
     },
     async previewStatus(input) {
-      return previews.status(input.repositoryId);
+      return await previews.status(input.repositoryId);
     },
     async previewStop(input) {
       await previews.stop(input.repositoryId);

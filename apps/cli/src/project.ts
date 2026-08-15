@@ -139,7 +139,7 @@ export interface ProjectConfig {
    * with `PORT` and `HOST` in its environment; it is expected to keep running
    * until it is stopped, unlike a validation command.
    */
-  previewCommand?: ValidationCommand;
+  previewCommand?: PreviewCommand;
   /**
    * Per-repository overrides, keyed by repository id.
    *
@@ -148,7 +148,7 @@ export interface ProjectConfig {
    * `previewCommand`, which stays as the default for a project whose
    * repositories all start the same way.
    */
-  previewCommands?: Record<string, ValidationCommand>;
+  previewCommands?: Record<string, PreviewCommand>;
   /**
    * How to install this repository's dependencies before its app is started.
    *
@@ -160,9 +160,19 @@ export interface ProjectConfig {
    * Absent means detection decides: a repository with a package.json and no
    * `node_modules` gets an install, and everything else is started as it is.
    */
-  installCommand?: ValidationCommand;
+  installCommand?: PreviewCommand;
   /** Per-repository overrides, keyed by repository id. */
-  installCommands?: Record<string, ValidationCommand>;
+  installCommands?: Record<string, PreviewCommand>;
+}
+
+/** A {@link ValidationCommand} that may also carry the app's configuration. */
+export interface PreviewCommand extends ValidationCommand {
+  /**
+   * Added to the environment the command runs in, after the control plane's
+   * own defaults and last, so a repository that needs something specific can
+   * always say so.
+   */
+  env?: Record<string, string>;
 }
 
 export const DEFAULT_CONFIG: ProjectConfig = {
@@ -278,6 +288,44 @@ function assertValidationCommand(value: unknown, where: string): ValidationComma
     executable: command.executable,
     args: [...command.args],
     label: command.label,
+  };
+}
+
+/**
+ * A command that starts an app, which is a validation command plus the one
+ * thing an app needs and a test run does not: configuration.
+ *
+ * A validation command is handed a checkout and asked whether it passes. An
+ * app is handed a checkout and asked to *be* something — and the difference
+ * between a checkout and a running app is almost always a value that is not in
+ * the repository, because values that identify one machine's database, project
+ * directory or API key are exactly what does not get committed. Detection can
+ * find the command; nothing can guess those.
+ */
+function assertPreviewCommand(value: unknown, where: string): PreviewCommand {
+  const command = assertValidationCommand(value, where);
+  const env = (value as { env?: unknown }).env;
+  if (env === undefined) {
+    return command;
+  }
+  if (typeof env !== "object" || env === null || Array.isArray(env)) {
+    fail(`${where} needs "env" to be an object of string values`);
+  }
+  const entries = Object.entries(env as Record<string, unknown>);
+  for (const [name, entry] of entries) {
+    // A NUL in either half is rejected for the same reason it is in the
+    // executable: the value crosses into `execve`, where a NUL truncates
+    // rather than erroring, so what runs would not be what was configured.
+    if (name.trim().length === 0 || name.includes("\0") || name.includes("=")) {
+      fail(`${where} has an invalid environment variable name`);
+    }
+    if (typeof entry !== "string" || entry.includes("\0")) {
+      fail(`${where} needs "env.${name}" to be a string`);
+    }
+  }
+  return {
+    ...command,
+    env: Object.fromEntries(entries as [string, string][]),
   };
 }
 
@@ -532,11 +580,12 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
     agents,
     // Validated the same way a validation command is, because it is the same
     // shape and the same mistakes are available: a missing executable, args
-    // that are not an array.
+    // that are not an array — plus the optional `env` an app needs and a test
+    // run does not.
     ...(config.previewCommand === undefined
       ? {}
       : {
-          previewCommand: assertValidationCommand(
+          previewCommand: assertPreviewCommand(
             config.previewCommand,
             "previewCommand",
           ),
@@ -549,7 +598,7 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
               config.previewCommands as Record<string, unknown>,
             ).map(([repositoryId, entry]) => [
               repositoryId,
-              assertValidationCommand(
+              assertPreviewCommand(
                 entry,
                 `previewCommands["${repositoryId}"]`,
               ),
@@ -559,7 +608,7 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
     ...(config.installCommand === undefined
       ? {}
       : {
-          installCommand: assertValidationCommand(
+          installCommand: assertPreviewCommand(
             config.installCommand,
             "installCommand",
           ),
@@ -572,7 +621,7 @@ export function assertProjectConfig(value: unknown): ProjectConfig {
               config.installCommands as Record<string, unknown>,
             ).map(([repositoryId, entry]) => [
               repositoryId,
-              assertValidationCommand(
+              assertPreviewCommand(
                 entry,
                 `installCommands["${repositoryId}"]`,
               ),

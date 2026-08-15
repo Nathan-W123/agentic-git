@@ -8,7 +8,10 @@ import type { CoordinationStore } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
 import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
 
-import type { CoordinatorProject } from "@coord/cli/project";
+import {
+  CoordinatorProject,
+  type PreviewCommand,
+} from "@coord/cli/project";
 
 /**
  * Runs a repository's own app, so somebody can look at what the agents built.
@@ -48,6 +51,17 @@ export interface PreviewStatus {
   revision: string;
   /** What is actually running, so the reader is not guessing. */
   label: string;
+  /**
+   * Whether the port is answering yet.
+   *
+   * Distinct from "running", because the gap between them is not always
+   * instant: a command that builds before it serves — which is the honest
+   * shape for any repository whose start script expects a build output — can
+   * be several minutes of a perfectly healthy process. Offering the address
+   * during that window is offering something that does not work, and a reader
+   * who clicks it concludes the preview is broken.
+   */
+  ready: boolean;
   startedAt: string;
   /** Set once the process has exited, with however it went. */
   exited?: { code: number | null; signal: string | null; at: string };
@@ -77,7 +91,7 @@ interface Running {
  */
 async function detectPreviewCommand(
   workspacePath: string,
-): Promise<{ executable: string; args: string[]; label: string } | undefined> {
+): Promise<PreviewCommand | undefined> {
   let manifest: { scripts?: Record<string, unknown> };
   try {
     manifest = JSON.parse(
@@ -235,7 +249,7 @@ async function describeUndetectable(workspacePath: string): Promise<string> {
  */
 async function detectInstallCommand(
   workspacePath: string,
-): Promise<{ executable: string; args: string[]; label: string } | undefined> {
+): Promise<PreviewCommand | undefined> {
   const has = async (name: string): Promise<boolean> => {
     try {
       await access(path.join(workspacePath, name));
@@ -264,13 +278,15 @@ async function detectInstallCommand(
  * went wrong rather than in the server that never ran.
  */
 async function runToCompletion(
-  command: { executable: string; args: string[]; label: string },
+  command: PreviewCommand,
   cwd: string,
   output: string[],
+  env: NodeJS.ProcessEnv,
 ): Promise<string | undefined> {
   return await new Promise((resolve) => {
     const child = spawn(command.executable, [...command.args], {
       cwd,
+      env: { ...env, ...command.env },
       stdio: ["ignore", "pipe", "pipe"],
     });
     const record = (chunk: Buffer): void => {
@@ -308,22 +324,89 @@ async function waitForPort(
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline && !exited()) {
-    const open = await new Promise<boolean>((resolve) => {
-      const probe = connect({ port, host: "127.0.0.1" });
-      const settle = (answer: boolean): void => {
-        probe.destroy();
-        resolve(answer);
-      };
-      probe.once("connect", () => settle(true));
-      probe.once("error", () => settle(false));
-      probe.setTimeout(1_000, () => settle(false));
-    });
-    if (open) {
+    if (await probePort(port)) {
       return true;
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   return false;
+}
+
+/** Whether anything is listening on a loopback port, asked once. */
+async function probePort(port: number): Promise<boolean> {
+  return await new Promise<boolean>((resolve) => {
+    const probe = connect({ port, host: "127.0.0.1" });
+    const settle = (answer: boolean): void => {
+      probe.destroy();
+      resolve(answer);
+    };
+    probe.once("connect", () => settle(true));
+    probe.once("error", () => settle(false));
+    probe.setTimeout(1_000, () => settle(false));
+  });
+}
+
+/**
+ * Variables that name *this* control plane's own state.
+ *
+ * A preview is a separate app in a separate checkout, and it inherits this
+ * process's environment so that a PATH, a HOME and a proxy setting all reach
+ * it. These are the ones that must not: they say which project directory,
+ * which database and which port belong to the control plane doing the
+ * starting, and handing them to a child is how a preview stops being a
+ * preview.
+ *
+ * It is not hypothetical, and it is not only about this repository previewing
+ * itself. `COORD_PROJECT_ROOT` points at a project whose control plane is
+ * already running and already holds its lock, so any child that reads it
+ * either refuses to start or — if the lock were not there — becomes a second
+ * writer on one SQLite file. Overriding them with the preview's own values is
+ * the whole of the fix; a repository that genuinely wants one of these back
+ * can say so in its command's `env`, which is applied last.
+ */
+const CONTROL_PLANE_VARIABLES = [
+  "COORD_PROJECT_ROOT",
+  "COORD_PORT",
+  "COORD_HOST",
+  "COORD_BOOTSTRAP_TOKEN",
+  "COORD_SECURE_COOKIES",
+  "COORD_ALLOWED_ORIGINS",
+];
+
+/**
+ * Stops a spawned preview and everything it started.
+ *
+ * A dev server is nearly always a process that starts another one — `npm run
+ * dev` is a shell script that execs a bundler — and signalling only the child
+ * leaves the grandchild running: it keeps the port, so the next press of play
+ * finds it taken, and it keeps the stdout pipe this process is reading, so the
+ * control plane itself acquires a handle that never closes. Pressing play a
+ * few times leaks a server each time.
+ *
+ * So the children are spawned into their own process group and the group is
+ * signalled. Windows has no process groups in this sense and no negative pid,
+ * where killing the child is the best available answer and `taskkill` would be
+ * a dependency on a shell this code deliberately never uses.
+ */
+function terminate(child: ChildProcess | undefined): void {
+  if (child?.pid === undefined) {
+    return;
+  }
+  try {
+    if (process.platform === "win32") {
+      child.kill("SIGTERM");
+      return;
+    }
+    process.kill(-child.pid, "SIGTERM");
+  } catch {
+    // Already gone, or never became a group leader. Either way the fallback
+    // costs nothing and cannot make things worse.
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      // Already gone.
+    }
+  }
 }
 
 /** A free loopback port, chosen by asking the OS for one and letting it go. */
@@ -423,6 +506,8 @@ export class PreviewService {
         port,
         revision: version.revision,
         label: "static files",
+        // Served in this process: there is no gap between running and ready.
+        ready: true,
         startedAt: new Date().toISOString(),
         recentOutput: [`serving ${workspace.path}`],
       };
@@ -456,6 +541,8 @@ export class PreviewService {
       );
     }
 
+    const port = await freePort();
+
     // Dependencies first. A checkout of canonical has none — they are ignored
     // by git, which is exactly why they are not in the revision — so a Node
     // app started here fails on its first import and looks like a broken
@@ -464,12 +551,17 @@ export class PreviewService {
       this.project.config.installCommands?.[input.repositoryId] ??
       this.project.config.installCommand ??
       (await detectInstallCommand(workspace.path));
+    // Resolved before the install, because an install can need configuration
+    // just as much as the server can — a private registry token is the usual
+    // one — and because it is what creates the preview's own project.
+    const environment = await this.previewEnvironment(input.repositoryId, port);
     const installOutput: string[] = [];
     if (install !== undefined) {
       const failure = await runToCompletion(
         install,
         workspace.path,
         installOutput,
+        environment,
       );
       if (failure !== undefined) {
         await rm(workspace.path, { recursive: true, force: true });
@@ -479,17 +571,14 @@ export class PreviewService {
       }
     }
 
-    const port = await freePort();
     const child = spawn(command.executable, [...command.args], {
       cwd: workspace.path,
-      env: {
-        ...process.env,
-        // The two spellings between them cover almost every dev server; a
-        // command that wants something else can name it in its own args.
-        PORT: String(port),
-        HOST: "127.0.0.1",
-      },
+      // The command's own `env` is applied last, so a repository that needs
+      // something specific always wins over what is inferred for it.
+      env: { ...environment, ...command.env },
       stdio: ["ignore", "pipe", "pipe"],
+      // Its own process group, so `terminate` can take the whole tree.
+      detached: process.platform !== "win32",
     });
 
     const status: PreviewStatus = {
@@ -498,6 +587,7 @@ export class PreviewService {
       port,
       revision: version.revision,
       label: command.label,
+      ready: false,
       startedAt: new Date().toISOString(),
       // The install's output leads the log. When a server fails to come up the
       // reason is often in the install that preceded it, and separating the
@@ -556,7 +646,7 @@ export class PreviewService {
     // the bug being fixed — so the wait ends the instant the child dies, and
     // otherwise gives up quietly and reports the preview as started. This is
     // the same reading `startForTask` has always taken.
-    const ready = await waitForPort(port, () => status.exited !== undefined);
+    status.ready = await waitForPort(port, () => status.exited !== undefined);
     const exit = status.exited;
     if (exit !== undefined) {
       const said = status.recentOutput.slice(-4).join(" ").trim();
@@ -571,7 +661,6 @@ export class PreviewService {
           `.coordinator/config.json.`,
       );
     }
-    void ready;
     return { ...status, recentOutput: [...status.recentOutput] };
   }
 
@@ -624,22 +713,29 @@ export class PreviewService {
       this.project.config.installCommands?.[input.repositoryId] ??
       this.project.config.installCommand ??
       (await detectInstallCommand(input.workspacePath));
+    const port = await freePort();
+    // The same environment the repository preview gets, and for the same
+    // reason: an agent looking at its own work is running the app, not the
+    // control plane, and must not be handed the control plane's project.
+    const environment = await this.previewEnvironment(input.repositoryId, port);
     if (install !== undefined) {
       const failure = await runToCompletion(
         install,
         input.workspacePath,
         output,
+        environment,
       );
       if (failure !== undefined) {
         return { output, failed: true };
       }
     }
 
-    const port = await freePort();
     const child = spawn(command.executable, [...command.args], {
       cwd: input.workspacePath,
-      env: { ...process.env, PORT: String(port), HOST: "127.0.0.1" },
+      env: { ...environment, ...command.env },
       stdio: ["ignore", "pipe", "pipe"],
+      // Its own process group, so `terminate` can take the whole tree.
+      detached: process.platform !== "win32",
     });
     let exited = false;
     const record = (chunk: Buffer): void => {
@@ -683,8 +779,8 @@ export class PreviewService {
       return;
     }
     this.taskPreviews.delete(taskId);
+    terminate(running.child);
     try {
-      running.child?.kill("SIGTERM");
       running.server?.close();
     } catch {
       // Already gone.
@@ -692,7 +788,7 @@ export class PreviewService {
   }
 
   /** What this repository's preview is doing, if it has one. */
-  public status(repositoryId: string): PreviewStatus | undefined {
+  public async status(repositoryId: string): Promise<PreviewStatus | undefined> {
     const entry = this.running.get(repositoryId);
     if (entry === undefined) {
       return undefined;
@@ -700,6 +796,14 @@ export class PreviewService {
     // Asking counts as watching, which is what keeps the idle sweep from
     // stopping a preview somebody has open.
     entry.lastAskedAt = Date.now();
+    // And it is where a slow preview is noticed to have finished coming up.
+    // Deliberately answered on demand rather than by a background loop: a loop
+    // would have to keep a timer alive for as long as the preview might still
+    // be building, which is indistinguishable from a process that will not
+    // exit. One connect per poll costs nothing and nobody has to own it.
+    if (!entry.status.ready && entry.status.exited === undefined) {
+      entry.status.ready = await probePort(entry.status.port);
+    }
     return { ...entry.status, recentOutput: [...entry.status.recentOutput] };
   }
 
@@ -714,8 +818,8 @@ export class PreviewService {
       // A dev server usually spawns children of its own, and killing only the
       // parent leaves them holding the port. Best effort either way: this is
       // cleanup, and a failure here must not surface as the caller's error.
+      terminate(entry.child);
       try {
-        entry.child?.kill("SIGTERM");
         entry.server?.close();
       } catch {
         // Already gone.
@@ -735,6 +839,49 @@ export class PreviewService {
       ...[...this.running.keys()].map((repositoryId) => this.stop(repositoryId)),
       ...[...this.taskPreviews.keys()].map((taskId) => this.stopForTask(taskId)),
     ]);
+  }
+
+  /**
+   * The environment a previewed app runs in.
+   *
+   * Inherited, minus this control plane's own identity, plus the port it has
+   * been given — spelled both the way most dev servers read it and the way
+   * this codebase's own apps do, because a preview of a control plane is a
+   * case worth supporting and it reads `COORD_PORT` first.
+   *
+   * `COORD_PROJECT_ROOT` is not merely cleared but *replaced*, with a project
+   * of the preview's own. Clearing it alone would leave a previewed control
+   * plane falling back to its working directory, which is the checkout — where
+   * there is no project, so it exits telling somebody to run `coord init` in a
+   * directory that is about to be deleted. The replacement is kept across
+   * restarts on purpose: a preview you have to set up from scratch every time
+   * you press play is one nobody presses twice.
+   */
+  private async previewEnvironment(
+    repositoryId: string,
+    port: number,
+  ): Promise<NodeJS.ProcessEnv> {
+    const environment: NodeJS.ProcessEnv = { ...process.env };
+    for (const name of CONTROL_PLANE_VARIABLES) {
+      delete environment[name];
+    }
+    const projectRoot = path.join(
+      this.project.workspaceRoot,
+      "preview-projects",
+      repositoryId,
+    );
+    await mkdir(projectRoot, { recursive: true });
+    // Idempotent, and never overwrites an existing config — so a preview keeps
+    // whatever was set up in it last time.
+    await CoordinatorProject.init(projectRoot);
+    return {
+      ...environment,
+      PORT: String(port),
+      HOST: "127.0.0.1",
+      COORD_PORT: String(port),
+      COORD_HOST: "127.0.0.1",
+      COORD_PROJECT_ROOT: projectRoot,
+    };
   }
 
   private async sweepIdle(): Promise<void> {
