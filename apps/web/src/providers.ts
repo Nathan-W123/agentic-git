@@ -152,16 +152,16 @@ export interface ProviderSettings {
 }
 
 /**
- * Names handed to newly connected accounts, in order.
+ * Names handed to newly connected accounts, drawn at random.
  *
- * Gods rather than things, and the distinction is not decoration. An agent
- * named after a product talks about itself as one: an agent called Apollo
- * once reported that "Apollo integration isn't installed" when asked about
- * itself. `agentIdentity()` counters that directly, and a name with no
+ * Greek and Roman gods, and the distinction from things is not decoration. An
+ * agent named after a product talks about itself as one: an agent called
+ * Apollo once reported that "Apollo integration isn't installed" when asked
+ * about itself. `agentIdentity()` counters that directly, and a name with no
  * software of the same name to be confused with does not start the argument.
  *
- * Order is the assignment order, so the first connections on a fresh
- * deployment get the names people recognise.
+ * Order carries no meaning: assignment picks uniformly from whatever is still
+ * free, so this reads as sections of a pantheon rather than as a queue.
  */
 export const AGENT_CALL_SIGNS = [
   // Olympians and kin
@@ -1197,6 +1197,12 @@ export class ProviderChatService {
    * Signs already in use anywhere on the deployment are skipped so two agents
    * in one room are not both Hermes. When the pool is exhausted the vendor
    * label stands, which is the behaviour every account had before this.
+   *
+   * The free signs are drawn from uniformly rather than taken in list order.
+   * Walking the list meant every fresh deployment produced Zeus, then Hera,
+   * then Poseidon, in that order forever: the name said which account
+   * connected first and nothing else, and two deployments side by side were
+   * the same three agents. A random draw makes the pantheon feel dealt out.
    */
   private assignCallSign(file: ConnectionFile, userId: string, provider: ProviderId): void {
     const connection = file[userId]?.[provider];
@@ -1212,13 +1218,14 @@ export class ProviderChatService {
         }
       }
     }
-    const free = AGENT_CALL_SIGNS.find(
+    const free = AGENT_CALL_SIGNS.filter(
       (sign) => !taken.has(sign.toLowerCase()),
     );
-    if (free === undefined) {
+    const sign = free[Math.floor(Math.random() * free.length)];
+    if (sign === undefined) {
       return;
     }
-    connection.settings = { ...connection.settings, callSign: free };
+    connection.settings = { ...connection.settings, callSign: sign };
   }
 
   private async readConnections(): Promise<ConnectionFile> {

@@ -8,6 +8,7 @@ import { CoordinatorProject } from "@coord/cli/project";
 import { UserCredentialStore } from "@coord/workspace-manager";
 
 import {
+  AGENT_CALL_SIGNS,
   ProviderChatError,
   ProviderChatService,
   parseClaudeStreamJson,
@@ -1321,5 +1322,78 @@ test("a github connection never appears in the channel roster", async () => {
   assert.deepEqual(
     connections["user-1"]?.map((entry) => entry.provider),
     ["anthropic"],
+  );
+});
+
+test("call sign assignment picks randomly from the free Greek and Roman god names", async () => {
+  // Taking the first free name meant the pool was really a queue: the first
+  // account on any deployment was Zeus, the second Hera, the third Poseidon,
+  // and the name carried nothing but join order.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+  });
+
+  const signs: string[] = [];
+  for (let index = 0; index < 8; index += 1) {
+    const statuses = await service.connectOwnCredential({
+      userId: `u${index}`,
+      provider: "anthropic",
+      kind: "oauth_token",
+      secret: `sk-ant-oat01-user-${index}`,
+    });
+    const sign = statuses.find((entry) => entry.id === "anthropic")?.callSign;
+    assert.ok(sign !== undefined, "a connected account is given a name");
+    signs.push(sign);
+  }
+
+  const pantheon = new Set<string>(AGENT_CALL_SIGNS);
+  for (const sign of signs) {
+    assert.ok(pantheon.has(sign), `${sign} is not one of the gods`);
+  }
+  // Signs in use are still skipped, so a room cannot hold two Hermeses.
+  assert.equal(new Set(signs).size, signs.length, "every sign is distinct");
+  // Eight draws from seventy-two names land in list order roughly once in
+  // 10^14 runs, so this asserts the draw is random without being flaky.
+  assert.notDeepEqual(
+    signs,
+    [...AGENT_CALL_SIGNS].slice(0, signs.length),
+    "call signs must not be handed out in list order",
+  );
+});
+
+test("an account that already has a call sign is never renamed", async () => {
+  // Assignment only ever fills a gap: a name people have learned survives a
+  // reconnect, and a name somebody chose survives everything.
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner(CLAUDE_PONG),
+  });
+
+  const first = await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-first",
+  });
+  const assigned = first.find((entry) => entry.id === "anthropic")?.callSign;
+  assert.ok(assigned !== undefined);
+
+  await service.setSettings({
+    userId: "u1",
+    provider: "anthropic",
+    callSign: "Icarus",
+  });
+  const again = await service.connectOwnCredential({
+    userId: "u1",
+    provider: "anthropic",
+    kind: "oauth_token",
+    secret: "sk-ant-oat01-second",
+  });
+  assert.equal(
+    again.find((entry) => entry.id === "anthropic")?.callSign,
+    "Icarus",
   );
 });

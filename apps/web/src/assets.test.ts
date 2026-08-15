@@ -5,6 +5,7 @@ import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { loadStaticAssets } from "./assets.js";
+import { AGENT_CALL_SIGNS } from "./providers.js";
 
 /* ------------------------------------------------------------- assets ---- */
 
@@ -842,6 +843,16 @@ test("no agent call sign is a prefix of another", async () => {
       .map((longer) => `${shorter} is a prefix of ${longer}`),
   );
   assert.deepEqual(collisions, []);
+  // One pantheon, two code paths. The browser names an agent as it is added
+  // to a channel and the server names an account as it connects, and the two
+  // lists have to agree or the same agent is Vesta by one route and Icarus by
+  // the other. `data.js` is served verbatim and cannot import this list, so
+  // the copies are compared here instead.
+  assert.deepEqual(
+    names,
+    [...AGENT_CALL_SIGNS],
+    "the browser's call signs must mirror AGENT_CALL_SIGNS in providers.ts",
+  );
 });
 
 test("an agent's reply to a person is shown, not folded into the thinking block", async () => {

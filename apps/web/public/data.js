@@ -916,23 +916,34 @@ export const TYPING_SWEEP_MS = TYPING_TTL_MS + 250;
  * pronounceable, which is what a name in a chat is actually for. Deliberately
  * a flat list rather than generated syllables: every one of these reads as a
  * name, and none of them will ever come out unpronounceable or unfortunate.
+ *
+ * Greek and Roman gods, and only gods — the same pool as `AGENT_CALL_SIGNS`
+ * in `src/providers.ts`, which names an account when it connects. Two lists
+ * meant an agent could be Icarus by one route and Vesta by the other, and a
+ * heroes-and-monsters list names agents after things as well as people: an
+ * agent called Apollo once reported that "Apollo integration isn't installed"
+ * when asked about itself, and Aegis, Hydra and Phoenix are all products
+ * somebody runs. This file is served to the browser verbatim and cannot
+ * import from the server build, so the list is mirrored rather than shared;
+ * change one and change the other.
  */
 export const AGENT_CODE_NAMES = [
-  // The NATO alphabet, which exists precisely to stay unambiguous over a bad
-  // connection — the same job a name has in a busy channel.
-  "Alfa", "Bravo", "Charlie", "Delta", "Echo", "Foxtrot", "Golf", "Hotel",
-  "India", "Juliett", "Kilo", "Lima", "Mike", "November", "Oscar", "Papa",
-  "Quebec", "Romeo", "Sierra", "Tango", "Uniform", "Victor", "Whiskey",
-  "Xray", "Yankee", "Zulu",
-  // Greek myth, for the same reason call signs have always borrowed from it:
-  // one word, already known, and nothing like a username.
-  "Achilles", "Aegis", "Ajax", "Andromeda", "Apollo", "Argus", "Artemis",
-  "Atlas", "Boreas", "Calypso", "Cassandra", "Castor", "Chiron", "Daedalus",
-  "Eos", "Erebus", "Gaia", "Hecate", "Helios", "Hermes", "Hestia", "Hydra",
-  "Hyperion", "Icarus", "Iris", "Kratos", "Leto", "Medea", "Morpheus",
-  "Nemesis", "Nereus", "Nike", "Notus", "Odysseus", "Orion", "Orpheus",
-  "Pallas", "Pandora", "Perseus", "Phoenix", "Pollux", "Poseidon",
-  "Prometheus", "Rhea", "Selene", "Thalia", "Theseus", "Triton", "Zephyrus",
+  // Olympians and kin
+  "Zeus", "Hera", "Poseidon", "Demeter", "Athena", "Apollo", "Artemis",
+  "Ares", "Aphrodite", "Hephaestus", "Hermes", "Hestia", "Dionysus",
+  "Hades", "Persephone",
+  // Titans and primordials
+  "Cronus", "Rhea", "Oceanus", "Tethys", "Hyperion", "Theia", "Themis",
+  "Mnemosyne", "Atlas", "Prometheus", "Epimetheus", "Gaia", "Uranus",
+  "Nyx", "Erebus", "Eos", "Helios", "Selene", "Iris",
+  // Winds and lesser gods
+  "Boreas", "Zephyrus", "Notus", "Eurus", "Pan", "Morpheus", "Nemesis",
+  "Nike", "Tyche", "Eris", "Hebe", "Janus",
+  // Roman counterparts and originals
+  "Jupiter", "Juno", "Neptune", "Ceres", "Minerva", "Mars", "Venus",
+  "Vulcan", "Mercury", "Vesta", "Bacchus", "Pluto", "Proserpina",
+  "Saturn", "Ops", "Sol", "Luna", "Aurora", "Victoria", "Fortuna",
+  "Bellona", "Faunus", "Flora", "Pomona", "Terminus", "Quirinus",
 ];
 
 /** Names already spoken for in this channel, however they were set. */
@@ -948,6 +959,10 @@ function takenChannelNames(repositoryId) {
  * Vespers here would make a mention ambiguous, while a Vesper in another
  * channel is no trouble at all. `undefined` when the list is exhausted, which
  * is the caller's cue to ask rather than to invent something.
+ *
+ * The choice among the free names is uniformly random rather than the first
+ * one going: taking them in order makes the name a join counter, so every
+ * channel opens with the same three gods in the same order.
  */
 export function freeAgentCodeName(repositoryId, avoid = []) {
   const taken = takenChannelNames(repositoryId);
