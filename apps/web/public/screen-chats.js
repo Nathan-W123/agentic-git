@@ -2457,6 +2457,24 @@ export function channelInfoPopoverHtml(repositoryId) {
            </div>`
     }
     ${canManage ? coOwnerPanelHtml(repositoryId) : ""}
+    ${
+      // Bringing the repository up to date with GitHub. It lived on the
+      // repositories screen, which this interface no longer has — leaving a
+      // person whose pull had just been refused with nowhere to settle it.
+      // Offered only where there is a GitHub origin to sync from.
+      state.repositories.find((repo) => repo.id === repositoryId)?.provider ===
+      "github"
+        ? `<div class="pop-block">
+             <button type="button" class="btn btn-sm"
+               data-act="channel-sync" data-value="${esc(repositoryId)}">
+               ${icon("sync")} Sync from GitHub
+             </button>
+             <p>Brings this project up to date with what has landed on
+               GitHub. Needed before pushing when the two have both moved
+               on.</p>
+           </div>`
+        : ""
+    }
     <div class="pop-block pop-block-danger">
       ${
         canManage
