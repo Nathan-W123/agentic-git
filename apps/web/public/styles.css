@@ -7163,6 +7163,11 @@ body.resizing-ns * {
 @media (max-width: 600px) {
   .app input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
   .app textarea,
+  /* The composer's mirror is a div, so the rule above never reached it: the
+     textarea grew to 16px on a phone and the layer painting its text stayed
+     at 12.5, which put every caret a few pixels off the letters it sat in.
+     Whatever size the textarea is told to be, its mirror is told too. */
+  .app .composer-mirror,
   .app select,
   #auth-root input,
   #auth-root textarea,

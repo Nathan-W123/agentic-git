@@ -1134,3 +1134,46 @@ test("the composer paints its mentions on a layer that matches the textarea", as
   // The caret is the one part of the textarea that must stay visible.
   assert.match(css, /caret-color: var\(--text\)/u);
 });
+
+test("a phone's caret sits on its own letters, and a backlog arrives as one line", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // A phone bumps every field to 16px so iOS does not zoom on focus. The
+  // mirror is a div, so that rule never reached it: the textarea grew and the
+  // layer painting its text did not, which put the caret off the letters it
+  // sat in. Whatever size the textarea is told to be, its mirror is told too.
+  const zoomAt = css.indexOf(".app textarea,");
+  assert.notEqual(zoomAt, -1, "the phone anti-zoom rule is still there");
+  const zoomRule = css.slice(zoomAt, css.indexOf("}", zoomAt));
+  assert.match(zoomRule, /\.app \.composer-mirror,/u);
+  assert.match(zoomRule, /font-size: 16px;/u);
+  // And it is the phone rule, not some other block that happens to match.
+  assert.match(
+    css.slice(css.lastIndexOf("@media", zoomAt), zoomAt),
+    /max-width: 600px/u,
+  );
+
+  // The header counted the whole organization — and, before that had loaded,
+  // only the reader. Both it and the sidebar now count this room.
+  assert.match(chats, /function channelPeopleFor/u);
+  assert.match(chats, /const people = channelPeopleFor\(repositoryId\)/u);
+  assert.match(chats, /const people = channelPeopleFor\(activeRepositoryId\)/u);
+  assert.doesNotMatch(
+    /function chanHeader[\s\S]*?\n\}/u.exec(chats)?.[0] ?? "",
+    /collaborators\(\)/u,
+    "the channel header no longer counts the organization",
+  );
+
+  // Reconnecting delivers everything that happened while the browser was
+  // closed. One banner each, five seconds each, was a wall of them; one
+  // reconcile each was a full app rebuild each.
+  assert.match(app, /function announceNews/u);
+  assert.match(app, /announceNews\(line\)/u);
+  assert.match(app, /lines\.length === 1 \? latest :/u);
+  assert.match(app, /clearTimeout\(channelFrameTimer\)/u);
+  assert.match(app, /CHANNEL_FRAME_COALESCE_MS/u);
+  // The burst collapses, it is not dropped: the count is still reported.
+  assert.match(app, /\$\{lines\.length\} updates/u);
+});
