@@ -2351,12 +2351,39 @@ svg {
 }
 
 .msg {
+  position: relative;
   max-width: 88%;
   padding: 11px 13px;
   border-radius: 12px;
   font-size: 12.5px;
   line-height: 1.55;
   word-break: break-word;
+}
+
+/* Rewind, hidden until the bubble is under the pointer — the same bargain
+   `.cmsg-actions` makes in the channel. It sits outside the bubble rather
+   than in it so it never reflows what somebody is reading, on the side the
+   bubble is not anchored to. */
+.msg .icon-btn[data-act="chat-msg-delete"] {
+  position: absolute;
+  top: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.msg.user .icon-btn[data-act="chat-msg-delete"] {
+  left: -26px;
+}
+
+.msg.agent .icon-btn[data-act="chat-msg-delete"] {
+  right: -26px;
+}
+
+.msg:hover .icon-btn[data-act="chat-msg-delete"],
+.msg:focus-within .icon-btn[data-act="chat-msg-delete"] {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .msg .msg-time {
@@ -3741,6 +3768,17 @@ svg {
     pointer-events: auto !important;
   }
 
+  /* And the private panel's rewind, for the same reason. Static rather than
+     hung off the bubble's edge: there is no gutter to hang it in once the
+     panel is the width of a phone. */
+  .msg .icon-btn[data-act="chat-msg-delete"] {
+    position: static !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    margin-left: 6px;
+    vertical-align: middle;
+  }
+
   /* `.rr-avatar:hover`/`:focus-within` already reveals this — see
      `rosterRow` in screen-chats.js, which gives the avatar a `tabindex` so a
      tap can focus it. This only removes the width clamp that assumed the
@@ -4500,6 +4538,31 @@ svg {
 .cmsg-row:focus-within .cmsg-actions {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* A message somebody unsaid, whose thread is still standing.
+
+   Deliberately quiet rather than absent: the row has to stay so the replies
+   under it keep answering something, but it is no longer a message anybody
+   should read for content. The avatar and name stay at full strength — who
+   deleted a message is often the only thing left worth knowing about it. */
+.cmsg-tombstone {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-4);
+  font-style: italic;
+}
+
+.cmsg-tombstone svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.7;
+}
+
+.cmsg-row.cmsg-deleted .cmsg-avatar,
+.cmsg-row.cmsg-deleted .cmsg-top {
+  opacity: 0.55;
 }
 
 /* A coordinator-authored line — @mention dispatch confirmations and

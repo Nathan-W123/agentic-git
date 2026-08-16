@@ -143,6 +143,9 @@ interface StoredChannelMessage {
   pinnedBy?: string;
   /** When this thread's task was ended outside the thread. */
   endedAt?: string;
+  /** When it was blanked in place, and by whom. */
+  deletedAt?: string;
+  deletedBy?: string;
   replies: StoredChannelReply[];
   /** Emoji to the set of user ids who reacted with it. */
   reactions: Map<string, Set<string>>;
@@ -1955,6 +1958,8 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       pinnedAt: message.pinnedAt,
       pinnedBy: message.pinnedBy,
       endedAt: message.endedAt,
+      ...(message.deletedAt === undefined ? {} : { deletedAt: message.deletedAt }),
+      ...(message.deletedBy === undefined ? {} : { deletedBy: message.deletedBy }),
     };
   }
 
@@ -2074,6 +2079,46 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     this.channelMessages.delete(messageId);
   }
 
+  public async redactChannelMessage(
+    repositoryId: string,
+    messageId: string,
+    input: { deletedAt: string; deletedBy: string },
+  ): Promise<void> {
+    const message = this.channelMessages.get(messageId);
+    if (message === undefined || message.repositoryId !== repositoryId) {
+      return;
+    }
+    // First deletion wins: a second pass must not restamp who unsaid it.
+    if (message.deletedAt !== undefined) {
+      return;
+    }
+    message.content = "";
+    message.deletedAt = input.deletedAt;
+    message.deletedBy = input.deletedBy;
+    // Reactions and the pin were both attention paid to a line that is no
+    // longer there. A banner pointing at a tombstone is worse than no banner.
+    message.reactions.clear();
+    delete message.pinnedAt;
+    delete message.pinnedBy;
+  }
+
+  public async deleteChannelReply(
+    repositoryId: string,
+    messageId: string,
+    replyId: string,
+  ): Promise<ChannelReply | undefined> {
+    const message = this.channelMessages.get(messageId);
+    if (message === undefined || message.repositoryId !== repositoryId) {
+      return undefined;
+    }
+    const index = message.replies.findIndex((reply) => reply.id === replyId);
+    if (index < 0) {
+      return undefined;
+    }
+    const [reply] = message.replies.splice(index, 1);
+    return reply === undefined ? undefined : copy(reply);
+  }
+
   public async deleteChannelMessages(repositoryId: string): Promise<number> {
     let removed = 0;
     for (const [id, message] of [...this.channelMessages]) {
@@ -2127,6 +2172,23 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       createdAt: new Date().toISOString(),
     };
     this.directMessages.set(message.id, message);
+    return { ...message };
+  }
+
+  public async deleteDirectMessage(
+    projectId: ProjectId,
+    messageId: string,
+    authorId: string,
+  ): Promise<DirectMessage | undefined> {
+    const message = this.directMessages.get(messageId);
+    if (
+      message === undefined ||
+      message.projectId !== projectId ||
+      message.authorId !== authorId
+    ) {
+      return undefined;
+    }
+    this.directMessages.delete(messageId);
     return { ...message };
   }
 

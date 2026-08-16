@@ -33,6 +33,35 @@ function conversationFor(agentId) {
   return state.conversations[agentId];
 }
 
+/**
+ * Rewinds a private conversation to just before one message.
+ *
+ * The private panel has no server-side transcript to delete from — the
+ * messages live in this browser and are replayed to the provider on each
+ * turn — so deleting here is truncation, and everything after the deleted
+ * message goes with it. Anything else produces a history the model never had.
+ *
+ * The CLI session goes too, and that is the part worth being deliberate
+ * about: a CLI-backed agent keeps its own copy of the conversation behind
+ * `cliSessionId`, and dropping messages on this side while resuming that
+ * session would have the agent still remembering, word for word, what the
+ * reader believes they deleted. Losing the session costs a warm context; the
+ * alternative costs the meaning of the button.
+ *
+ * Returns how many messages went, so the caller can say.
+ */
+export function truncateConversationFrom(agentId, index) {
+  const conversation = conversationFor(agentId);
+  if (!Number.isInteger(index) || index < 0 || index >= conversation.length) {
+    return 0;
+  }
+  const removed = conversation.splice(index).length;
+  if (state.cliSessions?.[agentId] !== undefined) {
+    delete state.cliSessions[agentId];
+  }
+  return removed;
+}
+
 /* --------------------------------------------------------------- view ---- */
 
 export function chatHeader(agent, { showClose = true } = {}) {
@@ -95,7 +124,7 @@ export function chatThread(agent) {
     </div>`;
   }
   let lastDay = "";
-  const rows = entries.map((entry) => {
+  const rows = entries.map((entry, index) => {
     const day = new Date(entry.at ?? Date.now()).toDateString();
     let separator = "";
     if (day !== lastDay) {
@@ -107,11 +136,25 @@ export function chatThread(agent) {
       return `${separator}<p class="msg system">${esc(entry.content)}</p>`;
     }
     const mine = entry.role === "user";
+    // Rewind, not erase. This whole transcript is replayed to the provider on
+    // every turn, so lifting one message out of the middle would leave the
+    // model answering a question that is no longer there — and the reply it
+    // had already given to it still sitting underneath. Deleting a message
+    // therefore takes everything after it too, which is also what somebody
+    // deleting a message here actually wants: to go back and ask differently.
     return `${separator}<div class="msg ${mine ? "user" : "agent"}">${esc(
       entry.content,
     )}<span class="msg-time">${esc(clockTime(entry.at))}${
       mine ? '<span class="tick">✓✓</span>' : ""
-    }</span></div>`;
+    }</span>${iconButton("trash", {
+      act: "chat-msg-delete",
+      value: String(index),
+      title:
+        index === entries.length - 1
+          ? "Delete this message"
+          : "Delete this message and everything after it",
+      small: true,
+    })}</div>`;
   });
   return `<div class="chat-thread" id="chat-thread">${rows.join("")}</div>`;
 }

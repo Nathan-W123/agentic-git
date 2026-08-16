@@ -679,6 +679,20 @@ const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
  * is for threads whose run ended while nothing was listening — the event has
  * been and gone, and the status is what survives it.
  */
+/**
+ * Statuses past the point where stopping means anything.
+ *
+ * The three terminal ones, plus `open` — a conversational turn that has
+ * already landed in canonical and is only waiting to be spoken to again.
+ * Cancelling that would rewrite finished work as abandoned.
+ */
+const TASK_STATUSES_PAST_STOPPING = new Set<string>([
+  "integrated",
+  "failed",
+  "cancelled",
+  "open",
+]);
+
 const TERMINAL_STATUS_LINE: Record<string, string> = {
   integrated: CHANNEL_TERMINAL_EVENTS["canonical_promoted"] ?? "Done.",
   // A landed conversational turn, which is finished work even though the task
@@ -2415,6 +2429,20 @@ function objectBody(value: unknown): Record<string, unknown> {
     throw new HttpError(400, "invalid_request", "JSON body must be an object");
   }
   return value as Record<string, unknown>;
+}
+
+/**
+ * Whether `viewerId` is behind this channel author.
+ *
+ * A channel has two kinds of author id: a user id, and an agent's
+ * `owner:vendor`. Both are the viewer's own words for the purpose of deleting
+ * them — an agent posts on its owner's credential, under a name that owner
+ * chose, and the person who dispatched it is the person the room holds
+ * responsible for the line. The prefix test is anchored on the separator so
+ * one user id cannot be the prefix of another's agent id.
+ */
+function isOwnChannelEntry(authorId: string, viewerId: string): boolean {
+  return authorId === viewerId || authorId.startsWith(`${viewerId}:`);
 }
 
 function matchPath(pathname: string, pattern: RegExp): string[] | undefined {
@@ -5988,6 +6016,57 @@ export class ApiGateway {
         "u",
       ),
     );
+    // Unsending one piece of private mail.
+    //
+    // Sender only, and gone for both sides — the two people in a conversation
+    // are the whole of its audience, so there is no third party a tombstone
+    // would be preserving the record for, and "deleted for me" would be a
+    // filter rather than a deletion. The store enforces the sender rule in the
+    // same statement that removes the row.
+    const directMessageDeleteMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/direct-messages/([^/]+)/messages/([^/]+)$`,
+        "u",
+      ),
+    );
+    if (directMessageDeleteMatch !== undefined) {
+      const [projectId = "", , messageId = ""] = directMessageDeleteMatch;
+      if (method !== "DELETE") {
+        throw new HttpError(405, "method_not_allowed", "Unsupported method");
+      }
+      await authorizeProject(this.options.store, principal, projectId, "view");
+      const removed = await this.options.store.deleteDirectMessage(
+        projectId,
+        messageId,
+        principal.user.id,
+      );
+      if (removed === undefined) {
+        throw new HttpError(404, "not_found", "Message was not found");
+      }
+      // To the two of them and nobody else, and deliberately not through the
+      // audit chain — the same rule sending one follows. That log is replayed
+      // to every subscriber of the project, and "A deleted a message to B" is
+      // the shape of a private conversation even with the words left out.
+      //
+      // The recipient is read back off the row rather than trusted from the
+      // path: the path segment names the conversation the client had open,
+      // and the row is the fact. They agree in every real request, and when
+      // they do not it is the row that decides what was deleted.
+      this.webSockets.sendToUsers(
+        projectId,
+        [principal.user.id, removed.recipientId],
+        {
+          type: "direct-message-deleted",
+          projectId,
+          messageId,
+          authorId: principal.user.id,
+          recipientId: removed.recipientId,
+        },
+      );
+      this.sendJson(response, 200, { removed: 1 });
+      return;
+    }
     const directReadMatch = matchPath(
       path,
       new RegExp(
@@ -6606,12 +6685,91 @@ export class ApiGateway {
       return;
     }
 
+    // Removing one reply.
+    //
+    // A reply is a leaf — nothing hangs off it — so it goes outright, and the
+    // rule about who may is the same one the root gets below: your own words,
+    // or anybody who runs the project.
+    const channelReplyDeleteMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/messages/([^/]+)/replies/([^/]+)$`,
+        "u",
+      ),
+    );
+    if (channelReplyDeleteMatch !== undefined && method === "DELETE") {
+      const [projectId = "", repositoryId = "", messageId = "", replyId = ""] =
+        channelReplyDeleteMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
+      if (
+        !(await this.options.store.projectHasRepository(projectId, repositoryId))
+      ) {
+        throw new HttpError(404, "not_found", "Repository was not found");
+      }
+      const message = await this.options.store.getChannelMessage(
+        repositoryId,
+        messageId,
+        principal.user.id,
+      );
+      const reply = message?.replies.find((entry) => entry.id === replyId);
+      if (message === undefined || reply === undefined) {
+        throw new HttpError(404, "not_found", "Reply was not found");
+      }
+      if (!isOwnChannelEntry(reply.authorId, principal.user.id)) {
+        await authorizeRepository(
+          this.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "manage_project",
+        );
+      }
+      await this.options.store.deleteChannelReply(
+        repositoryId,
+        messageId,
+        replyId,
+      );
+      await this.options.store.appendAudit(undefined, {
+        type: "channel_reply_deleted",
+        data: {
+          projectId,
+          repositoryId,
+          messageId,
+          replyId,
+          authorId: reply.authorId,
+          actorId: principal.user.id,
+        },
+      });
+      this.sendJson(response, 200, { removed: 1 });
+      return;
+    }
+
     // Removing a thread, or clearing the channel.
     //
-    // `manage_project` for both, and deliberately not "whoever posted it": a
-    // thread is a record of work an agent did, read by everybody in the
-    // repository, and deleting one throws away the only account of what
-    // happened. That is an administrative act, not tidying after yourself.
+    // Clearing the whole channel stays `manage_project`: every thread in it is
+    // a record of work other people read, and throwing the lot away is an
+    // administrative act rather than tidying after yourself.
+    //
+    // One message is the narrower case, and the rule is the one every chat
+    // product settles on — you may unsay what you said, and a moderator may
+    // unsay anything. "What you said" includes your own agent's lines, because
+    // an agent posts on its owner's credential and under their name; nobody
+    // else's agent is yours to silence.
+    //
+    // What deletion *means* depends on what hangs off the message. A root with
+    // replies is blanked in place: the replies are the agent's account of a
+    // task, and taking them with the request would delete other people's
+    // reading, not the author's words. A root nobody has replied under is
+    // removed outright. And when the thread was the story of a task that is
+    // still running, the work stops too — the message is the request, and
+    // withdrawing a request while a machine keeps acting on it is the one
+    // outcome nobody expects. See docs/architecture/message-deletion.md.
     const channelMessageMatch = matchPath(
       path,
       new RegExp(
@@ -6627,7 +6785,9 @@ export class ApiGateway {
         principal,
         projectId,
         repositoryId,
-        "manage_project",
+        messageId === undefined || messageId.length === 0
+          ? "manage_project"
+          : "view",
       );
       if (
         !(await this.options.store.projectHasRepository(projectId, repositoryId))
@@ -6644,12 +6804,73 @@ export class ApiGateway {
         this.sendJson(response, 200, { removed });
         return;
       }
-      await this.options.store.deleteChannelMessage(repositoryId, messageId);
+      const message = await this.options.store.getChannelMessage(
+        repositoryId,
+        messageId,
+        principal.user.id,
+      );
+      if (message === undefined) {
+        throw new HttpError(404, "not_found", "Message was not found");
+      }
+      if (!isOwnChannelEntry(message.authorId, principal.user.id)) {
+        await authorizeRepository(
+          this.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "manage_project",
+        );
+      }
+      // `?purge=1` asks for the whole thread, replies and all — what the
+      // thread panel's own delete has always meant and still promises in its
+      // confirmation. That is moderation rather than unsaying, so it needs
+      // `manage_project` however the message got there.
+      const purge = url.searchParams.get("purge") === "1";
+      if (purge) {
+        await authorizeRepository(
+          this.options.store,
+          principal,
+          projectId,
+          repositoryId,
+          "manage_project",
+        );
+      }
+      const cancelledTask = await this.stopTaskBehindMessage({
+        projectId,
+        repositoryId,
+        taskId: message.taskId,
+        actorId: principal.user.id,
+      });
+      // Replies decide the shape: blank in place when there is a thread to
+      // keep standing, remove outright when there is not.
+      const redacted = !purge && message.replies.length > 0;
+      if (redacted) {
+        await this.options.store.redactChannelMessage(repositoryId, messageId, {
+          deletedAt: new Date().toISOString(),
+          deletedBy: principal.user.id,
+        });
+      } else {
+        await this.options.store.deleteChannelMessage(repositoryId, messageId);
+      }
       await this.options.store.appendAudit(undefined, {
         type: "channel_message_deleted",
-        data: { projectId, repositoryId, messageId },
+        data: {
+          projectId,
+          repositoryId,
+          messageId,
+          authorId: message.authorId,
+          actorId: principal.user.id,
+          redacted,
+          purge,
+          ...(message.taskId === undefined ? {} : { taskId: message.taskId }),
+          cancelledTask,
+        },
       });
-      this.sendJson(response, 200, { removed: 1 });
+      this.sendJson(response, 200, {
+        removed: redacted ? 0 : 1,
+        redacted,
+        cancelledTask,
+      });
       return;
     }
 
@@ -12433,6 +12654,76 @@ export class ApiGateway {
         `once ${blocker} is done.`;
     }
     await this.replaceArbitrationNotice(watched, line);
+  }
+
+  /**
+   * Stops the work a deleted message asked for, if it is still running.
+   *
+   * Deleting the request and leaving the run is the outcome deletion exists to
+   * prevent: the thread the agent is narrating into disappears while the agent
+   * keeps editing the repository, and the person who withdrew the ask has no
+   * surface left to stop it from. So the delete carries the stop.
+   *
+   * Best effort in both directions. A task that has already finished cannot be
+   * stopped and is not an error — the thread is old, and deleting it is
+   * housekeeping. A deployment without the live-cancel operation falls back to
+   * the store's row flip, the same degradation the dashboard's cancel button
+   * takes. Returns whether anything was actually stopped, which is what the
+   * caller reports back so the UI can say so.
+   */
+  private async stopTaskBehindMessage(input: {
+    projectId: string;
+    repositoryId: string;
+    taskId: string | undefined;
+    actorId: string;
+  }): Promise<boolean> {
+    const { taskId } = input;
+    if (taskId === undefined || taskId === "") {
+      return false;
+    }
+    const task = (await this.options.store.listSubmittedTasks()).find(
+      (entry) => entry.id === taskId,
+    );
+    if (task === undefined || TASK_STATUSES_PAST_STOPPING.has(task.status)) {
+      return false;
+    }
+    const operation = this.options.operations.cancelTasks;
+    try {
+      if (operation === undefined) {
+        await this.options.store.cancelSubmittedTask(taskId);
+      } else {
+        const { cancelled } = await operation({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          taskIds: [taskId],
+          reason: "The message that asked for this was deleted",
+          actorId: input.actorId,
+        });
+        if (cancelled.length === 0) {
+          return false;
+        }
+      }
+    } catch (error) {
+      // The message still goes. A stop that failed must not leave the words
+      // standing — the person asked for them to be gone, and the run has the
+      // dashboard's own cancel button as its second chance.
+      process.stderr.write(
+        `[channel] stopping ${taskId} for a deleted message failed: ${
+          error instanceof Error ? error.message : String(error)
+        }\n`,
+      );
+      return false;
+    }
+    await this.options.store.appendAudit(undefined, {
+      type: "task_cancelled",
+      taskId,
+      data: {
+        projectId: input.projectId,
+        actorId: input.actorId,
+        reason: "message_deleted",
+      },
+    });
+    return true;
   }
 
   /** Keeps at most one temporary sequencing notice for a held task. */

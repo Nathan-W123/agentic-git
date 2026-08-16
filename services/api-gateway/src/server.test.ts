@@ -9742,3 +9742,227 @@ test("work merged into an existing thread says what asked for it", async (t) => 
     JSON.stringify(thread?.replies),
   );
 });
+
+test("deleting your own channel message removes it, and somebody else's does not", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "deletable");
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "guest@example.com",
+    repositoryId,
+  );
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const posted = await guest.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "A thought, quickly regretted." },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const messageId = posted.data.message.id;
+
+  // The guest is a developer: in the room, and no reach over anybody else's
+  // words in it. The owner's line is the owner's to unsay.
+  const owners = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "The owner's own line." },
+  });
+  const guestTryingOwners = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${owners.data.message.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(
+    guestTryingOwners.status,
+    403,
+    JSON.stringify(guestTryingOwners.data),
+  );
+
+  // The author's own goes outright — nothing hangs off it.
+  const removed = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${messageId}`,
+    { method: "DELETE" },
+  );
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+  assert.equal(removed.data.redacted, false);
+  assert.equal(removed.data.cancelledTask, false);
+  assert.equal(
+    await runtime.store.getChannelMessage(
+      repositoryId,
+      messageId,
+      session.user.id,
+    ),
+    undefined,
+  );
+
+  // Gone is gone: a second delete has nothing to find.
+  const again = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${messageId}`,
+    { method: "DELETE" },
+  );
+  assert.equal(again.status, 404, JSON.stringify(again.data));
+
+  // And a manager reaches anybody's — the other half of the rule.
+  const guestsSecond = await guest.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "Something for a moderator to remove." },
+  });
+  const moderated = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${guestsSecond.data.message.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(moderated.status, 200, JSON.stringify(moderated.data));
+  assert.equal(
+    await runtime.store.getChannelMessage(
+      repositoryId,
+      guestsSecond.data.message.id,
+      session.user.id,
+    ),
+    undefined,
+  );
+});
+
+test("deleting a message that carries a thread blanks it and stops its task", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repositoryId = await invitableRepository(owner, "thread-delete");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "Rename the config key everywhere." },
+  });
+  const messageId = posted.data.message.id;
+  const reply = await owner.request(
+    `${base}/messages/${messageId}/replies`,
+    { method: "POST", body: { content: "On it." } },
+  );
+  assert.equal(reply.status, 201, JSON.stringify(reply.data));
+
+  const task = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId,
+    objective: "rename the config key",
+    agentId: "test-agent-claude",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  await runtime.store.setChannelMessageTask(repositoryId, messageId, task.id);
+
+  const removed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${messageId}`,
+    { method: "DELETE" },
+  );
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+  // Blanked rather than removed: the reply under it is somebody's reading.
+  assert.equal(removed.data.redacted, true);
+  assert.equal(removed.data.removed, 0);
+  // And the work it asked for was stopped, because the message was the ask.
+  assert.equal(removed.data.cancelledTask, true);
+  assert.equal(
+    runtime.cancelCalls.some((call) => call.taskIds?.includes(task.id)),
+    true,
+    JSON.stringify(runtime.cancelCalls),
+  );
+
+  const tombstone = await runtime.store.getChannelMessage(
+    repositoryId,
+    messageId,
+    ownerId,
+  );
+  assert.equal(tombstone?.content, "");
+  assert.ok(tombstone?.deletedAt !== undefined);
+  assert.equal(tombstone?.deletedBy, ownerId);
+  assert.equal(
+    (tombstone?.replies ?? []).some(
+      (entry) => entry.id === reply.data.reply.id,
+    ),
+    true,
+  );
+
+  // The reply is its own decision, and its own delete. The tombstone stays:
+  // the two are separate rows and separate asks.
+  const replyGone = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${messageId}/replies/${reply.data.reply.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(replyGone.status, 200, JSON.stringify(replyGone.data));
+  const after = await runtime.store.getChannelMessage(
+    repositoryId,
+    messageId,
+    ownerId,
+  );
+  assert.equal(
+    (after?.replies ?? []).some((entry) => entry.id === reply.data.reply.id),
+    false,
+  );
+  assert.ok(after?.deletedAt !== undefined);
+
+  // `?purge=1` is the thread panel's own delete: the whole thread goes,
+  // replies included, which is what that button has always promised.
+  const second = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "A second thread." },
+  });
+  const secondId = second.data.message.id;
+  await owner.request(`${base}/messages/${secondId}/replies`, {
+    method: "POST",
+    body: { content: "With something under it." },
+  });
+  const purged = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${secondId}?purge=1`,
+    { method: "DELETE" },
+  );
+  assert.equal(purged.status, 200, JSON.stringify(purged.data));
+  assert.equal(purged.data.redacted, false);
+  assert.equal(
+    await runtime.store.getChannelMessage(repositoryId, secondId, ownerId),
+    undefined,
+  );
+});
+
+test("a direct message can be unsent by its sender and nobody else", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dm-delete");
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "dm-guest@example.com",
+    repositoryId,
+  );
+  const guestId = (await guest.request("/api/v1/auth/me")).data.user.id;
+
+  const sent = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${guestId}`,
+    { method: "POST", body: { content: "Sent too soon." } },
+  );
+  assert.equal(sent.status, 201, JSON.stringify(sent.data));
+  const messageId = sent.data.message.id;
+
+  // The recipient cannot unsend what they did not send.
+  const refused = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${session.user.id}/messages/${messageId}`,
+    { method: "DELETE" },
+  );
+  assert.equal(refused.status, 404, JSON.stringify(refused.data));
+
+  const removed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${guestId}/messages/${messageId}`,
+    { method: "DELETE" },
+  );
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+  // Gone for both sides, because both sides are the whole audience.
+  assert.deepEqual(
+    await runtime.store.listDirectMessages(
+      DEFAULT_PROJECT_ID,
+      guestId,
+      session.user.id,
+    ),
+    [],
+  );
+});

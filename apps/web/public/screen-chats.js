@@ -21,6 +21,7 @@ import {
   agentStatus,
   agentsThinkingIn,
 api,
+  canDeleteChannelEntry,
   canLeaveRepository,
   canManageRepository,
   channelAgentsFor,
@@ -1328,7 +1329,13 @@ function messageRow(
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
-  return `<div class="cmsg-row${
+  // A message somebody unsaid, whose thread is still standing. The row stays
+  // where it was — the replies under it are answers to something, and closing
+  // the gap would leave them answering the message above — but everything the
+  // row could still *do* goes with the words. React, pin, revert and delete
+  // all act on a line that is no longer there.
+  const deleted = entry.deletedAt !== undefined;
+  return `<div class="cmsg-row${deleted ? " cmsg-deleted" : ""}${
     // The auditor reads every merge without being asked, so its lines arrive
     // among work nobody is looking at yet. Drawn in the accent so they are
     // recognisable as the unprompted ones — and in *the reader's* accent
@@ -1351,13 +1358,13 @@ function messageRow(
         )}</span>
         <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
       </div>
-      <div class="cmsg-text">${messageBody(
-        entry.content,
-        repositoryId,
-        entry.mentions,
-      )}</div>
+      <div class="cmsg-text">${
+        deleted
+          ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
+          : messageBody(entry.content, repositoryId, entry.mentions)
+      }</div>
       ${
-        reactions.length === 0
+        deleted || reactions.length === 0
           ? ""
           : `<div class="cmsg-reactions">${reactions
               .map(
@@ -1399,7 +1406,9 @@ function messageRow(
         // Revert, as quiet as the actions beside it. It was a labelled button
         // under the file list, which gave "undo this task" more visual weight
         // than the task itself had.
-        entry.taskId === undefined || !canManageRepository(repositoryId)
+        deleted ||
+        entry.taskId === undefined ||
+        !canManageRepository(repositoryId)
           ? ""
           : iconButton("history", {
               act: "chan-revert-task",
@@ -1408,7 +1417,16 @@ function messageRow(
               small: true,
             })
       }
-      ${iconButton("smile", { act: "channel-react", value: entry.id, title: "React", small: true })}
+      ${
+        deleted
+          ? ""
+          : iconButton("smile", {
+              act: "channel-react",
+              value: entry.id,
+              title: "React",
+              small: true,
+            })
+      }
       ${
         // Roots only. A pin lives on `channel_messages`, and a reply is a row
         // in another table entirely — offering the button on one sent a POST
@@ -1417,7 +1435,7 @@ function messageRow(
         // server had no record of. The thread's own header carries the pin for
         // everything inside it, which is the affordance a reader wants anyway:
         // you pin the conversation, not one line of it.
-        isReply
+        isReply || deleted
           ? ""
           : iconButton("pin", {
               act: "channel-pin",
@@ -1425,6 +1443,30 @@ function messageRow(
               title: entry.pinnedAt === undefined ? "Pin" : "Unpin",
               small: true,
             })
+      }
+      ${
+        // Delete, in the same quiet set as the rest. Its own words or a
+        // manager's reach — `canDeleteChannelEntry` is the client's copy of
+        // the rule the gateway holds, so the button is absent rather than
+        // present-and-refused.
+        //
+        // Reply or root is decided by `messageId` rather than by `isReply`:
+        // the thread panel draws its own root in the compact reply style, so
+        // the flag says how a row looks and only the field says what it is.
+        // A reply carries its root's id too, because deleting one is a write
+        // against the thread it lives in.
+        (() => {
+          if (deleted || !canDeleteChannelEntry(repositoryId, entry)) {
+            return "";
+          }
+          const parentId = entry.messageId;
+          return iconButton("trash", {
+            act: parentId ? "thread-reply-delete" : "channel-message-delete",
+            value: parentId ? `${parentId}|${entry.id}` : entry.id,
+            title: parentId ? "Delete this reply" : "Delete this message",
+            small: true,
+          });
+        })()
       }
       ${
         // Anything the caller wants sitting beside the reply button — the
@@ -2329,7 +2371,19 @@ function dmPanel() {
                     value: message.id,
                     title: "Reply to this message",
                     small: true,
-                  })}</span>
+                  })}${
+                    // Only your own, and there is no tombstone: the two people
+                    // here are the whole audience, so unsending takes it off
+                    // both screens and leaves nothing to explain.
+                    mine
+                      ? iconButton("trash", {
+                          act: "dm-delete",
+                          value: message.id,
+                          title: "Delete this message",
+                          small: true,
+                        })
+                      : ""
+                  }</span>
                   <time class="dm-time">${esc(clockTime(message.createdAt))}</time>
                 </div>`;
               })

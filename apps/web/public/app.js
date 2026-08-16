@@ -17,6 +17,7 @@ import {
   TYPING_SWEEP_MS,
   noteAgentBusy,
   noteDirectMessage,
+  noteDirectMessageDeleted,
   ensureDirectMessages,
   loadChannelStats,
   bannerLineForAudit,
@@ -68,7 +69,10 @@ import {
   leaveRepository,
   channelMessagesFor,
   deleteAllChannelThreads,
+  deleteChannelMessageEntry,
+  deleteChannelReplyEntry,
   deleteChannelThread,
+  deleteDirectMessageEntry,
   loadPreview,
   rollbackTask,
   setAuditorPaused,
@@ -109,7 +113,12 @@ import {
   toast,
   banner as popupBanner,
 } from "./ui.js";
-import { ensureAgentOptions, scrollThread, sendChat } from "./chat.js";
+import {
+  ensureAgentOptions,
+  scrollThread,
+  sendChat,
+  truncateConversationFrom,
+} from "./chat.js";
 import {
   connectRepository,
   createRepository,
@@ -1457,6 +1466,139 @@ async function deleteThreadAction(repositoryId, messageId) {
       state.activeChannelThread = undefined;
     }
     toast("Thread deleted", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Deleting one message from the channel.
+ *
+ * The confirmation is written from what this particular message is, because
+ * the three outcomes are genuinely different things to agree to: a line with
+ * nothing hanging off it simply goes, a thread's opening message is blanked
+ * and its replies stay, and a message whose task is still running takes the
+ * run with it. Somebody who is told "this cannot be undone" and nothing else
+ * cannot tell which of those they just asked for.
+ */
+async function deleteChannelMessageAction(repositoryId, messageId) {
+  const entry = channelMessagesFor(repositoryId).find(
+    (candidate) => candidate.id === messageId,
+  );
+  const hasThread = (entry?.replies ?? []).length > 0;
+  // A guess, and only for the wording: the channel is not sent task statuses,
+  // so "carries a task and has not been marked ended" is the closest the
+  // client gets to "still going". The server decides what is actually stopped
+  // and says so in the reply.
+  const running = entry?.taskId !== undefined && entry?.endedAt === undefined;
+  const confirmed = await showModal({
+    title: "Delete this message?",
+    subtitle: [
+      hasThread
+        ? "The replies under it stay — they are the agent's account of the " +
+          "work, and other people have read them. The message itself is " +
+          "replaced with a note that it was deleted."
+        : "It goes for everyone in this channel.",
+      running
+        ? "The task it asked for is still going, so it will be stopped."
+        : "",
+      "This cannot be undone.",
+    ]
+      .filter((line) => line !== "")
+      .join(" "),
+    confirm: "Delete",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    const { cancelledTask } = await deleteChannelMessageEntry(
+      repositoryId,
+      messageId,
+    );
+    if (state.activeChannelThread === messageId && !hasThread) {
+      state.activeChannelThread = undefined;
+    }
+    toast(
+      cancelledTask ? "Message deleted, and its task stopped" : "Message deleted",
+      "ok",
+    );
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/** Deleting one reply from inside a thread. */
+async function deleteChannelReplyAction(repositoryId, messageId, replyId) {
+  const confirmed = await showModal({
+    title: "Delete this reply?",
+    subtitle:
+      "It goes for everyone reading this thread. This cannot be undone.",
+    confirm: "Delete",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    await deleteChannelReplyEntry(repositoryId, messageId, replyId);
+    toast("Reply deleted", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Deleting a message from the private agent conversation, which rewinds it.
+ *
+ * The confirmation says how many messages go rather than "this one", because
+ * that is what happens — see `truncateConversationFrom` for why it cannot be
+ * one — and somebody scrolling back to delete an early message would
+ * otherwise lose the whole conversation to a dialog that promised one line.
+ */
+async function deleteChatMessageAction(index) {
+  const agent = currentAgent();
+  if (agent === undefined || !Number.isInteger(index)) {
+    return;
+  }
+  const following = (state.conversations[agent.id] ?? []).length - index;
+  if (following <= 0) {
+    return;
+  }
+  const confirmed = await showModal({
+    title:
+      following === 1
+        ? "Delete this message?"
+        : `Delete this message and the ${String(following - 1)} after it?`,
+    subtitle:
+      "This conversation is replayed to the agent on every turn, so it is " +
+      "rewound to before this message rather than having one lifted out of " +
+      "the middle. The agent's own session is dropped with it, so nothing " +
+      "here is remembered on its side either.",
+    confirm: "Delete",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  truncateConversationFrom(agent.id, index);
+  render();
+}
+
+/** Unsending one direct message, from both sides of the conversation. */
+async function deleteDirectMessageAction(userId, messageId) {
+  const confirmed = await showModal({
+    title: "Delete this message?",
+    subtitle:
+      "It goes from your side and theirs. This cannot be undone.",
+    confirm: "Delete",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    await deleteDirectMessageEntry(userId, messageId);
     render();
   } catch (error) {
     toast(error.message, "error");
@@ -3147,6 +3289,21 @@ document.addEventListener("click", (event) => {
     case "channel-thread-delete":
       void deleteThreadAction(activeChannelId(), value);
       return;
+    case "channel-message-delete":
+      void deleteChannelMessageAction(activeChannelId(), value);
+      return;
+    case "thread-reply-delete": {
+      // `rootId|replyId`: deleting a reply is a write against the thread it
+      // lives in, and the row only ever carries one value.
+      const [rootId = "", replyId = ""] = value.split("|");
+      void deleteChannelReplyAction(activeChannelId(), rootId, replyId);
+      return;
+    }
+    case "dm-delete":
+      if (state.activeDm !== undefined) {
+        void deleteDirectMessageAction(state.activeDm, value);
+      }
+      return;
     case "channel-threads-clear":
       void clearThreadsAction(activeChannelId());
       return;
@@ -3660,6 +3817,9 @@ document.addEventListener("click", (event) => {
     case "chat-close":
     case "chat-toggle":
       toggleChat(render);
+      return;
+    case "chat-msg-delete":
+      void deleteChatMessageAction(Number(value));
       return;
 
     /* Agents */
@@ -4717,6 +4877,14 @@ async function boot() {
           { method: "POST" },
         ).catch(() => undefined);
       }
+      if (!renameFieldFocused()) {
+        render();
+      }
+      return;
+    }
+    // Unsent, and delivered the same private way it was sent.
+    if (frame?.type === "direct-message-deleted") {
+      noteDirectMessageDeleted(frame);
       if (!renameFieldFocused()) {
         render();
       }
