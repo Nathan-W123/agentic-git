@@ -118,6 +118,7 @@ interface TestRuntime {
     repositoryId: string;
     taskIds?: string[];
     vendor?: string;
+    ownerId?: string;
     reason: string;
     actorId: string;
   }>;
@@ -489,6 +490,7 @@ async function startRuntime(
         repositoryId: input.repositoryId,
         ...(input.taskIds === undefined ? {} : { taskIds: [...input.taskIds] }),
         ...(input.vendor === undefined ? {} : { vendor: input.vendor }),
+        ...(input.ownerId === undefined ? {} : { ownerId: input.ownerId }),
         reason: input.reason,
         actorId: input.actorId,
       });
@@ -516,7 +518,9 @@ async function startRuntime(
           explicit !== undefined
             ? !explicit.has(task.id)
             : task.status === "open" ||
-              (agentId !== undefined && task.agentId !== agentId)
+              (agentId !== undefined && task.agentId !== agentId) ||
+              (input.ownerId !== undefined &&
+                task.submittedBy !== input.ownerId)
         ) {
           continue;
         }
@@ -8544,6 +8548,85 @@ test("'/cancel @agent' stops that agent's work and nobody else's", async (t) => 
   );
   assert.equal(statuses.get(codexTask.id), "cancelled");
   assert.equal(statuses.get(claudeTask.id), "submitted");
+});
+
+test("'/stop @agent' spares another persona's same-vendor work", async (t) => {
+  // The reported bug: two personas run the same vendor CLI, so both resolve
+  // to the same configured agent id — and a vendor-scoped stop swept both.
+  // A persona is the (owner, vendor) pair, and the stop must honour it.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "persona-stop");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const colleague = await addColleague(runtime, "persona-stop@example.com");
+  runtime.chatConnections.set(colleague.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  assert.equal(
+    (
+      await owner.request(`${base}/agents/anthropic`, {
+        method: "POST",
+        body: { name: "Medea" },
+      })
+    ).status,
+    200,
+  );
+  assert.equal(
+    (
+      await owner.request(`${base}/agents/${colleague.id}:anthropic`, {
+        method: "POST",
+        body: { name: "Andromeda" },
+      })
+    ).status,
+    200,
+  );
+
+  const mine = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    objective: "my own claude job",
+    agentId: "test-agent-claude",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  const theirs = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId: repo,
+    objective: "the colleague's claude job",
+    agentId: "test-agent-claude",
+    validationCommands: [],
+    submittedBy: colleague.id,
+  });
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/stop @Medea" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(repo, ownerId);
+    return messages.some((message) =>
+      message.content.includes("Stopped 1 queued task for @Medea."),
+    );
+  }, "the channel never reported the persona-scoped stop");
+
+  assert.equal(runtime.cancelCalls[0]?.ownerId, ownerId);
+  const statuses = new Map(
+    (
+      await runtime.store.listSubmittedTasks({ repositoryId: repo })
+    ).map((task) => [task.id, task.status]),
+  );
+  assert.equal(statuses.get(mine.id), "cancelled");
+  // The other persona's task is untouched — same vendor, different person.
+  assert.equal(statuses.get(theirs.id), "submitted");
 });
 
 test("'/cancel' for a name nobody answers to stops nothing and says who it could", async (t) => {

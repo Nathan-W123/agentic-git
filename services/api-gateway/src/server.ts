@@ -1761,6 +1761,8 @@ export interface ApiOperations {
     projectId: string;
     repositoryId: string;
     actorId: string;
+    /** A person's answer to "which side wins" for files that collide. */
+    conflictResolution?: "refuse" | "prefer-remote" | "prefer-local";
   }): Promise<{
     status: "already_current" | "fast_forwarded" | "merged";
     remoteUrl: string;
@@ -1768,6 +1770,7 @@ export interface ApiOperations {
     upstreamRevision: string;
     previousRevision: string;
     revision: string;
+    resolved?: { side: "remote" | "local"; files: string[] };
   }>;
   submitTask(input: {
     projectId: string;
@@ -1845,6 +1848,13 @@ export interface ApiOperations {
     taskIds?: string[];
     agentId?: string;
     vendor?: "claude" | "codex" | "gemini";
+    /**
+     * Narrow a vendor-scoped stop to one persona's work. A channel persona
+     * is an (owner, vendor) pair, and every persona of one vendor resolves
+     * to the same configured agent — without this, "/stop @agent" also
+     * stopped every other persona's same-vendor tasks.
+     */
+    ownerId?: string;
     reason: string;
     actorId: string;
   }): Promise<{
@@ -4638,15 +4648,49 @@ export class ApiGateway {
           "This deployment does not support syncing from a remote",
         );
       }
-      const synced = await this.performOperation(
-        "repository_sync_failed",
-        async () =>
-          await syncRepository({
-            projectId,
-            repositoryId,
-            actorId: principal.user.id,
-          }),
-      );
+      const body = objectBody(await this.readJson(request));
+      const resolve = stringField(body["resolve"], "resolve", {
+        max: 20,
+        optional: true,
+      });
+      if (
+        resolve !== undefined &&
+        !["refuse", "prefer-remote", "prefer-local"].includes(resolve)
+      ) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          "resolve must be refuse, prefer-remote, or prefer-local",
+        );
+      }
+      let synced;
+      try {
+        synced = await syncRepository({
+          projectId,
+          repositoryId,
+          actorId: principal.user.id,
+          ...(resolve === undefined
+            ? {}
+            : {
+                conflictResolution: resolve as
+                  | "refuse"
+                  | "prefer-remote"
+                  | "prefer-local",
+              }),
+        });
+      } catch (error) {
+        // A collision is not a malfunction: it is a question for the person
+        // who asked, and the screen can only offer them the choice if the
+        // refusal is distinguishable from a sync that actually broke.
+        if ((error as { name?: unknown }).name === "SyncDivergedError") {
+          throw new HttpError(
+            409,
+            "sync_conflict",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        throw error;
+      }
       this.sendJson(response, 200, { sync: synced });
       return;
     }
@@ -8366,6 +8410,10 @@ export class ApiGateway {
       /^@?([\w.-]+(?:\s*\([^)]*\))?)/u.exec(input.rest.trim())?.[1] ?? ""
     ).replace(/[,.:;!?]+$/u, "");
     let vendor: "claude" | "codex" | "gemini" | undefined;
+    // The named persona's owner. The vendor alone is not a persona: every
+    // persona of one vendor runs through the same configured agent, so a
+    // vendor-only stop would take other people's same-vendor work with it.
+    let ownerId: string | undefined;
     let scope = "in this channel";
     if (target !== "") {
       const candidates = await this.resolveChannelMentionCandidates(
@@ -8390,12 +8438,14 @@ export class ApiGateway {
         return;
       }
       vendor = named.vendor;
+      ownerId = named.userId;
       scope = `for @${named.name}`;
     }
     const { cancelled } = await operation({
       projectId,
       repositoryId,
       ...(vendor === undefined ? {} : { vendor }),
+      ...(ownerId === undefined ? {} : { ownerId }),
       reason: "Stopped from the channel",
       actorId: input.senderId,
     });

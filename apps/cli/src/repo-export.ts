@@ -110,6 +110,8 @@ export interface RepoSyncOptions {
   projectId?: string;
   /** Who asked, for the audit trail. */
   actorId?: string;
+  /** A person's answer to "which side wins" when both changed one file. */
+  conflictResolution?: "refuse" | "prefer-remote" | "prefer-local";
   /**
    * The task asking for this sync, exempted from the executing-work guard.
    * A sync requested as an agent action arrives from inside a run, so the
@@ -175,6 +177,9 @@ export async function repoSync(
   const result = await repositories.syncFromRemote(canonical, {
     remoteUrl,
     workspaceRoot: project.workspaceRoot,
+    ...(options.conflictResolution === undefined
+      ? {}
+      : { conflictResolution: options.conflictResolution }),
     ...(options.credentials === undefined
       ? {}
       : { credentials: options.credentials }),
@@ -198,6 +203,14 @@ export async function repoSync(
       previousRevision: result.previousRevision,
       revision: result.revision,
       upstreamRevision: result.upstreamRevision,
+      // A resolution is a decision somebody made about somebody else's
+      // files, so it belongs on the record rather than only in a toast.
+      ...(result.resolved === undefined
+        ? {}
+        : {
+            resolvedSide: result.resolved.side,
+            resolvedFiles: result.resolved.files,
+          }),
     },
   });
   return result;

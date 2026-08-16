@@ -622,3 +622,93 @@ test("a conflicting sync refuses, names the files, and changes nothing", async (
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+test("a collision can be settled by taking GitHub's side, keeping both parents", async () => {
+  const fixture = await pushFixture();
+  try {
+    const localTip = await advanceCanonical(fixture, "a.txt", "local change\n");
+    const remoteTip = await advanceRemote(fixture, "a.txt", "github change\n");
+
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+      conflictResolution: "prefer-remote",
+    });
+
+    assert.equal(synced.status, "merged");
+    assert.deepEqual(synced.resolved, { side: "remote", files: ["a.txt"] });
+
+    const git = new GitClient();
+    const contents = await git.run([
+      `--git-dir=${fixture.canonical.path}`,
+      "show",
+      `${synced.revision}:a.txt`,
+    ]);
+    assert.equal(contents.stdout.trim(), "github change");
+    // Nothing was rewritten away: the losing side is still a parent, so its
+    // content stays reachable.
+    for (const parent of [localTip, remoteTip]) {
+      const contains = await git.run(
+        [
+          `--git-dir=${fixture.canonical.path}`,
+          "merge-base",
+          "--is-ancestor",
+          parent,
+          synced.revision,
+        ],
+        { allowFailure: true },
+      );
+      assert.equal(contains.exitCode, 0, `${parent} lost in the merge`);
+    }
+    // And the push it was blocking now goes through.
+    await fixture.repositories.pushToRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+    });
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("the same collision can be settled the other way", async () => {
+  const fixture = await pushFixture();
+  try {
+    await advanceCanonical(fixture, "a.txt", "local change\n");
+    await advanceRemote(fixture, "a.txt", "github change\n");
+
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+      conflictResolution: "prefer-local",
+    });
+
+    assert.deepEqual(synced.resolved, { side: "local", files: ["a.txt"] });
+    const contents = await new GitClient().run([
+      `--git-dir=${fixture.canonical.path}`,
+      "show",
+      `${synced.revision}:a.txt`,
+    ]);
+    assert.equal(contents.stdout.trim(), "local change");
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("a clean merge reports no resolution, because it decided nothing", async () => {
+  const fixture = await pushFixture();
+  try {
+    await advanceCanonical(fixture);
+    await advanceRemote(fixture);
+
+    // Offered a resolution it never needs: the files do not overlap.
+    const synced = await fixture.repositories.syncFromRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+      workspaceRoot: fixture.root,
+      conflictResolution: "prefer-remote",
+    });
+
+    assert.equal(synced.status, "merged");
+    assert.equal(synced.resolved, undefined);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
