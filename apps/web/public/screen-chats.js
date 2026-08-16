@@ -2072,6 +2072,19 @@ function threadListPanel(repositoryId) {
                 // demote to one quiet line beneath, and the clock time goes
                 // to the row's tooltip: the list is newest-first, so the
                 // ordering already answers "when" for anybody scanning it.
+                //
+                // No leading glyph either. Every row carried the same terminal
+                // mark: fifty identical icons down a list are a texture rather
+                // than information, and this one was actively misleading — a
+                // thread is a conversation about a piece of work, not a shell
+                // session, so the mark promised a log of command output. There
+                // was nothing meaningful to put in its place. The author's face
+                // was the obvious candidate, but a thread is rooted in the
+                // message that asked for the work, so that column would have
+                // been the same person's avatar the whole way down. The name
+                // leads instead, and the one thing worth spotting at a glance —
+                // which thread is running — is already carried by the accent
+                // wash and leading edge of `.thread-item-active`.
                 return `<div class="thread-item-row">
                   <button type="button" class="thread-item${working ? " thread-item-active" : ""}"
                     title="${esc(
@@ -2080,13 +2093,16 @@ function threadListPanel(repositoryId) {
                         : clockTime(entry.at),
                     )}"
                     data-act="channel-thread-open" data-value="${esc(entry.id)}">
-                    <span class="ti-icon">${icon("terminal")}</span>
                     <span class="ti-main">
                       <span class="ti-text">${esc(threadTitle(entry))}</span>
                       <span class="ti-meta">
                         <span class="ti-who">${esc(author.name)}</span>
                         <span class="ti-count">${esc(threadSaidCount(count))}</span>
-                        ${working ? `<span class="ti-live">Working</span>` : ""}
+                        ${
+                          working
+                            ? `<span class="ti-live"><span class="sr-only">Working</span></span>`
+                            : ""
+                        }
                       </span>
                     </span>
                     <span class="ti-go">${icon("chevronRight")}</span>
