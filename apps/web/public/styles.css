@@ -4453,7 +4453,15 @@ svg {
 
 .cmsg-row {
   display: flex;
-  gap: 12px;
+  /* Two lines when the message answers something: the reply's reference takes
+     a full-width line of its own, and the avatar and body wrap underneath it.
+     That line is what keeps the reference's hairline out of the avatar — it
+     used to share the avatar's band and be pulled left into the gutter, which
+     drew the elbow across the reader's picture. */
+  flex-wrap: wrap;
+  /* Column gap only: the wrapped reference line carries its own 2px of
+     breathing room, and a 12px row gap would open a hole above every reply. */
+  gap: 0 12px;
   padding: 7px 8px;
   margin: 0 -8px;
   border-radius: 8px;
@@ -4492,6 +4500,12 @@ svg {
   pointer-events: none;
 }
 
+/* A thread whose root also answers something starts its avatar one reference
+   line lower, so the branch drawn under that avatar starts there too. */
+.cmsg-row.cmsg-threaded:has(> .cmsg-ref)::before {
+  top: 58px;
+}
+
 /* A person's reply remains part of the channel transcript. The slight inset
    groups it with the quoted message while the reference above the response
    carries the exact relationship. */
@@ -4499,16 +4513,23 @@ svg {
   margin-left: 28px;
 }
 
+/* The inset moves the whole reply right, so its reference line reaches back
+   left to stand in the quoted message's own avatar column — the elbow then
+   falls towards the message being answered rather than towards the replier.
+   The basis grows by the same 28px so the line still ends at the row's right
+   edge instead of hanging off it. */
 .cmsg-row.cmsg-inline-reply .cmsg-ref {
   margin-left: -28px;
+  flex-basis: calc(100% + 28px);
+  max-width: calc(100% + 28px);
 }
 
 /* The mirror of that branch, drawn above a message instead of below one: a
    line that answers a thread further up turns *up* out of the same avatar
-   gutter and into a one-line quote of what it is answering. Pulled left past
-   the body's own edge so the corner lands over the avatar column, which is
-   what makes it read as coming from the conversation rather than starting in
-   this message.
+   gutter and into a one-line quote of what it is answering. It takes a line of
+   its own above the avatar — rather than starting inside the body and leaning
+   back over the gutter, which laid the elbow across the picture of whoever is
+   speaking, most visibly on a phone where the row has no width to spare.
 
    Quiet on purpose — `--border-soft` and `--text-3`, a size under the
    message's own. It is an address, not a second copy of the message: the
@@ -4517,9 +4538,10 @@ svg {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: fit-content;
+  /* Full width, so the avatar and body wrap onto the line beneath it. */
+  flex: 0 0 100%;
   max-width: 100%;
-  margin: 0 0 2px -28px;
+  margin: 0 0 2px;
   padding: 0;
   color: var(--text-3);
   font-size: 11.5px;
@@ -4532,12 +4554,16 @@ svg {
   color: var(--text-2);
 }
 
+/* 16px in: half of the 32px avatar, so the stroke comes down the middle of the
+   avatar column and stops just above the face rather than crossing it, and the
+   name past the corner (16 + 22 + 6) lands on the body's own left edge. */
 .cmsg-ref-elbow {
   flex: none;
   align-self: flex-start;
   width: 22px;
   height: 8px;
   margin-top: 8px;
+  margin-left: 16px;
   border-left: 1px solid var(--border-soft);
   border-top: 1px solid var(--border-soft);
   border-top-left-radius: 8px;

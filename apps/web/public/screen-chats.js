@@ -1669,24 +1669,31 @@ function messageRow(
     // isReply, and one message must not put two ids in the document.
     isReply ? "" : ` id="cmsg-${esc(entry.id)}"`
   }>
+    ${
+      // Above the name, the way a reply's reference sits above the reply:
+      // this line is an answer to a thread further up, and the reference is
+      // how the reader gets back to it. Only on the channel copy — inside
+      // the thread panel there is nothing to navigate to — and never on a
+      // message whose words have been taken away.
+      //
+      // A sibling of the avatar rather than the first thing in the body: the
+      // reference's hairline turns up out of the avatar gutter, and from
+      // inside the body the only way to reach that gutter is to lean back
+      // over it — which draws the line straight across the face standing
+      // there. Given its own line above the row (see `flex-wrap` on
+      // `.cmsg-row`) the hairline points down the avatar column instead.
+      deleted
+        ? ""
+        : inlineReply
+          ? messageReference(inlineReplyTo, repositoryId)
+          : isReply
+            ? ""
+            : holdNoticeRef(entry, repositoryId)
+    }
     <span class="cmsg-avatar">${
       author.agent !== undefined ? agentFace(author.agent, 32) : avatar(author.name, 32, author.name, author.name === currentUserName() ? myAvatar() : undefined)
     }</span>
     <div class="cmsg-body">
-      ${
-        // Above the name, the way a reply's reference sits above the reply:
-        // this line is an answer to a thread further up, and the reference is
-        // how the reader gets back to it. Only on the channel copy — inside
-        // the thread panel there is nothing to navigate to — and never on a
-        // message whose words have been taken away.
-        deleted
-          ? ""
-          : inlineReply
-            ? messageReference(inlineReplyTo, repositoryId)
-            : isReply
-              ? ""
-              : holdNoticeRef(entry, repositoryId)
-      }
       <div class="cmsg-top">
         <span class="cmsg-name${author.agent !== undefined ? " agent-name" : ""}">${esc(
           author.name,

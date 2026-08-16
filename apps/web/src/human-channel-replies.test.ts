@@ -101,3 +101,33 @@ test("the direct-reply composer names its target and resets after sending", asyn
   assert.match(submit, /state\.composerThreadId = undefined;/u);
   assert.match(submit, /state\.scrollToMessage = continuing;/u);
 });
+
+test("a reply's reference keeps clear of the avatar it sits above", async () => {
+  const [chats, css] = await Promise.all([
+    publicFile("screen-chats.js"),
+    publicFile("styles.css"),
+  ]);
+  const row = chats.slice(
+    chats.indexOf("function messageRow("),
+    chats.indexOf("function typingIndicator("),
+  );
+  // Anchored on the line start, so `.cmsg-ref` does not match the tail of
+  // `.cmsg-row.cmsg-inline-reply .cmsg-ref`.
+  const block = (selector: string): string => {
+    const start = css.indexOf(`\n${selector} {`);
+    assert.notEqual(start, -1, `${selector} is missing`);
+    return css.slice(start, css.indexOf("}", start));
+  };
+
+  // The reference is drawn before the avatar and outside the body, so it wraps
+  // onto a line of its own instead of leaning back across the picture.
+  assert.match(
+    row,
+    /messageReference\(inlineReplyTo, repositoryId\)[\s\S]*<span class="cmsg-avatar">[\s\S]*<div class="cmsg-body">/u,
+  );
+  assert.match(block(".cmsg-row"), /flex-wrap: wrap;/u);
+  assert.match(block(".cmsg-ref"), /flex: 0 0 100%;/u);
+  // No pull left out of the body: that pull is what put the elbow on the face.
+  assert.doesNotMatch(block(".cmsg-ref"), /margin: 0 0 2px -28px;/u);
+  assert.match(block(".cmsg-ref-elbow"), /margin-left: 16px;/u);
+});
