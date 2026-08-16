@@ -2098,7 +2098,11 @@ function threadListPanel(repositoryId) {
                       <span class="ti-meta">
                         <span class="ti-who">${esc(author.name)}</span>
                         <span class="ti-count">${esc(threadSaidCount(count))}</span>
-                        ${working ? `<span class="ti-live">Working</span>` : ""}
+                        ${
+                          working
+                            ? `<span class="ti-live"><span class="sr-only">Working</span></span>`
+                            : ""
+                        }
                       </span>
                     </span>
                     <span class="ti-go">${icon("chevronRight")}</span>

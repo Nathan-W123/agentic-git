@@ -7161,14 +7161,29 @@ dialog.modal::backdrop {
   background: var(--accent-wash-strong);
 }
 
-/* "Working", breathing, in the same accent as the bar under a running thread
-   in the channel — one word, because the row's own name already says what the
-   work is. */
+/* Breathing, in the same accent as the bar under a running thread in the
+   channel. A dot rather than the word "Working": the row is already lit and
+   edged, so the word was the third thing on the row saying the same thing,
+   and it pushed the reply count around as threads started and stopped. The
+   word survives for screen readers, where there is no wash and no edge to
+   read. Same fade as `.status-working`, so every live signal in the app
+   breathes on one clock. */
 .thread-item-active .ti-live {
   flex: none;
-  color: var(--accent-bright);
-  font-weight: 600;
+  align-self: center;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-bright);
   animation: status-breathe 2.4s ease-in-out infinite;
+}
+
+/* Motion is the whole of what this dot says; without it, it still has to read
+   as lit rather than half-faded. */
+@media (prefers-reduced-motion: reduce) {
+  .thread-item-active .ti-live {
+    animation: none;
+  }
 }
 
 /* ------------------------------------------------------ avatar and theme ---- */
