@@ -129,13 +129,20 @@ function settingRow(label, act, options, current) {
  */
 function chanRow(repo, activeRepositoryId) {
   const unread = channelUnreadCount(repo.id);
+  const mentions = channelUnreadCount(repo.id, { mentionsOnly: true });
   const active = repo.id === activeRepositoryId;
   return `<div class="chan-row${active ? " active" : ""}${
     unread > 0 ? " unread" : ""
   }" role="button" tabindex="0" data-act="channel-open" data-value="${esc(repo.id)}">
     <span class="cr-hash">${icon("chatBubble")}</span>
     <span class="cr-name">${esc(repo.id)}</span>
-    ${unread > 0 ? `<span class="cr-badge">${unread > 99 ? "99+" : unread}</span>` : ""}
+    ${
+      unread > 0
+        ? `<span class="cr-badge" title="${
+            mentions > 0 ? `${mentions} unread mention${mentions === 1 ? "" : "s"}` : `${unread} unread`
+          }">${mentions > 0 ? "@" : unread > 99 ? "99+" : unread}</span>`
+        : ""
+    }
     <span class="cr-more">${iconButton("dots", {
       act: "channel-menu",
       value: repo.id,
@@ -1447,7 +1454,7 @@ function mentionPopover(candidates) {
             ? "every agent"
             : entry.kind === "agent"
               ? "agent"
-              : ""
+              : "person"
         }</span>
       </button>`,
     )

@@ -1163,6 +1163,15 @@ type ChannelPersonMention = {
   name: string;
 };
 
+type ChannelMessageMention =
+  | { kind: "user"; id: string; name: string }
+  | { kind: "agent"; id: string; name: string };
+
+function textMentionsName(content: string, name: string): boolean {
+  const escaped = name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+  return new RegExp(`@${escaped}(?=$|[\\s,.:;!?()\\[\\]{}])`, "iu").test(content);
+}
+
 /* ------------------------------------------------- no-mention auto-claim --
  *
  * When a channel message carries no "@" at all, `maybeAutoClaimTask` (near
@@ -5999,7 +6008,14 @@ export class ApiGateway {
           Math.max(1, Number.parseInt(url.searchParams.get("limit") ?? "50", 10)),
         );
         const before = url.searchParams.get("before") ?? undefined;
-        const [messages, agentOverrides, readAt, pinned] = await Promise.all([
+        const [
+          messages,
+          agentOverrides,
+          readAt,
+          pinned,
+          mentionAgents,
+          mentionPeople,
+        ] = await Promise.all([
           this.options.store.listChannelMessages(repositoryId, principal.user.id, {
             limit,
             ...(before === undefined ? {} : { before }),
@@ -6010,6 +6026,8 @@ export class ApiGateway {
             repositoryId,
             principal.user.id,
           ),
+          this.resolveChannelMentionCandidates(projectId, repositoryId),
+          this.resolveChannelPeople(projectId, repositoryId),
         ]);
         // Sent with the messages rather than on a route of its own: the
         // picker is drawn on this screen, and a second round trip to learn
@@ -6022,11 +6040,25 @@ export class ApiGateway {
         // `withChangedFiles` — the banner wants a title and a target, and
         // any on-page copy already carries its file summary.
         this.sendJson(response, 200, {
-          messages: await this.withChangedFiles(repositoryId, messages),
+          messages: (
+            await this.withChangedFiles(repositoryId, messages)
+          ).map((message) =>
+            this.withChannelMessageMentions(
+              message,
+              mentionAgents,
+              mentionPeople,
+            ),
+          ),
           agentOverrides,
           readAt,
           slashCommands: SLASH_COMMANDS,
-          pinned,
+          pinned: pinned.map((message) =>
+            this.withChannelMessageMentions(
+              message,
+              mentionAgents,
+              mentionPeople,
+            ),
+          ),
         });
         return;
       }
@@ -6070,7 +6102,17 @@ export class ApiGateway {
             }\n`,
           );
         }
-        this.sendJson(response, 201, { message });
+        const [mentionAgents, mentionPeople] = await Promise.all([
+          this.resolveChannelMentionCandidates(projectId, repositoryId),
+          this.resolveChannelPeople(projectId, repositoryId),
+        ]);
+        this.sendJson(response, 201, {
+          message: this.withChannelMessageMentions(
+            message,
+            mentionAgents,
+            mentionPeople,
+          ),
+        });
         return;
       }
       throw new HttpError(405, "method_not_allowed", "Unsupported method");
@@ -8042,10 +8084,56 @@ export class ApiGateway {
       userIds.map((userId) => this.options.store.getUser(userId)),
     );
     return users.flatMap((user, index) =>
-      user === undefined
+      user === undefined || user.displayName.trim() === ""
         ? []
         : [{ userId: userIds[index] ?? user.id, name: user.displayName }],
     );
+  }
+
+  /** Public, stable identities for every resolved @mention in one message. */
+  private channelMessageMentions(
+    content: string,
+    agents: readonly ChannelMentionCandidate[],
+    people: readonly ChannelPersonMention[],
+  ): ChannelMessageMention[] {
+    const mentions: ChannelMessageMention[] = [
+      ...agents
+        .filter((agent) => textMentionsName(content, agent.name))
+        .map((agent) => ({
+          kind: "agent" as const,
+          id: `${agent.userId}:${agent.provider}`,
+          name: agent.name,
+        })),
+      ...people
+        .filter((person) => textMentionsName(content, person.name))
+        .map((person) => ({
+          kind: "user" as const,
+          id: person.userId,
+          name: person.name,
+        })),
+    ];
+    return mentions.filter(
+      (mention, index) =>
+        mentions.findIndex(
+          (candidate) =>
+            candidate.kind === mention.kind && candidate.id === mention.id,
+        ) === index,
+    );
+  }
+
+  private withChannelMessageMentions(
+    message: ChannelMessage,
+    agents: readonly ChannelMentionCandidate[],
+    people: readonly ChannelPersonMention[],
+  ): ChannelMessage & { mentions: ChannelMessageMention[] } {
+    return {
+      ...message,
+      mentions: this.channelMessageMentions(message.content, agents, people),
+      replies: message.replies.map((reply) => ({
+        ...reply,
+        mentions: this.channelMessageMentions(reply.content, agents, people),
+      })),
+    };
   }
 
   /**
@@ -8321,7 +8409,7 @@ export class ApiGateway {
         return;
       }
       const mentioned = candidates.filter((candidate) =>
-        content.includes(`@${candidate.name}`),
+        textMentionsName(content, candidate.name),
       );
       // Human names are already offered by the channel's mention picker. A
       // mention of one is a ping, not an instruction to an agent: the posted
@@ -8330,7 +8418,7 @@ export class ApiGateway {
       // people server-side is what stops a valid human ping from falling into
       // the "Nobody here answers" agent error below.
       const mentionedPeople = people.filter((person) =>
-        content.includes(`@${person.name}`),
+        textMentionsName(content, person.name),
       );
       if (
         mentioned.length === 0 &&

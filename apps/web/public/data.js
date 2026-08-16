@@ -2155,14 +2155,24 @@ export function channelParticipants(repositoryId) {
     kind: "agent",
     agent,
   }));
-  const humans =
-    state.members.length > 0
-      ? state.members.map((member) => ({
-          id: member.userId ?? member.id,
-          name: member.displayName ?? member.email,
-          kind: "human",
-        }))
-      : [{ id: currentUserId(), name: currentUserName(), kind: "human" }];
+  // The repository room is authoritative once loaded: unlike the
+  // organization member list it includes repository-scoped guests. Falling
+  // back keeps the picker useful during the roster request.
+  const room = state.channelPeople[repositoryId] ?? [];
+  const source = room.length > 0 ? room : state.members;
+  const humans = source.map((member) => ({
+    id: member.userId ?? member.id ?? member.user?.id,
+    name:
+      member.name ??
+      member.displayName ??
+      member.user?.displayName ??
+      member.email ??
+      member.user?.email,
+    kind: "human",
+  }));
+  if (humans.length === 0) {
+    humans.push({ id: currentUserId(), name: currentUserName(), kind: "human" });
+  }
   return [...agents, ...humans];
 }
 
@@ -2734,6 +2744,22 @@ export function sendChannelMessage(repositoryId, text, kind = "user", authorId) 
     authorId: authorId ?? currentUserId() ?? "you",
     content: trimmed,
     at: new Date().toISOString(),
+    mentions: channelParticipants(repositoryId)
+      .filter(
+        (participant) =>
+          typeof participant.name === "string" && participant.name !== "",
+      )
+      .filter((participant) =>
+        new RegExp(
+          `@${String(participant.name ?? "").replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}(?=$|[\\s,.:;!?()\\[\\]{}])`,
+          "iu",
+        ).test(trimmed),
+      )
+      .map((participant) => ({
+        kind: participant.kind === "agent" ? "agent" : "user",
+        id: participant.id,
+        name: participant.name,
+      })),
   };
   channelMessagesFor(repositoryId).push(message);
   if (kind === "user" && state.projectId) {
@@ -3236,11 +3262,17 @@ export function markChannelRead(repositoryId) {
   }
 }
 
-export function channelUnreadCount(repositoryId) {
+export function channelUnreadCount(repositoryId, { mentionsOnly = false } = {}) {
   const readAt = state.channelRead[repositoryId] ?? 0;
   const mine = currentUserId() || "you";
   return channelMessagesFor(repositoryId).filter(
-    (message) => message.authorId !== mine && new Date(message.at).getTime() > readAt,
+    (message) =>
+      message.authorId !== mine &&
+      new Date(message.at).getTime() > readAt &&
+      (!mentionsOnly ||
+        (message.mentions ?? []).some(
+          (mention) => mention.kind === "user" && mention.id === mine,
+        )),
   ).length;
 }
 

@@ -3411,12 +3411,22 @@ test("a human channel participant can be @mentioned without an agent refusal", a
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
   assert.equal(runtime.submittedTasks.length, 0);
+  const colleague = (await runtime.store.listUsers()).find(
+    (user) => user.email === "human-mention@example.com",
+  );
+  assert.ok(colleague !== undefined);
+  assert.deepEqual(posted.data.message.mentions, [
+    { kind: "user", id: colleague.id, name: "Colleague" },
+  ]);
 
   const after = await owner.request(`${base}/messages`);
   assert.deepEqual(
     (after.data.messages as any[]).map((message) => message.content),
     ["@Colleague could you take a look at this?"],
   );
+  assert.deepEqual((after.data.messages as any[])[0]?.mentions, [
+    { kind: "user", id: colleague.id, name: "Colleague" },
+  ]);
 });
 
 test("a human mention suppresses auto-claim but not an explicit agent mention", async (t) => {
@@ -3451,6 +3461,14 @@ test("a human mention suppresses auto-claim but not an explicit agent mention", 
   );
   assert.equal(runtime.submittedTasks.length, 1);
   assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
+  const after = await owner.request(`${base}/messages`);
+  const mixed = (after.data.messages as any[]).find((message) =>
+    message.content.includes("please review while"),
+  );
+  assert.deepEqual(
+    mixed.mentions.map((mention: any) => mention.kind).sort(),
+    ["agent", "user"],
+  );
 });
 
 test("a user outside the repository cannot be resolved as a channel ping", async (t) => {
@@ -3471,6 +3489,7 @@ test("a user outside the repository cannot be resolved as a channel ping", async
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
   assert.equal(runtime.submittedTasks.length, 0);
+  assert.deepEqual(posted.data.message.mentions, []);
 
   const after = await owner.request(`${base}/messages`);
   const coordinator = (after.data.messages as any[]).filter(
