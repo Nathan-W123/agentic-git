@@ -4396,25 +4396,28 @@ svg {
 }
 
 /* A thread branches from the root avatar into its compact reply summary.
-   The single hairline is deliberately quieter than the link text: it should
-   explain the relationship after a glance, not compete with the message. */
+   Two pixels gives the branch enough presence to read as a path rather than a
+   divider. It starts four pixels below the avatar and stops short of the reply
+   link, so the rounded stroke floats between the two components. */
 .cmsg-row.cmsg-threaded::before {
   content: "";
   position: absolute;
   left: 23px;
-  top: 40px;
+  top: 44px;
   bottom: 18px;
-  width: 20px;
-  border-left: 1px solid var(--accent-line);
-  border-bottom: 1px solid var(--accent-line);
-  border-bottom-left-radius: 9px;
+  width: 16px;
+  border-left: 2px solid var(--accent-line);
+  border-bottom: 2px solid var(--accent-line);
+  border-top-left-radius: 2px;
+  border-bottom-right-radius: 2px;
+  border-bottom-left-radius: 10px;
   pointer-events: none;
 }
 
 /* A thread whose root also answers something starts its avatar one reference
    line lower, so the branch drawn under that avatar starts there too. */
 .cmsg-row.cmsg-threaded:has(> .cmsg-ref)::before {
-  top: 58px;
+  top: 62px;
 }
 
 /* A person's reply is an ordinary line of the transcript, sitting in time
@@ -5523,19 +5526,21 @@ body.resizing-panel {
   margin-bottom: 0;
 }
 
-/* Continue the root avatar's stem into the reply label, then turn toward the
-   words. This is the same branch used in the channel transcript at a scale
-   suited to the thread panel. */
+/* Continue the root avatar's stem toward the reply label without touching
+   either component. This uses the channel branch's two-pixel stroke, rounded
+   caps and ten-pixel elbow at a scale suited to the thread panel. */
 .thread-root.has-replies::after {
   content: "";
   position: absolute;
-  left: 16px;
-  top: 40px;
+  left: 15px;
+  top: 44px;
   bottom: -15px;
-  width: 13px;
-  border-left: 1px solid var(--accent-line);
-  border-bottom: 1px solid var(--accent-line);
-  border-bottom-left-radius: 8px;
+  width: 11px;
+  border-left: 2px solid var(--accent-line);
+  border-bottom: 2px solid var(--accent-line);
+  border-top-left-radius: 2px;
+  border-bottom-right-radius: 2px;
+  border-bottom-left-radius: 10px;
   pointer-events: none;
 }
 

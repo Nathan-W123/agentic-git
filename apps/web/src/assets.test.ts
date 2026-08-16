@@ -503,8 +503,35 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(renderer, /class="thread-replies"/u);
   assert.match(renderer, /class="thread-replies-head"/u);
   assert.match(renderer, /class="thread-replies-flow"/u);
-  assert.match(css, /\.cmsg-row\.cmsg-threaded::before \{/u);
-  assert.match(css, /\.thread-root\.has-replies::after \{/u);
+  const channelBranch = /\n\.cmsg-row\.cmsg-threaded::before \{([\s\S]*?)\n\}/u.exec(
+    css,
+  )?.[1];
+  const referencedChannelBranch =
+    /\n\.cmsg-row\.cmsg-threaded:has\(> \.cmsg-ref\)::before \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
+  const panelBranch = /\n\.thread-root\.has-replies::after \{([\s\S]*?)\n\}/u.exec(
+    css,
+  )?.[1];
+  assert.notEqual(channelBranch, undefined, "the channel thread branch should exist");
+  assert.notEqual(
+    referencedChannelBranch,
+    undefined,
+    "a referenced thread root should retain its adjusted branch",
+  );
+  assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
+  for (const branch of [channelBranch, panelBranch]) {
+    assert.match(branch ?? "", /border-left: 2px solid var\(--accent-line\);/u);
+    assert.match(branch ?? "", /border-bottom: 2px solid var\(--accent-line\);/u);
+    assert.match(branch ?? "", /border-top-left-radius: 2px;/u);
+    assert.match(branch ?? "", /border-bottom-right-radius: 2px;/u);
+    assert.match(branch ?? "", /border-bottom-left-radius: 10px;/u);
+    assert.match(branch ?? "", /top: 44px;/u);
+  }
+  assert.match(channelBranch ?? "", /width: 16px;/u);
+  assert.match(referencedChannelBranch ?? "", /top: 62px;/u);
+  assert.match(panelBranch ?? "", /left: 15px;/u);
+  assert.match(panelBranch ?? "", /width: 11px;/u);
   assert.match(css, /\.thread-replies-head::after \{/u);
 });
 
