@@ -83,30 +83,56 @@ export interface ParsedSlashCommand {
 }
 
 /**
- * Reads a leading command, or nothing.
+ * A word that could be a command: a slash starting a word, and letters after
+ * it. The boundaries are what keep ordinary text out — `and/or` and
+ * `src/plan.ts` have no whitespace before the slash, and `/usr/bin` has none
+ * after `usr`. Sticky-free and global, because the scan below tries every
+ * candidate in the message rather than only the first character of it.
+ */
+const SLASH_TOKEN_PATTERN = /(^|\s)\/([a-z][a-z0-9-]*)(?=\s|$)/giu;
+
+/**
+ * Reads the command in a message, wherever it is written, or nothing.
  *
- * Only at the very start of a message, for the same reason `ADDRESSED_RE`
- * anchors an "@": a slash appears in the middle of ordinary text all the
- * time — paths, dates, "and/or" — and treating any of those as a command
- * would turn a sentence into a syntax error nobody typed.
+ * It used to have to be the very first thing typed. That is a rule the
+ * composer cannot teach anybody — somebody who has already written "@Eos "
+ * and then thinks of `/plan` gets a slash that does nothing, with no way to
+ * tell that position was the reason. So the whole message is scanned and the
+ * first *known* command word in it wins.
  *
- * An unknown word after the slash is not a command either. `/usr/bin/env is
- * on the path` is a sentence, and guessing at it would be worse than reading
- * it literally, which is what the channel already does well.
+ * Being known is what carries the safety the anchor used to. A slash appears
+ * in ordinary text constantly — paths, dates, "and/or" — and none of those
+ * spell one of the six words in `SLASH_COMMANDS` with whitespace either side.
+ * `/usr/bin/env is on the path` is still a sentence, and so is "read
+ * docs/plan.md": the price is that a message which genuinely means to *say*
+ * `/help` as its own word is read as asking for it, which is the same trade
+ * an "@" name already makes.
+ *
+ * `rest` is the message with only that one word taken out, so the mentions
+ * and the objective around it reach the dispatcher exactly as written.
  */
 export function parseSlashCommand(
   content: string,
 ): ParsedSlashCommand | undefined {
-  const match = /^\s*\/([a-z][a-z0-9-]*)(?=\s|$)/iu.exec(content);
-  if (match === null) {
-    return undefined;
+  for (const match of content.matchAll(SLASH_TOKEN_PATTERN)) {
+    const name = (match[2] ?? "").toLowerCase();
+    const command = SLASH_COMMANDS.find((entry) => entry.name === name);
+    if (command === undefined) {
+      continue;
+    }
+    const start = (match.index ?? 0) + (match[1] ?? "").length;
+    const before = content.slice(0, start);
+    const after = content.slice(start + 1 + name.length);
+    // Lifting a word out of the middle of a line leaves the space on each
+    // side of it. Only that seam is closed up — collapsing whitespace
+    // anywhere else would reflow a message somebody laid out deliberately,
+    // and the line breaks are left alone for the same reason.
+    const rest = /\s$/u.test(before)
+      ? before + after.replace(/^[ \t]+/u, "")
+      : before + after;
+    return { command, rest: rest.trim() };
   }
-  const name = (match[1] ?? "").toLowerCase();
-  const command = SLASH_COMMANDS.find((entry) => entry.name === name);
-  if (command === undefined) {
-    return undefined;
-  }
-  return { command, rest: content.slice(match[0].length).trim() };
+  return undefined;
 }
 
 /**

@@ -1295,17 +1295,34 @@ export function showPopover(anchor, html, { width = 400 } = {}) {
  * Exists so a "..." button has somewhere real to go. Items are ordinary
  * delegated actions, so a menu entry behaves exactly like the button it
  * stands in for.
+ *
+ * `danger: true` marks the one item in a menu that destroys something. It is
+ * a flag rather than a caller-supplied class so that every destructive entry
+ * in the app is the same red — the colour is what tells somebody, before they
+ * click, that this item is not like the others.
+ *
+ * A `hint` is the second line under a label, for the menus that offer a
+ * choice rather than a command and would otherwise need the reader to already
+ * know the difference.
  */
 export function showMenu(anchor, items) {
   const body = items
     .map((item) =>
       item.separator === true
         ? `<div class="menu-sep"></div>`
-        : `<button type="button" class="menu-item" data-act="${item.act}"${
+        : `<button type="button" class="menu-item${
+            item.danger === true ? " menu-item-danger" : ""
+          }" data-act="${item.act}"${
             item.value === undefined ? "" : ` data-value="${esc(item.value)}"`
           }${item.disabled === true ? " disabled" : ""}>${
             item.iconName === undefined ? "" : icon(item.iconName)
-          }<span>${esc(item.label)}</span></button>`,
+          }<span class="menu-item-text"><span class="menu-item-label">${esc(
+            item.label,
+          )}</span>${
+            item.hint === undefined
+              ? ""
+              : `<span class="menu-item-hint">${esc(item.hint)}</span>`
+          }</span></button>`,
     )
     .join("");
   return showPopover(anchor, `<div class="menu">${body}</div>`, { width: 216 });

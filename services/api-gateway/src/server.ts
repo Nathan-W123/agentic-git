@@ -8605,9 +8605,10 @@ export class ApiGateway {
   }): Promise<void> {
     const { projectId, repositoryId, senderId } = input;
     // A command says *how* to treat the request; an "@" says who it is for.
-    // Different questions, so they compose: the command word is taken off
-    // here and everything after it — mentions and all — goes on to be read
-    // exactly as it would have been without one.
+    // Different questions, so they compose: the command word is taken out
+    // here — wherever in the message it was written — and everything left
+    // around it, mentions and all, goes on to be read exactly as it would
+    // have been without one.
     const parsed = parseSlashCommand(input.content);
     const content = parsed === undefined ? input.content : parsed.rest;
     if (parsed !== undefined) {

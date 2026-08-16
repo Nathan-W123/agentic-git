@@ -163,6 +163,7 @@ import {
   pickMention,
   pickSlashCommand,
   renderChats,
+  rosterMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
   submitComposerMessage,
@@ -3265,6 +3266,9 @@ document.addEventListener("click", (event) => {
         toast("Org agents work in the room — @mention them in the channel.");
         return;
       }
+      // Also offered by the roster row's menu, which has nothing to say once
+      // the panel it opens is on screen.
+      closePopover();
       state.selectedAgent = value;
       state.activeAgentPanel = value;
       // This entry point is "talk to my agent", so it lands on the chat half
@@ -3418,7 +3422,23 @@ document.addEventListener("click", (event) => {
       render();
       return;
     }
+    /**
+     * The menu on a roster row — everything that row used to carry as its own
+     * buttons, including the one that removes the agent.
+     *
+     * The items come from `rosterMenuItems` in screen-chats.js rather than
+     * being built here: every condition in them is one the row is already
+     * drawn from, and split across two files is how a menu ends up offering
+     * what the row would not.
+     */
+    case "roster-agent-menu":
+      showMenu(node, rosterMenuItems(value));
+      return;
     case "channel-rename-toggle":
+      // Reached from the roster's menu, so the menu goes first: `render()`
+      // rebuilds the row behind it, and a popover left open over the result
+      // is anchored to a button that no longer exists.
+      closePopover();
       state.chatRenamingId = state.chatRenamingId === value ? undefined : value;
       render();
       if (state.chatRenamingId === value) {
@@ -3428,6 +3448,7 @@ document.addEventListener("click", (event) => {
       }
       return;
     case "channel-settings-toggle":
+      closePopover();
       state.chatSettingsOpenId = state.chatSettingsOpenId === value ? undefined : value;
       render();
       return;
@@ -3446,8 +3467,9 @@ document.addEventListener("click", (event) => {
       return;
     case "auditor-toggle":
       // `value` is the *current* paused state, so the new one is its
-      // opposite — read off the button that was drawn rather than from a
+      // opposite — read off the menu entry that was drawn rather than from a
       // second lookup that could disagree with what was on screen.
+      closePopover();
       void toggleAuditingAction(activeChannelId(), value !== "true");
       return;
     case "channel-info":
@@ -3463,15 +3485,20 @@ document.addEventListener("click", (event) => {
       render();
       refreshChannelInfoPopover();
       return;
+    // Both removals are reached from the roster row's menu — see
+    // `rosterMenuItems` — so the menu is dismissed before the roster it
+    // described is rebuilt without the agent in it.
     case "channel-agent-remove":
+      closePopover();
       removeChannelAgent(activeChannelId(), value);
       render();
       refreshChannelInfoPopover();
       return;
     case "channel-agent-remove-any": {
-      // `value` is `${userId}:${provider}` — see `rosterRow` in
+      // `value` is `${userId}:${provider}` — see `rosterMenuItems` in
       // screen-chats.js, which mints it from the same pair
       // `channelAgentsFor` already attaches to every non-mine entry.
+      closePopover();
       const separatorIndex = value.indexOf(":");
       removeChannelAgentForUser(
         activeChannelId(),

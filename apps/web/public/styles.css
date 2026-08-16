@@ -4126,46 +4126,33 @@ svg {
   opacity: 0.7;
 }
 
-.roster-row .rr-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex: none;
-}
-
-/* The auditor's on/off switch. Only ever drawn on one row, so it is sized to
-   sit inside the icon-button rhythm beside it rather than to be noticed. */
-.roster-row .rr-switch {
-  width: 26px;
-  height: 15px;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-2, transparent);
-  cursor: pointer;
+/* One button, revealed the same way a channel row's is — see `.chan-row
+   .cr-more`. The row used to carry four controls at once (a switch, rename,
+   settings, and a remove that was one mis-click from taking the agent out of
+   the channel); everything they did is in the menu behind this. */
+.roster-row .rr-more {
   flex: none;
   display: inline-flex;
-  align-items: center;
-  transition: background 120ms ease, border-color 120ms ease;
+  opacity: 0;
+  transition: opacity 0.12s ease;
 }
 
-.roster-row .rr-switch.on {
-  background: var(--accent);
-  border-color: var(--accent);
+.roster-row:hover .rr-more,
+.roster-row:focus-within .rr-more {
+  opacity: 1;
 }
 
-.roster-row .rr-switch-dot {
-  width: 11px;
-  height: 11px;
-  margin-left: 1px;
-  border-radius: 50%;
-  background: var(--text-dim, #888);
-  transition: transform 120ms ease, background 120ms ease;
+@media (hover: none) {
+  /* Nothing hovers on a touch screen, so the menu simply stays. */
+  .roster-row .rr-more {
+    opacity: 1;
+  }
 }
 
-.roster-row .rr-switch.on .rr-switch-dot {
-  transform: translateX(11px);
-  background: #fff;
+@media (prefers-reduced-motion: reduce) {
+  .roster-row .rr-more {
+    transition: none;
+  }
 }
 
 .roster-rename {
@@ -5567,6 +5554,47 @@ body.resizing-panel {
   height: 15px;
   flex: none;
   color: var(--text-3);
+}
+
+/* A label, and under it the sentence that says what picking it will do. The
+   grid is so the second line wraps under the first rather than under the
+   icon. */
+.menu-item-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.menu-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-item-hint {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-3);
+  white-space: normal;
+}
+
+/* The one item in a menu that destroys something, in the same red the rest of
+   the interface uses for errors and for `.btn-danger`. Red before the click,
+   not only in the confirmation after it: the colour is the warning. Its icon
+   is tinted too, since a grey trash can beside red text reads as a mistake. */
+.menu-item-danger,
+.menu-item-danger svg {
+  color: var(--red);
+}
+
+.menu-item-danger:hover:not(:disabled) {
+  background: var(--red-wash);
+  color: var(--red);
+}
+
+.menu-item-danger:hover:not(:disabled) svg {
+  color: var(--red);
 }
 
 .menu-sep {

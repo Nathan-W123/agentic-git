@@ -1311,3 +1311,82 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
   // The burst collapses, it is not dropped: the count is still reported.
   assert.match(app, /\$\{lines\.length\} updates/u);
 });
+
+test("a roster row carries one button, and removal is the red item behind it", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await browserSource();
+  const ui = await publicFile("ui.js");
+  const css = await publicFile("styles.css");
+
+  const row = chats.slice(
+    chats.indexOf("function rosterRow(agent)"),
+    chats.indexOf("export function rosterMenuItems"),
+  );
+  assert.notEqual(row, "", "the roster row should still be drawn here");
+  // The four controls the row used to carry — a switch, rename, model &
+  // effort, and a close button one mis-click from removing the agent —
+  // collapse into the same "..." the channel rows above already use.
+  assert.match(row, /act: "roster-agent-menu"/u);
+  for (const gone of [
+    "rr-switch",
+    'act: "channel-rename-toggle"',
+    'act: "channel-settings-toggle"',
+    'act: "channel-agent-remove"',
+  ]) {
+    assert.equal(
+      row.includes(gone),
+      false,
+      `${gone} should live in the menu, not on the row`,
+    );
+  }
+
+  // And the menu is where all four went, with removal last and red.
+  const menu = chats.slice(
+    chats.indexOf("export function rosterMenuItems"),
+    chats.indexOf("function chanSidebar"),
+  );
+  assert.match(menu, /"channel-rename-toggle"/u);
+  assert.match(menu, /"channel-settings-toggle"/u);
+  assert.match(menu, /"auditor-toggle"/u);
+  assert.match(menu, /separator: true/u);
+  assert.match(menu, /channel-agent-remove-any[\s\S]{0,200}danger: true/u);
+  // A teammate's agent may only be removed by somebody the server would let,
+  // and one's own is unconditional — the same rule the row was drawn by.
+  assert.match(menu, /agent\.mine === true \|\| canModerate/u);
+
+  // `danger` is a flag on the shared menu, so every destructive entry in the
+  // app is the same red rather than a colour chosen per caller.
+  assert.match(ui, /item\.danger === true \? " menu-item-danger"/u);
+  assert.match(css, /\.menu-item-danger[\s\S]{0,120}color: var\(--red\)/u);
+
+  // The menu is dismissed by everything it dispatches: `render()` rebuilds
+  // the row underneath it, and a popover anchored to a button that no longer
+  // exists is left floating over the result.
+  assert.match(app, /case "roster-agent-menu":[\s\S]{0,160}rosterMenuItems\(value\)/u);
+  assert.match(app, /case "channel-agent-remove":\s*\n\s*closePopover\(\);/u);
+});
+
+test("a slash command is offered wherever it is typed, not only at the start", async () => {
+  const chats = await publicFile("screen-chats.js");
+
+  // It used to have to be the first thing in the message, on both sides.
+  // Nothing on screen said so, and somebody who typed the mention first got
+  // a slash that opened nothing.
+  const mentionState = chats.slice(
+    chats.indexOf("function updateMentionState"),
+    chats.indexOf("export function updateComposerInput"),
+  );
+  assert.match(mentionState, /\/\(\^\|\\s\)\\\/\(\[a-z0-9-\]\*\)\$\/iu/u);
+  assert.equal(
+    /\^\\s\*\\\//u.test(mentionState),
+    false,
+    "the picker is no longer anchored to the start of the message",
+  );
+  // Completing the command keeps whatever was already written before it —
+  // the capture is put back, so the picker no longer eats the sentence.
+  const pick = chats.slice(
+    chats.indexOf("export function pickSlashCommand"),
+    chats.indexOf("export function pickMention"),
+  );
+  assert.match(pick, /`\$1\/\$\{name\} `/u);
+});

@@ -203,14 +203,6 @@ function rosterSettings(agent) {
 }
 
 /**
- * `canModerate` shows a remove button for agents that are not the viewer's
- * own — loosened from `agent.mine` to also admit anyone the server's
- * `manage_project`+/creator check (`removeChannelAgentForUser` in data.js,
- * the `?userId=` path on the membership DELETE route) would actually allow.
- * The self-service button for one's own agent is unconditional, matching
- * that the server never restricts it by permission level either.
- */
-/**
  * The hover card for one roster entry.
  *
  * Only for this account's own agents: the usage route reports the *caller's*
@@ -567,7 +559,19 @@ const AGENT_STATUS_TITLE = {
   personal: "Personal agent — only its owner can task it here",
 };
 
-function rosterRow(agent, canModerate) {
+/**
+ * One agent in the roster: a face, a name, what it is here for, and one
+ * button.
+ *
+ * The row used to carry four controls of its own — an auditor switch, rename,
+ * model & effort, and a close button that removed the agent outright. Four
+ * targets in twenty-two pixels of a narrow sidebar, one of them destructive
+ * and indistinguishable from the three that were not. Everything now lives
+ * behind the same "..." the channel rows above already use (`chanRow`), which
+ * is where the eye has learned to look for what a row can do, and removal is
+ * the one red item in it. See `rosterMenuItems`.
+ */
+function rosterRow(agent) {
   const renaming = state.chatRenamingId === agent.id;
   const settingsOpen = state.chatSettingsOpenId === agent.id;
   const auditor = isAuditor(agent);
@@ -611,63 +615,12 @@ function rosterRow(agent, canModerate) {
               : "No role set"
         }</div>
       </span>
-      <span class="rr-actions">
-        ${
-          // Only the auditor gets a switch, because it is the only role that
-          // spends without being asked. Moderators only: turning it back on
-          // starts an audit, which costs money, so it is the same decision
-          // the promotion route guards.
-          auditor && canModerate
-            ? `<button type="button" class="rr-switch${paused ? "" : " on"}"
-                data-act="auditor-toggle" data-value="${esc(String(paused))}"
-                role="switch" aria-checked="${paused ? "false" : "true"}"
-                title="${
-                  paused
-                    ? "Auditing is off. Turn it on to audit everything merged since it was switched off."
-                    : "Auditing is on. Turn it off to stop audits without demoting this agent."
-                }"><span class="rr-switch-dot"></span></button>`
-            : ""
-        }
-        ${iconButton("pencil", {
-          act: "channel-rename-toggle",
-          value: agent.id,
-          // A name and a role are not the same kind of thing any more: your
-          // own agent's name is the account's, and renaming it here changes
-          // it in every repository (and in Settings), while the role stays
-          // this channel's decision. Somebody else's agent is still renamed
-          // here alone.
-          title: agent.mine
-            ? "Rename everywhere, or set its role in this channel"
-            : "Rename or set role in this channel",
-          small: true,
-        })}
-        ${iconButton("sliders", {
-          act: "channel-settings-toggle",
-          value: agent.id,
-          title: "Model & effort",
-          small: true,
-        })}
-        ${
-          agent.mine
-            ? iconButton("close", {
-                act: "channel-agent-remove",
-                value: agent.id,
-                title: "Remove from this chat",
-                small: true,
-              })
-            : canModerate
-              ? iconButton("close", {
-                  // Non-mine entries are already keyed `${userId}:${provider}`
-                  // (see `channelAgentsFor` in data.js), which is exactly the
-                  // pair `removeChannelAgentForUser` needs.
-                  act: "channel-agent-remove-any",
-                  value: agent.id,
-                  title: "Remove this agent from the chat",
-                  small: true,
-                })
-              : ""
-        }
-      </span>
+      <span class="rr-more">${iconButton("dots", {
+        act: "roster-agent-menu",
+        value: agent.id,
+        title: `More for ${agent.name}`,
+        small: true,
+      })}</span>
     </div>
     ${
       renaming
@@ -695,13 +648,98 @@ function rosterRow(agent, canModerate) {
   </div>`;
 }
 
+/**
+ * What the "..." on a roster row offers, in the order somebody reaches for it.
+ *
+ * Built here rather than in `app.js` because every condition in it is the
+ * same one the row itself is drawn from — who owns the agent, whether it is
+ * the auditor, whether this account may moderate the channel. Splitting that
+ * across two files is how a menu ends up offering what the row would not.
+ *
+ * Removal is last, after a separator, and red. Whether it is the viewer's own
+ * agent decides which act removes it: `channel-agent-remove` takes the
+ * account's own provider id, while a teammate's entry is already keyed
+ * `${userId}:${provider}` (see `channelAgentsFor` in data.js), which is
+ * exactly the pair `removeChannelAgentForUser` needs. Moderators only for
+ * that second one, matching the server's `manage_project`/creator check on
+ * the `?userId=` path of the membership DELETE route; one's own agent is
+ * unconditional, as it is on the server.
+ */
+export function rosterMenuItems(agentId) {
+  const repositoryId = activeChannelId();
+  const agent = channelAgentsFor(repositoryId).find(
+    (entry) => entry.id === agentId,
+  );
+  if (agent === undefined) {
+    return [];
+  }
+  const canModerate = canManageRepository(repositoryId);
+  const paused = state.auditorPaused[repositoryId] === true;
+  const items = [];
+  // Only for personal agents of this account, the same rule the avatar's
+  // one-to-one act follows: an org agent's whole point is that its work
+  // happens where the team can see it.
+  if (agent.mine === true && agent.visibility !== "org") {
+    items.push({
+      act: "agent-chat-open",
+      value: agent.id,
+      label: `Message ${agent.name}`,
+      iconName: "chatBubble",
+    });
+  }
+  items.push({
+    act: "channel-rename-toggle",
+    value: agent.id,
+    // A name and a role are not the same kind of thing: your own agent's name
+    // is the account's, and renaming it here changes it in every repository
+    // (and in Settings), while the role stays this channel's decision.
+    label: "Rename & role",
+    hint: agent.mine === true
+      ? "Renames it everywhere; the role is this channel's"
+      : "In this channel only",
+    iconName: "pencil",
+  });
+  items.push({
+    act: "channel-settings-toggle",
+    value: agent.id,
+    label: "Model & effort",
+    iconName: "sliders",
+  });
+  // Only the auditor gets this, because it is the only role that spends
+  // without being asked. Moderators only: turning it back on starts an audit,
+  // which costs money, so it is the same decision the promotion route guards.
+  if (isAuditor(agent) && canModerate) {
+    items.push({
+      act: "auditor-toggle",
+      // The *current* paused state, read off what is on screen — the handler
+      // flips it.
+      value: String(paused),
+      label: paused ? "Resume auditing" : "Pause auditing",
+      hint: paused
+        ? "Audits everything merged since it was switched off"
+        : "Stops audits without demoting this agent",
+      iconName: paused ? "play" : "pause",
+    });
+  }
+  if (agent.mine === true || canModerate) {
+    items.push({ separator: true });
+    items.push({
+      act: agent.mine === true ? "channel-agent-remove" : "channel-agent-remove-any",
+      value: agent.id,
+      label: "Remove from this chat",
+      iconName: "trash",
+      danger: true,
+    });
+  }
+  return items;
+}
+
 function chanSidebar(activeRepositoryId) {
   const query = state.chatQuery.trim().toLowerCase();
   const channels = [...state.repositories]
     .filter((repo) => query === "" || repo.id.toLowerCase().includes(query))
     .sort((left, right) => left.id.localeCompare(right.id));
   const roster = channelAgentsFor(activeRepositoryId);
-  const canModerate = canManageRepository(activeRepositoryId);
   // The membership records rather than `collaborators()`, which flattens them
   // to names — the role has to come from somewhere, and it is on the record.
   // The server's room list when it has arrived — it includes repo-scoped
@@ -755,7 +793,7 @@ function chanSidebar(activeRepositoryId) {
         // thing above it is a line to read before reaching the thing to click.
         roster.length === 0
           ? ""
-          : roster.map((agent) => rosterRow(agent, canModerate)).join("")
+          : roster.map((agent) => rosterRow(agent)).join("")
       }
       <button type="button" class="roster-add" data-act="channel-agent-menu"
         data-value="${esc(activeRepositoryId ?? "")}">
@@ -3166,14 +3204,19 @@ function updateMentionState(node) {
   const value = node.value;
   const cursor = node.selectionStart ?? value.length;
   const before = value.slice(0, cursor);
-  // A command is only ever the first thing in a message — the same rule the
-  // server parses by — so the picker only offers one there. Anchoring it
-  // here as well is what stops a path typed mid-sentence from opening a
-  // menu over the composer.
-  const slash = /^\s*\/([a-z0-9-]*)$/iu.exec(before);
+  // A slash that starts a word, anywhere in the message — the same rule the
+  // server now parses by (`parseSlashCommand` in slash.ts). It used to have
+  // to be the very first thing typed, which nothing on screen said and
+  // nobody could infer: a person who had written the mention first got a
+  // slash that opened nothing.
+  //
+  // The word boundary is what keeps a path out. `src/retry.ts` and `and/or`
+  // have no space before the slash, so neither opens the picker, and a
+  // command that matches nothing shows no popover anyway.
+  const slash = /(^|\s)\/([a-z0-9-]*)$/iu.exec(before);
   state.slashActive = slash !== null;
   if (slash !== null) {
-    state.slashQuery = slash[1] ?? "";
+    state.slashQuery = slash[2] ?? "";
     state.slashIndex = 0;
     // One picker at a time: a bare "/" is never also a mention.
     state.mentionActive = false;
@@ -3249,7 +3292,10 @@ export function pickSlashCommand(name, rerender) {
   const cursor = node?.selectionStart ?? state.chatDraft.length;
   const before = state.chatDraft.slice(0, cursor);
   const after = state.chatDraft.slice(cursor);
-  const replaced = before.replace(/^\s*\/([a-z0-9-]*)$/iu, `/${name} `);
+  // The same boundary `updateMentionState` opened the picker on, so what is
+  // completed is the word the picker was offering — whatever came before it
+  // in the message is kept.
+  const replaced = before.replace(/(^|\s)\/([a-z0-9-]*)$/iu, `$1/${name} `);
   state.chatDraft = replaced + after;
   state.slashActive = false;
   state.slashQuery = "";
