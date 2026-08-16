@@ -2934,13 +2934,30 @@ document.addEventListener("click", (event) => {
       $("[data-act='channel-attach-input']")?.click();
       return;
     }
+    case "channel-attachment-remove": {
+      const escaped = value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      state.chatDraft = state.chatDraft
+        .replace(
+          new RegExp(`!?\\[[^\\]]*\\]\\(attachment:${escaped}\\)\\n?`, "gu"),
+          "",
+        )
+        .trimEnd();
+      render();
+      $("[data-act='channel-input']")?.focus();
+      return;
+    }
     case "channel-mention-key": {
       const input = $("[data-act='channel-input']");
       if (input === null) {
         return;
       }
       const at = input.selectionStart ?? input.value.length;
-      state.chatDraft = `${input.value.slice(0, at)}@${input.value.slice(at)}`;
+      const attachments = state.chatDraft.match(
+        /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
+      );
+      state.chatDraft = `${input.value.slice(0, at)}@${input.value.slice(at)}${
+        attachments === null ? "" : `\n${attachments.join("\n")}\n`
+      }`;
       state.mentionActive = true;
       state.mentionQuery = "";
       state.mentionIndex = 0;
@@ -4118,6 +4135,23 @@ document.addEventListener("change", (event) => {
     }
     default:
   }
+});
+
+/* Clipboard image files take the same validated upload path as the picker.
+   Text-only clipboard data is left to the textarea's native paste behavior. */
+document.addEventListener("paste", (event) => {
+  if (event.target?.dataset?.act !== "channel-input") {
+    return;
+  }
+  const files = [...(event.clipboardData?.items ?? [])]
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file) => file !== null);
+  if (files.length === 0) {
+    return;
+  }
+  event.preventDefault();
+  void attachChannelImages(files);
 });
 
 document.addEventListener("input", (event) => {

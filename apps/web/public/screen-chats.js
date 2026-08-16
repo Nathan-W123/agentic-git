@@ -280,6 +280,42 @@ function statusDot(status, title) {
 const ATTACHMENT_PATTERN =
   /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu;
 
+function draftAttachments(repositoryId) {
+  const base =
+    `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
+    `/repositories/${encodeURIComponent(repositoryId ?? "")}/attachments/`;
+  return [...String(state.chatDraft ?? "").matchAll(ATTACHMENT_PATTERN)].map(
+    (match) => ({
+      reference: match[0],
+      alt: match[1] || "Attached image",
+      id: match[2],
+      src: base + match[2],
+    }),
+  );
+}
+
+function draftText() {
+  return String(state.chatDraft ?? "").replace(ATTACHMENT_PATTERN, "").trimEnd();
+}
+
+function draftAttachmentPreviews(repositoryId) {
+  const attachments = draftAttachments(repositoryId);
+  if (attachments.length === 0) {
+    return "";
+  }
+  return `<div class="composer-attachments" aria-label="Attached images">${attachments
+    .map(
+      (attachment) => `<div class="composer-attachment">
+        <img src="${esc(attachment.src)}" alt="${esc(attachment.alt)}">
+        <span title="${esc(attachment.alt)}">${esc(attachment.alt)}</span>
+        <button type="button" class="composer-attachment-remove"
+          data-act="channel-attachment-remove" data-value="${esc(attachment.id)}"
+          aria-label="Remove ${esc(attachment.alt)}">&times;</button>
+      </div>`,
+    )
+    .join("")}</div>`;
+}
+
 /**
  * A narrow, safe subset of Markdown for what an agent writes.
  *
@@ -1477,9 +1513,10 @@ function terminalDrawer() {
 }
 
 function composer(repositoryId) {
-  return `<div class="chan-composer-wrap">
+  return `<div class="chan-composer-wrap${state.mentionActive ? " mention-active" : ""}">
     <div data-composer-suggestions>${composerSuggestions(repositoryId)}</div>
     ${composerThreadChip(repositoryId)}
+    ${draftAttachmentPreviews(repositoryId)}
     <form class="composer" data-act="channel-submit">
       <textarea data-act="channel-input" rows="1" spellcheck="true"
         enterkeyhint="send"
@@ -1487,7 +1524,7 @@ function composer(repositoryId) {
           state.composerThreadId === undefined
             ? `Message #${esc(repositoryId ?? "")}`
             : "Add to this thread..."
-        }">${esc(state.chatDraft)}</textarea>
+        }">${esc(draftText())}</textarea>
       <div class="composer-bar">
         <!-- The input is the control; the button only clicks it. A bare file
              input cannot be styled into this bar, and a label would take the
@@ -2793,7 +2830,10 @@ function updateMentionState(node) {
 }
 
 export function updateComposerInput(node) {
-  state.chatDraft = node.value;
+  const references = draftAttachments(activeChannelId())
+    .map((attachment) => attachment.reference)
+    .join("\n");
+  state.chatDraft = `${node.value}${references === "" ? "" : `\n${references}\n`}`;
   // What the screen actually shows about a draft is the suggestion popup and
   // nothing else: the send button is always enabled, and the textarea already
   // holds the character that was just typed. Only that small popup needs an
@@ -2814,6 +2854,7 @@ export function updateComposerInput(node) {
     `${String(state.slashActive)} ${state.slashQuery}`;
   const before = popupState();
   updateMentionState(node);
+  node.closest(".chan-composer-wrap")?.classList.toggle("mention-active", state.mentionActive);
   const changed = popupState() !== before;
   // The height is a property of this element, not of the app, so it is set
   // directly whether or not anything else is rebuilt.
