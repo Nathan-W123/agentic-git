@@ -637,7 +637,7 @@ const EFFORT_VALUE = /^[a-z][a-z0-9_-]{0,31}$/u;
  * in") on either stream and pad it with banners, so the first line that reads
  * like a diagnosis is preferred over the first line outright.
  */
-function probeFailureDetail(output: ProcessOutput): string {
+function diagnosisLine(output: ProcessOutput): string | undefined {
   const lines = `${output.stderr}\n${output.stdout}`
     .split("\n")
     .map((line) => line.trim())
@@ -647,13 +647,119 @@ function probeFailureDetail(output: ProcessOutput): string {
       line,
     ),
   );
+  return diagnosis ?? lines[0];
+}
+
+/** The same line, with something to say when the CLI printed nothing at all. */
+function probeFailureDetail(output: ProcessOutput): string {
   return (
-    diagnosis ??
-    lines[0] ??
+    diagnosisLine(output) ??
     (output.exitCode === 124
       ? "the CLI did not answer before the deadline"
       : `the CLI exited ${output.exitCode}`)
   ).slice(0, 300);
+}
+
+/**
+ * The reason a CLI event gives for its own failure, if it gives one.
+ *
+ * Both CLIs mark the failure on their last event rather than on the process:
+ * Claude Code ends a bad turn with `result`/`is_error`, Codex with
+ * `turn.failed` or an `error` item. Objects are read for their `message` so a
+ * structured vendor error does not come out as `[object Object]`.
+ */
+function cliEventFailure(event: Record<string, unknown>): string | undefined {
+  const error = event["error"];
+  if (typeof error === "string" && error.trim().length > 0) {
+    return error.trim();
+  }
+  if (typeof error === "object" && error !== null) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === "string" && message.trim().length > 0) {
+      return message.trim();
+    }
+  }
+  const message = event["message"];
+  if (typeof message === "string" && message.trim().length > 0) {
+    return message.trim();
+  }
+  if (
+    event["is_error"] === true ||
+    /error|fail/iu.test(String(event["subtype"] ?? event["type"] ?? ""))
+  ) {
+    const result = event["result"];
+    if (typeof result === "string" && result.trim().length > 0) {
+      return result.trim();
+    }
+  }
+  return undefined;
+}
+
+/**
+ * What to tell somebody when a CLI run exits non-zero.
+ *
+ * `stream-json` opens every run with an `init` event listing the cwd, the
+ * session id and every tool name the CLI knows, so quoting the *head* of
+ * stdout quoted that banner every single time: a chat reply that began
+ * `{"type":"system","subtype":"init","cwd":"/tmp/coord-provider-chat"…` and
+ * never reached the sentence saying what went wrong — which was then clipped
+ * again downstream, so the reason was unreachable from the room it failed in.
+ * The reason lives on the *last* event the CLI wrote, or on stderr, so those
+ * are what get read.
+ */
+function cliFailureDetail(output: ProcessOutput): string | undefined {
+  const lines = output.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith("{"));
+  for (let index = lines.length - 1; index >= 0; index -= 1) {
+    let event: Record<string, unknown>;
+    try {
+      event = JSON.parse(lines[index] as string) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const failure = cliEventFailure(event);
+    if (failure !== undefined) {
+      return failure.slice(0, 400);
+    }
+  }
+  return diagnosisLine(output)?.slice(0, 400);
+}
+
+/**
+ * A finished answer rescued from a run that still exited non-zero.
+ *
+ * A CLI can say everything it had to say and then fail on the way out — a
+ * session file it could not write, a cleanup step, a broken pipe once the
+ * stream was drained. Throwing on the exit code alone discarded a complete
+ * reply and replaced it with the exit code, which is the one thing in the run
+ * the reader cannot use. The answer wins; a stream with nothing usable in it
+ * still becomes the error it was.
+ */
+function salvagedClaudeReply(
+  stdout: string,
+  model: string,
+): ChatReply | undefined {
+  try {
+    const reply = parseClaudeStreamJson(stdout, model);
+    return reply.text.trim().length > 0 ? reply : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The same rescue for `codex exec --json`. See {@link salvagedClaudeReply}. */
+function salvagedCodexReply(
+  stdout: string,
+  model: string,
+): ChatReply | undefined {
+  try {
+    const reply = parseCodexJsonl(stdout, model);
+    return reply.text.trim().length > 0 ? reply : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 export type ProcessRunner = typeof runProcess;
@@ -3395,13 +3501,15 @@ export class ProviderChatService {
   }
 
   private cliFailure(name: string, output: ProcessOutput): ProviderChatError {
+    const detail = cliFailureDetail(output);
     return new ProviderChatError(
       502,
       "cli_failed",
-      `The ${name} CLI exited ${output.exitCode}: ${
-        output.stderr.trim().slice(0, 400) ||
-        output.stdout.trim().slice(0, 400)
-      }`,
+      detail === undefined
+        ? output.exitCode === 124
+          ? `The ${name} CLI did not answer before the deadline`
+          : `The ${name} CLI exited ${output.exitCode} without saying why`
+        : `The ${name} CLI exited ${output.exitCode}: ${detail}`,
     );
   }
 
@@ -3516,6 +3624,10 @@ export class ProviderChatService {
       output = await runOnce(false);
     }
     if (output.exitCode !== 0) {
+      const salvaged = salvagedClaudeReply(output.stdout, model);
+      if (salvaged !== undefined) {
+        return salvaged;
+      }
       throw this.cliFailure("claude", output);
     }
     return parseClaudeStreamJson(output.stdout, model);
@@ -3626,13 +3738,17 @@ export class ProviderChatService {
     if (output.exitCode !== 0 && resumable) {
       output = await runOnce(false);
     }
-    if (output.exitCode !== 0) {
-      throw this.cliFailure("codex", output);
+    const chosenModel = settings.model ?? "codex default";
+    let reply: ChatReply;
+    if (output.exitCode === 0) {
+      reply = parseCodexJsonl(output.stdout, chosenModel);
+    } else {
+      const salvaged = salvagedCodexReply(output.stdout, chosenModel);
+      if (salvaged === undefined) {
+        throw this.cliFailure("codex", output);
+      }
+      reply = salvaged;
     }
-    const reply = parseCodexJsonl(
-      output.stdout,
-      settings.model ?? "codex default",
-    );
     const models = await this.codexModels();
     const contextWindow = (
       models?.find((model) => model.id === settings.model) ?? models?.[0]
@@ -3688,6 +3804,10 @@ export class ProviderChatService {
       output = await runOnce(false);
     }
     if (output.exitCode !== 0) {
+      const salvaged = salvagedClaudeReply(output.stdout, model);
+      if (salvaged !== undefined) {
+        return salvaged;
+      }
       throw this.cliFailure("claude", output);
     }
     return parseClaudeStreamJson(output.stdout, model);
@@ -3754,13 +3874,17 @@ export class ProviderChatService {
     if (output.exitCode !== 0 && resumable) {
       output = await runOnce(false);
     }
-    if (output.exitCode !== 0) {
-      throw this.cliFailure("codex", output);
+    const chosenModel = settings.model ?? "codex default";
+    let reply: ChatReply;
+    if (output.exitCode === 0) {
+      reply = parseCodexJsonl(output.stdout, chosenModel);
+    } else {
+      const salvaged = salvagedCodexReply(output.stdout, chosenModel);
+      if (salvaged === undefined) {
+        throw this.cliFailure("codex", output);
+      }
+      reply = salvaged;
     }
-    const reply = parseCodexJsonl(
-      output.stdout,
-      settings.model ?? "codex default",
-    );
     // The account's model cache carries the real context window; attach it
     // so the usage view can show consumption against a true denominator.
     const models = await this.codexModels();

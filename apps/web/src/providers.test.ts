@@ -1761,3 +1761,131 @@ test("claude's cache tokens are counted, not silently dropped", () => {
   );
   assert.equal(quiet.usage?.cachedInputTokens, undefined);
 });
+
+/**
+ * A failed run has to say what went wrong in words the person reading a chat
+ * can use. `stream-json` opens every run with an `init` event listing the
+ * cwd, the session id and every tool name the CLI knows, so quoting the head
+ * of stdout quoted that banner — which is how a channel reply came out as
+ * `The claude CLI exited 1: {"type":"system","subtype":"init","cwd":...` with
+ * the actual reason off the end of the line.
+ */
+test("a failed CLI run is reported by its own error, not by its opening banner", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) => {
+        if (args[0] === "auth") {
+          return output(
+            JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }),
+          );
+        }
+        // Detection probes (`--version`, `--help`) run through the same
+        // runner and must still succeed.
+        if (!args.includes("--output-format")) {
+          return output("claude 1.2.3");
+        }
+        return output(
+          [
+            JSON.stringify({
+              type: "system",
+              subtype: "init",
+              cwd: "/tmp/coord-provider-chat",
+              session_id: "7489ef88-8a9f-474d-a3bf-6fb01ea98bf4",
+              tools: ["Task", "Bash", "CronCreate", "CronDelete", "CronList"],
+            }),
+            JSON.stringify({
+              type: "result",
+              subtype: "error_during_execution",
+              is_error: true,
+              result: "Prompt is too long for the selected model",
+            }),
+          ].join("\n"),
+          1,
+        );
+      },
+    }),
+  });
+  await service.connect({
+    userId: "u",
+    systemAdmin: true,
+    provider: "anthropic",
+  });
+  await assert.rejects(
+    service.complete({
+      userId: "u",
+      systemAdmin: true,
+      provider: "anthropic",
+      messages: [{ role: "user", content: "what does it actually mean?" }],
+    }),
+    (error: unknown) =>
+      error instanceof ProviderChatError &&
+      error.code === "cli_failed" &&
+      /Prompt is too long for the selected model/u.test(error.message) &&
+      // Not the banner the run opened with.
+      !/"subtype":"init"|coord-provider-chat/u.test(error.message),
+  );
+});
+
+/**
+ * The CLI can say everything it had to say and still exit non-zero on the way
+ * out. The answer is what was asked for, so it outlives the exit code.
+ */
+test("an answer already written survives a non-zero exit", async () => {
+  const harness = await createHarness();
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) => {
+        if (args[0] === "auth") {
+          return output(
+            JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }),
+          );
+        }
+        // Detection probes (`--version`, `--help`) run through the same
+        // runner and must still succeed.
+        if (!args.includes("--output-format")) {
+          return output("claude 1.2.3");
+        }
+        return output(
+          [
+            JSON.stringify({
+              type: "assistant",
+              message: {
+                content: [{ type: "text", text: "The whole answer." }],
+              },
+            }),
+            JSON.stringify({
+              type: "result",
+              is_error: false,
+              result: "The whole answer.",
+              session_id: "sess-4321",
+            }),
+          ].join("\n"),
+          1,
+        );
+      },
+    }),
+  });
+  await service.connect({
+    userId: "u",
+    systemAdmin: true,
+    provider: "anthropic",
+  });
+  const reply = await service.complete({
+    userId: "u",
+    systemAdmin: true,
+    provider: "anthropic",
+    messages: [{ role: "user", content: "what does it actually mean?" }],
+  });
+  assert.equal(reply.text, "The whole answer.");
+
+  // A run that exits non-zero with nothing usable is still a failure: the
+  // rescue is for answers, not for silence.
+  const empty = parseClaudeStreamJson(
+    [JSON.stringify({ type: "result", is_error: false, result: "" })].join("\n"),
+    "claude-sonnet-5",
+  );
+  assert.equal(empty.text, "");
+});

@@ -1524,6 +1524,56 @@ test("a task asked to change still fails when it changes nothing", async () => {
   }
 });
 
+test("an empty run carrying an agent account keeps that account whole", async () => {
+  // An empty run that was meant to write stays a failure, but the account the
+  // agent wrote is the only substantive evidence it leaves — and for a
+  // question misread as a change request, that account *is* the answer. It
+  // travels beside the alarm, entire, so the narration downstream has
+  // something to show rather than a clipped sentence.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const store = new InMemoryCoordinationStore();
+    const account =
+      "Diagnosis only — no files changed. The attachment route reads bytes " +
+      "back out of the attachment store and never writes them into the " +
+      "repository, so a pasted screenshot cannot bloat the checkout.";
+    const agent = new TestAgent(
+      "agent_a",
+      plan("task_a", []),
+      fixture.repository,
+      fixture.workspaces,
+      "",
+      false,
+      undefined,
+      account,
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        {
+          task: { ...task("task_a"), objective: "fix the retry loop" },
+          adapter: agent,
+        },
+      ],
+    });
+
+    assert.equal(result.tasks[0]?.status, "failed");
+    const explanation = result.tasks[0]?.explanation ?? "";
+    assert.match(explanation, /produced no repository changes/u);
+    assert.ok(explanation.includes(account), explanation);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a role preamble does not turn an audit into a failure", async () => {
   // The second half of the same bug. A channel dispatch submits
   // `withRoleContext(role, message)`, so the objective the coordinator reads

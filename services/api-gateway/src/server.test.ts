@@ -10,6 +10,8 @@ import {
   type CoordinationStore,
 } from "@coord/persistence";
 
+import { AGENT_ACCOUNT_PREFIX } from "@coord/shared-types";
+
 import {
   agentIdentity,
   ApiGateway,
@@ -4288,6 +4290,53 @@ test("a failed task says why, whichever shape the failure was recorded in", () =
     narrateTaskEvent("task_failed", {}),
     "I could not finish this.",
   );
+});
+
+/**
+ * A read-only request that ends with no diff reaches the failure path with its
+ * whole answer inside the failure: the coordinator appends the agent's own
+ * account to the alarm rather than discarding it. Clipping that at 200
+ * characters is how a channel showed "…What the URL act" and stopped — the
+ * deliverable, cut mid-word, with nothing to open and read the rest in.
+ */
+test("a failure carrying the agent's own account keeps the account whole", () => {
+  const account =
+    "Diagnosis only — no files changed. Short answer: no, that URL does not " +
+    "mean your pasted photos go into the codebase. What the URL actually " +
+    "points at is the attachment route, which reads the bytes back out of " +
+    "the attachment store; nothing on that path writes them into the " +
+    "repository, so pasting a screenshot cannot bloat the checkout.";
+  const said = String(
+    narrateTaskEvent("task_failed", {
+      status: "empty",
+      explanation:
+        "The agent produced no repository changes. " +
+        `${AGENT_ACCOUNT_PREFIX} ${account}`,
+    }),
+  );
+  // The alarm still leads — an empty run from a task meant to write is still
+  // a failure, whatever it says for itself.
+  assert.match(said, /^I could not finish this — I did not end up with any/u);
+  // And the answer survives in full, unclipped and unbroken.
+  assert.ok(said.includes(account), said);
+  assert.doesNotMatch(said, /…/u);
+});
+
+test("a clipped failure detail still ends on a whole word", () => {
+  // A bare slice cut mid-word, which reads as a model that stopped
+  // mid-thought rather than as a quotation somebody shortened.
+  const detail = Array.from({ length: 200 }, (_, index) => `token${index}`).join(
+    " ",
+  );
+  const said = explainAnswerFailure(detail);
+  assert.match(said, /…$/u);
+  const quoted = said
+    .replace("I could not answer that just now: ", "")
+    .replace(/…$/u, "")
+    .trim();
+  for (const word of quoted.split(" ")) {
+    assert.match(word, /^token\d+$/u, said);
+  }
 });
 
 test("a refused GitHub push keeps GitHub's remedy, not the agent's", () => {

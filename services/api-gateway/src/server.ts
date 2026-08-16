@@ -48,6 +48,7 @@ import {
   type AuditFinding,
 } from "./auditor.js";
 import {
+  AGENT_ACCOUNT_PREFIX,
   assertProjectPolicy,
   createId,
   describeError,
@@ -870,7 +871,61 @@ export function explainAnswerFailure(error?: string): string {
   const cleaned = (error ?? "").replace(/\s+/gu, " ").trim();
   return cleaned.length === 0
     ? "I could not answer that just now."
-    : `I could not answer that just now: ${cleaned.slice(0, 200)}`;
+    : `I could not answer that just now: ${clipToBoundary(cleaned, FAILURE_DETAIL_MAX)}`;
+}
+
+/**
+ * A bounded excerpt that still ends on a word.
+ *
+ * Every bound here used to be a bare `slice`, which is how a channel line
+ * ended "…What the URL act": a sentence cut mid-word reads as a model that
+ * stopped mid-thought rather than as a quotation somebody shortened. Cutting
+ * back to the last space and marking the cut says which of the two happened.
+ */
+function clipToBoundary(text: string, max: number): string {
+  if (text.length <= max) {
+    return text;
+  }
+  const head = text.slice(0, max);
+  const lastSpace = head.lastIndexOf(" ");
+  // Only honour the word boundary when it is near the end; a single
+  // unbroken token longer than the bound would otherwise clip to nothing.
+  const kept = lastSpace > max * 0.6 ? head.slice(0, lastSpace) : head;
+  return `${kept.trimEnd()}…`;
+}
+
+/** How much of the machinery's own error text a failure line may quote. */
+const FAILURE_DETAIL_MAX = 240;
+
+/**
+ * How much of the agent's own account a failure may carry: effectively all of
+ * it.
+ *
+ * The alarm above it is boilerplate and worth shortening; the account is the
+ * thing the reader actually asked for. A read-only request that reached this
+ * path — a diagnosis, an explanation — has its entire answer in that field, and
+ * clipping it to a couple of sentences threw the answer away and left a
+ * half-finished one in the room. The bound stays only so a runaway model
+ * cannot paste a novel into a channel.
+ */
+const FAILURE_ACCOUNT_MAX = 4_000;
+
+/**
+ * Splits a failure into the alarm and the agent's own words, if it carries
+ * both. See {@link AGENT_ACCOUNT_PREFIX} for who writes the seam.
+ */
+function splitAgentAccount(detail: string): {
+  alarm: string;
+  account?: string;
+} {
+  const at = detail.indexOf(AGENT_ACCOUNT_PREFIX);
+  if (at < 0) {
+    return { alarm: detail };
+  }
+  const account = detail.slice(at + AGENT_ACCOUNT_PREFIX.length).trim();
+  return account.length === 0
+    ? { alarm: detail }
+    : { alarm: detail.slice(0, at), account };
 }
 
 function explainTaskFailure(error: string, status?: string): string {
@@ -880,16 +935,29 @@ function explainTaskFailure(error: string, status?: string): string {
       "My Agents and send this again."
     );
   }
-  const cleaned = error.replace(/\s+/gu, " ").trim();
+  // Split before collapsing whitespace: the alarm is one sentence and reads
+  // the same flattened, while the account may be several paragraphs the agent
+  // laid out for a reader.
+  const { alarm, account } = splitAgentAccount(error);
+  const cleaned = alarm.replace(/\s+/gu, " ").trim();
   const reason = status === undefined ? undefined : INTEGRATION_FAILURE_REASONS[status];
-  if (cleaned.length > 0) {
-    return reason === undefined
-      ? `I could not finish this: ${cleaned.slice(0, 240)}`
-      : `I could not finish this — ${reason}: ${cleaned.slice(0, 200)}`;
-  }
-  return reason === undefined
-    ? "I could not finish this."
-    : `I could not finish this — ${reason}.`;
+  const opening =
+    cleaned.length > 0
+      ? reason === undefined
+        ? `I could not finish this: ${clipToBoundary(cleaned, FAILURE_DETAIL_MAX)}`
+        : `I could not finish this — ${reason}: ${clipToBoundary(cleaned, FAILURE_DETAIL_MAX)}`
+      : reason === undefined
+        ? "I could not finish this."
+        : `I could not finish this — ${reason}.`;
+  // Its own paragraph, so the answer is not read as a continuation of the
+  // alarm's sentence — and so the ending is long enough and shaped enough to
+  // open a thread rather than land as one clipped line in the room.
+  return account === undefined
+    ? opening
+    : `${opening}\n\n${AGENT_ACCOUNT_PREFIX} ${clipToBoundary(
+        account.trim(),
+        FAILURE_ACCOUNT_MAX,
+      )}`;
 }
 
 /**
@@ -13149,7 +13217,13 @@ export class ApiGateway {
             const threadWorthy =
               record.event.type === "task_reported" ||
               touchedFiles > 1 ||
-              line.length > 400;
+              line.length > 400 ||
+              // A failure carrying the agent's own account is a deliverable
+              // wearing an alarm: a diagnosis somebody asked for, ending in a
+              // run that wrote no files. Collapsed onto one channel line it
+              // reads as a wall of text with no way to open it, which is what
+              // the thread is for.
+              line.includes(AGENT_ACCOUNT_PREFIX);
             if (terminal && !threadWorthy) {
               await this.appendChannelEntry({
                 projectId: watched.projectId,
