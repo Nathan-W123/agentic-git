@@ -14,6 +14,7 @@ import type {
 import type { AgentAdapter } from "@coord/agent-protocol";
 import { AutoApprovalController, Coordinator } from "@coord/coordinator";
 import { CodexAdapter } from "@coord/adapter-codex";
+import { CLAUDE_PROFILE, PromptCliAdapter } from "@coord/adapter-prompt-cli";
 import { GenericCliAdapter } from "@coord/adapter-generic-cli";
 import { IntegrationService } from "@coord/integration-service";
 import {
@@ -86,6 +87,20 @@ function createAdapter(
         ...(live.windowsSandbox === undefined
           ? {}
           : { windowsSandbox: live.windowsSandbox }),
+      });
+    }
+    if (live.adapter === "prompt-cli") {
+      // Claude Code, through the shipped prompt-cli adapter: the same driver
+      // the product uses, so a live run measures what a deployment would
+      // actually spend rather than a stand-in.
+      return new PromptCliAdapter({
+        agentId: task.agentId,
+        repository: fixture.repository,
+        workspaces: fixture.workspaces,
+        planningRoot: path.join(fixture.rootPath, "planning"),
+        profile: CLAUDE_PROFILE,
+        ...(live.command === "" ? {} : { command: live.command }),
+        ...(live.args.length === 0 ? {} : { args: [...live.args] }),
       });
     }
     return new GenericCliAdapter({
@@ -190,11 +205,51 @@ export async function runCoordinatedFixture(
 /**
  * What the run spent, when the agents driving it can say.
  *
- * Only the Codex adapter reports a figure today, and only when its transcript
- * carried one, so the field is absent rather than zero for a scripted run —
- * a benchmark that reported "0 tokens" for a scripted fixture would read as a
- * measurement rather than as silence.
+ * Any adapter that accounts for its own spend contributes — Codex and
+ * prompt-cli both do — and only when the transcript actually carried a figure,
+ * so the field is absent rather than zero for a scripted run: a benchmark that
+ * reported "0 tokens" for a scripted fixture would read as a measurement
+ * rather than as silence.
  */
+/**
+ * What one adapter says it spent, in the one shape this file needs.
+ *
+ * The two adapters that account for tokens report them under different names —
+ * Codex counts a single `tokens`, prompt-cli breaks the figure down and totals
+ * it as `totalTokens` — so this normalises rather than asking either to
+ * change. Structural, not `instanceof`: an adapter earns its way into the
+ * accounting by reporting usage, not by being one of a listed pair.
+ *
+ * An adapter that reports nothing yields nothing, which is what keeps a
+ * scripted run silent instead of claiming it measured zero.
+ */
+export function reportedUsage(
+  adapter: AgentAdapter,
+): Array<{ taskId: string; phase: string; tokens: number }> {
+  const source = adapter as {
+    allTokenUsage?: () => ReadonlyArray<Record<string, unknown>>;
+  };
+  if (typeof source.allTokenUsage !== "function") {
+    return [];
+  }
+  const rows: Array<{ taskId: string; phase: string; tokens: number }> = [];
+  for (const entry of source.allTokenUsage()) {
+    const tokens = entry["tokens"] ?? entry["totalTokens"];
+    const taskId = entry["taskId"];
+    const phase = entry["phase"];
+    if (
+      typeof tokens !== "number" ||
+      !Number.isFinite(tokens) ||
+      typeof taskId !== "string" ||
+      typeof phase !== "string"
+    ) {
+      continue;
+    }
+    rows.push({ taskId, phase, tokens });
+  }
+  return rows;
+}
+
 function tokenMetrics(
   entries: ReadonlyArray<{ task: TaskDefinition; adapter: AgentAdapter }>,
 ): {
@@ -208,11 +263,14 @@ function tokenMetrics(
   const byPhase: Record<string, number> = {};
   let reported = false;
   for (const entry of entries) {
-    const adapter = entry.adapter;
-    if (!(adapter instanceof CodexAdapter)) {
-      continue;
-    }
-    for (const usage of adapter.allTokenUsage()) {
+    // Any adapter that accounts for its own spend, not Codex alone. This used
+    // to be `instanceof CodexAdapter`, which meant a Claude-driven run
+    // reported no tokens at all — not because none were spent but because
+    // nothing asked. `PromptCliAdapter` has had the identical method the whole
+    // time, so the only benchmark that could answer "what does coordination
+    // cost" was the one nobody was running.
+    const usages = reportedUsage(entry.adapter);
+    for (const usage of usages) {
       reported = true;
       byTask[usage.taskId] = (byTask[usage.taskId] ?? 0) + usage.tokens;
       byPhase[usage.phase] = (byPhase[usage.phase] ?? 0) + usage.tokens;

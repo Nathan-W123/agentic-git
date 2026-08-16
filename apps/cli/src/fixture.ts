@@ -30,7 +30,7 @@ import {
  */
 export interface LiveAgentConfig {
   /** Which adapter drives the process. Defaults to the JSONL protocol. */
-  adapter?: "generic-cli" | "codex";
+  adapter?: "generic-cli" | "codex" | "prompt-cli";
   command: string;
   args: string[];
   /** Benchmark tasks handed to the real agent. The rest stay scripted. */
@@ -170,7 +170,12 @@ export function readLiveAgentConfig(
 
   const sandbox = readSandboxConfig(env);
   const adapter = env["COORD_AGENT_ADAPTER"]?.trim();
-  if (adapter !== undefined && adapter !== "generic-cli" && adapter !== "codex") {
+  if (
+    adapter !== undefined &&
+    adapter !== "generic-cli" &&
+    adapter !== "codex" &&
+    adapter !== "prompt-cli"
+  ) {
     throw new Error(`Unsupported COORD_AGENT_ADAPTER value: ${adapter}`);
   }
   const executionSandbox = env["COORD_CODEX_SANDBOX"]?.trim();
