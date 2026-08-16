@@ -995,6 +995,53 @@ export const MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE channel_messages ADD COLUMN deleted_by TEXT`,
     ],
   },
+  {
+    // A flat channel response can point back to the root that prompted it
+    // without becoming a task-thread reply. The guards live beside the
+    // column so direct database writes obey the same rules as the stores:
+    // references stay inside one repository, and removing the target merely
+    // removes the address from responses that remain. Redaction does not
+    // delete the target row, so it deliberately leaves the link intact and
+    // the browser can still navigate to the tombstone.
+    version: 34,
+    name: "channel-message-references",
+    statements: [
+      `ALTER TABLE channel_messages ADD COLUMN referenced_message_id TEXT
+         REFERENCES channel_messages(id) ON DELETE SET NULL`,
+      `CREATE TRIGGER channel_message_reference_insert
+       BEFORE INSERT ON channel_messages
+       WHEN NEW.referenced_message_id IS NOT NULL
+       BEGIN
+         SELECT CASE WHEN NOT EXISTS (
+           SELECT 1 FROM channel_messages target
+            WHERE target.id = NEW.referenced_message_id
+              AND target.repository_id = NEW.repository_id
+         ) THEN RAISE(ABORT, 'channel message reference must target the same repository') END;
+       END`,
+      `CREATE TRIGGER channel_message_reference_update
+       BEFORE UPDATE OF referenced_message_id, repository_id ON channel_messages
+       WHEN NEW.referenced_message_id IS NOT NULL
+       BEGIN
+         SELECT CASE WHEN NOT EXISTS (
+           SELECT 1 FROM channel_messages target
+            WHERE target.id = NEW.referenced_message_id
+              AND target.repository_id = NEW.repository_id
+         ) THEN RAISE(ABORT, 'channel message reference must target the same repository') END;
+       END`,
+      `CREATE TRIGGER channel_message_reference_target_update
+       BEFORE UPDATE OF repository_id ON channel_messages
+       WHEN EXISTS (
+         SELECT 1 FROM channel_messages source
+          WHERE source.referenced_message_id = OLD.id
+            AND source.repository_id <> NEW.repository_id
+       )
+       BEGIN
+         SELECT RAISE(ABORT, 'channel message reference must target the same repository');
+       END`,
+      `CREATE INDEX channel_messages_by_reference
+         ON channel_messages(referenced_message_id)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

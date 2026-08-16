@@ -132,6 +132,8 @@ interface StoredChannelMessage {
   authorId: string;
   content: string;
   createdAt: string;
+  /** The earlier root this channel message answers. */
+  referencedMessageId?: string;
   /** Where it sits, once continuing a thread has moved it. */
   bumpedAt?: string;
   /** The task this thread is the story of, when it is one. */
@@ -1951,6 +1953,9 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       authorId: message.authorId,
       content: message.content,
       createdAt: message.createdAt,
+      ...(message.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: message.referencedMessageId }),
       replies: copy(message.replies),
       reactions,
       taskId: message.taskId,
@@ -2077,6 +2082,11 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       return;
     }
     this.channelMessages.delete(messageId);
+    for (const candidate of this.channelMessages.values()) {
+      if (candidate.referencedMessageId === messageId) {
+        delete candidate.referencedMessageId;
+      }
+    }
   }
 
   public async redactChannelMessage(
@@ -2137,6 +2147,14 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     if (content.length === 0) {
       throw new Error("A channel message must have content");
     }
+    if (input.referencedMessageId !== undefined) {
+      const target = this.channelMessages.get(input.referencedMessageId);
+      if (target === undefined || target.repositoryId !== input.repositoryId) {
+        throw new Error(
+          "A channel message reference must target the same repository",
+        );
+      }
+    }
     const message: StoredChannelMessage = {
       id: createId("chanmsg"),
       repositoryId: input.repositoryId,
@@ -2148,6 +2166,9 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       replies: [],
       reactions: new Map(),
       ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
+      ...(input.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: input.referencedMessageId }),
     };
     this.channelMessages.set(message.id, message);
     return this.toPublicChannelMessage(message, input.authorId);

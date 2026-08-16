@@ -4149,9 +4149,7 @@ svg {
 }
 
 /* One button, revealed the same way a channel row's is — see `.chan-row
-   .cr-more`. The row used to carry four controls at once (a switch, rename,
-   settings, and a remove that was one mis-click from taking the agent out of
-   the channel); everything they did is in the menu behind this. */
+   .cr-more`. Rename and delete live in the compact menu behind it. */
 .roster-row .rr-more {
   flex: none;
   display: inline-flex;
@@ -4178,110 +4176,23 @@ svg {
 }
 
 .roster-rename {
-  padding: 6px 8px 8px 41px;
+  min-width: 0;
+  width: 100%;
 }
 
 .roster-rename input {
+  display: block;
   width: 100%;
+  min-width: 0;
+  margin: -2px 0;
   background: var(--bg-inset);
   border: 1px solid var(--accent-line);
-  border-radius: 7px;
-  padding: 5px 8px;
-  font-size: 12px;
+  border-radius: 5px;
+  padding: 1px 4px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
   color: var(--text);
-}
-
-/* The role input sits below the name input in the same form — see
-   `rosterRow` in screen-chats.js. */
-.roster-rename input + input {
-  margin-top: 6px;
-}
-
-.roster-settings {
-  display: grid;
-  gap: 8px;
-  padding: 2px 8px 10px 41px;
-}
-
-.roster-settings .rs-label {
-  font-size: 10.5px;
-  color: var(--text-4);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-bottom: 4px;
-}
-
-/* Spells out what the choice above actually costs — "org" means a teammate's
-   prompt spends this account, which the word alone does not say. */
-.roster-settings .rs-hint {
-  margin-top: 4px;
-  font-size: 10.5px;
-  line-height: 1.45;
-  color: var(--text-3);
-}
-
-/* Why the picker above it is empty, in the words of the component that knows.
-   Set apart from `.rs-hint`, which explains a choice that exists; this one
-   explains the absence of one. */
-.roster-settings .rs-note {
-  margin: -2px 0 2px;
-  font-size: 10.5px;
-  line-height: 1.45;
-  color: var(--text-4);
-}
-
-.roster-settings .mini-select {
-  max-width: 100%;
-  width: 100%;
-}
-
-.roster-settings .mini-select select {
-  max-width: 100%;
-}
-
-/* The name and role are the first fields of the settings panel rather than a
-   second surface of their own, so the form supplies no indentation — the
-   panel around it already has the row's. */
-.roster-settings .roster-rename {
-  padding: 0;
-}
-
-/* Two labelled fields in one form: the second needs the same air between it
-   and the hint above it that the panel's own `gap` gives its other rows. */
-.roster-settings .roster-rename .rs-label ~ .rs-label {
-  margin-top: 8px;
-}
-
-/* The one destructive control in the panel, and the only red thing in it.
-   Shaped like `.menu-item-danger` — the same red, the same trash glyph, the
-   same wash on hover — because it is the same decision that used to sit in
-   the menu, moved to the bottom of the panel that decides everything else
-   about this agent. */
-.rs-remove {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  margin-top: 2px;
-  padding: 6px 8px;
-  background: transparent;
-  border: 1px solid var(--red-wash);
-  border-radius: 7px;
-  color: var(--red);
-  font-size: 12px;
-  font-weight: 550;
-  text-align: left;
-  cursor: pointer;
-}
-
-.rs-remove svg {
-  width: 14px;
-  height: 14px;
-  color: var(--red);
-}
-
-.rs-remove:hover {
-  background: var(--red-wash);
 }
 
 /* --------------------------------------------------------- chat main ---- */
@@ -4453,7 +4364,15 @@ svg {
 
 .cmsg-row {
   display: flex;
-  gap: 12px;
+  /* Two lines when the message answers something: the reply's reference takes
+     a full-width line of its own, and the avatar and body wrap underneath it.
+     That line is what keeps the reference's hairline out of the avatar — it
+     used to share the avatar's band and be pulled left into the gutter, which
+     drew the elbow across the reader's picture. */
+  flex-wrap: wrap;
+  /* Column gap only: the wrapped reference line carries its own 2px of
+     breathing room, and a 12px row gap would open a hole above every reply. */
+  gap: 0 12px;
   padding: 7px 8px;
   margin: 0 -8px;
   border-radius: 8px;
@@ -4492,23 +4411,30 @@ svg {
   pointer-events: none;
 }
 
-/* A person's reply remains part of the channel transcript. The slight inset
-   groups it with the quoted message while the reference above the response
-   carries the exact relationship. */
-.cmsg-row.cmsg-inline-reply {
-  margin-left: 28px;
+/* A thread whose root also answers something starts its avatar one reference
+   line lower, so the branch drawn under that avatar starts there too. */
+.cmsg-row.cmsg-threaded:has(> .cmsg-ref)::before {
+  top: 58px;
 }
 
-.cmsg-row.cmsg-inline-reply .cmsg-ref {
-  margin-left: -28px;
+/* A person's reply is an ordinary line of the transcript, sitting in time
+   order at the end of the room rather than tucked under the message it
+   answers — so it takes no inset. It used to carry one, back when it was
+   drawn directly beneath its target and the indent was what said "these two
+   go together"; now that the reply can be a long way below what it answers,
+   an indent would only look like a stray margin. The quoted reference line
+   above the reply carries the whole relationship, and clicking it goes to
+   the message being answered. */
+.cmsg-row.cmsg-inline-reply {
+  margin-left: 0;
 }
 
 /* The mirror of that branch, drawn above a message instead of below one: a
    line that answers a thread further up turns *up* out of the same avatar
-   gutter and into a one-line quote of what it is answering. Pulled left past
-   the body's own edge so the corner lands over the avatar column, which is
-   what makes it read as coming from the conversation rather than starting in
-   this message.
+   gutter and into a one-line quote of what it is answering. It takes a line of
+   its own above the avatar — rather than starting inside the body and leaning
+   back over the gutter, which laid the elbow across the picture of whoever is
+   speaking, most visibly on a phone where the row has no width to spare.
 
    Quiet on purpose — `--border-soft` and `--text-3`, a size under the
    message's own. It is an address, not a second copy of the message: the
@@ -4517,9 +4443,10 @@ svg {
   display: flex;
   align-items: center;
   gap: 6px;
-  width: fit-content;
+  /* Full width, so the avatar and body wrap onto the line beneath it. */
+  flex: 0 0 100%;
   max-width: 100%;
-  margin: 0 0 2px -28px;
+  margin: 0 0 2px;
   padding: 0;
   color: var(--text-3);
   font-size: 11.5px;
@@ -4532,15 +4459,20 @@ svg {
   color: var(--text-2);
 }
 
+/* 16px in: half of the 32px avatar, so the stroke comes down the middle of the
+   avatar column and stops just above the face rather than crossing it. The
+   two-pixel stroke and broad rounded corner make this a short floating path,
+   not another divider competing with the transcript. */
 .cmsg-ref-elbow {
   flex: none;
   align-self: flex-start;
   width: 22px;
   height: 8px;
   margin-top: 8px;
-  border-left: 1px solid var(--border-soft);
-  border-top: 1px solid var(--border-soft);
-  border-top-left-radius: 8px;
+  margin-left: 16px;
+  border-left: 2px solid var(--border-soft);
+  border-top: 2px solid var(--border-soft);
+  border-top-left-radius: 10px;
   pointer-events: none;
 }
 
@@ -6109,18 +6041,25 @@ body.resizing-panel {
 }
 
 .toast.banner {
-  border-color: var(--accent-line);
-  transition: opacity 0.6s ease, transform 0.6s ease;
+  width: fit-content;
+  max-width: min(320px, calc(100vw - 24px));
+  padding: 9px 34px 9px 12px;
+  background: var(--bg-card);
+  border-color: var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-card);
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+  animation: none;
+  transition: opacity 0.16s ease;
   /* The host is click-through so toasts never swallow a tap meant for the
      page; a banner that can be dismissed has to take its own taps back. */
   pointer-events: auto;
-  padding-right: 34px;
   position: relative;
 }
 
 .toast.banner.banner-out {
   opacity: 0;
-  transform: translateY(-6px);
 }
 
 .toast.error {
@@ -6147,6 +6086,22 @@ body.resizing-panel {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.toast.banner .toast-close {
+  top: 50%;
+  right: 5px;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-sm);
+  color: var(--text-3);
+  font-size: 14px;
+  transform: translateY(-50%);
+}
+
+.toast.banner .toast-close:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
 .toast.ok {
   border-color: rgba(74, 222, 128, 0.36);
   color: #86efac;
@@ -6156,6 +6111,24 @@ body.resizing-panel {
   from {
     opacity: 0;
     transform: translateY(6px);
+  }
+}
+
+@media (max-width: 600px) {
+  .toasts-alert {
+    right: 12px;
+    top: calc(10px + env(safe-area-inset-top, 0px));
+  }
+
+  .toast.banner {
+    width: calc(100vw - 24px);
+    max-width: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast.banner {
+    transition: none;
   }
 }
 
@@ -7235,10 +7208,6 @@ dialog.modal::backdrop {
 .ch-count svg {
   width: 13px;
   height: 13px;
-}
-
-.ch-sep {
-  opacity: 0.5;
 }
 
 /* One thread in the pullout, as a card: glyph, name, one metadata line,

@@ -33,7 +33,7 @@ test("replying to a person aims the channel composer", async () => {
   assert.match(action, /\$\("\[data-act='channel-input'\]"\)\?\.focus\(\);/u);
 });
 
-test("a person's response renders inline with the message it answers", async () => {
+test("a person's response takes its place at the end of the transcript", async () => {
   const [chats, data, css] = await Promise.all([
     publicFile("screen-chats.js"),
     publicFile("data.js"),
@@ -44,9 +44,27 @@ test("a person's response renders inline with the message it answers", async () 
     chats.indexOf("function isThreadEnding("),
   );
 
+  // Replies are collected, ordered by when they were written, and merged into
+  // the one timeline — not printed straight after the row they answer, which
+  // is what put a just-sent message back up in the middle of history.
   assert.match(
     list,
-    /entry\.kind === "user"[\s\S]*messageRow\(reply, repositoryId, \{ inlineReplyTo: entry \}\)/u,
+    /if \(entry\.kind !== "user"\) \{\s*continue;[\s\S]*inlineReplyTo: entry,/u,
+  );
+  assert.match(list, /pending\.sort\(\(a, b\) => stamp\(a\.at\) - stamp\(b\.at\)\)/u);
+  assert.match(
+    list,
+    /stamp\(pending\[next\]\.at\) < stamp\(entry\.at\)[\s\S]*timeline\.push\(pending\[next\]\)/u,
+  );
+  assert.match(list, /timeline\.push\(\.\.\.pending\.slice\(next\)\)/u);
+  assert.doesNotMatch(
+    list,
+    /messageRow\(entry, repositoryId, \{ hideChanges \}\) \+\s*inlineReplies/u,
+  );
+  // The relationship is still drawn — the quoted reference above the reply.
+  assert.match(
+    list,
+    /messageRow\(entry, repositoryId, \{ inlineReplyTo: item\.inlineReplyTo \}\)/u,
   );
   assert.match(
     chats,
@@ -54,10 +72,56 @@ test("a person's response renders inline with the message it answers", async () 
   );
   assert.match(chats, /messageReference\(inlineReplyTo, repositoryId\)/u);
   assert.match(chats, /cmsg-inline-reply/u);
-  assert.match(css, /\.cmsg-row\.cmsg-inline-reply \{/u);
+  // No inset: a reply that can sit far below what it answers should read as a
+  // normal line of the room, not a stray indent.
+  assert.match(css, /\.cmsg-row\.cmsg-inline-reply \{\s*margin-left: 0;/u);
   assert.match(
     data,
     /const reply = \{\s*id: [^\n]+,\s*messageId,\s*kind: "user",/u,
+  );
+});
+
+test("a person's response renders inline with the message it answers", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const row = chats.slice(
+    chats.indexOf("function messageRow("),
+    chats.indexOf("function typingIndicator("),
+  );
+
+  assert.match(row, /const inlineReply = inlineReplyTo !== undefined;/u);
+  assert.match(row, /messageReference\(inlineReplyTo, repositoryId\)/u);
+  assert.match(row, /inlineReply \? " cmsg-inline-reply" : ""/u);
+  assert.match(
+    row,
+    /const hasTaskThread = entry\.kind !== "user" && replies\.length > 0;/u,
+    "a human reply must not become task-thread navigation",
+  );
+});
+
+test("an agent root keeps its chronological place while referencing the request", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const row = chats.slice(
+    chats.indexOf("function messageRow("),
+    chats.indexOf("function typingIndicator("),
+  );
+  const list = chats.slice(
+    chats.indexOf("function messageList("),
+    chats.indexOf("function isThreadEnding("),
+  );
+
+  assert.match(row, /entry\.referencedMessageId !== undefined/u);
+  assert.match(row, /AGENT_AUTHORED_ROOT_KINDS\.has\(entry\.kind\)/u);
+  assert.match(row, /message\.id === entry\.referencedMessageId/u);
+  assert.match(row, /messageReference\(referencedRoot, repositoryId\)/u);
+  assert.match(
+    row,
+    /const hasTaskThread = entry\.kind !== "user" && replies\.length > 0;/u,
+    "the persisted reference must not replace an acknowledgement's task thread",
+  );
+  assert.match(
+    list,
+    /timeline\.push\(\{ entry, inlineReplyTo: undefined, at: entry\.at \}\)/u,
+    "agent roots stay in the canonical root timeline",
   );
 });
 
@@ -97,7 +161,40 @@ test("the direct-reply composer names its target and resets after sending", asyn
   assert.match(chip, /directReply \? "Replying to" : "Continuing in"/u);
   assert.match(chip, /directReply \? `\$\{author\.name\}: ` : ""/u);
   assert.match(chip, /title\.slice\(0, 70\)/u);
-  assert.match(submit, /if \(target\?\.kind === "user"\)/u);
+  assert.match(submit, /const directReply = target\?\.kind === "user";/u);
   assert.match(submit, /state\.composerThreadId = undefined;/u);
-  assert.match(submit, /state\.scrollToMessage = continuing;/u);
+  // Sending a reply ends at the bottom of the chat, where the reply now is —
+  // not back at the message it answers.
+  assert.match(submit, /if \(directReply\) \{\s*scrollChannel\(\);/u);
+  assert.doesNotMatch(submit, /state\.scrollToMessage = continuing;/u);
+});
+
+test("a reply's reference keeps clear of the avatar it sits above", async () => {
+  const [chats, css] = await Promise.all([
+    publicFile("screen-chats.js"),
+    publicFile("styles.css"),
+  ]);
+  const row = chats.slice(
+    chats.indexOf("function messageRow("),
+    chats.indexOf("function typingIndicator("),
+  );
+  // Anchored on the line start, so `.cmsg-ref` does not match the tail of
+  // `.cmsg-row.cmsg-inline-reply .cmsg-ref`.
+  const block = (selector: string): string => {
+    const start = css.indexOf(`\n${selector} {`);
+    assert.notEqual(start, -1, `${selector} is missing`);
+    return css.slice(start, css.indexOf("}", start));
+  };
+
+  // The reference is drawn before the avatar and outside the body, so it wraps
+  // onto a line of its own instead of leaning back across the picture.
+  assert.match(
+    row,
+    /messageReference\(inlineReplyTo, repositoryId\)[\s\S]*<span class="cmsg-avatar">[\s\S]*<div class="cmsg-body">/u,
+  );
+  assert.match(block(".cmsg-row"), /flex-wrap: wrap;/u);
+  assert.match(block(".cmsg-ref"), /flex: 0 0 100%;/u);
+  // No pull left out of the body: that pull is what put the elbow on the face.
+  assert.doesNotMatch(block(".cmsg-ref"), /margin: 0 0 2px -28px;/u);
+  assert.match(block(".cmsg-ref-elbow"), /margin-left: 16px;/u);
 });

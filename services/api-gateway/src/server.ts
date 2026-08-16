@@ -6438,6 +6438,7 @@ export class ApiGateway {
             repositoryId,
             content,
             senderId: principal.user.id,
+            referencedMessageId: message.id,
           });
         } catch (error) {
           // Still swallowed for the response — a mention that fails to
@@ -8923,8 +8924,10 @@ export class ApiGateway {
     repositoryId: string;
     content: string;
     senderId: string;
+    /** The stored channel root that caused this dispatch. */
+    referencedMessageId: string;
   }): Promise<void> {
-    const { projectId, repositoryId, senderId } = input;
+    const { projectId, repositoryId, senderId, referencedMessageId } = input;
     // A command says *how* to treat the request; an "@" says who it is for.
     // Different questions, so they compose: the command word is taken out
     // here — wherever in the message it was written — and everything left
@@ -9000,6 +9003,7 @@ export class ApiGateway {
               content,
               projectId,
               repositoryId,
+              referencedMessageId,
             ).catch(() => undefined),
           ),
         );
@@ -9058,7 +9062,13 @@ export class ApiGateway {
         // inference is occasionally wrong in the expensive direction — a
         // question read as a task opens a thread and spends a run.
         if (parsed?.command.name === "ask") {
-          await this.answerInChannel(candidate, content, projectId, repositoryId);
+          await this.answerInChannel(
+            candidate,
+            content,
+            projectId,
+            repositoryId,
+            referencedMessageId,
+          );
           continue;
         }
         await this.dispatchOneMention({
@@ -9067,6 +9077,7 @@ export class ApiGateway {
           content,
           senderId,
           candidate,
+          referencedMessageId,
           ...(parsed?.command.name === "plan" ? { planOnly: true } : {}),
         });
       }
@@ -9092,6 +9103,7 @@ export class ApiGateway {
       content,
       senderId,
       candidates,
+      referencedMessageId,
     });
   }
 
@@ -9233,6 +9245,8 @@ export class ApiGateway {
     content: string;
     senderId: string;
     candidate: ChannelMentionCandidate;
+    /** The channel root that asked for this answer or work. */
+    referencedMessageId?: string;
     /**
      * Distinguishes an explicit @mention from an auto-claim in the audit
      * trail. Both paths submit through this exact method and the exact same
@@ -9344,7 +9358,13 @@ export class ApiGateway {
     // question is answered by an agent that actually read the file, and it
     // still arrives as one line in the channel.
     if (readsAsQuestion(content) && !needsTheRepository(content)) {
-      await this.answerInChannel(candidate, content, projectId, repositoryId);
+      await this.answerInChannel(
+        candidate,
+        content,
+        projectId,
+        repositoryId,
+        input.referencedMessageId,
+      );
       return;
     }
 
@@ -9370,6 +9390,9 @@ export class ApiGateway {
           `anything I installed would be gone by the next task. The runtime ` +
           `is declared in \`infrastructure/docker/control-plane.Dockerfile\`, ` +
           `which is in this repository — ask me to add it there and it sticks.`,
+        ...(input.referencedMessageId === undefined
+          ? {}
+          : { referencedMessageId: input.referencedMessageId }),
       });
       return;
     }
@@ -9450,6 +9473,9 @@ export class ApiGateway {
           kind: "agent",
           authorId: `${candidate.userId}:${candidate.provider}`,
           content: openingLine,
+          ...(input.referencedMessageId === undefined
+            ? {}
+            : { referencedMessageId: input.referencedMessageId }),
         })
       ).id;
     // The request that caused this, in the words it was asked in, at the top
@@ -9505,7 +9531,14 @@ export class ApiGateway {
         await this.options.store
           .appendAudit(undefined, {
             type: "channel_message_posted",
-            data: { projectId, repositoryId, messageId: threadRootId },
+            data: {
+              projectId,
+              repositoryId,
+              messageId: threadRootId,
+              ...(input.referencedMessageId === undefined
+                ? {}
+                : { referencedMessageId: input.referencedMessageId }),
+            },
           })
           .catch(() => undefined);
       }
@@ -9912,6 +9945,7 @@ export class ApiGateway {
     question: string,
     projectId: string,
     repositoryId: string,
+    referencedMessageId?: string,
   ): Promise<void> {
     const answer = await this.askAgent(
       candidate,
@@ -9938,6 +9972,7 @@ export class ApiGateway {
       kind: "agent",
       authorId: `${candidate.userId}:${candidate.provider}`,
       content: answer.text ?? explainAnswerFailure(answer.error),
+      ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
     });
   }
 
@@ -13606,6 +13641,8 @@ export class ApiGateway {
     kind: "agent" | "system" | "outcome";
     authorId: string;
     content: string;
+    /** Earlier channel root this flat entry answers. */
+    referencedMessageId?: string;
   }): Promise<{ id: string }> {
     const message = await this.options.store.appendChannelMessage({
       repositoryId: input.repositoryId,
@@ -13613,6 +13650,9 @@ export class ApiGateway {
       kind: input.kind,
       authorId: input.authorId,
       content: input.content,
+      ...(input.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: input.referencedMessageId }),
     });
     await this.options.store.appendAudit(undefined, {
       type: "channel_message_posted",
@@ -13620,6 +13660,9 @@ export class ApiGateway {
         projectId: input.projectId,
         repositoryId: input.repositoryId,
         messageId: message.id,
+        ...(message.referencedMessageId === undefined
+          ? {}
+          : { referencedMessageId: message.referencedMessageId }),
       },
     });
     return message;
@@ -13896,6 +13939,7 @@ export class ApiGateway {
     content: string;
     senderId: string;
     candidates: ChannelMentionCandidate[];
+    referencedMessageId: string;
   }): Promise<void> {
     const { projectId, repositoryId, content, senderId, candidates } = input;
     // Two gates now, not one. `looksLikeTaskRequest` asks whether this is
@@ -13952,6 +13996,7 @@ export class ApiGateway {
       content:
         `${AUTO_CLAIM_OFFER_OPENING}${addressed}? Say "yes" and I'll get ` +
         `started — or @mention someone else.`,
+      referencedMessageId: input.referencedMessageId,
     });
   }
 
@@ -14074,6 +14119,7 @@ export class ApiGateway {
       senderId,
       candidate: chosen,
       trigger: "auto_claim",
+      referencedMessageId: request.id,
       ...(context === undefined ? {} : { context }),
     });
     return true;

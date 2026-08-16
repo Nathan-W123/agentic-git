@@ -3070,6 +3070,19 @@ export class SqliteCoordinationStore implements CoordinationStore {
     if (content.length === 0) {
       throw new Error("A channel message must have content");
     }
+    if (input.referencedMessageId !== undefined) {
+      const target = this.db
+        .prepare("SELECT repository_id FROM channel_messages WHERE id = ?")
+        .get(input.referencedMessageId) as Row | undefined;
+      if (
+        target === undefined ||
+        text(target, "repository_id") !== input.repositoryId
+      ) {
+        throw new Error(
+          "A channel message reference must target the same repository",
+        );
+      }
+    }
     const message = {
       id: createId("chanmsg"),
       repositoryId: input.repositoryId,
@@ -3083,8 +3096,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
       .prepare(
         `INSERT INTO channel_messages
            (id, repository_id, project_id, kind, author_id, content, created_at,
-            task_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            task_id, referenced_message_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         message.id,
@@ -3095,12 +3108,16 @@ export class SqliteCoordinationStore implements CoordinationStore {
         message.content,
         message.createdAt,
         input.taskId ?? null,
+        input.referencedMessageId ?? null,
       );
     return {
       ...message,
       replies: [],
       reactions: {},
       taskId: input.taskId,
+      ...(input.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: input.referencedMessageId }),
       changedFiles: undefined,
       pinnedAt: undefined,
       pinnedBy: undefined,
@@ -3868,6 +3885,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
   private toChannelMessageBase(
     row: Row,
   ): Omit<ChannelMessage, "replies" | "reactions"> {
+    const referencedMessageId = optionalText(row, "referenced_message_id");
     const deletedAt = optionalText(row, "deleted_at");
     const deletedBy = optionalText(row, "deleted_by");
     return {
@@ -3878,6 +3896,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       authorId: text(row, "author_id"),
       content: text(row, "content"),
       createdAt: text(row, "created_at"),
+      ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
       taskId: optionalText(row, "task_id"),
       changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
       pinnedAt: optionalText(row, "pinned_at"),

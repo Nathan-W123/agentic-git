@@ -803,4 +803,44 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       `ALTER TABLE channel_messages ADD COLUMN deleted_by TEXT`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version. Trigger enforcement
+    // keeps a reference inside its repository even for direct SQL writes;
+    // physical deletion clears it, while redaction keeps the target row and
+    // therefore keeps the navigable tombstone.
+    version: 34,
+    name: "channel-message-references",
+    statements: [
+      `ALTER TABLE channel_messages ADD COLUMN referenced_message_id TEXT
+         REFERENCES channel_messages(id) ON DELETE SET NULL`,
+      `CREATE FUNCTION validate_channel_message_reference()
+       RETURNS trigger AS $channel_reference$
+       BEGIN
+         IF NEW.referenced_message_id IS NOT NULL AND NOT EXISTS (
+           SELECT 1 FROM channel_messages target
+            WHERE target.id = NEW.referenced_message_id
+              AND target.repository_id = NEW.repository_id
+         ) THEN
+           RAISE EXCEPTION 'channel message reference must target the same repository';
+         END IF;
+         IF TG_OP = 'UPDATE' THEN
+           IF EXISTS (
+             SELECT 1 FROM channel_messages source
+              WHERE source.referenced_message_id = OLD.id
+                AND source.repository_id <> NEW.repository_id
+           ) THEN
+             RAISE EXCEPTION 'channel message reference must target the same repository';
+           END IF;
+         END IF;
+         RETURN NEW;
+       END;
+       $channel_reference$ LANGUAGE plpgsql`,
+      `CREATE TRIGGER channel_message_reference_validate
+       BEFORE INSERT OR UPDATE
+       ON channel_messages
+       FOR EACH ROW EXECUTE FUNCTION validate_channel_message_reference()`,
+      `CREATE INDEX channel_messages_by_reference
+         ON channel_messages(referenced_message_id)`,
+    ],
+  },
 ];

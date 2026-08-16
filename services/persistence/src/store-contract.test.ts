@@ -3348,6 +3348,106 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a channel message reference must target the same repository and clears when its target is physically deleted`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_reference",
+        path: "/reference.git",
+        branch: "main",
+      });
+      await store.saveRepository({
+        id: "repo_reference_other",
+        path: "/reference-other.git",
+        branch: "main",
+      });
+      const alice = await store.createUser({
+        email: "reference-alice@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+      const target = await store.appendChannelMessage({
+        repositoryId: "repo_reference",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "What changed in the retry policy?",
+      });
+      const response = await store.appendChannelMessage({
+        repositoryId: "repo_reference",
+        projectId: DEFAULT_PROJECT_ID,
+        kind: "agent",
+        authorId: `${alice.id}:anthropic`,
+        content: "It now backs off between attempts.",
+        referencedMessageId: target.id,
+      });
+
+      assert.equal(response.referencedMessageId, target.id);
+      assert.equal(
+        (
+          await store.getChannelMessage(
+            "repo_reference",
+            response.id,
+            alice.id,
+          )
+        )?.referencedMessageId,
+        target.id,
+      );
+      await assert.rejects(
+        store.appendChannelMessage({
+          repositoryId: "repo_reference_other",
+          projectId: DEFAULT_PROJECT_ID,
+          kind: "agent",
+          authorId: `${alice.id}:anthropic`,
+          content: "This must not cross rooms.",
+          referencedMessageId: target.id,
+        }),
+        /same repository/u,
+      );
+      await assert.rejects(
+        store.appendChannelMessage({
+          repositoryId: "repo_reference",
+          projectId: DEFAULT_PROJECT_ID,
+          kind: "agent",
+          authorId: `${alice.id}:anthropic`,
+          content: "This must point at something real.",
+          referencedMessageId: "chanmsg_missing",
+        }),
+        /same repository/u,
+      );
+
+      // Redaction leaves an addressable tombstone, so the reference survives.
+      await store.redactChannelMessage("repo_reference", target.id, {
+        deletedAt: "2026-01-01T00:00:00.000Z",
+        deletedBy: alice.id,
+      });
+      assert.equal(
+        (
+          await store.getChannelMessage(
+            "repo_reference",
+            response.id,
+            alice.id,
+          )
+        )?.referencedMessageId,
+        target.id,
+      );
+
+      // Removing the target row leaves the response but clears its address.
+      await store.deleteChannelMessage("repo_reference", target.id);
+      assert.equal(
+        (
+          await store.getChannelMessage(
+            "repo_reference",
+            response.id,
+            alice.id,
+          )
+        )?.referencedMessageId,
+        undefined,
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: pinned channel messages toggle, survive paging, and die with the row`, async () => {
     const { store, cleanup } = await backend.open();
     try {

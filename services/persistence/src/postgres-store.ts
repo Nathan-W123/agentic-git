@@ -3146,6 +3146,20 @@ export class PostgresCoordinationStore implements CoordinationStore {
     if (content.length === 0) {
       throw new Error("A channel message must have content");
     }
+    if (input.referencedMessageId !== undefined) {
+      const target = await this.row(
+        "SELECT repository_id FROM channel_messages WHERE id = $1",
+        [input.referencedMessageId],
+      );
+      if (
+        target === undefined ||
+        text(target, "repository_id") !== input.repositoryId
+      ) {
+        throw new Error(
+          "A channel message reference must target the same repository",
+        );
+      }
+    }
     const message = {
       id: createId("chanmsg"),
       repositoryId: input.repositoryId,
@@ -3158,8 +3172,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
     await this.query(
       `INSERT INTO channel_messages
          (id, repository_id, project_id, kind, author_id, content, created_at,
-          task_id)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          task_id, referenced_message_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
       [
         message.id,
         message.repositoryId,
@@ -3169,6 +3183,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         message.content,
         message.createdAt,
         input.taskId ?? null,
+        input.referencedMessageId ?? null,
       ],
     );
     return {
@@ -3176,6 +3191,9 @@ export class PostgresCoordinationStore implements CoordinationStore {
       replies: [],
       reactions: {},
       taskId: input.taskId,
+      ...(input.referencedMessageId === undefined
+        ? {}
+        : { referencedMessageId: input.referencedMessageId }),
       changedFiles: undefined,
       pinnedAt: undefined,
       pinnedBy: undefined,
@@ -3720,6 +3738,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
   private toChannelMessageBase(
     row: Row,
   ): Omit<ChannelMessage, "replies" | "reactions"> {
+    const referencedMessageId = optionalText(row, "referenced_message_id");
     const deletedAt = optionalText(row, "deleted_at");
     const deletedBy = optionalText(row, "deleted_by");
     return {
@@ -3730,6 +3749,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       authorId: text(row, "author_id"),
       content: text(row, "content"),
       createdAt: text(row, "created_at"),
+      ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
       taskId: optionalText(row, "task_id") as TaskId | undefined,
       changedFiles: parseChangedFiles(optionalText(row, "changed_files_json")),
       pinnedAt: optionalText(row, "pinned_at"),

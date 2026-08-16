@@ -790,6 +790,15 @@ export interface ChannelMessage {
   authorId: string;
   content: string;
   createdAt: string;
+  /**
+   * The earlier channel root this message is answering, when it is an
+   * agent-authored response rather than a new topic.
+   *
+   * Kept on the root instead of represented as a thread reply: task threads
+   * still narrate work, while this link preserves the ordinary chronological
+   * transcript and gives the response a way back to what prompted it.
+   */
+  referencedMessageId?: string;
   replies: ChannelReply[];
   /** Keyed by emoji; `mine` is relative to whichever viewer asked. */
   reactions: Record<string, ChannelReaction>;
@@ -885,6 +894,13 @@ export interface AppendChannelMessageInput {
   kind?: ChannelEntryKind;
   authorId: string;
   content: string;
+  /**
+   * A channel root this internally-authored message answers.
+   *
+   * The target must exist in the same repository. This is intentionally an
+   * internal store input rather than part of the public channel POST body.
+   */
+  referencedMessageId?: string;
   /**
    * The task this thread is the story of, when it is one.
    *
