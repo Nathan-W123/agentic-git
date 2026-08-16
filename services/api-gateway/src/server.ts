@@ -9652,6 +9652,17 @@ export class ApiGateway {
             `\n\nThat's the plan — nothing is running yet. Reply "go ahead" ` +
             `and I'll start; say what to change and I'll take it from there.`,
         }).catch(() => undefined);
+        // …and said in the room as well, because the sentence above is inside
+        // a thread nobody has been given a reason to open. A held plan looks
+        // exactly like a run in progress from the channel — the request, an
+        // acknowledgement, and then nothing — so the person who asked waits
+        // for an agent that is itself waiting for them.
+        await this.announceHold({
+          projectId,
+          repositoryId,
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          kind: "plan",
+        });
         return;
       }
       // Nothing runs a queued task on its own — it sits `submitted` until
@@ -10140,6 +10151,22 @@ export class ApiGateway {
     if (
       readsAsApproval(question) &&
       (await this.startPlannedTaskFor({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        messageId: input.messageId,
+        viewerId: input.viewerId,
+        responder: owner,
+      }))
+    ) {
+      return;
+    }
+    // "go ahead" against a thread whose run is gated on a review. Read here
+    // for the same reason as the line above, and after it because the two
+    // holds are exclusive: a task cannot be both `planned` and waiting on an
+    // approval, so whichever one is actually held answers.
+    if (
+      readsAsApproval(question) &&
+      (await this.approveHeldApprovalFor({
         projectId: input.projectId,
         repositoryId: input.repositoryId,
         messageId: input.messageId,
@@ -11556,6 +11583,155 @@ export class ApiGateway {
       }),
     ).catch(() => undefined);
     return true;
+  }
+
+  /**
+   * Releases an approval gate, because a person said go in the thread.
+   *
+   * The counterpart to {@link startPlannedTaskFor} for the other hold this
+   * system has. A run that stops at `awaiting_approval` announces itself in
+   * the thread and could only be released through `POST /approvals/:id` —
+   * a screen nobody watching a channel has any reason to be on. So "go ahead"
+   * in the thread it was announced in fell through to the agent *answering a
+   * question about* the gate, which reads exactly like it did something, and
+   * the run stayed held.
+   *
+   * The role is checked here rather than assumed: an approval carries a
+   * `requiredRole`, and a gate anyone in the room could clear is not a gate.
+   * Somebody without review access is told so instead, which is still a far
+   * better answer than the silence this replaces.
+   *
+   * Returns false when nothing is held, so an ordinary "yes" in a thread
+   * still reads as conversation.
+   */
+  private async approveHeldApprovalFor(input: {
+    projectId: string;
+    repositoryId: string;
+    messageId: string;
+    viewerId: string;
+    responder: ChannelMentionCandidate | undefined;
+  }): Promise<boolean> {
+    const root = await this.options.store.getChannelMessage(
+      input.repositoryId,
+      input.messageId,
+      input.viewerId,
+    );
+    if (root?.taskId === undefined || input.responder === undefined) {
+      return false;
+    }
+    const pending =
+      (await this.options.store
+        .listApprovals({
+          repositoryId: input.repositoryId,
+          taskId: root.taskId,
+          status: "pending",
+        })
+        .catch(() => undefined)) ?? [];
+    if (pending.length === 0) {
+      return false;
+    }
+    const authorId = `${input.responder.userId}:${input.responder.provider}`;
+    const permitted = await this.mayReview(
+      input.projectId,
+      input.repositoryId,
+      input.viewerId,
+    );
+    if (!permitted) {
+      await this.appendChannelThreadReply({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        messageId: input.messageId,
+        authorId,
+        content:
+          `That one is gated on a review, and this project only lets a ` +
+          `reviewer release it — so I can't act on your go-ahead. Ask ` +
+          `somebody with review access here and I'll pick it straight back up.`,
+      }).catch(() => undefined);
+      return true;
+    }
+    const decidedAt = new Date().toISOString();
+    const comment = "Approved in the channel thread";
+    for (const approval of pending) {
+      try {
+        await this.options.store.decideApproval({
+          approvalId: approval.id,
+          status: "approved",
+          decidedBy: input.viewerId,
+          comment,
+          decidedAt,
+        });
+      } catch {
+        // Decided by somebody else between the read and the write. The other
+        // decision stands; there is nothing left for this one to release.
+        continue;
+      }
+      await this.options.store
+        .appendAudit(approval.runId, {
+          type: "approval_decided",
+          taskId: approval.taskId,
+          data: {
+            projectId: approval.projectId,
+            approvalId: approval.id,
+            status: "approved",
+            actorId: input.viewerId,
+            comment,
+          },
+        })
+        .catch(() => undefined);
+    }
+    await this.appendChannelThreadReply({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      messageId: input.messageId,
+      authorId,
+      content: "Approved — picking this back up now.",
+    }).catch(() => undefined);
+    // The worker re-reads its approval on the next attempt and carries on from
+    // there; this only spares the wait for that poll where the run is in
+    // process, exactly as the other release paths do.
+    void Promise.resolve(
+      this.options.operations.runRepository?.({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        actorId: input.responder.userId,
+      }),
+    ).catch(() => undefined);
+    return true;
+  }
+
+  /**
+   * Whether this person could have decided the approval from the Approvals
+   * screen, resolved from the same two sources `authorizeProject` reads: the
+   * organization membership, and any grant on this repository.
+   */
+  private async mayReview(
+    projectId: string,
+    repositoryId: string,
+    userId: string,
+  ): Promise<boolean> {
+    const project = await this.options.store.getProject(projectId);
+    if (project === undefined) {
+      return false;
+    }
+    const user = await this.options.store.getUser(userId);
+    if (user?.systemAdmin === true) {
+      return true;
+    }
+    const [membership, granted] = await Promise.all([
+      this.options.store.getMembership(project.organizationId, userId),
+      this.options.store
+        .listRepositoryGrants(repositoryId)
+        .catch(() => undefined),
+    ]);
+    const grants = granted ?? [];
+    const roles = [
+      membership?.role,
+      grants.find((grant) => grant.userId === userId)?.role,
+    ];
+    return roles.some(
+      (role) =>
+        role !== undefined && permissionsForRole(role).includes("review"),
+    );
   }
 
   /**
@@ -13152,6 +13328,19 @@ export class ApiGateway {
           ) {
             await this.announceReplay(watched, data).catch(() => undefined);
           }
+          // A gate is room news for the same reason a held plan is: the line
+          // below goes into the thread, and a run that has stopped for a
+          // person is indistinguishable from a slow one to anybody who has
+          // not opened it. The thread keeps the detail; the room gets the one
+          // fact that needs acting on.
+          if (record.event.type === "approval_requested") {
+            await this.announceHold({
+              projectId: watched.projectId,
+              repositoryId: watched.repositoryId,
+              authorId: watched.authorId,
+              kind: "review",
+            });
+          }
           const narrated = narrateTaskEvent(record.event.type, data);
           if (narrated === undefined) {
             continue;
@@ -13363,6 +13552,43 @@ export class ApiGateway {
       },
     });
     return message;
+  }
+
+  /**
+   * Says in the room that a run has stopped and is waiting for a person.
+   *
+   * Both holds this system has — a `/plan` task parked at `planned`, and a
+   * run gated at `awaiting_approval` — announce themselves inside the thread
+   * and nowhere else. That is the one place the announcement cannot do its
+   * job: a thread is collapsed until somebody opens it, and nothing about a
+   * held run distinguishes it in the channel from a run still going. The
+   * person who asked sees their request, an acknowledgement, and then
+   * silence, and concludes the agent is stuck — while the agent is waiting
+   * for them.
+   *
+   * One line, in the room, naming the reply that releases it. `outcome`
+   * because that is what the browser retires the typing dots off, and this is
+   * the last thing this run says until somebody answers.
+   */
+  private async announceHold(input: {
+    projectId: string;
+    repositoryId: string;
+    authorId: string;
+    /** `plan` for a held `/plan`; `review` for an approval gate. */
+    kind: "plan" | "review";
+  }): Promise<void> {
+    await this.appendChannelEntry({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      kind: "outcome",
+      authorId: input.authorId,
+      content:
+        input.kind === "plan"
+          ? `⏸ Waiting on you — the plan is in the thread and nothing is ` +
+            `running. Reply "go ahead" there and I'll start.`
+          : `⏸ Waiting on you — this needs a review before it can land. ` +
+            `Reply "go ahead" in the thread to approve it.`,
+    }).catch(() => undefined);
   }
 
   /**

@@ -26,6 +26,7 @@ api,
   canManageRepository,
   channelAgentsFor,
   channelAuthor,
+  channelAwaitsGoAhead,
   channelMessagesFor,
   channelParticipants,
   channelUnreadCount,
@@ -47,6 +48,7 @@ api,
   providerOptionsNote,
   sendChannelMessage,
   state,
+  threadAwaitsGoAhead,
   threadIsWorking,
   threadTitle,
   threadTitleReply,
@@ -133,6 +135,10 @@ function chanRow(repo, activeRepositoryId) {
   const unread = channelUnreadCount(repo.id);
   const mentions = channelUnreadCount(repo.id, { mentionsOnly: true });
   const active = repo.id === activeRepositoryId;
+  // A room where something has stopped for a person. Unread says "there are
+  // words you have not read"; this says "nothing here moves until you answer",
+  // which is the one thing a reader cannot discover by not opening the room.
+  const held = channelAwaitsGoAhead(repo.id);
   return `<div class="chan-row${active ? " active" : ""}${
     unread > 0 ? " unread" : ""
   }" role="button" tabindex="0" data-act="channel-open" data-value="${esc(repo.id)}"
@@ -141,6 +147,11 @@ function chanRow(repo, activeRepositoryId) {
     }>
     <span class="cr-hash">${icon("chatBubble")}</span>
     <span class="cr-name">${esc(repo.id)}</span>
+    ${
+      held
+        ? `<span class="cr-held" title="An agent here is waiting for your go-ahead"><span class="sr-only">Waiting for you</span></span>`
+        : ""
+    }
     ${
       unread > 0
         ? `<span class="cr-badge" title="${
@@ -1467,6 +1478,17 @@ function messageRow(
             ? ""
             : changedFilesBlock(entry, repositoryId)
           : threadSummaryLink(entry, replies, repositoryId) +
+            // The thread said "reply go ahead" — inside itself, where a
+            // collapsed thread keeps it. Said again here, on the row that is
+            // always visible, because a held run is otherwise indistinguishable
+            // in the channel from one still going: same request, same
+            // acknowledgement, and then nothing either way.
+            (threadAwaitsGoAhead(entry)
+              ? `<button type="button" class="thread-held" data-act="channel-thread-open"
+                   data-value="${esc(entry.id)}">${icon(
+                     "clock",
+                   )} Waiting for your go-ahead — open the thread and reply "go ahead"</button>`
+              : "") +
             (() => {
               // A few pixels of accent under the thread: how far its run has
               // got, present only while there is a run to speak of. Quiet by
@@ -2118,6 +2140,11 @@ function threadListPanel(repositoryId) {
                 // up in the channel, so the two never disagree about who is
                 // working.
                 const working = threadIsWorking(entry);
+                // The other half of the same question. A held thread is not
+                // working and not finished, and without this it read as the
+                // latter — a row somebody had already dealt with — which is
+                // precisely the thread that needs them.
+                const held = threadAwaitsGoAhead(entry);
                 // The subject leads: somebody scanning this log is looking
                 // for a piece of work, and the agent's name told them which
                 // colleague — the wrong first question. Who and how much
@@ -2138,11 +2165,13 @@ function threadListPanel(repositoryId) {
                 // which thread is running — is already carried by the accent
                 // wash and leading edge of `.thread-item-active`.
                 return `<div class="thread-item-row">
-                  <button type="button" class="thread-item${working ? " thread-item-active" : ""}"
+                  <button type="button" class="thread-item${working ? " thread-item-active" : ""}${held ? " thread-item-held" : ""}"
                     title="${esc(
                       working
                         ? `Working now — started ${clockTime(entry.at)}`
-                        : clockTime(entry.at),
+                        : held
+                          ? `Waiting for your go-ahead — started ${clockTime(entry.at)}`
+                          : clockTime(entry.at),
                     )}"
                     data-act="channel-thread-open" data-value="${esc(entry.id)}">
                     <span class="ti-main">
@@ -2153,7 +2182,9 @@ function threadListPanel(repositoryId) {
                         ${
                           working
                             ? `<span class="ti-live"><span class="sr-only">Working</span></span>`
-                            : ""
+                            : held
+                              ? `<span class="ti-held">Waiting for you</span>`
+                              : ""
                         }
                       </span>
                     </span>

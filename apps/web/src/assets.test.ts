@@ -1646,3 +1646,42 @@ test("a slash command is offered wherever it is typed, not only at the start", a
   );
   assert.match(pick, /`\$1\/\$\{name\} `/u);
 });
+
+test("a run waiting on a person is marked as waiting, not as finished", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // The two holds this product has, read off the task the same way the typing
+  // dots read the working ones — so a task is in exactly one of the two sets
+  // and the two marks can never both be on.
+  assert.match(data, /const HELD_STATUS = new Set\(\["planned", "awaiting_approval"\]\)/u);
+  assert.match(data, /export function threadAwaitsGoAhead\(/u);
+  assert.match(data, /export function channelAwaitsGoAhead\(/u);
+
+  // The sidebar answers from the tasks rather than the messages: only the open
+  // channel has its messages loaded, so a badge read from those would be right
+  // for the room already on screen and absent for every other.
+  const channelHeld = data.slice(
+    data.indexOf("export function channelAwaitsGoAhead"),
+    data.indexOf("/** Records a `channel-typing` frame from somebody else. */"),
+  );
+  assert.match(channelHeld, /state\.tasks\.some/u);
+  assert.equal(/channelMessagesFor/u.test(channelHeld), false);
+
+  // Three surfaces, because a reader meets a held run at whichever of them
+  // they happen to be looking at: the room list, the message in the channel,
+  // and the thread list.
+  assert.match(chats, /class="cr-held"/u);
+  assert.match(chats, /class="thread-held" data-act="channel-thread-open"/u);
+  assert.match(chats, /class="ti-held"/u);
+  // The channel line is the one that has to say what to do about it.
+  assert.match(chats, /Waiting for your go-ahead/u);
+
+  // Amber, not the accent: "moving" and "stopped until you answer" are the two
+  // states this list exists to tell apart, and one colour for both is no answer.
+  const held = /\n\.thread-item-held \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(held, undefined, "a held thread has a shape rule");
+  assert.match(held ?? "", /var\(--orange\)/u);
+  assert.equal(/var\(--accent\)/u.test(held ?? ""), false);
+});

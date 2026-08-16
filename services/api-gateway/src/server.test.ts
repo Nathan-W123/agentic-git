@@ -5177,6 +5177,117 @@ test("a command and a mention work together, and /plan holds the run", async (t)
   }, "the approved plan never started");
 });
 
+test("a held run says in the room that it is waiting, not only in its thread", async (t) => {
+  // The hold announced itself with a sentence inside the thread and nothing
+  // anywhere else, and a thread is collapsed until somebody opens it. From
+  // the channel a held plan looked exactly like a run still going — the
+  // request, an acknowledgement, and then silence — so the person who asked
+  // waited for an agent that was waiting for them.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "held-plan-visible");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/plan @Claude (Owner) rework the retry loop" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(
+      repositoryId,
+      ownerId,
+    );
+    return messages.some(
+      (message) =>
+        message.kind === "outcome" && /Waiting on you/u.test(message.content),
+    );
+  }, "the room was never told the plan was held");
+
+  // In the room, and saying what to do about it: the reply that releases the
+  // hold is the only thing this line has to carry.
+  const announced = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.kind === "outcome");
+  assert.match(announced?.content ?? "", /go ahead/u);
+});
+
+test('"go ahead" releases a review gate from the thread it was announced in', async (t) => {
+  // The other hold. It could only be released through `POST /approvals/:id`,
+  // a screen nobody watching a channel is on, so "go ahead" in the thread
+  // fell through to the agent answering a question *about* the gate — which
+  // reads exactly like it did something, while the run stayed held.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "gated-run");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it.",
+  });
+  await runtime.store.addChannelReply({
+    repositoryId,
+    messageId: root.id,
+    kind: "progress",
+    authorId: `${ownerId}:anthropic`,
+    content: "Waiting on a human review before this can land.",
+  });
+  await runtime.store.setChannelMessageTask(repositoryId, root.id, "task_gated");
+  const approval = await runtime.store.createApproval({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId,
+    runId: "run_gated",
+    taskId: "task_gated",
+    kind: "policy_override",
+    requestedBy: "claude",
+    requiredRole: "reviewer",
+    reasons: ["schema change"],
+    expiresAt: new Date(Date.now() + 3_600_000).toISOString(),
+  });
+
+  const go = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "go ahead" } },
+  );
+  assert.equal(go.status, 201, JSON.stringify(go.data));
+
+  await waitFor(async () => {
+    const current = await runtime.store.getApproval(approval.id);
+    return current?.status === "approved";
+  }, "the gate was never released by the go-ahead");
+  const decided = await runtime.store.getApproval(approval.id);
+  assert.equal(decided?.decidedBy, ownerId);
+
+  // And the thread says it happened, rather than leaving the reader to guess
+  // from a run that quietly resumed.
+  const thread = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.id === root.id);
+  assert.match(
+    (thread?.replies ?? []).map((reply) => reply.content).join("\n"),
+    /Approved/u,
+  );
+});
+
 test("a channel's chosen model and reasoning level travel to the task", async (t) => {
   // The pickers beside an agent in the roster wrote to a table nothing read:
   // name and role reached the dispatch, model and effort were stored and

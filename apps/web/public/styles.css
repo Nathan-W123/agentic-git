@@ -3832,6 +3832,21 @@ svg {
   font-weight: 600;
 }
 
+/* A room where something has stopped and is waiting for a person — a held
+   `/plan`, or a run gated on a review. Amber, because amber already means
+   waiting everywhere else in this app, and a dot rather than a count because
+   there is nothing to count: one held run is the whole message, and the room
+   is where the sentence saying so lives. Sits before the unread badge so the
+   two read as "this needs you" then "this much is new". */
+.chan-row .cr-held {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--orange);
+  box-shadow: 0 0 0 3px var(--orange-wash);
+}
+
 .chan-row .cr-badge {
   min-width: 18px;
   height: 18px;
@@ -6168,6 +6183,16 @@ dialog.modal::backdrop {
     line-height: 16px;
   }
 
+  /* The rail keeps both marks, in opposite corners: unread is a count and
+     rides the badge above, a hold is a dot and sits under it. Losing this one
+     to the collapse would hide the only signal that says a room has stopped
+     for a person — which is the state somebody scanning a rail most needs. */
+  .chats-shell.chan-collapsed .chan-row .cr-held {
+    position: absolute;
+    bottom: 0;
+    right: -1px;
+  }
+
   .chats-shell.chan-collapsed .chan-sidebar-foot {
     justify-items: center;
     padding: 8px 0;
@@ -7133,6 +7158,64 @@ dialog.modal::backdrop {
   .thread-item-active .ti-live {
     animation: none;
   }
+}
+
+/* The held counterpart of `.thread-item-active`. Same shape — a wash and a
+   leading edge — in amber rather than the accent, because the difference
+   between "moving" and "stopped until you answer" is the one thing this list
+   is being asked to show, and two states drawn in one colour would be no
+   answer at all. Words rather than a dot here: a stopped thread has to say
+   what it is stopped on, and unlike the live marker it never flickers on and
+   off as a run progresses. */
+.thread-item-held {
+  background: var(--orange-wash);
+  box-shadow: inset 2px 0 0 var(--orange);
+}
+
+.thread-item-held:hover {
+  background: var(--orange-wash);
+}
+
+.ti-held {
+  flex: none;
+  color: var(--orange);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* The same fact on the channel row the thread hangs off, where a reader who
+   never opens the thread still meets it. A button, because the answer is one
+   click away — it opens the thread the go-ahead has to be typed into. */
+.thread-held {
+  /* Block-level, so it takes the line under the thread link rather than
+     sitting beside it — the two are different questions and reading them as
+     one row makes the second look like part of the first. */
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--orange);
+  border-radius: var(--radius);
+  background: var(--orange-wash);
+  color: var(--orange);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.thread-held:hover {
+  background: var(--orange-wash);
+  border-color: var(--orange);
+}
+
+.thread-held svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
 }
 
 /* ------------------------------------------------------ avatar and theme ---- */
