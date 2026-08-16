@@ -910,9 +910,8 @@ function chanSidebar(activeRepositoryId) {
         ${brandMark(26)}
         <span class="brand-text"><b>Lattice</b></span>
       </button>
-      <button type="button" class="icon-btn desk-only chan-collapse-btn${
-        state.chanCollapsed ? " on" : ""
-      }" data-act="chan-collapse-toggle"
+      <button type="button" class="icon-btn desk-only chan-collapse-btn"
+        data-act="chan-collapse-toggle"
         title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
         aria-pressed="${state.chanCollapsed === true}"
         aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}">${icon(
@@ -973,20 +972,15 @@ function chanSidebar(activeRepositoryId) {
         }
       </div>
     </div>
-    <!-- Account controls live at the foot like the products this shell is
-         modelled on. Both keep an icon in compact mode; the labels return on
-         expansion without changing actions or routes. -->
+    <!-- The profile is the one account control at the foot. Its menu already
+         contains Settings, so a second Settings row here would only make the
+         same destination compete with the account that owns it. -->
     <div class="chan-sidebar-foot">
       ${
         state.health === undefined
           ? `<div class="sys-line" title="Control plane unreachable"><span class="dot grey"></span>Control plane unreachable</div>`
           : ""
       }
-      <button type="button" class="chan-foot-action" data-act="nav"
-        data-value="settings" title="Settings" aria-label="Settings">
-        ${icon("gear")}
-        <span class="chan-foot-copy">Settings</span>
-      </button>
       <button type="button" class="chan-account" data-act="user-menu"
         title="Open profile menu" aria-label="Open profile menu for ${esc(user)}">
         ${avatar(user, 32, user, myAvatar())}
@@ -1237,6 +1231,14 @@ function threadSaidCount(said) {
  * The count still excludes the run's own narration and the `Task:` title
  * reply: those are the thread naming itself and thinking aloud, not replies,
  * and counting them made a one-line edit look like a long conversation.
+ *
+ * A held run adds one breathing amber dot beside the count and nothing else.
+ * This used to be a bordered amber banner on its own line under the link,
+ * spelling out "open the thread and reply go ahead" — directly above the
+ * room's own line saying the same sentence in words. Two paragraphs and a
+ * link for one fact. The dot keeps the fact and drops the repetition; the
+ * words survive for screen readers, and the sentence itself is still in the
+ * room, one message down, now pointing back here.
  */
 function threadSummaryLink(entry, replies, repositoryId) {
   const titled = threadTitleReply(entry);
@@ -1259,7 +1261,90 @@ function threadSummaryLink(entry, replies, repositoryId) {
   return `<button type="button" class="cmsg-thread-link" data-act="channel-thread-open"
       data-value="${esc(entry.id)}">
       <span class="avatar-stack ctl-faces">${faces}</span>
-      <span class="cmsg-thread-replies">${esc(threadSaidCount(said.length))}</span>
+      <span class="cmsg-thread-replies">${esc(threadSaidCount(said.length))}</span>${
+        threadAwaitsGoAhead(entry)
+          ? `<span class="ctl-held" aria-hidden="true"></span>
+      <span class="sr-only">Waiting for your go-ahead</span>`
+          : ""
+      }
+    </button>`;
+}
+
+/**
+ * How the room's own hold line opens, as the gateway writes it.
+ *
+ * Mirrors `CHANNEL_HOLD_PREFIX` in `services/api-gateway/src/server.ts`. The
+ * line is already addressed to the reader in words; what the browser adds is
+ * the one thing the text cannot carry — which thread it is talking about.
+ */
+const HOLD_NOTICE_PREFIX = "⏸ Waiting on you";
+
+/**
+ * The thread a room-level hold line is about, if it is about one.
+ *
+ * Walked backwards from the line itself: a hold is announced immediately
+ * after the run that raised it stops, so the nearest held thread above it is
+ * the one being waited on. Nothing found is not an error — the announcement
+ * can outlive the loaded page, and a line with no target simply renders as
+ * the plain message it has always been.
+ */
+function holdNoticeTarget(entry, repositoryId) {
+  if (
+    entry.kind !== "outcome" ||
+    !String(entry.content ?? "").startsWith(HOLD_NOTICE_PREFIX)
+  ) {
+    return undefined;
+  }
+  const messages = channelMessagesFor(repositoryId);
+  const at = messages.findIndex((message) => message.id === entry.id);
+  for (let index = (at === -1 ? messages.length : at) - 1; index >= 0; index -= 1) {
+    if (threadAwaitsGoAhead(messages[index])) {
+      return messages[index];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A line back to the message this one is answering, above the message itself.
+ *
+ * The hold announcement says "the plan is in the thread" and then leaves the
+ * reader to find it: the thread is somewhere above, collapsed, among however
+ * much else the room has said since. So the line wears the reference every
+ * chat app draws for a reply — a hairline turning up out of the avatar gutter
+ * into a quiet one-line quote of the message it points at — and clicking it
+ * goes there. `channel-pin-jump` is exactly that navigation already: open the
+ * target as a thread if it has one, scroll to it if it does not, and say so
+ * when it has aged out of the loaded history.
+ */
+function holdNoticeRef(entry, repositoryId) {
+  const root = holdNoticeTarget(entry, repositoryId);
+  if (root === undefined) {
+    return "";
+  }
+  const author = channelAuthor(repositoryId, root);
+  const line =
+    String(root.content ?? "")
+      .split(/\n/u)
+      .map((part) => part.trim())
+      .find((part) => part.length > 0) ?? "";
+  return `<button type="button" class="cmsg-ref" data-act="channel-pin-jump"
+      data-value="${esc(root.id)}">
+      <span class="cmsg-ref-elbow" aria-hidden="true"></span>
+      ${
+        author.agent !== undefined
+          ? agentFace(author.agent, 16)
+          : avatar(
+              author.name,
+              16,
+              author.name,
+              author.name === currentUserName() ? myAvatar() : undefined,
+            )
+      }
+      <span class="cmsg-ref-name">${esc(author.name)}</span>
+      <span class="cmsg-ref-text">${esc(
+        line.length > 80 ? `${line.slice(0, 77)}…` : line,
+      )}</span>
     </button>`;
 }
 
@@ -1469,6 +1554,14 @@ function messageRow(
       author.agent !== undefined ? agentFace(author.agent, 32) : avatar(author.name, 32, author.name, author.name === currentUserName() ? myAvatar() : undefined)
     }</span>
     <div class="cmsg-body">
+      ${
+        // Above the name, the way a reply's reference sits above the reply:
+        // this line is an answer to a thread further up, and the reference is
+        // how the reader gets back to it. Only on the channel copy — inside
+        // the thread panel there is nothing to navigate to — and never on a
+        // message whose words have been taken away.
+        isReply || deleted ? "" : holdNoticeRef(entry, repositoryId)
+      }
       <div class="cmsg-top">
         <span class="cmsg-name${author.agent !== undefined ? " agent-name" : ""}">${esc(
           author.name,
@@ -1510,17 +1603,6 @@ function messageRow(
             ? ""
             : changedFilesBlock(entry, repositoryId)
           : threadSummaryLink(entry, replies, repositoryId) +
-            // The thread said "reply go ahead" — inside itself, where a
-            // collapsed thread keeps it. Said again here, on the row that is
-            // always visible, because a held run is otherwise indistinguishable
-            // in the channel from one still going: same request, same
-            // acknowledgement, and then nothing either way.
-            (threadAwaitsGoAhead(entry)
-              ? `<button type="button" class="thread-held" data-act="channel-thread-open"
-                   data-value="${esc(entry.id)}">${icon(
-                     "clock",
-                   )} Waiting for your go-ahead — open the thread and reply "go ahead"</button>`
-              : "") +
             (() => {
               // A few pixels of accent under the thread: how far its run has
               // got, present only while there is a run to speak of. Quiet by
@@ -1677,7 +1759,8 @@ function messageList(repositoryId) {
     (entry) => query === "" || entry.content.toLowerCase().includes(query),
   );
   if (entries.length === 0) {
-    return `<div class="chan-messages" id="chan-messages">${emptyState(
+    return `<div class="chan-messages" id="chan-messages"
+      data-scroll-key="channel:${esc(repositoryId)}">${emptyState(
       "chatBubble",
       query === "" ? "No messages yet" : "Nothing matches that search",
       query === ""
@@ -1717,7 +1800,8 @@ function messageList(repositoryId) {
       threadedTasks.has(entry.taskId);
     return separator + messageRow(entry, repositoryId, { hideChanges });
   });
-  return `<div class="chan-messages" id="chan-messages">${rows.join(
+  return `<div class="chan-messages" id="chan-messages"
+    data-scroll-key="channel:${esc(repositoryId)}">${rows.join(
     "",
   )}${typingIndicator(repositoryId, undefined)}</div>`;
 }
@@ -2070,7 +2154,7 @@ function chanTreePanel(repositoryId) {
       <span class="spacer"></span>
       ${panelClose("chan-tree-close", "Close files (Esc)")}
     </header>
-    <div class="thread-body tree-body">
+    <div class="thread-body tree-body" data-scroll-key="tree:${esc(repositoryId)}">
       ${
         // The workspace this lists is cut from canonical once and only moves
         // forward on its own while it is clean. A dirty one is somebody's
@@ -2151,7 +2235,7 @@ function threadListPanel(repositoryId) {
       }
       ${panelClose("channel-threads-close", "Close threads (Esc)")}
     </header>
-    <div class="thread-body">
+    <div class="thread-body" data-scroll-key="thread-list:${esc(repositoryId)}">
       ${
         threads.length === 0
           ? `<div class="util-empty">No threads yet. A thread appears when an agent has more than one thing to say about a task.</div>`
@@ -2568,7 +2652,7 @@ function dmPanel() {
       <span class="spacer"></span>
       ${panelClose("dm-close", "Close conversation (Esc)")}
     </header>
-    <div class="thread-body dm-body">
+    <div class="thread-body dm-body" data-scroll-key="dm:${esc(userId)}">
       ${
         messages.length === 0
           ? `<p class="dm-empty">No messages yet. This conversation is just
@@ -2658,7 +2742,8 @@ function threadPanel(repositoryId) {
       })}
       ${panelClose("channel-thread-close", "Close thread (Esc)")}
     </header>
-    <div class="thread-body">
+    <div class="thread-body"
+      data-scroll-key="thread:${esc(repositoryId)}:${esc(messageId)}">
       <div class="thread-root${hasReplies ? " has-replies" : ""}">${messageRow(root, repositoryId, { isReply: true })}</div>
       ${threadReplies(root, repositoryId)}
       ${threadTyping(root)}
@@ -2988,7 +3073,8 @@ function filePanel() {
     ${
       editing
         ? fileEditor(path)
-        : `<div class="thread-body code-body">${
+        : `<div class="thread-body code-body"
+             data-scroll-key="file:${esc(activeChannelId())}:${esc(path)}:diff">${
             patch === undefined
               ? emptyState(
                   "file",
@@ -3014,7 +3100,8 @@ function filePanel() {
  */
 function fileEditor(path) {
   if (state.chanFileLoading) {
-    return `<div class="thread-body fp-editor-wrap">
+    return `<div class="thread-body fp-editor-wrap"
+      data-scroll-key="file:${esc(activeChannelId())}:${esc(path)}:loading">
       <p class="fp-note">Reading ${esc(path)}…</p>
     </div>`;
   }
@@ -3022,7 +3109,8 @@ function fileEditor(path) {
     const hasDiff = (state.changeSet?.patches ?? []).some(
       (entry) => entry.path === path,
     );
-    return `<div class="thread-body fp-editor-wrap">
+    return `<div class="thread-body fp-editor-wrap"
+      data-scroll-key="file:${esc(activeChannelId())}:${esc(path)}:error">
         <p class="fp-note err">${esc(state.chanFileError)}</p>
       </div>
       <div class="fp-actions">
@@ -3037,7 +3125,8 @@ function fileEditor(path) {
       </div>`;
   }
   const dirty = state.chanFileDraft !== state.chanFileBase;
-  return `<div class="thread-body fp-editor-wrap">
+  return `<div class="thread-body fp-editor-wrap"
+      data-scroll-key="file:${esc(activeChannelId())}:${esc(path)}:edit">
       <textarea class="fp-editor" data-act="chan-file-edit" spellcheck="false"
         wrap="off" aria-label="${esc(path)}">${esc(state.chanFileDraft ?? "")}</textarea>
     </div>
@@ -3319,7 +3408,17 @@ export function captureChannelScroll() {
       // editor. Restoring one panel's offset into the next would be a
       // position the reader never had, so the shape has to match too.
       shape: scroller.className,
+      key: scroller.dataset.scrollKey,
       top: scroller.scrollTop,
+      // Read this from the node now, not from the last scroll event. Browsers
+      // may deliver that event after a live update has already started its
+      // render, and a stale `followingChannel` is exactly how a reader who had
+      // just moved up got snapped back to the latest message.
+      following:
+        selector === "#chan-messages"
+          ? scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight <=
+            FOLLOW_SLACK_PX
+          : undefined,
       id: anchor?.id,
       offset:
         anchor === undefined ? 0 : anchor.getBoundingClientRect().top - edge,
@@ -3340,7 +3439,11 @@ export function captureChannelScroll() {
 export function restoreChannelAnchor(saved) {
   for (const entry of saved ?? []) {
     const scroller = document.querySelector(entry.selector);
-    if (scroller === null || scroller.className !== entry.shape) {
+    if (
+      scroller === null ||
+      scroller.className !== entry.shape ||
+      scroller.dataset.scrollKey !== entry.key
+    ) {
       continue;
     }
     const anchor =
@@ -3363,10 +3466,18 @@ export function restoreChannelAnchor(saved) {
  * Puts the transcript back where the reader had it, after a render replaced
  * it. Called with the new DOM in place.
  */
-export function restoreChannelScroll() {
+export function restoreChannelScroll(saved) {
   const list = document.querySelector("#chan-messages");
   if (list === null) {
     return;
+  }
+  const captured = (saved ?? []).find(
+    (entry) =>
+      entry.selector === "#chan-messages" &&
+      entry.key === list.dataset.scrollKey,
+  );
+  if (captured?.following !== undefined) {
+    followingChannel = captured.following;
   }
   followHeight = list.clientHeight;
   // A requested jump outranks following: the reader asked for one message,
@@ -3391,7 +3502,9 @@ export function restoreChannelScroll() {
     // itself out late; the `load` handler below catches the pictures.
     requestAnimationFrame(() => {
       const settled = document.querySelector("#chan-messages");
-      if (settled !== null && followingChannel) {
+      // A second render can replace the node before this callback runs. Never
+      // let an old render reach forward and move the new transcript.
+      if (settled === list && followingChannel) {
         settled.scrollTop = settled.scrollHeight;
         followHeight = settled.clientHeight;
       }
@@ -3401,6 +3514,37 @@ export function restoreChannelScroll() {
     return;
   }
   list.dataset.followBound = "1";
+  // A viewport resize and a finger drag can produce the same scroll event on
+  // a phone. Record the reader's intent before that event: the height-change
+  // branch below may keep following through a keyboard/address-bar resize,
+  // but it must not turn an upward wheel or drag into a jump to the bottom.
+  list.addEventListener(
+    "wheel",
+    (event) => {
+      if (event.deltaY < 0) {
+        followingChannel = false;
+      }
+    },
+    { passive: true },
+  );
+  let touchStartY;
+  list.addEventListener(
+    "touchstart",
+    (event) => {
+      touchStartY = event.touches[0]?.clientY;
+    },
+    { passive: true },
+  );
+  list.addEventListener(
+    "touchmove",
+    (event) => {
+      const y = event.touches[0]?.clientY;
+      if (touchStartY !== undefined && y !== undefined && y > touchStartY + 4) {
+        followingChannel = false;
+      }
+    },
+    { passive: true },
+  );
   // `load` does not bubble, so the transcript listens for it on the way down
   // rather than binding every image. An attachment that decodes after the
   // pin adds its full height above the newest message otherwise, which reads
@@ -3715,7 +3859,7 @@ export function pickSlashCommand(name, rerender) {
   const next = document.querySelector("[data-act='channel-input']");
   if (next !== null) {
     const pos = replaced.length;
-    next.focus();
+    next.focus({ preventScroll: true });
     next.setSelectionRange(pos, pos);
   }
 }
@@ -3732,7 +3876,7 @@ export function pickMention(name, rerender) {
   const next = document.querySelector("[data-act='channel-input']");
   if (next !== null) {
     const pos = replaced.length;
-    next.focus();
+    next.focus({ preventScroll: true });
     next.setSelectionRange(pos, pos);
   }
 }

@@ -562,6 +562,10 @@ svg {
   align-items: center;
   gap: 6px;
   padding: 10px 10px 6px;
+  overflow: hidden;
+  transition:
+    gap 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    padding 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .chan-brand {
@@ -573,20 +577,24 @@ svg {
   padding: 4px;
   text-align: left;
   color: var(--text);
+  transition:
+    opacity 0.12s ease,
+    transform 0.18s ease,
+    visibility 0s linear;
 }
 
 .chan-collapse-btn {
   flex: none;
+  margin-left: auto;
 }
 
 .chan-sidebar-foot {
   display: grid;
-  gap: 3px;
+  align-self: end;
   padding: 8px;
   border-top: 1px solid var(--border-soft);
 }
 
-.chan-foot-action,
 .chan-account {
   display: flex;
   align-items: center;
@@ -600,21 +608,9 @@ svg {
   transition: background 0.13s ease, color 0.13s ease;
 }
 
-.chan-foot-action:hover,
 .chan-account:hover {
   background: var(--bg-hover);
   color: var(--text);
-}
-
-.chan-foot-action svg {
-  width: 18px;
-  height: 18px;
-  flex: none;
-}
-
-.chan-foot-copy {
-  font-size: 12.5px;
-  font-weight: 550;
 }
 
 .chan-account .avatar {
@@ -2370,6 +2366,14 @@ svg {
   overflow-wrap: break-word;
   word-break: normal;
   tab-size: 4;
+  /* Width is a shared metric too, and it is the one that used to change by
+     itself: a message long enough to pass `max-height` gives the textarea a
+     scrollbar, and the 10px that takes came out of the line the caret is
+     measured against. The mirror is `overflow: hidden` and never lost those
+     pixels, so from that message on the two wrapped at different words and
+     the caret drifted further from the letters with every line. Reserving
+     the gutter on both keeps one width in both states, scrolling or not. */
+  scrollbar-gutter: stable;
 }
 
 .composer-mirror {
@@ -3554,10 +3558,11 @@ svg {
      two things to drag inside 256 pixels and a band of dead panel whenever
      neither list was long enough to fill its share. `.chan-scroll` is the
      one that moves. */
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-height: 0;
   background: var(--bg-panel);
-  transition: width 0.18s ease;
+  overflow-x: hidden;
+  transition: width 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
   /* No border. This column is a shade off the conversation in both themes
      (`--bg-panel` against `--bg-chat`), and a whole page-height rule on top
      of that difference is one line of chrome doing a job the ground has
@@ -4473,6 +4478,60 @@ svg {
   border-bottom: 1px solid var(--accent-line);
   border-bottom-left-radius: 9px;
   pointer-events: none;
+}
+
+/* The mirror of that branch, drawn above a message instead of below one: a
+   line that answers a thread further up turns *up* out of the same avatar
+   gutter and into a one-line quote of what it is answering. Pulled left past
+   the body's own edge so the corner lands over the avatar column, which is
+   what makes it read as coming from the conversation rather than starting in
+   this message.
+
+   Quiet on purpose — `--border-soft` and `--text-3`, a size under the
+   message's own. It is an address, not a second copy of the message: the
+   words are still up there, and this is how the reader gets to them. */
+.cmsg-ref {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 2px -28px;
+  padding: 0;
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cmsg-ref:hover {
+  color: var(--text-2);
+}
+
+.cmsg-ref-elbow {
+  flex: none;
+  align-self: flex-start;
+  width: 22px;
+  height: 8px;
+  margin-top: 8px;
+  border-left: 1px solid var(--border-soft);
+  border-top: 1px solid var(--border-soft);
+  border-top-left-radius: 8px;
+  pointer-events: none;
+}
+
+.cmsg-ref-name {
+  flex: none;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+/* One line, however long the message it points at. */
+.cmsg-ref-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cmsg-row .cmsg-avatar {
@@ -6179,37 +6238,39 @@ dialog.modal::backdrop {
   }
 }
 
-/* The desktop collapse leaves a real navigation rail behind. Channel links,
-   the product mark, Settings and the profile menu keep their icons; search,
-   roster detail and labels fold away. Phones use the full-width drawer below,
-   so none of these compact-rail rules apply there. */
+/* The desktop collapse leaves a real navigation rail behind. Channel links
+   and the profile menu keep their icons; search, roster detail and labels fold
+   away. The brand fades out while the collapse control rides the shrinking
+   rail's right edge into the top-left crown position. Phones use the full-width
+   drawer below, so none of these compact-rail rules apply there. */
 @media (min-width: 601px) {
   .chats-shell.chan-collapsed > .chan-sidebar {
     width: 64px;
   }
 
   .chats-shell.chan-collapsed .chan-sidebar-top {
-    flex-direction: column;
-    padding: 10px 0 6px;
+    gap: 0;
+    padding: 10px 16px 6px;
   }
 
   .chats-shell.chan-collapsed .chan-brand {
-    flex: none;
-    justify-content: center;
-    width: 40px;
-    height: 40px;
-    padding: 0;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateX(-4px);
+    transition:
+      opacity 0.1s ease,
+      transform 0.18s ease,
+      visibility 0s linear 0.18s;
   }
 
   .chats-shell.chan-collapsed :is(
-      .brand-text,
       .chan-sidebar-head,
       .chan-sec:not(.chan-sec-channels),
       .chan-roster,
       .chan-sec-label,
       .cr-name,
       .cr-more,
-      .chan-foot-copy,
       .chan-account-copy,
       .chan-account-more
     ) {
@@ -6281,7 +6342,7 @@ dialog.modal::backdrop {
     padding: 8px 0;
   }
 
-  .chats-shell.chan-collapsed :is(.chan-foot-action, .chan-account) {
+  .chats-shell.chan-collapsed .chan-account {
     justify-content: center;
     width: 40px;
     height: 40px;
@@ -6702,7 +6763,6 @@ dialog.modal::backdrop {
     height: 34px;
   }
 
-  .chan-foot-action,
   .chan-account {
     min-height: 44px;
   }
@@ -7267,38 +7327,32 @@ dialog.modal::backdrop {
 }
 
 /* The same fact on the channel row the thread hangs off, where a reader who
-   never opens the thread still meets it. A button, because the answer is one
-   click away — it opens the thread the go-ahead has to be typed into. */
-.thread-held {
-  /* Block-level, so it takes the line under the thread link rather than
-     sitting beside it — the two are different questions and reading them as
-     one row makes the second look like part of the first. */
-  display: flex;
-  width: fit-content;
-  max-width: 100%;
-  align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-  padding: 5px 10px;
-  border: 1px solid var(--orange);
-  border-radius: var(--radius);
-  background: var(--orange-wash);
-  color: var(--orange);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  text-align: left;
-}
+   never opens the thread still meets it — as one dot beside the reply count,
+   not the bordered amber banner that used to take the line underneath. The
+   banner spelled out "open the thread and reply go ahead" immediately above
+   the room's own line saying exactly that, so the loudest thing on the row
+   was its second copy.
 
-.thread-held:hover {
-  background: var(--orange-wash);
-  border-color: var(--orange);
-}
-
-.thread-held svg {
-  width: 14px;
-  height: 14px;
+   Shaped like `.thread-item-active .ti-live` and breathing on the same clock,
+   in amber rather than the accent because that is the difference between
+   "moving" and "stopped until you answer" everywhere else here — `.cr-held`
+   in the room list, `.thread-item-held` in the pullout. The words are still
+   said, in `.sr-only` text, where there is no colour or motion to read. */
+.cmsg-thread-link .ctl-held {
   flex: none;
+  align-self: center;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--orange);
+  box-shadow: 0 0 0 3px var(--orange-wash);
+  animation: status-breathe 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cmsg-thread-link .ctl-held {
+    animation: none;
+  }
 }
 
 /* ------------------------------------------------------ avatar and theme ---- */

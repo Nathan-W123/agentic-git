@@ -404,6 +404,7 @@ test("navigation is the four product routes and nothing invented", async () => {
 
 test("the sidebar collapses to an icon rail with account controls at its foot", async () => {
   const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
   const css = await publicFile("styles.css");
   const sidebar = chats.slice(
     chats.indexOf("function chanSidebar"),
@@ -421,14 +422,18 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
   assert.doesNotMatch(header, /data-act="chan-collapse-toggle"/u);
   assert.match(header, /data-act="chan-sidebar-toggle"/u);
 
-  // Settings and profile/account are stable footer rows and reuse the same
-  // delegated actions as the rest of the app.
+  // The account is the sole footer action. Its existing menu is the route to
+  // Settings, so the sidebar does not duplicate that destination with a gear.
   assert.match(sidebar, /class="chan-sidebar-foot"/u);
-  assert.match(
+  assert.doesNotMatch(
     sidebar,
     /class="chan-foot-action" data-act="nav"\s*data-value="settings"/u,
   );
   assert.match(sidebar, /class="chan-account" data-act="user-menu"/u);
+  assert.match(
+    app,
+    /case "user-menu":[\s\S]{0,180}value: "settings", label: "Settings"/u,
+  );
   assert.match(sidebar, /section\("People", "invite-repo"/u);
   assert.doesNotMatch(
     sidebar,
@@ -436,8 +441,8 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
     "the account action should not repeat its destination as a subtitle",
   );
 
-  // Compact means narrow, never absent. The labels fold away while the links,
-  // channel icons, Settings and account avatar remain real controls.
+  // Compact means narrow, never absent. The logo fades out, the collapse
+  // control remains in the crown, and the account avatar stays at the foot.
   assert.match(
     css,
     /\.chats-shell\.chan-collapsed > \.chan-sidebar \{\s*width: 64px;/u,
@@ -450,7 +455,31 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
   assert.match(css, /\.chan-row\.active::before \{/u);
   assert.match(
     css,
-    /\.chats-shell\.chan-collapsed :is\(\.chan-foot-action, \.chan-account\)/u,
+    /\.chats-shell\.chan-collapsed \.chan-brand \{[\s\S]{0,260}opacity: 0;[\s\S]{0,80}visibility: hidden;/u,
+  );
+  assert.match(css, /\.chan-collapse-btn \{\s*flex: none;\s*margin-left: auto;/u);
+  const sidebarRule = /\.chan-sidebar \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(sidebarRule, undefined, "the sidebar has a base layout rule");
+  assert.match(sidebarRule ?? "", /transition: width 0\.18s cubic-bezier/u);
+  assert.match(
+    css,
+    /grid-template-rows: auto auto minmax\(0, 1fr\) auto;/u,
+  );
+
+  // Changing the class on the existing shell gives the width transition an
+  // actual before/after. Persistence and accessible state still update, but
+  // this action must not replace the app with render().
+  const collapseAction = app.slice(
+    app.indexOf('case "chan-collapse-toggle"'),
+    app.indexOf('case "chan-sidebar-close"'),
+  );
+  assert.match(collapseAction, /classList\.toggle\(\s*"chan-collapsed"/u);
+  assert.match(collapseAction, /persist\("ag\.chanCollapsed"/u);
+  assert.match(collapseAction, /setAttribute\("aria-pressed"/u);
+  assert.doesNotMatch(collapseAction, /\brender\(\)/u);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]{0,180}transition-duration: 0\.01ms !important;/u,
   );
 });
 
@@ -994,6 +1023,95 @@ test("slash and mention filtering does not rebuild the app while typing", async 
   );
 });
 
+test("composer keystrokes stay on their existing DOM nodes", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const threadStart = chats.indexOf("export function updateThreadComposerInput");
+  const threadEnd = chats.indexOf("\nfunction updateMentionState", threadStart);
+  assert.notEqual(threadStart, -1, "the thread composer input handler should exist");
+  assert.notEqual(threadEnd, -1, "the thread composer input handler should have a boundary");
+
+  const threadHandler = chats.slice(threadStart, threadEnd);
+  assert.match(threadHandler, /state\.threadDraft =/u);
+  assert.doesNotMatch(
+    threadHandler,
+    /\b(?:render|rerender)\s*\(/u,
+    "typing a thread reply must not rebuild the transcript",
+  );
+
+  const channelStart = chats.indexOf("export function updateComposerInput");
+  const channelEnd = chats.indexOf("\nexport function pickSlashCommand", channelStart);
+  assert.notEqual(channelStart, -1, "the channel composer input handler should exist");
+  assert.notEqual(channelEnd, -1, "the channel composer input handler should have a boundary");
+  assert.doesNotMatch(
+    chats.slice(channelStart, channelEnd),
+    /\b(?:render|rerender)\s*\(/u,
+    "typing in the channel must only repaint the local composer",
+  );
+});
+
+test("conversation restores cannot overrule a newer scroll", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const capture = chats.slice(
+    chats.indexOf("export function captureChannelScroll"),
+    chats.indexOf("\nexport function restoreChannelAnchor"),
+  );
+  const restore = chats.slice(
+    chats.indexOf("export function restoreChannelScroll"),
+    chats.indexOf("\nexport function openChannel"),
+  );
+
+  // A render snapshots whether this exact channel was at the bottom from the
+  // live geometry. Relying on the previous scroll event leaves a race where a
+  // wheel/touch move has happened but its event has not updated the old flag.
+  assert.match(capture, /key: scroller\.dataset\.scrollKey/u);
+  assert.match(
+    capture,
+    /scroller\.scrollHeight - scroller\.scrollTop - scroller\.clientHeight <=\s*FOLLOW_SLACK_PX/u,
+  );
+  assert.match(app, /restoreChannelScroll\(savedScroll\);/u);
+  assert.match(restore, /entry\.key === list\.dataset\.scrollKey/u);
+
+  // Every replaceable scroll surface carries an identity. A raw offset from
+  // one thread, DM, file, or channel must never be restored into another one
+  // merely because both nodes use `.thread-body`.
+  for (const key of ["channel:", "thread:", "thread-list:", "dm:", "file:", "tree:"]) {
+    assert.match(chats, new RegExp(`data-scroll-key="${key}`, "u"), `${key} has a scroll identity`);
+  }
+  assert.match(
+    chats,
+    /scroller\.dataset\.scrollKey !== entry\.key/u,
+    "anchor restoration is scoped to the same surface",
+  );
+
+  // The next-frame settle belongs only to the node that scheduled it. An old
+  // render must not query a replacement transcript and pull that one down.
+  assert.match(restore, /settled === list && followingChannel/u);
+  // On mobile a drag and a viewport resize may share one scroll event. User
+  // intent turns following off before the resize branch can pin the bottom.
+  assert.match(restore, /"wheel"[\s\S]*event\.deltaY < 0[\s\S]*followingChannel = false/u);
+  assert.match(restore, /"touchmove"[\s\S]*y > touchStartY \+ 4[\s\S]*followingChannel = false/u);
+});
+
+test("composer refocus never moves the conversation", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const typeInto = app.slice(
+    app.indexOf("function typeIntoComposer"),
+    app.indexOf("\nfunction actionOf", app.indexOf("function typeIntoComposer")),
+  );
+  const pickers = chats.slice(
+    chats.indexOf("export function pickSlashCommand"),
+    chats.indexOf("\nexport function handleComposerKeydown"),
+  );
+  assert.match(typeInto, /focus\(\{ preventScroll: true \}\)/u);
+  assert.equal(
+    [...pickers.matchAll(/focus\(\{ preventScroll: true \}\)/gu)].length,
+    2,
+    "slash and mention insertion both restore the caret without scrolling",
+  );
+});
+
 test("a composer refresh keeps rapid edits, whitespace, and the caret's value", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await browserSource();
@@ -1488,6 +1606,7 @@ test("the colour wheel's marker and its click land on the same colour", async ()
 
 test("the composer paints its mentions on a layer that matches the textarea", async () => {
   const chats = await publicFile("screen-chats.js");
+  const app = await browserSource();
   const css = await publicFile("styles.css");
 
   // A textarea has one colour for all of its text, so the ping is painted by
@@ -1588,6 +1707,11 @@ test("the composer paints its mentions on a layer that matches the textarea", as
     "line-height",
     "white-space",
     "overflow-wrap",
+    // Width is a shared metric as well, and the only one that used to change
+    // on its own: a draft past `max-height` gave the textarea a scrollbar and
+    // took its 10px out of the line the caret is measured against, while the
+    // `overflow: hidden` mirror kept them. Reserved on both, it cannot drift.
+    "scrollbar-gutter",
   ]) {
     assert.match(
       shared[1] ?? "",
@@ -1616,6 +1740,35 @@ test("the composer paints its mentions on a layer that matches the textarea", as
     /\b(?:font-weight|letter-spacing|margin|padding):/u,
     "painting a command must not change glyph advances or spacing",
   );
+
+  // The other two ways the caret got away from the letters, both of which
+  // needed something outside the keystroke path to happen first — which is
+  // why it read as intermittent, and why staging an image (a render each)
+  // was where it was noticed.
+  //
+  // A render rebuilds the mirror at the top of its own scroll while the
+  // textarea is put back where it was, so the restore has to move both.
+  const restore = app.slice(
+    app.indexOf("function restoreFocus"),
+    app.indexOf("\nfunction confirmDiscardEdit"),
+  );
+  assert.match(restore, /next\.scrollTop = saved\.top;/u);
+  assert.match(restore, /\[data-composer-mirror\]/u);
+  assert.match(restore, /mirror\.scrollTop = next\.scrollTop;/u);
+
+  // And nothing writes the textarea's value behind the mirror's back: an
+  // assignment fires no input event, so the painted text stays a token short
+  // of the caret until the next keystroke. It goes through the draft instead.
+  const insert = app.slice(
+    app.indexOf('case "mention-agents-insert"'),
+    app.indexOf('case "dm-close"'),
+  );
+  assert.notEqual(insert, "", "the @agents shortcut should still be there");
+  assert.doesNotMatch(insert, /input\.value =/u);
+  assert.match(insert, /state\.chatDraft = /u);
+  assert.match(insert, /render\(\);/u);
+  // ...carrying any staged image across, the same as `typeIntoComposer`.
+  assert.match(insert, /attachment:\[0-9a-f\]\{32\}/u);
 });
 
 test("a phone's caret sits on its own letters, and a backlog arrives as one line", async () => {
@@ -1838,10 +1991,14 @@ test("a run waiting on a person is marked as waiting, not as finished", async ()
   // they happen to be looking at: the room list, the message in the channel,
   // and the thread list.
   assert.match(chats, /class="cr-held"/u);
-  assert.match(chats, /class="thread-held" data-act="channel-thread-open"/u);
+  assert.match(chats, /class="ctl-held"/u);
   assert.match(chats, /class="ti-held"/u);
-  // The channel line is the one that has to say what to do about it.
-  assert.match(chats, /Waiting for your go-ahead/u);
+  // The channel's mark is a dot beside the reply count, not a bordered banner
+  // repeating in full the sentence the room's own hold line already says one
+  // message below it. The words survive where colour and motion cannot be
+  // read.
+  assert.equal(/class="thread-held"/u.test(chats), false);
+  assert.match(chats, /class="sr-only">Waiting for your go-ahead/u);
 
   // Amber, not the accent: "moving" and "stopped until you answer" are the two
   // states this list exists to tell apart, and one colour for both is no answer.
@@ -1849,4 +2006,37 @@ test("a run waiting on a person is marked as waiting, not as finished", async ()
   assert.notEqual(held, undefined, "a held thread has a shape rule");
   assert.match(held ?? "", /var\(--orange\)/u);
   assert.equal(/var\(--accent\)/u.test(held ?? ""), false);
+
+  // Same amber on the channel's dot, and the same clock every other live
+  // signal in the app breathes on — with the motion reducible, because the
+  // fade is the whole of what it says.
+  const dot = /\n\.cmsg-thread-link \.ctl-held \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(dot, undefined, "the channel's held mark has a shape rule");
+  assert.match(dot ?? "", /var\(--orange\)/u);
+  assert.match(dot ?? "", /animation: status-breathe/u);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.cmsg-thread-link \.ctl-held \{\n {4}animation: none;/u,
+  );
+});
+
+test("the room's hold line carries a way back to the thread it is about", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // The line says "the plan is in the thread" and the thread is somewhere
+  // above, collapsed. Recognised by the prefix the gateway writes, resolved to
+  // the nearest held thread before it, and drawn as a reference back to it.
+  assert.match(chats, /const HOLD_NOTICE_PREFIX = "⏸ Waiting on you"/u);
+  assert.match(chats, /function holdNoticeTarget\(/u);
+  assert.match(chats, /class="cmsg-ref" data-act="channel-pin-jump"/u);
+  // Not invented navigation: `channel-pin-jump` already opens a target that
+  // has a thread and scrolls to one that does not.
+  assert.match(await browserSource(), /case "channel-pin-jump":/u);
+
+  // The elbow is the channel's own thread branch, turned upward — same gutter,
+  // same hairline, a rounded corner instead of a straight drop.
+  const elbow = /\n\.cmsg-ref-elbow \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(elbow, undefined, "the reference draws a line back");
+  assert.match(elbow ?? "", /border-top-left-radius/u);
 });
