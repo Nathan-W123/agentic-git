@@ -107,6 +107,10 @@ interface TestRuntime {
     targetRevision: string;
     files?: readonly string[];
   }>;
+  /** Makes the next revert answer with this instead of succeeding. */
+  setRollbackOutcome: (
+    outcome: { status: string; explanation: string } | undefined,
+  ) => void;
   /** Every stop the gateway asked for, in order — scope, words and all. */
   cancelCalls: Array<{
     repositoryId: string;
@@ -265,6 +269,9 @@ async function startRuntime(
   const chatAnswer: TestRuntime["chatAnswer"] = {};
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
   const rollbacks: TestRuntime["rollbacks"] = [];
+  // What `rollbackRepository` answers. Undefined is the ordinary success; a
+  // test sets it to make a revert fail the way a real one can.
+  let rollbackOutcome: { status: string; explanation: string } | undefined;
   const runCalls: TestRuntime["runCalls"] = [];
   const cancelCalls: TestRuntime["cancelCalls"] = [];
   // Models canonical mirrors independently from persistence. Deleting only
@@ -546,11 +553,13 @@ async function startRuntime(
         // than the whole tree.
         ...(input.files === undefined ? {} : { files: input.files }),
       });
-      return {
-        status: "integrated",
-        explanation: "reverted",
-        revision: input.targetRevision,
-      };
+      return (
+        rollbackOutcome ?? {
+          status: "integrated",
+          explanation: "reverted",
+          revision: input.targetRevision,
+        }
+      );
     },
     // The real store's allowlist, in miniature: the deployment decides what an
     // image is, and the gateway only ever passes bytes through.
@@ -679,6 +688,9 @@ async function startRuntime(
     chatAnswer,
     canonicalDiffs,
     rollbacks,
+    setRollbackOutcome: (outcome) => {
+      rollbackOutcome = outcome;
+    },
     runCalls,
     cancelCalls,
     canonicalDiff,
@@ -9090,4 +9102,169 @@ test("a remark about work is not a request, and is offered nothing", async (t) =
       message.kind === "system" && /Nobody was named here\./u.test(message.content),
   );
   assert.deepEqual(offers, [], JSON.stringify(offers));
+});
+
+test("a revert reports that it worked, and takes the thread's file list back with it", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "revert-files");
+  const landed = "b".repeat(40);
+  const before = "a".repeat(40);
+
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "rework the retry loop",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: task.id,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      previousRevision: before,
+      revision: landed,
+      files: ["src/retry.ts"],
+    },
+  });
+  runtime.canonicalState.head = landed;
+  // What the summary backfill rebuilds from. Without this the durability
+  // assertion below passes whether or not the revert is respected, because
+  // there would be nothing to rebuild the list out of.
+  await runtime.store.appendAudit(undefined, {
+    type: "workspace_changed",
+    taskId: task.id,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      changedFiles: [{ path: "src/retry.ts", status: "modified" }],
+    },
+  });
+
+  // The thread this work was narrated in, carrying the file summary a reader
+  // sees under it.
+  const thread = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it.",
+  });
+  await runtime.store.setChannelMessageTask(repositoryId, thread.id, task.id);
+  await runtime.store.setChannelMessageChangedFiles(repositoryId, thread.id, [
+    { path: "src/retry.ts", status: "modified" },
+  ]);
+
+  const reverted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/rollback`,
+    { method: "POST", body: { taskId: task.id } },
+  );
+  assert.equal(reverted.status, 200, JSON.stringify(reverted.data));
+  // The one status that means it happened. Everything else — conflict,
+  // validation_failed, stale, empty — is a revert that did not.
+  assert.equal(reverted.data.rollback.status, "integrated");
+  // Back to the state before this task, not to some other revision.
+  assert.equal(runtime.rollbacks.at(-1)?.targetRevision, before);
+
+  // And the thread stops claiming the file it no longer changes. The stores
+  // normalise an empty list to "nothing recorded", so this reads back as
+  // absent rather than as an empty array.
+  const after = await runtime.store.getChannelMessage(
+    repositoryId,
+    thread.id,
+    ownerId,
+  );
+  assert.equal(after?.changedFiles, undefined);
+
+  // And it stays gone across a channel read. A thread with no file list is
+  // what the summary backfill goes looking for, and the events it rebuilds
+  // from are the very ones this revert undid.
+  //
+  // Honest about its own strength: the backfill needs line counts this
+  // fixture cannot produce, so it currently writes nothing here either way —
+  // disabling the `task_reverted` guard does not fail this assertion. It is a
+  // regression guard, not a proof: if the rebuild ever starts working in this
+  // fixture, or somebody removes the guard *and* fixes the counts, the file
+  // comes back and this catches it.
+  const listed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages`,
+  );
+  assert.equal(listed.status, 200);
+  const rebuilt = (listed.data.messages as any[]).find(
+    (message) => message.id === thread.id,
+  );
+  assert.equal(
+    rebuilt?.changedFiles ?? undefined,
+    undefined,
+    JSON.stringify(rebuilt?.changedFiles),
+  );
+});
+
+test("a revert that fails validation is not reported as one that worked", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "revert-refused");
+  const landed = "d".repeat(40);
+
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "rework the retry loop",
+    agentId: "anthropic",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  await runtime.store.appendAudit(undefined, {
+    type: "canonical_promoted",
+    taskId: task.id,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      previousRevision: "c".repeat(40),
+      revision: landed,
+      files: ["src/retry.ts"],
+    },
+  });
+  runtime.canonicalState.head = landed;
+
+  const thread = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it.",
+  });
+  await runtime.store.setChannelMessageTask(repositoryId, thread.id, task.id);
+  await runtime.store.setChannelMessageChangedFiles(repositoryId, thread.id, [
+    { path: "src/retry.ts", status: "modified" },
+  ]);
+
+  runtime.setRollbackOutcome({
+    status: "validation_failed",
+    explanation: "The tests do not pass on the older tree",
+  });
+  const refused = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/rollback`,
+    { method: "POST", body: { taskId: task.id } },
+  );
+  assert.equal(refused.status, 200);
+  assert.equal(refused.data.rollback.status, "validation_failed");
+
+  // Nothing was put back, so the thread still reports what this task changed.
+  // Clearing it here would tell a reader the files are safe when they are not.
+  const after = await runtime.store.getChannelMessage(
+    repositoryId,
+    thread.id,
+    ownerId,
+  );
+  assert.deepEqual(after?.changedFiles, [
+    { path: "src/retry.ts", status: "modified" },
+  ]);
 });

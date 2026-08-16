@@ -5600,6 +5600,21 @@ export class ApiGateway {
       });
       // A rollback that was refused is a legitimate answer, not a transport
       // error, so the outcome travels in the body with a 200.
+      if (result.status === "integrated" && taskId !== undefined) {
+        // Recorded before the summary is cleared, because clearing it is not
+        // durable on its own: a thread with no file list is exactly what the
+        // backfill in `withChangedFileSummaries` goes looking for, and it
+        // would rebuild the list from the very events this revert undid. The
+        // event is what tells it not to.
+        await this.options.store
+          .appendAudit(undefined, {
+            type: "task_reverted",
+            taskId,
+            data: { projectId, repositoryId, revision: targetRevision },
+          })
+          .catch(() => undefined);
+        await this.forgetThreadChangedFiles(repositoryId, taskId);
+      }
       this.sendJson(response, 200, { rollback: result });
       return;
     }
@@ -11780,7 +11795,13 @@ export class ApiGateway {
         try {
           const filter: AuditEventFilter = {
             taskId,
-            types: ["workspace_changed", "changeset_collected"],
+            types: [
+              "workspace_changed",
+              "changeset_collected",
+              // Read alongside the reports so the loop below can tell a
+              // report that still stands from one that has been put back.
+              "task_reverted",
+            ],
           };
           // Both halves of the log, because archiving moves rows out of the
           // live table and the CLI's `audit archive` is a thing somebody
@@ -11804,15 +11825,31 @@ export class ApiGateway {
           // file can stop being changed when an agent reverts itself, and
           // accumulating across reports would claim edits that no longer
           // exist.
-          const files = events.reduce<ChannelChangedFile[]>(
-            (latest, record) => {
-              const found = changedFilesFrom(
-                (record.event.data ?? {}) as Record<string, unknown>,
-              );
-              return found.length > 0 ? found : latest;
-            },
-            [],
-          );
+          let files: ChannelChangedFile[] = [];
+          let revertedSinceLastReport = false;
+          for (const record of events) {
+            if (record.event.type === "task_reverted") {
+              // Everything reported before this is no longer true. Not a
+              // `break`: a conversational task can land again after being
+              // reverted, and a later report is the current answer.
+              files = [];
+              revertedSinceLastReport = true;
+              continue;
+            }
+            const found = changedFilesFrom(
+              (record.event.data ?? {}) as Record<string, unknown>,
+            );
+            if (found.length > 0) {
+              files = found;
+              revertedSinceLastReport = false;
+            }
+          }
+          // Reverted and nothing since: the summary is empty because the work
+          // is gone, not because it was never recorded, so this pass must
+          // leave it alone rather than rebuild it from the undone reports.
+          if (revertedSinceLastReport) {
+            return;
+          }
           // Prefer what is already stored when the log has nothing newer —
           // this pass may be running only to add counts to it.
           const bare =
@@ -12919,6 +12956,52 @@ export class ApiGateway {
    * Work only reaches canonical at settlement, so a cancelled run's edits die
    * with its workspace and no revert is needed or wanted.
    */
+  /**
+   * Drops one task's contribution to its thread's changed-file summary.
+   *
+   * The summary is what a task changed, and after a revert this task changed
+   * nothing — the files are back. It is stored as one flat set per thread
+   * with no record of who contributed what, so the per-task map is what makes
+   * removing one task's share possible without taking a second dispatch's
+   * work in the same thread with it.
+   *
+   * Writing an empty list clears the field: the stores normalise `[]` to
+   * "nothing recorded" on purpose, and all three agree about it. That is the
+   * right outcome here — the thread stops claiming files it no longer
+   * changes — but it is only half the job, because "nothing recorded" is
+   * also the state the backfill treats as a summary worth rebuilding. The
+   * `task_reverted` event written beside this is the other half.
+   *
+   * The watch map is the fast path and holds only tasks this process is still
+   * narrating, so a revert of anything older falls back to finding the thread
+   * by the task it names. Bounded, because a revert is something somebody
+   * does to work they can see.
+   */
+  private async forgetThreadChangedFiles(
+    repositoryId: string,
+    taskId: string,
+  ): Promise<void> {
+    let messageId = this.watchedChannelTasks.get(taskId)?.messageId;
+    if (messageId === undefined) {
+      const recent = await this.options.store
+        .listChannelMessages(repositoryId, "", { limit: 200 })
+        .catch(() => []);
+      messageId = recent.find((message) => message.taskId === taskId)?.id;
+    }
+    if (messageId === undefined) {
+      return;
+    }
+    const perTask = this.threadChangedFiles.get(messageId);
+    perTask?.delete(taskId);
+    await this.options.store
+      .setChannelMessageChangedFiles(
+        repositoryId,
+        messageId,
+        unionChangedFiles([...(perTask?.values() ?? [])]),
+      )
+      .catch(() => undefined);
+  }
+
   private async undoTask(
     projectId: string,
     repositoryId: string,

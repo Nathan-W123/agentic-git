@@ -900,6 +900,12 @@ export type AuditEventType =
   | "canonical_changed"
   | "task_failed"
   | "task_cancelled"
+  /**
+   * One task's landed work was put back. Recorded against the *reverted*
+   * task, not the revert's own, so anything reconstructing what that task
+   * changed can see that the answer is now "nothing".
+   */
+  | "task_reverted"
   | "cleanup_failed"
   | "ownership_released"
   | "recovery_completed"
