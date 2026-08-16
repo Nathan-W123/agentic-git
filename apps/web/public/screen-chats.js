@@ -1418,6 +1418,16 @@ function mentionPopover(candidates) {
     .join("")}</div>`;
 }
 
+function composerSuggestions(repositoryId) {
+  return `${
+    state.slashActive ? slashPopover(channelSlashCandidates(repositoryId)) : ""
+  }${
+    state.mentionActive
+      ? mentionPopover(channelMentionCandidates(repositoryId))
+      : ""
+  }`;
+}
+
 /**
  * The sandbox terminal, as a drawer over the bottom of the channel.
  *
@@ -1467,10 +1477,8 @@ function terminalDrawer() {
 }
 
 function composer(repositoryId) {
-  const candidates = state.mentionActive ? channelMentionCandidates(repositoryId) : [];
   return `<div class="chan-composer-wrap">
-    ${state.slashActive ? slashPopover(channelSlashCandidates(repositoryId)) : ""}
-    ${state.mentionActive ? mentionPopover(candidates) : ""}
+    <div data-composer-suggestions>${composerSuggestions(repositoryId)}</div>
     ${composerThreadChip(repositoryId)}
     <form class="composer" data-act="channel-submit">
       <textarea data-act="channel-input" rows="1" spellcheck="true"
@@ -2784,12 +2792,12 @@ function updateMentionState(node) {
   state.mentionIndex = 0;
 }
 
-export function updateComposerInput(node, rerender) {
+export function updateComposerInput(node) {
   state.chatDraft = node.value;
-  // What the screen actually shows about a draft is the mention popup and
+  // What the screen actually shows about a draft is the suggestion popup and
   // nothing else: the send button is always enabled, and the textarea already
-  // holds the character that was just typed. So a render is only owed when
-  // that popup would change.
+  // holds the character that was just typed. Only that small popup needs an
+  // update when its query changes.
   //
   // It used to happen on every keystroke, and a render here is not cheap — it
   // rebuilds the whole app, destroying the textarea being typed into, then
@@ -2797,9 +2805,10 @@ export function updateComposerInput(node, rerender) {
   // long transcript behind it that is the latency between pressing a key and
   // seeing the letter, on the one screen where responsiveness is the entire
   // experience.
-  // Both pickers, not just the mention one: a render is owed whenever either
-  // popup would change, and tracking only the first would leave the command
-  // list frozen — or absent — while somebody types into it.
+  // Both pickers, not just the mention one: their small suggestion surface is
+  // updated whenever either popup changes. Rebuilding the full app for that
+  // used to reparse the transcript, sidebar and roster after every character
+  // typed following "/" or "@".
   const popupState = () =>
     `${String(state.mentionActive)} ${state.mentionQuery} ` +
     `${String(state.slashActive)} ${state.slashQuery}`;
@@ -2813,15 +2822,11 @@ export function updateComposerInput(node, rerender) {
   if (!changed) {
     return;
   }
-  const selStart = node.selectionStart;
-  const selEnd = node.selectionEnd;
-  rerender();
-  const next = document.querySelector("[data-act='channel-input']");
-  if (next !== null) {
-    next.focus();
-    next.setSelectionRange(selStart, selEnd);
-    next.style.height = "auto";
-    next.style.height = `${Math.min(next.scrollHeight, 148)}px`;
+  const suggestions = node
+    .closest(".chan-composer-wrap")
+    ?.querySelector("[data-composer-suggestions]");
+  if (suggestions !== null && suggestions !== undefined) {
+    suggestions.innerHTML = composerSuggestions(activeChannelId());
   }
 }
 
