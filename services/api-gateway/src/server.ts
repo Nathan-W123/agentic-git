@@ -179,6 +179,19 @@ interface WatchedChannelTask {
    * open. Flushed in order the moment something substantive does arrive.
    */
   pending: string[];
+  /**
+   * The request that caused this work, held until the thread actually opens.
+   *
+   * Posted eagerly it would *create* the thread, and a task small enough to
+   * finish without narrating itself is deliberately two lines in the room
+   * with no thread at all. So it waits with the rest of the held narration
+   * and leads it when something finally opens the room.
+   *
+   * Absent when the request was already made inside the thread, or when the
+   * dispatch joined a thread that exists — both are cases where it is either
+   * in there already or was posted outright.
+   */
+  opener?: { authorId: string; content: string };
   /** Whether a thread has been opened, after which everything goes into it. */
   threaded: boolean;
 }
@@ -8955,6 +8968,40 @@ export class ApiGateway {
           content: openingLine,
         })
       ).id;
+    // The request that caused this, in the words it was asked in, at the top
+    // of the thread it produced.
+    //
+    // The thread used to open on the agent's restatement — "Task: rework the
+    // retry loop" — which is a good name and not what anybody said. Opening a
+    // thread panel showed the work with no visible cause: the sentence that
+    // started it was back in the channel, and on a phone, where the panel is
+    // the whole screen, it was not visible at all.
+    //
+    // It matters more, not less, when the work joins a thread that already
+    // exists. A merged request never appeared in the thread it was merged
+    // into, so a conversation would grow a second task with nothing in it
+    // saying why — which is the case `findThreadToContinue` creates on
+    // purpose, and the one hardest to read after the fact.
+    //
+    // Skipped only when the request was made inside the thread already, since
+    // then it is a reply and is in it by definition.
+    const opener =
+      input.threadMessageId === undefined
+        ? { authorId: senderId, content }
+        : undefined;
+    if (opener !== undefined && continuing !== undefined) {
+      // The room is already there, so there is nothing to protect it from —
+      // and this is the case that needed it most: work merged into an
+      // existing thread used to arrive with nothing in the thread saying why.
+      await this.appendChannelThreadReply({
+        projectId,
+        repositoryId,
+        messageId: threadRootId,
+        authorId: opener.authorId,
+        kind: "user",
+        content: opener.content,
+      }).catch(() => undefined);
+    }
     // The agent's own wording, fetched now that the thread it belongs to is
     // already on the screen. Not awaited: a slow model must not hold up
     // queueing the work, and the only thing riding on it is how the first
@@ -9212,6 +9259,11 @@ export class ApiGateway {
         // substantive first, they simply arrive with the next line rather than
         // holding one up.
         pending: [],
+        // Held with the narration for the reason above: posting it now would
+        // open a thread this task may never deserve.
+        ...(opener === undefined || continuing !== undefined
+          ? {}
+          : { opener }),
         // Whether a room already exists, not whether one is deserved. The
         // held-narration rule is about sparing the channel a thread nobody
         // needs — but when this dispatch joined an existing thread the room is
@@ -12643,6 +12695,20 @@ export class ApiGateway {
             // start — as one entry rather than one per thought, because it is
             // one train of reasoning and arrived as a paragraph in the
             // agent's head before it arrived as lines in ours.
+            // What was asked, before what was thought about it. The thread
+            // exists as of this moment, so the request that caused it can go
+            // in without having been what created it.
+            if (watched.opener !== undefined) {
+              await this.appendChannelThreadReply({
+                projectId: watched.projectId,
+                repositoryId: watched.repositoryId,
+                messageId: watched.messageId,
+                authorId: watched.opener.authorId,
+                content: watched.opener.content,
+                kind: "user",
+              });
+              delete watched.opener;
+            }
             if (watched.pending.length > 0) {
               await this.appendChannelThreadReply({
                 projectId: watched.projectId,
@@ -12759,7 +12825,7 @@ export class ApiGateway {
      * than an agent's. Each reads differently and counts differently — see
      * `ChannelEntryKind`.
      */
-    kind?: "agent" | "progress" | "system" | "outcome";
+    kind?: "agent" | "progress" | "system" | "outcome" | "user";
   }): Promise<void> {
     await this.options.store.addChannelReply({
       repositoryId: input.repositoryId,

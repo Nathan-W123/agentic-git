@@ -9372,3 +9372,122 @@ test("a remark that opens with a noun from the verb list is never read at all", 
   );
   assert.equal(runtime.submittedTasks.length, 0);
 });
+
+test("a thread opens on the request that caused it, in the words it was asked in", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const repositoryId = await invitableRepository(owner, "thread-opener");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const agents = await owner.request(`${base}/agents`);
+  const name = (agents.data.agents as { name: string }[])[0]?.name ?? "";
+  const asked = `@${name} rework the retry loop`;
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: asked },
+  });
+  await waitFor(async () => {
+    const listed = await runtime.store.listSubmittedTasks({ repositoryId });
+    return listed.length > 0;
+  }, "the mention never became a task");
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+
+  // Held until here, deliberately: posting it at dispatch would open a thread
+  // for every task, and a task small enough to finish without narrating
+  // itself is meant to stay two lines in the room.
+  const beforeNarration = await owner.request(`${base}/messages`);
+  const quiet = (beforeNarration.data.messages as any[]).find(
+    (message) => message.taskId === task!.id,
+  );
+  assert.deepEqual(quiet?.replies ?? [], [], "no thread before there is news");
+
+  await runtime.store.appendAudit(undefined, {
+    type: "agent_progress",
+    taskId: task!.id,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      message: "Reading retry.ts and mapping every caller",
+    },
+  });
+
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    const thread = (listed.data.messages as any[]).find(
+      (message) => message.taskId === task!.id,
+    );
+    return ((thread?.replies ?? []) as any[]).some((reply) =>
+      String(reply.content).includes("mapping every caller"),
+    );
+  }, "the run never narrated");
+
+  const listed = await owner.request(`${base}/messages`);
+  const thread = (listed.data.messages as any[]).find(
+    (message) => message.taskId === task!.id,
+  );
+  const replies = (thread?.replies ?? []) as any[];
+  // First, and attributed to the person who asked rather than to the agent —
+  // opening a thread showed the work with no visible cause before this.
+  assert.equal(replies[0]?.kind, "user", JSON.stringify(replies));
+  assert.equal(replies[0]?.content, asked);
+  assert.equal(replies[0]?.authorId, ownerId);
+});
+
+test("work merged into an existing thread says what asked for it", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const repositoryId = await invitableRepository(owner, "thread-merge-opener");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // A thread that already exists, with a task hanging off it.
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it.",
+  });
+  const agents = await owner.request(`${base}/agents`);
+  const name = (agents.data.agents as { name: string }[])[0]?.name ?? "";
+  const asked = `@${name} and also raise the retry ceiling`;
+
+  await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: asked } },
+  );
+
+  // Asked inside the thread, so it is a reply and is in there by definition —
+  // the dispatch must not post a second copy of it.
+  await waitFor(async () => {
+    const thread = await runtime.store.getChannelMessage(
+      repositoryId,
+      root.id,
+      ownerId,
+    );
+    return (thread?.replies ?? []).some(
+      (reply) => reply.content === asked && reply.kind === "user",
+    );
+  }, "the request never landed in the thread");
+  const thread = await runtime.store.getChannelMessage(
+    repositoryId,
+    root.id,
+    ownerId,
+  );
+  assert.equal(
+    (thread?.replies ?? []).filter((reply) => reply.content === asked).length,
+    1,
+    JSON.stringify(thread?.replies),
+  );
+});
