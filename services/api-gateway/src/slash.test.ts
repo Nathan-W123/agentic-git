@@ -23,24 +23,52 @@ test("a command and a mention live in the same message", () => {
 
 test("a slash inside a sentence is not a command", () => {
   // Slashes appear in ordinary text constantly. Reading any of them as
-  // syntax would turn a sentence into an error nobody typed.
+  // syntax would turn a sentence into an error nobody typed. None of them
+  // spells a command word with whitespace on both sides, which is what the
+  // scan requires now that position no longer rules them out.
   for (const content of [
     "check /usr/bin/env is on the path",
     "the file is at src/retry.ts",
     "should we do this and/or that",
     "look at apps/web/public/data.js",
     "10/10 would ship",
+    // The command words themselves, as parts of a path rather than as words.
+    "read docs/plan.md before starting",
+    "it is in scripts/stop.sh",
   ]) {
     assert.equal(parseSlashCommand(content), undefined, content);
   }
-
-  // Anchored to the start: a command word later in the message is prose.
-  assert.equal(parseSlashCommand("please /plan this"), undefined);
 
   // An unknown word after the slash is not a command either — guessing at it
   // would be worse than reading it literally.
   assert.equal(parseSlashCommand("/deploy everything"), undefined);
   assert.equal(parseSlashCommand("/"), undefined);
+});
+
+test("a command is read wherever it is written, not only at the start", () => {
+  // Position was a rule the composer could not teach: somebody who had
+  // already typed a mention and then thought of "/plan" got a slash that did
+  // nothing, with no way to tell that was the reason.
+  const middle = parseSlashCommand("@Eos /plan rework the retry loop");
+  assert.equal(middle?.command.name, "plan");
+  // Only the command word is lifted out — everything around it reaches the
+  // dispatcher exactly as written, with the seam closed up.
+  assert.equal(middle?.rest, "@Eos rework the retry loop");
+
+  const trailing = parseSlashCommand("@Papa stop what you are doing /stop");
+  assert.equal(trailing?.command.name, "stop");
+  assert.equal(trailing?.rest, "@Papa stop what you are doing");
+
+  // The first known command wins, and an unknown word before it is left in
+  // the message as the text it was.
+  const first = parseSlashCommand("/deploy the thing /ask @Eos why");
+  assert.equal(first?.command.name, "ask");
+  assert.equal(first?.rest, "/deploy the thing @Eos why");
+
+  // A second line is still the same message.
+  const multiline = parseSlashCommand("have a look at this\n/plan @Eos the retry loop");
+  assert.equal(multiline?.command.name, "plan");
+  assert.equal(multiline?.rest, "have a look at this\n@Eos the retry loop");
 });
 
 test("the lookup offers what is being typed, and everything for a bare slash", () => {

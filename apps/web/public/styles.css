@@ -2351,12 +2351,39 @@ svg {
 }
 
 .msg {
+  position: relative;
   max-width: 88%;
   padding: 11px 13px;
   border-radius: 12px;
   font-size: 12.5px;
   line-height: 1.55;
   word-break: break-word;
+}
+
+/* Rewind, hidden until the bubble is under the pointer — the same bargain
+   `.cmsg-actions` makes in the channel. It sits outside the bubble rather
+   than in it so it never reflows what somebody is reading, on the side the
+   bubble is not anchored to. */
+.msg .icon-btn[data-act="chat-msg-delete"] {
+  position: absolute;
+  top: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.msg.user .icon-btn[data-act="chat-msg-delete"] {
+  left: -26px;
+}
+
+.msg.agent .icon-btn[data-act="chat-msg-delete"] {
+  right: -26px;
+}
+
+.msg:hover .icon-btn[data-act="chat-msg-delete"],
+.msg:focus-within .icon-btn[data-act="chat-msg-delete"] {
+  opacity: 1;
+  pointer-events: auto;
 }
 
 .msg .msg-time {
@@ -2408,16 +2435,106 @@ svg {
   padding: 4px 0;
 }
 
+/*
+ * The composer, in its two sizes.
+ *
+ * Every metric the lean bar changes is a variable set here and overridden in
+ * exactly one place — the collapse rule below. The alternative was a second
+ * copy of that rule's condition in front of each property it touches, and the
+ * textarea and the mirror painted underneath it cannot afford to disagree
+ * about padding by a pixel: they are the same string drawn twice, and the
+ * moment their metrics drift the highlight slides off the name it belongs to.
+ * A variable cannot drift the way two selectors can.
+ *
+ * `flex` values on the children are unconditional and cost nothing while the
+ * composer is a block — they only start meaning something once `--composer-
+ * layout` turns the box into a row.
+ */
 .composer {
+  --composer-pad-top: 11px;
+  --composer-pad-bottom: 6px;
+  --composer-pad-x: 13px;
+  --composer-shape: var(--radius-lg);
+  --composer-layout: block;
+  --composer-bar-layout: flex;
+  --composer-inset: 0;
+  --composer-send-shape: 8px;
+
   margin: 0 12px 12px;
+  display: var(--composer-layout);
+  align-items: center;
+  gap: 4px;
+  padding: var(--composer-inset);
   background: var(--bg-card);
   border: 1px solid var(--border);
-  border-radius: var(--radius-lg);
-  transition: border-color 0.15s ease;
+  border-radius: var(--composer-shape);
+  transition: border-color 0.15s ease, border-radius 0.15s ease;
 }
 
 .composer:focus-within {
   border-color: var(--accent-line);
+}
+
+/*
+ * The lean bar.
+ *
+ * Empty, unfocused and with nothing pending, the composer is one pill about
+ * the height of its own send button: attach on the left, the placeholder
+ * across the middle, send on the right. The second row and everything on it
+ * — the mention key, the context dial, the model and effort pickers — come
+ * back the instant it is pressed, which is also the first instant any of them
+ * can be used: nothing can be typed, mentioned or configured into a composer
+ * that is not focused, so the collapsed state hides no control at a moment it
+ * could have been reached. What it buys is the roughly forty pixels of
+ * transcript that a permanently two-row box was spending on a toolbar nobody
+ * was looking at.
+ *
+ * `:placeholder-shown` is the emptiness test, rather than a flag in state,
+ * because every render is one `innerHTML` assignment over the whole app: a
+ * flag would have to be captured and restored across it, while the textarea's
+ * own value is what the markup is built from and survives on its own. It is
+ * also live — the bar opens on the first character typed, not on the render
+ * that character eventually causes.
+ *
+ * `.is-expanded` is for the things the textarea cannot see: staged
+ * attachments and a thread the next message is aimed at both sit outside this
+ * form, and both have to keep their bar open over an empty box.
+ */
+.composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown) {
+  --composer-pad-top: 7px;
+  --composer-pad-bottom: 7px;
+  --composer-pad-x: 4px;
+  --composer-shape: 999px;
+  --composer-layout: flex;
+  /* `contents` rather than a nested row: it lifts the toolbar's buttons into
+     the pill itself, which is what lets the attach button sit to the left of
+     the text and the send button to the right of it without either composer
+     rearranging its markup. */
+  --composer-bar-layout: contents;
+  --composer-inset: 0 5px;
+  --composer-send-shape: 999px;
+}
+
+/* The second row's contents, while there is no second row. Kept in the
+   markup and merely unpainted, so focusing the composer reveals them without
+   a render — and so nothing here has to know which controls a given composer
+   happens to carry. */
+.composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown)
+  :is(
+    .mini-select,
+    .ctx,
+    .composer-note,
+    .composer-bar .spacer,
+    [data-act="chat-mention"],
+    [data-act="channel-mention-key"]
+  ) {
+  display: none;
+}
+
+/* Attach leads, text follows, send closes. A no-op in the expanded bar, where
+   the attach button is already the first thing on the row. */
+.composer-bar > .icon-btn:first-of-type {
+  order: -1;
 }
 
 /* Stands in for the composer when there is no agent to talk to. */
@@ -2445,11 +2562,13 @@ svg {
  */
 .composer-field {
   position: relative;
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .composer-field textarea,
 .composer-mirror {
-  padding: 11px 13px 6px;
+  padding: var(--composer-pad-top) var(--composer-pad-x) var(--composer-pad-bottom);
   font-size: 12.5px;
   font-family: inherit;
   line-height: 1.5;
@@ -2471,11 +2590,16 @@ svg {
 .composer textarea {
   position: relative;
   width: 100%;
+  /* `flex-basis: 0` rather than `auto`, or the 100% above would be the
+     starting width of a row that also has buttons on it and the pill would
+     overflow its own border. Inert while the composer is a block. */
+  flex: 1 1 0;
+  min-width: 0;
   background: none;
   border: none;
   outline: none;
   resize: none;
-  padding: 11px 13px 6px;
+  padding: var(--composer-pad-top) var(--composer-pad-x) var(--composer-pad-bottom);
   /* Thread replies use the textarea itself to paint their text. Keep both
      properties explicit so a transparent fill used by a mirrored composer
      cannot make this shared control's characters disappear in WebKit. */
@@ -2505,9 +2629,10 @@ svg {
   background: var(--accent-wash-strong, rgba(139, 92, 246, 0.28));
 }
 
-/* Every composer control sits on one row. */
+/* Every composer control sits on one row — and while the composer is lean,
+   that row is the pill itself rather than a second one under the text. */
 .composer-bar {
-  display: flex;
+  display: var(--composer-bar-layout);
   align-items: center;
   gap: 6px;
   padding: 4px 7px 7px;
@@ -2571,7 +2696,9 @@ svg {
   place-items: center;
   width: 30px;
   height: 30px;
-  border-radius: 8px;
+  /* Round in the pill, rounded-square in the open composer. The fallback is
+     for the send buttons that live outside a composer entirely. */
+  border-radius: var(--composer-send-shape, 8px);
   background: var(--accent);
   color: #fff;
   flex: none;
@@ -3607,7 +3734,7 @@ svg {
 }
 
 .chan-sidebar {
-  width: 268px;
+  width: 256px;
   flex: none;
   display: grid;
   /* Brand, search, channels, then the roster takes what remains — so Users
@@ -3616,14 +3743,21 @@ svg {
   grid-template-rows: auto auto auto 1fr;
   min-height: 0;
   background: var(--bg-panel);
-  border-right: 1px solid var(--border-soft);
+  /* No border. This column is a shade off the conversation in both themes
+     (`--bg-panel` against `--bg-chat`), and a whole page-height rule on top
+     of that difference is one line of chrome doing a job the ground has
+     already done. The right-hand `.thread-panel` keeps its border and gains a
+     shadow for the opposite reason: it comes and goes, so it has to announce
+     itself as something laid over the conversation rather than beside it.
+     Off-canvas on a phone it carries `--shadow-pop` instead, which is the
+     same argument — a drawer is over the page, a column is the page. */
 }
 
 .chan-sidebar-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 14px 12px 10px;
+  padding: 12px 10px 8px;
 }
 
 .chan-sidebar-head .search {
@@ -3739,6 +3873,17 @@ svg {
   .dm-msg .dm-msg-actions {
     opacity: 1 !important;
     pointer-events: auto !important;
+  }
+
+  /* And the private panel's rewind, for the same reason. Static rather than
+     hung off the bubble's edge: there is no gutter to hang it in once the
+     panel is the width of a phone. */
+  .msg .icon-btn[data-act="chat-msg-delete"] {
+    position: static !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+    margin-left: 6px;
+    vertical-align: middle;
   }
 
   /* `.rr-avatar:hover`/`:focus-within` already reveals this — see
@@ -4126,46 +4271,33 @@ svg {
   opacity: 0.7;
 }
 
-.roster-row .rr-actions {
-  display: flex;
-  align-items: center;
-  gap: 2px;
-  flex: none;
-}
-
-/* The auditor's on/off switch. Only ever drawn on one row, so it is sized to
-   sit inside the icon-button rhythm beside it rather than to be noticed. */
-.roster-row .rr-switch {
-  width: 26px;
-  height: 15px;
-  padding: 0;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  background: var(--surface-2, transparent);
-  cursor: pointer;
+/* One button, revealed the same way a channel row's is — see `.chan-row
+   .cr-more`. The row used to carry four controls at once (a switch, rename,
+   settings, and a remove that was one mis-click from taking the agent out of
+   the channel); everything they did is in the menu behind this. */
+.roster-row .rr-more {
   flex: none;
   display: inline-flex;
-  align-items: center;
-  transition: background 120ms ease, border-color 120ms ease;
+  opacity: 0;
+  transition: opacity 0.12s ease;
 }
 
-.roster-row .rr-switch.on {
-  background: var(--accent);
-  border-color: var(--accent);
+.roster-row:hover .rr-more,
+.roster-row:focus-within .rr-more {
+  opacity: 1;
 }
 
-.roster-row .rr-switch-dot {
-  width: 11px;
-  height: 11px;
-  margin-left: 1px;
-  border-radius: 50%;
-  background: var(--text-dim, #888);
-  transition: transform 120ms ease, background 120ms ease;
+@media (hover: none) {
+  /* Nothing hovers on a touch screen, so the menu simply stays. */
+  .roster-row .rr-more {
+    opacity: 1;
+  }
 }
 
-.roster-row .rr-switch.on .rr-switch-dot {
-  transform: translateX(11px);
-  background: #fff;
+@media (prefers-reduced-motion: reduce) {
+  .roster-row .rr-more {
+    transition: none;
+  }
 }
 
 .roster-rename {
@@ -4228,6 +4360,51 @@ svg {
 
 .roster-settings .mini-select select {
   max-width: 100%;
+}
+
+/* The name and role are the first fields of the settings panel rather than a
+   second surface of their own, so the form supplies no indentation — the
+   panel around it already has the row's. */
+.roster-settings .roster-rename {
+  padding: 0;
+}
+
+/* Two labelled fields in one form: the second needs the same air between it
+   and the hint above it that the panel's own `gap` gives its other rows. */
+.roster-settings .roster-rename .rs-label ~ .rs-label {
+  margin-top: 8px;
+}
+
+/* The one destructive control in the panel, and the only red thing in it.
+   Shaped like `.menu-item-danger` — the same red, the same trash glyph, the
+   same wash on hover — because it is the same decision that used to sit in
+   the menu, moved to the bottom of the panel that decides everything else
+   about this agent. */
+.rs-remove {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 2px;
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px solid var(--red-wash);
+  border-radius: 7px;
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rs-remove svg {
+  width: 14px;
+  height: 14px;
+  color: var(--red);
+}
+
+.rs-remove:hover {
+  background: var(--red-wash);
 }
 
 /* --------------------------------------------------------- chat main ---- */
@@ -4468,6 +4645,31 @@ svg {
 .cmsg-row:focus-within .cmsg-actions {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* A message somebody unsaid, whose thread is still standing.
+
+   Deliberately quiet rather than absent: the row has to stay so the replies
+   under it keep answering something, but it is no longer a message anybody
+   should read for content. The avatar and name stay at full strength — who
+   deleted a message is often the only thing left worth knowing about it. */
+.cmsg-tombstone {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-4);
+  font-style: italic;
+}
+
+.cmsg-tombstone svg {
+  width: 12px;
+  height: 12px;
+  opacity: 0.7;
+}
+
+.cmsg-row.cmsg-deleted .cmsg-avatar,
+.cmsg-row.cmsg-deleted .cmsg-top {
+  opacity: 0.55;
 }
 
 /* A coordinator-authored line — @mention dispatch confirmations and
@@ -4892,13 +5094,49 @@ svg {
 
 /* A ping is a quiet, static label in the reader's primary accent. The wash is
    derived from that same accent for both themes, so it stays light without
-   introducing a second colour or motion into the transcript. */
-.cmsg-text .mention-ping {
+   introducing a second colour or motion. The same rule paints the draft's
+   mirror and the posted transcript, keeping the two states visually aligned. */
+.cmsg-text .mention-ping,
+.composer-mirror .mention-ping {
   font-weight: 650;
   color: var(--accent-bright);
   background: var(--accent-wash);
   border-radius: 4px;
+}
+
+/* A posted label can spend a little inline space to read as a token. */
+.cmsg-text .mention-ping {
   padding: 1px 4px;
+}
+
+/* The mirror must stay character-for-character the width of the textarea or
+   the caret and every character after a ping drift sideways. A paint-only
+   halo supplies the same subtle backing without changing inline layout. */
+.composer-mirror .mention-ping {
+  box-shadow: 0 0 0 2px var(--accent-wash);
+}
+
+/* A command is the same kind of token as a ping and gets the same treatment,
+   in the second accent so the two are told apart at a glance: one addresses
+   somebody, the other tells the channel to do something. Both are painted the
+   moment they are typed, from the composer's mirror, and keep that colour once
+   the message is posted. */
+.cmsg-text .slash-ping,
+.composer-mirror .slash-ping {
+  font-weight: 650;
+  color: var(--accent-2-bright);
+  background: var(--accent-2-wash);
+  border-radius: 4px;
+}
+
+.cmsg-text .slash-ping {
+  padding: 1px 4px;
+}
+
+/* Paint only, for the same reason as the mention above it: padding here would
+   move every character after the command and take the caret with it. */
+.composer-mirror .slash-ping {
+  box-shadow: 0 0 0 2px var(--accent-2-wash);
 }
 
 /* The request itself, at the top of the thinking it produced. Set apart from
@@ -5158,6 +5396,22 @@ svg {
 
 /* -------------------------------------------------------------- thread ---- */
 
+/*
+ * A surface over the conversation, not another column of it.
+ *
+ * This used to be told apart from the transcript by one hairline of
+ * `--border-soft`, which is the same hairline that separates a message from
+ * the next message — so a thread opening beside the channel read as the
+ * channel having changed rather than as somewhere you had stepped aside into.
+ * Two things say otherwise now, and neither costs layout: the border is the
+ * strong one rather than the hairline the transcript already uses between its
+ * own messages, and a shadow falls left onto the conversation so the panel
+ * reads as in front of it rather than tiled beside it.
+ *
+ * The shadow is spread with a negative offset so it only ever paints on the
+ * left edge — a glow around a full-height element that reaches the window's
+ * own edges is just a smudge under the browser chrome.
+ */
 .thread-panel {
   /* Dragged, and remembered — see `panel-grip` handling in app.js. The floor
      keeps a diff readable; the ceiling lets it take the whole conversation
@@ -5171,7 +5425,9 @@ svg {
   grid-template-rows: auto 1fr auto;
   min-height: 0;
   background: var(--bg-panel);
-  border-left: 1px solid var(--border-soft);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: -14px 0 30px -22px rgba(0, 0, 0, 0.9);
+  z-index: 4;
 }
 
 .panel-grip {
@@ -5214,10 +5470,55 @@ body.resizing-panel {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 13px 14px;
+  padding: 11px 10px 11px 14px;
   border-bottom: 1px solid var(--border-soft);
   font-size: 13.5px;
   font-weight: 600;
+}
+
+/* One quiet word saying which of the six surfaces this is — see `panelKind`.
+   Sized and coloured to be read second: the thing that follows it is the name
+   somebody came here for, and this is only the category it belongs to. */
+.thread-head .panel-kind {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  /* Butted against what it labels rather than spaced evenly among the
+     header's other children, which read as two peers otherwise. */
+  margin-right: -4px;
+}
+
+/* The one control the eye goes to when something is covering what was being
+   read. It starts brighter than the tools beside it and is fenced off from
+   them by a rule, so "close this" is never the fifth identical glyph in a row
+   — the file panel puts Diff/Edit, a back arrow and this on the same line.
+
+   The rule is a pseudo-element rather than a border, because `.icon-btn` is a
+   fixed 30px box centring its glyph: a border and padding come out of that
+   width under `border-box` and push the cross off its own centre. */
+.thread-head .panel-close {
+  flex: none;
+  position: relative;
+  margin-left: 9px;
+  color: var(--text-2);
+}
+
+.thread-head .panel-close::before {
+  content: "";
+  position: absolute;
+  left: -9px;
+  top: 5px;
+  bottom: 5px;
+  width: 1px;
+  background: var(--border-soft);
+}
+
+/* Nothing to fence off when it is the only control there. */
+.thread-head .panel-close:first-of-type::before {
+  display: none;
 }
 
 /* The thread's subject, in the slot that used to say "Thread". Ellipsized
@@ -5556,6 +5857,47 @@ body.resizing-panel {
   color: var(--text-3);
 }
 
+/* A label, and under it the sentence that says what picking it will do. The
+   grid is so the second line wraps under the first rather than under the
+   icon. */
+.menu-item-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.menu-item-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-item-hint {
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--text-3);
+  white-space: normal;
+}
+
+/* The one item in a menu that destroys something, in the same red the rest of
+   the interface uses for errors and for `.btn-danger`. Red before the click,
+   not only in the confirmation after it: the colour is the warning. Its icon
+   is tinted too, since a grey trash can beside red text reads as a mistake. */
+.menu-item-danger,
+.menu-item-danger svg {
+  color: var(--red);
+}
+
+.menu-item-danger:hover:not(:disabled) {
+  background: var(--red-wash);
+  color: var(--red);
+}
+
+.menu-item-danger:hover:not(:disabled) svg {
+  color: var(--red);
+}
+
 .menu-sep {
   height: 1px;
   margin: 4px 2px;
@@ -5872,6 +6214,12 @@ dialog.modal::backdrop {
   display: none;
 }
 
+/* The mirror image of `.desk-only`: only there once the surface it closes is
+   a drawer covering the conversation. Turned back on in the 600px tier. */
+.drawer-close {
+  display: none;
+}
+
 @media (min-width: 601px) {
   .desk-only {
     display: inline-grid;
@@ -6049,6 +6397,12 @@ dialog.modal::backdrop {
      affordances if the platform supplies them. */
   .chan-sidebar-btn {
     display: inline-grid !important;
+  }
+
+  /* See `.drawer-close` above — the drawer's own way out, next to the search
+     box it opens with. */
+  .drawer-close {
+    display: inline-grid;
   }
 
   .chan-sidebar {

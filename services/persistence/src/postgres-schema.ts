@@ -794,4 +794,13 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
       )`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 33,
+    name: "channel-message-tombstones",
+    statements: [
+      `ALTER TABLE channel_messages ADD COLUMN deleted_at TEXT`,
+      `ALTER TABLE channel_messages ADD COLUMN deleted_by TEXT`,
+    ],
+  },
 ];

@@ -2383,6 +2383,31 @@ export async function sendDirectMessage(userId, content) {
 }
 
 /**
+ * Unsends one direct message.
+ *
+ * Gone for both people, because both people are the whole audience: a
+ * "delete for me" would be a filter on one screen while the sentence stayed
+ * on the other, which is not what unsending a message means to anyone.
+ * Sender-only, and the server holds that rule.
+ *
+ * The inbox row is left to `loadDirectMessages` rather than recomputed here —
+ * deleting the newest message changes which one is "last", and guessing at
+ * that locally is how a preview ends up disagreeing with the thread.
+ */
+export async function deleteDirectMessageEntry(userId, messageId) {
+  await api(
+    directPath(
+      `/${encodeURIComponent(userId)}/messages/${encodeURIComponent(messageId)}`,
+    ),
+    { method: "DELETE" },
+  );
+  state.dmThreads[userId] = (state.dmThreads[userId] ?? []).filter(
+    (entry) => entry.id !== messageId,
+  );
+  await loadDirectMessages();
+}
+
+/**
  * A message that arrived over the socket, for either side of a conversation.
  *
  * Keyed on whoever is not the reader, which is what makes one handler serve
@@ -2417,6 +2442,30 @@ export function noteDirectMessage(frame) {
       (conversation) => conversation.userId !== other,
     ),
   ];
+}
+
+/**
+ * A message the other side unsent, arriving over the socket.
+ *
+ * The counterpart to `noteDirectMessage`, and keyed the same way — whoever is
+ * not the reader — so the sender's own echo and the recipient's copy are one
+ * handler. Without this the recipient's screen kept a sentence the sender has
+ * been told is gone, until something else happened to reload the thread.
+ */
+export function noteDirectMessageDeleted(frame) {
+  const messageId = frame?.messageId;
+  if (messageId === undefined) {
+    return;
+  }
+  const me = currentUserId();
+  const other = frame.authorId === me ? frame.recipientId : frame.authorId;
+  state.dmThreads[other] = (state.dmThreads[other] ?? []).filter(
+    (entry) => entry.id !== messageId,
+  );
+  // The inbox row shows the last message and an unread count, and the deleted
+  // one may have been either. Re-read rather than recompute: this is the same
+  // "the store stays the source of truth" the audit stream follows.
+  void loadDirectMessages();
 }
 
 /** Whether somebody has this project open right now. */
@@ -3306,21 +3355,97 @@ export async function rollbackTask(repositoryId, taskId) {
 }
 
 /**
- * Removes one thread, or every thread in the channel.
+ * Removes one channel message.
+ *
+ * What comes back decides what happens locally, because the server decides
+ * which of the two deletions this was: a message nobody has replied under is
+ * gone, and one that carries a thread is blanked in place so the replies —
+ * other people's reading, and the agent's account of a task — keep standing
+ * under a tombstone. See docs/architecture/message-deletion.md.
  *
  * Local state is updated only once the server has agreed. An optimistic
  * delete that failed would leave the reader believing something is gone while
  * it is still there for everybody else — the wrong way round for an action
  * that cannot be undone.
+ *
+ * Returns whether the message's task was stopped, so the caller can say so:
+ * "deleted" and "deleted, and the agent working on it has been stopped" are
+ * very different things to have just done.
+ */
+export async function deleteChannelMessageEntry(
+  repositoryId,
+  messageId,
+  { purge = false } = {},
+) {
+  const response = await api(
+    channelPath(
+      repositoryId,
+      `/messages/${encodeURIComponent(messageId)}${purge ? "?purge=1" : ""}`,
+    ),
+    { method: "DELETE" },
+  );
+  const messages = state.channelMessages[repositoryId] ?? [];
+  if (response?.redacted === true) {
+    state.channelMessages[repositoryId] = messages.map((entry) =>
+      entry.id === messageId
+        ? {
+            ...entry,
+            content: "",
+            reactions: {},
+            deletedAt: new Date().toISOString(),
+            deletedBy: currentUserId(),
+          }
+        : entry,
+    );
+  } else {
+    state.channelMessages[repositoryId] = messages.filter(
+      (entry) => entry.id !== messageId,
+    );
+  }
+  // A pinned message that has gone must not stay in the banner pointing at a
+  // jump target the document no longer has.
+  state.channelPins[repositoryId] = (
+    state.channelPins[repositoryId] ?? []
+  ).filter((entry) => entry.id !== messageId);
+  return { cancelledTask: response?.cancelledTask === true };
+}
+
+/**
+ * Removes one whole thread from the thread panel.
+ *
+ * `purge`, because that is what this button has always meant and what its
+ * confirmation still promises: everything in the thread goes, replies
+ * included. Unsaying one message is the other button, on the message itself.
  */
 export async function deleteChannelThread(repositoryId, messageId) {
+  await deleteChannelMessageEntry(repositoryId, messageId, { purge: true });
+}
+
+/**
+ * Removes one reply from a thread.
+ *
+ * A reply is a leaf — nothing hangs off it — so there is no tombstone case
+ * here and it simply goes, from the thread and from the channel copy of the
+ * root that carries the same replies.
+ */
+export async function deleteChannelReplyEntry(repositoryId, messageId, replyId) {
   await api(
-    channelPath(repositoryId, `/messages/${encodeURIComponent(messageId)}`),
+    channelPath(
+      repositoryId,
+      `/messages/${encodeURIComponent(messageId)}/replies/${encodeURIComponent(replyId)}`,
+    ),
     { method: "DELETE" },
   );
   state.channelMessages[repositoryId] = (
     state.channelMessages[repositoryId] ?? []
-  ).filter((entry) => entry.id !== messageId);
+  ).map((entry) =>
+    entry.id === messageId
+      ? {
+          ...entry,
+          replies: (entry.replies ?? []).filter((reply) => reply.id !== replyId),
+        }
+      : entry,
+  );
 }
 
 export async function deleteAllChannelThreads(repositoryId) {
@@ -3387,6 +3512,30 @@ export function channelUnreadCount(repositoryId, { mentionsOnly = false } = {}) 
           (mention) => mention.kind === "user" && mention.id === mine,
         )),
   ).length;
+}
+
+/**
+ * Whether the reader may delete this message or reply.
+ *
+ * The same rule the gateway enforces, drawn rather than discovered: your own
+ * words, or anybody who runs the project. "Your own" includes your agent's
+ * lines — an agent posts on its owner's credential, under a name that owner
+ * chose — and never anybody else's agent. System lines belong to the
+ * coordinator and are nobody's to unsay.
+ *
+ * Only a guess at what the server will allow, so an out-of-date answer costs a
+ * button that 403s rather than anything worse.
+ */
+export function canDeleteChannelEntry(repositoryId, entry) {
+  if (entry === undefined || entry.kind === "system") {
+    return false;
+  }
+  const me = currentUserId();
+  const authorId = String(entry.authorId ?? "");
+  return (
+    (me !== "" && (authorId === me || authorId.startsWith(`${me}:`))) ||
+    canManageRepository(repositoryId)
+  );
 }
 
 /** Resolves who sent a message right now, so a rename reaches old messages. */

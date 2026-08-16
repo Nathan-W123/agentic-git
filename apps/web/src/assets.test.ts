@@ -449,6 +449,59 @@ test("every composer control sits on one row with an icon-sized context dial", a
   assert.match(css, /\.ctx svg \{\s*width: 15px;\s*height: 15px;/u);
 });
 
+test("an empty, unfocused composer collapses to one lean row", async () => {
+  const css = await publicFile("styles.css");
+  // The collapse is driven by the textarea's own emptiness rather than by a
+  // flag in state, because every render replaces the whole app's markup and a
+  // flag would have to be carried across it.
+  const collapsed =
+    /\.composer:not\(\.is-expanded\):not\(:focus-within\):has\(textarea:placeholder-shown\)/gu;
+  assert.ok(
+    (css.match(collapsed) ?? []).length >= 2,
+    "the lean bar should be selected off :placeholder-shown",
+  );
+  // Every metric the lean bar changes goes through a variable. Two copies of
+  // these paddings — one for the textarea and one for the mirror painted
+  // under it — is how the highlight slides off the name it belongs to.
+  assert.match(
+    css,
+    /\.composer-field textarea,\s*\.composer-mirror \{\s*padding: var\(--composer-pad-top\) var\(--composer-pad-x\) var\(--composer-pad-bottom\);/u,
+  );
+  assert.match(css, /--composer-shape: 999px;/u);
+  assert.match(css, /--composer-bar-layout: contents;/u);
+  // Nothing on the folded row is dropped from the markup: it is unpainted, so
+  // focusing the composer brings it back without waiting for a render.
+  const hidden = /:has\(textarea:placeholder-shown\)\s*:is\(([\s\S]*?)\)\s*\{\s*display: none;/u
+    .exec(css)?.[1];
+  assert.notEqual(hidden, undefined, "the folded controls should be one list");
+  for (const control of [
+    "mini-select",
+    "ctx",
+    "composer-note",
+    "chat-mention",
+    "channel-mention-key",
+  ]) {
+    assert.match(hidden ?? "", new RegExp(control, "u"), `${control} folds away, not out`);
+  }
+});
+
+test("the composer stays open over a decision the textarea cannot see", async () => {
+  const source = await publicFile("screen-chats.js");
+  const start = source.indexOf("function composer(repositoryId)");
+  const body = source.slice(start, source.indexOf("\n}", start));
+  // Staged images, an upload in flight and a thread the next message is aimed
+  // at all live outside the form, so an empty box would otherwise collapse the
+  // bar carrying the controls that answer them.
+  assert.match(body, /is-expanded/u);
+  for (const pending of [
+    /state\.attaching > 0/u,
+    /state\.composerThreadId !== undefined/u,
+    /draftAttachments\(repositoryId\)\.length > 0/u,
+  ]) {
+    assert.match(body, pending);
+  }
+});
+
 test("the chat panel shows a bare progress bar and no token statistics", async () => {
   const source = await publicFile("chat.js");
   const start = source.indexOf("export function chatProgress");
@@ -931,17 +984,31 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
     /messageBody\(\s*entry\.content,\s*repositoryId,\s*entry\.mentions,/u,
   );
 
-  // One readable accent on its light wash, with no changing gradient.
+  // One readable accent on its light wash, shared with the live composer and
+  // with no changing gradient.
+  const sharedSelector =
+    ".cmsg-text .mention-ping,\n.composer-mirror .mention-ping {";
   const rule = css.slice(
-    css.indexOf(".cmsg-text .mention-ping {"),
-    css.indexOf("}", css.indexOf(".cmsg-text .mention-ping {")) + 1,
+    css.indexOf(sharedSelector),
+    css.indexOf("}", css.indexOf(sharedSelector)) + 1,
   );
+  assert.notEqual(css.indexOf(sharedSelector), -1);
   assert.match(rule, /color: var\(--accent-bright\);/u);
   assert.match(rule, /background: var\(--accent-wash\);/u);
   assert.match(rule, /border-radius:/u);
-  assert.match(rule, /padding:/u);
   assert.doesNotMatch(rule, /gradient|animation|background-clip|text-fill/iu);
+  assert.match(
+    css,
+    /\.cmsg-text \.mention-ping \{\n  padding: 1px 4px;\n\}/u,
+  );
   assert.doesNotMatch(css, /mention-wave/u);
+
+  // A command keeps the colour it had in the composer once it is posted:
+  // `richText` runs the same `slashMarkup` the mirror does, and the posted
+  // token gets the same inline padding a posted ping does.
+  assert.match(chats, /function slashMarkup/u);
+  assert.match(chats, /const inline = \(value\) =>\s*\n\s*slashMarkup\(/u);
+  assert.match(css, /\.cmsg-text \.slash-ping \{\n  padding: 1px 4px;\n\}/u);
 });
 
 test("the invite screen names the product, not only the team", async () => {
@@ -1183,13 +1250,75 @@ test("the composer paints its mentions on a layer that matches the textarea", as
   assert.match(chats, /paintComposerMirror\(node\);/u);
   assert.match(css, /\.composer-mirror \.mention-ping/u);
 
-  // Mentions only — none of richText's markdown. `**bold**` renders two
-  // characters shorter than it is typed, and a mirror that is shorter than
-  // the textarea wraps somewhere else and drags the highlight off the name.
-  const mirror = /function composerMirror\(value\) \{[\s\S]*?\n\}/u.exec(chats);
-  assert.ok(mirror !== null, "composerMirror is defined");
-  assert.equal(/richText/u.test(mirror[0]), false);
-  assert.match(mirror[0], /mentionMarkup\(esc\(/u);
+  // Mentions only — none of richText's markdown. Exercise the actual mirror,
+  // including the live participant list that the merge accidentally omitted.
+  const start = chats.indexOf("function mentionMarkup");
+  const end = chats.indexOf("\n/** Repaints the layer", start);
+  assert.notEqual(start, -1, "screen-chats.js declares mentionMarkup");
+  assert.notEqual(end, -1, "composerMirror has a testable boundary");
+  const createMirror = new Function(
+    "esc",
+    `${chats.slice(start, end)}\nreturn composerMirror;`,
+  );
+  const composerMirror = createMirror((value: unknown) => {
+    const entities: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return String(value ?? "").replace(
+      /[&<>"']/gu,
+      (character) => entities[character] ?? character,
+    );
+  }) as (value: string, participants: Array<{ name: string }>) => string;
+  const wrap = (value: string, names: string[]) =>
+    composerMirror(
+      value,
+      names.map((name) => ({ name })),
+    )
+      .replace(/<span class="mention-ping">@([^<]*)<\/span>/gu, "[$1]")
+      .replace(/<span class="slash-ping">\/([^<]*)<\/span>/gu, "{$1}");
+  assert.equal(
+    wrap("ask @Mary Jane and @Claude (Owner)", [
+      "Mary",
+      "Mary Jane",
+      "Claude (Owner)",
+    ]),
+    "ask [Mary Jane] and [Claude (Owner)]\n",
+  );
+  assert.equal(
+    wrap("mail nate@example.com; see docs/@notes", ["example.com", "notes"]),
+    "mail nate@example.com; see docs/@notes\n",
+  );
+  assert.equal(
+    wrap("<code>@agent</code>", ["agent"]),
+    "&lt;code&gt;@agent&lt;/code&gt;\n",
+  );
+  assert.equal(wrap("@agents review", []), "[agents] review\n");
+
+  // The point of the mirror is that it colours what is being typed *now*. A
+  // ping only lit up once its last character landed, and a name that never
+  // resolved never lit up at all, so the composer looked broken next to the
+  // transcript above it. The half-typed token is a ping too.
+  assert.equal(wrap("ask @Mar", ["Mary Jane"]), "ask [Mar]\n");
+  assert.equal(wrap("@", []), "[]\n");
+  // ...and a command is coloured from the first character after the slash,
+  // wherever in the message it was written.
+  assert.equal(wrap("/plan the migration", []), "{plan} the migration\n");
+  assert.equal(wrap("@agents /plan it", []), "[agents] {plan} it\n");
+  // A path is not a command, and neither is a slash inside a word — the same
+  // boundary the picker itself opens on.
+  assert.equal(wrap("edit src/retry.ts", []), "edit src/retry.ts\n");
+  assert.equal(wrap("ls /usr/bin", []), "ls /usr/bin\n");
+  // The markup the passes before it produced is not re-read by the ones
+  // after: a resolved multi-word name stays whole, and no closing tag is
+  // mistaken for a command.
+  assert.equal(
+    wrap("/plan with @Mary Jane", ["Mary Jane"]),
+    "{plan} with [Mary Jane]\n",
+  );
 
   // The metrics the two share. Declared once, for both selectors, because a
   // single pixel of difference between them wraps the mirror at a different
@@ -1214,6 +1343,25 @@ test("the composer paints its mentions on a layer that matches the textarea", as
 
   // The caret is the one part of the textarea that must stay visible.
   assert.match(css, /caret-color: var\(--text\)/u);
+  const composerPing = /\.composer-mirror \.mention-ping \{([\s\S]*?)\n\}/u
+    .exec(css);
+  assert.ok(composerPing !== null, "the composer mention rule exists");
+  assert.doesNotMatch(
+    composerPing[1] ?? "",
+    /\b(?:margin|padding):/u,
+    "painting a mention must not move the textarea's following characters",
+  );
+  // The command token is painted under the same constraint, in the second
+  // accent so a command and a ping are not the same colour.
+  assert.match(css, /\.cmsg-text \.slash-ping,\n\.composer-mirror \.slash-ping \{/u);
+  assert.match(css, /\.composer-mirror \.slash-ping \{[\s\S]{0,120}accent-2-wash/u);
+  const composerSlash = /\.composer-mirror \.slash-ping \{([\s\S]*?)\n\}/u.exec(css);
+  assert.ok(composerSlash !== null, "the composer command rule exists");
+  assert.doesNotMatch(
+    composerSlash[1] ?? "",
+    /\b(?:margin|padding):/u,
+    "painting a command must not move the textarea's following characters",
+  );
 });
 
 test("a phone's caret sits on its own letters, and a backlog arrives as one line", async () => {
@@ -1257,4 +1405,135 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
   assert.match(app, /CHANNEL_FRAME_COALESCE_MS/u);
   // The burst collapses, it is not dropped: the count is still reported.
   assert.match(app, /\$\{lines\.length\} updates/u);
+});
+
+test("a roster row carries one button, and one settings panel behind it", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await browserSource();
+  const ui = await publicFile("ui.js");
+  const css = await publicFile("styles.css");
+
+  const row = chats.slice(
+    chats.indexOf("function rosterRow(agent)"),
+    chats.indexOf("/**\n * What the \"...\" on a roster row offers"),
+  );
+  assert.notEqual(row, "", "the roster row should still be drawn here");
+  // The four controls the row used to carry — a switch, rename, model &
+  // effort, and a close button one mis-click from removing the agent —
+  // collapse into the same "..." the channel rows above already use.
+  assert.match(row, /act: "roster-agent-menu"/u);
+  for (const gone of [
+    "rr-switch",
+    'act: "channel-rename-toggle"',
+    'act: "channel-settings-toggle"',
+    'act: "channel-agent-remove"',
+  ]) {
+    assert.equal(
+      row.includes(gone),
+      false,
+      `${gone} should live in the menu, not on the row`,
+    );
+  }
+  // The row's only expandable is the one panel; the separate rename form it
+  // used to grow instead is gone.
+  assert.match(row, /settingsOpen \? rosterSettings\(agent\) : ""/u);
+  assert.equal(row.includes("chatRenamingId"), false);
+
+  // The menu is now short on purpose: editing the agent at all is one entry,
+  // beside the two things that are not edits.
+  const menu = chats.slice(
+    chats.indexOf("export function rosterMenuItems"),
+    chats.indexOf("function chanSidebar"),
+  );
+  assert.match(menu, /"channel-settings-toggle"/u);
+  assert.match(menu, /label: "Settings"/u);
+  assert.match(menu, /"auditor-toggle"/u);
+  assert.match(menu, /"agent-chat-open"/u);
+  // Rename, model and removal are no longer three ways into the same
+  // question — the panel holds all of them.
+  for (const gone of [
+    "channel-rename-toggle",
+    "channel-agent-remove",
+    "separator: true",
+  ]) {
+    assert.equal(
+      menu.includes(gone),
+      false,
+      `${gone} belongs to the settings panel, not the menu`,
+    );
+  }
+
+  // And the panel is where they went: the name and role in a form that
+  // commits them, the model and effort as dropdowns, removal last and red.
+  const settings = chats.slice(
+    chats.indexOf("function rosterSettings(agent)"),
+    chats.indexOf("/**\n * The hover card for one roster entry"),
+  );
+  assert.notEqual(settings, "", "the settings panel is drawn here");
+  assert.match(settings, /data-act="channel-rename-form"/u);
+  assert.match(settings, /data-act="channel-rename-input"/u);
+  assert.match(settings, /data-act="channel-role-input"/u);
+  assert.match(settings, /settingRow\("Model", "channel-agent-model"/u);
+  assert.match(settings, /"channel-agent-effort"/u);
+  assert.match(settings, /class="rs-remove" data-act="\$\{removeAct\}"/u);
+  // A teammate's agent may only be removed by somebody the server would let,
+  // and one's own is unconditional — the same rule the menu applied before.
+  assert.match(
+    settings,
+    /agent\.mine === true \|\| canManageRepository\(activeChannelId\(\)\)/u,
+  );
+  assert.match(
+    settings,
+    /agent\.mine === true\s*\?\s*"channel-agent-remove"\s*:\s*"channel-agent-remove-any"/u,
+  );
+  // Red, and the only red thing in the panel.
+  assert.match(css, /\.rs-remove \{[\s\S]{0,240}color: var\(--red\)/u);
+  assert.match(css, /\.rs-remove:hover \{[\s\S]{0,80}background: var\(--red-wash\)/u);
+
+  // `danger` is still the flag the shared menu paints its destructive entries
+  // with, so anything that goes back into a menu is the same red.
+  assert.match(ui, /item\.danger === true \? " menu-item-danger"/u);
+  assert.match(css, /\.menu-item-danger[\s\S]{0,120}color: var\(--red\)/u);
+
+  // The menu is dismissed by everything it dispatches: `render()` rebuilds
+  // the row underneath it, and a popover anchored to a button that no longer
+  // exists is left floating over the result.
+  assert.match(app, /case "roster-agent-menu":[\s\S]{0,160}rosterMenuItems\(value\)/u);
+  assert.match(app, /case "channel-agent-remove":\s*\n\s*closePopover\(\);/u);
+  assert.match(
+    app,
+    /case "channel-settings-toggle":\s*\n\s*closePopover\(\);/u,
+  );
+  // Opening the panel puts the cursor in the field somebody most often came
+  // for, and a commit that changes nothing must not rebuild the panel around
+  // the picker they were reaching for.
+  assert.match(app, /channel-rename-input'\]"\);\s*\n\s*input\?\.focus\(\)/u);
+  assert.match(app, /input\.value !== input\.defaultValue/u);
+  assert.match(app, /nameInput\.value !== nameInput\.defaultValue/u);
+  assert.match(app, /state\.chatSettingsOpenId === agentId/u);
+});
+
+test("a slash command is offered wherever it is typed, not only at the start", async () => {
+  const chats = await publicFile("screen-chats.js");
+
+  // It used to have to be the first thing in the message, on both sides.
+  // Nothing on screen said so, and somebody who typed the mention first got
+  // a slash that opened nothing.
+  const mentionState = chats.slice(
+    chats.indexOf("function updateMentionState"),
+    chats.indexOf("export function updateComposerInput"),
+  );
+  assert.match(mentionState, /\/\(\^\|\\s\)\\\/\(\[a-z0-9-\]\*\)\$\/iu/u);
+  assert.equal(
+    /\^\\s\*\\\//u.test(mentionState),
+    false,
+    "the picker is no longer anchored to the start of the message",
+  );
+  // Completing the command keeps whatever was already written before it —
+  // the capture is put back, so the picker no longer eats the sentence.
+  const pick = chats.slice(
+    chats.indexOf("export function pickSlashCommand"),
+    chats.indexOf("export function pickMention"),
+  );
+  assert.match(pick, /`\$1\/\$\{name\} `/u);
 });

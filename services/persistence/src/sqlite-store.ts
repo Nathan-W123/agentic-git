@@ -3145,6 +3145,26 @@ export class SqliteCoordinationStore implements CoordinationStore {
     return message;
   }
 
+  public async deleteDirectMessage(
+    projectId: ProjectId,
+    messageId: string,
+    authorId: string,
+  ): Promise<DirectMessage | undefined> {
+    const row = this.db
+      .prepare(
+        `SELECT * FROM direct_messages
+         WHERE id = ? AND project_id = ? AND author_id = ?`,
+      )
+      .get(messageId, projectId, authorId) as Row | undefined;
+    if (row === undefined) {
+      return undefined;
+    }
+    this.db
+      .prepare("DELETE FROM direct_messages WHERE id = ?")
+      .run(messageId);
+    return this.toDirectMessage(row);
+  }
+
   public async listDirectMessages(
     projectId: ProjectId,
     viewerId: string,
@@ -3481,6 +3501,68 @@ export class SqliteCoordinationStore implements CoordinationStore {
     }
   }
 
+  public async redactChannelMessage(
+    repositoryId: string,
+    messageId: string,
+    input: { deletedAt: string; deletedBy: string },
+  ): Promise<void> {
+    this.db.exec("BEGIN");
+    try {
+      // `deleted_at IS NULL` so a second pass cannot restamp who unsaid it.
+      const result = this.db
+        .prepare(
+          // The pin goes with the words: a banner pointing at a tombstone is
+        // worse than no banner.
+        `UPDATE channel_messages
+             SET content = '', deleted_at = ?, deleted_by = ?,
+                 pinned_at = NULL, pinned_by = NULL
+           WHERE repository_id = ? AND id = ? AND deleted_at IS NULL`,
+        )
+        .run(input.deletedAt, input.deletedBy, repositoryId, messageId);
+      if (Number(result.changes) > 0) {
+        // Reactions were agreement with a line that is no longer there.
+        this.db
+          .prepare("DELETE FROM channel_message_reactions WHERE message_id = ?")
+          .run(messageId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  public async deleteChannelReply(
+    repositoryId: string,
+    messageId: string,
+    replyId: string,
+  ): Promise<ChannelReply | undefined> {
+    const row = this.db
+      .prepare(
+        `SELECT r.* FROM channel_message_replies r
+           JOIN channel_messages m ON m.id = r.message_id
+         WHERE r.id = ? AND r.message_id = ? AND m.repository_id = ?`,
+      )
+      .get(replyId, messageId, repositoryId) as Row | undefined;
+    if (row === undefined) {
+      return undefined;
+    }
+    this.db.exec("BEGIN");
+    try {
+      this.db
+        .prepare("DELETE FROM channel_message_reactions WHERE message_id = ?")
+        .run(replyId);
+      this.db
+        .prepare("DELETE FROM channel_message_replies WHERE id = ?")
+        .run(replyId);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    return this.toChannelReply(row);
+  }
+
   public async deleteChannelMessages(repositoryId: string): Promise<number> {
     this.db.exec("BEGIN");
     try {
@@ -3786,6 +3868,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
   private toChannelMessageBase(
     row: Row,
   ): Omit<ChannelMessage, "replies" | "reactions"> {
+    const deletedAt = optionalText(row, "deleted_at");
+    const deletedBy = optionalText(row, "deleted_by");
     return {
       id: text(row, "id"),
       repositoryId: text(row, "repository_id"),
@@ -3799,6 +3883,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
       pinnedAt: optionalText(row, "pinned_at"),
       pinnedBy: optionalText(row, "pinned_by"),
       endedAt: optionalText(row, "ended_at"),
+      ...(deletedAt === undefined ? {} : { deletedAt }),
+      ...(deletedBy === undefined ? {} : { deletedBy }),
     };
   }
 

@@ -1060,12 +1060,23 @@ export function tabs(act, items, current) {
     .join("")}</div>`;
 }
 
-export function iconButton(name, { act = "", title = "", value = "", small = false } = {}) {
-  return `<button type="button" class="icon-btn${small ? " sm" : ""}"${
-    act ? ` data-act="${act}"` : ""
-  }${value ? ` data-value="${esc(value)}"` : ""} title="${esc(title)}" aria-label="${esc(
-    title,
-  )}">${icon(name)}</button>`;
+/**
+ * `cls` is for the handful of icon buttons that are not one of a row.
+ *
+ * A panel's close button is the example: it does the same thing every icon
+ * button does, but it is the one control a reader looks for when a surface is
+ * covering what they were reading, and it earns a treatment the tools beside
+ * it do not get. Cheaper than a second near-identical helper.
+ */
+export function iconButton(
+  name,
+  { act = "", title = "", value = "", small = false, cls = "" } = {},
+) {
+  return `<button type="button" class="icon-btn${small ? " sm" : ""}${
+    cls ? ` ${cls}` : ""
+  }"${act ? ` data-act="${act}"` : ""}${
+    value ? ` data-value="${esc(value)}"` : ""
+  } title="${esc(title)}" aria-label="${esc(title)}">${icon(name)}</button>`;
 }
 
 export function statTile({ value, label, foot, iconName, tone = "purple" }) {
@@ -1295,17 +1306,34 @@ export function showPopover(anchor, html, { width = 400 } = {}) {
  * Exists so a "..." button has somewhere real to go. Items are ordinary
  * delegated actions, so a menu entry behaves exactly like the button it
  * stands in for.
+ *
+ * `danger: true` marks the one item in a menu that destroys something. It is
+ * a flag rather than a caller-supplied class so that every destructive entry
+ * in the app is the same red — the colour is what tells somebody, before they
+ * click, that this item is not like the others.
+ *
+ * A `hint` is the second line under a label, for the menus that offer a
+ * choice rather than a command and would otherwise need the reader to already
+ * know the difference.
  */
 export function showMenu(anchor, items) {
   const body = items
     .map((item) =>
       item.separator === true
         ? `<div class="menu-sep"></div>`
-        : `<button type="button" class="menu-item" data-act="${item.act}"${
+        : `<button type="button" class="menu-item${
+            item.danger === true ? " menu-item-danger" : ""
+          }" data-act="${item.act}"${
             item.value === undefined ? "" : ` data-value="${esc(item.value)}"`
           }${item.disabled === true ? " disabled" : ""}>${
             item.iconName === undefined ? "" : icon(item.iconName)
-          }<span>${esc(item.label)}</span></button>`,
+          }<span class="menu-item-text"><span class="menu-item-label">${esc(
+            item.label,
+          )}</span>${
+            item.hint === undefined
+              ? ""
+              : `<span class="menu-item-hint">${esc(item.hint)}</span>`
+          }</span></button>`,
     )
     .join("");
   return showPopover(anchor, `<div class="menu">${body}</div>`, { width: 216 });

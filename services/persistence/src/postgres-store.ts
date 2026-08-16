@@ -3056,6 +3056,59 @@ export class PostgresCoordinationStore implements CoordinationStore {
     });
   }
 
+  public async redactChannelMessage(
+    repositoryId: string,
+    messageId: string,
+    input: { deletedAt: string; deletedBy: string },
+  ): Promise<void> {
+    await this.transaction(async (client) => {
+      // `deleted_at IS NULL` so a second pass cannot restamp who unsaid it.
+      const result = await client.query(
+        // The pin goes with the words: a banner pointing at a tombstone is
+        // worse than no banner.
+        `UPDATE channel_messages
+           SET content = '', deleted_at = $1, deleted_by = $2,
+               pinned_at = NULL, pinned_by = NULL
+         WHERE repository_id = $3 AND id = $4 AND deleted_at IS NULL`,
+        [input.deletedAt, input.deletedBy, repositoryId, messageId],
+      );
+      if ((result.rowCount ?? 0) > 0) {
+        // Reactions were agreement with a line that is no longer there.
+        await client.query(
+          "DELETE FROM channel_message_reactions WHERE message_id = $1",
+          [messageId],
+        );
+      }
+    });
+  }
+
+  public async deleteChannelReply(
+    repositoryId: string,
+    messageId: string,
+    replyId: string,
+  ): Promise<ChannelReply | undefined> {
+    return await this.transaction(async (client) => {
+      const found = await client.query(
+        `SELECT r.* FROM channel_message_replies r
+           JOIN channel_messages m ON m.id = r.message_id
+         WHERE r.id = $1 AND r.message_id = $2 AND m.repository_id = $3`,
+        [replyId, messageId, repositoryId],
+      );
+      const row = found.rows[0] as Row | undefined;
+      if (row === undefined) {
+        return undefined;
+      }
+      await client.query(
+        "DELETE FROM channel_message_reactions WHERE message_id = $1",
+        [replyId],
+      );
+      await client.query("DELETE FROM channel_message_replies WHERE id = $1", [
+        replyId,
+      ]);
+      return this.toChannelReply(row);
+    });
+  }
+
   public async deleteChannelMessages(repositoryId: string): Promise<number> {
     return await this.transaction(async (client) => {
       const ids = (
@@ -3164,6 +3217,23 @@ export class PostgresCoordinationStore implements CoordinationStore {
       ],
     );
     return message;
+  }
+
+  public async deleteDirectMessage(
+    projectId: ProjectId,
+    messageId: string,
+    authorId: string,
+  ): Promise<DirectMessage | undefined> {
+    const rows = (
+      await this.query(
+        `DELETE FROM direct_messages
+         WHERE id = $1 AND project_id = $2 AND author_id = $3
+         RETURNING *`,
+        [messageId, projectId, authorId],
+      )
+    ).rows as Row[];
+    const row = rows[0];
+    return row === undefined ? undefined : this.toDirectMessage(row);
   }
 
   public async listDirectMessages(
@@ -3650,6 +3720,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
   private toChannelMessageBase(
     row: Row,
   ): Omit<ChannelMessage, "replies" | "reactions"> {
+    const deletedAt = optionalText(row, "deleted_at");
+    const deletedBy = optionalText(row, "deleted_by");
     return {
       id: text(row, "id"),
       repositoryId: text(row, "repository_id"),
@@ -3663,6 +3735,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
       pinnedAt: optionalText(row, "pinned_at"),
       pinnedBy: optionalText(row, "pinned_by"),
       endedAt: optionalText(row, "ended_at"),
+      ...(deletedAt === undefined ? {} : { deletedAt }),
+      ...(deletedBy === undefined ? {} : { deletedBy }),
     };
   }
 

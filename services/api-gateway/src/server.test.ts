@@ -3504,7 +3504,7 @@ function agentSpeech(messages: unknown[]): any[] {
   return (messages as any[]).filter(
     (message) =>
       message.kind === "agent" &&
-      !/^Want me to take care of this\?/u.test(String(message.content ?? "")),
+      !/^Want me to take this/u.test(String(message.content ?? "")),
   );
 }
 
@@ -3853,6 +3853,11 @@ test("an explicit @mention suppresses auto-claim even when an unmentioned agent 
   assert.ok(task !== undefined);
   assert.equal(task.actorId, backend.id);
   assert.equal(task.vendor, "codex");
+  assert.equal(
+    task.context,
+    undefined,
+    "explicit mentions must not inherit ambient channel context",
+  );
 
   const after = await owner.request(`${base}/messages`);
   const systemMessages = (after.data.messages as any[]).filter(
@@ -9278,8 +9283,8 @@ test("an unnamed request is offered before it is started, and yes starts it", as
     (message) => message.kind === "agent",
   );
   assert.ok(offer !== undefined, JSON.stringify(offered.data.messages));
-  assert.match(offer.content, /Want me to take care of this\?/u);
-  assert.match(offer.content, /Reply "yes"/u);
+  assert.match(offer.content, /Want me to take this, Owner\?/u);
+  assert.match(offer.content, /Say "yes"/u);
   assert.match(offer.content, /@mention someone else/u);
 
   const agreed = await owner.request(`${base}/messages`, {
@@ -9293,6 +9298,138 @@ test("an unnamed request is offered before it is started, and yes starts it", as
     String(runtime.submittedTasks[0]?.objective),
     /settings page layout/u,
   );
+});
+
+test("a proactive offer reads lean channel context and carries it into accepted work", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "offer-context");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // More than the bound, so this proves the model gets the nearby exchange
+  // rather than the whole room. Stored directly because these are setup
+  // conversation lines, not requests whose dispatch behaviour is under test.
+  for (let index = 0; index < 10; index += 1) {
+    await runtime.store.appendChannelMessage({
+      repositoryId,
+      projectId: DEFAULT_PROJECT_ID,
+      kind: "user",
+      authorId: ownerId,
+      content: `context marker ${index}: checkout flow detail`,
+    });
+  }
+
+  const request = "please fix that flow";
+  const before = runtime.chatPrompts.length;
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: request },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  const classification = runtime.chatPrompts.slice(before).at(-1)?.prompt ?? "";
+  assert.match(classification, /Recent channel context before this request/u);
+  assert.doesNotMatch(classification, /context marker 1:/u);
+  assert.match(classification, /context marker 2:/u);
+  assert.match(classification, /context marker 9:/u);
+  assert.ok(
+    classification.indexOf("context marker 9:") <
+      classification.indexOf("Current message:"),
+    classification,
+  );
+  assert.equal(
+    classification.match(/please fix that flow/gu)?.length,
+    1,
+    "the current request should be classified once, outside the background",
+  );
+
+  const offered = await owner.request(`${base}/messages`);
+  const offer = (offered.data.messages as any[]).find((message) =>
+    /^Want me to take this/u.test(String(message.content)),
+  );
+  assert.ok(offer !== undefined, JSON.stringify(offered.data.messages));
+  assert.match(String(offer.content), /Want me to take this, Owner\?/u);
+
+  const agreed = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "yes" },
+  });
+  assert.equal(agreed.status, 201, JSON.stringify(agreed.data));
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const task = runtime.submittedTasks[0];
+  assert.match(String(task?.objective), /please fix that flow/u);
+  const context = task?.context ?? "";
+  assert.doesNotMatch(context, /context marker 1:/u);
+  assert.match(context, /context marker 2:/u);
+  assert.match(context, /context marker 9:/u);
+  assert.doesNotMatch(context, /please fix that flow/u);
+  assert.doesNotMatch(context, /Want me to take this/u);
+  assert.doesNotMatch(context, /\byes\b/iu);
+});
+
+test("a generic proactive follow-up uses recent context to choose its agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "offer-context-route");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const settings = await addColleague(runtime, "context-settings@example.com");
+  const database = await addColleague(runtime, "context-database@example.com");
+  runtime.chatConnections.set(settings.id, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  runtime.chatConnections.set(database.id, [
+    { provider: "google", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // The unrelated agent has the longer name and therefore wins the stable
+  // zero-score fallback. Only the preceding database discussion can make the
+  // database agent the better fit for the deliberately generic request.
+  assert.equal(
+    (await owner.request(`${base}/agents/${settings.id}:openai`, {
+      method: "POST",
+      body: { name: "Settings Page Layout Frontend Accessibility Assistant" },
+    })).status,
+    200,
+  );
+  assert.equal(
+    (await owner.request(`${base}/agents/${database.id}:google`, {
+      method: "POST",
+      body: { name: "Database Migration Agent" },
+    })).status,
+    200,
+  );
+  await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "user",
+    authorId: bootstrapped.user.id,
+    content: "The billing database migration keeps failing in CI.",
+  });
+
+  await autoClaim(owner, base, "please fix that");
+
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.equal(runtime.submittedTasks[0]?.actorId, database.id);
+  assert.equal(runtime.submittedTasks[0]?.vendor, "gemini");
+  assert.match(
+    runtime.submittedTasks[0]?.context ?? "",
+    /billing database migration keeps failing/u,
+  );
+
+  // Context is only the fallback for a generic request. Once the current
+  // message names a lane, its own words win over the database discussion.
+  await autoClaim(owner, base, "please update the settings page layout");
+  assert.equal(runtime.submittedTasks.length, 2);
+  assert.equal(runtime.submittedTasks[1]?.actorId, settings.id);
+  assert.equal(runtime.submittedTasks[1]?.vendor, "codex");
 });
 
 test("only the person who asked can accept the offer", async (t) => {
@@ -9376,7 +9513,7 @@ test("a remark about work is not a request, and is offered nothing", async (t) =
   const offers = (after.data.messages as any[]).filter(
     (message) =>
       message.kind === "agent" &&
-      /Want me to take care of this\?/u.test(message.content),
+      /Want me to take this/u.test(message.content),
   );
   assert.deepEqual(offers, [], JSON.stringify(offers));
 });
@@ -9581,7 +9718,7 @@ test("the agent reads the message before offering, and a remark gets no offer", 
   assert.deepEqual(agentSpeech(after.data.messages), []);
   assert.deepEqual(
     (after.data.messages as any[]).filter((message) =>
-      /Want me to take care of this\?/u.test(String(message.content)),
+      /Want me to take this/u.test(String(message.content)),
     ),
     [],
   );
@@ -9740,5 +9877,229 @@ test("work merged into an existing thread says what asked for it", async (t) => 
     (thread?.replies ?? []).filter((reply) => reply.content === asked).length,
     1,
     JSON.stringify(thread?.replies),
+  );
+});
+
+test("deleting your own channel message removes it, and somebody else's does not", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "deletable");
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "guest@example.com",
+    repositoryId,
+  );
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const posted = await guest.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "A thought, quickly regretted." },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const messageId = posted.data.message.id;
+
+  // The guest is a developer: in the room, and no reach over anybody else's
+  // words in it. The owner's line is the owner's to unsay.
+  const owners = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "The owner's own line." },
+  });
+  const guestTryingOwners = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${owners.data.message.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(
+    guestTryingOwners.status,
+    403,
+    JSON.stringify(guestTryingOwners.data),
+  );
+
+  // The author's own goes outright — nothing hangs off it.
+  const removed = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${messageId}`,
+    { method: "DELETE" },
+  );
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+  assert.equal(removed.data.redacted, false);
+  assert.equal(removed.data.cancelledTask, false);
+  assert.equal(
+    await runtime.store.getChannelMessage(
+      repositoryId,
+      messageId,
+      session.user.id,
+    ),
+    undefined,
+  );
+
+  // Gone is gone: a second delete has nothing to find.
+  const again = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${messageId}`,
+    { method: "DELETE" },
+  );
+  assert.equal(again.status, 404, JSON.stringify(again.data));
+
+  // And a manager reaches anybody's — the other half of the rule.
+  const guestsSecond = await guest.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "Something for a moderator to remove." },
+  });
+  const moderated = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${guestsSecond.data.message.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(moderated.status, 200, JSON.stringify(moderated.data));
+  assert.equal(
+    await runtime.store.getChannelMessage(
+      repositoryId,
+      guestsSecond.data.message.id,
+      session.user.id,
+    ),
+    undefined,
+  );
+});
+
+test("deleting a message that carries a thread blanks it and stops its task", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repositoryId = await invitableRepository(owner, "thread-delete");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "Rename the config key everywhere." },
+  });
+  const messageId = posted.data.message.id;
+  const reply = await owner.request(
+    `${base}/messages/${messageId}/replies`,
+    { method: "POST", body: { content: "On it." } },
+  );
+  assert.equal(reply.status, 201, JSON.stringify(reply.data));
+
+  const task = await runtime.store.submitTask({
+    projectId: DEFAULT_PROJECT_ID,
+    repositoryId,
+    objective: "rename the config key",
+    agentId: "test-agent-claude",
+    validationCommands: [],
+    submittedBy: ownerId,
+  });
+  await runtime.store.setChannelMessageTask(repositoryId, messageId, task.id);
+
+  const removed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${messageId}`,
+    { method: "DELETE" },
+  );
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+  // Blanked rather than removed: the reply under it is somebody's reading.
+  assert.equal(removed.data.redacted, true);
+  assert.equal(removed.data.removed, 0);
+  // And the work it asked for was stopped, because the message was the ask.
+  assert.equal(removed.data.cancelledTask, true);
+  assert.equal(
+    runtime.cancelCalls.some((call) => call.taskIds?.includes(task.id)),
+    true,
+    JSON.stringify(runtime.cancelCalls),
+  );
+
+  const tombstone = await runtime.store.getChannelMessage(
+    repositoryId,
+    messageId,
+    ownerId,
+  );
+  assert.equal(tombstone?.content, "");
+  assert.ok(tombstone?.deletedAt !== undefined);
+  assert.equal(tombstone?.deletedBy, ownerId);
+  assert.equal(
+    (tombstone?.replies ?? []).some(
+      (entry) => entry.id === reply.data.reply.id,
+    ),
+    true,
+  );
+
+  // The reply is its own decision, and its own delete. The tombstone stays:
+  // the two are separate rows and separate asks.
+  const replyGone = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${messageId}/replies/${reply.data.reply.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(replyGone.status, 200, JSON.stringify(replyGone.data));
+  const after = await runtime.store.getChannelMessage(
+    repositoryId,
+    messageId,
+    ownerId,
+  );
+  assert.equal(
+    (after?.replies ?? []).some((entry) => entry.id === reply.data.reply.id),
+    false,
+  );
+  assert.ok(after?.deletedAt !== undefined);
+
+  // `?purge=1` is the thread panel's own delete: the whole thread goes,
+  // replies included, which is what that button has always promised.
+  const second = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "A second thread." },
+  });
+  const secondId = second.data.message.id;
+  await owner.request(`${base}/messages/${secondId}/replies`, {
+    method: "POST",
+    body: { content: "With something under it." },
+  });
+  const purged = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/messages/${secondId}?purge=1`,
+    { method: "DELETE" },
+  );
+  assert.equal(purged.status, 200, JSON.stringify(purged.data));
+  assert.equal(purged.data.redacted, false);
+  assert.equal(
+    await runtime.store.getChannelMessage(repositoryId, secondId, ownerId),
+    undefined,
+  );
+});
+
+test("a direct message can be unsent by its sender and nobody else", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dm-delete");
+  const guest = await joinRepository(
+    runtime,
+    owner,
+    "dm-guest@example.com",
+    repositoryId,
+  );
+  const guestId = (await guest.request("/api/v1/auth/me")).data.user.id;
+
+  const sent = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${guestId}`,
+    { method: "POST", body: { content: "Sent too soon." } },
+  );
+  assert.equal(sent.status, 201, JSON.stringify(sent.data));
+  const messageId = sent.data.message.id;
+
+  // The recipient cannot unsend what they did not send.
+  const refused = await guest.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${session.user.id}/messages/${messageId}`,
+    { method: "DELETE" },
+  );
+  assert.equal(refused.status, 404, JSON.stringify(refused.data));
+
+  const removed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/direct-messages/${guestId}/messages/${messageId}`,
+    { method: "DELETE" },
+  );
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+  // Gone for both sides, because both sides are the whole audience.
+  assert.deepEqual(
+    await runtime.store.listDirectMessages(
+      DEFAULT_PROJECT_ID,
+      guestId,
+      session.user.id,
+    ),
+    [],
   );
 });

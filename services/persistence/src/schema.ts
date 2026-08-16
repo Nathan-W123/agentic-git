@@ -974,6 +974,27 @@ export const MIGRATIONS: readonly Migration[] = [
       )`,
     ],
   },
+  {
+    // A message somebody unsaid, where the row has to stay.
+    //
+    // Deleting a root that already has replies would take the agent's whole
+    // account of a task with it — work other people read, and the only record
+    // of what was changed — so a root with replies is blanked in place
+    // instead and the thread carries on under a tombstone. Two columns beside
+    // the pin's, for the same reason: at most one such fact per message, and
+    // it dies with the row on the paths that do remove one.
+    //
+    // Nothing here for replies or direct messages. Both are leaves: a reply
+    // has nothing hanging off it, and a direct message is read by exactly the
+    // two people in the conversation, so there is no third party a tombstone
+    // would be keeping the record for. Those are removed outright.
+    version: 33,
+    name: "channel-message-tombstones",
+    statements: [
+      `ALTER TABLE channel_messages ADD COLUMN deleted_at TEXT`,
+      `ALTER TABLE channel_messages ADD COLUMN deleted_by TEXT`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

@@ -17,6 +17,7 @@ import {
   TYPING_SWEEP_MS,
   noteAgentBusy,
   noteDirectMessage,
+  noteDirectMessageDeleted,
   ensureDirectMessages,
   loadChannelStats,
   bannerLineForAudit,
@@ -68,7 +69,10 @@ import {
   leaveRepository,
   channelMessagesFor,
   deleteAllChannelThreads,
+  deleteChannelMessageEntry,
+  deleteChannelReplyEntry,
   deleteChannelThread,
+  deleteDirectMessageEntry,
   loadPreview,
   rollbackTask,
   setAuditorPaused,
@@ -109,7 +113,12 @@ import {
   toast,
   banner as popupBanner,
 } from "./ui.js";
-import { ensureAgentOptions, scrollThread, sendChat } from "./chat.js";
+import {
+  ensureAgentOptions,
+  scrollThread,
+  sendChat,
+  truncateConversationFrom,
+} from "./chat.js";
 import {
   connectRepository,
   createRepository,
@@ -163,6 +172,7 @@ import {
   pickMention,
   pickSlashCommand,
   renderChats,
+  rosterMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
   submitComposerMessage,
@@ -1462,6 +1472,139 @@ async function deleteThreadAction(repositoryId, messageId) {
   }
 }
 
+/**
+ * Deleting one message from the channel.
+ *
+ * The confirmation is written from what this particular message is, because
+ * the three outcomes are genuinely different things to agree to: a line with
+ * nothing hanging off it simply goes, a thread's opening message is blanked
+ * and its replies stay, and a message whose task is still running takes the
+ * run with it. Somebody who is told "this cannot be undone" and nothing else
+ * cannot tell which of those they just asked for.
+ */
+async function deleteChannelMessageAction(repositoryId, messageId) {
+  const entry = channelMessagesFor(repositoryId).find(
+    (candidate) => candidate.id === messageId,
+  );
+  const hasThread = (entry?.replies ?? []).length > 0;
+  // A guess, and only for the wording: the channel is not sent task statuses,
+  // so "carries a task and has not been marked ended" is the closest the
+  // client gets to "still going". The server decides what is actually stopped
+  // and says so in the reply.
+  const running = entry?.taskId !== undefined && entry?.endedAt === undefined;
+  const confirmed = await showModal({
+    title: "Delete this message?",
+    subtitle: [
+      hasThread
+        ? "The replies under it stay — they are the agent's account of the " +
+          "work, and other people have read them. The message itself is " +
+          "replaced with a note that it was deleted."
+        : "It goes for everyone in this channel.",
+      running
+        ? "The task it asked for is still going, so it will be stopped."
+        : "",
+      "This cannot be undone.",
+    ]
+      .filter((line) => line !== "")
+      .join(" "),
+    confirm: "Delete",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    const { cancelledTask } = await deleteChannelMessageEntry(
+      repositoryId,
+      messageId,
+    );
+    if (state.activeChannelThread === messageId && !hasThread) {
+      state.activeChannelThread = undefined;
+    }
+    toast(
+      cancelledTask ? "Message deleted, and its task stopped" : "Message deleted",
+      "ok",
+    );
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/** Deleting one reply from inside a thread. */
+async function deleteChannelReplyAction(repositoryId, messageId, replyId) {
+  const confirmed = await showModal({
+    title: "Delete this reply?",
+    subtitle:
+      "It goes for everyone reading this thread. This cannot be undone.",
+    confirm: "Delete",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    await deleteChannelReplyEntry(repositoryId, messageId, replyId);
+    toast("Reply deleted", "ok");
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
+/**
+ * Deleting a message from the private agent conversation, which rewinds it.
+ *
+ * The confirmation says how many messages go rather than "this one", because
+ * that is what happens — see `truncateConversationFrom` for why it cannot be
+ * one — and somebody scrolling back to delete an early message would
+ * otherwise lose the whole conversation to a dialog that promised one line.
+ */
+async function deleteChatMessageAction(index) {
+  const agent = currentAgent();
+  if (agent === undefined || !Number.isInteger(index)) {
+    return;
+  }
+  const following = (state.conversations[agent.id] ?? []).length - index;
+  if (following <= 0) {
+    return;
+  }
+  const confirmed = await showModal({
+    title:
+      following === 1
+        ? "Delete this message?"
+        : `Delete this message and the ${String(following - 1)} after it?`,
+    subtitle:
+      "This conversation is replayed to the agent on every turn, so it is " +
+      "rewound to before this message rather than having one lifted out of " +
+      "the middle. The agent's own session is dropped with it, so nothing " +
+      "here is remembered on its side either.",
+    confirm: "Delete",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  truncateConversationFrom(agent.id, index);
+  render();
+}
+
+/** Unsending one direct message, from both sides of the conversation. */
+async function deleteDirectMessageAction(userId, messageId) {
+  const confirmed = await showModal({
+    title: "Delete this message?",
+    subtitle:
+      "It goes from your side and theirs. This cannot be undone.",
+    confirm: "Delete",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  try {
+    await deleteDirectMessageEntry(userId, messageId);
+    render();
+  } catch (error) {
+    toast(error.message, "error");
+  }
+}
+
 async function clearThreadsAction(repositoryId) {
   const threads = channelMessagesFor(repositoryId).filter(
     (entry) => (entry.replies ?? []).length > 0,
@@ -2458,8 +2601,26 @@ const SWIPE_MAX_SLOPE = 0.6;
 
 let swipeStart;
 
-/** Whichever side panel is showing, closed the way its own button closes it. */
+/**
+ * Whichever side panel is showing, closed the way its own button closes it.
+ *
+ * The order is `renderChats`'s order, not an order of its own. Six things can
+ * occupy the one panel and only the first of them is on screen, so anything
+ * closing by a different precedence closes something invisible. The two this
+ * did not know about at all — an agent conversation and a direct message —
+ * outrank the rest there, which meant a swipe with one of them open put away
+ * the thread behind it and left the panel exactly where it was.
+ */
 function closeSidePanel() {
+  if (state.activeAgentPanel !== undefined) {
+    state.activeAgentPanel = undefined;
+    return true;
+  }
+  if (state.activeDm !== undefined) {
+    state.activeDm = undefined;
+    state.dmDraft = "";
+    return true;
+  }
   if (state.chanFileView !== undefined) {
     // The same question the close button asks. A swipe is easy to do by
     // accident, which makes silently discarding an edit worse here, not
@@ -2488,12 +2649,60 @@ function closeSidePanel() {
 
 function sidePanelOpen() {
   return (
+    state.activeAgentPanel !== undefined ||
+    state.activeDm !== undefined ||
     state.chanFileView !== undefined ||
     state.chanTree === true ||
     state.activeChannelThread !== undefined ||
     state.chanThreadList === true
   );
 }
+
+/**
+ * Escape closes whatever is stacked over the conversation, one layer a press.
+ *
+ * The panel had a close button and a swipe and nothing for a keyboard, which
+ * on a desktop — where there is no swipe — left the mouse as the only way out
+ * of a surface that covers half the window. This is the third way, and it
+ * unwinds in the order the layers were put on: the phone's channel drawer,
+ * then the side panel.
+ *
+ * Deliberately last in line. A field owns its own Escape (the file editor
+ * blurs, the mention and slash pickers dismiss), a `<dialog>` closes itself,
+ * and a popover traps its own keys — so this stands down whenever any of them
+ * is what the press was for, and a reader in the reply box presses Escape
+ * once to leave it and again to close the panel.
+ */
+document.addEventListener("keydown", (event) => {
+  if (
+    event.key !== "Escape" ||
+    event.defaultPrevented ||
+    state.route !== "chats"
+  ) {
+    return;
+  }
+  if ($("#modal")?.open === true || $("#layer-root")?.childElementCount > 0) {
+    return;
+  }
+  // The element the key was pressed on, not the one focused now. The file
+  // editor's own Escape handler runs before this one and blurs the textarea,
+  // so by the time this reads `document.activeElement` the field it should
+  // have stood down for is already gone — and one press would both leave the
+  // editor and throw the panel away, which is the opposite of a ladder.
+  // `event.target` still names the textarea either way.
+  const field = event.target;
+  if (field instanceof Element && FOCUSABLE_FIELDS.has(field.tagName)) {
+    return;
+  }
+  if (state.chanSidebarOpen === true) {
+    state.chanSidebarOpen = false;
+    render();
+    return;
+  }
+  if (sidePanelOpen() && closeSidePanel()) {
+    render();
+  }
+});
 
 document.addEventListener(
   "touchstart",
@@ -2642,9 +2851,15 @@ function restoreFocus(saved) {
       // Not a field with a selection. Focus is enough.
     }
   }
-  if (saved.height !== "") {
+  if (saved.height !== "" && next.value !== "") {
     // The composer grows by having its height set imperatively, which is not
     // in the markup and so does not survive the rebuild on its own.
+    //
+    // Not onto a field that came back empty, though — which is what a
+    // composer looks like on the render immediately after it is sent, still
+    // focused for the next message. Restoring the height the sent message had
+    // grown to would leave a lean, empty bar standing several rows tall until
+    // something else happened to redraw it.
     next.style.height = saved.height;
   }
   next.scrollTop = saved.top;
@@ -3146,6 +3361,21 @@ document.addEventListener("click", (event) => {
     case "channel-thread-delete":
       void deleteThreadAction(activeChannelId(), value);
       return;
+    case "channel-message-delete":
+      void deleteChannelMessageAction(activeChannelId(), value);
+      return;
+    case "thread-reply-delete": {
+      // `rootId|replyId`: deleting a reply is a write against the thread it
+      // lives in, and the row only ever carries one value.
+      const [rootId = "", replyId = ""] = value.split("|");
+      void deleteChannelReplyAction(activeChannelId(), rootId, replyId);
+      return;
+    }
+    case "dm-delete":
+      if (state.activeDm !== undefined) {
+        void deleteDirectMessageAction(state.activeDm, value);
+      }
+      return;
     case "channel-threads-clear":
       void clearThreadsAction(activeChannelId());
       return;
@@ -3265,6 +3495,9 @@ document.addEventListener("click", (event) => {
         toast("Org agents work in the room — @mention them in the channel.");
         return;
       }
+      // Also offered by the roster row's menu, which has nothing to say once
+      // the panel it opens is on screen.
+      closePopover();
       state.selectedAgent = value;
       state.activeAgentPanel = value;
       // This entry point is "talk to my agent", so it lands on the chat half
@@ -3418,18 +3651,39 @@ document.addEventListener("click", (event) => {
       render();
       return;
     }
-    case "channel-rename-toggle":
-      state.chatRenamingId = state.chatRenamingId === value ? undefined : value;
+    /**
+     * The menu on a roster row — everything that row used to carry as its own
+     * buttons, including the one that removes the agent.
+     *
+     * The items come from `rosterMenuItems` in screen-chats.js rather than
+     * being built here: every condition in them is one the row is already
+     * drawn from, and split across two files is how a menu ends up offering
+     * what the row would not.
+     */
+    case "roster-agent-menu":
+      showMenu(node, rosterMenuItems(value));
+      return;
+    /**
+     * The one entry that edits an agent, opening the panel that holds all of
+     * it — name, role, model, effort and the red removal (`rosterSettings` in
+     * screen-chats.js). It used to be two entries opening two panels, with a
+     * third entry above them doing the destructive thing on a single click.
+     *
+     * Reached from the roster's menu, so the menu goes first: `render()`
+     * rebuilds the row behind it, and a popover left open over the result is
+     * anchored to a button that no longer exists.
+     */
+    case "channel-settings-toggle":
+      closePopover();
+      state.chatSettingsOpenId = state.chatSettingsOpenId === value ? undefined : value;
       render();
-      if (state.chatRenamingId === value) {
+      if (state.chatSettingsOpenId === value) {
+        // The name is the field somebody most often came here for, and it is
+        // the first one in the panel.
         const input = $("[data-act='channel-rename-input']");
         input?.focus();
         input?.select();
       }
-      return;
-    case "channel-settings-toggle":
-      state.chatSettingsOpenId = state.chatSettingsOpenId === value ? undefined : value;
-      render();
       return;
     case "agent-rename-toggle":
       state.settingsRenamingId =
@@ -3446,8 +3700,9 @@ document.addEventListener("click", (event) => {
       return;
     case "auditor-toggle":
       // `value` is the *current* paused state, so the new one is its
-      // opposite — read off the button that was drawn rather than from a
+      // opposite — read off the menu entry that was drawn rather than from a
       // second lookup that could disagree with what was on screen.
+      closePopover();
       void toggleAuditingAction(activeChannelId(), value !== "true");
       return;
     case "channel-info":
@@ -3463,15 +3718,20 @@ document.addEventListener("click", (event) => {
       render();
       refreshChannelInfoPopover();
       return;
+    // Both removals are reached from the roster row's menu — see
+    // `rosterMenuItems` — so the menu is dismissed before the roster it
+    // described is rebuilt without the agent in it.
     case "channel-agent-remove":
+      closePopover();
       removeChannelAgent(activeChannelId(), value);
       render();
       refreshChannelInfoPopover();
       return;
     case "channel-agent-remove-any": {
-      // `value` is `${userId}:${provider}` — see `rosterRow` in
+      // `value` is `${userId}:${provider}` — see `rosterMenuItems` in
       // screen-chats.js, which mints it from the same pair
       // `channelAgentsFor` already attaches to every non-mine entry.
+      closePopover();
       const separatorIndex = value.indexOf(":");
       removeChannelAgentForUser(
         activeChannelId(),
@@ -3629,6 +3889,9 @@ document.addEventListener("click", (event) => {
     case "chat-close":
     case "chat-toggle":
       toggleChat(render);
+      return;
+    case "chat-msg-delete":
+      void deleteChatMessageAction(Number(value));
       return;
 
     /* Agents */
@@ -4071,17 +4334,29 @@ document.addEventListener("submit", (event) => {
       }
       return;
     }
+    /**
+     * The name and role fields inside the settings panel. Committed here, and
+     * on blur below.
+     *
+     * Only what actually changed is written, and nothing is rendered if
+     * nothing did: the panel stays open around these fields now, and a
+     * rebuild for a field somebody merely tabbed through would take the
+     * select they were reaching for out from under the pointer.
+     */
     case "channel-rename-form": {
       const input = $("[data-act='channel-rename-input']", form);
-      if (input !== null) {
+      const roleInput = $("[data-act='channel-role-input']", form);
+      const renamed = input !== null && input.value !== input.defaultValue;
+      const rerolled = roleInput !== null && roleInput.value !== roleInput.defaultValue;
+      if (renamed) {
         renameChannelAgent(activeChannelId(), form.dataset.value, input.value);
       }
-      const roleInput = $("[data-act='channel-role-input']", form);
-      if (roleInput !== null) {
+      if (rerolled) {
         setChannelAgentSetting(activeChannelId(), form.dataset.value, "role", roleInput.value.trim());
       }
-      state.chatRenamingId = undefined;
-      render();
+      if (renamed || rerolled) {
+        render();
+      }
       return;
     }
     default:
@@ -4277,8 +4552,13 @@ document.addEventListener("input", (event) => {
     return;
   }
   if (act === "chat-input") {
+    // Cleared rather than measured once the box is empty: an empty composer
+    // collapses to the lean bar, and a height measured against the open one
+    // would hold the pill open with nothing in it.
     node.style.height = "auto";
-    node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+    if (node.value !== "") {
+      node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+    }
   }
   if (act === "channel-search") {
     state.chatQuery = node.value;
@@ -4402,7 +4682,7 @@ document.addEventListener("keydown", (event) => {
 
 /**
  * Enter commits an in-progress agent rename or role edit, same as blurring
- * the field — both live in the same form (see `rosterRow` in
+ * the field — both live in the same form (see `rosterSettings` in
  * screen-chats.js), so both are handled here.
  */
 document.addEventListener("keydown", (event) => {
@@ -4447,22 +4727,35 @@ document.addEventListener("focusout", (event) => {
   if (act !== "channel-rename-input" && act !== "channel-role-input") {
     return;
   }
+  // Enter already committed and rebuilt the panel, and the field this event
+  // came from is the one that rebuild threw away. Reading a value off it
+  // would commit the same edit a second time.
+  if (!node.isConnected) {
+    return;
+  }
   const form = node.closest("form");
   if (form !== null && form.contains(event.relatedTarget)) {
     return;
   }
   const agentId = node.dataset.value;
-  if (activeChannelId() && agentId && state.chatRenamingId === agentId) {
+  if (activeChannelId() && agentId && state.chatSettingsOpenId === agentId) {
     const nameInput = form === null ? null : $("[data-act='channel-rename-input']", form);
     const roleInput = form === null ? null : $("[data-act='channel-role-input']", form);
-    if (nameInput !== null) {
+    // Unchanged fields are not written and, more to the point, do not render:
+    // the settings panel these live in stays open, and rebuilding it as focus
+    // leaves a field somebody only looked at would move the model picker they
+    // were on their way to.
+    const renamed = nameInput !== null && nameInput.value !== nameInput.defaultValue;
+    const rerolled = roleInput !== null && roleInput.value !== roleInput.defaultValue;
+    if (renamed) {
       renameChannelAgent(activeChannelId(), agentId, nameInput.value);
     }
-    if (roleInput !== null) {
+    if (rerolled) {
       setChannelAgentSetting(activeChannelId(), agentId, "role", roleInput.value.trim());
     }
-    state.chatRenamingId = undefined;
-    render();
+    if (renamed || rerolled) {
+      render();
+    }
   }
 });
 
@@ -4661,6 +4954,14 @@ async function boot() {
           { method: "POST" },
         ).catch(() => undefined);
       }
+      if (!renameFieldFocused()) {
+        render();
+      }
+      return;
+    }
+    // Unsent, and delivered the same private way it was sent.
+    if (frame?.type === "direct-message-deleted") {
+      noteDirectMessageDeleted(frame);
       if (!renameFieldFocused()) {
         render();
       }

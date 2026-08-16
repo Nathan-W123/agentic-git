@@ -3165,6 +3165,184 @@ for (const backend of backends) {
         before.map((message) => message.content),
         ["Can you look at the deploy?"],
       );
+
+      // Unsending: the sender's own, gone for both sides, and nobody else's.
+      // Bob trying to delete Alice's message is answered the same way as a
+      // message that was never there — "not yours" and "already gone" must
+      // not be distinguishable, or the answer is a probe.
+      assert.equal(
+        await store.deleteDirectMessage(
+          DEFAULT_PROJECT_ID,
+          first.id,
+          bob.id,
+        ),
+        undefined,
+      );
+      assert.equal(
+        (
+          await store.listDirectMessages(DEFAULT_PROJECT_ID, bob.id, alice.id)
+        ).length,
+        2,
+      );
+      const unsent = await store.deleteDirectMessage(
+        DEFAULT_PROJECT_ID,
+        first.id,
+        alice.id,
+      );
+      assert.equal(unsent?.id, first.id);
+      assert.equal(unsent?.recipientId, bob.id);
+      for (const viewer of [alice, bob]) {
+        assert.deepEqual(
+          (
+            await store.listDirectMessages(
+              DEFAULT_PROJECT_ID,
+              viewer.id,
+              viewer.id === alice.id ? bob.id : alice.id,
+            )
+          ).map((message) => message.content),
+          ["Looking now."],
+        );
+      }
+      // Deleting twice is not an error, and still says nothing was there.
+      assert.equal(
+        await store.deleteDirectMessage(
+          DEFAULT_PROJECT_ID,
+          first.id,
+          alice.id,
+        ),
+        undefined,
+      );
+    } finally {
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a channel message is blanked when it carries a thread and removed when it does not`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      await store.saveRepository({
+        id: "repo_delete",
+        path: "/delete.git",
+        branch: "main",
+      });
+      const alice = await store.createUser({
+        email: "del-alice@example.invalid",
+        displayName: "Alice",
+        passwordDigest: "unused",
+      });
+
+      const root = await store.appendChannelMessage({
+        repositoryId: "repo_delete",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "Please rename the config key.",
+      });
+      const reply = await store.addChannelReply({
+        repositoryId: "repo_delete",
+        messageId: root.id,
+        authorId: alice.id,
+        content: "Done — three call sites.",
+      });
+      await store.toggleChannelReaction(
+        "repo_delete",
+        root.id,
+        alice.id,
+        "👍",
+      );
+      await store.toggleChannelMessagePin("repo_delete", root.id, alice.id);
+
+      // Blanked in place: the words and the reactions go, the thread stays.
+      // The row keeps its identity and its position, so the reply underneath
+      // is still an answer to something rather than to the message above.
+      await store.redactChannelMessage("repo_delete", root.id, {
+        deletedAt: "2026-01-01T00:00:00.000Z",
+        deletedBy: alice.id,
+      });
+      const redacted = await store.getChannelMessage(
+        "repo_delete",
+        root.id,
+        alice.id,
+      );
+      assert.equal(redacted?.content, "");
+      assert.equal(redacted?.deletedAt, "2026-01-01T00:00:00.000Z");
+      assert.equal(redacted?.deletedBy, alice.id);
+      assert.deepEqual(redacted?.reactions, {});
+      // The pin was attention paid to words that are gone; the banner must
+      // not be left pointing at a tombstone.
+      assert.equal(redacted?.pinnedAt, undefined);
+      assert.deepEqual(
+        await store.listPinnedChannelMessages("repo_delete", alice.id),
+        [],
+      );
+      assert.deepEqual(
+        redacted?.replies.map((entry) => entry.id),
+        [reply.id],
+      );
+      assert.equal(redacted?.createdAt, root.createdAt);
+
+      // First deletion wins: a second pass must not restamp who unsaid it.
+      await store.redactChannelMessage("repo_delete", root.id, {
+        deletedAt: "2026-02-02T00:00:00.000Z",
+        deletedBy: "someone_else",
+      });
+      assert.equal(
+        (await store.getChannelMessage("repo_delete", root.id, alice.id))
+          ?.deletedBy,
+        alice.id,
+      );
+
+      // A reply is a leaf and simply goes. Removing it leaves the tombstone
+      // standing — the two are separate rows and separate decisions.
+      const removedReply = await store.deleteChannelReply(
+        "repo_delete",
+        root.id,
+        reply.id,
+      );
+      assert.equal(removedReply?.id, reply.id);
+      assert.deepEqual(
+        (await store.getChannelMessage("repo_delete", root.id, alice.id))
+          ?.replies,
+        [],
+      );
+      assert.equal(
+        await store.deleteChannelReply("repo_delete", root.id, reply.id),
+        undefined,
+      );
+
+      // Not from another repository's message, however real both ids are.
+      const other = await store.appendChannelMessage({
+        repositoryId: "repo_delete",
+        projectId: DEFAULT_PROJECT_ID,
+        authorId: alice.id,
+        content: "Unrelated.",
+      });
+      const otherReply = await store.addChannelReply({
+        repositoryId: "repo_delete",
+        messageId: other.id,
+        authorId: alice.id,
+        content: "Also unrelated.",
+      });
+      assert.equal(
+        await store.deleteChannelReply("repo_missing", other.id, otherReply.id),
+        undefined,
+      );
+      assert.equal(
+        await store.deleteChannelReply("repo_delete", root.id, otherReply.id),
+        undefined,
+      );
+
+      // And a message nobody has replied under is not blanked, it is gone.
+      await store.deleteChannelMessage("repo_delete", root.id);
+      assert.equal(
+        await store.getChannelMessage("repo_delete", root.id, alice.id),
+        undefined,
+      );
+
+      // Redacting something that is not there is not an error.
+      await store.redactChannelMessage("repo_delete", "chanmsg_missing", {
+        deletedAt: "2026-03-03T00:00:00.000Z",
+        deletedBy: alice.id,
+      });
     } finally {
       await cleanup();
     }

@@ -21,6 +21,7 @@ import {
   agentStatus,
   agentsThinkingIn,
 api,
+  canDeleteChannelEntry,
   canLeaveRepository,
   canManageRepository,
   channelAgentsFor,
@@ -152,9 +153,57 @@ function chanRow(repo, activeRepositoryId) {
   </div>`;
 }
 
+/**
+ * Everything there is to change about one agent, in one place.
+ *
+ * It used to be two menu entries opening two different panels — a rename form
+ * and a settings panel — with removal a third entry in the menu above them.
+ * Three ways in for what is one question ("what do I want this agent to be
+ * here?") meant the menu had to name each of them, and naming them is what
+ * made a short menu long. One entry opens this, and everything is a labelled
+ * field with the one destructive thing last and red.
+ *
+ * The name and role stay a `<form>`, because that is what commits them: Enter
+ * or blur, both handled in app.js against `channel-rename-form`. Model and
+ * effort are selects and write on change, so they are outside it — a select
+ * inside a form that submits on Enter would commit the text fields as a side
+ * effect of picking a model.
+ */
 function rosterSettings(agent) {
   const options = optionsFor(agent);
+  const removeAct =
+    agent.mine === true ? "channel-agent-remove" : "channel-agent-remove-any";
   return `<div class="roster-settings" data-agent="${esc(agent.id)}">
+    <form class="roster-rename" data-act="channel-rename-form"
+      data-value="${esc(agent.id)}">
+      <div class="rs-label">Name</div>
+      <input data-act="channel-rename-input" data-value="${esc(agent.id)}"
+        value="${esc(agent.name)}" placeholder="${esc(agent.name)}"
+        ${agent.mine ? 'maxlength="40" title="Its name in every repository"' : ""}
+        autocomplete="off" enterkeyhint="done">
+      <div class="rs-hint">${
+        // A name and a role are not the same kind of thing: your own agent's
+        // name is the account's, and renaming it here changes it in every
+        // repository (and in Settings), while the role stays this channel's
+        // decision.
+        agent.mine === true
+          ? "Renames it in every repository."
+          : "In this channel only."
+      }</div>
+      <div class="rs-label">Role</div>
+      <input data-act="channel-role-input" data-value="${esc(agent.id)}"
+        value="${esc(agent.role ?? "")}" placeholder="Role in this channel"
+        list="channel-role-options" autocomplete="off" enterkeyhint="done">
+      <datalist id="channel-role-options">
+        <!-- Every other role is free text that reaches the agent as a
+             sentence and nothing else, so there is nothing to offer.
+             These two are the ones the code acts on, and a reserved word
+             nobody can discover is a reserved word nobody uses —
+             \`investigator\` had been exactly that since it was built. -->
+        <option value="${AUDITOR_ROLE}">Audits every merge, unprompted</option>
+        <option value="${INVESTIGATOR_ROLE}">Explains why a task failed</option>
+      </datalist>
+    </form>
     ${settingRow("Model", "channel-agent-model", options.models, agent.model ?? "")}
     ${
       // Where the list above came from, in the words of the thing that knows:
@@ -199,17 +248,25 @@ function rosterSettings(agent) {
           </div>`
         : ""
     }
+    ${
+      // Last, and the only red thing here. Whether it is the viewer's own
+      // agent decides which act removes it: `channel-agent-remove` takes the
+      // account's own provider id, while a teammate's entry is already keyed
+      // `${userId}:${provider}` (see `channelAgentsFor` in data.js), which is
+      // exactly the pair `removeChannelAgentForUser` needs. Moderators only
+      // for that second one, matching the server's `manage_project`/creator
+      // check on the `?userId=` path of the membership DELETE route; one's own
+      // agent is unconditional, as it is on the server.
+      agent.mine === true || canManageRepository(activeChannelId())
+        ? `<button type="button" class="rs-remove" data-act="${removeAct}"
+            data-value="${esc(agent.id)}">
+            ${icon("trash")}<span>Remove from this chat</span>
+          </button>`
+        : ""
+    }
   </div>`;
 }
 
-/**
- * `canModerate` shows a remove button for agents that are not the viewer's
- * own — loosened from `agent.mine` to also admit anyone the server's
- * `manage_project`+/creator check (`removeChannelAgentForUser` in data.js,
- * the `?userId=` path on the membership DELETE route) would actually allow.
- * The self-service button for one's own agent is unconditional, matching
- * that the server never restricts it by permission level either.
- */
 /**
  * The hover card for one roster entry.
  *
@@ -337,7 +394,7 @@ function draftAttachmentPreviews(repositoryId) {
  * keeps `<code>@agent</code>` untouched because its preceding character is
  * `>` rather than an accepted text boundary.
  */
-function mentionMarkup(value, names) {
+function mentionMarkup(value, names = []) {
   const alternatives = [...new Set(names)]
     .filter((name) => name.length > 0)
     .sort((left, right) => right.length - left.length)
@@ -356,20 +413,81 @@ function mentionMarkup(value, names) {
 }
 
 /**
+ * Marks a slash command wherever one is written.
+ *
+ * The same boundary the picker opens on (`updateMentionState`) and the same
+ * one the server parses by, so what is coloured is exactly what the channel
+ * will treat as a command: a slash that starts a word. `src/retry.ts` and
+ * `and/or` have no boundary before the slash and stay plain, and the trailing
+ * boundary keeps `/usr/bin` out — a path is not a command, and colouring one
+ * would promise something the channel is not going to do.
+ *
+ * `value` is already escaped, and applying this after mentions and inline
+ * markup is safe for the same reason `mentionMarkup` is: every slash in the
+ * markup those produced (`</span>`, `</code>`) is preceded by `<`, which is
+ * not a boundary this accepts.
+ */
+function slashMarkup(value) {
+  return value.replace(
+    /(^|[\s([])\/([a-z0-9-]+)(?=$|[\s,.:;!?()[\]{}])/giu,
+    (_match, before, name) => `${before}<span class="slash-ping">/${name}</span>`,
+  );
+}
+
+/**
+ * Marks the `@…` a person is part-way through typing.
+ *
+ * `mentionMarkup` can only colour a name it recognises, which is the right
+ * rule for a posted message and the wrong one for a draft: it means the ping
+ * a person is typing stays grey until its last character lands, and a name
+ * that never resolves stays grey forever. In the composer the `@` itself is
+ * the thing being written, so it is coloured from the first character.
+ *
+ * Run after `mentionMarkup`, never before: a resolved multi-word name is
+ * already inside a span by then, and the `@` in it is preceded by `>` rather
+ * than a boundary this accepts, so it is left alone rather than being cut
+ * back to its first word.
+ */
+function draftMentionMarkup(value) {
+  return value.replace(
+    /(^|[\s([])@([\w.-]*)/gu,
+    (_match, before, name) => `${before}<span class="mention-ping">@${name}</span>`,
+  );
+}
+
+/**
  * The composer's text, marked up for the layer painted under the textarea.
  *
- * Only mentions — none of `richText`'s markdown. What is on screen while
- * somebody types has to be character-for-character what they typed, or the
- * mirror and the textarea wrap at different points and the caret stops
+ * Mentions and commands, and none of `richText`'s markdown. What is on screen
+ * while somebody types has to be character-for-character what they typed, or
+ * the mirror and the textarea wrap at different points and the caret stops
  * landing where the letters are. `**bold**` collapsing to two fewer
- * characters would do exactly that.
+ * characters would do exactly that; a span around characters that are all
+ * still there does not.
  *
  * The trailing newline is deliberate. A textarea keeps a final empty line
  * visible and a div collapses it, so without this the mirror is one line
  * shorter than the box the moment somebody ends on Enter.
  */
-function composerMirror(value) {
-  return `${mentionMarkup(esc(String(value ?? "")))}\n`;
+function composerMirror(value, participants = []) {
+  // Posted messages bring their resolved mentions with them. A draft has no
+  // such record yet, so its mirror has to read the same live roster as the
+  // picker. Passing no names here was the merge regression that left every
+  // `<span class="mention-ping">` out of the composer even though the mirror
+  // itself was present.
+  const names = [
+    "agents",
+    ...participants
+      .map((participant) => participant?.name)
+      .filter((name) => typeof name === "string" && name.length > 0),
+  ].map((name) => esc(name));
+  // Resolved names first, so a multi-word one is coloured whole; then the
+  // half-typed `@` that has no name to match yet; then commands. The draft
+  // pass cannot undo the first because what that produced is already inside a
+  // span — see `draftMentionMarkup`.
+  return `${slashMarkup(
+    draftMentionMarkup(mentionMarkup(esc(String(value ?? "")), names)),
+  )}\n`;
 }
 
 /** Repaints the layer under the textarea. Called on every keystroke. */
@@ -380,7 +498,10 @@ function paintComposerMirror(node) {
   if (mirror === null || mirror === undefined) {
     return;
   }
-  mirror.innerHTML = composerMirror(node.value);
+  mirror.innerHTML = composerMirror(
+    node.value,
+    channelParticipants(activeChannelId()),
+  );
   // A composer past its max height scrolls, and the mirror has to scroll with
   // it or the highlight slides off the text it belongs to.
   mirror.scrollTop = node.scrollTop;
@@ -410,12 +531,17 @@ function richText(text, mentions) {
     .split(/\n{2,}/u)
     .map((block) => block.trim())
     .filter((block) => block.length > 0);
+  // The command keeps the colour it had in the composer. A message whose
+  // first word turned grey the moment it was sent read as though the channel
+  // had stopped recognising it, when what it had done was run it.
   const inline = (value) =>
-    mentionMarkup(
-      value
-        .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>")
-        .replace(/`([^`]+)`/gu, "<code>$1</code>"),
-      mentionNames,
+    slashMarkup(
+      mentionMarkup(
+        value
+          .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>")
+          .replace(/`([^`]+)`/gu, "<code>$1</code>"),
+        mentionNames,
+      ),
     );
   return blocks
     .map((block) => {
@@ -553,8 +679,21 @@ const AGENT_STATUS_TITLE = {
   personal: "Personal agent — only its owner can task it here",
 };
 
-function rosterRow(agent, canModerate) {
-  const renaming = state.chatRenamingId === agent.id;
+/**
+ * One agent in the roster: a face, a name, what it is here for, and one
+ * button.
+ *
+ * The row used to carry four controls of its own — an auditor switch, rename,
+ * model & effort, and a close button that removed the agent outright. Four
+ * targets in twenty-two pixels of a narrow sidebar, one of them destructive
+ * and indistinguishable from the three that were not. Everything now lives
+ * behind the same "..." the channel rows above already use (`chanRow`), which
+ * is where the eye has learned to look for what a row can do, and everything
+ * there is to change about the agent — name, role, model, effort, and removal
+ * in red — is one entry in it opening `rosterSettings` underneath the row.
+ * See `rosterMenuItems`.
+ */
+function rosterRow(agent) {
   const settingsOpen = state.chatSettingsOpenId === agent.id;
   const auditor = isAuditor(agent);
   const paused = state.auditorPaused[activeChannelId()] === true;
@@ -597,88 +736,82 @@ function rosterRow(agent, canModerate) {
               : "No role set"
         }</div>
       </span>
-      <span class="rr-actions">
-        ${
-          // Only the auditor gets a switch, because it is the only role that
-          // spends without being asked. Moderators only: turning it back on
-          // starts an audit, which costs money, so it is the same decision
-          // the promotion route guards.
-          auditor && canModerate
-            ? `<button type="button" class="rr-switch${paused ? "" : " on"}"
-                data-act="auditor-toggle" data-value="${esc(String(paused))}"
-                role="switch" aria-checked="${paused ? "false" : "true"}"
-                title="${
-                  paused
-                    ? "Auditing is off. Turn it on to audit everything merged since it was switched off."
-                    : "Auditing is on. Turn it off to stop audits without demoting this agent."
-                }"><span class="rr-switch-dot"></span></button>`
-            : ""
-        }
-        ${iconButton("pencil", {
-          act: "channel-rename-toggle",
-          value: agent.id,
-          // A name and a role are not the same kind of thing any more: your
-          // own agent's name is the account's, and renaming it here changes
-          // it in every repository (and in Settings), while the role stays
-          // this channel's decision. Somebody else's agent is still renamed
-          // here alone.
-          title: agent.mine
-            ? "Rename everywhere, or set its role in this channel"
-            : "Rename or set role in this channel",
-          small: true,
-        })}
-        ${iconButton("sliders", {
-          act: "channel-settings-toggle",
-          value: agent.id,
-          title: "Model & effort",
-          small: true,
-        })}
-        ${
-          agent.mine
-            ? iconButton("close", {
-                act: "channel-agent-remove",
-                value: agent.id,
-                title: "Remove from this chat",
-                small: true,
-              })
-            : canModerate
-              ? iconButton("close", {
-                  // Non-mine entries are already keyed `${userId}:${provider}`
-                  // (see `channelAgentsFor` in data.js), which is exactly the
-                  // pair `removeChannelAgentForUser` needs.
-                  act: "channel-agent-remove-any",
-                  value: agent.id,
-                  title: "Remove this agent from the chat",
-                  small: true,
-                })
-              : ""
-        }
-      </span>
+      <span class="rr-more">${iconButton("dots", {
+        act: "roster-agent-menu",
+        value: agent.id,
+        title: `More for ${agent.name}`,
+        small: true,
+      })}</span>
     </div>
-    ${
-      renaming
-        ? `<form class="roster-rename" data-act="channel-rename-form" data-value="${esc(agent.id)}">
-            <input data-act="channel-rename-input" data-value="${esc(agent.id)}"
-              value="${esc(agent.name)}" placeholder="${esc(agent.name)}"
-              ${agent.mine ? 'maxlength="40" title="Its name in every repository"' : ""}
-              autocomplete="off" enterkeyhint="done">
-            <input data-act="channel-role-input" data-value="${esc(agent.id)}"
-              value="${esc(agent.role ?? "")}" placeholder="Role in this channel"
-              list="channel-role-options" autocomplete="off" enterkeyhint="done">
-            <datalist id="channel-role-options">
-              <!-- Every other role is free text that reaches the agent as a
-                   sentence and nothing else, so there is nothing to offer.
-                   These two are the ones the code acts on, and a reserved word
-                   nobody can discover is a reserved word nobody uses —
-                   \`investigator\` had been exactly that since it was built. -->
-              <option value="${AUDITOR_ROLE}">Audits every merge, unprompted</option>
-              <option value="${INVESTIGATOR_ROLE}">Explains why a task failed</option>
-            </datalist>
-          </form>`
-        : ""
-    }
     ${settingsOpen ? rosterSettings(agent) : ""}
   </div>`;
+}
+
+/**
+ * What the "..." on a roster row offers, in the order somebody reaches for it.
+ *
+ * Built here rather than in `app.js` because every condition in it is the
+ * same one the row itself is drawn from — who owns the agent, whether it is
+ * the auditor, whether this account may moderate the channel. Splitting that
+ * across two files is how a menu ends up offering what the row would not.
+ *
+ * Deliberately short. Everything that edits the agent — name, role, model,
+ * effort, visibility, and the red removal — is one "Settings" entry opening
+ * `rosterSettings` under the row, rather than three entries here naming three
+ * halves of the same decision. What is left beside it are the two things that
+ * are not edits: talking to the agent, and pausing what the auditor does on
+ * its own.
+ */
+export function rosterMenuItems(agentId) {
+  const repositoryId = activeChannelId();
+  const agent = channelAgentsFor(repositoryId).find(
+    (entry) => entry.id === agentId,
+  );
+  if (agent === undefined) {
+    return [];
+  }
+  const canModerate = canManageRepository(repositoryId);
+  const paused = state.auditorPaused[repositoryId] === true;
+  const items = [];
+  // Only for personal agents of this account, the same rule the avatar's
+  // one-to-one act follows: an org agent's whole point is that its work
+  // happens where the team can see it.
+  if (agent.mine === true && agent.visibility !== "org") {
+    items.push({
+      act: "agent-chat-open",
+      value: agent.id,
+      label: `Message ${agent.name}`,
+      iconName: "chatBubble",
+    });
+  }
+  items.push({
+    act: "channel-settings-toggle",
+    value: agent.id,
+    label: "Settings",
+    hint: "Name, role, model — and removal",
+    iconName: "sliders",
+  });
+  // Only the auditor gets this, because it is the only role that spends
+  // without being asked. Moderators only: turning it back on starts an audit,
+  // which costs money, so it is the same decision the promotion route guards.
+  if (isAuditor(agent) && canModerate) {
+    items.push({
+      act: "auditor-toggle",
+      // The *current* paused state, read off what is on screen — the handler
+      // flips it.
+      value: String(paused),
+      label: paused ? "Resume auditing" : "Pause auditing",
+      hint: paused
+        ? "Audits everything merged since it was switched off"
+        : "Stops audits without demoting this agent",
+      iconName: paused ? "play" : "pause",
+    });
+  }
+  // Removal is not here any more: it is the red button at the bottom of the
+  // settings panel, one level in from a menu that opens on a single click
+  // next to the row it destroys. Same rule about who may do it, applied in
+  // `rosterSettings` where the button is drawn.
+  return items;
 }
 
 function chanSidebar(activeRepositoryId) {
@@ -687,7 +820,6 @@ function chanSidebar(activeRepositoryId) {
     .filter((repo) => query === "" || repo.id.toLowerCase().includes(query))
     .sort((left, right) => left.id.localeCompare(right.id));
   const roster = channelAgentsFor(activeRepositoryId);
-  const canModerate = canManageRepository(activeRepositoryId);
   // The membership records rather than `collaborators()`, which flattens them
   // to names — the role has to come from somewhere, and it is on the record.
   // The server's room list when it has arrived — it includes repo-scoped
@@ -706,6 +838,17 @@ function chanSidebar(activeRepositoryId) {
       <button type="button" class="chan-new" data-act="channel-new" title="New chat">
         ${icon("plus")}
       </button>
+      <!-- Phone only, where this column is an off-canvas drawer over the
+           conversation. It could already be dismissed by tapping the scrim,
+           by swiping it back, or by picking a channel — three gestures and
+           no button, which left somebody who opened it just to read the
+           roster with nothing to press. Desktop hides it: there the column
+           covers nothing, and folding it away is the header's own control. -->
+      ${iconButton("close", {
+        act: "chan-sidebar-close",
+        title: "Close",
+        cls: "drawer-close",
+      })}
     </div>
     <div class="chan-list">
       <div class="chan-list-label">Channels</div>
@@ -741,7 +884,7 @@ function chanSidebar(activeRepositoryId) {
         // thing above it is a line to read before reaching the thing to click.
         roster.length === 0
           ? ""
-          : roster.map((agent) => rosterRow(agent, canModerate)).join("")
+          : roster.map((agent) => rosterRow(agent)).join("")
       }
       <button type="button" class="roster-add" data-act="channel-agent-menu"
         data-value="${esc(activeRepositoryId ?? "")}">
@@ -872,8 +1015,15 @@ function chanHeader(repository, repositoryId) {
     <!-- The desktop counterpart of the button above: on a wide screen the
          channel list is a column rather than a drawer, so folding it away is
          a different act from opening it and gets its own control. Hidden
-         below the breakpoint where the drawer takes over. -->
-    <button type="button" class="icon-btn desk-only" data-act="chan-collapse-toggle"
+         below the breakpoint where the drawer takes over.
+
+         Lit while the column is folded away. The aria-pressed below said so
+         to a screen reader and nothing said so to an eye: one grey glyph
+         meant both "hide this" and "the list you are missing is behind here",
+         which is the whole of "where did the channels go". The "on" modifier
+         is icon-btn's existing treatment for a toggle showing its state. -->
+    <button type="button" class="icon-btn desk-only${state.chanCollapsed ? " on" : ""}"
+      data-act="chan-collapse-toggle"
       title="${state.chanCollapsed ? "Show channels &amp; people" : "Hide channels &amp; people"}"
       aria-pressed="${state.chanCollapsed === true}"
       aria-label="${state.chanCollapsed ? "Show channels and people" : "Hide channels and people"}">${icon(
@@ -1197,7 +1347,13 @@ function messageRow(
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
-  return `<div class="cmsg-row${
+  // A message somebody unsaid, whose thread is still standing. The row stays
+  // where it was — the replies under it are answers to something, and closing
+  // the gap would leave them answering the message above — but everything the
+  // row could still *do* goes with the words. React, pin, revert and delete
+  // all act on a line that is no longer there.
+  const deleted = entry.deletedAt !== undefined;
+  return `<div class="cmsg-row${deleted ? " cmsg-deleted" : ""}${
     // The auditor reads every merge without being asked, so its lines arrive
     // among work nobody is looking at yet. Drawn in the accent so they are
     // recognisable as the unprompted ones — and in *the reader's* accent
@@ -1220,13 +1376,13 @@ function messageRow(
         )}</span>
         <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
       </div>
-      <div class="cmsg-text">${messageBody(
-        entry.content,
-        repositoryId,
-        entry.mentions,
-      )}</div>
+      <div class="cmsg-text">${
+        deleted
+          ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
+          : messageBody(entry.content, repositoryId, entry.mentions)
+      }</div>
       ${
-        reactions.length === 0
+        deleted || reactions.length === 0
           ? ""
           : `<div class="cmsg-reactions">${reactions
               .map(
@@ -1268,7 +1424,9 @@ function messageRow(
         // Revert, as quiet as the actions beside it. It was a labelled button
         // under the file list, which gave "undo this task" more visual weight
         // than the task itself had.
-        entry.taskId === undefined || !canManageRepository(repositoryId)
+        deleted ||
+        entry.taskId === undefined ||
+        !canManageRepository(repositoryId)
           ? ""
           : iconButton("history", {
               act: "chan-revert-task",
@@ -1277,7 +1435,16 @@ function messageRow(
               small: true,
             })
       }
-      ${iconButton("smile", { act: "channel-react", value: entry.id, title: "React", small: true })}
+      ${
+        deleted
+          ? ""
+          : iconButton("smile", {
+              act: "channel-react",
+              value: entry.id,
+              title: "React",
+              small: true,
+            })
+      }
       ${
         // Roots only. A pin lives on `channel_messages`, and a reply is a row
         // in another table entirely — offering the button on one sent a POST
@@ -1286,7 +1453,7 @@ function messageRow(
         // server had no record of. The thread's own header carries the pin for
         // everything inside it, which is the affordance a reader wants anyway:
         // you pin the conversation, not one line of it.
-        isReply
+        isReply || deleted
           ? ""
           : iconButton("pin", {
               act: "channel-pin",
@@ -1294,6 +1461,30 @@ function messageRow(
               title: entry.pinnedAt === undefined ? "Pin" : "Unpin",
               small: true,
             })
+      }
+      ${
+        // Delete, in the same quiet set as the rest. Its own words or a
+        // manager's reach — `canDeleteChannelEntry` is the client's copy of
+        // the rule the gateway holds, so the button is absent rather than
+        // present-and-refused.
+        //
+        // Reply or root is decided by `messageId` rather than by `isReply`:
+        // the thread panel draws its own root in the compact reply style, so
+        // the flag says how a row looks and only the field says what it is.
+        // A reply carries its root's id too, because deleting one is a write
+        // against the thread it lives in.
+        (() => {
+          if (deleted || !canDeleteChannelEntry(repositoryId, entry)) {
+            return "";
+          }
+          const parentId = entry.messageId;
+          return iconButton("trash", {
+            act: parentId ? "thread-reply-delete" : "channel-message-delete",
+            value: parentId ? `${parentId}|${entry.id}` : entry.id,
+            title: parentId ? "Delete this reply" : "Delete this message",
+            small: true,
+          });
+        })()
       }
       ${
         // Anything the caller wants sitting beside the reply button — the
@@ -1574,11 +1765,23 @@ function composerSuggestions(repositoryId) {
 
 
 function composer(repositoryId) {
+  // Empty and unfocused, the composer shrinks to one lean row and its toolbar
+  // folds into it — the rest is in styles.css, off the textarea's own
+  // `:placeholder-shown`, so typing opens it without waiting for a render.
+  // Three things it cannot see from there, because all three live outside the
+  // form: an image staged for the next message, a thread that message is
+  // aimed at, and an upload still in flight. Each of them is a pending
+  // decision the bar has to stay open over, and each has a control on the row
+  // that answers it.
+  const pending =
+    state.attaching > 0 ||
+    state.composerThreadId !== undefined ||
+    draftAttachments(repositoryId).length > 0;
   return `<div class="chan-composer-wrap${state.mentionActive ? " mention-active" : ""}">
     <div data-composer-suggestions>${composerSuggestions(repositoryId)}</div>
     ${composerThreadChip(repositoryId)}
     ${draftAttachmentPreviews(repositoryId)}
-    <form class="composer" data-act="channel-submit">
+    <form class="composer${pending ? " is-expanded" : ""}" data-act="channel-submit">
       <div class="composer-field">
         <!-- The ping colours the letters, which a textarea cannot do: it has
              one colour for all of its text. So the highlighting is painted by
@@ -1589,7 +1792,10 @@ function composer(repositoryId) {
              Hidden from assistive tech, because a screen reader should hear
              the textarea's value once and not twice. -->
         <div class="composer-mirror" data-composer-mirror aria-hidden="true"
-          >${composerMirror(draftText())}</div>
+          >${composerMirror(
+            draftText(),
+            channelParticipants(repositoryId),
+          )}</div>
         <textarea data-act="channel-input" rows="1" spellcheck="true"
           enterkeyhint="send"
           placeholder="${
@@ -1631,6 +1837,31 @@ function panelGrip() {
   return `<div class="panel-grip" role="separator" aria-orientation="vertical"
     tabindex="0" title="Drag to resize — double-click to reset"
     aria-label="Resize panel"></div>`;
+}
+
+/**
+ * What kind of thing this panel is, said in one word above what it is called.
+ *
+ * Six different surfaces share the one column and each of them used to open
+ * with nothing but a name in it — a repository path, a person, a thread's
+ * first sentence — which are all things the transcript underneath is also full
+ * of. So the panel arriving read as the conversation changing rather than as a
+ * second surface over it. The word is the smallest thing that says "you
+ * stepped aside into this, and it closes".
+ */
+function panelKind(label) {
+  return `<span class="panel-kind">${esc(label)}</span>`;
+}
+
+/**
+ * The control every one of those six surfaces is looked for first.
+ *
+ * One call rather than six spellings of the same `iconButton`, so the close
+ * cannot drift apart from panel to panel — it was already three different
+ * tooltips for the identical act.
+ */
+function panelClose(act, title) {
+  return iconButton("close", { act, title, cls: "panel-close" });
 }
 
 /**
@@ -1710,9 +1941,9 @@ function chanTreePanel(repositoryId) {
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
-      <span>Files</span>
+      ${panelKind("Files")}
       <span class="spacer"></span>
-      ${iconButton("close", { act: "chan-tree-close", title: "Close" })}
+      ${panelClose("chan-tree-close", "Close files (Esc)")}
     </header>
     <div class="thread-body tree-body">
       ${
@@ -1782,7 +2013,7 @@ function threadListPanel(repositoryId) {
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
-      <span>Threads</span>
+      ${panelKind("Threads")}
       <span class="spacer"></span>
       ${
         threads.length === 0 || !canManageRepository(repositoryId)
@@ -1793,7 +2024,7 @@ function threadListPanel(repositoryId) {
               small: true,
             })
       }
-      ${iconButton("close", { act: "channel-threads-close", title: "Close" })}
+      ${panelClose("channel-threads-close", "Close threads (Esc)")}
     </header>
     <div class="thread-body">
       ${
@@ -2104,16 +2335,14 @@ function agentPanel() {
     ${panelGrip()}
     <div class="agent-panel-head">
       <header class="thread-head">
+        ${panelKind("Agent")}
         <span class="dm-head-name">
           ${agentFace(agent, 20)}
           ${esc(agent.name)}
           ${statusDot(status, AGENT_STATUS_TITLE[status])}
         </span>
         <span class="spacer"></span>
-        ${iconButton("close", {
-          act: "agent-panel-close",
-          title: "Close this conversation",
-        })}
+        ${panelClose("agent-panel-close", "Close this conversation (Esc)")}
       </header>
       ${
         canChatPrivately
@@ -2172,13 +2401,14 @@ function dmPanel() {
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
+      ${panelKind("Direct")}
       <span class="dm-head-name">
         ${avatar(name, 20)}
         ${esc(name)}
         ${statusDot(online ? "working" : "away", online ? "Here" : "Away")}
       </span>
       <span class="spacer"></span>
-      ${iconButton("close", { act: "dm-close", title: "Close conversation" })}
+      ${panelClose("dm-close", "Close conversation (Esc)")}
     </header>
     <div class="thread-body dm-body">
       ${
@@ -2195,7 +2425,19 @@ function dmPanel() {
                     value: message.id,
                     title: "Reply to this message",
                     small: true,
-                  })}</span>
+                  })}${
+                    // Only your own, and there is no tombstone: the two people
+                    // here are the whole audience, so unsending takes it off
+                    // both screens and leaves nothing to explain.
+                    mine
+                      ? iconButton("trash", {
+                          act: "dm-delete",
+                          value: message.id,
+                          title: "Delete this message",
+                          small: true,
+                        })
+                      : ""
+                  }</span>
                   <time class="dm-time">${esc(clockTime(message.createdAt))}</time>
                 </div>`;
               })
@@ -2235,6 +2477,7 @@ function threadPanel(repositoryId) {
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
+      ${panelKind("Thread")}
       <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
       ${iconButton("pin", {
@@ -2247,7 +2490,7 @@ function threadPanel(repositoryId) {
         value: messageId,
         title: "Send the next channel message into this thread",
       })}
-      ${iconButton("close", { act: "channel-thread-close", title: "Close thread" })}
+      ${panelClose("channel-thread-close", "Close thread (Esc)")}
     </header>
     <div class="thread-body">
       <div class="thread-root">${messageRow(root, repositoryId, { isReply: true })}</div>
@@ -2517,6 +2760,7 @@ function filePanel() {
   return `<aside class="thread-panel file-panel${dirty ? " dirty" : ""}">
     ${panelGrip()}
     <header class="thread-head">
+      ${panelKind("File")}
       <span class="fp-path" title="${esc(path)}">${esc(path)}</span>
       ${
         stats === undefined
@@ -2540,10 +2784,7 @@ function filePanel() {
         act: "chan-file-back",
         title: "Back to files",
       })}
-      ${iconButton("close", {
-        act: "chan-file-close",
-        title: "Close files",
-      })}
+      ${panelClose("chan-file-close", "Close files (Esc)")}
     </header>
     ${
       editing
@@ -3149,14 +3390,19 @@ function updateMentionState(node) {
   const value = node.value;
   const cursor = node.selectionStart ?? value.length;
   const before = value.slice(0, cursor);
-  // A command is only ever the first thing in a message — the same rule the
-  // server parses by — so the picker only offers one there. Anchoring it
-  // here as well is what stops a path typed mid-sentence from opening a
-  // menu over the composer.
-  const slash = /^\s*\/([a-z0-9-]*)$/iu.exec(before);
+  // A slash that starts a word, anywhere in the message — the same rule the
+  // server now parses by (`parseSlashCommand` in slash.ts). It used to have
+  // to be the very first thing typed, which nothing on screen said and
+  // nobody could infer: a person who had written the mention first got a
+  // slash that opened nothing.
+  //
+  // The word boundary is what keeps a path out. `src/retry.ts` and `and/or`
+  // have no space before the slash, so neither opens the picker, and a
+  // command that matches nothing shows no popover anyway.
+  const slash = /(^|\s)\/([a-z0-9-]*)$/iu.exec(before);
   state.slashActive = slash !== null;
   if (slash !== null) {
-    state.slashQuery = slash[1] ?? "";
+    state.slashQuery = slash[2] ?? "";
     state.slashIndex = 0;
     // One picker at a time: a bare "/" is never also a mention.
     state.mentionActive = false;
@@ -3207,8 +3453,15 @@ export function updateComposerInput(node) {
   paintComposerMirror(node);
   // The height is a property of this element, not of the app, so it is set
   // directly whether or not anything else is rebuilt.
+  //
+  // Emptied, it is cleared rather than measured: an empty box collapses to
+  // the lean bar, whose padding is not the padding this measurement was taken
+  // against, and a pixel height left behind from the open composer would hold
+  // the pill several rows tall with nothing in it.
   node.style.height = "auto";
-  node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+  if (node.value !== "") {
+    node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+  }
   if (!changed) {
     return;
   }
@@ -3232,7 +3485,10 @@ export function pickSlashCommand(name, rerender) {
   const cursor = node?.selectionStart ?? state.chatDraft.length;
   const before = state.chatDraft.slice(0, cursor);
   const after = state.chatDraft.slice(cursor);
-  const replaced = before.replace(/^\s*\/([a-z0-9-]*)$/iu, `/${name} `);
+  // The same boundary `updateMentionState` opened the picker on, so what is
+  // completed is the word the picker was offering — whatever came before it
+  // in the message is kept.
+  const replaced = before.replace(/(^|\s)\/([a-z0-9-]*)$/iu, `$1/${name} `);
   state.chatDraft = replaced + after;
   state.slashActive = false;
   state.slashQuery = "";

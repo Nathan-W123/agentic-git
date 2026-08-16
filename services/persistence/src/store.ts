@@ -821,6 +821,17 @@ export interface ChannelMessage {
    * does not paste a second, canned ending under work that already reported.
    */
   endedAt: string | undefined;
+  /**
+   * When this message was deleted in place, leaving a tombstone behind.
+   *
+   * Only set on a root that still holds replies: removing such a row would
+   * take an agent's whole account of a task with it, so the words go and the
+   * thread stays. A message nobody has replied to is deleted outright and is
+   * simply absent, which is why this is undefined far more often than not.
+   */
+  deletedAt?: string;
+  /** Who deleted it. Present exactly when {@link deletedAt} is. */
+  deletedBy?: string;
 }
 
 /**
@@ -1600,8 +1611,50 @@ export interface CoordinationStore {
   deleteChannelMessage(repositoryId: string, messageId: string): Promise<void>;
   /** Removes every message in one channel. Returns how many went. */
   deleteChannelMessages(repositoryId: string): Promise<number>;
+  /**
+   * Blanks a message in place, leaving its thread standing.
+   *
+   * The alternative to {@link deleteChannelMessage} for a root somebody has
+   * already replied under: the replies are an agent's account of a task and
+   * belong to the people who read them, not to whoever opened the thread, so
+   * a request to unsay something takes the words and nothing else. Reactions
+   * and the pin go with the content — both were attention paid to a line that
+   * is no longer there — while replies, task link and position are untouched.
+   */
+  redactChannelMessage(
+    repositoryId: string,
+    messageId: string,
+    input: { deletedAt: string; deletedBy: string },
+  ): Promise<void>;
+  /**
+   * Removes one reply with its reactions, returning what went.
+   *
+   * A reply is a leaf: nothing hangs off it, so there is nothing a tombstone
+   * would protect and it is removed outright. The returned row is what the
+   * caller needs to have already checked who wrote it.
+   */
+  deleteChannelReply(
+    repositoryId: string,
+    messageId: string,
+    replyId: string,
+  ): Promise<ChannelReply | undefined>;
 
   appendDirectMessage(input: AppendDirectMessageInput): Promise<DirectMessage>;
+  /**
+   * Removes one direct message, and only if `authorId` is the one who sent
+   * it.
+   *
+   * The check is here rather than at the caller because it is the whole of
+   * the rule: private mail has no moderator, so the sender unsends and
+   * nobody else can. Undefined when there was no such message of theirs to
+   * remove — the same answer for "already gone" and "not yours", which is
+   * the pair a probe would otherwise tell apart.
+   */
+  deleteDirectMessage(
+    projectId: ProjectId,
+    messageId: string,
+    authorId: string,
+  ): Promise<DirectMessage | undefined>;
   /**
    * One conversation, oldest first, between the viewer and one other person.
    *
