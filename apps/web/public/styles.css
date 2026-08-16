@@ -4819,49 +4819,15 @@ svg {
   padding: 0 3px;
 }
 
-/* A ping, in the reader's own two accents.
-   Both colours come from the picker in settings — `--accent` and `--accent-2`
-   are written onto the root when the appearance loads — so the wave is the
-   pair this person chose, not a fixed gradient. The stops repeat the sequence
-   twice across a band three times the token's width, which is what lets the
-   position animate from one end to the other and land on an identical frame:
-   the sweep loops with no visible jump back.
-   Clipped to the glyphs, so the colour runs through the at sign and the
-   letters themselves rather than sitting behind them. `-webkit-` first for
-   Safari and every iOS browser, which still only understand the prefixed
-   property; the unprefixed pair follows for everything else. */
+/* A ping is a quiet, static label in the reader's primary accent. The wash is
+   derived from that same accent for both themes, so it stays light without
+   introducing a second colour or motion into the transcript. */
 .cmsg-text .mention-ping {
   font-weight: 650;
-  background-image: linear-gradient(
-    100deg,
-    var(--accent-bright) 0%,
-    var(--accent-2-bright) 25%,
-    var(--accent-bright) 50%,
-    var(--accent-2-bright) 75%,
-    var(--accent-bright) 100%
-  );
-  background-size: 300% 100%;
-  background-position: 0% 50%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  color: transparent;
-  animation: mention-wave 3.6s linear infinite;
-}
-
-@keyframes mention-wave {
-  to {
-    background-position: -200% 50%;
-  }
-}
-
-/* Still both accents when motion is off — the ping has to stay legible as a
-   ping — but held on one frame rather than travelling. */
-@media (prefers-reduced-motion: reduce) {
-  .cmsg-text .mention-ping {
-    animation: none;
-    background-position: 50% 50%;
-  }
+  color: var(--accent-bright);
+  background: var(--accent-wash);
+  border-radius: 4px;
+  padding: 1px 4px;
 }
 
 /* The request itself, at the top of the thinking it produced. Set apart from

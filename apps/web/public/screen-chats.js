@@ -324,32 +324,34 @@ function draftAttachmentPreviews(repositoryId) {
 }
 
 /**
- * A ping as it appears in a posted message: the at sign and the handle.
+ * Marks the complete names a posted message actually mentions.
  *
- * The same shape the composer completes into the draft — `pickMention` writes
- * `@name ` — so what is highlighted when the message is read is exactly what
- * the picker put there. A handle has to start with a letter, which keeps an
- * email address (`nate@example.com`) and a path (`a/@b`) out: the character
- * before the at sign must be the start of the line, a space or an opening
- * bracket, so an at sign in the middle of a word is left alone.
+ * The server includes resolved mention names with every message, and the
+ * optimistic local post carries the same shape. Matching those names instead
+ * of guessing where an `@` token ends keeps `@Claude (Owner)` and a person's
+ * multi-word display name in one span without swallowing the request after
+ * it. Longest first handles names where one is a prefix of another.
  *
- * Applied to already-escaped text, after the inline patterns have run, so the
- * only `>` in the string belongs to a tag this file built — and `>` is not a
- * character the pattern accepts before an at sign, which is what keeps
- * `<code>@agent</code>` from being painted inside its own code span.
+ * `value` and `names` are already escaped. The boundary before `@` leaves
+ * email addresses and paths alone, while applying this after inline markup
+ * keeps `<code>@agent</code>` untouched because its preceding character is
+ * `>` rather than an accepted text boundary.
  */
-const MENTION_TEXT_PATTERN = /(^|[\s([])@([A-Za-z][\w-]*(?:\.[\w-]+)*)/gu;
-
-/**
- * The wave is one span, not one per letter: the gradient is painted across the
- * whole token and clipped to the glyphs, so the colour travels through the at
- * sign and the letters as a single sweep. The text inside is untouched, so
- * copying a message still yields `@name`.
- */
-function mentionMarkup(value) {
+function mentionMarkup(value, names) {
+  const alternatives = [...new Set(names)]
+    .filter((name) => name.length > 0)
+    .sort((left, right) => right.length - left.length)
+    .map((name) => name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"));
+  if (alternatives.length === 0) {
+    return value;
+  }
+  const pattern = new RegExp(
+    `(^|[\\s([])@(${alternatives.join("|")})(?=$|[\\s,.:;!?()\\[\\]{}])`,
+    "giu",
+  );
   return value.replace(
-    MENTION_TEXT_PATTERN,
-    (_match, before, handle) => `${before}<span class="mention-ping">@${handle}</span>`,
+    pattern,
+    (_match, before, name) => `${before}<span class="mention-ping">@${name}</span>`,
   );
 }
 
@@ -365,7 +367,14 @@ function mentionMarkup(value) {
  * summary is actually made of; links, images, tables and raw HTML are not,
  * and every one of them is a way for text to do something other than be read.
  */
-function richText(text) {
+function richText(text, mentions) {
+  const mentionNames = [
+    "agents",
+    ...mentions
+      .map((mention) => mention?.name)
+      .filter((name) => typeof name === "string")
+      .map((name) => esc(name)),
+  ];
   const blocks = esc(String(text ?? ""))
     .split(/\n{2,}/u)
     .map((block) => block.trim())
@@ -375,6 +384,7 @@ function richText(text) {
       value
         .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>")
         .replace(/`([^`]+)`/gu, "<code>$1</code>"),
+      mentionNames,
     );
   return blocks
     .map((block) => {
@@ -399,8 +409,12 @@ function richText(text) {
     .join("");
 }
 
-function messageBody(content, repositoryId) {
+function messageBody(content, repositoryId, mentions) {
   const text = String(content ?? "");
+  // Older messages and optimistic replies may not carry resolved mention
+  // metadata yet. The current roster is the same source the picker uses, so
+  // it is the accurate fallback until the server copy arrives.
+  const resolvedMentions = mentions ?? channelParticipants(repositoryId);
   const images = [];
   let stripped = text;
   for (const match of text.matchAll(ATTACHMENT_PATTERN)) {
@@ -408,13 +422,13 @@ function messageBody(content, repositoryId) {
     stripped = stripped.replace(match[0], "");
   }
   if (images.length === 0) {
-    return richText(text);
+    return richText(text, resolvedMentions);
   }
   const base =
     `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
     `/repositories/${encodeURIComponent(repositoryId ?? "")}/attachments/`;
   return (
-    richText(stripped.trim()) +
+    richText(stripped.trim(), resolvedMentions) +
     images
       .map(
         (image) =>
@@ -1155,7 +1169,11 @@ function messageRow(
         )}</span>
         <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
       </div>
-      <div class="cmsg-text">${messageBody(entry.content, repositoryId)}</div>
+      <div class="cmsg-text">${messageBody(
+        entry.content,
+        repositoryId,
+        entry.mentions,
+      )}</div>
       ${
         reactions.length === 0
           ? ""
