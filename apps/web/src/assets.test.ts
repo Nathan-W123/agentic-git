@@ -429,6 +429,12 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
     /class="chan-foot-action" data-act="nav"\s*data-value="settings"/u,
   );
   assert.match(sidebar, /class="chan-account" data-act="user-menu"/u);
+  assert.match(sidebar, /section\("People", "invite-repo"/u);
+  assert.doesNotMatch(
+    sidebar,
+    />Profile<\/span>/u,
+    "the account action should not repeat its destination as a subtitle",
+  );
 
   // Compact means narrow, never absent. The labels fold away while the links,
   // channel icons, Settings and account avatar remain real controls.
@@ -441,10 +447,36 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
     /\.chats-shell\.chan-collapsed > \.chan-sidebar \{[^}]*display: none;/u,
   );
   assert.match(css, /\.chats-shell\.chan-collapsed \.chan-row \{/u);
+  assert.match(css, /\.chan-row\.active::before \{/u);
   assert.match(
     css,
     /\.chats-shell\.chan-collapsed :is\(\.chan-foot-action, \.chan-account\)/u,
   );
+});
+
+test("a reply carries a quiet visual path back to its root", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const rendererStart = chats.indexOf("function threadReplies");
+  const rendererEnd = chats.indexOf("\n/**\n * How much summary", rendererStart);
+  const renderer = chats.slice(rendererStart, rendererEnd);
+
+  assert.match(
+    chats,
+    /replies\.length > 0 && !isReply \? " cmsg-threaded" : ""/u,
+    "only channel roots with replies should grow a branch",
+  );
+  assert.match(
+    chats,
+    /replies\.length === 0 \|\| isReply/u,
+    "the open thread root should not repeat the channel's reply link",
+  );
+  assert.match(renderer, /class="thread-replies"/u);
+  assert.match(renderer, /class="thread-replies-head"/u);
+  assert.match(renderer, /class="thread-replies-flow"/u);
+  assert.match(css, /\.cmsg-row\.cmsg-threaded::before \{/u);
+  assert.match(css, /\.thread-root\.has-replies::after \{/u);
+  assert.match(css, /\.thread-replies-head::after \{/u);
 });
 
 test("the summary opens over the editor instead of navigating away", async () => {

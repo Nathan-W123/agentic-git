@@ -622,23 +622,18 @@ svg {
 }
 
 .chan-account-copy {
-  display: grid;
+  display: block;
   min-width: 0;
   flex: 1;
-  line-height: 1.25;
 }
 
 .chan-account-copy b {
+  display: block;
   overflow: hidden;
   font-size: 12.5px;
   font-weight: 600;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-.chan-account-copy span {
-  font-size: 10.5px;
-  color: var(--text-4);
 }
 
 .chan-account-more {
@@ -3652,6 +3647,7 @@ svg {
 }
 
 .chan-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -3805,6 +3801,21 @@ svg {
      right only by coincidence of the dark theme; on light it read as
      white-on-cream. `--text` is what both themes call readable. */
   color: var(--text);
+}
+
+/* A narrow marker makes selection legible even when the accent wash is close
+   to the panel colour. It costs no extra label or badge, and survives the
+   compact rail where the channel name folds away. */
+.chan-row.active::before {
+  content: "";
+  position: absolute;
+  left: 1px;
+  top: 50%;
+  width: 2px;
+  height: 18px;
+  border-radius: 2px;
+  background: linear-gradient(var(--accent), var(--accent-2));
+  transform: translateY(-50%);
 }
 
 .chan-row .cr-hash {
@@ -4446,6 +4457,22 @@ svg {
 
 .cmsg-row:hover {
   background: var(--bg-hover);
+}
+
+/* A thread branches from the root avatar into its compact reply summary.
+   The single hairline is deliberately quieter than the link text: it should
+   explain the relationship after a glance, not compete with the message. */
+.cmsg-row.cmsg-threaded::before {
+  content: "";
+  position: absolute;
+  left: 23px;
+  top: 40px;
+  bottom: 18px;
+  width: 20px;
+  border-left: 1px solid var(--accent-line);
+  border-bottom: 1px solid var(--accent-line);
+  border-bottom-left-radius: 9px;
+  pointer-events: none;
 }
 
 .cmsg-row .cmsg-avatar {
@@ -5459,9 +5486,49 @@ body.resizing-panel {
 }
 
 .thread-root {
-  padding-bottom: 12px;
-  margin-bottom: 10px;
-  border-bottom: 1px solid var(--border-soft);
+  position: relative;
+  padding-bottom: 5px;
+  margin-bottom: 0;
+}
+
+/* Continue the root avatar's stem into the reply label, then turn toward the
+   words. This is the same branch used in the channel transcript at a scale
+   suited to the thread panel. */
+.thread-root.has-replies::after {
+  content: "";
+  position: absolute;
+  left: 16px;
+  top: 40px;
+  bottom: -15px;
+  width: 13px;
+  border-left: 1px solid var(--accent-line);
+  border-bottom: 1px solid var(--accent-line);
+  border-bottom-left-radius: 8px;
+  pointer-events: none;
+}
+
+.thread-replies-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 28px;
+  padding-left: 35px;
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.thread-replies-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--border-soft), transparent);
+}
+
+.thread-replies-flow {
+  padding-top: 2px;
 }
 
 .thread-count {
@@ -6160,11 +6227,15 @@ dialog.modal::backdrop {
   }
 
   .chats-shell.chan-collapsed .chan-row {
-    position: relative;
     justify-content: center;
     width: 40px;
     height: 40px;
     padding: 0;
+  }
+
+  .chats-shell.chan-collapsed .chan-row.active::before {
+    left: -6px;
+    height: 22px;
   }
 
   .chats-shell.chan-collapsed .chan-row .cr-hash svg {

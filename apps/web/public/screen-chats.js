@@ -939,7 +939,7 @@ function chanSidebar(activeRepositoryId) {
             : channels.map((repo) => chanRow(repo, activeRepositoryId)).join("")
         }
       </div>
-      ${section("Users", "invite-repo", channel, "Invite someone")}
+      ${section("People", "invite-repo", channel, "Invite someone")}
       <div class="chan-roster">
         ${
           // People first, then agents. The channel header already names the
@@ -978,7 +978,7 @@ function chanSidebar(activeRepositoryId) {
       <button type="button" class="chan-account" data-act="user-menu"
         title="Open profile menu" aria-label="Open profile menu for ${esc(user)}">
         ${avatar(user, 32, user, myAvatar())}
-        <span class="chan-account-copy"><b>${esc(user)}</b><span>Profile</span></span>
+        <span class="chan-account-copy"><b>${esc(user)}</b></span>
         ${icon("chevronRight", 'class="chan-account-more"')}
       </button>
     </div>
@@ -1438,7 +1438,9 @@ function messageRow(
   // row could still *do* goes with the words. React, pin, revert and delete
   // all act on a line that is no longer there.
   const deleted = entry.deletedAt !== undefined;
-  return `<div class="cmsg-row${deleted ? " cmsg-deleted" : ""}${
+  return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
+    replies.length > 0 && !isReply ? " cmsg-threaded" : ""
+  }${deleted ? " cmsg-deleted" : ""}${
     // The auditor reads every merge without being asked, so its lines arrive
     // among work nobody is looking at yet. Drawn in the accent so they are
     // recognisable as the unprompted ones — and in *the reader's* accent
@@ -1486,9 +1488,12 @@ function messageRow(
         // thread's own link — the work is the thread's story, and a summary of
         // it sitting directly under the opening message read as a property of
         // that one message, beside a second copy wherever else the task was
-        // mentioned. Only a message with no thread keeps the block on itself,
-        // because there is nothing else for it to hang from.
-        replies.length === 0
+        // mentioned. A message with no thread keeps the block on itself
+        // because there is nothing else for it to hang from; the root inside
+        // the open thread keeps it because that is the thread. Crucially, the
+        // root does not repeat the channel's "N replies" link inside the panel
+        // those replies are already open in.
+        replies.length === 0 || isReply
           ? hideChanges
             ? ""
             : changedFilesBlock(entry, repositoryId)
@@ -2611,6 +2616,7 @@ function threadPanel(repositoryId) {
   if (root === undefined) {
     return "";
   }
+  const hasReplies = (root.replies?.length ?? 0) > 0;
   // The subject in the header, where a reader looks first. "Thread" only
   // when nothing names it — and the title being here is what the fold
   // comment inside threadReplies has assumed all along.
@@ -2634,7 +2640,7 @@ function threadPanel(repositoryId) {
       ${panelClose("channel-thread-close", "Close thread (Esc)")}
     </header>
     <div class="thread-body">
-      <div class="thread-root">${messageRow(root, repositoryId, { isReply: true })}</div>
+      <div class="thread-root${hasReplies ? " has-replies" : ""}">${messageRow(root, repositoryId, { isReply: true })}</div>
       ${threadReplies(root, repositoryId)}
       ${threadTyping(root)}
       ${typingIndicator(repositoryId, root.id)}
@@ -2760,7 +2766,11 @@ function threadReplies(root, repositoryId) {
   if (replies.length === 0) {
     return `<div class="thread-count">No replies yet</div>`;
   }
-  return threadReplyTurns(replies)
+  const titled = threadTitleReply(root);
+  const said = replies.filter(
+    (reply) => reply !== titled && !isThreadThinking(reply),
+  );
+  const flow = threadReplyTurns(replies)
     .map((turn, index) => {
       const thinking = threadThinkingBlock(root.id, turn, index);
       return `${
@@ -2772,6 +2782,14 @@ function threadReplies(root, repositoryId) {
         .join("")}`;
     })
     .join("");
+  return `<section class="thread-replies" aria-label="${esc(
+    threadSaidCount(said.length),
+  )}">
+    <div class="thread-replies-head" aria-hidden="true">
+      <span>${esc(threadSaidCount(said.length))}</span>
+    </div>
+    <div class="thread-replies-flow">${flow}</div>
+  </section>`;
 }
 
 /**
