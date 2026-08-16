@@ -2796,6 +2796,17 @@ function restoreFocus(saved) {
     next.style.height = saved.height;
   }
   next.scrollTop = saved.top;
+  // The channel composer's text is painted by a layer under the textarea, and
+  // that layer is rebuilt by this render at the top of its own scroll. Putting
+  // the textarea back where it was without moving the mirror with it leaves
+  // the letters one scroll offset away from the caret sitting in them —
+  // which is what a background frame arriving mid-message looked like.
+  const mirror = next
+    .closest?.(".composer-field")
+    ?.querySelector("[data-composer-mirror]");
+  if (mirror !== null && mirror !== undefined) {
+    mirror.scrollTop = next.scrollTop;
+  }
 }
 
 function confirmDiscardEdit() {
@@ -3461,9 +3472,22 @@ document.addEventListener("click", (event) => {
     case "mention-agents-insert": {
       const input = document.querySelector("[data-act='channel-input']");
       if (input !== null) {
-        input.value = `@agents ${input.value.replace(/^@agents\s*/u, "")}`;
-        input.focus();
-        input.setSelectionRange(input.value.length, input.value.length);
+        // Through the draft and a render, exactly like `typeIntoComposer`
+        // above. Assigning `.value` fires no input event, so neither the draft
+        // nor the layer painting the textarea's text heard about the eight
+        // characters just put in front of them: the mirror kept showing the
+        // old sentence while the caret stood a whole "@agents " to its right.
+        const attachments = state.chatDraft.match(
+          /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
+        );
+        const written = `@agents ${input.value.replace(/^@agents\s*/u, "")}`;
+        state.chatDraft = `${written}${
+          attachments === null ? "" : `\n${attachments.join("\n")}\n`
+        }`;
+        render();
+        const next = document.querySelector("[data-act='channel-input']");
+        next?.focus();
+        next?.setSelectionRange(written.length, written.length);
       }
       return;
     }

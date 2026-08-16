@@ -2366,6 +2366,14 @@ svg {
   overflow-wrap: break-word;
   word-break: normal;
   tab-size: 4;
+  /* Width is a shared metric too, and it is the one that used to change by
+     itself: a message long enough to pass `max-height` gives the textarea a
+     scrollbar, and the 10px that takes came out of the line the caret is
+     measured against. The mirror is `overflow: hidden` and never lost those
+     pixels, so from that message on the two wrapped at different words and
+     the caret drifted further from the letters with every line. Reserving
+     the gutter on both keeps one width in both states, scrolling or not. */
+  scrollbar-gutter: stable;
 }
 
 .composer-mirror {

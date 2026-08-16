@@ -1517,6 +1517,7 @@ test("the colour wheel's marker and its click land on the same colour", async ()
 
 test("the composer paints its mentions on a layer that matches the textarea", async () => {
   const chats = await publicFile("screen-chats.js");
+  const app = await browserSource();
   const css = await publicFile("styles.css");
 
   // A textarea has one colour for all of its text, so the ping is painted by
@@ -1617,6 +1618,11 @@ test("the composer paints its mentions on a layer that matches the textarea", as
     "line-height",
     "white-space",
     "overflow-wrap",
+    // Width is a shared metric as well, and the only one that used to change
+    // on its own: a draft past `max-height` gave the textarea a scrollbar and
+    // took its 10px out of the line the caret is measured against, while the
+    // `overflow: hidden` mirror kept them. Reserved on both, it cannot drift.
+    "scrollbar-gutter",
   ]) {
     assert.match(
       shared[1] ?? "",
@@ -1645,6 +1651,35 @@ test("the composer paints its mentions on a layer that matches the textarea", as
     /\b(?:font-weight|letter-spacing|margin|padding):/u,
     "painting a command must not change glyph advances or spacing",
   );
+
+  // The other two ways the caret got away from the letters, both of which
+  // needed something outside the keystroke path to happen first — which is
+  // why it read as intermittent, and why staging an image (a render each)
+  // was where it was noticed.
+  //
+  // A render rebuilds the mirror at the top of its own scroll while the
+  // textarea is put back where it was, so the restore has to move both.
+  const restore = app.slice(
+    app.indexOf("function restoreFocus"),
+    app.indexOf("\nfunction confirmDiscardEdit"),
+  );
+  assert.match(restore, /next\.scrollTop = saved\.top;/u);
+  assert.match(restore, /\[data-composer-mirror\]/u);
+  assert.match(restore, /mirror\.scrollTop = next\.scrollTop;/u);
+
+  // And nothing writes the textarea's value behind the mirror's back: an
+  // assignment fires no input event, so the painted text stays a token short
+  // of the caret until the next keystroke. It goes through the draft instead.
+  const insert = app.slice(
+    app.indexOf('case "mention-agents-insert"'),
+    app.indexOf('case "dm-close"'),
+  );
+  assert.notEqual(insert, "", "the @agents shortcut should still be there");
+  assert.doesNotMatch(insert, /input\.value =/u);
+  assert.match(insert, /state\.chatDraft = /u);
+  assert.match(insert, /render\(\);/u);
+  // ...carrying any staged image across, the same as `typeIntoComposer`.
+  assert.match(insert, /attachment:\[0-9a-f\]\{32\}/u);
 });
 
 test("a phone's caret sits on its own letters, and a backlog arrives as one line", async () => {
