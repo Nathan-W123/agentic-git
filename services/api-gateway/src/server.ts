@@ -2472,6 +2472,16 @@ export class ApiGateway {
   private threadReconcileTimer: NodeJS.Timeout | undefined;
   /** Last `conflict_detected` sequence narrated to a channel. */
   private conflictSequence: number | undefined;
+  /** The one temporary sequencing notice currently shown for each held task. */
+  private readonly arbitrationNotices = new Map<
+    string,
+    {
+      projectId: string;
+      repositoryId: string;
+      messageId: string;
+      content: string;
+    }
+  >();
   /**
    * The audit-log position the auditor has consumed, in memory.
    *
@@ -12124,7 +12134,8 @@ export class ApiGateway {
     const blockers = (Array.isArray(data["blockedBy"]) ? data["blockedBy"] : [])
       .slice(0, 2)
       .map(describe);
-    const blocker = blockers.length > 0 ? blockers.join(" and ") : "work in flight";
+    const blocker =
+      blockers.length > 0 ? blockers.join(" and ") : "work in flight";
     const fileList = (value: unknown): string[] =>
       (Array.isArray(value) ? value : []).filter(
         (entry): entry is string => typeof entry === "string",
@@ -12135,6 +12146,13 @@ export class ApiGateway {
     const status = String(data["status"] ?? "");
     const approved =
       status === "approved" || status === "approved_with_constraints";
+    if (approved && data["partial"] !== true) {
+      // A sequencing notice describes a temporary condition. Once the held
+      // task can run, remove that condition from the room instead of leaving
+      // stale history behind and adding a second "starts now" announcement.
+      await this.replaceArbitrationNotice(watched);
+      return;
+    }
     let line: string;
     if (data["partial"] === true) {
       const granted = fileList(data["grantedFiles"]);
@@ -12156,26 +12174,6 @@ export class ApiGateway {
         `${granted.length > 0 ? clause(granted) : "the free part"} now, ` +
         `${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"} once ` +
         `${blocker} is done.`;
-    } else if (approved) {
-      // The hold clearing is as much news as the hold was — a room told
-      // "it starts the moment that lands" deserves the moment. Only said
-      // when a hold was actually announced for this task, or every ordinary
-      // approval would ring the bell.
-      const prior = await this.options.store.listAuditEvents({
-        taskId: watched.taskId,
-        types: ["plan_admitted"],
-      });
-      const wasHeld = prior
-        .slice(0, -1)
-        .some((entry) =>
-          ["sequenced", "blocked"].includes(
-            String(entry.event.data["status"] ?? ""),
-          ),
-        );
-      if (!wasHeld) {
-        return;
-      }
-      line = `⚖️ ${held} starts now — what it was waiting on is done.`;
     } else if (status === "blocked") {
       line =
         `⚖️ ${held} and ${blocker} have conflicting files — ${held} is ` +
@@ -12185,12 +12183,48 @@ export class ApiGateway {
         `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts ` +
         `once ${blocker} is done.`;
     }
-    await this.appendChannelEntry({
+    await this.replaceArbitrationNotice(watched, line);
+  }
+
+  /** Keeps at most one temporary sequencing notice for a held task. */
+  private async replaceArbitrationNotice(
+    watched: { projectId: string; repositoryId: string; taskId: string },
+    content?: string,
+  ): Promise<void> {
+    const prior = this.arbitrationNotices.get(watched.taskId);
+    if (content !== undefined && prior?.content === content) {
+      return;
+    }
+    if (prior !== undefined) {
+      await this.options.store.deleteChannelMessage(
+        prior.repositoryId,
+        prior.messageId,
+      );
+      await this.options.store.appendAudit(undefined, {
+        type: "channel_message_deleted",
+        data: {
+          projectId: prior.projectId,
+          repositoryId: prior.repositoryId,
+          messageId: prior.messageId,
+        },
+      });
+      this.arbitrationNotices.delete(watched.taskId);
+    }
+    if (content === undefined) {
+      return;
+    }
+    const message = await this.appendChannelEntry({
       projectId: watched.projectId,
       repositoryId: watched.repositoryId,
       kind: "system",
       authorId: "coordinator",
-      content: line,
+      content,
+    });
+    this.arbitrationNotices.set(watched.taskId, {
+      projectId: watched.projectId,
+      repositoryId: watched.repositoryId,
+      messageId: message.id,
+      content,
     });
   }
 
@@ -12301,8 +12335,10 @@ export class ApiGateway {
    * invisible in the room where people watch the agents work; the only
    * symptom of an arbitration was one task mysteriously waiting.
    *
-   * Spoken by the room, not by an agent, and in the same sentence shape as
-   * `announceArbitration`: two agent names and the order they run in.
+   * Spoken by the room, not by an agent. Structural sequence/block decisions
+   * are deliberately left to `announceArbitration`, whose `plan_admitted`
+   * event identifies the actual held task. Guessing the order from the
+   * detector's pair emitted a second, sometimes reversed sentence.
    */
   private async narrateConflicts(): Promise<void> {
     const events = await this.options.store.listAuditEvents({
@@ -12333,7 +12369,11 @@ export class ApiGateway {
       // Advisory intent overlap admits both tasks untouched; saying "conflict"
       // about work that is running anyway would teach readers to ignore the
       // times it matters.
-      if (disposition === "concurrent") {
+      if (
+        disposition === "concurrent" ||
+        disposition === "sequence" ||
+        disposition === "block"
+      ) {
         continue;
       }
       // The same resolver `announceArbitration` uses. This path used to quote
@@ -12350,14 +12390,8 @@ export class ApiGateway {
       // "who is waiting on whom". It is written to the audit record, which is
       // where an argument that long belongs; the room gets the order.
       const line =
-        disposition === "sequence"
-          ? `⚖️ ${named[0]} and ${named[1]} have conflicting files — ` +
-            `${named[1]} starts once ${named[0]} is done.`
-          : disposition === "block"
-            ? `⚖️ ${named[0]} and ${named[1]} have conflicting files — ` +
-              `${named[1]} is narrowing its plan.`
-            : `⚖️ ${named[0]} and ${named[1]} have conflicting files but can ` +
-              `run together.`;
+        `⚖️ ${named[0]} and ${named[1]} have conflicting files but can ` +
+        `run together.`;
       await this.appendChannelEntry({
         projectId,
         repositoryId,

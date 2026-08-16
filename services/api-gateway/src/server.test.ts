@@ -7063,7 +7063,7 @@ async function roomWithTwoAgents(
   return { claude: claude.id, codex: codex.id };
 }
 
-test("a file collision is announced as two agent names and an order, not two quoted prompts", async (t) => {
+test("a file collision and its admission produce one authoritative ordering", async (t) => {
   // The bug this covers, in the words of the person who hit it: the room said
   // '⚖️ "paste the 72 possible names an agent …" is waiting — "when a prompt
   // gets added to a thread …" has the files it needs. It starts the moment
@@ -7111,6 +7111,20 @@ test("a file collision is announced as two agent names and an order, not two quo
       explanation: "file_overlap: services/api-gateway/src/server.ts (+20)",
     },
   });
+  // The detector only identifies a conflicting pair. The admission is the
+  // authoritative ordering: it says which task was actually held. These two
+  // events used to produce opposite announcements for the same collision.
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation:
+        "Sequenced behind executing work on the same resources: " +
+        "services/api-gateway/src/server.ts",
+    },
+  });
 
   await waitFor(
     async () => {
@@ -7122,16 +7136,18 @@ test("a file collision is announced as two agent names and an order, not two quo
   );
 
   const messages = await runtime.store.listChannelMessages(repo, ownerId);
-  const line = String(
-    messages.find((message) => message.authorId === "coordinator")?.content,
+  const lines = messages
+    .filter((message) => message.authorId === "coordinator")
+    .map((message) => String(message.content));
+  assert.deepEqual(
+    lines,
+    [
+      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
+        `files — @Claude (${firstName}) starts once @Codex (${firstName}) is done.`,
+    ],
+    `the collision did not produce one authoritative order: ${JSON.stringify(lines)}`,
   );
-  // Both agents by the name the room already calls them, and the order.
-  assert.equal(
-    line,
-    `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
-      `files — @Codex (${firstName}) starts once @Claude (${firstName}) is done.`,
-    `the collision line did not read as two names and an order: ${line}`,
-  );
+  const line = lines[0] ?? "";
   // The specific things that made it unreadable, each named so a rewrite that
   // reintroduces one fails here rather than in somebody's channel.
   assert.doesNotMatch(
@@ -7218,7 +7234,7 @@ test("a collision that can run together is one line, and one that cannot say so 
   );
 });
 
-test("a sequenced admission names both agents rather than quoting both prompts", async (t) => {
+test("a sequenced admission is removed silently when the held task can start", async (t) => {
   // The other half of the same complaint. This path already tried to resolve a
   // name and always failed, so every hold in the room was two truncated
   // prompts; and having resolved one it then spent two more clauses on why.
@@ -7277,6 +7293,29 @@ test("a sequenced admission names both agents rather than quoting both prompts",
     /paste the 72 possible names|has the files it needs|the moment that lands/u,
     "the hold kept the quoted objective or its justification clause",
   );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "approved",
+      explanation: "The blocking work landed",
+    },
+  });
+  await waitFor(
+    async () => {
+      const current = await runtime.store.listChannelMessages(repo, ownerId);
+      return current.every((message) => message.authorId !== "coordinator");
+    },
+    "the expired hold notice stayed in the room",
+    8_000,
+  );
+  const afterRelease = await runtime.store.listChannelMessages(repo, ownerId);
+  assert.equal(
+    afterRelease.some((message) => /starts now/iu.test(message.content)),
+    false,
+    "releasing the hold added a redundant starts-now message",
+  );
 });
 
 test("an agent with no connection this channel knows still falls back to its objective", async (t) => {
@@ -7311,6 +7350,15 @@ test("an agent with no connection this channel knows still falls back to its obj
       taskIds: [tasks.claude, tasks.codex],
       disposition: "sequence",
       evidence: [],
+    },
+  });
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation: "Sequenced behind executing work on the same resources",
     },
   });
 
