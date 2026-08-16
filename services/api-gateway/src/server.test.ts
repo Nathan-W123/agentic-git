@@ -15,6 +15,7 @@ import {
   ApiGateway,
   describeTaskState,
   explainAnswerFailure,
+  looksLikeTaskRequest,
   narrateTaskEvent,
   summariseObjective,
   type ApiOperations,
@@ -8771,4 +8772,38 @@ test("a thread opens while the agent is working, not once it has finished", asyn
     const replies = (thread?.replies ?? []) as { content: string }[];
     return replies.some((reply) => reply.content.includes("mapping every caller"));
   }, "the thread stayed empty while the agent was working");
+});
+
+test("asking about work is not asking for it", () => {
+  // The verb list carries past tenses — "changed", "fixed", "updated" — so a
+  // question about work already done matched it and was dispatched as new
+  // work. In a thread that meant checking out the repository and running a
+  // whole task to answer three words, on somebody's own account.
+  for (const question of [
+    "which key changed?",
+    "what did you fix?",
+    "which files were updated?",
+    "why was the retry loop removed?",
+    "has anyone updated the readme?",
+    "what is its default?",
+  ]) {
+    assert.equal(looksLikeTaskRequest(question), false, question);
+  }
+
+  // A question mark is grammar, not intent. Everything here still dispatches:
+  // the polite interrogatives are imperatives, the last is a question with a
+  // request stapled to it, and "handle" is present tense in a sentence that
+  // asks for nothing already done.
+  for (const request of [
+    "can you fix the retry loop?",
+    "could you add a hello to the readme?",
+    "would you rename the auth module?",
+    "please update the readme",
+    "fix the login bug",
+    "why not just delete that file?",
+    "did you see the bug? fix it",
+    "which key changed, and can you revert it?",
+  ]) {
+    assert.equal(looksLikeTaskRequest(request), true, request);
+  }
 });

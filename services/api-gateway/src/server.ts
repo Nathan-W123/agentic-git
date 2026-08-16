@@ -1200,6 +1200,71 @@ const STATUS_QUESTION_RE =
   /\b(is|are|was|were|did|does|do|has|have|any|what'?s|when'?s)\b[^?]*\b(done|finished|fixed|ready|status|progress|update|updated|merged|deployed|live|working)\b[^?]*\?\s*$/iu;
 
 /**
+ * Phrasings that make an interrogative a request rather than a question.
+ * "Can you fix the retry loop?" is an imperative wearing a question mark;
+ * {@link asksAboutWork} must not veto it.
+ */
+const REQUEST_MARKER_RE =
+  /\b(please|can you|could you|would you|will you|can we|could we|should we|let'?s|i need you to|we need to|go ahead and)\b/iu;
+
+/**
+ * Auxiliaries that put a sentence in the past or the perfect, which is the
+ * grammar of asking *about* work: "what did you fix?", "has anyone updated
+ * the readme?". Modals — can, could, would, will — are deliberately absent:
+ * those ask for work, and live in {@link REQUEST_MARKER_RE} instead.
+ */
+const ASKING_ABOUT_RE = /\b(did|has|have|had|was|were)\b/iu;
+
+/** Past-tense members of {@link TASK_VERB_RE}, including its three irregulars. */
+const PAST_TENSE_VERB_RE = /(?:ed|made|built|wrote)$/iu;
+
+/** {@link TASK_VERB_RE} again, global, for counting every verb in a sentence. */
+const TASK_VERB_RE_GLOBAL = new RegExp(TASK_VERB_RE.source, "giu");
+
+/**
+ * Whether this asks *about* work rather than *for* it.
+ *
+ * {@link TASK_VERB_RE} carries past-tense inflections — "changed", "fixed",
+ * "updated" — so a question about work already done matched it and was
+ * dispatched as new work. "Which key changed?" in a thread checked out the
+ * repository and ran a whole task to answer three words, and every question
+ * of that shape spent an account the same way.
+ *
+ * Three conditions, all required:
+ *
+ *  - It *ends* as a question, rather than merely opening like one. "Did you
+ *    see the bug? Fix it" is a request with a question in front of it, and
+ *    anchoring on the final `?` is what tells the two apart.
+ *  - Nothing in it asks for work — see {@link REQUEST_MARKER_RE}.
+ *  - And either it is phrased in the past or perfect, or every task verb in
+ *    it is past tense. The second clause is what keeps a mixed sentence
+ *    ("which key changed, and can you revert it?") on the work path.
+ *
+ * A question that needs the repository to answer is unaffected and still
+ * becomes a task — that is {@link needsTheRepository}'s job, and reading code
+ * to report on it is work this product does deliberately. What this removes
+ * is the case where nothing needed opening at all.
+ */
+function asksAboutWork(text: string): boolean {
+  if (!text.endsWith("?")) {
+    return false;
+  }
+  if (REQUEST_MARKER_RE.test(text)) {
+    return false;
+  }
+  if (ASKING_ABOUT_RE.test(text)) {
+    return true;
+  }
+  // `match` with a global regex ignores and resets `lastIndex`, so this
+  // shared constant cannot carry state between calls.
+  const verbs = text.match(TASK_VERB_RE_GLOBAL) ?? [];
+  return (
+    verbs.length > 0 &&
+    verbs.every((verb) => PAST_TENSE_VERB_RE.test(verb.trim()))
+  );
+}
+
+/**
  * The message with its @mentions removed.
  *
  * Strips `@Name` and `@Name (Owner)` and nothing more. Allowing whitespace
@@ -1324,7 +1389,7 @@ const THREAD_MERGE_MIN_OVERLAP = 0.42;
 /** Threads older than this are finished business, however well they match. */
 const THREAD_MERGE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
-function looksLikeTaskRequest(content: string): boolean {
+export function looksLikeTaskRequest(content: string): boolean {
   const text = content.trim();
   if (text.length < 6) {
     return false;
@@ -1336,6 +1401,9 @@ function looksLikeTaskRequest(content: string): boolean {
     return false;
   }
   if (STATUS_QUESTION_RE.test(text)) {
+    return false;
+  }
+  if (asksAboutWork(text)) {
     return false;
   }
   return true;
@@ -1974,6 +2042,12 @@ export interface ChatProviderOperations {
     provider: string;
     messages: unknown;
     cliSessionId?: string;
+    /**
+     * A throwaway line — a title, an acknowledgement — rather than work.
+     * The provider service runs these on a cheap model; see
+     * `CEREMONIAL_MODELS` there.
+     */
+    ceremonial?: boolean;
   }): Promise<unknown>;
   /**
    * Same as {@link complete} but reports progress as the CLI produces it.
@@ -8987,6 +9061,7 @@ export class ApiGateway {
         "think them, one per line, no bullets or numbering.\n\nRequest: " +
         objective,
       OPENING_TIMEOUT_MS,
+      true,
     );
     if (answer.text === undefined) {
       return { title: summariseObjective(objective), thoughts: [] };
@@ -9774,6 +9849,7 @@ export class ApiGateway {
     prompt: string,
     timeoutMs: number,
     onEvent?: (event: ChatStreamEvent) => void,
+    ceremonial = false,
   ): Promise<{ reply?: unknown; error?: string }> {
     const providers = this.options.operations.chatProviders;
     if (providers === undefined) {
@@ -9784,6 +9860,7 @@ export class ApiGateway {
       systemAdmin: false,
       provider: candidate.provider,
       messages: [{ role: "user", content: prompt }],
+      ...(ceremonial ? { ceremonial: true } : {}),
     };
     const timedOut = Symbol("timeout");
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -9828,8 +9905,15 @@ export class ApiGateway {
     candidate: ChannelMentionCandidate,
     prompt: string,
     timeoutMs: number,
+    ceremonial = false,
   ): Promise<{ text?: string; error?: string }> {
-    const answer = await this.performChat(candidate, prompt, timeoutMs);
+    const answer = await this.performChat(
+      candidate,
+      prompt,
+      timeoutMs,
+      undefined,
+      ceremonial,
+    );
     // `ChatReply.text` is the field the provider service actually fills.
     // Reading `content` — the shape of the *request* — found nothing every
     // time, so every dynamic line silently fell back to a fixed one.
@@ -9932,6 +10016,7 @@ export class ApiGateway {
           userId: candidate.userId,
           systemAdmin: false,
           provider: candidate.provider,
+          ceremonial: true,
           messages: [
             {
               role: "user",

@@ -1651,3 +1651,113 @@ test("a teammate's older connection is named by the roster read too", async () =
     sign,
   );
 });
+
+test("a ceremonial line runs on the cheap model, and real work does not", async () => {
+  const harness = await createHarness();
+  const seen: string[][] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      claude: (args) => {
+        if (args[0] === "auth") {
+          return output(
+            JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }),
+          );
+        }
+        // Detection probes (`--help`, `--version`) run through the same
+        // runner; only the completions are being measured here.
+        if (args.includes("--output-format")) {
+          seen.push([...args]);
+        }
+        return output(
+          [
+            JSON.stringify({
+              type: "assistant",
+              message: { content: [{ type: "text", text: "On it." }] },
+            }),
+            JSON.stringify({ type: "result", is_error: false }),
+          ].join("\n"),
+        );
+      },
+    }),
+  });
+  await service.connect({
+    userId: "u",
+    systemAdmin: true,
+    provider: "anthropic",
+  });
+  await service.setSettings({
+    userId: "u",
+    provider: "anthropic",
+    model: "claude-opus-5",
+  });
+
+  const modelOf = (args: readonly string[]) =>
+    args[args.indexOf("--model") + 1];
+
+  // The account chose Opus. A twenty-word acknowledgement is not worth it —
+  // the whole specification of that line is its length — so a ceremonial turn
+  // is answered by Haiku instead.
+  await service.complete({
+    userId: "u",
+    systemAdmin: true,
+    provider: "anthropic",
+    messages: [{ role: "user", content: "say you are picking this up" }],
+    ceremonial: true,
+  });
+  assert.equal(modelOf(seen[0] ?? []), "claude-haiku-4-5");
+
+  // And the override reaches nothing else: a real turn is still the model the
+  // account is paying for and chose on purpose.
+  await service.complete({
+    userId: "u",
+    systemAdmin: true,
+    provider: "anthropic",
+    messages: [{ role: "user", content: "now do the actual work" }],
+  });
+  assert.equal(modelOf(seen[1] ?? []), "claude-opus-5");
+});
+
+test("claude's cache tokens are counted, not silently dropped", () => {
+  // Claude Code reports the prompt in three parts. `input_tokens` alone is
+  // the uncached remainder, so reading it as "the prompt" understates a
+  // well-cached turn by however well the cache worked.
+  const reply = parseClaudeStreamJson(
+    [
+      JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "text", text: "done" }] },
+      }),
+      JSON.stringify({
+        type: "result",
+        is_error: false,
+        result: "done",
+        usage: {
+          input_tokens: 2_000,
+          cache_read_input_tokens: 18_478,
+          cache_creation_input_tokens: 7_284,
+          output_tokens: 12,
+        },
+      }),
+    ].join("\n"),
+    "claude-sonnet-5",
+  );
+  assert.equal(reply.usage?.inputTokens, 2_000);
+  assert.equal(reply.usage?.cachedInputTokens, 25_762);
+  assert.equal(reply.usage?.outputTokens, 12);
+
+  // A provider that reports no cache fields at all must not gain a zero —
+  // "cached nothing" and "said nothing about caching" are different answers.
+  const quiet = parseClaudeStreamJson(
+    [
+      JSON.stringify({
+        type: "result",
+        is_error: false,
+        result: "done",
+        usage: { input_tokens: 5, output_tokens: 1 },
+      }),
+    ].join("\n"),
+    "claude-sonnet-5",
+  );
+  assert.equal(quiet.usage?.cachedInputTokens, undefined);
+});

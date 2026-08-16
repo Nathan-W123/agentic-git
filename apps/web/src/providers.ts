@@ -582,6 +582,26 @@ const SUGGESTED_EFFORTS: Record<ProviderId, string[]> = {
   google: [],
 };
 const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5";
+
+/**
+ * The model to run a throwaway line on, per provider.
+ *
+ * Some of what this server asks a model for is ceremony, not work: a six-word
+ * thread title, a twenty-word "picking this up". Those were running on
+ * whatever model the account had chosen — {@link DEFAULT_CLAUDE_MODEL} unless
+ * somebody changed it — which is Sonnet rates for a sentence whose whole
+ * specification is "under twenty words".
+ *
+ * Only Anthropic has an entry, and deliberately. Haiku is a model this
+ * deployment can name with confidence; guessing a cheap counterpart for
+ * another vendor and being wrong turns every acknowledgement into an
+ * unknown-model error, which costs far more than it saves. An absent entry
+ * means "no override" — that provider keeps the account's own model, exactly
+ * as before.
+ */
+const CEREMONIAL_MODELS: Partial<Record<ProviderId, string>> = {
+  anthropic: "claude-haiku-4-5",
+};
 const DEFAULT_CLAUDE_EFFORT = "high";
 
 const MAX_MESSAGES = 40;
@@ -3112,6 +3132,8 @@ export class ProviderChatService {
       provider: ProviderId;
       messages: unknown;
       cliSessionId?: string;
+      /** A throwaway line — run it on {@link CEREMONIAL_MODELS}. */
+      ceremonial?: boolean;
     },
     onEvent: (event: ChatStreamEvent) => void,
   ): Promise<ChatReply> {
@@ -3162,6 +3184,7 @@ export class ProviderChatService {
     systemAdmin: boolean;
     provider: ProviderId;
     messages: unknown;
+    ceremonial?: boolean;
   }): Promise<{
     text: string;
     settings: ProviderSettings;
@@ -3203,9 +3226,18 @@ export class ProviderChatService {
         "Gemini chat is unavailable until the signed-in Google account is eligible",
       );
     }
+    const settings = connection?.settings ?? {};
+    // A ceremonial turn overrides only the model. Effort, call sign and
+    // everything else stay the account's own, so the line still sounds like
+    // this agent — it is just not worth a frontier model to say it.
+    const ceremonial =
+      input.ceremonial === true
+        ? CEREMONIAL_MODELS[input.provider]
+        : undefined;
     return {
       text: latest.content,
-      settings: connection?.settings ?? {},
+      settings:
+        ceremonial === undefined ? settings : { ...settings, model: ceremonial },
       credential,
     };
   }
@@ -3268,6 +3300,8 @@ export class ProviderChatService {
     provider: ProviderId;
     messages: unknown;
     cliSessionId?: string;
+    /** A throwaway line — run it on {@link CEREMONIAL_MODELS}. */
+    ceremonial?: boolean;
   }): Promise<ChatReply> {
     const prompt = await this.prepareCompletion(input);
     try {
@@ -3835,12 +3869,36 @@ export function parseClaudeStreamJson(
         errorDetail = event["result"];
       }
       const eventUsage = event["usage"] as
-        | { input_tokens?: number; output_tokens?: number }
+        | {
+            input_tokens?: number;
+            cache_read_input_tokens?: number;
+            cache_creation_input_tokens?: number;
+            output_tokens?: number;
+          }
         | undefined;
+      // `input_tokens` is the *uncached remainder*, not the prompt. The whole
+      // prompt is that plus what was read from cache plus what was written to
+      // it, which is why the task path already sums all three (see
+      // `context-pressure.ts`). Reading only the first here meant a turn that
+      // sent 40k tokens and served 38k of them from cache reported 2k, and
+      // the number people were shown got *smaller* the better caching worked.
+      //
+      // The read count is the diagnostic too: caching is on by default and
+      // needs no flag, so the question is never "is it enabled" but "is the
+      // prefix still identical". Zero reads across turns of one conversation
+      // is the symptom of something rewriting the prefix, and until now this
+      // deployment had no way to see it.
+      const cachedInput =
+        (eventUsage?.cache_read_input_tokens ?? 0) +
+        (eventUsage?.cache_creation_input_tokens ?? 0);
       usage = {
         ...(eventUsage?.input_tokens === undefined
           ? {}
           : { inputTokens: eventUsage.input_tokens }),
+        ...(eventUsage?.cache_read_input_tokens === undefined &&
+        eventUsage?.cache_creation_input_tokens === undefined
+          ? {}
+          : { cachedInputTokens: cachedInput }),
         ...(eventUsage?.output_tokens === undefined
           ? {}
           : { outputTokens: eventUsage.output_tokens }),
