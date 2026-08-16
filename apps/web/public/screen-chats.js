@@ -1113,7 +1113,42 @@ function chanSearchRow() {
 }
 
 /**
- * The one line under a message that stands for its whole thread.
+ * The names of everybody who said something in a thread, first appearance
+ * first and one entry per person however much they said.
+ */
+function threadParticipants(replies, repositoryId) {
+  const names = [];
+  for (const reply of replies) {
+    const name = channelAuthor(repositoryId, reply)?.name ?? "";
+    if (name !== "" && !names.includes(name)) {
+      names.push(name);
+    }
+  }
+  return names;
+}
+
+/**
+ * Who is in a thread, as words rather than as a stack of faces.
+ *
+ * "Luna +2" is the same fact the overlapped avatars carried, in one line of
+ * text that never has to be decoded — and it leaves the row's leading slot
+ * free for a single glyph, which is what makes a list of these scan as a list
+ * rather than as a wall of portraits.
+ */
+function threadWho(names) {
+  if (names.length === 0) {
+    return "Thread";
+  }
+  return names.length === 1 ? names[0] : `${names[0]} +${names.length - 1}`;
+}
+
+/** How much was actually said, thinking excluded. */
+function threadSaidCount(said) {
+  return said === 0 ? "No replies yet" : `${said} repl${said === 1 ? "y" : "ies"}`;
+}
+
+/**
+ * The card under a message that stands for its whole thread.
  *
  * It used to read "8 replies", counting every step the run narrated to
  * itself — so a one-line edit looked like a long conversation, and the number
@@ -1121,13 +1156,16 @@ function chanSearchRow() {
  * never said what the thread was *about*, though the agent names every task
  * it picks up and that name is sitting in the first reply.
  *
- * So: the name, the faces of whoever is in it, and a count of things actually
- * said. Thinking is excluded — it is the run talking to itself, and it has
- * its own collapsed block inside the thread.
+ * Now it is the same row a background task gets anywhere else: one glyph, the
+ * name of the work, a quiet second line saying who and how much, and a chevron
+ * that promises there is somewhere to go. The avatar stack and the accent-
+ * coloured link text went with it — four overlapping portraits and a tinted
+ * sentence competing for a line that only ever answers "what is this, and how
+ * do I open it".
  */
 function threadSummaryLink(entry, replies, repositoryId) {
   const titled = threadTitleReply(entry);
-  // No content fallback here: this link renders directly under the root
+  // No content fallback here: this card renders directly under the root
   // message's own text, and a "title" echoing it would say nothing twice.
   // The task-objective fallback inside the helper still names threads that
   // never got a "Task:" reply.
@@ -1135,34 +1173,18 @@ function threadSummaryLink(entry, replies, repositoryId) {
   const said = replies.filter(
     (reply) => reply !== titled && !isThreadThinking(reply),
   );
-  // One face per participant, in the order they first appear, so a thread
-  // shows who is in it before it is opened. Deduplicated by author: three
-  // messages from one agent is one agent.
-  const seen = new Set();
-  const faces = replies
-    .map((reply) => channelAuthor(repositoryId, reply))
-    .filter((author) => {
-      const key = author?.name ?? "";
-      if (key === "" || seen.has(key)) {
-        return false;
-      }
-      seen.add(key);
-      return true;
-    })
-    .slice(0, 4)
-    .map((author) =>
-      author.agent !== undefined ? agentFace(author.agent, 18) : avatar(author.name, 18, author.name, author.name === currentUserName() ? myAvatar() : undefined),
-    )
-    .join("");
-  const count =
-    said.length === 0
-      ? "Thread"
-      : `${said.length} repl${said.length === 1 ? "y" : "ies"}`;
+  const who = threadWho(threadParticipants(replies, repositoryId));
   return `<button type="button" class="cmsg-thread-link" data-act="channel-thread-open"
       data-value="${esc(entry.id)}">
-      <span class="ctl-faces">${faces}</span>
-      ${name === "" ? "" : `<span class="ctl-name">${esc(name)}</span>`}
-      <span class="ctl-count">${esc(count)}</span>
+      <span class="ctl-icon">${icon("terminal")}</span>
+      <span class="ctl-main">
+        <span class="ctl-name">${esc(name === "" ? "Thread" : name)}</span>
+        <span class="ctl-meta">
+          <span class="ctl-who">${esc(who)}</span>
+          <span class="ctl-count">${esc(threadSaidCount(said.length))}</span>
+        </span>
+      </span>
+      <span class="ctl-go">${icon("chevronRight")}</span>
     </button>`;
 }
 
@@ -2047,26 +2069,23 @@ function threadListPanel(repositoryId) {
                 const author = channelAuthor(repositoryId, entry);
                 // The subject leads: somebody scanning this log is looking
                 // for a piece of work, and the agent's name told them which
-                // colleague — the wrong first question. Who and when demote
-                // to the metadata row beneath.
+                // colleague — the wrong first question. Who and how much
+                // demote to one quiet line beneath, and the clock time goes
+                // to the row's tooltip: the list is newest-first, so the
+                // ordering already answers "when" for anybody scanning it.
                 return `<div class="thread-item-row">
                   <button type="button" class="thread-item"
+                    title="${esc(clockTime(entry.at))}"
                     data-act="channel-thread-open" data-value="${esc(entry.id)}">
-                    <span class="ti-text">${esc(threadTitle(entry))}</span>
-                    <span class="ti-top">
-                      <span class="ti-face">${
-                        author.agent !== undefined
-                          ? agentFace(author.agent, 16)
-                          : avatar(author.name, 16)
-                      }</span>
-                      <span class="ti-who">${esc(author.name)}</span>
-                      <span class="ti-time">${esc(clockTime(entry.at))}</span>
+                    <span class="ti-icon">${icon("terminal")}</span>
+                    <span class="ti-main">
+                      <span class="ti-text">${esc(threadTitle(entry))}</span>
+                      <span class="ti-meta">
+                        <span class="ti-who">${esc(author.name)}</span>
+                        <span class="ti-count">${esc(threadSaidCount(count))}</span>
+                      </span>
                     </span>
-                    <span class="ti-count">${
-                      count === 0
-                        ? "No replies yet"
-                        : `${count} repl${count === 1 ? "y" : "ies"}`
-                    }</span>
+                    <span class="ti-go">${icon("chevronRight")}</span>
                   </button>
                   ${
                     canManageRepository(repositoryId)
