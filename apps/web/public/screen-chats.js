@@ -1920,6 +1920,107 @@ function withoutRolePreamble(objective) {
   return request.trim() === "" ? trimmed : request;
 }
 
+/**
+ * How long a history line is allowed to be before it stops describing the work
+ * and starts reproducing the request. Sized to the column: one line at the
+ * panel's narrowest, so no row wraps and none is cut off mid-word by CSS
+ * instead of by us.
+ */
+const BRIEF_OBJECTIVE_LIMIT = 72;
+
+function capitalised(text) {
+  return text === "" ? text : `${text[0].toUpperCase()}${text.slice(1)}`;
+}
+
+/** One clean clause, ending in an ellipsis when there was more. */
+function shortened(text) {
+  if (text.length <= BRIEF_OBJECTIVE_LIMIT) {
+    return capitalised(text.replace(/[\s,;:]+$/u, ""));
+  }
+  const cut = text.slice(0, BRIEF_OBJECTIVE_LIMIT);
+  const space = cut.lastIndexOf(" ");
+  // A word boundary, unless the only one is so early that keeping it would
+  // leave a couple of characters standing in for a sentence.
+  const kept = space > BRIEF_OBJECTIVE_LIMIT / 2 ? cut.slice(0, space) : cut;
+  return `${capitalised(kept.replace(/[\s,;:.]+$/u, ""))}…`;
+}
+
+/**
+ * Enough of a request to recognise it, rather than the request itself.
+ *
+ * History rows printed the first line of the objective verbatim, so a panel of
+ * forty tasks read as forty pasted prompts — carrying the "@zeus" that
+ * dispatched them, whatever markdown the person happened to type, and running
+ * on until the column cut them off. What a reader wants from this list is
+ * which piece of work each row was.
+ *
+ * Deliberately mechanical: no model call and no stored field, so this costs
+ * nothing and cannot disagree with the task it describes. It only ever
+ * shortens text the row already had, and the untouched objective stays one
+ * hover away on the row itself.
+ */
+function briefObjective(objective) {
+  const body = withoutRolePreamble(objective)
+    // Fenced code and pasted logs say how the request was written, not what it
+    // asked for; inline code is worth keeping, just not its backticks.
+    .replace(/```[\s\S]*?```/gu, " ")
+    .replace(/`([^`]*)`/gu, "$1")
+    // Emphasis and links are formatting for a message body, and this row is
+    // not one: the words inside them are the description, the syntax is not.
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, "$1")
+    .replace(/\*\*([^*]+)\*\*|__([^_]+)__/gu, (_match, starred, scored) =>
+      starred ?? scored,
+    );
+  const line =
+    body
+      .split(/\r?\n/u)
+      .map((entry) =>
+        entry
+          // Markdown scaffolding, then the mention that dispatched the work:
+          // every row in this panel is that agent's, so its own name is the
+          // one word the line cannot be telling the reader.
+          .replace(/^\s*(?:[-*+>]|#{1,6}|\d+[.)])\s+/u, "")
+          .replace(/^(?:\s*@[\w.-]+[,:]?\s*)+/u, "")
+          .replace(/\s+/gu, " ")
+          .trim(),
+      )
+      .find((entry) => entry.length > 0) ?? "";
+  if (line === "") {
+    return "";
+  }
+  // The leading sentence, but only when stopping there leaves something worth
+  // reading: a full stop inside "app.js" or after "e.g" would otherwise cut a
+  // row down to a fragment.
+  const sentence = line.split(/(?<=[.!?])\s+/u)[0] ?? line;
+  return shortened(sentence.length >= 24 ? sentence : line);
+}
+
+/**
+ * The one line a history row shows for a task.
+ *
+ * The agent's own "Task: …" opener first, when the thread it was discussed in
+ * has one. That title was written by the agent that did the work, from the
+ * whole request — a description in the proper sense, which no amount of
+ * client-side trimming can match. The condensed objective is the fallback for
+ * everything dispatched outside a thread, or answered before the opener
+ * landed.
+ */
+function taskSummaryLine(task, message) {
+  const titled = threadTitleReply(message);
+  const title =
+    titled === undefined
+      ? ""
+      : String(titled.content)
+          .replace(/^Task:\s*/u, "")
+          .split("\n")[0]
+          .replace(/\s+/gu, " ")
+          .trim();
+  return (
+    (title === "" ? briefObjective(task.objective) : shortened(title)) ||
+    "(no description)"
+  );
+}
+
 const TASK_GLYPH = {
   integrated: "✓",
   failed: "✕",
@@ -1941,19 +2042,18 @@ function agentHistory(agent, repositoryId) {
   return `<div class="agent-history scroll">${rows
     .map(({ task, message }) => {
       const glyph = TASK_GLYPH[task.status] ?? "•";
-      // The first line of the request, not of the objective: those differ by a
-      // role preamble on everything a channel dispatched.
-      const line =
-        withoutRolePreamble(task.objective)
-          .split(/\r?\n/u)
-          .map((entry) => entry.trim())
-          .find((entry) => entry.length > 0) ?? "(no description)";
+      // A description of the work, not the words that asked for it. The
+      // request is still here — on the row's tooltip, with its role preamble
+      // taken off, for the reader who wants to know exactly what was said.
+      const line = taskSummaryLine(task, message);
+      const full = withoutRolePreamble(task.objective).trim();
       const open =
         message === undefined
           ? ""
           : ` role="button" tabindex="0" data-act="channel-thread-open"
               data-value="${esc(message.id)}"`;
-      return `<div class="agent-history-row ${esc(task.status)}"${open}>
+      return `<div class="agent-history-row ${esc(task.status)}"${open}
+        title="${esc(full)}">
         <span class="ah-glyph">${glyph}</span>
         <span class="ah-objective">${esc(line)}</span>
         <span class="ah-when">${esc(relativeTime(task.submittedAt))}</span>
