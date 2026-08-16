@@ -2033,3 +2033,94 @@ class AskingAgent extends TestAgent {
     });
   }
 }
+
+test("a wave only replans the tasks its work actually moved under", async () => {
+  // The n(n-1)/2 the profiling found. Tasks are sequenced on *predicted*
+  // overlap — a and b both claim ab.txt, b and c both claim bc.txt — but a
+  // replan is only owed when canonical actually moved under a plan. Here each
+  // task writes one file nobody else claims, so the chain still serialises and
+  // nothing needs planning again.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-replan-test-"));
+  const build = () => {
+    const agents = {
+      a: new TestAgent("agent_a", plan("task_a", ["src/a.txt", "src/ab.txt"]),
+        fixtureRef.repository, fixtureRef.workspaces, "src/a.txt"),
+      b: new TestAgent("agent_b", plan("task_b", ["src/ab.txt", "src/b.txt", "src/bc.txt"]),
+        fixtureRef.repository, fixtureRef.workspaces, "src/b.txt"),
+      c: new TestAgent("agent_c", plan("task_c", ["src/bc.txt", "src/c.txt"]),
+        fixtureRef.repository, fixtureRef.workspaces, "src/c.txt"),
+    };
+    return [
+      { task: task("task_a"), adapter: agents.a },
+      { task: task("task_b"), adapter: agents.b },
+      { task: task("task_c"), adapter: agents.c },
+    ];
+  };
+  let fixtureRef!: Awaited<ReturnType<typeof createFixture>>;
+
+  try {
+    fixtureRef = await createFixture(root);
+    const run = await new Coordinator({
+      repositories: fixtureRef.repositories,
+      workspaces: fixtureRef.workspaces,
+    }).run({
+      repository: fixtureRef.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: build(),
+    });
+
+    // Still fully sequenced, and still all three landed: this changes what a
+    // wave costs, not what it orders or what it produces.
+    assert.equal(run.tasks.every((entry) => entry.status === "integrated"), true);
+    assert.deepEqual(
+      run.audit.filter((e) => e.type === "replan_requested").map((e) => e.taskId),
+      [],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the strict rebase switch restores the unconditional replan", async () => {
+  // The rollback, spelled the same as the worker path's. With it on, every
+  // queued task plans again after every wave: two after the first promotion,
+  // one after the second — the n(n-1)/2 this replaced.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-replan-strict-"));
+  const previous = process.env["COORD_STRICT_PLAN_REBASE"];
+  process.env["COORD_STRICT_PLAN_REBASE"] = "1";
+  try {
+    const fixture = await createFixture(root);
+    const run = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        { task: task("task_a"), adapter: new TestAgent("agent_a",
+          plan("task_a", ["src/a.txt", "src/ab.txt"]),
+          fixture.repository, fixture.workspaces, "src/a.txt") },
+        { task: task("task_b"), adapter: new TestAgent("agent_b",
+          plan("task_b", ["src/ab.txt", "src/b.txt", "src/bc.txt"]),
+          fixture.repository, fixture.workspaces, "src/b.txt") },
+        { task: task("task_c"), adapter: new TestAgent("agent_c",
+          plan("task_c", ["src/bc.txt", "src/c.txt"]),
+          fixture.repository, fixture.workspaces, "src/c.txt") },
+      ],
+    });
+    assert.equal(run.tasks.every((entry) => entry.status === "integrated"), true);
+    assert.equal(
+      run.audit.filter((e) => e.type === "replan_requested").length,
+      3,
+    );
+  } finally {
+    if (previous === undefined) {
+      delete process.env["COORD_STRICT_PLAN_REBASE"];
+    } else {
+      process.env["COORD_STRICT_PLAN_REBASE"] = previous;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
