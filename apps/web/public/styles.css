@@ -87,7 +87,6 @@
   --radius-lg: 14px;
   --radius-xl: 18px;
 
-  --sidebar-w: 246px;
   --tree-w: 232px;
   --chat-w: 380px;
 
@@ -567,10 +566,6 @@ svg {
   color: var(--text);
 }
 
-.chan-brand .brand-text b {
-  font-size: 15px;
-}
-
 .chan-brand-gear {
   width: 14px;
   height: 14px;
@@ -582,31 +577,13 @@ svg {
   color: var(--text-2);
 }
 
-.app.no-sidebar {
-  grid-template-columns: 1fr;
-}
+/* ------------------------------------------------------------- brand ---- */
 
-/* ----------------------------------------------------------- sidebar ---- */
-
-.sidebar {
-  background: var(--bg-panel);
-  border-right: 1px solid var(--border-soft);
-  display: grid;
-  grid-template-rows: auto auto 1fr auto;
-  min-height: 0;
-  padding: 0 12px 12px;
-}
-
-.brand {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 18px 8px 16px;
-}
-
+/* The mark takes its size from the `width`/`height` the caller passes to
+   `brandMark` — 26 in the sidebar's crown, 54 on the sign-in card. It used to
+   be pinned to 34px here, which is neither, and every caller that asked for
+   another size was quietly overruled unless it also had a rule of its own. */
 .brand-mark {
-  width: 34px;
-  height: 34px;
   flex: none;
 }
 
@@ -616,239 +593,18 @@ svg {
 }
 
 .brand-text b {
-  font-size: 15.5px;
+  font-size: 15px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 
-.brand-text span {
-  font-size: 11.5px;
-  color: var(--accent-bright);
-}
-
-.repo-switch {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 10px 11px;
-  margin-bottom: 14px;
-  background: var(--bg-card);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  text-align: left;
-  transition: border-color 0.15s ease;
-}
-
-.repo-switch:hover {
-  border-color: var(--border-strong);
-}
-
-.repo-switch .rs-body {
-  min-width: 0;
-  display: grid;
-  gap: 1px;
-}
-
-.repo-switch .rs-name {
-  font-size: 12.5px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.repo-switch .rs-branch {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  font-size: 11px;
-  color: var(--text-3);
-}
-
-.repo-switch svg {
-  width: 15px;
-  height: 15px;
-  color: var(--text-3);
-  flex: none;
-}
-
-.nav {
-  display: grid;
-  gap: 2px;
-  align-content: start;
-  overflow-y: auto;
-  min-height: 0;
-}
-
-.nav-item {
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 9px 11px;
-  border-radius: var(--radius);
-  color: var(--text-2);
-  font-size: 13.5px;
-  transition: background 0.14s ease, color 0.14s ease;
-}
-
-.nav-item svg {
-  width: 17px;
-  height: 17px;
-  flex: none;
-}
-
-.nav-item:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-.nav-item.active {
-  background: var(--accent-wash);
-  /* The wash is 12% alpha, so the page shows through it — the text
-     sits on the theme's own background, not on the accent. White was
-     right only by coincidence of the dark theme; on light it read as
-     white-on-cream. `--text` is what both themes call readable. */
-  color: var(--text);
-}
-
-.nav-item.active svg {
-  color: var(--accent-bright);
-}
-
-.nav-item .count {
-  margin-left: auto;
-  min-width: 19px;
-  height: 19px;
-  padding: 0 6px;
-  border-radius: 9px;
-  background: var(--accent);
-  color: #fff;
-  font-size: 11px;
-  font-weight: 600;
-  display: grid;
-  place-items: center;
-}
-
-.nav-item .chev {
-  margin-left: auto;
-  width: 14px;
-  height: 14px;
-  color: var(--text-4);
-}
-
-.sidebar-foot {
-  display: grid;
-  gap: 10px;
-  padding-top: 12px;
-  border-top: 1px solid var(--border-soft);
-}
-
-.user-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 9px;
-  border-radius: var(--radius);
-  transition: background 0.15s ease;
-  text-align: left;
-  width: 100%;
-}
-
-.user-card:hover {
-  background: var(--bg-hover);
-}
-
-.user-card .uc-body {
-  min-width: 0;
-  display: grid;
-}
-
-.user-card .uc-name {
-  font-size: 12.5px;
-  font-weight: 500;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.user-card .uc-mail {
-  font-size: 11px;
-  color: var(--text-3);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.user-card svg {
-  width: 14px;
-  height: 14px;
-  color: var(--text-4);
-  margin-left: auto;
-  flex: none;
-}
-
-.plan-card {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 10px 11px;
-  background: var(--accent-wash);
-  border: 1px solid rgba(139, 92, 246, 0.22);
-  border-radius: var(--radius);
-}
-
-.plan-card .pc-body {
-  display: grid;
-  line-height: 1.25;
-}
-
-.plan-card .pc-title {
-  font-size: 12.5px;
-  font-weight: 600;
-  color: var(--accent-bright);
-}
-
-.plan-card .pc-sub {
-  font-size: 11px;
-  color: var(--text-3);
-}
-
-.plan-card .pc-star {
-  margin-left: auto;
-  color: var(--orange);
-}
-
-.plan-card svg {
-  width: 15px;
-  height: 15px;
-}
-
-.sidebar-links {
-  display: grid;
-  gap: 2px;
-}
-
-.sidebar-links a {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 5px 9px;
-  font-size: 12px;
-  color: var(--text-3);
-  border-radius: 8px;
-}
-
-.sidebar-links a:hover {
-  color: var(--text);
-  background: var(--bg-hover);
-}
-
-.sidebar-links svg {
-  width: 12px;
-  height: 12px;
-  margin-left: auto;
-}
+/* The outer app rail — `.sidebar`, `.brand`, `.repo-switch`, `.nav`,
+   `.nav-item`, `.sidebar-foot`, `.user-card`, `.plan-card`, `.sidebar-links`
+   and the `--sidebar-w` that measured it — is not defined anywhere in this
+   file any more. Nothing has rendered that markup since the channel sidebar
+   became the navigation (see the note where `sidebar()` used to be in
+   app.js), so this was ~240 lines of stylesheet describing a panel no reader
+   could reach, plus a phone drawer and a scrim to slide it in with. */
 
 .sys-line {
   display: flex;
@@ -2436,11 +2192,17 @@ svg {
 }
 
 /*
- * The desktop composer is deliberately one steady, lean row. Its controls
- * and text remain in the same places when it receives focus, matching the
- * compact prompt bar people use with a pointer and a wide viewport. Phones
+ * The desktop composer is deliberately one steady, lean row: "+" on the left,
+ * the sentence, send on the right, and nothing else asking to be read. Its
+ * controls and text remain in the same places when it receives focus, matching
+ * the compact prompt bar people use with a pointer and a wide viewport. Phones
  * override these variables below: they begin with this pill, then open into
  * a clearer two-row composer when somebody starts writing.
+ *
+ * It reads as floating over the conversation rather than as a panel bolted to
+ * the bottom of it — a lifted pill with a shadow under it, so the transcript
+ * looks like it continues underneath. That is the whole trick behind the bars
+ * this one is modelled on: one shape, raised, with the message in it.
  *
  * Every metric is a variable because the textarea and the mirror painted
  * underneath it cannot afford to disagree about padding by a pixel: they are
@@ -2448,14 +2210,19 @@ svg {
  * highlight slides off the name it belongs to.
  */
 .composer {
-  --composer-pad-top: 7px;
-  --composer-pad-bottom: 7px;
-  --composer-pad-x: 4px;
+  --composer-pad-top: 8px;
+  --composer-pad-bottom: 8px;
+  --composer-pad-x: 6px;
   --composer-shape: 999px;
   --composer-layout: flex;
   --composer-bar-layout: contents;
-  --composer-inset: 0 5px;
+  --composer-inset: 0 6px;
   --composer-send-shape: 999px;
+  /* The gap that pushes send to the far edge is only wanted on the two-row
+     phone bar. While every control is on the pill itself, an elastic gap
+     between the text and the send button steals half the width of the box
+     somebody is writing in. */
+  --composer-spacer-layout: none;
 
   margin: 0 12px 12px;
   display: var(--composer-layout);
@@ -2465,17 +2232,35 @@ svg {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--composer-shape);
-  transition: border-color 0.15s ease;
+  box-shadow: var(--shadow-pop);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
+/* Focus lifts it rather than repainting it: the same shadow with a soft ring
+   of the accent around it, which is the one moment this bar is the subject. */
 .composer:focus-within {
   border-color: var(--accent-line);
+  box-shadow: var(--shadow-pop), 0 0 0 3px var(--accent-wash);
 }
 
-/* Attach leads, text follows, send closes. A no-op in the expanded bar, where
-   the attach button is already the first thing on the row. */
+/* "+" leads, text follows, send closes. A no-op in the expanded bar, where
+   the "+" is already the first thing on the row. */
 .composer-bar > .icon-btn:first-of-type {
   order: -1;
+}
+
+/* The one control on the left, and the only thing standing in for what used to
+   be a row of icons. Round, like the send button facing it across the bar. */
+.composer-bar .composer-plus {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  color: var(--text-2);
+}
+
+.composer-bar .composer-plus:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 /* Stands in for the composer when there is no agent to talk to. */
@@ -2588,6 +2373,7 @@ svg {
 }
 
 .composer-bar .spacer {
+  display: var(--composer-spacer-layout, block);
   flex: 1;
 }
 
@@ -2660,6 +2446,15 @@ svg {
 .send-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* Nothing written yet, so nothing to send. The button keeps its place — it is
+   what makes the right end of the bar read as an end — but it waits in grey
+   instead of sitting lit beside an empty box. `.is-expanded` is excluded
+   because a staged image is something to send with no text at all. */
+.composer:not(.is-expanded):has(textarea:placeholder-shown) .send-btn {
+  background: var(--bg-hover);
+  color: var(--text-3);
 }
 
 .send-btn svg {
@@ -3686,10 +3481,14 @@ svg {
   width: 256px;
   flex: none;
   display: grid;
-  /* Brand, search, channels, then the roster takes what remains — so Users
-     starts directly under the last channel instead of being shoved to the
-     floor by a stretched channel list. The list caps and scrolls instead. */
-  grid-template-rows: auto auto auto 1fr;
+  /* Brand, search, then everything else in one scroller that takes what
+     remains. The panel used to be four rows with two scrollbars in it — a
+     capped channel list above an independently scrolling roster — which is
+     two things to drag inside 256 pixels and a band of dead panel whenever
+     neither list was long enough to fill its share. `.chan-scroll` is the
+     one that moves; `auto` on the last row is the failure-only `.sys-line`,
+     which is absent almost always. */
+  grid-template-rows: auto auto 1fr auto;
   min-height: 0;
   background: var(--bg-panel);
   /* No border. This column is a shade off the conversation in both themes
@@ -3713,45 +3512,71 @@ svg {
   flex: 1;
 }
 
-.chan-new {
-  display: inline-grid;
-  place-items: center;
-  width: 30px;
-  height: 30px;
-  border-radius: 8px;
-  background: var(--accent-wash);
-  color: var(--accent-bright);
-  flex: none;
-}
-
-.chan-new:hover {
-  background: var(--accent-wash-strong);
-}
-
-.chan-new svg {
-  width: 16px;
-  height: 16px;
-}
-
-.chan-list {
+/* The one thing that scrolls in this column. */
+.chan-scroll {
   overflow-y: auto;
-  max-height: 38vh;
-  padding: 2px 8px 10px;
-  display: grid;
-  gap: 2px;
-  align-content: start;
+  min-height: 0;
+  padding-bottom: 10px;
 }
 
-.chan-list-label {
+/* A section heading, and the "+" that adds to the list under it — the single
+   shape that replaced three different ones (a filled accent square by the
+   search box, and two full-width "add" rows pinned under the people and agent
+   lists). Sticky, so the heading of the list being scrolled through stays
+   named. */
+.chan-sec {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
   padding: 12px 9px 6px;
+  background: var(--bg-panel);
   font-size: 10.5px;
-  /* These name the two halves of the roster, so they are headings rather than
-     captions. At `--text-4` they read as the faintest thing in the panel,
-     which is the wrong end of the hierarchy for the only labels in it. */
+  /* Headings rather than captions: they name the three lists in the panel,
+     and at `--text-4` they read as the faintest thing in it, which is the
+     wrong end of the hierarchy for the only labels there are. */
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text);
+}
+
+.chan-sec-label {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chan-sec-add {
+  display: inline-grid;
+  place-items: center;
+  width: 20px;
+  height: 20px;
+  flex: none;
+  border-radius: 6px;
+  color: var(--text-3);
+  transition: background 0.13s ease, color 0.13s ease;
+}
+
+.chan-sec-add:hover {
+  background: var(--bg-hover);
+  color: var(--accent-bright);
+}
+
+.chan-sec-add svg {
+  width: 14px;
+  height: 14px;
+}
+
+.chan-list {
+  padding: 0 8px;
+  display: grid;
+  gap: 2px;
+  align-content: start;
 }
 
 .chan-row {
@@ -3949,11 +3774,11 @@ svg {
   flex: none;
 }
 
+/* No scrollbar and no rule above it: `.chan-scroll` carries the scrolling for
+   the whole column now, and the sticky heading is what separates one list
+   from the next. */
 .chan-roster {
-  overflow-y: auto;
-  border-top: 1px solid var(--border-soft);
-  padding: 4px 8px 12px;
-  min-height: 0;
+  padding: 0 8px;
 }
 
 .roster-row {
@@ -3962,7 +3787,7 @@ svg {
 }
 
 /* The usage card opens *below* the row and inside the roster's own width.
-   `.chan-roster` scrolls, and a scroll container clips any absolutely
+   `.chan-scroll` scrolls, and a scroll container clips any absolutely
    positioned descendant that reaches outside it — so a card opening sideways
    out of the sidebar is not merely off-panel, it is invisible. */
 /* Anchored to the avatar, not the row: the card is about the agent, and a
@@ -4907,6 +4732,21 @@ svg {
 .chan-composer-wrap {
   position: relative;
   margin: 0 12px 12px;
+}
+
+/* The last inch of the transcript, faded into the page behind the bar. The
+   composer is drawn as a raised pill; this is what makes the conversation look
+   like it passes underneath it rather than stopping politely above. Same
+   colour as the column, so it is invisible until there is text under it. */
+.chan-composer-wrap::after {
+  content: "";
+  position: absolute;
+  left: -12px;
+  right: -12px;
+  bottom: 100%;
+  height: 18px;
+  background: linear-gradient(to top, var(--bg-chat), transparent);
+  pointer-events: none;
 }
 
 .chan-composer-wrap .composer {
@@ -6127,7 +5967,6 @@ dialog.modal::backdrop {
 @media (max-width: 1360px) {
   :root {
     --chat-w: 330px;
-    --sidebar-w: 220px;
   }
 
   .coord-stats {
@@ -6175,37 +6014,24 @@ dialog.modal::backdrop {
   }
 }
 
-/* Folding the two left columns away, wide screens only.
+/* Folding the channel column away, wide screens only.
  *
- * Above the breakpoints below, both are real grid/flex columns and hiding one
- * gives its width to the conversation. Below them they are off-canvas drawers
- * already, and `display: none` here would fight the transform that slides them
- * in — so the whole idea is scoped to the sizes where a column exists to fold.
+ * Above the breakpoint it is a real flex column and hiding it gives its width
+ * to the conversation. Below it the column is an off-canvas drawer already,
+ * and `display: none` here would fight the transform that slides it in — so
+ * the idea is scoped to the sizes where a column exists to fold.
  *
- * `.desk-only` is the pair of buttons that do it, hidden on phones for the
- * same reason: there is nothing there to collapse. */
-@media (min-width: 901px) {
-  .app.nav-collapsed {
-    grid-template-columns: 1fr;
-  }
-
-  .app.nav-collapsed > .sidebar {
-    display: none;
-  }
-}
-
+ * `.desk-only` is the button that does it, hidden on phones for the same
+ * reason: there is nothing there to collapse. There is no `.wide-only` pair
+ * any more — its half of the job was folding the outer rail, which no longer
+ * exists. */
 @media (min-width: 601px) {
   .chats-shell.chan-collapsed > .chan-sidebar {
     display: none;
   }
 }
 
-/* Two classes because the two panels stop being panels at different sizes:
-   the nav rail becomes a drawer at 900px, the channel list at 600px. A button
-   offering to fold away something that is already a drawer does nothing, and
-   looks broken for it. */
-.desk-only,
-.wide-only {
+.desk-only {
   display: none;
 }
 
@@ -6221,41 +6047,9 @@ dialog.modal::backdrop {
   }
 }
 
-@media (min-width: 901px) {
-  .wide-only {
-    display: inline-grid;
-  }
-}
-
 @media (max-width: 900px) {
   .app {
     grid-template-columns: 1fr;
-  }
-
-  .sidebar {
-    position: fixed;
-    top: 0;
-    bottom: 0;
-    left: 0;
-    width: 246px;
-    z-index: 80;
-    transform: translateX(-100%);
-    transition: transform 0.2s ease;
-  }
-
-  .app.nav-open .sidebar {
-    transform: none;
-  }
-
-  .nav-scrim {
-    position: fixed;
-    inset: 0;
-    z-index: 79;
-    background: rgba(4, 5, 9, 0.5);
-  }
-
-  .menu-btn {
-    display: inline-grid !important;
   }
 
   /* Opens `.tree-pane` below — see the toggle button added to `toolbar()`
@@ -6302,7 +6096,7 @@ dialog.modal::backdrop {
 
   /* Tapping outside the overlay tree closes it — see the `.tree-scrim` div
      `renderCode` (screen-code.js) renders alongside it, the same pattern as
-     `.nav-scrim` and `.chat-scrim` above. */
+     `.chat-scrim` above and `.chan-sidebar-scrim` below. */
   .tree-scrim {
     display: block;
     position: fixed;
@@ -6406,6 +6200,9 @@ dialog.modal::backdrop {
     --composer-bar-layout: flex;
     --composer-inset: 0;
     --composer-send-shape: 8px;
+    /* The two-row bar is the one shape that wants the elastic gap: the text is
+       on its own line, so pushing send to the far edge costs it nothing. */
+    --composer-spacer-layout: block;
 
     max-height: 240px;
     overflow: hidden;
@@ -6421,38 +6218,32 @@ dialog.modal::backdrop {
   }
 
   .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown) {
-    --composer-pad-top: 7px;
-    --composer-pad-bottom: 7px;
-    --composer-pad-x: 4px;
+    --composer-pad-top: 8px;
+    --composer-pad-bottom: 8px;
+    --composer-pad-x: 6px;
     --composer-shape: 999px;
     --composer-layout: flex;
-    /* Lift the useful edge controls into the pill until it is opened. */
+    /* Lift the two edge controls into the pill until it is opened. */
     --composer-bar-layout: contents;
-    --composer-inset: 0 5px;
+    --composer-inset: 0 6px;
     --composer-send-shape: 999px;
+    --composer-spacer-layout: none;
 
     max-height: 52px;
   }
 
   /* The fuller toolbar is already in the markup. Keep it out of the idle
-     pill, then reveal it as part of the focus expansion without a render. */
+     pill, then reveal it as part of the focus expansion without a render.
+     What survives the fold is what the bar is for: the "+" and send. */
   .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown)
-    :is(
-      .mini-select,
-      .ctx,
-      .composer-note,
-      .composer-bar .spacer,
-      [data-act="chat-mention"],
-      [data-act="channel-mention-key"]
-    ) {
+    :is(.mini-select, .ctx, .composer-note, .composer-bar .spacer) {
     display: none;
   }
 
-  /* `.chan-sidebar` (channel list + roster) goes off-canvas the same way
-     the outer app `.sidebar` already does at 900px — toggled by the new
-     `.chan-sidebar-btn` in `chanHeader` (screen-chats.js), closed by the
-     scrim, by picking a channel, or by the outer nav's own Esc/back
-     affordances if the platform supplies them. */
+  /* `.chan-sidebar` (channel list + roster) goes off-canvas below this
+     width — toggled by `.chan-sidebar-btn` in `chanHeader`
+     (screen-chats.js), closed by the scrim, by picking a channel, or by its
+     own `.drawer-close`. */
   .chan-sidebar-btn {
     display: inline-grid !important;
   }
@@ -6633,16 +6424,6 @@ dialog.modal::backdrop {
     min-height: 44px;
   }
 
-  /* The outer nav drawer — Chats / My Agents / Notifications — is not part
-     of the phone product: the channel drawer already carries the channels,
-     the users and the agents, and Settings is a tap on the brand inside it.
-     A hamburger whose menu duplicates the drawer beside it was one more
-     thing to mis-tap. `!important` because the 900px tier above turns this
-     button on the same way. */
-  .menu-btn {
-    display: none !important;
-  }
-
   /* The tools are pinned open on a phone (chanHeader renders them without
      asking `chanToolsOpen` below the breakpoint), so the chevron would
      toggle nothing. */
@@ -6733,6 +6514,10 @@ dialog.modal::backdrop {
   }
 }
 
+/* Never shown, at any width. The hamburger opened the outer app rail, and
+   there is no rail to open; the channel header's copy of it is gone and the
+   Code screen's toolbar still renders one, which this keeps out of sight
+   until that screen is swept. No breakpoint turns it back on. */
 .menu-btn {
   display: none;
 }
@@ -7042,35 +6827,10 @@ dialog.modal::backdrop {
 
 /* --------------------------------------------------- roster and threads ---- */
 
-/* Sits with the list it adds to, indented to the rows above it rather than to
-   the panel, so it reads as the next line of that list. */
-.roster-add {
-  display: flex;
-  align-items: center;
-  gap: 9px;
-  width: 100%;
-  margin: 2px 0 10px;
-  padding: 7px 8px;
-  border: 0;
-  border-radius: 9px;
-  background: none;
-  color: var(--text-3);
-  font: inherit;
-  font-size: 12.5px;
-  cursor: pointer;
-  text-align: left;
-}
-
-.roster-add:hover {
-  background: var(--bg-hover);
-  color: var(--text-2);
-}
-
-.roster-add svg {
-  width: 15px;
-  height: 15px;
-  flex: none;
-}
+/* No `.roster-add` here any more. "Invite someone" and "Add an agent" were
+   two permanent full-width rows at the bottom of the two lists, dressed to
+   look like more rows in them; both are now the "+" on the heading of the
+   list they add to — see `.chan-sec-add`. */
 
 /* Counts in the channel header: figure beside glyph, not a sentence. */
 .ch-desc {
@@ -7362,11 +7122,6 @@ dialog.modal::backdrop {
 
 /* Fixed full-height surfaces. Each is its own stacking context pinned to the
    viewport, so a container's padding cannot reach them. */
-.sidebar {
-  padding-top: var(--safe-top);
-  padding-left: calc(12px + var(--safe-left));
-}
-
 .chan-sidebar,
 .thread-panel,
 .file-panel {
@@ -7465,14 +7220,9 @@ dialog.modal::backdrop {
   min-height: 100dvh;
 }
 
-/* The two `vh` stragglers, for the same reason as the shell above. The
-   channel drawer's list mis-sized by its share of the URL-bar delta, which
-   on a phone is the difference between the last channel being reachable
-   and being under the composer. */
-.chan-list {
-  max-height: 38dvh;
-}
-
+/* The `vh` straggler, for the same reason as the shell above. `.chan-list` is
+   no longer here: it has no height of its own to mis-size now that the whole
+   sidebar scrolls as one — see `.chan-scroll`. */
 .agent-panel {
   height: calc(100dvh - 320px);
 }
@@ -7483,9 +7233,8 @@ dialog.modal::backdrop {
    moment the channel list runs out, which reads as the app losing the
    user's place for no reason. */
 #chan-messages,
-.chan-list,
+.chan-scroll,
 .chan-sidebar,
-.sidebar,
 .tree-pane,
 .thread-panel,
 .file-panel,

@@ -533,6 +533,34 @@ test("telling an agent not to change anything is not a request to change somethi
   }
 });
 
+test("asking for the answer and nothing else is a report, whatever it asks about", () => {
+  // Observed in a channel: `add` appears twice, both times inside the thing
+  // being asked *about*, and the editing-verb veto reads an editing verb
+  // anywhere in the sentence — so a question whose whole request was "just
+  // answer this" ran as a change task, changed nothing, and came back as a
+  // failure with the answer buried in the failure line.
+  for (const objective of [
+    "can you diagnose if this url means that everytime i add a photo to my " +
+      "conversation, it adds the photo into the codebase and causes bloat? " +
+      "just answer this question - https://example.test/a.png",
+    "just tell me whether the migration removed the column",
+    "answer this question: does the worker write into the repo?",
+    "simply explain how the attachment route serves a file",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), true, objective);
+  }
+
+  // The bypass is deliberately narrow: it wants the words "just answer",
+  // "just tell me" and their kin, not any sentence with `answer` in it. An
+  // ordinary imperative that happens to start with "just" is still work.
+  for (const objective of [
+    "look, just add the endpoint",
+    "just fix the retry loop",
+  ]) {
+    assert.equal(readsAsReportRequest(objective), false, objective);
+  }
+});
+
 test("the ordinary words for asking to be told something count as a report", () => {
   // The list began with the formal verbs — audit, analyse, diagnose — and
   // missed how people actually ask, so a plain "look at this and describe it"

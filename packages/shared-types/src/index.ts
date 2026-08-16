@@ -707,6 +707,18 @@ export interface IntegrationResult {
 export const ROLE_CONTEXT_PREFIX = "Your role in this repository:";
 
 /**
+ * How a failure line introduces the agent's own words.
+ *
+ * An empty run that still wrote an account has that account appended to the
+ * alarm rather than replacing it (see the coordinator's empty-changeset
+ * branch), and the narration that turns the failure into a channel line has to
+ * find the seam again: the alarm is boilerplate worth clipping and the account
+ * is the deliverable, which must not be cut mid-word. Written in one place so
+ * the reader cannot silently stop recognising what the writer emits.
+ */
+export const AGENT_ACCOUNT_PREFIX = "The agent's own account:";
+
+/**
  * An objective with any role preamble removed — what was actually asked for.
  */
 export function withoutRoleContext(objective: string): string {
@@ -731,6 +743,16 @@ export function withoutRoleContext(objective: string): string {
 }
 
 /**
+ * Asking for the answer and nothing else, in the words people use for it.
+ *
+ * Read before the editing-verb veto, because a question is often *about*
+ * editing and the veto cannot tell the subject of a question from a request
+ * to act on it.
+ */
+const ANSWER_ONLY_RE =
+  /\b(?:just|only|simply)\s+(?:answer|tell|explain|say)\b|\banswer\s+(?:this|the|my|that)\s+question\b/iu;
+
+/**
  * Whether a task was asked to look at the repository rather than change it.
  *
  * Read-only work is real work — an audit, a summary, an explanation succeeds
@@ -749,7 +771,10 @@ export function withoutRoleContext(objective: string): string {
  * An editing verb settles it first, whatever else the sentence does. "Can you
  * fix the retry loop?" is a question and a change request, and letting the
  * question mark excuse an empty result is exactly how a sandbox refusing every
- * write would pass for success.
+ * write would pass for success. The one thing that outranks it is
+ * {@link ANSWER_ONLY_RE}: a request that says outright it wants an answer and
+ * nothing else has named its deliverable, and the editing verbs left in the
+ * sentence belong to whatever it is asking *about*.
  *
  * Read against the request alone, with any role preamble stripped first. A
  * channel dispatch prepends "Your role in this repository: …" to every
@@ -771,6 +796,17 @@ export function readsAsReportRequest(objective: string): boolean {
     /\b(?:do\s+not|don'?t|never|without|avoid|no\s+need\s+to)\s+(?:\w+\s+){0,2}?(?:fix|add|change|edit|write|create|remove|delete|rename|update|implement|refactor|patch|modify|touch|alter)\w*/giu,
     " ",
   );
+  // Asking for the answer and nothing else, said outright. The veto below reads
+  // an editing verb anywhere in the sentence, and a question is often *about*
+  // editing: "does adding a photo add it to the codebase? just answer this
+  // question" names `add` twice and asks for neither. That question was judged
+  // a change request, ran, changed nothing, and came back as a failure with the
+  // answer buried in the failure line. An explicit answer-only instruction is
+  // the plainest statement anybody makes that the deliverable is words, so it
+  // settles the reading before the veto looks.
+  if (ANSWER_ONLY_RE.test(asked)) {
+    return true;
+  }
   if (
     /\b(fix|add|change|edit|write|create|remove|delete|rename|update|implement|refactor|patch|revert|bump|replace|move|migrate|upgrade|install|wire|hook)\b/iu.test(
       asked,

@@ -91,7 +91,6 @@ import {
   toggleChannelMessagePin,
   toggleChannelReaction,
   toggleFavourite,
-  unreadCount,
 } from "./data.js";
 import {
   $,
@@ -645,114 +644,20 @@ async function submitInviteSignIn(form) {
 
 /* -------------------------------------------------------------- shell ---- */
 
-const NAV = [
-  // Chats is the landing view now, so its icon — a chat bubble rather than a
-  // house — is the leftmost, primary item in the rail.
-  { route: "chats", label: "Chats", iconName: "chatBubble" },
-  // No "My Agents" here. Connecting an agent is an account-level act, not a
-  // place to spend time, and it now sits in Settings beside the other things
-  // that belong to the account. Talking to your own agent moved to the channel
-  // panel, which is where it was wanted.
-  //
-  // The route is deliberately still reachable by URL — the Task, Files and
-  // Metrics views live there and nothing has replaced them yet, so this drops
-  // the item without deleting the screen behind it.
-  // No "Notifications" here. The banner says the news when it happens, the
-  // topbar bell holds the unread count and the record, and the per-agent
-  // history panel (see docs/handoff/agent-identity-and-history.md) is where
-  // the tab's job is going. Route stays reachable through the bell.
-  { route: "settings", label: "Settings", iconName: "gear" },
-];
-
-function sidebar() {
-  const repository = currentRepository();
-  const unread = unreadCount();
-  const user = currentUserName();
-  const email = state.principal?.user?.email ?? "";
-
-  return `<aside class="sidebar">
-    <a class="brand" href="#chats">
-      ${brandMark(34)}
-      <span class="brand-text"><b>Lattice</b></span>
-    </a>
-
-    ${
-      repository === undefined
-        ? "<div></div>"
-        : `<button class="repo-switch" data-act="repo-switch">
-            ${icon("cloud")}
-            <span class="rs-body">
-              <span class="rs-name">${esc(repository.id)}</span>
-              <span class="rs-branch">${icon("branch")}${esc(
-                repository.branch ?? "main",
-              )}</span>
-            </span>
-            ${icon("chevronDown")}
-          </button>`
-    }
-
-    <nav class="nav">
-      ${NAV.filter(
-        (item) => item.needsRepo !== true || repository !== undefined,
-      )
-        .map(
-          (item) => `<a class="nav-item${
-            state.route === item.route ? " active" : ""
-          }" href="#${item.route}" data-act="nav" data-value="${item.route}">
-            ${icon(item.iconName)}
-            <span>${esc(item.label)}</span>
-            ${
-              item.route === "notifications" && unread > 0
-                ? `<span class="count">${unread}</span>`
-                : ""
-            }
-          </a>`,
-        )
-        .join("")}
-    </nav>
-
-    <div class="sidebar-foot">
-      <button class="user-card" data-act="user-menu">
-        ${avatar(user, 32, user, myAvatar())}
-        <span class="uc-body">
-          <span class="uc-name">${esc(user)}</span>
-          <span class="uc-mail">${esc(email)}</span>
-        </span>
-        ${icon("chevronDown")}
-      </button>
-      <div class="plan-card">
-        ${icon("cloud")}
-        <span class="pc-body">
-          <span class="pc-title">${esc(state.project?.name ?? "Project")}</span>
-          <span class="pc-sub">Cloud mode</span>
-        </span>
-        <span class="pc-star">${icon("star")}</span>
-      </div>
-      <!-- No "invite someone" here. An invitation names one repository, so
-           asking for one from under the project meant asking which repository
-           first; the channel's own header is where somebody already knows the
-           answer. -->
-      ${
-        // Silent while everything works. "All systems operational" was a line
-        // that never changed, which is a line nobody reads — and it cost a
-        // permanent row at the bottom of the sidebar to say nothing.
-        //
-        // The failure half stays. Losing the control plane is the one thing
-        // this corner knew that the rest of the screen cannot show, and a
-        // deployment that has gone unreachable failing silently would be worse
-        // than the noise this removes.
-        state.health === undefined
-          ? `<div class="sys-line">
-              <span class="dot grey"></span>Control plane unreachable
-            </div>`
-          : ""
-      }
-    </div>
-  </aside>`;
-}
+/* No `sidebar()` here any more, and no `NAV` list behind it.
+ *
+ * The outer rail — brand, repository switcher, Chats/Settings links, account
+ * card, plan card — stopped being rendered when the channel sidebar became the
+ * navigation, and then sat in this file for a while as markup nothing could
+ * reach. Everything it held has somewhere else to be: the brand and Settings
+ * are the crown of `chanSidebar` (screen-chats.js), the account is the topbar
+ * avatar's menu, and the failure-only health line is at that sidebar's foot.
+ * Its stylesheet block, its phone drawer, the `nav-scrim` and the hamburger
+ * that opened it went with it — a menu button that opens a panel which is no
+ * longer rendered is worse than no button at all.
+ */
 
 function topbar() {
-  const unread = unreadCount();
   const user = currentUserName();
   return `<header class="topbar">
     ${
@@ -2949,7 +2854,7 @@ function renderNow() {
     return;
   }
   if (state.projectId === "") {
-    root.innerHTML = `<div class="app no-sidebar"><div class="main">
+    root.innerHTML = `<div class="app"><div class="main">
       <div class="scroll"><div class="page">${emptyState(
         "folder",
         "No project yet",
@@ -2958,23 +2863,14 @@ function renderNow() {
     return;
   }
 
-  const classes = ["app"];
-  if (state.navOpen) {
-    classes.push("nav-open");
-  }
-  if (state.navCollapsed) {
-    classes.push("nav-collapsed");
-  }
   const focusedField = captureFocus();
   // Where the reader had the conversation, for the same reason focus is taken
   // here: the swap below throws both away, and neither is in `state`.
   const savedScroll = captureChannelScroll();
-  // No rail. The channel sidebar is the navigation now — channels are the
-  // app — and everything the rail held moved: the brand into that sidebar
-  // (clicking it opens Settings), the account block into the topbar avatar,
-  // and the failure-only health line to the sidebar's foot. `sidebar()` and
-  // the nav drawer stay in the file, unrendered, until the next sweep.
-  root.innerHTML = `<div class="${classes.join(" ")}">
+  // One column. There is no rail to open, collapse or scrim any more — the
+  // channel sidebar is the navigation — so the shell carries no `nav-open` or
+  // `nav-collapsed` modifier and the whole `sidebar()` block is gone.
+  root.innerHTML = `<div class="app">
     <div class="main${BARE.has(state.route) ? " bare" : ""}${
       state.loadError === undefined ? "" : " has-banner"
     }">
@@ -3076,7 +2972,6 @@ function navigate(route) {
     route = "chats";
   }
   state.route = route;
-  state.navOpen = false;
   // An open rename field belongs to the screen it was opened on; leaving and
   // coming back to Settings should not find it still open on an old value.
   state.settingsRenamingId = undefined;
@@ -3112,6 +3007,35 @@ function refreshChannelInfoPopover() {
   }
 }
 
+/**
+ * Types one character into the channel composer, as if it had been pressed.
+ *
+ * The "@" and the "/" are the two characters that open a picker, and both are
+ * now reached from the "+" menu rather than from a button of their own. Going
+ * through the draft rather than through the textarea is what survives the
+ * render: the box is rebuilt from `state.chatDraft`, and any image already
+ * staged for this message lives in the draft as markdown the textarea never
+ * shows — so it is carried across rather than dropped on the floor.
+ */
+function typeIntoComposer(character, opened) {
+  const input = $("[data-act='channel-input']");
+  if (input === null) {
+    return;
+  }
+  const at = input.selectionStart ?? input.value.length;
+  const attachments = state.chatDraft.match(
+    /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
+  );
+  state.chatDraft = `${input.value.slice(0, at)}${character}${input.value.slice(at)}${
+    attachments === null ? "" : `\n${attachments.join("\n")}\n`
+  }`;
+  opened();
+  render();
+  const next = $("[data-act='channel-input']");
+  next?.focus();
+  next?.setSelectionRange(at + 1, at + 1);
+}
+
 function actionOf(event) {
   const node = event.target.closest("[data-act]");
   return node === null ? undefined : { node, act: node.dataset.act, value: node.dataset.value };
@@ -3133,14 +3057,6 @@ document.addEventListener("click", (event) => {
     case "nav":
       event.preventDefault();
       navigate(value);
-      return;
-    case "nav-toggle":
-      state.navOpen = !state.navOpen;
-      render();
-      return;
-    case "nav-close":
-      state.navOpen = false;
-      render();
       return;
     case "auth-mode":
       event.preventDefault();
@@ -3172,9 +3088,6 @@ document.addEventListener("click", (event) => {
     case "open-repo":
       invalidateCode();
       openRepository(value, navigate);
-      return;
-    case "repo-switch":
-      navigate("chats");
       return;
     case "repo-view":
       state.repoView = value;
@@ -3226,10 +3139,47 @@ document.addEventListener("click", (event) => {
     case "channel-open":
       openChannel(value, render);
       return;
+    case "composer-plus": {
+      // The one control on the left of the bar. Everything that adds something
+      // to a message hangs off it: a picture, a command, a name. Ordering is
+      // by how often each is reached for, and the menu opens *upward* — the
+      // composer sits on the floor of the window, and `showPopover` hangs a
+      // menu below its anchor, which would put this one off the screen.
+      const menu =
+        value === "chat"
+          ? showMenu(node, [
+              {
+                act: "chat-attach-blocked",
+                label: "Photos & files",
+                hint: "Not available on this deployment",
+                iconName: "paperclip",
+                disabled: true,
+              },
+              { act: "chat-mention", label: "Mention a file or agent", iconName: "at" },
+            ])
+          : showMenu(node, [
+              { act: "channel-attach", label: "Photos & files", iconName: "paperclip" },
+              {
+                act: "channel-slash-key",
+                label: "Run a command",
+                hint: "Everything this channel answers to",
+                iconName: "terminal",
+              },
+              { act: "channel-mention-key", label: "Mention someone", iconName: "at" },
+            ]);
+      const box = node.getBoundingClientRect();
+      menu.style.left = `${Math.max(
+        12,
+        Math.min(box.left, window.innerWidth - menu.offsetWidth - 12),
+      )}px`;
+      menu.style.top = `${Math.max(12, box.top - menu.offsetHeight - 8)}px`;
+      return;
+    }
     case "channel-attach": {
       // Clicking the picker rather than being it: a bare file input cannot be
       // styled into the composer bar, and wrapping the button in a label would
       // swallow the click before the delegated handler saw it.
+      closePopover();
       $("[data-act='channel-attach-input']")?.click();
       return;
     }
@@ -3246,24 +3196,21 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "channel-mention-key": {
-      const input = $("[data-act='channel-input']");
-      if (input === null) {
-        return;
-      }
-      const at = input.selectionStart ?? input.value.length;
-      const attachments = state.chatDraft.match(
-        /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
-      );
-      state.chatDraft = `${input.value.slice(0, at)}@${input.value.slice(at)}${
-        attachments === null ? "" : `\n${attachments.join("\n")}\n`
-      }`;
-      state.mentionActive = true;
-      state.mentionQuery = "";
-      state.mentionIndex = 0;
-      render();
-      const next = $("[data-act='channel-input']");
-      next?.focus();
-      next?.setSelectionRange(at + 1, at + 1);
+      closePopover();
+      typeIntoComposer("@", () => {
+        state.mentionActive = true;
+        state.mentionQuery = "";
+        state.mentionIndex = 0;
+      });
+      return;
+    }
+    case "channel-slash-key": {
+      closePopover();
+      typeIntoComposer("/", () => {
+        state.slashActive = true;
+        state.slashQuery = "";
+        state.slashIndex = 0;
+      });
       return;
     }
     case "channel-mention-pick":
@@ -3323,11 +3270,6 @@ document.addEventListener("click", (event) => {
       return;
     case "chan-sidebar-toggle":
       state.chanSidebarOpen = state.chanSidebarOpen !== true;
-      render();
-      return;
-    case "nav-collapse-toggle":
-      state.navCollapsed = state.navCollapsed !== true;
-      persist("ag.navCollapsed", state.navCollapsed);
       render();
       return;
     // Records which way the reader just flipped it, and lets the browser do
@@ -4275,6 +4217,7 @@ document.addEventListener("click", (event) => {
 
     /* Composer affordances */
     case "chat-mention": {
+      closePopover();
       const input = $("[data-act='chat-input']");
       if (input === null) {
         return;

@@ -435,8 +435,7 @@ test("every composer control sits on one row with an icon-sized context dial", a
   const bar = /<div class="composer-bar">([\s\S]*?)<\/div>/u.exec(source)?.[1];
   assert.notEqual(bar, undefined, "the composer toolbar should be one row");
   for (const control of [
-    "paperclip",
-    "at",
+    "composer-plus",
     "contextRing",
     "chat-model",
     "chat-effort",
@@ -444,6 +443,12 @@ test("every composer control sits on one row with an icon-sized context dial", a
   ]) {
     assert.match(bar ?? "", new RegExp(control, "u"), `${control} belongs on the row`);
   }
+  // One control on the left, not a row of them: the "@" and the paperclip are
+  // reached from the "+" menu, the way the chat apps this bar is modelled on
+  // reach them. A permanent "@" is an instruction to address somebody, offered
+  // before there is a message to address.
+  assert.equal(/data-act="chat-mention"/u.test(bar ?? ""), false);
+  assert.equal(/paperclip/u.test(bar ?? ""), false);
   // The ring is an indicator beside the icons, not a chart: same optical size.
   const css = await publicFile("styles.css");
   assert.match(css, /\.ctx svg \{\s*width: 15px;\s*height: 15px;/u);
@@ -474,15 +479,46 @@ test("an empty, unfocused composer collapses to one lean row", async () => {
   const hidden = /:has\(textarea:placeholder-shown\)\s*:is\(([\s\S]*?)\)\s*\{\s*display: none;/u
     .exec(css)?.[1];
   assert.notEqual(hidden, undefined, "the folded controls should be one list");
-  for (const control of [
-    "mini-select",
-    "ctx",
-    "composer-note",
-    "chat-mention",
-    "channel-mention-key",
-  ]) {
+  for (const control of ["mini-select", "ctx", "composer-note", "spacer"]) {
     assert.match(hidden ?? "", new RegExp(control, "u"), `${control} folds away, not out`);
   }
+  // The two controls the bar exists for stay: one "+" and one send.
+  assert.equal(/composer-plus/u.test(hidden ?? ""), false);
+  assert.equal(/send-btn/u.test(hidden ?? ""), false);
+});
+
+test("the composer is one lean floating bar with a + and a send", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const chat = await publicFile("chat.js");
+  const css = await publicFile("styles.css");
+  // Both composers open the same menu from the same control, so "add something
+  // to this message" is one idea in one place rather than two rows of icons.
+  for (const source of [chats, chat]) {
+    assert.match(source, /act: "composer-plus"/u);
+    assert.match(source, /cls: "composer-plus"/u);
+  }
+  // Nothing surfaces the "@" permanently any more — it is typed, or picked
+  // from the menu, which is what the apps this bar follows do.
+  assert.equal(/act: "channel-mention-key"/u.test(chats), false);
+  assert.equal(/act: "chat-mention"/u.test(chat), false);
+  // Attaching, commands and mentions all hang off the one control.
+  const menu = /case "composer-plus": \{([\s\S]*?)\n    \}/u.exec(await publicFile("app.js"))?.[1];
+  assert.notEqual(menu, undefined, "the + opens a menu");
+  for (const entry of ["channel-attach", "channel-slash-key", "channel-mention-key", "chat-mention"]) {
+    assert.match(menu ?? "", new RegExp(entry, "u"), `${entry} belongs behind the +`);
+  }
+  // It opens upward: the bar sits on the floor of the window, and a menu hung
+  // below its anchor would be off the bottom of the screen.
+  assert.match(menu ?? "", /box\.top - menu\.offsetHeight/u);
+  // Raised off the conversation rather than bolted to the bottom of it.
+  const shape = /\n\.composer \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(shape, undefined, "the composer has a shape rule");
+  assert.match(shape ?? "", /box-shadow: var\(--shadow-pop\);/u);
+  assert.match(shape ?? "", /--composer-shape: 999px;/u);
+  // The elastic gap is off while every control is on the pill, or it takes
+  // half the width of the box away from the sentence being written in it.
+  assert.match(shape ?? "", /--composer-spacer-layout: none;/u);
+  assert.match(css, /\.composer-bar \.spacer \{\s*display: var\(--composer-spacer-layout/u);
 });
 
 test("the composer stays open over a decision the textarea cannot see", async () => {
@@ -851,11 +887,15 @@ test("no control's whole behaviour is an apology", async () => {
 });
 
 test("controls the deployment cannot honour are disabled, not chatty", async () => {
-  const chat = await publicFile("chat.js");
-  // Attachments need a backend that is not there. A visibly disabled control
-  // with a reason is honest; a live one that toasts an excuse is not.
-  assert.match(chat, /<button type="button" class="icon-btn" disabled[\s\S]{0,120}paperclip/u);
   const app = await browserSource();
+  // Attachments need a backend that is not there. Since the "+" menu is where
+  // attaching now lives, that is where the refusal lives: a visibly disabled
+  // entry carrying its reason is honest; a live one that toasts an excuse is
+  // not.
+  assert.match(
+    app,
+    /label: "Photos & files",\s*hint: "Not available on this deployment",\s*iconName: "paperclip",\s*disabled: true,/u,
+  );
   // Sign-in providers this control plane does not implement are absent
   // entirely rather than present and refusing.
   assert.equal(/data-act="oauth"/u.test(app), false);

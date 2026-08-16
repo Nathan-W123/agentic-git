@@ -162,9 +162,10 @@ export function chatThread(agent) {
 /**
  * The composer.
  *
- * Every control sits on one row under the text box, and the context indicator
- * is drawn at icon size beside the paperclip rather than as a chart — this
- * panel is for talking to an agent, not for reading telemetry.
+ * Every control sits on one row under the text box: one "+" on the left for
+ * anything being added to the message, and send on the right. The context
+ * indicator is drawn at icon size rather than as a chart — this panel is for
+ * talking to an agent, not for reading telemetry.
  */
 export function chatComposer(agent, placeholder = "Ask your agent to do anything...") {
   // Nothing can be sent to an agent that is not connected, so the composer
@@ -196,9 +197,12 @@ export function chatComposer(agent, placeholder = "Ask your agent to do anything
       enterkeyhint="send"
       placeholder="${esc(placeholder)}"${busy || !ready ? " disabled" : ""}></textarea>
     <div class="composer-bar">
-      <button type="button" class="icon-btn" disabled
-        title="Attachments are not available on this deployment">${icon("paperclip")}</button>
-      ${iconButton("at", { act: "chat-mention", title: "Mention a file or agent" })}
+      ${iconButton("plus", {
+        act: "composer-plus",
+        value: "chat",
+        title: "Add to this message",
+        cls: "composer-plus",
+      })}
       ${contextRing(contextPercentFor(agent?.id), true)}
       <span class="spacer"></span>
       ${miniSelect("chat-model", models, agent?.model ?? "", "Model")}

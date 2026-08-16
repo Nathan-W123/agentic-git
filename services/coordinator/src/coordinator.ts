@@ -21,6 +21,7 @@ import {
   type CanonicalRepository,
 } from "@coord/repository-service";
 import {
+  AGENT_ACCOUNT_PREFIX,
   assertAgentPlan,
   createId,
   describeError,
@@ -3357,7 +3358,7 @@ export class Coordinator {
       // failure whatever it says for itself.
       const failureExplanation =
         integration.status === "empty" && agentAccount.length > 0
-          ? `${integration.explanation}. The agent's own account: ${agentAccount}`
+          ? `${integration.explanation}. ${AGENT_ACCOUNT_PREFIX} ${agentAccount}`
           : integration.explanation;
       const explanation = reported
         ? // The agent's own words are the deliverable here — there is no diff
