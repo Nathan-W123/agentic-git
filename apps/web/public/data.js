@@ -193,11 +193,10 @@ export const state = {
    */
   agentPanelTab: "history",
   /*
-   * Whether a thread's thinking block is unfolded, keyed by thread id.
+   * Whether a turn's thinking block is unfolded, keyed by thread and turn.
    *
-   * Only holds threads the reader has actually clicked. An absent entry means
-   * "no opinion", which is what lets the default (open while running, folded
-   * once finished) still apply to every thread they have not touched.
+   * Only holds blocks the reader has actually clicked. An absent entry means
+   * closed, so every new turn starts folded until the reader opens it.
    */
   thinkingOpen: {},
   /**

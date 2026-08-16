@@ -2713,7 +2713,6 @@ function threadThinkingBlock(rootId, turn, index) {
     return { html: "", visible: body };
   }
 
-  const done = turn.replies.some((reply) => isThreadEnding(reply));
   const key = `${rootId}:thinking:${index}`;
   // Silent at zero. A task that has been stated and not yet worked on has a
   // block holding the request alone, and "0 steps" reads as a failure rather
@@ -2723,10 +2722,9 @@ function threadThinkingBlock(rootId, turn, index) {
       ? ""
       : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
   const html = `<details class="thread-thinking"${
-    // A new turn receives a new key, so it opens while active without opening
-    // any finished turn above it. The reader's choice remains stable as more
-    // progress arrives for this turn alone.
-    (state.thinkingOpen[key] ?? !done) ? " open" : ""
+    // Every turn starts folded. Its independent key still keeps an explicit
+    // reader choice stable as more progress arrives for this turn alone.
+    state.thinkingOpen[key] === true ? " open" : ""
   }>
     <summary data-act="thinking-toggle" data-value="${esc(key)}">
       <span class="tt-label">Thinking</span>

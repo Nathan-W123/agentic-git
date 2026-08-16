@@ -1357,7 +1357,7 @@ test("an agent's reply to a person is shown, not folded into the thinking block"
   );
 });
 
-test("each task turn puts its own thinking below its prompt", async () => {
+test("each task turn puts its own thinking below its prompt and starts closed", async () => {
   const source = await publicFile("screen-chats.js");
   const groupingStart = source.indexOf("function threadReplyTurns");
   const thinkingStart = source.indexOf("function threadThinkingBlock");
@@ -1400,7 +1400,16 @@ test("each task turn puts its own thinking below its prompt", async () => {
 
   const thinking = source.slice(thinkingStart, rendererStart);
   assert.match(thinking, /const key = `\$\{rootId\}:thinking:\$\{index\}`/u);
-  assert.match(thinking, /state\.thinkingOpen\[key\] \?\? !done/u);
+  assert.match(
+    thinking,
+    /state\.thinkingOpen\[key\] === true/u,
+    "only an explicit reader choice should open a Thinking block",
+  );
+  assert.equal(
+    thinking.includes("?? !done"),
+    false,
+    "an active turn should start closed just like a finished turn",
+  );
 });
 
 test("the working dots come back for the next turn in a finished thread", async () => {
@@ -1417,14 +1426,14 @@ test("the working dots come back for the next turn in a finished thread", async 
   );
   assert.match(body, /replies\[replies\.length - 1\]/u);
 
-  // A new turn gets its own disclosure key. It therefore opens from its live
-  // default without reopening the completed turn above it or needing a
-  // thread-global reset before submit.
+  // A new turn gets its own disclosure key. It therefore stays closed without
+  // changing the completed turn above it or needing a thread-global reset
+  // before submit.
   const thinkingStart = source.indexOf("function threadThinkingBlock");
   const thinkingEnd = source.indexOf("\nfunction threadReplies", thinkingStart);
   const thinking = source.slice(thinkingStart, thinkingEnd);
   assert.match(thinking, /const key = `\$\{rootId\}:thinking:\$\{index\}`/u);
-  assert.match(thinking, /state\.thinkingOpen\[key\] \?\? !done/u);
+  assert.match(thinking, /state\.thinkingOpen\[key\] === true/u);
 
   const app = await browserSource();
   assert.equal(
