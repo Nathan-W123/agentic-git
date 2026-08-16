@@ -1073,6 +1073,36 @@ export function agentsThinkingIn(repositoryId) {
   return [...new Set(names)];
 }
 
+/**
+ * Is an agent working on this thread's task right now?
+ *
+ * The same question `agentsThinkingIn` answers for a whole channel, asked of
+ * one thread — so the threads pullout can mark the live work rather than
+ * making somebody open each row to find out which one is still moving.
+ *
+ * The task's own status is the truth where the task is known, and it is the
+ * same `WORKING_STATUS` the typing dots use, so a thread stays marked for
+ * exactly as long as its agent is shown as thinking. A busy frame is the
+ * fallback for the window before the task list has caught up with it, which
+ * is precisely when a reader is most likely to be watching.
+ *
+ * Unlike `agentsThinkingIn` this reads without retiring anything: it runs
+ * once per row of a render, and a selector that mutates state while a list is
+ * being built would make the answer depend on the order the rows were drawn.
+ */
+export function threadIsWorking(entry) {
+  const taskId = entry?.taskId;
+  if (taskId === undefined || taskId === null || taskId === "") {
+    return false;
+  }
+  const task = state.tasks.find((candidate) => candidate.id === taskId);
+  if (task !== undefined) {
+    return WORKING_STATUS.has(task.status);
+  }
+  const busy = state.agentBusy[taskId];
+  return busy !== undefined && busy.expiresAt > Date.now();
+}
+
 /** Records a `channel-typing` frame from somebody else. */
 export function noteTyping(frame) {
   const key = typingKey(frame.repositoryId, frame.threadId);

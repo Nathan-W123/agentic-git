@@ -2436,29 +2436,26 @@ svg {
 }
 
 /*
- * The composer, in its two sizes.
+ * The desktop composer is deliberately one steady, lean row. Its controls
+ * and text remain in the same places when it receives focus, matching the
+ * compact prompt bar people use with a pointer and a wide viewport. Phones
+ * override these variables below: they begin with this pill, then open into
+ * a clearer two-row composer when somebody starts writing.
  *
- * Every metric the lean bar changes is a variable set here and overridden in
- * exactly one place — the collapse rule below. The alternative was a second
- * copy of that rule's condition in front of each property it touches, and the
- * textarea and the mirror painted underneath it cannot afford to disagree
- * about padding by a pixel: they are the same string drawn twice, and the
- * moment their metrics drift the highlight slides off the name it belongs to.
- * A variable cannot drift the way two selectors can.
- *
- * `flex` values on the children are unconditional and cost nothing while the
- * composer is a block — they only start meaning something once `--composer-
- * layout` turns the box into a row.
+ * Every metric is a variable because the textarea and the mirror painted
+ * underneath it cannot afford to disagree about padding by a pixel: they are
+ * the same string drawn twice, and the moment their metrics drift the
+ * highlight slides off the name it belongs to.
  */
 .composer {
-  --composer-pad-top: 11px;
-  --composer-pad-bottom: 6px;
-  --composer-pad-x: 13px;
-  --composer-shape: var(--radius-lg);
-  --composer-layout: block;
-  --composer-bar-layout: flex;
-  --composer-inset: 0;
-  --composer-send-shape: 8px;
+  --composer-pad-top: 7px;
+  --composer-pad-bottom: 7px;
+  --composer-pad-x: 4px;
+  --composer-shape: 999px;
+  --composer-layout: flex;
+  --composer-bar-layout: contents;
+  --composer-inset: 0 5px;
+  --composer-send-shape: 999px;
 
   margin: 0 12px 12px;
   display: var(--composer-layout);
@@ -2468,67 +2465,11 @@ svg {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--composer-shape);
-  transition: border-color 0.15s ease, border-radius 0.15s ease;
+  transition: border-color 0.15s ease;
 }
 
 .composer:focus-within {
   border-color: var(--accent-line);
-}
-
-/*
- * The lean bar.
- *
- * Empty, unfocused and with nothing pending, the composer is one pill about
- * the height of its own send button: attach on the left, the placeholder
- * across the middle, send on the right. The second row and everything on it
- * — the mention key, the context dial, the model and effort pickers — come
- * back the instant it is pressed, which is also the first instant any of them
- * can be used: nothing can be typed, mentioned or configured into a composer
- * that is not focused, so the collapsed state hides no control at a moment it
- * could have been reached. What it buys is the roughly forty pixels of
- * transcript that a permanently two-row box was spending on a toolbar nobody
- * was looking at.
- *
- * `:placeholder-shown` is the emptiness test, rather than a flag in state,
- * because every render is one `innerHTML` assignment over the whole app: a
- * flag would have to be captured and restored across it, while the textarea's
- * own value is what the markup is built from and survives on its own. It is
- * also live — the bar opens on the first character typed, not on the render
- * that character eventually causes.
- *
- * `.is-expanded` is for the things the textarea cannot see: staged
- * attachments and a thread the next message is aimed at both sit outside this
- * form, and both have to keep their bar open over an empty box.
- */
-.composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown) {
-  --composer-pad-top: 7px;
-  --composer-pad-bottom: 7px;
-  --composer-pad-x: 4px;
-  --composer-shape: 999px;
-  --composer-layout: flex;
-  /* `contents` rather than a nested row: it lifts the toolbar's buttons into
-     the pill itself, which is what lets the attach button sit to the left of
-     the text and the send button to the right of it without either composer
-     rearranging its markup. */
-  --composer-bar-layout: contents;
-  --composer-inset: 0 5px;
-  --composer-send-shape: 999px;
-}
-
-/* The second row's contents, while there is no second row. Kept in the
-   markup and merely unpainted, so focusing the composer reveals them without
-   a render — and so nothing here has to know which controls a given composer
-   happens to carry. */
-.composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown)
-  :is(
-    .mini-select,
-    .ctx,
-    .composer-note,
-    .composer-bar .spacer,
-    [data-act="chat-mention"],
-    [data-act="channel-mention-key"]
-  ) {
-  display: none;
 }
 
 /* Attach leads, text follows, send closes. A no-op in the expanded bar, where
@@ -4905,26 +4846,60 @@ svg {
   transition: width 0.4s ease;
 }
 
-/* The way into the thread: a card, not a tinted sentence.
-   It used to be an accent-coloured inline link carrying a stack of faces, so
-   the one row that answers "what is this and how do I open it" was also the
-   loudest thing under the message. A quiet surface with a chevron says the
-   same thing and lets the conversation stay the brightest surface. */
+/* The way into a thread from the channel: faces, then a tinted count.
+   No surface, no border, no chevron — the card treatment belongs to the
+   threads pullout, where a row has to identify a thread with nothing above it.
+   Here the message it hangs under has already done that, so all this owes the
+   reader is "there is more, and this much of it". Sized to its content rather
+   than the column so the hit area ends where the words do. */
 .cmsg-thread-link {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  width: 100%;
-  margin-top: 8px;
-  padding: 9px 10px;
-  border-radius: var(--radius);
-  background: var(--bg-card);
-  color: var(--text);
+  gap: 8px;
+  max-width: 100%;
+  margin-top: 6px;
+  padding: 2px 0;
   text-align: left;
 }
 
-.cmsg-thread-link:hover {
-  background: var(--bg-card-2);
+/* The count is the link, and it is the reader's own accent rather than a
+   fixed blue: every other clickable tint on the screen is drawn from the same
+   custom property, so this reads as the same kind of thing in any theme. */
+.cmsg-thread-replies {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--accent-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmsg-thread-link:hover .cmsg-thread-replies {
+  text-decoration: underline;
+}
+
+/* The repliers, overlapped. `avatar-stack` already carries the overlap for
+   portraits; agent faces are vendor marks rather than `.avatar`s, so the same
+   pull has to be spelled out for whatever the stack actually holds. The ring
+   is the chat surface's own colour, which is what makes overlapping faces read
+   as separate rather than as one smudge. */
+.cmsg-thread-link .ctl-faces > * {
+  margin-right: -6px;
+}
+
+.cmsg-thread-link .ctl-faces > *:last-child {
+  margin-right: 0;
+}
+
+.cmsg-thread-link .ctl-faces .avatar {
+  border: 2px solid var(--bg-chat);
+}
+
+/* A presence dot on a 20px face in a stack is a third of the face, and it is
+   answering a question nobody asked of a thread summary. */
+.cmsg-thread-link .ctl-faces .presence {
+  display: none;
 }
 
 /* ------------------------------------------------------------ mention ---- */
@@ -6410,6 +6385,69 @@ dialog.modal::backdrop {
    "message composer with two inline mini-selects" are still fine at 820px
    and are not fine at 380px. */
 @media (max-width: 600px) {
+  /*
+   * A phone gets the space-efficient pill only while it is idle. Focus,
+   * text, an attachment, or a targeted thread opens it into a two-row bar so
+   * the textarea and touch controls each have room. `max-height` supplies the
+   * visible expansion while the layout changes underneath it; the global
+   * reduced-motion rule later in this file reduces that transition to an
+   * effectively immediate state change when requested.
+   *
+   * `:placeholder-shown` is the live emptiness test. It opens on the first
+   * character without waiting for the app's full `innerHTML` render cycle,
+   * and `.is-expanded` covers pending state that lives outside the textarea.
+   */
+  .composer {
+    --composer-pad-top: 11px;
+    --composer-pad-bottom: 6px;
+    --composer-pad-x: 13px;
+    --composer-shape: var(--radius-lg);
+    --composer-layout: block;
+    --composer-bar-layout: flex;
+    --composer-inset: 0;
+    --composer-send-shape: 8px;
+
+    max-height: 240px;
+    overflow: hidden;
+    transition:
+      border-color 0.15s ease,
+      border-radius 0.2s ease,
+      max-height 0.22s ease;
+  }
+
+  .composer textarea,
+  .composer-mirror {
+    transition: padding 0.2s ease;
+  }
+
+  .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown) {
+    --composer-pad-top: 7px;
+    --composer-pad-bottom: 7px;
+    --composer-pad-x: 4px;
+    --composer-shape: 999px;
+    --composer-layout: flex;
+    /* Lift the useful edge controls into the pill until it is opened. */
+    --composer-bar-layout: contents;
+    --composer-inset: 0 5px;
+    --composer-send-shape: 999px;
+
+    max-height: 52px;
+  }
+
+  /* The fuller toolbar is already in the markup. Keep it out of the idle
+     pill, then reveal it as part of the focus expansion without a render. */
+  .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown)
+    :is(
+      .mini-select,
+      .ctx,
+      .composer-note,
+      .composer-bar .spacer,
+      [data-act="chat-mention"],
+      [data-act="channel-mention-key"]
+    ) {
+    display: none;
+  }
+
   /* `.chan-sidebar` (channel list + roster) goes off-canvas the same way
      the outer app `.sidebar` already does at 900px — toggled by the new
      `.chan-sidebar-btn` in `chanHeader` (screen-chats.js), closed by the
@@ -7108,6 +7146,35 @@ dialog.modal::backdrop {
   background: var(--bg-card-2);
 }
 
+/* The thread an agent is working on right now. The list is a log of finished
+   work with the live ones mixed in, and nothing in a row said which was
+   which — so the one thread worth watching looked exactly like the fifty that
+   ended yesterday. Lit in the accent's own wash with a line down its leading
+   edge: enough to find at a glance down the list, and still a card rather
+   than a second kind of row. */
+.thread-item-active {
+  background: var(--accent-wash);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.thread-item-active:hover {
+  background: var(--accent-wash-strong);
+}
+
+.thread-item-active .ti-icon {
+  color: var(--accent-bright);
+}
+
+/* "Working", breathing, in the same accent as the bar under a running thread
+   in the channel — one word, because the row's own name already says what the
+   work is. */
+.thread-item-active .ti-live {
+  flex: none;
+  color: var(--accent-bright);
+  font-weight: 600;
+  animation: status-breathe 2.4s ease-in-out infinite;
+}
+
 /* ------------------------------------------------------ avatar and theme ---- */
 
 .avatar.has-photo {
@@ -7416,12 +7483,13 @@ dialog.modal::backdrop {
 }
 
 /* ------------------------------------------------- thread summary ---- */
-/* The card under a message that stands for its thread: one glyph, what the
-   work is called, and a quiet second line saying who is in it and how much
-   was actually said. Two lines and nothing else — the same shape a background
-   task gets in the threads pullout, so the two surfaces read as one thing
-   seen twice rather than as two designs. */
-.cmsg-thread-link .ctl-icon,
+/* One thread in the pullout: a glyph, what the work is called, and a quiet
+   second line saying who is in it and how much was actually said. This shape
+   belongs to the pullout alone. The channel used to share these rules, so the
+   two surfaces were one design seen twice — but a card in the channel repeats
+   the message directly above it, which is why the channel now gets a plain
+   tinted count (`.cmsg-thread-link`) and these selectors name only
+   `.thread-item`. */
 .thread-item .ti-icon {
   display: flex;
   flex: none;
@@ -7430,7 +7498,6 @@ dialog.modal::backdrop {
   color: var(--text-3);
 }
 
-.cmsg-thread-link .ctl-icon svg,
 .thread-item .ti-icon svg {
   width: 17px;
   height: 17px;
@@ -7438,20 +7505,17 @@ dialog.modal::backdrop {
 
 /* The chevron only promises there is somewhere to go, so it is the dimmest
    thing in the row and never competes with the name. */
-.cmsg-thread-link .ctl-go,
 .thread-item .ti-go {
   display: flex;
   flex: none;
   color: var(--text-4);
 }
 
-.cmsg-thread-link .ctl-go svg,
 .thread-item .ti-go svg {
   width: 16px;
   height: 16px;
 }
 
-.cmsg-thread-link .ctl-main,
 .thread-item .ti-main {
   display: grid;
   gap: 2px;
@@ -7462,7 +7526,6 @@ dialog.modal::backdrop {
 /* The name the agent gave the task carries the card. Wrapped to two lines
    rather than truncated at one: a task name is a sentence, and the half of it
    that fits is rarely the half that identifies the work. */
-.cmsg-thread-link .ctl-name,
 .thread-item .ti-text {
   font-size: 13px;
   font-weight: 600;
@@ -7475,7 +7538,6 @@ dialog.modal::backdrop {
 }
 
 /* Who, then how much — metadata, in the size and colour that says so. */
-.cmsg-thread-link .ctl-meta,
 .thread-item .ti-meta {
   display: flex;
   align-items: baseline;
@@ -7484,7 +7546,6 @@ dialog.modal::backdrop {
   min-width: 0;
 }
 
-.cmsg-thread-link .ctl-who,
 .thread-item .ti-who {
   color: var(--text-2);
   overflow: hidden;
@@ -7492,7 +7553,6 @@ dialog.modal::backdrop {
   white-space: nowrap;
 }
 
-.cmsg-thread-link .ctl-count,
 .thread-item .ti-count {
   color: var(--text-4);
   flex: none;
