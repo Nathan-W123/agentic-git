@@ -2042,6 +2042,12 @@ export interface ChatProviderOperations {
     provider: string;
     messages: unknown;
     cliSessionId?: string;
+    /**
+     * A throwaway line — a title, an acknowledgement — rather than work.
+     * The provider service runs these on a cheap model; see
+     * `CEREMONIAL_MODELS` there.
+     */
+    ceremonial?: boolean;
   }): Promise<unknown>;
   /**
    * Same as {@link complete} but reports progress as the CLI produces it.
@@ -9055,6 +9061,7 @@ export class ApiGateway {
         "think them, one per line, no bullets or numbering.\n\nRequest: " +
         objective,
       OPENING_TIMEOUT_MS,
+      true,
     );
     if (answer.text === undefined) {
       return { title: summariseObjective(objective), thoughts: [] };
@@ -9842,6 +9849,7 @@ export class ApiGateway {
     prompt: string,
     timeoutMs: number,
     onEvent?: (event: ChatStreamEvent) => void,
+    ceremonial = false,
   ): Promise<{ reply?: unknown; error?: string }> {
     const providers = this.options.operations.chatProviders;
     if (providers === undefined) {
@@ -9852,6 +9860,7 @@ export class ApiGateway {
       systemAdmin: false,
       provider: candidate.provider,
       messages: [{ role: "user", content: prompt }],
+      ...(ceremonial ? { ceremonial: true } : {}),
     };
     const timedOut = Symbol("timeout");
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -9896,8 +9905,15 @@ export class ApiGateway {
     candidate: ChannelMentionCandidate,
     prompt: string,
     timeoutMs: number,
+    ceremonial = false,
   ): Promise<{ text?: string; error?: string }> {
-    const answer = await this.performChat(candidate, prompt, timeoutMs);
+    const answer = await this.performChat(
+      candidate,
+      prompt,
+      timeoutMs,
+      undefined,
+      ceremonial,
+    );
     // `ChatReply.text` is the field the provider service actually fills.
     // Reading `content` — the shape of the *request* — found nothing every
     // time, so every dynamic line silently fell back to a fixed one.
@@ -10000,6 +10016,7 @@ export class ApiGateway {
           userId: candidate.userId,
           systemAdmin: false,
           provider: candidate.provider,
+          ceremonial: true,
           messages: [
             {
               role: "user",
