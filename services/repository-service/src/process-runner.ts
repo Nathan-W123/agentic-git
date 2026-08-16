@@ -22,6 +22,16 @@ export interface ProcessOptions {
   timeoutMs?: number;
   /** Retains at most this many bytes from each output stream. */
   maxOutputBytes?: number;
+  /**
+   * Which end of an over-limit stream survives. `head` (the default) keeps
+   * the first `maxOutputBytes` and drops the rest — right for build logs,
+   * where the first error is the story. `tail` keeps the last: right for a
+   * streamed agent transcript, whose one durable payload — the result
+   * envelope — is the final line, and which head retention was guaranteed
+   * to discard on exactly the long runs that needed it most. Truncation is
+   * still reported either way; only what is kept changes.
+   */
+  retainOutput?: "head" | "tail";
   /** Terminates the child when the operation is cancelled. */
   signal?: AbortSignal;
   /**
@@ -211,7 +221,7 @@ export async function runProcess(
     let stderrTruncated = false;
     const maxOutputBytes = options.maxOutputBytes;
 
-    const capture = (
+    const captureHead = (
       target: Buffer[],
       chunk: Buffer,
       currentBytes: number,
@@ -230,6 +240,41 @@ export async function runProcess(
         truncated: chunk.length > remaining,
       };
     };
+    // A rolling window over the end of the stream: old buffers are shed from
+    // the front as new ones arrive, so retention is O(cap) memory however
+    // much the child writes. Trimming may split a multi-byte character at
+    // the window's leading edge; the seam decodes as a replacement character
+    // in a line the caller was going to skip anyway.
+    const captureTail = (
+      target: Buffer[],
+      chunk: Buffer,
+      currentBytes: number,
+    ): { bytes: number; truncated: boolean } => {
+      target.push(chunk);
+      let bytes = currentBytes + chunk.length;
+      if (maxOutputBytes === undefined) {
+        return { bytes, truncated: false };
+      }
+      let truncated = false;
+      while (bytes > maxOutputBytes) {
+        const first = target[0];
+        if (first === undefined) {
+          break;
+        }
+        const excess = bytes - maxOutputBytes;
+        if (first.length <= excess) {
+          target.shift();
+          bytes -= first.length;
+        } else {
+          target[0] = first.subarray(excess);
+          bytes -= excess;
+        }
+        truncated = true;
+      }
+      return { bytes, truncated };
+    };
+    const retainTail = options.retainOutput === "tail";
+    const capture = retainTail ? captureTail : captureHead;
 
     // Decoders are per-stream and stateful: a UTF-8 character split across two
     // reads must not reach an observer as two replacement characters.
@@ -323,16 +368,22 @@ export async function runProcess(
       cleanUp();
 
       const truncationMarker = "\n[output truncated]";
+      // Tail retention loses the beginning, so its marker leads; head
+      // retention loses the end, so its marker trails. Either way the
+      // marker sits on the missing side.
+      const leadingMarker = "[output truncated]\n";
       const timeoutMarker =
         `\n[process timed out after ${String(options.timeoutMs)} ms]`;
       resolve({
         exitCode: timedOut ? 124 : aborted ? 130 : (exitCode ?? 1),
         stdout:
+          (retainTail && stdoutTruncated ? leadingMarker : "") +
           Buffer.concat(stdout).toString("utf8") +
-          (stdoutTruncated ? truncationMarker : ""),
+          (!retainTail && stdoutTruncated ? truncationMarker : ""),
         stderr:
+          (retainTail && stderrTruncated ? leadingMarker : "") +
           Buffer.concat(stderr).toString("utf8") +
-          (stderrTruncated ? truncationMarker : "") +
+          (!retainTail && stderrTruncated ? truncationMarker : "") +
           (timedOut ? timeoutMarker : "") +
           (aborted ? "\n[process aborted]" : ""),
         durationMs: Math.round(performance.now() - startedAt),

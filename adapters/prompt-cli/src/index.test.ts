@@ -223,6 +223,71 @@ test("claude: plan-mode planning, skip-permissions execution, collected diff", a
   assert.deepEqual(changeSet.symbolsChanged, ["value"]);
 });
 
+test("claude: a transcript past the cap still finishes — the tail holds the result", async () => {
+  // The stream carries every thinking step and tool result, so a long run
+  // outgrows any cap. This exact shape — truncated flag set, head gone
+  // mid-line, envelope last — used to fail the whole round as "output
+  // exceeded the configured limit".
+  const fixture = await createFixture();
+  const retention: Array<string | undefined> = [];
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    retention.push(options.retainOutput);
+    if (args.includes("--permission-mode")) {
+      return output(
+        claudeEnvelope("```json\n" + JSON.stringify(PLAN) + "\n```"),
+      );
+    }
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(
+      "[output truncated]\n" +
+        '99,"tool_use_id":"toolu_x"}\n' +
+        '{"type":"assistant","message":{"content":[]}}\n'.repeat(50) +
+        claudeEnvelope(JSON.stringify(COMPLETION)),
+      { stdoutTruncated: true },
+    );
+  };
+
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+
+  await adapter.sendContext(session.id, contextFor(workspace));
+  const changeSet = await adapter.collectChanges(session.id);
+  assert.equal(changeSet.patches.length, 1);
+  // The adapter asked the runner to keep the end of the stream, which is
+  // what makes the truncated head harmless.
+  assert.ok(retention.every((mode) => mode === "tail"));
+});
+
 test("claude: an action round trip — the platform acts, the next round knows", async () => {
   // "Push to GitHub" through the adapter's own machinery: round one is told
   // what the platform can do and asks for the push; the platform answers
