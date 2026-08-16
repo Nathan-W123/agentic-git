@@ -2260,89 +2260,126 @@ function threadPanel(repositoryId) {
 }
 
 /**
- * A running commentary is worth having and not worth reading in full.
+ * Splits a thread into turns without inventing a task identifier in the UI.
  *
- * The narration of a task — planning, editing, validating — is most of what a
- * thread contains and almost none of what somebody opening it wants first.
- * They want the request, and how it ended. So the steps in between collapse
- * into one line they can open, and the outcome stays where it can be seen.
+ * Every request that starts or extends work is stored as a `user` reply before
+ * that run's progress. It is therefore the durable boundary between turns,
+ * including a task explicitly added to an existing thread. Replies before the
+ * first such boundary are retained as a legacy opening turn; threads whose
+ * root is itself the request never needed a copied user reply.
+ */
+function threadReplyTurns(replies) {
+  const turns = [];
+  let turn = { prompt: undefined, replies: [] };
+  let ended = false;
+  const finish = () => {
+    if (turn.prompt !== undefined || turn.replies.length > 0) {
+      turns.push(turn);
+    }
+  };
+  for (const reply of replies) {
+    // A human prompt is the usual boundary. An outcome is also a durable
+    // boundary for work merged into this thread automatically: that path can
+    // add the next agent acknowledgement and run without copying the channel
+    // prompt into the reply list.
+    if (reply.kind === "user" || ended) {
+      finish();
+      turn = {
+        prompt: reply.kind === "user" ? reply : undefined,
+        replies: [],
+      };
+      ended = false;
+      if (reply.kind === "user") {
+        continue;
+      }
+    }
+    turn.replies.push(reply);
+    ended = reply.kind === "outcome";
+  }
+  finish();
+  return turns;
+}
+
+/** One turn's narration, with state independent from every other turn. */
+function threadThinkingBlock(rootId, turn, index) {
+  // A task title belongs to the fold only when it opens this turn. A later
+  // agent reply that happens to begin "Task:" is something the agent said to
+  // the reader and must stay visible.
+  const [first, ...rest] = turn.replies;
+  const titleLine = /^Task: /u.test(String(first?.content ?? ""))
+    ? first
+    : undefined;
+  const body = titleLine === undefined ? turn.replies : rest;
+  const steps = body.filter(isThreadThinking);
+  if (steps.length === 0 && titleLine === undefined) {
+    return { html: "", visible: body };
+  }
+
+  const done = turn.replies.some((reply) => isThreadEnding(reply));
+  const key = `${rootId}:thinking:${index}`;
+  // Silent at zero. A task that has been stated and not yet worked on has a
+  // block holding the request alone, and "0 steps" reads as a failure rather
+  // than work that has not started.
+  const count =
+    steps.length === 0
+      ? ""
+      : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
+  const html = `<details class="thread-thinking"${
+    // A new turn receives a new key, so it opens while active without opening
+    // any finished turn above it. The reader's choice remains stable as more
+    // progress arrives for this turn alone.
+    (state.thinkingOpen[key] ?? !done) ? " open" : ""
+  }>
+    <summary data-act="thinking-toggle" data-value="${esc(key)}">
+      <span class="tt-label">Thinking</span>
+      <span class="tt-count">${esc(count)}</span></summary>
+    <div class="tt-body">${
+      titleLine === undefined
+        ? ""
+        : `<p class="tt-task">${esc(
+            String(titleLine.content ?? "")
+              .replace(/^Task:\s*/u, "")
+              .trim(),
+          )}</p>`
+    }${steps
+      .map((reply) => String(reply.content ?? "").trim())
+      .filter((text) => text.length > 0)
+      .join("\n")
+      .split(/\n+/u)
+      .map((line) => `<p>${esc(line)}</p>`)
+      .join("")}</div>
+  </details>`;
+  return {
+    html,
+    visible: body.filter((reply) => !isThreadThinking(reply)),
+  };
+}
+
+/**
+ * Renders each request with the thinking and answer that belong to that turn.
  *
- * Collapsed by default only while there is something after them. A thread
- * still working has its latest step showing, because that is the part being
- * waited on.
+ * The old renderer filtered the whole thread into one progress pile and one
+ * reply pile. That moved every Thinking disclosure to the top, above even the
+ * prompt that caused it, and made a re-prompt look like it produced no new
+ * work. Keeping the same fold per turn preserves chronology and causality.
  */
 function threadReplies(root, repositoryId) {
   const replies = root.replies ?? [];
   if (replies.length === 0) {
     return `<div class="thread-count">No replies yet</div>`;
   }
-  const finishedAt = replies.findIndex((reply) => isThreadEnding(reply));
-  const done = finishedAt !== -1;
-  // The title line names the task, and it now sits inside the thinking block
-  // rather than above it. It used to be its own message row on the reasoning
-  // that it is not commentary — true, and it still left the thread opening
-  // with a restatement of the request that was already the thread's own title
-  // two lines further up. Folded in, it is there for whoever wants the exact
-  // wording and out of the way of everybody else.
-  const [first, ...rest] = replies;
-  // Deliberately first-reply-only, unlike the shared threadTitleReply
-  // detector: folding a mid-thread "Task:" message into the thinking block
-  // would hide a real reply, not a name.
-  const titleLine = /^Task: /u.test(String(first?.content ?? "")) ? first : undefined;
-  const body = titleLine === undefined ? replies : rest;
-  const steps = body.filter(isThreadThinking);
-  const outcome = body.filter((reply) => !isThreadThinking(reply));
-
-  // Silent at zero. A task that has been stated and not yet worked on has a
-  // block holding the request alone, and "0 steps" beside it reads as a
-  // failure to do something rather than as work not started.
-  const count =
-    steps.length === 0
-      ? ""
-      : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
-  return `
-    ${
-      steps.length === 0 && titleLine === undefined
-        ? ""
-        : `<details class="thread-thinking"${
-            // Open while it runs, unless the reader has said otherwise.
-            //
-            // `open` was written from `done` alone, so every arriving step
-            // re-rendered the element with the attribute back on: closing it
-            // lasted until the agent's next thought, which on a working task
-            // is a second or two. Thinking is the noisiest thing in a thread
-            // and the most reasonable thing to want folded away.
-            //
-            // The reader's choice is remembered per thread and outranks the
-            // default in both directions — a closed one stays closed as steps
-            // arrive, and one opened after the task finished stays open.
-            (state.thinkingOpen[root.id] ?? !done) ? " open" : ""
-          }>
-             <summary data-act="thinking-toggle" data-value="${esc(root.id)}">
-               <span class="tt-label">Thinking</span>
-               <span class="tt-count">${esc(count)}</span></summary>
-             <div class="tt-body">${
-               // The request, in the agent's own restatement of it, above the
-               // steps it took. First because it is what the steps are for.
-               titleLine === undefined
-                 ? ""
-                 : `<p class="tt-task">${esc(
-                     String(titleLine.content ?? "")
-                       .replace(/^Task:\s*/u, "")
-                       .trim(),
-                   )}</p>`
-             }${steps
-               .map((reply) => String(reply.content ?? "").trim())
-               .filter((text) => text.length > 0)
-               .join("\n")
-               .split(/\n+/u)
-               .map((line) => `<p>${esc(line)}</p>`)
-               .join("")}</div>
-           </details>`
-    }
-    ${outcome
-      .map((reply) => summaryBlock(reply, repositoryId))
-      .join("")}`;
+  return threadReplyTurns(replies)
+    .map((turn, index) => {
+      const thinking = threadThinkingBlock(root.id, turn, index);
+      return `${
+        turn.prompt === undefined
+          ? ""
+          : summaryBlock(turn.prompt, repositoryId)
+      }${thinking.html}${thinking.visible
+        .map((reply) => summaryBlock(reply, repositoryId))
+        .join("")}`;
+    })
+    .join("");
 }
 
 /**

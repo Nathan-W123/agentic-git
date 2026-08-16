@@ -1048,6 +1048,52 @@ test("an agent's reply to a person is shown, not folded into the thinking block"
   );
 });
 
+test("each task turn puts its own thinking below its prompt", async () => {
+  const source = await publicFile("screen-chats.js");
+  const groupingStart = source.indexOf("function threadReplyTurns");
+  const thinkingStart = source.indexOf("function threadThinkingBlock");
+  const rendererStart = source.indexOf(
+    "function threadReplies",
+    thinkingStart,
+  );
+  const rendererEnd = source.indexOf(
+    "\n/**\n * How much summary",
+    rendererStart,
+  );
+  assert.notEqual(
+    groupingStart,
+    -1,
+    "thread replies should be grouped into turns",
+  );
+  assert.notEqual(thinkingStart, -1, "each turn should render its own thinking");
+  assert.notEqual(rendererStart, -1, "the thread reply renderer should exist");
+
+  const grouping = source.slice(groupingStart, thinkingStart);
+  assert.match(grouping, /reply\.kind === "user"/u);
+  assert.match(grouping, /ended = reply\.kind === "outcome"/u);
+  assert.match(
+    grouping,
+    /prompt: reply\.kind === "user" \? reply : undefined/u,
+  );
+
+  const renderer = source.slice(rendererStart, rendererEnd);
+  const promptAt = renderer.indexOf("summaryBlock(turn.prompt, repositoryId)");
+  const thinkingAt = renderer.indexOf("${thinking.html}");
+  assert.ok(promptAt >= 0, "the turn's prompt should be rendered");
+  assert.ok(
+    thinkingAt > promptAt,
+    "the turn's Thinking disclosure must follow the prompt that caused it",
+  );
+  assert.match(
+    renderer,
+    /threadReplyTurns\(replies\)[\s\S]*\.map\(\(turn, index\)/u,
+  );
+
+  const thinking = source.slice(thinkingStart, rendererStart);
+  assert.match(thinking, /const key = `\$\{rootId\}:thinking:\$\{index\}`/u);
+  assert.match(thinking, /state\.thinkingOpen\[key\] \?\? !done/u);
+});
+
 test("the working dots come back for the next turn in a finished thread", async () => {
   // The same turn, silent twice: a thread whose earlier turn ended is exactly
   // where the next request is made, and asking whether the thread had *ever*
@@ -1062,21 +1108,20 @@ test("the working dots come back for the next turn in a finished thread", async 
   );
   assert.match(body, /replies\[replies\.length - 1\]/u);
 
-  // The dots are only half of the live state. A finished turn normally leaves
-  // its Thinking disclosure closed; extending it must open that same thread's
-  // disclosure before new streamed reasoning arrives.
+  // A new turn gets its own disclosure key. It therefore opens from its live
+  // default without reopening the completed turn above it or needing a
+  // thread-global reset before submit.
+  const thinkingStart = source.indexOf("function threadThinkingBlock");
+  const thinkingEnd = source.indexOf("\nfunction threadReplies", thinkingStart);
+  const thinking = source.slice(thinkingStart, thinkingEnd);
+  assert.match(thinking, /const key = `\$\{rootId\}:thinking:\$\{index\}`/u);
+  assert.match(thinking, /state\.thinkingOpen\[key\] \?\? !done/u);
+
   const app = await browserSource();
-  const resetStart = app.indexOf("function beginThreadTurn");
-  const reset = app.slice(resetStart, app.indexOf("\n}", resetStart));
-  assert.notEqual(resetStart, -1);
-  assert.match(reset, /state\.thinkingOpen\[messageId\] = true/u);
-  assert.match(
-    app,
-    /case "channel-submit":[\s\S]{0,140}beginThreadTurn\(state\.composerThreadId/u,
-  );
-  assert.match(
-    app,
-    /case "channel-thread-submit":[\s\S]{0,140}beginThreadTurn\(state\.activeChannelThread/u,
+  assert.equal(
+    app.includes("function beginThreadTurn"),
+    false,
+    "submitting a turn must not reopen a thread-global Thinking block",
   );
 });
 
