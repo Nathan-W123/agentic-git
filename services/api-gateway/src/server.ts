@@ -2154,6 +2154,13 @@ export interface ChatProviderOperations {
     provider: string;
     model?: string;
     effort?: string;
+    /**
+     * The agent's name, held on the account and therefore the same in every
+     * repository — see `ProviderSettings.callSign` in `apps/web/src/providers.ts`.
+     * An empty string clears it back to the vendor label, the way model and
+     * effort clear.
+     */
+    callSign?: string;
     visibility?: "personal" | "org";
   }): Promise<unknown>;
   complete(input: {
@@ -2570,6 +2577,16 @@ export class ApiGateway {
   private threadReconcileTimer: NodeJS.Timeout | undefined;
   /** Last `conflict_detected` sequence narrated to a channel. */
   private conflictSequence: number | undefined;
+  /** The one temporary sequencing notice currently shown for each held task. */
+  private readonly arbitrationNotices = new Map<
+    string,
+    {
+      projectId: string;
+      repositoryId: string;
+      messageId: string;
+      content: string;
+    }
+  >();
   /**
    * The audit-log position the auditor has consumed, in memory.
    *
@@ -6826,11 +6843,57 @@ export class ApiGateway {
           );
         }
       }
+      // A name is the agent's own, not this room's.
+      //
+      // An agent answers to one name, everywhere: renaming your own agent
+      // here writes the account's call sign — the same record the Settings
+      // screen writes through `/chat/providers/{id}/settings` — and clears
+      // the per-repository names that would otherwise go on shadowing it in
+      // the other channels. Renaming in one room and finding the old name
+      // still up in the next is what this replaces.
+      //
+      // Only your own. A teammate's agent is still renamed for this channel
+      // alone: their name is theirs, and renaming it in every repository they
+      // work in is not a decision anyone with `view` here gets to make.
+      const chatProviders = this.options.operations.chatProviders;
+      const ownPrefix = `${principal.user.id}:`;
+      const ownProvider = agentId.startsWith(ownPrefix)
+        ? agentId.slice(ownPrefix.length)
+        : undefined;
+      let namedAccountWide = false;
+      if (name !== undefined && ownProvider !== undefined && chatProviders !== undefined) {
+        try {
+          await chatProviders.setSettings({
+            userId: principal.user.id,
+            provider: ownProvider,
+            callSign: name,
+          });
+          namedAccountWide = true;
+        } catch (error) {
+          const status = (error as { status?: unknown }).status;
+          const code = (error as { code?: unknown }).code;
+          // A vendor this deployment cannot see a connection for still gets
+          // the old per-channel rename rather than an error: the roster is
+          // showing the agent, so refusing to rename what is plainly there
+          // would be the worse answer. Everything else — a name too long for
+          // a call sign, most of all — is reported, because silently storing
+          // it in one channel is how the two came to disagree.
+          if (code !== "not_connected") {
+            if (error instanceof Error && typeof status === "number" && typeof code === "string") {
+              throw new HttpError(status, code, error.message);
+            }
+            throw error;
+          }
+        }
+      }
+      if (namedAccountWide) {
+        await this.options.store.clearChannelAgentNameOverrides(agentId);
+      }
       const override = await this.options.store.setChannelAgentOverride(
         repositoryId,
         agentId,
         {
-          ...(name === undefined ? {} : { name }),
+          ...(name === undefined || namedAccountWide ? {} : { name }),
           ...(role === undefined ? {} : { role }),
           ...(model === undefined ? {} : { model }),
           ...(effort === undefined ? {} : { effort }),
@@ -6838,9 +6901,20 @@ export class ApiGateway {
       );
       await this.options.store.appendAudit(undefined, {
         type: "channel_agent_overridden",
-        data: { projectId, repositoryId, agentId },
+        data: {
+          projectId,
+          repositoryId,
+          agentId,
+          ...(namedAccountWide ? { name, scope: "account" } : {}),
+        },
       });
-      this.sendJson(response, 200, { override });
+      this.sendJson(response, 200, {
+        // The name the agent now answers to, whichever record holds it: an
+        // account-wide rename leaves no `name` on the override, and a client
+        // reading only the override would have seen its own rename vanish.
+        override: namedAccountWide ? { ...override, name } : override,
+        ...(namedAccountWide ? { scope: "account" as const } : {}),
+      });
       return;
     }
 
@@ -7172,6 +7246,15 @@ export class ApiGateway {
             max: 20,
             optional: true,
           });
+          // The agent's name, and the reason this route is what Settings
+          // renames through: a call sign is held on the account, so one write
+          // here is the agent's name in every repository at once. `min: 0`
+          // because an empty string is the documented "clear it" value.
+          const callSign = stringField(body["callSign"], "callSign", {
+            max: 40,
+            min: 0,
+            optional: true,
+          });
           // Only the two the credential store understands. A free string here
           // would reach the connection file and decide, wrongly, whose
           // credential a teammate's prompt spends.
@@ -7190,17 +7273,36 @@ export class ApiGateway {
               "Visibility must be personal or org",
             );
           }
-          this.sendJson(response, 200, {
-            providers: await performChat(() =>
-              chatOperations.setSettings({
-                userId: identity.userId,
-                provider,
-                ...(model === undefined ? {} : { model }),
-                ...(effort === undefined ? {} : { effort }),
-                ...(visibility === undefined ? {} : { visibility }),
-              }),
-            ),
-          });
+          const providers = await performChat(() =>
+            chatOperations.setSettings({
+              userId: identity.userId,
+              provider,
+              ...(model === undefined ? {} : { model }),
+              ...(effort === undefined ? {} : { effort }),
+              ...(callSign === undefined ? {} : { callSign }),
+              ...(visibility === undefined ? {} : { visibility }),
+            }),
+          );
+          // A rename is account-wide, so nothing per-repository may go on
+          // shadowing it: an override naming this agent in one channel wins
+          // over the call sign there (`resolveChannelAgentPresentation`), and
+          // leaving those standing is exactly the "renamed it and the other
+          // repositories kept the old name" complaint. Roles, models and
+          // efforts set in a channel are that channel's decision and stay.
+          if (callSign !== undefined) {
+            await this.options.store.clearChannelAgentNameOverrides(
+              `${identity.userId}:${provider}`,
+            );
+            await this.options.store.appendAudit(undefined, {
+              type: "channel_agent_overridden",
+              data: {
+                agentId: `${identity.userId}:${provider}`,
+                name: callSign,
+                scope: "account",
+              },
+            });
+          }
+          this.sendJson(response, 200, { providers });
           return;
         }
         throw new HttpError(405, "method_not_allowed", "Unsupported method");
@@ -12280,7 +12382,8 @@ export class ApiGateway {
     const blockers = (Array.isArray(data["blockedBy"]) ? data["blockedBy"] : [])
       .slice(0, 2)
       .map(describe);
-    const blocker = blockers.length > 0 ? blockers.join(" and ") : "work in flight";
+    const blocker =
+      blockers.length > 0 ? blockers.join(" and ") : "work in flight";
     const fileList = (value: unknown): string[] =>
       (Array.isArray(value) ? value : []).filter(
         (entry): entry is string => typeof entry === "string",
@@ -12291,6 +12394,13 @@ export class ApiGateway {
     const status = String(data["status"] ?? "");
     const approved =
       status === "approved" || status === "approved_with_constraints";
+    if (approved && data["partial"] !== true) {
+      // A sequencing notice describes a temporary condition. Once the held
+      // task can run, remove that condition from the room instead of leaving
+      // stale history behind and adding a second "starts now" announcement.
+      await this.replaceArbitrationNotice(watched);
+      return;
+    }
     let line: string;
     if (data["partial"] === true) {
       const granted = fileList(data["grantedFiles"]);
@@ -12312,26 +12422,6 @@ export class ApiGateway {
         `${granted.length > 0 ? clause(granted) : "the free part"} now, ` +
         `${deferredFiles.length > 0 ? clause(deferredFiles) : "the rest"} once ` +
         `${blocker} is done.`;
-    } else if (approved) {
-      // The hold clearing is as much news as the hold was — a room told
-      // "it starts the moment that lands" deserves the moment. Only said
-      // when a hold was actually announced for this task, or every ordinary
-      // approval would ring the bell.
-      const prior = await this.options.store.listAuditEvents({
-        taskId: watched.taskId,
-        types: ["plan_admitted"],
-      });
-      const wasHeld = prior
-        .slice(0, -1)
-        .some((entry) =>
-          ["sequenced", "blocked"].includes(
-            String(entry.event.data["status"] ?? ""),
-          ),
-        );
-      if (!wasHeld) {
-        return;
-      }
-      line = `⚖️ ${held} starts now — what it was waiting on is done.`;
     } else if (status === "blocked") {
       line =
         `⚖️ ${held} and ${blocker} have conflicting files — ${held} is ` +
@@ -12341,12 +12431,48 @@ export class ApiGateway {
         `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts ` +
         `once ${blocker} is done.`;
     }
-    await this.appendChannelEntry({
+    await this.replaceArbitrationNotice(watched, line);
+  }
+
+  /** Keeps at most one temporary sequencing notice for a held task. */
+  private async replaceArbitrationNotice(
+    watched: { projectId: string; repositoryId: string; taskId: string },
+    content?: string,
+  ): Promise<void> {
+    const prior = this.arbitrationNotices.get(watched.taskId);
+    if (content !== undefined && prior?.content === content) {
+      return;
+    }
+    if (prior !== undefined) {
+      await this.options.store.deleteChannelMessage(
+        prior.repositoryId,
+        prior.messageId,
+      );
+      await this.options.store.appendAudit(undefined, {
+        type: "channel_message_deleted",
+        data: {
+          projectId: prior.projectId,
+          repositoryId: prior.repositoryId,
+          messageId: prior.messageId,
+        },
+      });
+      this.arbitrationNotices.delete(watched.taskId);
+    }
+    if (content === undefined) {
+      return;
+    }
+    const message = await this.appendChannelEntry({
       projectId: watched.projectId,
       repositoryId: watched.repositoryId,
       kind: "system",
       authorId: "coordinator",
-      content: line,
+      content,
+    });
+    this.arbitrationNotices.set(watched.taskId, {
+      projectId: watched.projectId,
+      repositoryId: watched.repositoryId,
+      messageId: message.id,
+      content,
     });
   }
 
@@ -12457,8 +12583,10 @@ export class ApiGateway {
    * invisible in the room where people watch the agents work; the only
    * symptom of an arbitration was one task mysteriously waiting.
    *
-   * Spoken by the room, not by an agent, and in the same sentence shape as
-   * `announceArbitration`: two agent names and the order they run in.
+   * Spoken by the room, not by an agent. Structural sequence/block decisions
+   * are deliberately left to `announceArbitration`, whose `plan_admitted`
+   * event identifies the actual held task. Guessing the order from the
+   * detector's pair emitted a second, sometimes reversed sentence.
    */
   private async narrateConflicts(): Promise<void> {
     const events = await this.options.store.listAuditEvents({
@@ -12489,7 +12617,11 @@ export class ApiGateway {
       // Advisory intent overlap admits both tasks untouched; saying "conflict"
       // about work that is running anyway would teach readers to ignore the
       // times it matters.
-      if (disposition === "concurrent") {
+      if (
+        disposition === "concurrent" ||
+        disposition === "sequence" ||
+        disposition === "block"
+      ) {
         continue;
       }
       // The same resolver `announceArbitration` uses. This path used to quote
@@ -12506,14 +12638,8 @@ export class ApiGateway {
       // "who is waiting on whom". It is written to the audit record, which is
       // where an argument that long belongs; the room gets the order.
       const line =
-        disposition === "sequence"
-          ? `⚖️ ${named[0]} and ${named[1]} have conflicting files — ` +
-            `${named[1]} starts once ${named[0]} is done.`
-          : disposition === "block"
-            ? `⚖️ ${named[0]} and ${named[1]} have conflicting files — ` +
-              `${named[1]} is narrowing its plan.`
-            : `⚖️ ${named[0]} and ${named[1]} have conflicting files but can ` +
-              `run together.`;
+        `⚖️ ${named[0]} and ${named[1]} have conflicting files but can ` +
+        `run together.`;
       await this.appendChannelEntry({
         projectId,
         repositoryId,

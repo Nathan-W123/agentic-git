@@ -863,49 +863,85 @@ test("the channel composer highlights mentions and previews pasted images", asyn
   assert.match(css, /\.composer-attachment img/u);
 });
 
-test("a ping in a posted message waves through both of the reader's accents", async () => {
+test("thread composer characters stay visible without a painted text layer", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
 
-  // The wave is applied after the inline patterns, so a mention inside a code
-  // span stays code — the `>` that closes the tag is not a boundary the
-  // pattern accepts.
-  assert.match(chats, /mentionMarkup\(\s*value\s*\n?[\s\S]{0,160}<code>\$1<\/code>"\),/u);
-  assert.match(chats, /class="mention-ping">@\$\{handle\}<\/span>/u);
+  // Thread replies are a plain textarea, not a transparent control laid over
+  // a mirror. The shared composer rule must therefore paint both ordinary CSS
+  // text and WebKit's separate text fill rather than relying on inheritance.
+  assert.match(
+    chats,
+    /<form class="composer" data-act="channel-thread-submit"[\s\S]{0,240}<textarea data-act="channel-thread-input"/u,
+  );
+  const rule = /\.composer textarea \{([\s\S]*?)\n\}/u.exec(css);
+  assert.ok(rule !== null, "the shared composer textarea rule exists");
+  assert.match(rule[1] ?? "", /\n\s*color: var\(--text\);/u);
+  assert.match(rule[1] ?? "", /\n\s*-webkit-text-fill-color: var\(--text\);/u);
+  assert.doesNotMatch(rule[1] ?? "", /transparent/u);
+});
 
-  const literal = chats.match(/const MENTION_TEXT_PATTERN =\s*(\/[\s\S]*?\/)gu;/u)?.[1];
-  assert.ok(literal, "screen-chats.js declares MENTION_TEXT_PATTERN");
-  const wrap = (text: string) =>
-    text.replace(
-      new RegExp(literal.slice(1, -1), "gu"),
-      (_match, before: string, handle: string) => `${before}[${handle}]`,
+test("a posted ping highlights its full name with a quiet static treatment", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  const start = chats.indexOf("function mentionMarkup");
+  const end = chats.indexOf("\n/**\n * A narrow, safe subset", start);
+  assert.notEqual(start, -1, "screen-chats.js declares mentionMarkup");
+  assert.notEqual(end, -1, "mentionMarkup has a testable boundary");
+  const createMarkup = new Function(
+    `${chats.slice(start, end)}\nreturn mentionMarkup;`,
+  );
+  const mentionMarkup = createMarkup() as (
+    value: string,
+    names: string[],
+  ) => string;
+  const wrap = (text: string, names: string[]) =>
+    mentionMarkup(text, names).replace(
+      /<span class="mention-ping">@([^<]+)<\/span>/gu,
+      "[$1]",
     );
-  assert.equal(wrap("ping @agent-one now"), "ping [agent-one] now");
-  assert.equal(wrap("@nate ship it"), "[nate] ship it");
+
+  assert.equal(
+    wrap("ping @Claude (Owner) now", ["Claude (Owner)"]),
+    "ping [Claude (Owner)] now",
+  );
+  assert.equal(
+    wrap("@Mary Jane ask @Claude (Owner), please", [
+      "Mary",
+      "Mary Jane",
+      "Claude (Owner)",
+    ]),
+    "[Mary Jane] ask [Claude (Owner)], please",
+  );
+  assert.equal(
+    wrap("@Mary Jane then @Mary Jane", ["Mary Jane"]),
+    "[Mary Jane] then [Mary Jane]",
+  );
   // An address and a path are not pings, and neither is an at sign inside a
   // word — only what the picker writes.
-  assert.equal(wrap("mail nate@example.com"), "mail nate@example.com");
-  assert.equal(wrap("see docs/@notes"), "see docs/@notes");
-  assert.equal(wrap("<code>@agent</code>"), "<code>@agent</code>");
-
-  // Both accents, clipped to the glyphs, and moving. One rule covers the
-  // posted message and the layer under the composer, so the ping a reader
-  // sees and the one the typist sees cannot drift apart.
-  assert.match(css, /\.cmsg-text \.mention-ping,\n\.composer-mirror \.mention-ping \{/u);
-  const rule = css.slice(
-    css.indexOf(".cmsg-text .mention-ping,"),
-    css.indexOf("}", css.indexOf("animation: mention-wave")),
+  assert.equal(
+    wrap("mail nate@example.com", ["example.com"]),
+    "mail nate@example.com",
   );
-  assert.match(rule, /var\(--accent-bright\)/u);
-  assert.match(rule, /var\(--accent-2-bright\)/u);
-  assert.match(rule, /-webkit-background-clip: text;/u);
-  assert.match(rule, /\n  background-clip: text;/u);
-  assert.match(rule, /animation: mention-wave [\d.]+s linear infinite;/u);
-  assert.match(css, /@keyframes mention-wave \{[\s\S]{0,120}background-position: -200% 50%;/u);
+  assert.equal(wrap("see docs/@notes", ["notes"]), "see docs/@notes");
+  assert.equal(wrap("<code>@agent</code>", ["agent"]), "<code>@agent</code>");
   assert.match(
-    css,
-    /@media \(prefers-reduced-motion: reduce\) \{\n  \.cmsg-text \.mention-ping,\n  \.composer-mirror \.mention-ping \{\n    animation: none;/u,
+    chats,
+    /messageBody\(\s*entry\.content,\s*repositoryId,\s*entry\.mentions,/u,
   );
+
+  // One readable accent on its light wash, with no changing gradient.
+  const rule = css.slice(
+    css.indexOf(".cmsg-text .mention-ping {"),
+    css.indexOf("}", css.indexOf(".cmsg-text .mention-ping {")) + 1,
+  );
+  assert.match(rule, /color: var\(--accent-bright\);/u);
+  assert.match(rule, /background: var\(--accent-wash\);/u);
+  assert.match(rule, /border-radius:/u);
+  assert.match(rule, /padding:/u);
+  assert.doesNotMatch(rule, /gradient|animation|background-clip|text-fill/iu);
+  assert.doesNotMatch(css, /mention-wave/u);
 });
 
 test("the invite screen names the product, not only the team", async () => {
@@ -1012,6 +1048,52 @@ test("an agent's reply to a person is shown, not folded into the thinking block"
   );
 });
 
+test("each task turn puts its own thinking below its prompt", async () => {
+  const source = await publicFile("screen-chats.js");
+  const groupingStart = source.indexOf("function threadReplyTurns");
+  const thinkingStart = source.indexOf("function threadThinkingBlock");
+  const rendererStart = source.indexOf(
+    "function threadReplies",
+    thinkingStart,
+  );
+  const rendererEnd = source.indexOf(
+    "\n/**\n * How much summary",
+    rendererStart,
+  );
+  assert.notEqual(
+    groupingStart,
+    -1,
+    "thread replies should be grouped into turns",
+  );
+  assert.notEqual(thinkingStart, -1, "each turn should render its own thinking");
+  assert.notEqual(rendererStart, -1, "the thread reply renderer should exist");
+
+  const grouping = source.slice(groupingStart, thinkingStart);
+  assert.match(grouping, /reply\.kind === "user"/u);
+  assert.match(grouping, /ended = reply\.kind === "outcome"/u);
+  assert.match(
+    grouping,
+    /prompt: reply\.kind === "user" \? reply : undefined/u,
+  );
+
+  const renderer = source.slice(rendererStart, rendererEnd);
+  const promptAt = renderer.indexOf("summaryBlock(turn.prompt, repositoryId)");
+  const thinkingAt = renderer.indexOf("${thinking.html}");
+  assert.ok(promptAt >= 0, "the turn's prompt should be rendered");
+  assert.ok(
+    thinkingAt > promptAt,
+    "the turn's Thinking disclosure must follow the prompt that caused it",
+  );
+  assert.match(
+    renderer,
+    /threadReplyTurns\(replies\)[\s\S]*\.map\(\(turn, index\)/u,
+  );
+
+  const thinking = source.slice(thinkingStart, rendererStart);
+  assert.match(thinking, /const key = `\$\{rootId\}:thinking:\$\{index\}`/u);
+  assert.match(thinking, /state\.thinkingOpen\[key\] \?\? !done/u);
+});
+
 test("the working dots come back for the next turn in a finished thread", async () => {
   // The same turn, silent twice: a thread whose earlier turn ended is exactly
   // where the next request is made, and asking whether the thread had *ever*
@@ -1026,21 +1108,20 @@ test("the working dots come back for the next turn in a finished thread", async 
   );
   assert.match(body, /replies\[replies\.length - 1\]/u);
 
-  // The dots are only half of the live state. A finished turn normally leaves
-  // its Thinking disclosure closed; extending it must open that same thread's
-  // disclosure before new streamed reasoning arrives.
+  // A new turn gets its own disclosure key. It therefore opens from its live
+  // default without reopening the completed turn above it or needing a
+  // thread-global reset before submit.
+  const thinkingStart = source.indexOf("function threadThinkingBlock");
+  const thinkingEnd = source.indexOf("\nfunction threadReplies", thinkingStart);
+  const thinking = source.slice(thinkingStart, thinkingEnd);
+  assert.match(thinking, /const key = `\$\{rootId\}:thinking:\$\{index\}`/u);
+  assert.match(thinking, /state\.thinkingOpen\[key\] \?\? !done/u);
+
   const app = await browserSource();
-  const resetStart = app.indexOf("function beginThreadTurn");
-  const reset = app.slice(resetStart, app.indexOf("\n}", resetStart));
-  assert.notEqual(resetStart, -1);
-  assert.match(reset, /state\.thinkingOpen\[messageId\] = true/u);
-  assert.match(
-    app,
-    /case "channel-submit":[\s\S]{0,140}beginThreadTurn\(state\.composerThreadId/u,
-  );
-  assert.match(
-    app,
-    /case "channel-thread-submit":[\s\S]{0,140}beginThreadTurn\(state\.activeChannelThread/u,
+  assert.equal(
+    app.includes("function beginThreadTurn"),
+    false,
+    "submitting a turn must not reopen a thread-global Thinking block",
   );
 });
 

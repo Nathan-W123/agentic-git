@@ -3456,6 +3456,26 @@ export class PostgresCoordinationStore implements CoordinationStore {
     return override;
   }
 
+  public async clearChannelAgentNameOverrides(agentId: string): Promise<void> {
+    // Two statements rather than one UPDATE: a row whose only content was the
+    // name has nothing left to say afterwards, and leaving it empty would keep
+    // an override in every list for no reason.
+    await this.query(
+      `DELETE FROM channel_agent_overrides
+        WHERE agent_id = $1 AND name IS NOT NULL
+          AND (role IS NULL OR role = '')
+          AND (model IS NULL OR model = '')
+          AND (effort IS NULL OR effort = '')`,
+      [agentId],
+    );
+    await this.query(
+      `UPDATE channel_agent_overrides
+          SET name = NULL, updated_at = $1
+        WHERE agent_id = $2 AND name IS NOT NULL`,
+      [new Date().toISOString(), agentId],
+    );
+  }
+
   public async listAgentCallSigns(): Promise<AgentCallSign[]> {
     const rows = await this.rows(
       "SELECT * FROM agent_call_signs ORDER BY assigned_at, user_id",

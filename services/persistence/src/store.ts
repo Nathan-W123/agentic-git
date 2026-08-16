@@ -1648,6 +1648,26 @@ export interface CoordinationStore {
     patch: { name?: string; role?: string; model?: string; effort?: string },
   ): Promise<ChannelAgentOverride>;
   /**
+   * Drops one agent's per-repository *names*, everywhere.
+   *
+   * An agent has one name, held on the account as its call sign, and renaming
+   * it is meant to be visible in every repository at once. A per-repository
+   * name row shadows that call sign wherever it exists
+   * (`resolveChannelAgentPresentation` prefers the override), so a rename that
+   * only wrote the call sign left the old name standing in every room the
+   * agent had ever been renamed in. Clearing the shadows is what makes one
+   * name mean one name.
+   *
+   * Roles, models and efforts are per-repository decisions and are deliberately
+   * untouched: this clears the `name` column and nothing else, deleting a row
+   * only when nothing else on it survives. `agentId` is the resolved
+   * `${userId}:${provider}` form and only rows naming that one agent are
+   * touched — a legacy bare-provider row names every agent on the vendor, so
+   * clearing it here would rename somebody else's agent as a side effect of
+   * renaming your own.
+   */
+  clearChannelAgentNameOverrides(agentId: string): Promise<void>;
+  /**
    * Every agent name this deployment has handed out, across all accounts.
    *
    * Read whole rather than per user because both readers need it whole: the

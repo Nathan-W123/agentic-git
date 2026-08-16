@@ -356,7 +356,39 @@ async function startRuntime(
       async usage() {
         return {};
       },
-      async setSettings() {
+      async setSettings(input) {
+        // Only the call sign, which is the one setting the gateway does more
+        // than relay: a rename is account-wide, so the fixture has to behave
+        // like the real service — refuse a vendor this account has not
+        // connected, and otherwise write the name where both readers of it
+        // look (the connection the roster resolves through, and the durable
+        // store).
+        const connections = chatConnections.get(input.userId) ?? [];
+        const connection = connections.find(
+          (entry) => entry.provider === input.provider,
+        );
+        if (connection === undefined) {
+          throw Object.assign(
+            new Error(`Connect ${input.provider} before changing its settings`),
+            { status: 409, code: "not_connected" },
+          );
+        }
+        if (input.callSign !== undefined) {
+          const trimmed = input.callSign.trim();
+          if (trimmed.length > 40) {
+            throw Object.assign(
+              new Error("A call sign is at most 40 characters"),
+              { status: 400, code: "invalid_call_sign" },
+            );
+          }
+          if (trimmed === "") {
+            delete connection.callSign;
+            await store.clearAgentCallSign(input.userId, input.provider);
+          } else {
+            connection.callSign = trimmed;
+            await store.setAgentCallSign(input.userId, input.provider, trimmed);
+          }
+        }
         return {};
       },
       async complete(input: any) {
@@ -7075,7 +7107,7 @@ async function roomWithTwoAgents(
   return { claude: claude.id, codex: codex.id };
 }
 
-test("a file collision is announced as two agent names and an order, not two quoted prompts", async (t) => {
+test("a file collision and its admission produce one authoritative ordering", async (t) => {
   // The bug this covers, in the words of the person who hit it: the room said
   // '⚖️ "paste the 72 possible names an agent …" is waiting — "when a prompt
   // gets added to a thread …" has the files it needs. It starts the moment
@@ -7123,6 +7155,20 @@ test("a file collision is announced as two agent names and an order, not two quo
       explanation: "file_overlap: services/api-gateway/src/server.ts (+20)",
     },
   });
+  // The detector only identifies a conflicting pair. The admission is the
+  // authoritative ordering: it says which task was actually held. These two
+  // events used to produce opposite announcements for the same collision.
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation:
+        "Sequenced behind executing work on the same resources: " +
+        "services/api-gateway/src/server.ts",
+    },
+  });
 
   await waitFor(
     async () => {
@@ -7134,16 +7180,18 @@ test("a file collision is announced as two agent names and an order, not two quo
   );
 
   const messages = await runtime.store.listChannelMessages(repo, ownerId);
-  const line = String(
-    messages.find((message) => message.authorId === "coordinator")?.content,
+  const lines = messages
+    .filter((message) => message.authorId === "coordinator")
+    .map((message) => String(message.content));
+  assert.deepEqual(
+    lines,
+    [
+      `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
+        `files — @Claude (${firstName}) starts once @Codex (${firstName}) is done.`,
+    ],
+    `the collision did not produce one authoritative order: ${JSON.stringify(lines)}`,
   );
-  // Both agents by the name the room already calls them, and the order.
-  assert.equal(
-    line,
-    `⚖️ @Claude (${firstName}) and @Codex (${firstName}) have conflicting ` +
-      `files — @Codex (${firstName}) starts once @Claude (${firstName}) is done.`,
-    `the collision line did not read as two names and an order: ${line}`,
-  );
+  const line = lines[0] ?? "";
   // The specific things that made it unreadable, each named so a rewrite that
   // reintroduces one fails here rather than in somebody's channel.
   assert.doesNotMatch(
@@ -7230,7 +7278,7 @@ test("a collision that can run together is one line, and one that cannot say so 
   );
 });
 
-test("a sequenced admission names both agents rather than quoting both prompts", async (t) => {
+test("a sequenced admission is removed silently when the held task can start", async (t) => {
   // The other half of the same complaint. This path already tried to resolve a
   // name and always failed, so every hold in the room was two truncated
   // prompts; and having resolved one it then spent two more clauses on why.
@@ -7289,6 +7337,29 @@ test("a sequenced admission names both agents rather than quoting both prompts",
     /paste the 72 possible names|has the files it needs|the moment that lands/u,
     "the hold kept the quoted objective or its justification clause",
   );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "approved",
+      explanation: "The blocking work landed",
+    },
+  });
+  await waitFor(
+    async () => {
+      const current = await runtime.store.listChannelMessages(repo, ownerId);
+      return current.every((message) => message.authorId !== "coordinator");
+    },
+    "the expired hold notice stayed in the room",
+    8_000,
+  );
+  const afterRelease = await runtime.store.listChannelMessages(repo, ownerId);
+  assert.equal(
+    afterRelease.some((message) => /starts now/iu.test(message.content)),
+    false,
+    "releasing the hold added a redundant starts-now message",
+  );
 });
 
 test("an agent with no connection this channel knows still falls back to its objective", async (t) => {
@@ -7323,6 +7394,15 @@ test("an agent with no connection this channel knows still falls back to its obj
       taskIds: [tasks.claude, tasks.codex],
       disposition: "sequence",
       evidence: [],
+    },
+  });
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation: "Sequenced behind executing work on the same resources",
     },
   });
 
@@ -7600,17 +7680,105 @@ test("the roster falls back to the stored call sign, not the vendor label", asyn
   assert.equal(roster.data.agents.length, 1);
   assert.equal(roster.data.agents[0].name, "Athena");
 
-  // A channel rename still wins over it: the per-room override is the one
-  // thing that is allowed to disagree with an agent's account-wide name.
+  // Renaming your own agent from a channel renames it everywhere: the name is
+  // the account's call sign, not a label this room happens to use, so the
+  // second repository below answers to it without ever having been told.
+  const second = await invitableRepository(owner, "named-too");
+  await joinAllConnectedAgents(runtime, second);
   const renamed = await owner.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents/${ownerId}:anthropic`,
     { method: "POST", body: { name: "Scout" } },
   );
   assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+  assert.equal(renamed.data.scope, "account");
+  assert.equal(renamed.data.override.name, "Scout");
   const afterRename = await owner.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`,
   );
   assert.equal(afterRename.data.agents[0].name, "Scout");
+  const elsewhere = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${second}/channel/agents`,
+  );
+  assert.equal(elsewhere.data.agents[0].name, "Scout");
+  // Written where the account holds it, not as a per-room shadow of it.
+  const signs = await runtime.store.listAgentCallSigns();
+  assert.equal(signs.find((sign) => sign.userId === ownerId)?.callSign, "Scout");
+  const overrides = await runtime.store.listChannelAgentOverrides(repo);
+  assert.equal(overrides[`${ownerId}:anthropic`]?.name, undefined);
+});
+
+test("renaming an agent in Settings renames it in every repository", async (t) => {
+  // The reported bug, from the other side: an agent renamed in one channel
+  // kept its old name in the next, and Settings — which reads the account's
+  // own connection — never showed the new one at all. One name, written
+  // account-wide, and the per-repository names that used to shadow it are
+  // cleared as part of the same write.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const first = await invitableRepository(owner, "one");
+  const second = await invitableRepository(owner, "two");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "personal", callSign: "Athena" },
+  ]);
+  await joinAllConnectedAgents(runtime, first);
+  await joinAllConnectedAgents(runtime, second);
+  // A name this room had given it before any of this existed, which is
+  // exactly what used to survive a rename and keep answering to the old name.
+  await runtime.store.setChannelAgentOverride(second, `${ownerId}:anthropic`, {
+    name: "Vesta",
+    role: "Backend Engineer",
+  });
+
+  const renamed = await owner.request("/api/v1/chat/providers/anthropic/settings", {
+    method: "POST",
+    body: { callSign: "Hermes" },
+  });
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+
+  for (const repositoryId of [first, second]) {
+    const roster = await owner.request(
+      `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/agents`,
+    );
+    assert.equal(roster.status, 200, JSON.stringify(roster.data));
+    assert.equal(roster.data.agents[0].name, "Hermes");
+  }
+  // The role that room set is its own decision and survives the rename.
+  const overrides = await runtime.store.listChannelAgentOverrides(second);
+  assert.equal(overrides[`${ownerId}:anthropic`]?.name, undefined);
+  assert.equal(overrides[`${ownerId}:anthropic`]?.role, "Backend Engineer");
+
+  // And the name is the one a mention resolves against, everywhere.
+  const posted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${second}/channel/messages`,
+    { method: "POST", body: { content: "@Hermes please look at this" } },
+  );
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 1);
+});
+
+test("a call sign longer than the account allows is refused, not half-written", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "long-name");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "personal", callSign: "Athena" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+
+  const refused = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents/${ownerId}:anthropic`,
+    { method: "POST", body: { name: "N".repeat(41) } },
+  );
+  assert.equal(refused.status, 400, JSON.stringify(refused.data));
+  assert.equal(refused.data.error.code, "invalid_call_sign");
+  const roster = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`,
+  );
+  assert.equal(roster.data.agents[0].name, "Athena");
 });
 
 test("the roster reports the connection's own call sign, and that name answers", async (t) => {

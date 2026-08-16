@@ -324,45 +324,34 @@ function draftAttachmentPreviews(repositoryId) {
 }
 
 /**
- * A ping as it appears in a posted message: the at sign and the handle.
+ * Marks the complete names a posted message actually mentions.
  *
- * The same shape the composer completes into the draft — `pickMention` writes
- * `@name ` — so what is highlighted when the message is read is exactly what
- * the picker put there. A handle has to start with a letter, which keeps an
- * email address (`nate@example.com`) and a path (`a/@b`) out: the character
- * before the at sign must be the start of the line, a space or an opening
- * bracket, so an at sign in the middle of a word is left alone.
+ * The server includes resolved mention names with every message, and the
+ * optimistic local post carries the same shape. Matching those names instead
+ * of guessing where an `@` token ends keeps `@Claude (Owner)` and a person's
+ * multi-word display name in one span without swallowing the request after
+ * it. Longest first handles names where one is a prefix of another.
  *
- * Applied to already-escaped text, after the inline patterns have run, so the
- * only `>` in the string belongs to a tag this file built — and `>` is not a
- * character the pattern accepts before an at sign, which is what keeps
- * `<code>@agent</code>` from being painted inside its own code span.
+ * `value` and `names` are already escaped. The boundary before `@` leaves
+ * email addresses and paths alone, while applying this after inline markup
+ * keeps `<code>@agent</code>` untouched because its preceding character is
+ * `>` rather than an accepted text boundary.
  */
-/*
- * The owner tag is part of the name, not text after it. An agent nobody has
- * given a call sign to is "Claude (Nathan)", and stopping at the space left
- * half of every such ping in plain body text — the reader saw "Claude"
- * coloured and "(Nathan)" not, which reads as the highlighter being broken
- * rather than as a name ending there.
- *
- * Deliberately only a single bracketed word, so "@Hera (see the thread
- * below)" still ends the mention at "Hera". That is the discriminator this
- * has and the router does not: the router resolves against the roster and
- * simply finds nobody, while this has only the string.
- */
-const MENTION_TEXT_PATTERN =
-  /(^|[\s([])@([A-Za-z][\w-]*(?:\.[\w-]+)*(?:\s\([A-Za-z][\w'-]*\))?)/gu;
-
-/**
- * The wave is one span, not one per letter: the gradient is painted across the
- * whole token and clipped to the glyphs, so the colour travels through the at
- * sign and the letters as a single sweep. The text inside is untouched, so
- * copying a message still yields `@name`.
- */
-function mentionMarkup(value) {
+function mentionMarkup(value, names) {
+  const alternatives = [...new Set(names)]
+    .filter((name) => name.length > 0)
+    .sort((left, right) => right.length - left.length)
+    .map((name) => name.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&"));
+  if (alternatives.length === 0) {
+    return value;
+  }
+  const pattern = new RegExp(
+    `(^|[\\s([])@(${alternatives.join("|")})(?=$|[\\s,.:;!?()\\[\\]{}])`,
+    "giu",
+  );
   return value.replace(
-    MENTION_TEXT_PATTERN,
-    (_match, before, handle) => `${before}<span class="mention-ping">@${handle}</span>`,
+    pattern,
+    (_match, before, name) => `${before}<span class="mention-ping">@${name}</span>`,
   );
 }
 
@@ -409,7 +398,14 @@ function paintComposerMirror(node) {
  * summary is actually made of; links, images, tables and raw HTML are not,
  * and every one of them is a way for text to do something other than be read.
  */
-function richText(text) {
+function richText(text, mentions) {
+  const mentionNames = [
+    "agents",
+    ...mentions
+      .map((mention) => mention?.name)
+      .filter((name) => typeof name === "string")
+      .map((name) => esc(name)),
+  ];
   const blocks = esc(String(text ?? ""))
     .split(/\n{2,}/u)
     .map((block) => block.trim())
@@ -419,6 +415,7 @@ function richText(text) {
       value
         .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>")
         .replace(/`([^`]+)`/gu, "<code>$1</code>"),
+      mentionNames,
     );
   return blocks
     .map((block) => {
@@ -443,8 +440,12 @@ function richText(text) {
     .join("");
 }
 
-function messageBody(content, repositoryId) {
+function messageBody(content, repositoryId, mentions) {
   const text = String(content ?? "");
+  // Older messages and optimistic replies may not carry resolved mention
+  // metadata yet. The current roster is the same source the picker uses, so
+  // it is the accurate fallback until the server copy arrives.
+  const resolvedMentions = mentions ?? channelParticipants(repositoryId);
   const images = [];
   let stripped = text;
   for (const match of text.matchAll(ATTACHMENT_PATTERN)) {
@@ -452,13 +453,13 @@ function messageBody(content, repositoryId) {
     stripped = stripped.replace(match[0], "");
   }
   if (images.length === 0) {
-    return richText(text);
+    return richText(text, resolvedMentions);
   }
   const base =
     `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
     `/repositories/${encodeURIComponent(repositoryId ?? "")}/attachments/`;
   return (
-    richText(stripped.trim()) +
+    richText(stripped.trim(), resolvedMentions) +
     images
       .map(
         (image) =>
@@ -616,7 +617,14 @@ function rosterRow(agent, canModerate) {
         ${iconButton("pencil", {
           act: "channel-rename-toggle",
           value: agent.id,
-          title: "Rename or set role in this channel",
+          // A name and a role are not the same kind of thing any more: your
+          // own agent's name is the account's, and renaming it here changes
+          // it in every repository (and in Settings), while the role stays
+          // this channel's decision. Somebody else's agent is still renamed
+          // here alone.
+          title: agent.mine
+            ? "Rename everywhere, or set its role in this channel"
+            : "Rename or set role in this channel",
           small: true,
         })}
         ${iconButton("sliders", {
@@ -652,6 +660,7 @@ function rosterRow(agent, canModerate) {
         ? `<form class="roster-rename" data-act="channel-rename-form" data-value="${esc(agent.id)}">
             <input data-act="channel-rename-input" data-value="${esc(agent.id)}"
               value="${esc(agent.name)}" placeholder="${esc(agent.name)}"
+              ${agent.mine ? 'maxlength="40" title="Its name in every repository"' : ""}
               autocomplete="off" enterkeyhint="done">
             <input data-act="channel-role-input" data-value="${esc(agent.id)}"
               value="${esc(agent.role ?? "")}" placeholder="Role in this channel"
@@ -1211,7 +1220,11 @@ function messageRow(
         )}</span>
         <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
       </div>
-      <div class="cmsg-text">${messageBody(entry.content, repositoryId)}</div>
+      <div class="cmsg-text">${messageBody(
+        entry.content,
+        repositoryId,
+        entry.mentions,
+      )}</div>
       ${
         reactions.length === 0
           ? ""
@@ -1915,6 +1928,107 @@ function withoutRolePreamble(objective) {
   return request.trim() === "" ? trimmed : request;
 }
 
+/**
+ * How long a history line is allowed to be before it stops describing the work
+ * and starts reproducing the request. Sized to the column: one line at the
+ * panel's narrowest, so no row wraps and none is cut off mid-word by CSS
+ * instead of by us.
+ */
+const BRIEF_OBJECTIVE_LIMIT = 72;
+
+function capitalised(text) {
+  return text === "" ? text : `${text[0].toUpperCase()}${text.slice(1)}`;
+}
+
+/** One clean clause, ending in an ellipsis when there was more. */
+function shortened(text) {
+  if (text.length <= BRIEF_OBJECTIVE_LIMIT) {
+    return capitalised(text.replace(/[\s,;:]+$/u, ""));
+  }
+  const cut = text.slice(0, BRIEF_OBJECTIVE_LIMIT);
+  const space = cut.lastIndexOf(" ");
+  // A word boundary, unless the only one is so early that keeping it would
+  // leave a couple of characters standing in for a sentence.
+  const kept = space > BRIEF_OBJECTIVE_LIMIT / 2 ? cut.slice(0, space) : cut;
+  return `${capitalised(kept.replace(/[\s,;:.]+$/u, ""))}…`;
+}
+
+/**
+ * Enough of a request to recognise it, rather than the request itself.
+ *
+ * History rows printed the first line of the objective verbatim, so a panel of
+ * forty tasks read as forty pasted prompts — carrying the "@zeus" that
+ * dispatched them, whatever markdown the person happened to type, and running
+ * on until the column cut them off. What a reader wants from this list is
+ * which piece of work each row was.
+ *
+ * Deliberately mechanical: no model call and no stored field, so this costs
+ * nothing and cannot disagree with the task it describes. It only ever
+ * shortens text the row already had, and the untouched objective stays one
+ * hover away on the row itself.
+ */
+function briefObjective(objective) {
+  const body = withoutRolePreamble(objective)
+    // Fenced code and pasted logs say how the request was written, not what it
+    // asked for; inline code is worth keeping, just not its backticks.
+    .replace(/```[\s\S]*?```/gu, " ")
+    .replace(/`([^`]*)`/gu, "$1")
+    // Emphasis and links are formatting for a message body, and this row is
+    // not one: the words inside them are the description, the syntax is not.
+    .replace(/!?\[([^\]]*)\]\([^)]*\)/gu, "$1")
+    .replace(/\*\*([^*]+)\*\*|__([^_]+)__/gu, (_match, starred, scored) =>
+      starred ?? scored,
+    );
+  const line =
+    body
+      .split(/\r?\n/u)
+      .map((entry) =>
+        entry
+          // Markdown scaffolding, then the mention that dispatched the work:
+          // every row in this panel is that agent's, so its own name is the
+          // one word the line cannot be telling the reader.
+          .replace(/^\s*(?:[-*+>]|#{1,6}|\d+[.)])\s+/u, "")
+          .replace(/^(?:\s*@[\w.-]+[,:]?\s*)+/u, "")
+          .replace(/\s+/gu, " ")
+          .trim(),
+      )
+      .find((entry) => entry.length > 0) ?? "";
+  if (line === "") {
+    return "";
+  }
+  // The leading sentence, but only when stopping there leaves something worth
+  // reading: a full stop inside "app.js" or after "e.g" would otherwise cut a
+  // row down to a fragment.
+  const sentence = line.split(/(?<=[.!?])\s+/u)[0] ?? line;
+  return shortened(sentence.length >= 24 ? sentence : line);
+}
+
+/**
+ * The one line a history row shows for a task.
+ *
+ * The agent's own "Task: …" opener first, when the thread it was discussed in
+ * has one. That title was written by the agent that did the work, from the
+ * whole request — a description in the proper sense, which no amount of
+ * client-side trimming can match. The condensed objective is the fallback for
+ * everything dispatched outside a thread, or answered before the opener
+ * landed.
+ */
+function taskSummaryLine(task, message) {
+  const titled = threadTitleReply(message);
+  const title =
+    titled === undefined
+      ? ""
+      : String(titled.content)
+          .replace(/^Task:\s*/u, "")
+          .split("\n")[0]
+          .replace(/\s+/gu, " ")
+          .trim();
+  return (
+    (title === "" ? briefObjective(task.objective) : shortened(title)) ||
+    "(no description)"
+  );
+}
+
 const TASK_GLYPH = {
   integrated: "✓",
   failed: "✕",
@@ -1936,19 +2050,18 @@ function agentHistory(agent, repositoryId) {
   return `<div class="agent-history scroll">${rows
     .map(({ task, message }) => {
       const glyph = TASK_GLYPH[task.status] ?? "•";
-      // The first line of the request, not of the objective: those differ by a
-      // role preamble on everything a channel dispatched.
-      const line =
-        withoutRolePreamble(task.objective)
-          .split(/\r?\n/u)
-          .map((entry) => entry.trim())
-          .find((entry) => entry.length > 0) ?? "(no description)";
+      // A description of the work, not the words that asked for it. The
+      // request is still here — on the row's tooltip, with its role preamble
+      // taken off, for the reader who wants to know exactly what was said.
+      const line = taskSummaryLine(task, message);
+      const full = withoutRolePreamble(task.objective).trim();
       const open =
         message === undefined
           ? ""
           : ` role="button" tabindex="0" data-act="channel-thread-open"
               data-value="${esc(message.id)}"`;
-      return `<div class="agent-history-row ${esc(task.status)}"${open}>
+      return `<div class="agent-history-row ${esc(task.status)}"${open}
+        title="${esc(full)}">
         <span class="ah-glyph">${glyph}</span>
         <span class="ah-objective">${esc(line)}</span>
         <span class="ah-when">${esc(relativeTime(task.submittedAt))}</span>
@@ -2155,96 +2268,126 @@ function threadPanel(repositoryId) {
 }
 
 /**
- * A running commentary is worth having and not worth reading in full.
+ * Splits a thread into turns without inventing a task identifier in the UI.
  *
- * The narration of a task — planning, editing, validating — is most of what a
- * thread contains and almost none of what somebody opening it wants first.
- * They want the request, and how it ended. So the steps in between collapse
- * into one line they can open, and the outcome stays where it can be seen.
+ * Every request that starts or extends work is stored as a `user` reply before
+ * that run's progress. It is therefore the durable boundary between turns,
+ * including a task explicitly added to an existing thread. Replies before the
+ * first such boundary are retained as a legacy opening turn; threads whose
+ * root is itself the request never needed a copied user reply.
+ */
+function threadReplyTurns(replies) {
+  const turns = [];
+  let turn = { prompt: undefined, replies: [] };
+  let ended = false;
+  const finish = () => {
+    if (turn.prompt !== undefined || turn.replies.length > 0) {
+      turns.push(turn);
+    }
+  };
+  for (const reply of replies) {
+    // A human prompt is the usual boundary. An outcome is also a durable
+    // boundary for work merged into this thread automatically: that path can
+    // add the next agent acknowledgement and run without copying the channel
+    // prompt into the reply list.
+    if (reply.kind === "user" || ended) {
+      finish();
+      turn = {
+        prompt: reply.kind === "user" ? reply : undefined,
+        replies: [],
+      };
+      ended = false;
+      if (reply.kind === "user") {
+        continue;
+      }
+    }
+    turn.replies.push(reply);
+    ended = reply.kind === "outcome";
+  }
+  finish();
+  return turns;
+}
+
+/** One turn's narration, with state independent from every other turn. */
+function threadThinkingBlock(rootId, turn, index) {
+  // A task title belongs to the fold only when it opens this turn. A later
+  // agent reply that happens to begin "Task:" is something the agent said to
+  // the reader and must stay visible.
+  const [first, ...rest] = turn.replies;
+  const titleLine = /^Task: /u.test(String(first?.content ?? ""))
+    ? first
+    : undefined;
+  const body = titleLine === undefined ? turn.replies : rest;
+  const steps = body.filter(isThreadThinking);
+  if (steps.length === 0 && titleLine === undefined) {
+    return { html: "", visible: body };
+  }
+
+  const done = turn.replies.some((reply) => isThreadEnding(reply));
+  const key = `${rootId}:thinking:${index}`;
+  // Silent at zero. A task that has been stated and not yet worked on has a
+  // block holding the request alone, and "0 steps" reads as a failure rather
+  // than work that has not started.
+  const count =
+    steps.length === 0
+      ? ""
+      : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
+  const html = `<details class="thread-thinking"${
+    // A new turn receives a new key, so it opens while active without opening
+    // any finished turn above it. The reader's choice remains stable as more
+    // progress arrives for this turn alone.
+    (state.thinkingOpen[key] ?? !done) ? " open" : ""
+  }>
+    <summary data-act="thinking-toggle" data-value="${esc(key)}">
+      <span class="tt-label">Thinking</span>
+      <span class="tt-count">${esc(count)}</span></summary>
+    <div class="tt-body">${
+      titleLine === undefined
+        ? ""
+        : `<p class="tt-task">${esc(
+            String(titleLine.content ?? "")
+              .replace(/^Task:\s*/u, "")
+              .trim(),
+          )}</p>`
+    }${steps
+      .map((reply) => String(reply.content ?? "").trim())
+      .filter((text) => text.length > 0)
+      .join("\n")
+      .split(/\n+/u)
+      .map((line) => `<p>${esc(line)}</p>`)
+      .join("")}</div>
+  </details>`;
+  return {
+    html,
+    visible: body.filter((reply) => !isThreadThinking(reply)),
+  };
+}
+
+/**
+ * Renders each request with the thinking and answer that belong to that turn.
  *
- * Collapsed by default only while there is something after them. A thread
- * still working has its latest step showing, because that is the part being
- * waited on.
+ * The old renderer filtered the whole thread into one progress pile and one
+ * reply pile. That moved every Thinking disclosure to the top, above even the
+ * prompt that caused it, and made a re-prompt look like it produced no new
+ * work. Keeping the same fold per turn preserves chronology and causality.
  */
 function threadReplies(root, repositoryId) {
   const replies = root.replies ?? [];
   if (replies.length === 0) {
     return `<div class="thread-count">No replies yet</div>`;
   }
-  const finishedAt = replies.findIndex((reply) => isThreadEnding(reply));
-  const done = finishedAt !== -1;
-  // The title line names the task, and it now sits inside the thinking block
-  // rather than above it. It used to be its own message row on the reasoning
-  // that it is not commentary — true, and it still left the thread opening
-  // with a restatement of the request that was already the thread's own title
-  // two lines further up. Folded in, it is there for whoever wants the exact
-  // wording and out of the way of everybody else.
-  // The first thing the *agent* said, which is no longer the first reply: the
-  // request that caused the thread now leads it, in the words it was asked
-  // in. Still opening-only rather than anywhere — folding a mid-thread
-  // "Task:" message into the thinking block would hide a real reply, not a
-  // name — but "opening" has to skip the person who asked.
-  const opening = replies.find((reply) => reply.kind !== "user");
-  const titleLine = /^Task: /u.test(String(opening?.content ?? ""))
-    ? opening
-    : undefined;
-  const body =
-    titleLine === undefined
-      ? replies
-      : replies.filter((reply) => reply !== titleLine);
-  const steps = body.filter(isThreadThinking);
-  const outcome = body.filter((reply) => !isThreadThinking(reply));
-
-  // Silent at zero. A task that has been stated and not yet worked on has a
-  // block holding the request alone, and "0 steps" beside it reads as a
-  // failure to do something rather than as work not started.
-  const count =
-    steps.length === 0
-      ? ""
-      : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
-  return `
-    ${
-      steps.length === 0 && titleLine === undefined
-        ? ""
-        : `<details class="thread-thinking"${
-            // Open while it runs, unless the reader has said otherwise.
-            //
-            // `open` was written from `done` alone, so every arriving step
-            // re-rendered the element with the attribute back on: closing it
-            // lasted until the agent's next thought, which on a working task
-            // is a second or two. Thinking is the noisiest thing in a thread
-            // and the most reasonable thing to want folded away.
-            //
-            // The reader's choice is remembered per thread and outranks the
-            // default in both directions — a closed one stays closed as steps
-            // arrive, and one opened after the task finished stays open.
-            (state.thinkingOpen[root.id] ?? !done) ? " open" : ""
-          }>
-             <summary data-act="thinking-toggle" data-value="${esc(root.id)}">
-               <span class="tt-label">Thinking</span>
-               <span class="tt-count">${esc(count)}</span></summary>
-             <div class="tt-body">${
-               // The request, in the agent's own restatement of it, above the
-               // steps it took. First because it is what the steps are for.
-               titleLine === undefined
-                 ? ""
-                 : `<p class="tt-task">${esc(
-                     String(titleLine.content ?? "")
-                       .replace(/^Task:\s*/u, "")
-                       .trim(),
-                   )}</p>`
-             }${steps
-               .map((reply) => String(reply.content ?? "").trim())
-               .filter((text) => text.length > 0)
-               .join("\n")
-               .split(/\n+/u)
-               .map((line) => `<p>${esc(line)}</p>`)
-               .join("")}</div>
-           </details>`
-    }
-    ${outcome
-      .map((reply) => summaryBlock(reply, repositoryId))
-      .join("")}`;
+  return threadReplyTurns(replies)
+    .map((turn, index) => {
+      const thinking = threadThinkingBlock(root.id, turn, index);
+      return `${
+        turn.prompt === undefined
+          ? ""
+          : summaryBlock(turn.prompt, repositoryId)
+      }${thinking.html}${thinking.visible
+        .map((reply) => summaryBlock(reply, repositoryId))
+        .join("")}`;
+    })
+    .join("");
 }
 
 /**
