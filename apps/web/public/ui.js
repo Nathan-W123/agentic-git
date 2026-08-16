@@ -1167,17 +1167,34 @@ export function elapsed(milliseconds) {
 /**
  * A top-right banner for something that just happened — "Zeus completed a
  * task" — that says its sentence and leaves. Reuses the alert host's corner
- * because that is where eyes already look for news; unlike an error it takes
- * no dismissal and holds no focus, five seconds and a fade.
+ * because that is where eyes already look for news; unlike an error it holds
+ * no focus and clears itself after five seconds and a fade.
+ *
+ * There is only ever one. News that arrives while a banner is up replaces it
+ * rather than queueing beneath it: a column of them covered the screen of the
+ * phone it was meant to inform, and the notifications tab is where the whole
+ * list belongs anyway. It closes on a tap as well, because five seconds is a
+ * long time to have something in front of the thing you opened the app for.
  */
 export function banner(message) {
   const host = $("#toasts-alert");
   if (host === null) {
     return;
   }
+  for (const previous of host.querySelectorAll(".toast.banner")) {
+    previous.remove();
+  }
   const node = document.createElement("div");
   node.className = "toast banner";
-  node.textContent = message;
+  const line = document.createElement("span");
+  line.textContent = message;
+  node.append(line);
+  const dismiss = document.createElement("button");
+  dismiss.className = "toast-close";
+  dismiss.setAttribute("aria-label", "Dismiss");
+  dismiss.textContent = "×";
+  dismiss.addEventListener("click", () => node.remove());
+  node.append(dismiss);
   host.append(node);
   window.setTimeout(() => {
     node.classList.add("banner-out");

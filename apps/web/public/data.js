@@ -773,6 +773,46 @@ let socketRetryTimer;
 let socketRetryMs = 1_000;
 const SOCKET_RETRY_MAX_MS = 30_000;
 
+/**
+ * Where the replay should start: the furthest this browser has ever got.
+ *
+ * The cursor used to be read from `state.audit` alone, and that list is not
+ * the head of the log — the audit route filters a window of the oldest events
+ * it will return down to one project, so on an install with any history its
+ * last entry sits a long way behind. Reconnecting from there replayed events
+ * this browser had already been handed, and reconnecting is what a phone does
+ * every time it comes back to the foreground, so the same old news arrived
+ * again on every unlock.
+ *
+ * So the sequence is remembered as it is received and only ever moves
+ * forward. Scoped to the project it was recorded against: another project's
+ * sequence says nothing about this one's, and reading it as if it did would
+ * skip a real backlog.
+ */
+export function eventCursor() {
+  let remembered = 0;
+  try {
+    const raw = JSON.parse(stored("ag.eventCursor", "{}"));
+    if (raw?.projectId === state.projectId && Number.isSafeInteger(raw?.sequence)) {
+      remembered = raw.sequence;
+    }
+  } catch {
+    /* A cursor we cannot read is a cursor we do not have. */
+  }
+  return Math.max(remembered, state.audit.at(-1)?.sequence ?? 0);
+}
+
+/** Records that a sequence has been delivered here, if it is news. */
+export function noteEventSequence(sequence) {
+  if (!Number.isSafeInteger(sequence) || sequence <= eventCursor()) {
+    return;
+  }
+  persist(
+    "ag.eventCursor",
+    JSON.stringify({ projectId: state.projectId, sequence }),
+  );
+}
+
 export function connectSocket(onEvent) {
   closeSocket();
   socketHandler = onEvent;
@@ -788,7 +828,7 @@ function openEventSocket() {
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   // The hub listens on one path and scopes the subscription by query, so a
   // single upgrade handler serves every project.
-  const after = state.audit.at(-1)?.sequence ?? 0;
+  const after = eventCursor();
   const url =
     `${protocol}://${window.location.host}${API_ROOT}/events` +
     `?projectId=${encodeURIComponent(state.projectId)}&after=${after}`;
@@ -1794,6 +1834,22 @@ const NOTIFY = {
 };
 
 /**
+ * How the notifications list names one event.
+ *
+ * Shared with the banner so that "already read" means the same thing in both
+ * places: marking the list read and then being told the same news in the
+ * corner a moment later is the same event announced twice.
+ */
+function notificationId(event) {
+  return event.id ?? `${event.type}-${event.occurredAt}-${event.taskId ?? ""}`;
+}
+
+/** Whether this event has already been read on the notifications screen. */
+export function notificationSeen(event) {
+  return state.readNotifications.has(notificationId(event));
+}
+
+/**
  * The audit stream reduced to the events a person actually needs to see.
  *
  * Everything the coordinator records is available on the run detail; this is
@@ -1812,7 +1868,7 @@ export function notifications() {
     }
     const task = state.tasks.find((candidate) => candidate.id === event.taskId);
     rows.push({
-      id: event.id ?? `${event.type}-${event.occurredAt}-${event.taskId ?? ""}`,
+      id: notificationId(event),
       ...meta,
       at: event.occurredAt,
       body: notificationBody(event, task),
@@ -1871,6 +1927,37 @@ export function markRead(ids) {
   window.localStorage.setItem(
     "ag.read",
     JSON.stringify([...state.readNotifications].slice(-400)),
+  );
+}
+
+/**
+ * The last sequence that has already had its say in the corner of the screen.
+ *
+ * The delivery cursor above is about what arrived; this is about what was
+ * announced, and they are not the same guarantee. A second tab, a cursor
+ * reset, a replay this browser asked for on purpose — all of them can hand
+ * over an event twice, and the second time is not news. Kept per project for
+ * the same reason the cursor is.
+ */
+export function announcedThrough() {
+  try {
+    const raw = JSON.parse(stored("ag.newsThrough", "{}"));
+    return raw?.projectId === state.projectId && Number.isSafeInteger(raw?.sequence)
+      ? raw.sequence
+      : 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** Moves the announcement watermark forward, never back. */
+export function noteAnnounced(sequence) {
+  if (!Number.isSafeInteger(sequence) || sequence <= announcedThrough()) {
+    return;
+  }
+  persist(
+    "ag.newsThrough",
+    JSON.stringify({ projectId: state.projectId, sequence }),
   );
 }
 
