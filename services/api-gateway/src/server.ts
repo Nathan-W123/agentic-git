@@ -179,6 +179,19 @@ interface WatchedChannelTask {
    * open. Flushed in order the moment something substantive does arrive.
    */
   pending: string[];
+  /**
+   * The request that caused this work, held until the thread actually opens.
+   *
+   * Posted eagerly it would *create* the thread, and a task small enough to
+   * finish without narrating itself is deliberately two lines in the room
+   * with no thread at all. So it waits with the rest of the held narration
+   * and leads it when something finally opens the room.
+   *
+   * Absent when the request was already made inside the thread, or when the
+   * dispatch joined a thread that exists — both are cases where it is either
+   * in there already or was posted outright.
+   */
+  opener?: { authorId: string; content: string };
   /** Whether a thread has been opened, after which everything goes into it. */
   threaded: boolean;
 }
@@ -1416,6 +1429,22 @@ const REQUEST_OPENER_RE =
 const IMPERATIVE_OPENER_RE = new RegExp(`^(?:${TASK_VERB_RE.source})`, "iu");
 
 /**
+ * Words that, following the opening one, prove it was the subject.
+ *
+ * Half the work vocabulary is also ordinary nouns — changes, updates, a
+ * build, a review, a patch, a fix — so "Changes look good" opens with a word
+ * from the verb list and is not an instruction, it is somebody saying the
+ * changes look good. It was offered an agent, which is the complaint.
+ *
+ * English separates the two by what comes next: an imperative takes an object
+ * or a preposition ("fix the login bug", "deploy to staging"), while a
+ * finite verb after the opening word means that word was the thing doing it.
+ * A closed list, because guessing is what got this wrong in the first place.
+ */
+const SUBJECT_TAIL_RE =
+  /^(is|are|was|were|look|looks|looked|seem|seems|seemed|have|has|had|went|work|works|worked|came|come|comes|will|would|should|can|could|do|does|did|and|but|so)\b/iu;
+
+/**
  * Whether this is a request *addressed to somebody*, not just a sentence with
  * work vocabulary in it.
  *
@@ -1437,7 +1466,16 @@ export function readsAsDirectRequest(content: string): boolean {
   if (text.length === 0) {
     return false;
   }
-  return REQUEST_OPENER_RE.test(text) || IMPERATIVE_OPENER_RE.test(text);
+  if (REQUEST_OPENER_RE.test(text)) {
+    return true;
+  }
+  const opening = IMPERATIVE_OPENER_RE.exec(text);
+  if (opening === null) {
+    return false;
+  }
+  // Only an instruction if the opening word is doing the instructing rather
+  // than being talked about — see SUBJECT_TAIL_RE.
+  return !SUBJECT_TAIL_RE.test(text.slice(opening[0].length).trimStart());
 }
 
 /**
@@ -1446,7 +1484,17 @@ export function readsAsDirectRequest(content: string): boolean {
  * metadata of its own, and the offer has to be recognisable in the transcript
  * by the same reading a person gives it.
  */
-const AUTO_CLAIM_OFFER_OPENING = "Nobody was named here.";
+const AUTO_CLAIM_OFFER_OPENING = "Want me to take care of this?";
+
+/**
+ * How long the "is this a request" check may take.
+ *
+ * Short on purpose: it runs between somebody pressing send and the channel
+ * saying anything, and a check that outlives the reader's attention has
+ * failed whatever it answers. Timing out reads as "no", which is the
+ * direction that costs nothing.
+ */
+const CLASSIFY_TIMEOUT_MS = 20_000;
 
 /** How far back an acceptance will look for the offer it is answering. */
 const AUTO_CLAIM_OFFER_LOOKBACK = 6;
@@ -8920,6 +8968,40 @@ export class ApiGateway {
           content: openingLine,
         })
       ).id;
+    // The request that caused this, in the words it was asked in, at the top
+    // of the thread it produced.
+    //
+    // The thread used to open on the agent's restatement — "Task: rework the
+    // retry loop" — which is a good name and not what anybody said. Opening a
+    // thread panel showed the work with no visible cause: the sentence that
+    // started it was back in the channel, and on a phone, where the panel is
+    // the whole screen, it was not visible at all.
+    //
+    // It matters more, not less, when the work joins a thread that already
+    // exists. A merged request never appeared in the thread it was merged
+    // into, so a conversation would grow a second task with nothing in it
+    // saying why — which is the case `findThreadToContinue` creates on
+    // purpose, and the one hardest to read after the fact.
+    //
+    // Skipped only when the request was made inside the thread already, since
+    // then it is a reply and is in it by definition.
+    const opener =
+      input.threadMessageId === undefined
+        ? { authorId: senderId, content }
+        : undefined;
+    if (opener !== undefined && continuing !== undefined) {
+      // The room is already there, so there is nothing to protect it from —
+      // and this is the case that needed it most: work merged into an
+      // existing thread used to arrive with nothing in the thread saying why.
+      await this.appendChannelThreadReply({
+        projectId,
+        repositoryId,
+        messageId: threadRootId,
+        authorId: opener.authorId,
+        kind: "user",
+        content: opener.content,
+      }).catch(() => undefined);
+    }
     // The agent's own wording, fetched now that the thread it belongs to is
     // already on the screen. Not awaited: a slow model must not hold up
     // queueing the work, and the only thing riding on it is how the first
@@ -9177,6 +9259,11 @@ export class ApiGateway {
         // substantive first, they simply arrive with the next line rather than
         // holding one up.
         pending: [],
+        // Held with the narration for the reason above: posting it now would
+        // open a thread this task may never deserve.
+        ...(opener === undefined || continuing !== undefined
+          ? {}
+          : { opener }),
         // Whether a room already exists, not whether one is deserved. The
         // held-narration rule is about sparing the channel a thread nobody
         // needs — but when this dispatch joined an existing thread the room is
@@ -12608,6 +12695,20 @@ export class ApiGateway {
             // start — as one entry rather than one per thought, because it is
             // one train of reasoning and arrived as a paragraph in the
             // agent's head before it arrived as lines in ours.
+            // What was asked, before what was thought about it. The thread
+            // exists as of this moment, so the request that caused it can go
+            // in without having been what created it.
+            if (watched.opener !== undefined) {
+              await this.appendChannelThreadReply({
+                projectId: watched.projectId,
+                repositoryId: watched.repositoryId,
+                messageId: watched.messageId,
+                authorId: watched.opener.authorId,
+                content: watched.opener.content,
+                kind: "user",
+              });
+              delete watched.opener;
+            }
             if (watched.pending.length > 0) {
               await this.appendChannelThreadReply({
                 projectId: watched.projectId,
@@ -12724,7 +12825,7 @@ export class ApiGateway {
      * than an agent's. Each reads differently and counts differently — see
      * `ChannelEntryKind`.
      */
-    kind?: "agent" | "progress" | "system" | "outcome";
+    kind?: "agent" | "progress" | "system" | "outcome" | "user";
   }): Promise<void> {
     await this.options.store.addChannelReply({
       repositoryId: input.repositoryId,
@@ -12798,13 +12899,61 @@ export class ApiGateway {
     // merely slow costs one line and a "yes". The sender can also ignore it
     // and @mention whoever should have it, which was always the escape and is
     // now the faster path when the pick is wrong.
-    await this.postChannelSystemMessage(
+    // The word list gets the easy half right and cannot get the rest right:
+    // most of the work vocabulary is also ordinary nouns, and no list of
+    // words distinguishes "update the readme" from "the update went out".
+    // So the agent that would take it reads the message first, on the cheap
+    // model — see CEREMONIAL_MODELS. It is a sentence in, a word out, and it
+    // only runs for messages the free checks already think are requests, so
+    // an ordinary conversation costs nothing.
+    if (!(await this.readsAsWorkToAgent(chosen, content))) {
+      return;
+    }
+    // In the agent's own voice, not the channel's. It is the one being asked
+    // to do it, the reader can see whose usage is about to be spent, and a
+    // system aside saying an agent "looks like the closest fit" was the
+    // system talking about an agent standing right there.
+    await this.appendChannelEntry({
       projectId,
       repositoryId,
-      `${AUTO_CLAIM_OFFER_OPENING} @${chosen.name} looks like the closest ` +
-        `fit — reply "yes" and it will start. Or @mention whoever should ` +
-        `take it.`,
-    );
+      kind: "agent",
+      authorId: `${chosen.userId}:${chosen.provider}`,
+      content:
+        `${AUTO_CLAIM_OFFER_OPENING} Reply "yes" and I'll start — or ` +
+        `@mention someone else.`,
+    });
+  }
+
+  /**
+   * Whether the agent that would take this reads it as work.
+   *
+   * The last gate, and the only one that reads the sentence rather than
+   * matching against it. Everything before it is free and stays first: this
+   * runs on the account whose agent would do the work, so an ordinary remark
+   * must never reach it, and the word list is what keeps the bill at zero for
+   * a channel that is just talking.
+   *
+   * Anything other than a plain yes is a no — a timeout, an unreachable CLI,
+   * an expired sign-in, a model that answered with a paragraph. Not offering
+   * costs a re-ask; offering wrongly is the noise this exists to remove.
+   */
+  private async readsAsWorkToAgent(
+    candidate: ChannelMentionCandidate,
+    content: string,
+  ): Promise<boolean> {
+    const answer = await this.askAgent(
+      candidate,
+      "Someone wrote this in a team chat for a software project.\n\n" +
+        "Is it asking for work to be done on the repository — a change, a " +
+        "fix, an investigation, something built? A remark, an opinion, a " +
+        "greeting, a status question, or a comment about work already " +
+        "finished is not.\n\n" +
+        "Answer with one word: yes or no.\n\nMessage: " +
+        content,
+      CLASSIFY_TIMEOUT_MS,
+      true,
+    ).catch(() => ({ text: undefined }));
+    return /^\s*yes\b/iu.test(answer.text ?? "");
   }
 
   /**
@@ -12843,7 +12992,7 @@ export class ApiGateway {
     for (let index = recent.length - 1; index >= 0; index -= 1) {
       const message = recent[index];
       if (
-        message?.kind === "system" &&
+        message?.kind === "agent" &&
         message.content.startsWith(AUTO_CLAIM_OFFER_OPENING)
       ) {
         offerAt = index;

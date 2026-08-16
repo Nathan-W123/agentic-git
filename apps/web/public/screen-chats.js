@@ -2229,12 +2229,19 @@ function threadReplies(root, repositoryId) {
   // with a restatement of the request that was already the thread's own title
   // two lines further up. Folded in, it is there for whoever wants the exact
   // wording and out of the way of everybody else.
-  const [first, ...rest] = replies;
-  // Deliberately first-reply-only, unlike the shared threadTitleReply
-  // detector: folding a mid-thread "Task:" message into the thinking block
-  // would hide a real reply, not a name.
-  const titleLine = /^Task: /u.test(String(first?.content ?? "")) ? first : undefined;
-  const body = titleLine === undefined ? replies : rest;
+  // The first thing the *agent* said, which is no longer the first reply: the
+  // request that caused the thread now leads it, in the words it was asked
+  // in. Still opening-only rather than anywhere — folding a mid-thread
+  // "Task:" message into the thinking block would hide a real reply, not a
+  // name — but "opening" has to skip the person who asked.
+  const opening = replies.find((reply) => reply.kind !== "user");
+  const titleLine = /^Task: /u.test(String(opening?.content ?? ""))
+    ? opening
+    : undefined;
+  const body =
+    titleLine === undefined
+      ? replies
+      : replies.filter((reply) => reply !== titleLine);
   const steps = body.filter(isThreadThinking);
   const outcome = body.filter((reply) => !isThreadThinking(reply));
 

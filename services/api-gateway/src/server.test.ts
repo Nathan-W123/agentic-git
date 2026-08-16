@@ -107,6 +107,8 @@ interface TestRuntime {
     targetRevision: string;
     files?: readonly string[];
   }>;
+  /** What the agent answers when asked whether a message is work. */
+  setTaskClassification: (answer: string) => void;
   /** Makes the next revert answer with this instead of succeeding. */
   setRollbackOutcome: (
     outcome: { status: string; explanation: string } | undefined,
@@ -267,6 +269,8 @@ async function startRuntime(
   const submittedTasks: TestRuntime["submittedTasks"] = [];
   const chatPrompts: TestRuntime["chatPrompts"] = [];
   const chatAnswer: TestRuntime["chatAnswer"] = {};
+  /** How the agent answers "is this work?" — "yes" unless a test says else. */
+  let taskClassification = "yes";
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
   const rollbacks: TestRuntime["rollbacks"] = [];
   // What `rollbackRepository` answers. Undefined is the ordinary success; a
@@ -295,11 +299,19 @@ async function startRuntime(
     input: any,
     onEvent?: (event: Record<string, unknown>) => void,
   ): Promise<Record<string, unknown>> => {
+    const asked = String(input?.messages?.[0]?.content ?? "");
     chatPrompts.push({
       userId: String(input?.userId ?? ""),
       provider: String(input?.provider ?? ""),
-      prompt: String(input?.messages?.[0]?.content ?? ""),
+      prompt: asked,
     });
+    // The unnamed path asks the agent whether a message is work before it
+    // offers to take it. Answered here rather than through `chatAnswer` so a
+    // test about dispatch does not have to know the question exists; a test
+    // about the check itself sets `taskClassification` to "no".
+    if (/Answer with one word: yes or no/u.test(asked)) {
+      return { text: taskClassification };
+    }
     for (const event of chatAnswer.streamEvents ?? []) {
       onEvent?.(event);
     }
@@ -690,6 +702,9 @@ async function startRuntime(
     rollbacks,
     setRollbackOutcome: (outcome) => {
       rollbackOutcome = outcome;
+    },
+    setTaskClassification: (answer) => {
+      taskClassification = answer;
     },
     runCalls,
     cancelCalls,
@@ -3443,6 +3458,21 @@ test("a human channel participant can be @mentioned without an agent refusal", a
 
 
 /**
+ * What the agents actually said, minus the "want me to take this?" offer.
+ *
+ * An unnamed request draws an offer in the agent's own voice before anything
+ * runs, so it is an agent message like any other. These assertions are about
+ * what an agent says once it has the work.
+ */
+function agentSpeech(messages: unknown[]): any[] {
+  return (messages as any[]).filter(
+    (message) =>
+      message.kind === "agent" &&
+      !/^Want me to take care of this\?/u.test(String(message.content ?? "")),
+  );
+}
+
+/**
  * Posts an unaddressed request and says yes to the offer it draws.
  *
  * An unnamed request is offered rather than started — picking the agent is a
@@ -3596,9 +3626,7 @@ test("a clearly-scoped task message auto-claims to the one obviously-best agent"
   assert.equal(task.vendor, "claude");
 
   const after = await owner.request(`${base}/messages`);
-  const systemMessages = (after.data.messages as any[]).filter(
-    (message) => message.kind === "agent",
-  );
+  const systemMessages = agentSpeech(after.data.messages);
   assert.equal(systemMessages.length, 1, JSON.stringify(systemMessages));
   // The claim no longer names the agent in prose, because the message is
   // now written *by* it: the channel shows the author, so repeating the name
@@ -3667,9 +3695,7 @@ test("an ambiguous task message is dispatched anyway, deterministically", async 
   // The agent answers in its own voice, and that answer is the thread the
   // work hangs off — not a system aside.
   const after = await owner.request(`${base}/messages`);
-  const agentMessages = (after.data.messages as any[]).filter(
-    (message) => message.kind === "agent",
-  );
+  const agentMessages = agentSpeech(after.data.messages);
   assert.ok(agentMessages.length >= 1, JSON.stringify(after.data.messages));
   assert.match(agentMessages[0].content, /On it/u);
   // No thread yet, deliberately. The title and opening reasoning are held
@@ -3969,9 +3995,7 @@ test("an unaddressed task is taken even when it matches no agent's role", async 
   assert.equal(runtime.submittedTasks[0]?.actorId, bootstrapped.user.id);
 
   const after = await owner.request(`${base}/messages`);
-  const agentMessages = (after.data.messages as any[]).filter(
-    (message) => message.kind === "agent",
-  );
+  const agentMessages = agentSpeech(after.data.messages);
   assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
   // Nobody was named, and the pickup still reads as an ordinary
   // acknowledgement — the explanation was removed as noise.
@@ -8997,14 +9021,15 @@ test("an unnamed request is offered before it is started, and yes starts it", as
   // checkout, a run and somebody's usage; a slow one costs a word.
   assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
   const offered = await owner.request(`${base}/messages`);
+  // In the agent's own voice, not the channel's: it is the one being asked,
+  // and the author line is how a reader sees whose usage this would spend.
   const offer = (offered.data.messages as any[]).find(
-    (message) => message.kind === "system",
+    (message) => message.kind === "agent",
   );
   assert.ok(offer !== undefined, JSON.stringify(offered.data.messages));
-  assert.match(offer.content, /Nobody was named here\./u);
-  // The offer names who would take it and how to redirect it.
-  assert.match(offer.content, /reply "yes"/u);
-  assert.match(offer.content, /@mention whoever should/u);
+  assert.match(offer.content, /Want me to take care of this\?/u);
+  assert.match(offer.content, /Reply "yes"/u);
+  assert.match(offer.content, /@mention someone else/u);
 
   const agreed = await owner.request(`${base}/messages`, {
     method: "POST",
@@ -9099,7 +9124,8 @@ test("a remark about work is not a request, and is offered nothing", async (t) =
   const after = await owner.request(`${base}/messages`);
   const offers = (after.data.messages as any[]).filter(
     (message) =>
-      message.kind === "system" && /Nobody was named here\./u.test(message.content),
+      message.kind === "agent" &&
+      /Want me to take care of this\?/u.test(message.content),
   );
   assert.deepEqual(offers, [], JSON.stringify(offers));
 });
@@ -9267,4 +9293,201 @@ test("a revert that fails validation is not reported as one that worked", async 
   assert.deepEqual(after?.changedFiles, [
     { path: "src/retry.ts", status: "modified" },
   ]);
+});
+
+test("the agent reads the message before offering, and a remark gets no offer", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "reads-first");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Half the work vocabulary is also ordinary nouns, so no word list tells
+  // "update the readme" from "the update went out". These clear the free
+  // checks and are still not requests; the agent that would take them is
+  // asked, and says no.
+  runtime.setTaskClassification("no");
+  const before = runtime.chatPrompts.length;
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "please update the settings page layout" },
+  });
+  assert.equal(posted.status, 201);
+
+  // It was read — one prompt, and it asked the question this gate asks.
+  const asked = runtime.chatPrompts.slice(before);
+  assert.equal(asked.length, 1, JSON.stringify(asked));
+  assert.match(String(asked[0]?.prompt), /Answer with one word: yes or no/u);
+  assert.match(String(asked[0]?.prompt), /settings page layout/u);
+
+  // And nothing was offered or started.
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const after = await owner.request(`${base}/messages`);
+  assert.deepEqual(agentSpeech(after.data.messages), []);
+  assert.deepEqual(
+    (after.data.messages as any[]).filter((message) =>
+      /Want me to take care of this\?/u.test(String(message.content)),
+    ),
+    [],
+  );
+});
+
+test("a remark that opens with a noun from the verb list is never read at all", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "free-checks-first");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // The reason the word list stays in front of the model: these cost nothing
+  // to refuse, and a channel that is only talking must not spend an account
+  // per sentence to find that out. "Changes look good" opens with a word from
+  // the verb list and is a person saying the changes look good.
+  const before = runtime.chatPrompts.length;
+  for (const remark of [
+    "Changes have been made and look good",
+    "Changes look good",
+    "Yo what's up",
+    "the update went out this morning",
+    "the build is fixed now",
+  ]) {
+    const posted = await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: remark },
+    });
+    assert.equal(posted.status, 201, remark);
+  }
+  assert.deepEqual(
+    runtime.chatPrompts.slice(before),
+    [],
+    "no agent was asked about any of these",
+  );
+  assert.equal(runtime.submittedTasks.length, 0);
+});
+
+test("a thread opens on the request that caused it, in the words it was asked in", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const repositoryId = await invitableRepository(owner, "thread-opener");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const agents = await owner.request(`${base}/agents`);
+  const name = (agents.data.agents as { name: string }[])[0]?.name ?? "";
+  const asked = `@${name} rework the retry loop`;
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: asked },
+  });
+  await waitFor(async () => {
+    const listed = await runtime.store.listSubmittedTasks({ repositoryId });
+    return listed.length > 0;
+  }, "the mention never became a task");
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+
+  // Held until here, deliberately: posting it at dispatch would open a thread
+  // for every task, and a task small enough to finish without narrating
+  // itself is meant to stay two lines in the room.
+  const beforeNarration = await owner.request(`${base}/messages`);
+  const quiet = (beforeNarration.data.messages as any[]).find(
+    (message) => message.taskId === task!.id,
+  );
+  assert.deepEqual(quiet?.replies ?? [], [], "no thread before there is news");
+
+  await runtime.store.appendAudit(undefined, {
+    type: "agent_progress",
+    taskId: task!.id,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      message: "Reading retry.ts and mapping every caller",
+    },
+  });
+
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    const thread = (listed.data.messages as any[]).find(
+      (message) => message.taskId === task!.id,
+    );
+    return ((thread?.replies ?? []) as any[]).some((reply) =>
+      String(reply.content).includes("mapping every caller"),
+    );
+  }, "the run never narrated");
+
+  const listed = await owner.request(`${base}/messages`);
+  const thread = (listed.data.messages as any[]).find(
+    (message) => message.taskId === task!.id,
+  );
+  const replies = (thread?.replies ?? []) as any[];
+  // First, and attributed to the person who asked rather than to the agent —
+  // opening a thread showed the work with no visible cause before this.
+  assert.equal(replies[0]?.kind, "user", JSON.stringify(replies));
+  assert.equal(replies[0]?.content, asked);
+  assert.equal(replies[0]?.authorId, ownerId);
+});
+
+test("work merged into an existing thread says what asked for it", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const repositoryId = await invitableRepository(owner, "thread-merge-opener");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // A thread that already exists, with a task hanging off it.
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it.",
+  });
+  const agents = await owner.request(`${base}/agents`);
+  const name = (agents.data.agents as { name: string }[])[0]?.name ?? "";
+  const asked = `@${name} and also raise the retry ceiling`;
+
+  await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: asked } },
+  );
+
+  // Asked inside the thread, so it is a reply and is in there by definition —
+  // the dispatch must not post a second copy of it.
+  await waitFor(async () => {
+    const thread = await runtime.store.getChannelMessage(
+      repositoryId,
+      root.id,
+      ownerId,
+    );
+    return (thread?.replies ?? []).some(
+      (reply) => reply.content === asked && reply.kind === "user",
+    );
+  }, "the request never landed in the thread");
+  const thread = await runtime.store.getChannelMessage(
+    repositoryId,
+    root.id,
+    ownerId,
+  );
+  assert.equal(
+    (thread?.replies ?? []).filter((reply) => reply.content === asked).length,
+    1,
+    JSON.stringify(thread?.replies),
+  );
 });
