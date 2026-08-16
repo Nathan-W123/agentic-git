@@ -189,6 +189,38 @@ test("captured output is bounded", async () => {
   assert.ok(result.stderr.length < 100);
 });
 
+test("tail retention keeps the end of the stream, where the payload lives", async () => {
+  // The shape of a streamed agent transcript: megabytes of events, and the
+  // one line that matters written last. Head retention was guaranteed to
+  // discard it on exactly the runs that most needed to finish.
+  const result = await runProcess(
+    process.execPath,
+    [
+      "-e",
+      "process.stdout.write('noise\\n'.repeat(500));" +
+        "process.stdout.write('THE RESULT LINE\\n')",
+    ],
+    { maxOutputBytes: 256, retainOutput: "tail" },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.stdoutTruncated, true);
+  assert.ok(result.stdout.includes("THE RESULT LINE"));
+  // The marker sits on the missing side — the beginning.
+  assert.match(result.stdout, /^\[output truncated\]\n/u);
+  assert.ok(result.stdout.length < 400, String(result.stdout.length));
+});
+
+test("tail retention under the limit is a plain, unmarked capture", async () => {
+  const result = await runProcess(
+    process.execPath,
+    ["-e", "process.stdout.write('small\\n')"],
+    { maxOutputBytes: 1024, retainOutput: "tail" },
+  );
+  assert.equal(result.stdout, "small\n");
+  assert.equal(result.stdoutTruncated, undefined);
+});
+
 test("an abort signal terminates the child", async () => {
   const controller = new AbortController();
   const running = runProcess(

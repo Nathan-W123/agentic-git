@@ -1559,11 +1559,15 @@ export class PromptCliAdapter implements AgentAdapter {
         `exit code ${output.exitCode}`;
       throw new Error(`${this.profile.name} execution failed: ${reason}`);
     }
-    if (output.stdoutTruncated === true) {
-      throw new Error(
-        `${this.profile.name} output exceeded the configured limit`,
-      );
-    }
+    // Truncation is no longer a failure. The stream carries every thinking
+    // step and tool result, so a long run can outgrow any cap — and this
+    // used to fail the whole round as "output exceeded the configured
+    // limit". The runner now retains the *tail* of the stream, and every
+    // durable payload — the result envelope, the usage block, the vendor
+    // session id — lives on the final line, so a truncated head costs
+    // nothing the parsers below need. A stream whose retained tail still
+    // holds no envelope fails in the parser, with a message that says what
+    // is actually missing.
     // Recorded only where the CLI actually reported a figure. A profile with
     // no `usage` reader, or an envelope without a usage block, contributes
     // nothing rather than contributing a zero.
@@ -1653,6 +1657,11 @@ export class PromptCliAdapter implements AgentAdapter {
       ...(this.options.env === undefined ? {} : { env: this.options.env }),
       timeoutMs,
       maxOutputBytes: this.maxOutputBytes,
+      // The end of the stream is the payload: the result envelope is the
+      // last line, and head retention was guaranteed to discard it on
+      // exactly the long runs that most needed to finish. The narrator
+      // still sees every byte live regardless of what is retained.
+      retainOutput: "tail",
       signal: controller.signal,
       ...(narrate && this.profile.narrate !== undefined
         ? { onStdout: this.narrator(record) }
