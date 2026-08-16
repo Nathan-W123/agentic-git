@@ -21,6 +21,10 @@ import {
   ensureDirectMessages,
   loadChannelStats,
   bannerLineForAudit,
+  announcedThrough,
+  noteAnnounced,
+  noteEventSequence,
+  notificationSeen,
   loadDmThread,
   sendDirectMessage,
   noteTyping,
@@ -4860,39 +4864,115 @@ const NEWS_COALESCE_MS = 350;
  */
 const CHANNEL_FRAME_COALESCE_MS = 120;
 
+/**
+ * How long news waits while the stream is still handing over a backlog.
+ *
+ * The hub drains from the cursor in batches of five hundred, one poll apart,
+ * so a reconnect's history does not arrive as one burst — it arrives as
+ * bursts half a second apart. That gap is wider than the live window above,
+ * which is why a night's worth of events used to produce a banner per batch
+ * rather than a banner. Wider than the hub's poll, so the whole replay
+ * settles into one sentence.
+ */
+const BACKLOG_SETTLE_MS = 1_200;
+
+/**
+ * How old an event can be and still be worth interrupting somebody for.
+ *
+ * News is news for about as long as it is still happening. Anything older
+ * than this is history the notifications tab already holds, and announcing it
+ * on arrival is how a reader gets told at breakfast about a task that
+ * finished before midnight.
+ */
+const BANNER_STALE_MS = 15 * 60 * 1_000;
+
 let pendingNews = [];
 let newsTimer;
 let channelFrameTimer;
+let catchUpTimer;
+
+/**
+ * Whether the stream is still catching this browser up.
+ *
+ * Set by the hub's `connected` frame and cleared once the stream goes quiet,
+ * so a replay is told apart from the events that arrive while somebody is
+ * watching. It changes only how long news waits before it speaks.
+ */
+let catchingUp = false;
+
+function beginCatchUp() {
+  catchingUp = true;
+  extendCatchUp();
+}
+
+function extendCatchUp() {
+  if (!catchingUp) {
+    return;
+  }
+  window.clearTimeout(catchUpTimer);
+  catchUpTimer = window.setTimeout(() => {
+    catchingUp = false;
+  }, BACKLOG_SETTLE_MS);
+}
 
 /**
  * One line of news, or one line about several.
  *
- * The socket opens with `after` set to the last event this browser knows, so
- * reconnecting delivers everything that happened while it was closed — which
- * on a phone opened the next morning is every task that finished or was
- * stopped overnight. Each of those raised its own banner, five seconds each,
- * stacked down the screen: the reader could not read them, could not dismiss
- * them, and the app appeared to hang while it rendered them.
+ * The socket opens with a cursor, so reconnecting delivers everything that
+ * happened while it was closed — which on a phone opened the next morning is
+ * every task that finished or was stopped overnight. Each of those raised its
+ * own banner, five seconds each, stacked down the screen: the reader could
+ * not read them, could not dismiss them, and the app appeared to hang while
+ * it rendered them.
  *
  * The backlog is not less interesting than one event, but it is not more
  * interesting a hundred times over. Anything arriving inside the window
  * collapses into a count plus the most recent line, and the notifications tab
- * still has all of it in full.
+ * still has all of it in full. `banner` shows one at a time, so even a flush
+ * that lands mid-replay replaces its predecessor instead of stacking on it.
  */
 function announceNews(line) {
   pendingNews.push(line);
   window.clearTimeout(newsTimer);
-  newsTimer = window.setTimeout(() => {
-    const lines = pendingNews;
-    pendingNews = [];
-    const latest = lines.at(-1);
-    if (latest === undefined) {
-      return;
-    }
-    popupBanner(
-      lines.length === 1 ? latest : `${lines.length} updates — latest: ${latest}`,
-    );
-  }, NEWS_COALESCE_MS);
+  newsTimer = window.setTimeout(
+    () => {
+      const lines = pendingNews;
+      pendingNews = [];
+      const latest = lines.at(-1);
+      if (latest === undefined) {
+        return;
+      }
+      popupBanner(
+        lines.length === 1 ? latest : `${lines.length} updates — latest: ${latest}`,
+      );
+    },
+    catchingUp ? BACKLOG_SETTLE_MS : NEWS_COALESCE_MS,
+  );
+}
+
+/**
+ * The sentence this frame deserves in the corner, or nothing.
+ *
+ * Three things disqualify a frame, and all three are the same complaint: news
+ * somebody has already had. A sequence at or below the announcement watermark
+ * was announced in an earlier session; an event already marked read was read
+ * on the notifications screen; an event from hours ago is not an
+ * interruption. What is left is what actually just happened.
+ */
+function newsLineForFrame(frame) {
+  const sequence = frame?.sequence;
+  if (Number.isSafeInteger(sequence) && sequence <= announcedThrough()) {
+    return undefined;
+  }
+  const event = frame?.event;
+  const at = Date.parse(event?.occurredAt ?? "");
+  if (Number.isFinite(at) && Date.now() - at > BANNER_STALE_MS) {
+    return undefined;
+  }
+  if (notificationSeen(event ?? {})) {
+    return undefined;
+  }
+  return bannerLineForAudit(event);
 }
 
 async function boot() {
@@ -4930,6 +5010,14 @@ async function boot() {
   });
 
   connectSocket((frame) => {
+    // The hub's handshake, and the only warning that a replay is about to
+    // start. Everything between here and the stream going quiet is history
+    // this browser missed rather than something happening now. Not returned
+    // on: this frame has always fallen through to the refresh at the bottom,
+    // which is what repaints a screen that has been away.
+    if (frame?.type === "connected") {
+      beginCatchUp();
+    }
     // Transient, and never part of the audit replay — see `broadcastTransient`
     // on the hub. Re-rendered immediately so the dots appear while the other
     // person is still mid-word.
@@ -5026,8 +5114,14 @@ async function boot() {
     // question is worth a sentence in the corner wherever the reader is,
     // which is the notifications tab's job done at the moment it matters.
     if (frame?.type === "audit") {
-      const line = bannerLineForAudit(frame.event);
+      // Remembered before anything else: the next connection starts here, and
+      // that is what stops the same backlog being replayed — and re-announced
+      // — every time a phone comes back to the foreground.
+      noteEventSequence(frame.sequence);
+      extendCatchUp();
+      const line = newsLineForFrame(frame);
       if (line !== undefined) {
+        noteAnnounced(frame.sequence);
         announceNews(line);
       }
     }
