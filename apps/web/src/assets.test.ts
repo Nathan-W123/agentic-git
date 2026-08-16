@@ -824,6 +824,27 @@ test("slash and mention filtering does not rebuild the app while typing", async 
   );
 });
 
+test("channel @mentions include repository guests and surface directed unread pings", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+
+  const participants = data.slice(
+    data.indexOf("export function channelParticipants"),
+    data.indexOf("\nfunction seedMessages", data.indexOf("export function channelParticipants")),
+  );
+  assert.match(participants, /state\.channelPeople\[repositoryId\]/u);
+  assert.match(participants, /member\.user\?\.displayName/u);
+  assert.match(chats, /entry\.kind === "agent"[\s\S]{0,100}"person"/u);
+
+  const unread = data.slice(
+    data.indexOf("export function channelUnreadCount"),
+    data.indexOf("\n}\n", data.indexOf("export function channelUnreadCount")) + 2,
+  );
+  assert.match(unread, /mentionsOnly/u);
+  assert.match(unread, /mention\.kind === "user" && mention\.id === mine/u);
+  assert.match(chats, /mentions > 0 \? "@"/u);
+});
+
 test("the channel composer highlights mentions and previews pasted images", async () => {
   const app = await browserSource();
   const chats = await publicFile("screen-chats.js");
