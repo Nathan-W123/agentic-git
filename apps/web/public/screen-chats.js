@@ -374,7 +374,22 @@ function draftAttachments(repositoryId) {
 }
 
 function draftText() {
-  return String(state.chatDraft ?? "").replace(ATTACHMENT_PATTERN, "").trimEnd();
+  const draft = String(state.chatDraft ?? "");
+  const attachmentAt = draft.search(ATTACHMENT_PATTERN);
+  if (attachmentAt === -1) {
+    // This value is written back into the textarea after any background
+    // render. It must be byte-for-byte what the person typed: `trimEnd()`
+    // made a render arriving after Space or Shift+Enter silently erase that
+    // input and clamp the restored caret to the shortened value.
+    return draft;
+  }
+
+  // Attachments are stored after the visible draft as reference lines. Drop
+  // the single newline that separates that hidden suffix from the textarea,
+  // but never trim the visible text itself — in particular, keep spaces and
+  // an additional newline the person entered before the separator.
+  const visible = draft.slice(0, attachmentAt);
+  return visible.endsWith("\n") ? visible.slice(0, -1) : visible;
 }
 
 function draftAttachmentPreviews(repositoryId) {

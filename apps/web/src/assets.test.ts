@@ -962,6 +962,126 @@ test("slash and mention filtering does not rebuild the app while typing", async 
   );
 });
 
+test("a composer refresh keeps rapid edits, whitespace, and the caret's value", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await browserSource();
+  const start = chats.indexOf("const ATTACHMENT_PATTERN");
+  const end = chats.indexOf("\nfunction draftAttachmentPreviews", start);
+  assert.notEqual(start, -1, "the attachment suffix pattern should exist");
+  assert.notEqual(end, -1, "draftText should have a testable boundary");
+
+  const state: { chatDraft?: string } = {};
+  const createDraftText = new Function(
+    "state",
+    `${chats.slice(start, end)}\nreturn draftText;`,
+  );
+  const draftText = createDraftText(state) as () => string;
+
+  // Background channel, typing, and task frames rebuild the textarea from
+  // this value. The last input event must therefore survive exactly; trimming
+  // here used to make a just-typed Space disappear and move the restored
+  // caret backward, which felt intermittent because it needed a frame to land.
+  for (const value of [
+    "rapid  letters backspace ",
+    "two trailing spaces  ",
+    "Shift+Enter keeps this line\n",
+    "日本語の変換 ",
+  ]) {
+    state.chatDraft = value;
+    assert.equal(draftText(), value, JSON.stringify(value));
+  }
+
+  // Attachment references remain outside the textarea. Only their structural
+  // separator is removed; whitespace immediately before it is user input.
+  const reference = "![diagram](attachment:0123456789abcdef0123456789abcdef.png)";
+  state.chatDraft = `keep both spaces  \n${reference}\n`;
+  assert.equal(draftText(), "keep both spaces  ");
+  state.chatDraft = `keep the entered newline\n\n${reference}\n`;
+  assert.equal(draftText(), "keep the entered newline\n");
+
+  // The render path already captures and restores focus. Keeping the stored
+  // value exact is what makes those saved offsets meaningful after a refresh.
+  assert.match(app, /const focusedField = captureFocus\(\);/u);
+  assert.match(app, /restoreFocus\(focusedField\);/u);
+  const restoreStart = app.indexOf("function restoreFocus");
+  const restoreEnd = app.indexOf("\nfunction confirmDiscardEdit", restoreStart);
+  assert.match(
+    app.slice(restoreStart, restoreEnd),
+    /next\.setSelectionRange\(saved\.start, saved\.end\)/u,
+  );
+});
+
+test("the composer keyboard leaves Space, Shift+Enter, and IME to native input", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("export function handleComposerKeydown");
+  assert.notEqual(start, -1, "the channel composer key handler should exist");
+  const source = chats.slice(start).replace("export function", "function");
+  const state = { slashActive: false, mentionActive: false };
+  let submitted = 0;
+  const createHandler = new Function(
+    "state",
+    "imeComposing",
+    "channelSlashCandidates",
+    "activeChannelId",
+    "pickSlashCommand",
+    "channelMentionCandidates",
+    "pickMention",
+    "submitComposerMessage",
+    `${source}\nreturn handleComposerKeydown;`,
+  );
+  const handler = createHandler(
+    state,
+    (event: { isComposing?: boolean; keyCode?: number }) =>
+      event.isComposing === true || event.keyCode === 229,
+    () => [],
+    () => "repository",
+    () => undefined,
+    () => [],
+    () => undefined,
+    () => {
+      submitted += 1;
+    },
+  ) as (
+    event: {
+      key: string;
+      shiftKey?: boolean;
+      isComposing?: boolean;
+      keyCode?: number;
+      preventDefault: () => void;
+    },
+    rerender: () => void,
+  ) => void;
+
+  const press = (
+    key: string,
+    options: { shiftKey?: boolean; isComposing?: boolean } = {},
+  ) => {
+    let prevented = 0;
+    handler(
+      {
+        key,
+        ...options,
+        preventDefault: () => {
+          prevented += 1;
+        },
+      },
+      () => undefined,
+    );
+    return prevented;
+  };
+
+  assert.equal(press(" "), 0, "Space stays a native textarea edit");
+  assert.equal(press("Enter", { shiftKey: true }), 0, "Shift+Enter inserts a newline");
+  assert.equal(
+    press("Enter", { isComposing: true }),
+    0,
+    "composition Enter accepts the candidate",
+  );
+  assert.equal(submitted, 0);
+  assert.equal(press("Enter"), 1, "plain Enter is the only send gesture here");
+  assert.equal(submitted, 1);
+});
+
 test("channel @mentions include repository guests and surface directed unread pings", async () => {
   const data = await publicFile("data.js");
   const chats = await publicFile("screen-chats.js");
@@ -1387,6 +1507,10 @@ test("the composer paints its mentions on a layer that matches the textarea", as
     "&lt;code&gt;@agent&lt;/code&gt;\n",
   );
   assert.equal(wrap("@agents review", []), "[agents] review\n");
+  assert.equal(
+    wrap("keep  repeated and trailing spaces  ", []),
+    "keep  repeated and trailing spaces  \n",
+  );
 
   // The point of the mirror is that it colours what is being typed *now*. A
   // ping only lit up once its last character landed, and a name that never
