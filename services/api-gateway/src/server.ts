@@ -8241,7 +8241,20 @@ export class ApiGateway {
       );
       return;
     }
-    const target = input.rest.trim().replace(/^@/u, "");
+    // The name, and only the name. "/stop @Hera" and "/stop @Hera please" and
+    // "/stop @Hera, that's wrong" are one person saying the same thing, and
+    // matching the whole remainder against the roster meant the last two
+    // found nobody and stopped nothing — announcing "nobody here answers to
+    // that" while the agent carried on working.
+    //
+    // The optional bracket is not optional in practice: an agent nobody has
+    // named is "Claude (Nathan)", so a first-word split would have taken
+    // "Claude" and missed every unnamed agent in the product. Same shape
+    // `withoutMentions` already strips, so the two agree about where a
+    // mention ends.
+    const target = (
+      /^@?([\w.-]+(?:\s*\([^)]*\))?)/u.exec(input.rest.trim())?.[1] ?? ""
+    ).replace(/[,.:;!?]+$/u, "");
     let vendor: "claude" | "codex" | "gemini" | undefined;
     let scope = "in this channel";
     if (target !== "") {

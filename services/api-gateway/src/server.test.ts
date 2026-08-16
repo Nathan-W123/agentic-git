@@ -8909,3 +8909,54 @@ test("asking about work is not asking for it", () => {
     assert.equal(looksLikeTaskRequest(request), true, request);
   }
 });
+
+test("/stop names one agent even with words after the name", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const repositoryId = await invitableRepository(owner, "stop-named");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  // An agent nobody has renamed is "Claude (Nathan)" — a space and a bracket
+  // inside the name, which is exactly what a first-word split would lose.
+  const mention = `Claude (${String(session.user.displayName).split(" ")[0]})`;
+
+  // Each of these is one person saying "stop that agent". Matching the whole
+  // remainder against the roster meant everything but the bare name found
+  // nobody and stopped nothing, while saying so in the channel.
+  for (const [index, rest] of [
+    `@${mention}`,
+    `@${mention} please`,
+    `@${mention}, that's wrong`,
+  ].entries()) {
+    const task = await runtime.store.submitTask({
+      repositoryId,
+      projectId: DEFAULT_PROJECT_ID,
+      objective: `rework number ${index}`,
+      // The fixture's `cancelTasks` matches a vendor-scoped stop against
+      // `test-agent-<vendor>`; a name-targeted stop resolves to the claude
+      // vendor, so this is the agent it has to be looking for.
+      agentId: "test-agent-claude",
+      validationCommands: [],
+      submittedBy: ownerId,
+    });
+    const posted = await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: `/stop ${rest}` },
+    });
+    assert.equal(posted.status, 201, rest);
+    await waitFor(async () => {
+      const listed = await runtime.store.listSubmittedTasks({ repositoryId });
+      return listed.find((entry) => entry.id === task.id)?.status === "cancelled";
+    }, `"/stop ${rest}" did not stop the named agent`);
+  }
+
+  const said = (await owner.request(`${base}/messages`)).data.messages
+    .map((message: any) => String(message.content))
+    .join("\n");
+  assert.doesNotMatch(said, /Nobody here answers/u);
+});
