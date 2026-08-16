@@ -338,7 +338,20 @@ function draftAttachmentPreviews(repositoryId) {
  * character the pattern accepts before an at sign, which is what keeps
  * `<code>@agent</code>` from being painted inside its own code span.
  */
-const MENTION_TEXT_PATTERN = /(^|[\s([])@([A-Za-z][\w-]*(?:\.[\w-]+)*)/gu;
+/*
+ * The owner tag is part of the name, not text after it. An agent nobody has
+ * given a call sign to is "Claude (Nathan)", and stopping at the space left
+ * half of every such ping in plain body text — the reader saw "Claude"
+ * coloured and "(Nathan)" not, which reads as the highlighter being broken
+ * rather than as a name ending there.
+ *
+ * Deliberately only a single bracketed word, so "@Hera (see the thread
+ * below)" still ends the mention at "Hera". That is the discriminator this
+ * has and the router does not: the router resolves against the roster and
+ * simply finds nobody, while this has only the string.
+ */
+const MENTION_TEXT_PATTERN =
+  /(^|[\s([])@([A-Za-z][\w-]*(?:\.[\w-]+)*(?:\s\([A-Za-z][\w'-]*\))?)/gu;
 
 /**
  * The wave is one span, not one per letter: the gradient is painted across the
@@ -351,6 +364,37 @@ function mentionMarkup(value) {
     MENTION_TEXT_PATTERN,
     (_match, before, handle) => `${before}<span class="mention-ping">@${handle}</span>`,
   );
+}
+
+/**
+ * The composer's text, marked up for the layer painted under the textarea.
+ *
+ * Only mentions — none of `richText`'s markdown. What is on screen while
+ * somebody types has to be character-for-character what they typed, or the
+ * mirror and the textarea wrap at different points and the caret stops
+ * landing where the letters are. `**bold**` collapsing to two fewer
+ * characters would do exactly that.
+ *
+ * The trailing newline is deliberate. A textarea keeps a final empty line
+ * visible and a div collapses it, so without this the mirror is one line
+ * shorter than the box the moment somebody ends on Enter.
+ */
+function composerMirror(value) {
+  return `${mentionMarkup(esc(String(value ?? "")))}\n`;
+}
+
+/** Repaints the layer under the textarea. Called on every keystroke. */
+function paintComposerMirror(node) {
+  const mirror = node
+    .closest(".composer-field")
+    ?.querySelector("[data-composer-mirror]");
+  if (mirror === null || mirror === undefined) {
+    return;
+  }
+  mirror.innerHTML = composerMirror(node.value);
+  // A composer past its max height scrolls, and the mirror has to scroll with
+  // it or the highlight slides off the text it belongs to.
+  mirror.scrollTop = node.scrollTop;
 }
 
 /**
@@ -1557,13 +1601,25 @@ function composer(repositoryId) {
     ${composerThreadChip(repositoryId)}
     ${draftAttachmentPreviews(repositoryId)}
     <form class="composer" data-act="channel-submit">
-      <textarea data-act="channel-input" rows="1" spellcheck="true"
-        enterkeyhint="send"
-        placeholder="${
-          state.composerThreadId === undefined
-            ? `Message #${esc(repositoryId ?? "")}`
-            : "Add to this thread..."
-        }">${esc(draftText())}</textarea>
+      <div class="composer-field">
+        <!-- The ping colours the letters, which a textarea cannot do: it has
+             one colour for all of its text. So the highlighting is painted by
+             a div underneath holding the same string, and the textarea above
+             it is made transparent apart from its caret. Everything typing
+             depends on — selection, undo, spellcheck, IME, mobile keyboards —
+             is still the real control; only the pixels come from the mirror.
+             Hidden from assistive tech, because a screen reader should hear
+             the textarea's value once and not twice. -->
+        <div class="composer-mirror" data-composer-mirror aria-hidden="true"
+          >${composerMirror(draftText())}</div>
+        <textarea data-act="channel-input" rows="1" spellcheck="true"
+          enterkeyhint="send"
+          placeholder="${
+            state.composerThreadId === undefined
+              ? `Message #${esc(repositoryId ?? "")}`
+              : "Add to this thread..."
+          }">${esc(draftText())}</textarea>
+      </div>
       <div class="composer-bar">
         <!-- The input is the control; the button only clicks it. A bare file
              input cannot be styled into this bar, and a label would take the
@@ -3013,6 +3069,10 @@ export function updateComposerInput(node) {
   updateMentionState(node);
   node.closest(".chan-composer-wrap")?.classList.toggle("mention-active", state.mentionActive);
   const changed = popupState() !== before;
+  // Same reasoning as the height below: a property of this element, repainted
+  // directly. Routing it through a render would put the whole-app rebuild
+  // this function exists to avoid back on the keystroke path.
+  paintComposerMirror(node);
   // The height is a property of this element, not of the app, so it is set
   // directly whether or not anything else is rebuilt.
   node.style.height = "auto";

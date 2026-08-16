@@ -2434,21 +2434,67 @@ svg {
   line-height: 1.5;
 }
 
+/*
+ * The textarea and the layer that paints its text.
+ *
+ * Every metric below is shared by both, because they are the same string
+ * drawn twice and the caret sits in one while the letters come from the
+ * other. A single pixel of difference in padding, size, line height or
+ * wrapping and the two wrap at different words — the highlight slides off
+ * the name it belongs to and the caret stops landing where it points.
+ */
+.composer-field {
+  position: relative;
+}
+
+.composer-field textarea,
+.composer-mirror {
+  padding: 11px 13px 6px;
+  font-size: 12.5px;
+  font-family: inherit;
+  line-height: 1.5;
+  letter-spacing: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: normal;
+  tab-size: 4;
+}
+
+.composer-mirror {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  color: var(--text);
+  pointer-events: none;
+}
+
 .composer textarea {
+  position: relative;
   width: 100%;
   background: none;
   border: none;
   outline: none;
   resize: none;
-  padding: 11px 13px 6px;
-  color: var(--text);
-  font-size: 12.5px;
-  line-height: 1.5;
   max-height: 148px;
+  /* Transparent, not hidden: the glyphs still lay out — which is what wraps
+     the mirror underneath and positions the caret — they simply are not
+     painted. `caret-color` puts the one part that must stay visible back. */
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--text);
 }
 
+/* The placeholder is the textarea's own and has to survive the transparent
+   fill above, so it restores both properties rather than just `color`. */
 .composer textarea::placeholder {
   color: var(--text-4);
+  -webkit-text-fill-color: var(--text-4);
+}
+
+/* Selection is drawn above the mirror, so a solid highlight would hide the
+   very text being selected. A washed one lets it read through. */
+.composer textarea::selection {
+  background: var(--accent-wash-strong, rgba(139, 92, 246, 0.28));
 }
 
 /* Every composer control sits on one row. */
@@ -4830,7 +4876,10 @@ svg {
    letters themselves rather than sitting behind them. `-webkit-` first for
    Safari and every iOS browser, which still only understand the prefixed
    property; the unprefixed pair follows for everything else. */
-.cmsg-text .mention-ping {
+/* Both places the same string appears: the sent message, and the layer
+   painted under the composer while it is still being typed. */
+.cmsg-text .mention-ping,
+.composer-mirror .mention-ping {
   font-weight: 650;
   background-image: linear-gradient(
     100deg,
@@ -4858,7 +4907,8 @@ svg {
 /* Still both accents when motion is off — the ping has to stay legible as a
    ping — but held on one frame rather than travelling. */
 @media (prefers-reduced-motion: reduce) {
-  .cmsg-text .mention-ping {
+  .cmsg-text .mention-ping,
+  .composer-mirror .mention-ping {
     animation: none;
     background-position: 50% 50%;
   }

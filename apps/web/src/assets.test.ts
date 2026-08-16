@@ -888,9 +888,12 @@ test("a ping in a posted message waves through both of the reader's accents", as
   assert.equal(wrap("see docs/@notes"), "see docs/@notes");
   assert.equal(wrap("<code>@agent</code>"), "<code>@agent</code>");
 
-  // Both accents, clipped to the glyphs, and moving.
+  // Both accents, clipped to the glyphs, and moving. One rule covers the
+  // posted message and the layer under the composer, so the ping a reader
+  // sees and the one the typist sees cannot drift apart.
+  assert.match(css, /\.cmsg-text \.mention-ping,\n\.composer-mirror \.mention-ping \{/u);
   const rule = css.slice(
-    css.indexOf(".cmsg-text .mention-ping {"),
+    css.indexOf(".cmsg-text .mention-ping,"),
     css.indexOf("}", css.indexOf("animation: mention-wave")),
   );
   assert.match(rule, /var\(--accent-bright\)/u);
@@ -901,7 +904,7 @@ test("a ping in a posted message waves through both of the reader's accents", as
   assert.match(css, /@keyframes mention-wave \{[\s\S]{0,120}background-position: -200% 50%;/u);
   assert.match(
     css,
-    /@media \(prefers-reduced-motion: reduce\) \{\n  \.cmsg-text \.mention-ping \{\n    animation: none;/u,
+    /@media \(prefers-reduced-motion: reduce\) \{\n  \.cmsg-text \.mention-ping,\n  \.composer-mirror \.mention-ping \{\n    animation: none;/u,
   );
 });
 
@@ -1082,4 +1085,52 @@ test("the colour wheel's marker and its click land on the same colour", async ()
   const red = /left:([\d.]+)%;top:([\d.]+)%/u.exec(ui.colorWheel("x", "#ff0000"));
   assert.equal(Number(red![1]).toFixed(0), "50");
   assert.equal(Number(red![2]).toFixed(0), "0");
+});
+
+test("the composer paints its mentions on a layer that matches the textarea", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // A textarea has one colour for all of its text, so the ping is painted by
+  // a div underneath holding the same string.
+  assert.match(chats, /class="composer-mirror" data-composer-mirror/u);
+  assert.match(chats, /function composerMirror/u);
+  assert.match(chats, /function paintComposerMirror/u);
+  // Repainted on the keystroke path itself. Going through `render()` would
+  // put the whole-app rebuild that handler exists to avoid back in the way of
+  // every character typed.
+  assert.match(chats, /paintComposerMirror\(node\);/u);
+  assert.match(css, /\.composer-mirror \.mention-ping/u);
+
+  // Mentions only — none of richText's markdown. `**bold**` renders two
+  // characters shorter than it is typed, and a mirror that is shorter than
+  // the textarea wraps somewhere else and drags the highlight off the name.
+  const mirror = /function composerMirror\(value\) \{[\s\S]*?\n\}/u.exec(chats);
+  assert.ok(mirror !== null, "composerMirror is defined");
+  assert.equal(/richText/u.test(mirror[0]), false);
+  assert.match(mirror[0], /mentionMarkup\(esc\(/u);
+
+  // The metrics the two share. Declared once, for both selectors, because a
+  // single pixel of difference between them wraps the mirror at a different
+  // word than the textarea and the caret stops landing on the letters.
+  const shared = /\.composer-field textarea,\s*\.composer-mirror \{([\s\S]*?)\}/u
+    .exec(css);
+  assert.ok(shared !== null, "the textarea and its mirror share one rule");
+  for (const property of [
+    "padding",
+    "font-size",
+    "font-family",
+    "line-height",
+    "white-space",
+    "overflow-wrap",
+  ]) {
+    assert.match(
+      shared[1] ?? "",
+      new RegExp(`\\n\\s*${property}:`, "u"),
+      `${property} is shared`,
+    );
+  }
+
+  // The caret is the one part of the textarea that must stay visible.
+  assert.match(css, /caret-color: var\(--text\)/u);
 });
