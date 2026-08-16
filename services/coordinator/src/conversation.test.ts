@@ -722,6 +722,124 @@ test("an idle session closes; the conversation continues cold in its directory",
   }
 });
 
+test("the deployment's idle deadline is read from the environment", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+  const previous = process.env["COORD_CONVERSATION_SESSION_IDLE_MS"];
+
+  try {
+    // Idle from the moment it lands, said the way an operator says it: the
+    // deployment builds its registry with no arguments at all, so a bound
+    // only a caller could pass would be a bound nobody could set.
+    process.env["COORD_CONVERSATION_SESSION_IDLE_MS"] = "0";
+    const fixture = await createFixture(root);
+    const agent = new ConversationAgent(
+      "agent_conv",
+      plan("turn_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const coordinator = new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    });
+    const conversation = openConversation(fixture, root, agent, "conversation", {
+      coordinator,
+    });
+
+    agent.turnOutput = { path: "src/a.txt", content: "turn one\n" };
+    const first = await conversation.runTurn(task("turn_1"));
+    assert.equal(first.tasks[0]?.status, "integrated");
+    assert.equal(agent.cancelCount, 0);
+
+    await coordinator.closeIdleConversationSessions();
+    assert.equal(agent.cancelCount, 1);
+  } finally {
+    if (previous === undefined) {
+      delete process.env["COORD_CONVERSATION_SESSION_IDLE_MS"];
+    } else {
+      process.env["COORD_CONVERSATION_SESSION_IDLE_MS"] = previous;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("the deployment's session cap is read from the environment", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
+  const previous = process.env["COORD_MAX_CONVERSATION_SESSIONS"];
+
+  try {
+    process.env["COORD_MAX_CONVERSATION_SESSIONS"] = "1";
+    const fixture = await createFixture(root);
+    const coordinator = new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    });
+    const first = new ConversationAgent(
+      "agent_first",
+      plan("first_1", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const second = new ConversationAgent(
+      "agent_second",
+      plan("second_1", ["src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+    );
+    const conversationA = openConversation(fixture, root, first, "conv_a", {
+      coordinator,
+    });
+    const conversationB = openConversation(fixture, root, second, "conv_b", {
+      coordinator,
+    });
+
+    first.turnOutput = { path: "src/a.txt", content: "first one\n" };
+    assert.equal(
+      (await conversationA.runTurn(task("first_1"))).tasks[0]?.status,
+      "integrated",
+    );
+    second.turnOutput = { path: "src/b.txt", content: "second one\n" };
+    assert.equal(
+      (await conversationB.runTurn(task("second_1"))).tasks[0]?.status,
+      "integrated",
+    );
+
+    // The configured cap of one, honoured: the older session is the one that
+    // pays, and it pays with its process rather than its place.
+    assert.equal(first.cancelCount, 1);
+    assert.equal(second.cancelCount, 0);
+  } finally {
+    if (previous === undefined) {
+      delete process.env["COORD_MAX_CONVERSATION_SESSIONS"];
+    } else {
+      process.env["COORD_MAX_CONVERSATION_SESSIONS"] = previous;
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a conversation bound that is not a number is refused, not ignored", () => {
+  const previous = process.env["COORD_MAX_CONVERSATION_SESSIONS"];
+
+  try {
+    process.env["COORD_MAX_CONVERSATION_SESSIONS"] = "eight";
+    // Falling back to the default here would leave a deployment holding a
+    // cap it did not choose and believes it did not set.
+    assert.throws(() => new ConversationRegistry(), {
+      message: /COORD_MAX_CONVERSATION_SESSIONS/u,
+    });
+    // An explicit argument still wins, so a caller that knows its own bound
+    // is not held hostage by the environment it happens to run in.
+    assert.doesNotThrow(() => new ConversationRegistry({ maxSessions: 2 }));
+  } finally {
+    if (previous === undefined) {
+      delete process.env["COORD_MAX_CONVERSATION_SESSIONS"];
+    } else {
+      process.env["COORD_MAX_CONVERSATION_SESSIONS"] = previous;
+    }
+  }
+});
+
 test("the session cap closes the oldest conversation's session first", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-conv-test-"));
 

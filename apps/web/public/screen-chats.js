@@ -280,6 +280,42 @@ function statusDot(status, title) {
 const ATTACHMENT_PATTERN =
   /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu;
 
+function draftAttachments(repositoryId) {
+  const base =
+    `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
+    `/repositories/${encodeURIComponent(repositoryId ?? "")}/attachments/`;
+  return [...String(state.chatDraft ?? "").matchAll(ATTACHMENT_PATTERN)].map(
+    (match) => ({
+      reference: match[0],
+      alt: match[1] || "Attached image",
+      id: match[2],
+      src: base + match[2],
+    }),
+  );
+}
+
+function draftText() {
+  return String(state.chatDraft ?? "").replace(ATTACHMENT_PATTERN, "").trimEnd();
+}
+
+function draftAttachmentPreviews(repositoryId) {
+  const attachments = draftAttachments(repositoryId);
+  if (attachments.length === 0) {
+    return "";
+  }
+  return `<div class="composer-attachments" aria-label="Attached images">${attachments
+    .map(
+      (attachment) => `<div class="composer-attachment">
+        <img src="${esc(attachment.src)}" alt="${esc(attachment.alt)}">
+        <span title="${esc(attachment.alt)}">${esc(attachment.alt)}</span>
+        <button type="button" class="composer-attachment-remove"
+          data-act="channel-attachment-remove" data-value="${esc(attachment.id)}"
+          aria-label="Remove ${esc(attachment.alt)}">&times;</button>
+      </div>`,
+    )
+    .join("")}</div>`;
+}
+
 /**
  * A narrow, safe subset of Markdown for what an agent writes.
  *
@@ -1418,6 +1454,16 @@ function mentionPopover(candidates) {
     .join("")}</div>`;
 }
 
+function composerSuggestions(repositoryId) {
+  return `${
+    state.slashActive ? slashPopover(channelSlashCandidates(repositoryId)) : ""
+  }${
+    state.mentionActive
+      ? mentionPopover(channelMentionCandidates(repositoryId))
+      : ""
+  }`;
+}
+
 /**
  * The sandbox terminal, as a drawer over the bottom of the channel.
  *
@@ -1467,11 +1513,10 @@ function terminalDrawer() {
 }
 
 function composer(repositoryId) {
-  const candidates = state.mentionActive ? channelMentionCandidates(repositoryId) : [];
-  return `<div class="chan-composer-wrap">
-    ${state.slashActive ? slashPopover(channelSlashCandidates(repositoryId)) : ""}
-    ${state.mentionActive ? mentionPopover(candidates) : ""}
+  return `<div class="chan-composer-wrap${state.mentionActive ? " mention-active" : ""}">
+    <div data-composer-suggestions>${composerSuggestions(repositoryId)}</div>
     ${composerThreadChip(repositoryId)}
+    ${draftAttachmentPreviews(repositoryId)}
     <form class="composer" data-act="channel-submit">
       <textarea data-act="channel-input" rows="1" spellcheck="true"
         enterkeyhint="send"
@@ -1479,7 +1524,7 @@ function composer(repositoryId) {
           state.composerThreadId === undefined
             ? `Message #${esc(repositoryId ?? "")}`
             : "Add to this thread..."
-        }">${esc(state.chatDraft)}</textarea>
+        }">${esc(draftText())}</textarea>
       <div class="composer-bar">
         <!-- The input is the control; the button only clicks it. A bare file
              input cannot be styled into this bar, and a label would take the
@@ -2558,11 +2603,92 @@ export function renderChats() {
 let followingChannel = true;
 const FOLLOW_SLACK_PX = 80;
 
+/**
+ * The transcript's height as the follow flag last saw it.
+ *
+ * The soft keyboard, the collapsing address bar and the composer growing an
+ * attachment thumbnail all change how tall the scroller is, and the browser
+ * answers by firing `scroll` on a container the reader never touched. Measured
+ * against a stale height that reads as "they scrolled a long way up", so the
+ * conversation stopped following itself because somebody opened the keyboard.
+ */
+let followHeight = 0;
+
 export function scrollChannel() {
   const list = document.querySelector("#chan-messages");
   if (list !== null) {
     list.scrollTop = list.scrollHeight;
+    followHeight = list.clientHeight;
     followingChannel = true;
+  }
+}
+
+/**
+ * Where the reader had a transcript, in terms of what they were reading.
+ *
+ * Taken before the render that replaces the DOM; `restoreChannelAnchor` puts
+ * it back afterwards. A message id rather than a pixel offset, because
+ * history loading in above the reader moves every offset but not the line
+ * they had their eyes on. The offset is kept as the tie-breaker for the
+ * scrollers whose rows carry no id, and for a message that has since gone.
+ */
+const SCROLL_SURFACES = ["#chan-messages", ".thread-body"];
+
+export function captureChannelScroll() {
+  return SCROLL_SURFACES.map((selector) => {
+    const scroller = document.querySelector(selector);
+    if (scroller === null) {
+      return undefined;
+    }
+    const edge = scroller.getBoundingClientRect().top;
+    // The first row still on screen: what the reader is looking at, as
+    // opposed to the rows that have scrolled off above it.
+    const anchor = [...scroller.querySelectorAll("[id]")].find(
+      (node) => node.getBoundingClientRect().bottom > edge,
+    );
+    return {
+      selector,
+      // Panels share `.thread-body` — a thread, a direct message, the file
+      // editor. Restoring one panel's offset into the next would be a
+      // position the reader never had, so the shape has to match too.
+      shape: scroller.className,
+      top: scroller.scrollTop,
+      id: anchor?.id,
+      offset:
+        anchor === undefined ? 0 : anchor.getBoundingClientRect().top - edge,
+    };
+  }).filter((saved) => saved !== undefined);
+}
+
+/**
+ * Puts a transcript back where `captureChannelScroll` found it.
+ *
+ * Called with the new DOM in place, before `restoreChannelScroll` — following
+ * the bottom and a requested jump both outrank standing still, and both are
+ * that function's job. This is what happens the rest of the time, and what
+ * used to happen instead was nothing at all: the replaced node starts at
+ * `scrollTop` 0, so a reader who was scrolled up anywhere in the history got
+ * the first message ever sent, every time anything rendered.
+ */
+export function restoreChannelAnchor(saved) {
+  for (const entry of saved ?? []) {
+    const scroller = document.querySelector(entry.selector);
+    if (scroller === null || scroller.className !== entry.shape) {
+      continue;
+    }
+    const anchor =
+      entry.id === undefined ? null : document.getElementById(entry.id);
+    if (anchor === null) {
+      // The message is gone — filtered out by a search, or off the end of the
+      // loaded history. The raw offset is still closer than the top.
+      scroller.scrollTop = entry.top;
+      continue;
+    }
+    scroller.scrollTop =
+      anchor.getBoundingClientRect().top -
+      scroller.getBoundingClientRect().top +
+      scroller.scrollTop -
+      entry.offset;
   }
 }
 
@@ -2575,6 +2701,7 @@ export function restoreChannelScroll() {
   if (list === null) {
     return;
   }
+  followHeight = list.clientHeight;
   // A requested jump outranks following: the reader asked for one message,
   // and snapping to the bottom over it would answer a different question.
   // One-shot, and following turns off so the next arriving message does not
@@ -2591,13 +2718,49 @@ export function restoreChannelScroll() {
   }
   if (followingChannel) {
     list.scrollTop = list.scrollHeight;
+    // The pin above measured a transcript whose images have no height yet:
+    // `loading="lazy"` with no intrinsic size is a zero-tall box until the
+    // bytes arrive. Settling on the next frame catches the text that laid
+    // itself out late; the `load` handler below catches the pictures.
+    requestAnimationFrame(() => {
+      const settled = document.querySelector("#chan-messages");
+      if (settled !== null && followingChannel) {
+        settled.scrollTop = settled.scrollHeight;
+        followHeight = settled.clientHeight;
+      }
+    });
   }
   if (list.dataset.followBound === "1") {
     return;
   }
   list.dataset.followBound = "1";
+  // `load` does not bubble, so the transcript listens for it on the way down
+  // rather than binding every image. An attachment that decodes after the
+  // pin adds its full height above the newest message otherwise, which reads
+  // as the conversation drifting upward on its own.
+  list.addEventListener(
+    "load",
+    () => {
+      if (followingChannel) {
+        list.scrollTop = list.scrollHeight;
+        followHeight = list.clientHeight;
+      }
+    },
+    true,
+  );
   list.addEventListener("scroll", () => {
-    const distance = list.scrollHeight - list.scrollTop - list.clientHeight;
+    const height = list.clientHeight;
+    // Not the reader: the scroller changed size under them and the browser
+    // adjusted. Following is theirs to turn off by scrolling away, and a
+    // keyboard opening is not that.
+    if (height !== followHeight) {
+      followHeight = height;
+      if (followingChannel) {
+        list.scrollTop = list.scrollHeight;
+      }
+      return;
+    }
+    const distance = list.scrollHeight - list.scrollTop - height;
     followingChannel = distance <= FOLLOW_SLACK_PX;
   });
 }
@@ -2784,12 +2947,15 @@ function updateMentionState(node) {
   state.mentionIndex = 0;
 }
 
-export function updateComposerInput(node, rerender) {
-  state.chatDraft = node.value;
-  // What the screen actually shows about a draft is the mention popup and
+export function updateComposerInput(node) {
+  const references = draftAttachments(activeChannelId())
+    .map((attachment) => attachment.reference)
+    .join("\n");
+  state.chatDraft = `${node.value}${references === "" ? "" : `\n${references}\n`}`;
+  // What the screen actually shows about a draft is the suggestion popup and
   // nothing else: the send button is always enabled, and the textarea already
-  // holds the character that was just typed. So a render is only owed when
-  // that popup would change.
+  // holds the character that was just typed. Only that small popup needs an
+  // update when its query changes.
   //
   // It used to happen on every keystroke, and a render here is not cheap — it
   // rebuilds the whole app, destroying the textarea being typed into, then
@@ -2797,14 +2963,16 @@ export function updateComposerInput(node, rerender) {
   // long transcript behind it that is the latency between pressing a key and
   // seeing the letter, on the one screen where responsiveness is the entire
   // experience.
-  // Both pickers, not just the mention one: a render is owed whenever either
-  // popup would change, and tracking only the first would leave the command
-  // list frozen — or absent — while somebody types into it.
+  // Both pickers, not just the mention one: their small suggestion surface is
+  // updated whenever either popup changes. Rebuilding the full app for that
+  // used to reparse the transcript, sidebar and roster after every character
+  // typed following "/" or "@".
   const popupState = () =>
     `${String(state.mentionActive)} ${state.mentionQuery} ` +
     `${String(state.slashActive)} ${state.slashQuery}`;
   const before = popupState();
   updateMentionState(node);
+  node.closest(".chan-composer-wrap")?.classList.toggle("mention-active", state.mentionActive);
   const changed = popupState() !== before;
   // The height is a property of this element, not of the app, so it is set
   // directly whether or not anything else is rebuilt.
@@ -2813,15 +2981,11 @@ export function updateComposerInput(node, rerender) {
   if (!changed) {
     return;
   }
-  const selStart = node.selectionStart;
-  const selEnd = node.selectionEnd;
-  rerender();
-  const next = document.querySelector("[data-act='channel-input']");
-  if (next !== null) {
-    next.focus();
-    next.setSelectionRange(selStart, selEnd);
-    next.style.height = "auto";
-    next.style.height = `${Math.min(next.scrollHeight, 148)}px`;
+  const suggestions = node
+    .closest(".chan-composer-wrap")
+    ?.querySelector("[data-composer-suggestions]");
+  if (suggestions !== null && suggestions !== undefined) {
+    suggestions.innerHTML = composerSuggestions(activeChannelId());
   }
 }
 

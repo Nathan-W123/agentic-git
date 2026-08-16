@@ -808,6 +808,40 @@ test("controls the deployment cannot honour are disabled, not chatty", async () 
   assert.equal(/data-act="oauth"/u.test(app), false);
 });
 
+test("slash and mention filtering does not rebuild the app while typing", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("export function updateComposerInput");
+  const end = chats.indexOf("\nexport function pickSlashCommand", start);
+  assert.notEqual(start, -1, "the channel composer input handler should exist");
+  assert.notEqual(end, -1, "the composer input handler should have a boundary");
+  const handler = chats.slice(start, end);
+
+  assert.match(handler, /suggestions\.innerHTML = composerSuggestions/u);
+  assert.equal(
+    /\brerender\s*\(/u.test(handler),
+    false,
+    "filtering / and @ suggestions must not trigger a full-app render",
+  );
+});
+
+test("the channel composer highlights mentions and previews pasted images", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  assert.match(app, /addEventListener\("paste"/u);
+  assert.match(app, /clipboardData\?\.items/u);
+  assert.match(app, /item\.getAsFile\(\)/u);
+  assert.match(app, /event\.preventDefault\(\);[\s\S]{0,80}attachChannelImages/u);
+  assert.match(app, /case "channel-attachment-remove"/u);
+  assert.match(chats, /function draftAttachmentPreviews/u);
+  assert.match(chats, /class="composer-attachments"/u);
+  assert.match(chats, /state\.mentionActive \? " mention-active"/u);
+  assert.match(chats, /classList\.toggle\("mention-active", state\.mentionActive\)/u);
+  assert.match(css, /\.chan-composer-wrap\.mention-active::before/u);
+  assert.match(css, /\.composer-attachment img/u);
+});
+
 test("the invite screen names the product, not only the team", async () => {
   const app = await browserSource();
   const start = app.indexOf("function renderInvite");

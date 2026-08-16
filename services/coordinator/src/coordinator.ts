@@ -138,10 +138,36 @@ interface OpenConversation {
 
 /** See {@link ConversationRegistry}. */
 export interface ConversationRegistryOptions {
-  /** See {@link CoordinatorDependencies.conversationSessionIdleMs}. */
+  /**
+   * See {@link CoordinatorDependencies.conversationSessionIdleMs}. Absent,
+   * COORD_CONVERSATION_SESSION_IDLE_MS decides, and then the default.
+   */
   sessionIdleMs?: number;
-  /** See {@link CoordinatorDependencies.maxConversationSessions}. */
+  /**
+   * See {@link CoordinatorDependencies.maxConversationSessions}. Absent,
+   * COORD_MAX_CONVERSATION_SESSIONS decides, and then the default.
+   */
   maxSessions?: number;
+}
+
+/**
+ * A whole-number knob an operator may set in the environment.
+ *
+ * Refuses nonsense rather than falling back to the default: a deployment that
+ * set a bound and got the default anyway is a deployment whose cap silently
+ * is not the one it configured, and the whole point of these two is that the
+ * held processes are countable.
+ */
+function configuredWholeNumber(key: string, fallback: number): number {
+  const raw = process.env[key]?.trim() ?? "";
+  if (raw.length === 0) {
+    return fallback;
+  }
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${key} must be a non-negative integer`);
+  }
+  return value;
 }
 
 /**
@@ -166,10 +192,23 @@ export class ConversationRegistry {
   private readonly maxSessions: number;
 
   public constructor(options: ConversationRegistryOptions = {}) {
+    // Caller first, deployment second, default last. The environment is read
+    // here rather than at the place a registry is built because a deployment
+    // builds one in its own host process (`apps/web`) and passes no options
+    // at all: a bound only an argument could reach would be a bound no
+    // operator could set.
     this.sessionIdleMs =
-      options.sessionIdleMs ?? DEFAULT_CONVERSATION_SESSION_IDLE_MS;
+      options.sessionIdleMs ??
+      configuredWholeNumber(
+        "COORD_CONVERSATION_SESSION_IDLE_MS",
+        DEFAULT_CONVERSATION_SESSION_IDLE_MS,
+      );
     this.maxSessions =
-      options.maxSessions ?? DEFAULT_MAX_CONVERSATION_SESSIONS;
+      options.maxSessions ??
+      configuredWholeNumber(
+        "COORD_MAX_CONVERSATION_SESSIONS",
+        DEFAULT_MAX_CONVERSATION_SESSIONS,
+      );
   }
 
   /** Removes and returns a conversation; the caller owns it from then on. */
@@ -625,7 +664,8 @@ const DEFAULT_WORKING_CHANGE_POLL_MS = 10_000;
  * Fifteen minutes, like the question deadline and for the same reason: long
  * enough that somebody who stepped away can still pick their conversation
  * back up warm, short enough that an abandoned one is not a process held for
- * the rest of the day.
+ * the rest of the day. A deployment that holds more, or less, sets
+ * COORD_CONVERSATION_SESSION_IDLE_MS.
  */
 const DEFAULT_CONVERSATION_SESSION_IDLE_MS = 15 * 60 * 1000;
 
@@ -633,7 +673,8 @@ const DEFAULT_CONVERSATION_SESSION_IDLE_MS = 15 * 60 * 1000;
  * Eight held CLI processes is a deliberate deployment cost; twenty is the
  * failure mode the design doc names. Between turns a session does nothing
  * but remember, so the cap can be small without costing anyone a running
- * turn — a turn in flight is not in this map at all.
+ * turn — a turn in flight is not in this map at all. A machine with more or
+ * less room than this assumes sets COORD_MAX_CONVERSATION_SESSIONS.
  */
 const DEFAULT_MAX_CONVERSATION_SESSIONS = 8;
 

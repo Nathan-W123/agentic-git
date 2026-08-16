@@ -62,10 +62,21 @@ the web UI.
 | `COORD_CREDENTIAL_POLICY` | What a task does when its submitter has connected no provider account: `host-login` falls back to the machine's own CLI login, `refuse` fails the task. **Set `refuse` on any deployment serving more than one person** — otherwise one person's tasks quietly spend the host owner's subscription. See [per-user provider accounts](architecture/per-user-credentials.md). | `host-login` |
 | `COORD_GITHUB_CLIENT_ID` | Client ID of a GitHub OAuth App with **Enable Device Flow** ticked (github.com → Settings → Developer settings → OAuth Apps). Turns on "Sign in with GitHub" when connecting the push credential in Settings; the device grant needs no client secret. Unset, connecting GitHub means pasting a personal access token. See [per-user provider accounts](architecture/per-user-credentials.md). | unset |
 | `COORD_REPOSITORY_PARALLELISM` | How many remote workers may hold leases in one repository at once. Concurrent workers are separated at plan time: each submits its plan before editing and a colliding plan is sequenced rather than executed. Correctness does not depend on this setting — every result still integrates from its exact leased base or is requeued to replan — so raising it trades a little planning overhead for throughput. | `4` |
+| `COORD_MAX_CONVERSATION_SESSIONS` | How many conversational tasks may hold a live agent session between turns. A held session is a held CLI process, so this is the memory a machine spends on warm conversations. Past the cap the conversation whose turn landed longest ago gives its session up; it stays open and its next turn starts cold in the directory it kept. See [conversational tasks](architecture/conversational-tasks.md). | `8` |
+| `COORD_CONVERSATION_SESSION_IDLE_MS` | How long a conversation's session may sit idle between turns before it is closed. Same trade as the cap, measured in silence rather than in count, and the conversation survives it either way. | `900000` (15 minutes) |
+| `COORD_OPEN_CONVERSATION_MAX_AGE_MS` | How long a landed conversational task waits for its next message before the waiting ends and the task is settled. The work stays landed — only the thread stops being continuable, and its workspace and session are released. | `21600000` (6 hours) |
 
 The same variables work without Docker: build with `npm ci && npm run build`,
 then run `node apps/web/dist/index.js` under whatever supervisor you prefer.
 Node.js >= 24 and `git` must be installed.
+
+Under Compose, a variable reaches the control plane only if it is listed in
+the `control-plane` service's `environment:` block — `docker-compose.yml` says
+so where it forwards the optional knobs. The three conversation settings are
+not forwarded there yet, so a Compose deployment that wants one adds the line
+(`COORD_MAX_CONVERSATION_SESSIONS: ${COORD_MAX_CONVERSATION_SESSIONS:-}`, and
+the same shape for the other two) beside the ones already there. Empty is each
+one's own default, so an unset variable changes nothing.
 
 ## Audit retention
 

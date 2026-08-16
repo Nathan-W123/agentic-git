@@ -1157,6 +1157,12 @@ type ChannelMentionCandidate = {
   effort?: string;
 };
 
+/** One human participant whose displayed channel name can be @mentioned. */
+type ChannelPersonMention = {
+  userId: string;
+  name: string;
+};
+
 /* ------------------------------------------------- no-mention auto-claim --
  *
  * When a channel message carries no "@" at all, `maybeAutoClaimTask` (near
@@ -8006,6 +8012,43 @@ export class ApiGateway {
   }
 
   /**
+   * The people an @mention in this repository's channel can address.
+   *
+   * This intentionally uses the same two access paths as the channel roster:
+   * an organization membership reaches every repository, while a repository
+   * grant reaches this repository only. `projectPeople` is broader because it
+   * powers the project-wide DM roster, so using it here would let a guest from
+   * a different repository suppress an unknown-mention warning.
+   */
+  private async resolveChannelPeople(
+    projectId: string,
+    repositoryId: string,
+  ): Promise<ChannelPersonMention[]> {
+    const project = await this.options.store.getProject(projectId);
+    if (project === undefined) {
+      return [];
+    }
+    const [memberships, grants] = await Promise.all([
+      this.options.store.listMemberships(project.organizationId),
+      this.options.store.listRepositoryGrants(repositoryId),
+    ]);
+    const userIds = [
+      ...new Set([
+        ...memberships.map((entry) => entry.userId),
+        ...grants.map((entry) => entry.userId),
+      ]),
+    ];
+    const users = await Promise.all(
+      userIds.map((userId) => this.options.store.getUser(userId)),
+    );
+    return users.flatMap((user, index) =>
+      user === undefined
+        ? []
+        : [{ userId: userIds[index] ?? user.id, name: user.displayName }],
+    );
+  }
+
+  /**
    * Turns a channel @mention into a real task.
    *
    * Real dispatch is new — posting a message used to be inert chat text no
@@ -8216,10 +8259,10 @@ export class ApiGateway {
         return;
       }
     }
-    const candidates = await this.resolveChannelMentionCandidates(
-      projectId,
-      repositoryId,
-    );
+    const [candidates, people] = await Promise.all([
+      this.resolveChannelMentionCandidates(projectId, repositoryId),
+      this.resolveChannelPeople(projectId, repositoryId),
+    ]);
     if (content.includes("@")) {
       // An explicit @mention — resolved to a real candidate or not — is the
       // sender declaring who they mean. Auto-claim (below) must never also
@@ -8280,7 +8323,20 @@ export class ApiGateway {
       const mentioned = candidates.filter((candidate) =>
         content.includes(`@${candidate.name}`),
       );
-      if (mentioned.length === 0 && ADDRESSED_RE.test(content)) {
+      // Human names are already offered by the channel's mention picker. A
+      // mention of one is a ping, not an instruction to an agent: the posted
+      // channel message and its unread/event delivery are the notification,
+      // and no task should be submitted on the person's behalf. Resolving the
+      // people server-side is what stops a valid human ping from falling into
+      // the "Nobody here answers" agent error below.
+      const mentionedPeople = people.filter((person) =>
+        content.includes(`@${person.name}`),
+      );
+      if (
+        mentioned.length === 0 &&
+        mentionedPeople.length === 0 &&
+        ADDRESSED_RE.test(content)
+      ) {
         // Somebody addressed a name and nothing happened.
         //
         // The silence above was reasoned as conservative, and for a stray

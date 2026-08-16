@@ -155,6 +155,7 @@ import {
   signInForInvitation,
 } from "./data.js";
 import {
+  captureChannelScroll,
   channelInfoPopoverHtml,
   handleComposerKeydown,
   handleTerminalKeydown,
@@ -163,6 +164,7 @@ import {
   pickMention,
   pickSlashCommand,
   renderChats,
+  restoreChannelAnchor,
   restoreChannelScroll,
   runTerminalCommand,
   startTerminalResize,
@@ -2679,6 +2681,9 @@ function renderNow() {
     classes.push("nav-collapsed");
   }
   const focusedField = captureFocus();
+  // Where the reader had the conversation, for the same reason focus is taken
+  // here: the swap below throws both away, and neither is in `state`.
+  const savedScroll = captureChannelScroll();
   // No rail. The channel sidebar is the navigation now — channels are the
   // app — and everything the rail held moved: the brand into that sidebar
   // (clicking it opens Settings), the account block into the topbar avatar,
@@ -2699,7 +2704,11 @@ function renderNow() {
   // rather than inherit one a separate Code screen happened to fetch first.
   if (state.route === "chats") {
     // The transcript is replaced on every render, which resets it to the top.
-    // Put it back where the reader had it before anything else runs.
+    // Put it back where the reader had it before anything else runs. The
+    // anchor first and the follow pin second, in that order: somebody
+    // reading history keeps their message, and somebody at the bottom of a
+    // live conversation still gets the bottom.
+    restoreChannelAnchor(savedScroll);
     restoreChannelScroll();
     void ensureCodeData(render);
     scrollThread();
@@ -2934,13 +2943,30 @@ document.addEventListener("click", (event) => {
       $("[data-act='channel-attach-input']")?.click();
       return;
     }
+    case "channel-attachment-remove": {
+      const escaped = value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
+      state.chatDraft = state.chatDraft
+        .replace(
+          new RegExp(`!?\\[[^\\]]*\\]\\(attachment:${escaped}\\)\\n?`, "gu"),
+          "",
+        )
+        .trimEnd();
+      render();
+      $("[data-act='channel-input']")?.focus();
+      return;
+    }
     case "channel-mention-key": {
       const input = $("[data-act='channel-input']");
       if (input === null) {
         return;
       }
       const at = input.selectionStart ?? input.value.length;
-      state.chatDraft = `${input.value.slice(0, at)}@${input.value.slice(at)}`;
+      const attachments = state.chatDraft.match(
+        /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
+      );
+      state.chatDraft = `${input.value.slice(0, at)}@${input.value.slice(at)}${
+        attachments === null ? "" : `\n${attachments.join("\n")}\n`
+      }`;
       state.mentionActive = true;
       state.mentionQuery = "";
       state.mentionIndex = 0;
@@ -4118,6 +4144,23 @@ document.addEventListener("change", (event) => {
     }
     default:
   }
+});
+
+/* Clipboard image files take the same validated upload path as the picker.
+   Text-only clipboard data is left to the textarea's native paste behavior. */
+document.addEventListener("paste", (event) => {
+  if (event.target?.dataset?.act !== "channel-input") {
+    return;
+  }
+  const files = [...(event.clipboardData?.items ?? [])]
+    .filter((item) => item.kind === "file")
+    .map((item) => item.getAsFile())
+    .filter((file) => file !== null);
+  if (files.length === 0) {
+    return;
+  }
+  event.preventDefault();
+  void attachChannelImages(files);
 });
 
 document.addEventListener("input", (event) => {
