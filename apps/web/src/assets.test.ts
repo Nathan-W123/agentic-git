@@ -785,6 +785,43 @@ test("motion is restrained, reducible, and off when an agent is not there", asyn
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/u);
 });
 
+test("agent news is one compact banner, not a stack of cards", async () => {
+  const ui = await publicFile("ui.js");
+  const css = await publicFile("styles.css");
+  const start = ui.indexOf("export function banner");
+  const end = ui.indexOf("\nexport function toast", start);
+  assert.notEqual(start, -1, "the agent-news banner was not found");
+  assert.notEqual(end, -1, "the toast function no longer follows the banner");
+  const banner = ui.slice(start, end);
+
+  // New news replaces the old line instead of building an alert stack, and
+  // the only chrome left beside that line is its accessible dismiss button.
+  assert.match(banner, /querySelectorAll\("\.toast\.banner"\)/u);
+  assert.match(banner, /previous\.remove\(\)/u);
+  assert.match(banner, /dismiss\.setAttribute\("aria-label", "Dismiss"\)/u);
+
+  const bannerRule = /\.toast\.banner \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
+  assert.match(bannerRule, /max-width: min\(320px, calc\(100vw - 24px\)\)/u);
+  assert.match(bannerRule, /border-color: var\(--border\)/u);
+  assert.match(bannerRule, /box-shadow: var\(--shadow-card\)/u);
+  assert.match(bannerRule, /overflow-wrap: anywhere/u);
+  assert.match(bannerRule, /animation: none/u);
+  assert.equal(/accent-line/u.test(bannerRule), false, "news should not look selected");
+
+  const exitRule = /\.toast\.banner\.banner-out \{([\s\S]*?)\n\}/u.exec(css)?.[1] ?? "";
+  assert.match(exitRule, /opacity: 0/u);
+  assert.equal(/transform/u.test(exitRule), false, "dismissal should not move the banner");
+
+  assert.match(
+    css,
+    /@media \(max-width: 600px\)[\s\S]*?\.toast\.banner \{\s*width: calc\(100vw - 24px\);/u,
+  );
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\s*\.toast\.banner \{\s*transition: none;/u,
+  );
+});
+
 test("every agent kind resolves to its own character", async () => {
   const source = await publicFile("ui.js");
   // The agent keys and the doodle names are deliberately different words
