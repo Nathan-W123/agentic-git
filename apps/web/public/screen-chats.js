@@ -47,6 +47,7 @@ api,
   providerOptionsNote,
   sendChannelMessage,
   state,
+  threadIsWorking,
   threadTitle,
   threadTitleReply,
   typingOn,
@@ -1113,33 +1114,23 @@ function chanSearchRow() {
 }
 
 /**
- * The names of everybody who said something in a thread, first appearance
- * first and one entry per person however much they said.
+ * Everybody who said something in a thread, first appearance first and one
+ * entry per person however much they said.
+ *
+ * Authors rather than names, because the faces are drawn from them: an agent
+ * gets its vendor mark in its owner's colour, a person gets their portrait,
+ * and only `channelAuthor` knows which of the two a reply came from.
  */
 function threadParticipants(replies, repositoryId) {
-  const names = [];
+  const authors = [];
   for (const reply of replies) {
-    const name = channelAuthor(repositoryId, reply)?.name ?? "";
-    if (name !== "" && !names.includes(name)) {
-      names.push(name);
+    const author = channelAuthor(repositoryId, reply);
+    const name = author?.name ?? "";
+    if (name !== "" && !authors.some((seen) => seen.name === name)) {
+      authors.push(author);
     }
   }
-  return names;
-}
-
-/**
- * Who is in a thread, as words rather than as a stack of faces.
- *
- * "Luna +2" is the same fact the overlapped avatars carried, in one line of
- * text that never has to be decoded — and it leaves the row's leading slot
- * free for a single glyph, which is what makes a list of these scan as a list
- * rather than as a wall of portraits.
- */
-function threadWho(names) {
-  if (names.length === 0) {
-    return "Thread";
-  }
-  return names.length === 1 ? names[0] : `${names[0]} +${names.length - 1}`;
+  return authors;
 }
 
 /** How much was actually said, thinking excluded. */
@@ -1148,43 +1139,45 @@ function threadSaidCount(said) {
 }
 
 /**
- * The card under a message that stands for its whole thread.
+ * The way into a thread from the channel: who is in it, and how many replies.
  *
- * It used to read "8 replies", counting every step the run narrated to
- * itself — so a one-line edit looked like a long conversation, and the number
- * told you how long the work took rather than how much was said. It also
- * never said what the thread was *about*, though the agent names every task
- * it picks up and that name is sitting in the first reply.
+ * Deliberately not the card the threads pullout uses. In the channel the root
+ * message directly above has already said what the thread is about, so a card
+ * repeating the task's name under every one of them was the same sentence
+ * twice inside 40 pixels, wrapped in a surface loud enough to compete with the
+ * conversation it belongs to.
  *
- * Now it is the same row a background task gets anywhere else: one glyph, the
- * name of the work, a quiet second line saying who and how much, and a chevron
- * that promises there is somewhere to go. The avatar stack and the accent-
- * coloured link text went with it — four overlapping portraits and a tinted
- * sentence competing for a line that only ever answers "what is this, and how
- * do I open it".
+ * What is left is the one fact the message above does not carry — how much was
+ * said in reply — as an accent-coloured link with the repliers' faces beside
+ * it. The colour is the reader's own accent rather than a fixed blue, so it is
+ * the same "this is a link" signal every other tinted thing on the screen uses.
+ *
+ * The count still excludes the run's own narration and the `Task:` title
+ * reply: those are the thread naming itself and thinking aloud, not replies,
+ * and counting them made a one-line edit look like a long conversation.
  */
 function threadSummaryLink(entry, replies, repositoryId) {
   const titled = threadTitleReply(entry);
-  // No content fallback here: this card renders directly under the root
-  // message's own text, and a "title" echoing it would say nothing twice.
-  // The task-objective fallback inside the helper still names threads that
-  // never got a "Task:" reply.
-  const name = threadTitle(entry, { fallbackToContent: false });
   const said = replies.filter(
     (reply) => reply !== titled && !isThreadThinking(reply),
   );
-  const who = threadWho(threadParticipants(replies, repositoryId));
+  const faces = threadParticipants(replies, repositoryId)
+    .slice(0, 3)
+    .map((author) =>
+      author.agent !== undefined
+        ? agentFace(author.agent, 20)
+        : avatar(
+            author.name,
+            20,
+            author.name,
+            author.name === currentUserName() ? myAvatar() : undefined,
+          ),
+    )
+    .join("");
   return `<button type="button" class="cmsg-thread-link" data-act="channel-thread-open"
       data-value="${esc(entry.id)}">
-      <span class="ctl-icon">${icon("terminal")}</span>
-      <span class="ctl-main">
-        <span class="ctl-name">${esc(name === "" ? "Thread" : name)}</span>
-        <span class="ctl-meta">
-          <span class="ctl-who">${esc(who)}</span>
-          <span class="ctl-count">${esc(threadSaidCount(said.length))}</span>
-        </span>
-      </span>
-      <span class="ctl-go">${icon("chevronRight")}</span>
+      <span class="avatar-stack ctl-faces">${faces}</span>
+      <span class="cmsg-thread-replies">${esc(threadSaidCount(said.length))}</span>
     </button>`;
 }
 
@@ -2067,6 +2060,12 @@ function threadListPanel(repositoryId) {
                   (reply) => reply.kind !== "progress" && reply !== titled,
                 ).length;
                 const author = channelAuthor(repositoryId, entry);
+                // The one thing a log of finished work cannot say for itself:
+                // which of these is still moving. Marked from the task's own
+                // status, the same signal that keeps the agent's typing dots
+                // up in the channel, so the two never disagree about who is
+                // working.
+                const working = threadIsWorking(entry);
                 // The subject leads: somebody scanning this log is looking
                 // for a piece of work, and the agent's name told them which
                 // colleague — the wrong first question. Who and how much
@@ -2074,8 +2073,12 @@ function threadListPanel(repositoryId) {
                 // to the row's tooltip: the list is newest-first, so the
                 // ordering already answers "when" for anybody scanning it.
                 return `<div class="thread-item-row">
-                  <button type="button" class="thread-item"
-                    title="${esc(clockTime(entry.at))}"
+                  <button type="button" class="thread-item${working ? " thread-item-active" : ""}"
+                    title="${esc(
+                      working
+                        ? `Working now — started ${clockTime(entry.at)}`
+                        : clockTime(entry.at),
+                    )}"
                     data-act="channel-thread-open" data-value="${esc(entry.id)}">
                     <span class="ti-icon">${icon("terminal")}</span>
                     <span class="ti-main">
@@ -2083,6 +2086,7 @@ function threadListPanel(repositoryId) {
                       <span class="ti-meta">
                         <span class="ti-who">${esc(author.name)}</span>
                         <span class="ti-count">${esc(threadSaidCount(count))}</span>
+                        ${working ? `<span class="ti-live">Working</span>` : ""}
                       </span>
                     </span>
                     <span class="ti-go">${icon("chevronRight")}</span>

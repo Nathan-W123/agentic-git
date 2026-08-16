@@ -4905,26 +4905,60 @@ svg {
   transition: width 0.4s ease;
 }
 
-/* The way into the thread: a card, not a tinted sentence.
-   It used to be an accent-coloured inline link carrying a stack of faces, so
-   the one row that answers "what is this and how do I open it" was also the
-   loudest thing under the message. A quiet surface with a chevron says the
-   same thing and lets the conversation stay the brightest surface. */
+/* The way into a thread from the channel: faces, then a tinted count.
+   No surface, no border, no chevron — the card treatment belongs to the
+   threads pullout, where a row has to identify a thread with nothing above it.
+   Here the message it hangs under has already done that, so all this owes the
+   reader is "there is more, and this much of it". Sized to its content rather
+   than the column so the hit area ends where the words do. */
 .cmsg-thread-link {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 10px;
-  width: 100%;
-  margin-top: 8px;
-  padding: 9px 10px;
-  border-radius: var(--radius);
-  background: var(--bg-card);
-  color: var(--text);
+  gap: 8px;
+  max-width: 100%;
+  margin-top: 6px;
+  padding: 2px 0;
   text-align: left;
 }
 
-.cmsg-thread-link:hover {
-  background: var(--bg-card-2);
+/* The count is the link, and it is the reader's own accent rather than a
+   fixed blue: every other clickable tint on the screen is drawn from the same
+   custom property, so this reads as the same kind of thing in any theme. */
+.cmsg-thread-replies {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--accent-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cmsg-thread-link:hover .cmsg-thread-replies {
+  text-decoration: underline;
+}
+
+/* The repliers, overlapped. `avatar-stack` already carries the overlap for
+   portraits; agent faces are vendor marks rather than `.avatar`s, so the same
+   pull has to be spelled out for whatever the stack actually holds. The ring
+   is the chat surface's own colour, which is what makes overlapping faces read
+   as separate rather than as one smudge. */
+.cmsg-thread-link .ctl-faces > * {
+  margin-right: -6px;
+}
+
+.cmsg-thread-link .ctl-faces > *:last-child {
+  margin-right: 0;
+}
+
+.cmsg-thread-link .ctl-faces .avatar {
+  border: 2px solid var(--bg-chat);
+}
+
+/* A presence dot on a 20px face in a stack is a third of the face, and it is
+   answering a question nobody asked of a thread summary. */
+.cmsg-thread-link .ctl-faces .presence {
+  display: none;
 }
 
 /* ------------------------------------------------------------ mention ---- */
@@ -7108,6 +7142,35 @@ dialog.modal::backdrop {
   background: var(--bg-card-2);
 }
 
+/* The thread an agent is working on right now. The list is a log of finished
+   work with the live ones mixed in, and nothing in a row said which was
+   which — so the one thread worth watching looked exactly like the fifty that
+   ended yesterday. Lit in the accent's own wash with a line down its leading
+   edge: enough to find at a glance down the list, and still a card rather
+   than a second kind of row. */
+.thread-item-active {
+  background: var(--accent-wash);
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
+.thread-item-active:hover {
+  background: var(--accent-wash-strong);
+}
+
+.thread-item-active .ti-icon {
+  color: var(--accent-bright);
+}
+
+/* "Working", breathing, in the same accent as the bar under a running thread
+   in the channel — one word, because the row's own name already says what the
+   work is. */
+.thread-item-active .ti-live {
+  flex: none;
+  color: var(--accent-bright);
+  font-weight: 600;
+  animation: status-breathe 2.4s ease-in-out infinite;
+}
+
 /* ------------------------------------------------------ avatar and theme ---- */
 
 .avatar.has-photo {
@@ -7416,12 +7479,13 @@ dialog.modal::backdrop {
 }
 
 /* ------------------------------------------------- thread summary ---- */
-/* The card under a message that stands for its thread: one glyph, what the
-   work is called, and a quiet second line saying who is in it and how much
-   was actually said. Two lines and nothing else — the same shape a background
-   task gets in the threads pullout, so the two surfaces read as one thing
-   seen twice rather than as two designs. */
-.cmsg-thread-link .ctl-icon,
+/* One thread in the pullout: a glyph, what the work is called, and a quiet
+   second line saying who is in it and how much was actually said. This shape
+   belongs to the pullout alone. The channel used to share these rules, so the
+   two surfaces were one design seen twice — but a card in the channel repeats
+   the message directly above it, which is why the channel now gets a plain
+   tinted count (`.cmsg-thread-link`) and these selectors name only
+   `.thread-item`. */
 .thread-item .ti-icon {
   display: flex;
   flex: none;
@@ -7430,7 +7494,6 @@ dialog.modal::backdrop {
   color: var(--text-3);
 }
 
-.cmsg-thread-link .ctl-icon svg,
 .thread-item .ti-icon svg {
   width: 17px;
   height: 17px;
@@ -7438,20 +7501,17 @@ dialog.modal::backdrop {
 
 /* The chevron only promises there is somewhere to go, so it is the dimmest
    thing in the row and never competes with the name. */
-.cmsg-thread-link .ctl-go,
 .thread-item .ti-go {
   display: flex;
   flex: none;
   color: var(--text-4);
 }
 
-.cmsg-thread-link .ctl-go svg,
 .thread-item .ti-go svg {
   width: 16px;
   height: 16px;
 }
 
-.cmsg-thread-link .ctl-main,
 .thread-item .ti-main {
   display: grid;
   gap: 2px;
@@ -7462,7 +7522,6 @@ dialog.modal::backdrop {
 /* The name the agent gave the task carries the card. Wrapped to two lines
    rather than truncated at one: a task name is a sentence, and the half of it
    that fits is rarely the half that identifies the work. */
-.cmsg-thread-link .ctl-name,
 .thread-item .ti-text {
   font-size: 13px;
   font-weight: 600;
@@ -7475,7 +7534,6 @@ dialog.modal::backdrop {
 }
 
 /* Who, then how much — metadata, in the size and colour that says so. */
-.cmsg-thread-link .ctl-meta,
 .thread-item .ti-meta {
   display: flex;
   align-items: baseline;
@@ -7484,7 +7542,6 @@ dialog.modal::backdrop {
   min-width: 0;
 }
 
-.cmsg-thread-link .ctl-who,
 .thread-item .ti-who {
   color: var(--text-2);
   overflow: hidden;
@@ -7492,7 +7549,6 @@ dialog.modal::backdrop {
   white-space: nowrap;
 }
 
-.cmsg-thread-link .ctl-count,
 .thread-item .ti-count {
   color: var(--text-4);
   flex: none;
