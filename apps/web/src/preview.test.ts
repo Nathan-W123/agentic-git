@@ -246,6 +246,9 @@ async function environmentReportingRepository(scripts: {
       'say("COORD_HOST");',
       'say("SECRET_FROM_CONFIG");',
       'say("COORD_BOOTSTRAP_TOKEN");',
+      // How the container was deployed, which must not reach a preview: with
+      // it set, the preview's own `npm ci` omits devDependencies.
+      'say("NODE_ENV");',
       'createServer((_, response) => response.end("ok")).listen(',
       '  Number(process.env["PORT"]), "127.0.0.1");',
       "",
@@ -288,6 +291,10 @@ test("a previewed app is given its own project, not the control plane's", async 
   const inherited = path.join(root, "live-project");
   process.env["COORD_PROJECT_ROOT"] = inherited;
   process.env["COORD_BOOTSTRAP_TOKEN"] = "not-for-the-child";
+  // How the *container* was deployed. The image sets this, and it is the one
+  // that broke previewing a repository whose dev server has to be built.
+  const previousNodeEnv = process.env["NODE_ENV"];
+  process.env["NODE_ENV"] = "production";
   try {
     const repository = await repoAdd(project, store, {
       sourcePath,
@@ -323,12 +330,24 @@ test("a previewed app is given its own project, not the control plane's", async 
         await reported(previews, repository.id, "COORD_HOST"),
         "127.0.0.1",
       );
+      // And the deployment's own NODE_ENV does not travel. With it set, the
+      // preview's `npm ci` omits devDependencies, so a repository whose dev
+      // server is built by anything installs cleanly and then dies with
+      // "turbo: not found" — which reads as the start command being wrong, so
+      // the obvious fix is to type a different start command, and that cannot
+      // work either. The command was never the problem.
+      assert.equal(await reported(previews, repository.id, "NODE_ENV"), "");
 
       const response = await fetch(status.url);
       assert.equal(response.status, 200);
       assert.equal(await response.text(), "ok");
     } finally {
       await previews.close();
+      if (previousNodeEnv === undefined) {
+        delete process.env["NODE_ENV"];
+      } else {
+        process.env["NODE_ENV"] = previousNodeEnv;
+      }
     }
   } finally {
     delete process.env["COORD_PROJECT_ROOT"];

@@ -42,6 +42,9 @@ const LOG_LINES = 200;
  */
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 
+/** How long the play button waits for a port before reporting "starting". */
+const START_READY_TIMEOUT_MS = 120_000;
+
 export interface PreviewStatus {
   repositoryId: string;
   /** Where to look. Always loopback; see the class doc. */
@@ -544,6 +547,28 @@ const CONTROL_PLANE_VARIABLES = [
   "COORD_BOOTSTRAP_TOKEN",
   "COORD_SECURE_COOKIES",
   "COORD_ALLOWED_ORIGINS",
+  // How the control plane was deployed, which is not how a preview is run.
+  //
+  // The container image sets `NODE_ENV=production`, and inheriting it made
+  // `npm ci` in the preview's checkout omit devDependencies — so a repository
+  // whose dev server is built by anything (`turbo`, `vite`, `tsc`) installed
+  // successfully and then failed with `turbo: not found`. Which reads as the
+  // start command being wrong, so the obvious thing to try is a different
+  // start command, and that cannot work either: the command was never the
+  // problem, the install was.
+  //
+  // Deleted rather than set to "development": unset is what npm needs to
+  // install dev dependencies, and it lets the app pick its own default rather
+  // than this deciding one for it.
+  "NODE_ENV",
+  "NPM_CONFIG_PRODUCTION",
+  "npm_config_production",
+  // npm exports its own invocation into the child environment, so a preview
+  // spawned from a control plane that was itself started by `npm start`
+  // inherits that run's config and lifecycle variables.
+  "npm_config_argv",
+  "npm_lifecycle_event",
+  "npm_lifecycle_script",
 ];
 
 /**
@@ -819,7 +844,18 @@ export class PreviewService {
     // the bug being fixed — so the wait ends the instant the child dies, and
     // otherwise gives up quietly and reports the preview as started. This is
     // the same reading `startForTask` has always taken.
-    status.ready = await waitForPort(port, () => status.exited !== undefined);
+    // Longer than the agent path below, because the waits are different
+    // things. This one is a person who pressed play, and a repository whose
+    // dev server builds before it listens — a turbo or vite pipeline from a
+    // cold cache — routinely needs more than twenty seconds to reach a port.
+    // Timing out here does not stop it; the status simply reads "starting"
+    // when it is in fact starting. The agent path stays short because it is
+    // holding a workspace and its leases while it waits.
+    status.ready = await waitForPort(
+      port,
+      () => status.exited !== undefined,
+      START_READY_TIMEOUT_MS,
+    );
     const exit = status.exited;
     if (exit !== undefined) {
       const said = status.recentOutput.slice(-4).join(" ").trim();
