@@ -23,8 +23,13 @@ test("a render nobody asked for does not move the reader", async () => {
   // The whole screen goes through one `innerHTML` swap, which drops the
   // transcript's scroll on the floor. Taking the position has to happen
   // before that line, not after it.
-  const capture = app.indexOf("captureChannelScroll()");
-  const swap = app.indexOf("root.innerHTML = `<div class=\"${classes");
+  const capture = app.indexOf("const savedScroll = captureChannelScroll()");
+  // Matched on the assignment rather than on the markup that follows it: the
+  // opening tag has been rewritten twice by work that had nothing to do with
+  // scrolling — once by the sidebar removal, which is how this assertion came
+  // to be looking for a `${classes` interpolation that no longer existed —
+  // and a guard that silently stops guarding is worse than no guard.
+  const swap = app.indexOf("root.innerHTML = `<div class=\"app\"", capture);
   assert.notEqual(capture, -1, "app.js should capture the transcript position");
   assert.notEqual(swap, -1, "the screen-wide innerHTML swap should still exist");
   assert.equal(
@@ -35,7 +40,7 @@ test("a render nobody asked for does not move the reader", async () => {
   // And putting it back has to happen before the follow pin, or a reader at
   // the bottom of a live conversation would be left mid-history instead.
   const anchor = app.indexOf("restoreChannelAnchor(savedScroll)");
-  const follow = app.indexOf("restoreChannelScroll();", swap);
+  const follow = app.indexOf("restoreChannelScroll(savedScroll);", swap);
   assert.notEqual(anchor, -1, "app.js should restore the captured position");
   assert.equal(anchor > swap, true, "the restore needs the new DOM in place");
   assert.equal(
@@ -77,11 +82,68 @@ test("a keyboard opening is not the reader scrolling away", async () => {
 test("a picture that decodes late does not drift the conversation", async () => {
   const chats = await publicFile("screen-chats.js");
   const styles = await publicFile("styles.css");
-  // Pinned once synchronously, when a lazy attachment is still a zero-tall
-  // box, then again once the frame settles and again once the bytes arrive.
+  // Pinned once synchronously, when a picture nobody has measured is still
+  // holding a guessed box, then again once the frame settles and again once
+  // the bytes arrive.
   assert.match(chats, /requestAnimationFrame\(\(\) => \{/u);
   assert.match(chats, /list\.addEventListener\(\s*"load",/u);
   // And the box is reserved up front, so the shift is bounded rather than
   // being the picture's whole height.
   assert.match(styles, /\.cmsg-image img \{[^}]*aspect-ratio: auto 4 \/ 3;/su);
+});
+
+test("an image is only ever measured once", async () => {
+  const chats = await publicFile("screen-chats.js");
+  // The screen is one `innerHTML` assignment, so a decoded `<img>` is thrown
+  // away and rebuilt by every background render — a poll tick, somebody
+  // else's typing indicator — and laid out again at the stylesheet's guessed
+  // 4/3 box until it decodes a second time. Per picture, per render. That is
+  // the conversation teleporting under a reader who is only typing.
+  //
+  // So the first decode is measured and kept, and every render after it
+  // states the real ratio in the markup. Attachment ids address immutable
+  // bytes, which is what makes a remembered size safe to reuse.
+  assert.match(chats, /const IMAGE_SIZE_KEY = "ag\.image-sizes";/u);
+  assert.match(chats, /function rememberImageSize\(node\)/u);
+  assert.match(chats, /node\?\.naturalWidth/u);
+  assert.match(chats, /node\?\.naturalHeight/u);
+  assert.match(chats, /persist\(IMAGE_SIZE_KEY, JSON\.stringify\(\[\.\.\.imageSizes\]\)\)/u);
+  // Anything on this origin can write that key, and the value goes straight
+  // into a `style` attribute, so it is checked on the way back in.
+  assert.match(chats, /RATIO_PATTERN\.test\(entry\[1\]\)/u);
+  // The measured ratio is inline, and carries no `auto` — the numbers *are*
+  // the natural ratio, so letting the decode restate them is the shift being
+  // removed. An image nobody has measured gets no inline ratio at all, and
+  // keeps the stylesheet's fallback and its lazy load.
+  assert.match(chats, /style="aspect-ratio: \$\{esc\(ratio\)\}"/u);
+  assert.match(chats, /ratio === undefined \? ' loading="lazy"' : ""/u);
+  assert.match(chats, /decoding="async"/u);
+  // The id has to reach the measuring handler, on the transcript image and on
+  // the composer thumbnail — staging an image before posting it is what makes
+  // the very first render of the posted message the right size.
+  assert.match(chats, /data-attachment="\$\{esc\(image\.id\)\}"/u);
+  assert.match(chats, /data-attachment="\$\{esc\(attachment\.id\)\}"/u);
+});
+
+test("a first decode holds a reader who is not following", async () => {
+  const chats = await publicFile("screen-chats.js");
+  // The follow pin is bound to `#chan-messages` and answers for the reader at
+  // the bottom of a live conversation. Everyone else — reading history, or
+  // reading a thread, where there is no follow at all — used to get nothing:
+  // an unmeasured picture above them took its real height and slid the
+  // message they were on down the screen.
+  //
+  // Re-applying the anchor is the whole correction. It is a message id and a
+  // distance from the top of the scroller, so it survives anything growing
+  // above it. Bound once, on `document`, because `load` does not bubble and
+  // the composer thumbnail is not inside any scroller.
+  assert.match(chats, /function watchImageSizes\(\)/u);
+  assert.match(chats, /document\.addEventListener\(\s*"load",/u);
+  assert.match(chats, /if \(imageWatchBound\) \{/u);
+  assert.match(chats, /restoreChannelAnchor\(\[held\.entry\]\)/u);
+  // Only while the scroller is still where the restore left it. If it has
+  // moved, the reader moved it — or the follow pin did — and reaching in
+  // would be the yank this is here to prevent.
+  assert.match(chats, /scroller\.scrollTop !== held\.applied/u);
+  assert.match(chats, /heldAnchors\.set\(\s*entry\.selector/u);
 });

@@ -360,6 +360,114 @@ const ATTACHMENT_PATTERN =
   /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu;
 
 /**
+ * The shape of every attachment this browser has already drawn once.
+ *
+ * A picture has no size until its bytes arrive, and the whole screen is one
+ * `innerHTML` assignment — so every render throws away the `<img>` that had
+ * already decoded and builds a fresh one that has not. The transcript then
+ * laid every image out at the stylesheet's guessed 4/3 box and snapped it to
+ * the real shape a moment later, once per render, for every picture on
+ * screen. A background frame arriving while somebody read or typed is what
+ * that looked like from the outside: the conversation jumping under them.
+ *
+ * The fix is to stop guessing. The first decode is measured and kept here,
+ * and every render after it hands the browser the true ratio in the markup,
+ * so the box is right in the first frame and never moves. Attachment ids are
+ * content-addressed and their bytes are immutable, so a remembered size can
+ * never be wrong for the id it was measured on — which is what makes this
+ * safe to keep in `localStorage` and reuse across reloads.
+ */
+const IMAGE_SIZE_KEY = "ag.image-sizes";
+
+/**
+ * Enough for any transcript somebody is actually reading, and small enough
+ * that the entry never grows without bound. `Map` iterates in insertion
+ * order, so the oldest measurement is the one that goes.
+ */
+const IMAGE_SIZE_LIMIT = 400;
+
+const RATIO_PATTERN = /^[1-9][0-9]{0,4} \/ [1-9][0-9]{0,4}$/u;
+
+const imageSizes = new Map(
+  (() => {
+    try {
+      const saved = JSON.parse(
+        window.localStorage.getItem(IMAGE_SIZE_KEY) ?? "[]",
+      );
+      return Array.isArray(saved)
+        ? saved.filter(
+            (entry) =>
+              Array.isArray(entry) &&
+              typeof entry[0] === "string" &&
+              typeof entry[1] === "string" &&
+              // Read back into a `style` attribute, so it is checked on the
+              // way in rather than trusted because this app wrote it: another
+              // script on the origin can put anything under this key.
+              RATIO_PATTERN.test(entry[1]),
+          )
+        : [];
+    } catch {
+      return [];
+    }
+  })(),
+);
+
+/**
+ * Measures one decoded attachment, and says whether that was news.
+ *
+ * "News" is what the callers act on: an image whose real shape differed from
+ * the box reserved for it has just changed the height of everything below it,
+ * and that is the moment a reader needs putting back where they were.
+ */
+function rememberImageSize(node) {
+  const id = node?.dataset?.attachment;
+  const width = node?.naturalWidth ?? 0;
+  const height = node?.naturalHeight ?? 0;
+  if (id === undefined || width < 1 || height < 1) {
+    return false;
+  }
+  const ratio = `${String(width)} / ${String(height)}`;
+  if (imageSizes.get(id) === ratio) {
+    return false;
+  }
+  imageSizes.set(id, ratio);
+  while (imageSizes.size > IMAGE_SIZE_LIMIT) {
+    imageSizes.delete(imageSizes.keys().next().value);
+  }
+  try {
+    persist(IMAGE_SIZE_KEY, JSON.stringify([...imageSizes]));
+  } catch {
+    // A full or blocked store is not worth losing the render over. The map
+    // still holds the measurement for the rest of this session.
+  }
+  return true;
+}
+
+/**
+ * One attachment, in a box the browser can lay out before it has the bytes.
+ *
+ * The ratio goes in the `style` attribute rather than the stylesheet because
+ * it is per-image; the stylesheet keeps the 4/3 fallback for the one render
+ * that happens before anything has been measured. An inline `aspect-ratio`
+ * has no `auto` keyword in it on purpose — the measured numbers *are* the
+ * natural ratio, so letting the decode override them again is the shift this
+ * is here to remove.
+ *
+ * `loading="lazy"` stays on exactly the images nobody has measured yet. A
+ * lazy image that has never been seen is a zero-cost placeholder; a lazy
+ * image that has been seen is a picture the reader already has in cache, and
+ * deferring it only buys a blank box where the bytes were ready.
+ */
+function attachmentImage(base, image) {
+  const ratio = imageSizes.get(image.id);
+  return `<a class="cmsg-image" href="${esc(base + image.id)}" target="_blank"
+             rel="noopener noreferrer"><img src="${esc(base + image.id)}"
+             alt="${esc(image.alt)}" data-attachment="${esc(image.id)}"
+             decoding="async"${ratio === undefined ? ' loading="lazy"' : ""}
+             ${ratio === undefined ? "" : `style="aspect-ratio: ${esc(ratio)}"`}></a>`;
+}
+
+/**
  * The three helpers below take the draft rather than reading one.
  *
  * Two composers stage images now — the channel bar and the thread panel's
@@ -412,7 +520,8 @@ function draftAttachmentPreviews(
   return `<div class="composer-attachments" aria-label="Attached images">${attachments
     .map(
       (attachment) => `<div class="composer-attachment">
-        <img src="${esc(attachment.src)}" alt="${esc(attachment.alt)}">
+        <img src="${esc(attachment.src)}" alt="${esc(attachment.alt)}"
+          data-attachment="${esc(attachment.id)}" decoding="async">
         <span title="${esc(attachment.alt)}">${esc(attachment.alt)}</span>
         <button type="button" class="composer-attachment-remove"
           data-act="${esc(removeAct)}" data-value="${esc(attachment.id)}"
@@ -628,14 +737,7 @@ function messageBody(content, repositoryId, mentions) {
     `/repositories/${encodeURIComponent(repositoryId ?? "")}/attachments/`;
   return (
     richText(stripped.trim(), resolvedMentions) +
-    images
-      .map(
-        (image) =>
-          `<a class="cmsg-image" href="${esc(base + image.id)}" target="_blank"
-             rel="noopener noreferrer"><img src="${esc(base + image.id)}"
-             alt="${esc(image.alt)}" loading="lazy"></a>`,
-      )
-      .join("")
+    images.map((image) => attachmentImage(base, image)).join("")
   );
 }
 
@@ -3437,6 +3539,7 @@ export function captureChannelScroll() {
  * the first message ever sent, every time anything rendered.
  */
 export function restoreChannelAnchor(saved) {
+  watchImageSizes();
   for (const entry of saved ?? []) {
     const scroller = document.querySelector(entry.selector);
     if (
@@ -3452,14 +3555,75 @@ export function restoreChannelAnchor(saved) {
       // The message is gone — filtered out by a search, or off the end of the
       // loaded history. The raw offset is still closer than the top.
       scroller.scrollTop = entry.top;
-      continue;
+    } else {
+      scroller.scrollTop =
+        anchor.getBoundingClientRect().top -
+        scroller.getBoundingClientRect().top +
+        scroller.scrollTop -
+        entry.offset;
     }
-    scroller.scrollTop =
-      anchor.getBoundingClientRect().top -
-      scroller.getBoundingClientRect().top +
-      scroller.scrollTop -
-      entry.offset;
+    heldAnchors.set(entry.selector, { entry, applied: scroller.scrollTop });
   }
+}
+
+/**
+ * The anchor each surface is currently sitting on, and the offset that put it
+ * there.
+ *
+ * A picture decoding late is the one thing that moves a reader *after* the
+ * restore above has finished: it adds its real height in the middle of
+ * history that was already laid out, and everything below — including the
+ * message being read — slides. The anchor is a message id and a distance from
+ * the top of the scroller, so re-applying the same one puts that message back
+ * under the reader's eyes whatever grew above it.
+ *
+ * `applied` is how this knows it still may. If the scroller has moved since
+ * the restore, the reader moved it, or the follow pin did, and either way
+ * this has no business reaching in.
+ */
+const heldAnchors = new Map();
+
+let imageWatchBound = false;
+
+/**
+ * Measures every image the app draws, once, and holds the reader still when
+ * the measurement changes what they are looking at.
+ *
+ * On `document` rather than on the transcript, and bound once rather than per
+ * render: `load` does not bubble, so this is a capture-phase listener, and
+ * that also catches the composer's staged thumbnail. Measuring there is worth
+ * having — an image is staged before it is posted, so by the time the message
+ * appears in the transcript its shape is already known and the very first
+ * render of it is the right size.
+ */
+function watchImageSizes() {
+  if (imageWatchBound) {
+    return;
+  }
+  imageWatchBound = true;
+  document.addEventListener(
+    "load",
+    (event) => {
+      const node = event.target;
+      if (node?.tagName !== "IMG" || !rememberImageSize(node)) {
+        return;
+      }
+      // A size nobody had measured means the box just changed from the
+      // stylesheet's guess to the truth, which moved everything below it.
+      for (const [selector, held] of heldAnchors) {
+        const scroller = document.querySelector(selector);
+        if (
+          scroller === null ||
+          !scroller.contains(node) ||
+          scroller.scrollTop !== held.applied
+        ) {
+          continue;
+        }
+        restoreChannelAnchor([held.entry]);
+      }
+    },
+    true,
+  );
 }
 
 /**
@@ -3496,10 +3660,11 @@ export function restoreChannelScroll(saved) {
   }
   if (followingChannel) {
     list.scrollTop = list.scrollHeight;
-    // The pin above measured a transcript whose images have no height yet:
-    // `loading="lazy"` with no intrinsic size is a zero-tall box until the
-    // bytes arrive. Settling on the next frame catches the text that laid
-    // itself out late; the `load` handler below catches the pictures.
+    // The pin above measured a transcript that may still be settling: a
+    // picture nobody has measured yet holds the stylesheet's guessed box
+    // until its bytes arrive. Settling on the next frame catches the text
+    // that laid itself out late; the `load` handler below catches the
+    // pictures whose real shape turns out not to be the guess.
     requestAnimationFrame(() => {
       const settled = document.querySelector("#chan-messages");
       // A second render can replace the node before this callback runs. Never
@@ -3548,7 +3713,9 @@ export function restoreChannelScroll(saved) {
   // `load` does not bubble, so the transcript listens for it on the way down
   // rather than binding every image. An attachment that decodes after the
   // pin adds its full height above the newest message otherwise, which reads
-  // as the conversation drifting upward on its own.
+  // as the conversation drifting upward on its own. This is the follow half;
+  // `watchImageSizes` holds a reader who is *not* following, on this surface
+  // and on the thread panel beside it.
   list.addEventListener(
     "load",
     () => {

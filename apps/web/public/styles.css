@@ -4458,6 +4458,18 @@ svg {
   margin: 0 -8px;
   border-radius: 8px;
   position: relative;
+  /* The transcript is not windowed — every message a channel has loaded is a
+     real row in the document, and the scroll restore walks all of them
+     measuring rectangles on every render. `layout` tells the engine each row
+     is its own problem, so a picture settling inside one does not re-solve
+     the rest of the conversation.
+
+     Layout containment only. `paint` would clip the hover actions and the
+     thread hairline that deliberately sit outside the row, and
+     `content-visibility` would have the browser guess the height of every row
+     it has skipped — a guess that changes `scrollHeight` as the reader moves
+     through it, which is the jumping this file is trying to stop. */
+  contain: layout;
 }
 
 .cmsg-row:hover {
@@ -5261,11 +5273,17 @@ svg {
   display: block;
   width: 100%;
   height: auto;
-  /* Until the bytes arrive the picture has no intrinsic size, `height: auto`
-     resolves to nothing, and the transcript grows by the whole thumbnail the
-     moment it decodes — which on a phone is enough to shove the message being
-     read off the screen. `auto` keeps the real ratio once it is known, so the
-     fallback only ever describes the box nobody has seen yet. */
+  /* Only ever the box for a picture this browser has never drawn. Every
+     image it has drawn once carries its measured `aspect-ratio` inline, from
+     `imageSizes` in screen-chats.js, so the reserved box is the real one in
+     the first frame and does not move when the bytes land.
+
+     That inline ratio is why this fallback matters so little now, and why it
+     keeps the `auto`: a screen is one `innerHTML` assignment, so a decoded
+     `<img>` is thrown away and rebuilt on every background render, and a
+     guessed 4/3 box snapping to a wide screenshot's real shape — once per
+     render, per picture — is what the conversation jumping under the reader
+     actually was. */
   aspect-ratio: auto 4 / 3;
   max-height: 320px;
   object-fit: contain;
