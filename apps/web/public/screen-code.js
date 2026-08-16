@@ -627,7 +627,6 @@ export function summaryPopoverHtml(agent) {
 
     <div class="sum-actions">
       <button class="btn btn-sm" data-act="sum-tests">${icon("play")} Run tests</button>
-      <button class="btn btn-sm" data-act="sum-terminal">${icon("terminal")} Open terminal</button>
       <button class="btn btn-sm" data-act="sum-diff">${icon("columns")} View full diff</button>
     </div>`;
 }

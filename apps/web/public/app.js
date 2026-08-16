@@ -158,16 +158,12 @@ import {
   captureChannelScroll,
   channelInfoPopoverHtml,
   handleComposerKeydown,
-  handleTerminalKeydown,
-  nudgeTerminalHeight,
   openChannel,
   pickMention,
   pickSlashCommand,
   renderChats,
   restoreChannelAnchor,
   restoreChannelScroll,
-  runTerminalCommand,
-  startTerminalResize,
   submitComposerMessage,
   submitThreadReply,
   updateComposerInput,
@@ -2999,13 +2995,6 @@ document.addEventListener("click", (event) => {
     case "channel-slash-pick":
       pickSlashCommand(value, render);
       return;
-    case "chan-term-toggle":
-      state.termOpen = !state.termOpen;
-      render();
-      if (state.termOpen) {
-        $("[data-act='chan-term-input']")?.focus();
-      }
-      return;
     case "channel-react":
       toggleChannelReaction(activeChannelId(), value, "👍");
       render();
@@ -3565,10 +3554,6 @@ document.addEventListener("click", (event) => {
       closePopover();
       void runTests();
       return;
-    case "sum-terminal":
-      closePopover();
-      toast("Terminal commands run in your sandboxed overlay workspace.");
-      return;
     case "sum-diff":
       closePopover();
       setDiffMode("split", render);
@@ -4007,9 +3992,6 @@ document.addEventListener("submit", (event) => {
       beginThreadTurn(state.composerThreadId, state.chatDraft);
       submitComposerMessage(render);
       return;
-    case "chan-term-submit":
-      void runTerminalCommand(render);
-      return;
     case "channel-thread-submit":
       beginThreadTurn(state.activeChannelThread, state.threadDraft);
       submitThreadReply(render);
@@ -4251,15 +4233,6 @@ document.addEventListener("input", (event) => {
     updateComposerInput(node, render);
     return;
   }
-  if (act === "chan-term-input") {
-    // Deliberately no render: the drawer's transcript does not depend on
-    // what is half-typed, and re-rendering would cost a caret restore on
-    // every keystroke for nothing. Typing also leaves command recall, so
-    // Up after editing starts from the newest entry again.
-    state.termDraft = node.value;
-    state.termSeek = undefined;
-    return;
-  }
   if (act === "chan-file-edit") {
     // Deliberately no render. Every other input on this screen rebuilds the
     // whole screen and puts the caret back afterwards, which is affordable for
@@ -4339,24 +4312,6 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-/* Up and Down recall previously run commands in the terminal drawer. */
-document.addEventListener("keydown", (event) => {
-  if (event.target?.dataset?.act === "chan-term-input") {
-    handleTerminalKeydown(event, render);
-  }
-  if (event.target?.dataset?.act === "chan-term-resize") {
-    nudgeTerminalHeight(event, render);
-  }
-});
-
-/* The terminal drawer's top edge is a drag handle. Started on pointerdown
-   rather than click, and tracked on `window`, so the pointer outrunning the
-   4px grip mid-drag does not drop the resize. */
-document.addEventListener("pointerdown", (event) => {
-  if (event.target?.dataset?.act === "chan-term-resize") {
-    startTerminalResize(event, render);
-  }
-});
 
 /* Enter sends a thread reply the same way it sends a channel message. */
 document.addEventListener("keydown", (event) => {
