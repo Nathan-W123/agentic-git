@@ -337,7 +337,7 @@ function draftAttachmentPreviews(repositoryId) {
  * keeps `<code>@agent</code>` untouched because its preceding character is
  * `>` rather than an accepted text boundary.
  */
-function mentionMarkup(value, names) {
+function mentionMarkup(value, names = []) {
   const alternatives = [...new Set(names)]
     .filter((name) => name.length > 0)
     .sort((left, right) => right.length - left.length)
@@ -368,8 +368,19 @@ function mentionMarkup(value, names) {
  * visible and a div collapses it, so without this the mirror is one line
  * shorter than the box the moment somebody ends on Enter.
  */
-function composerMirror(value) {
-  return `${mentionMarkup(esc(String(value ?? "")))}\n`;
+function composerMirror(value, participants = []) {
+  // Posted messages bring their resolved mentions with them. A draft has no
+  // such record yet, so its mirror has to read the same live roster as the
+  // picker. Passing no names here was the merge regression that left every
+  // `<span class="mention-ping">` out of the composer even though the mirror
+  // itself was present.
+  const names = [
+    "agents",
+    ...participants
+      .map((participant) => participant?.name)
+      .filter((name) => typeof name === "string" && name.length > 0),
+  ].map((name) => esc(name));
+  return `${mentionMarkup(esc(String(value ?? "")), names)}\n`;
 }
 
 /** Repaints the layer under the textarea. Called on every keystroke. */
@@ -380,7 +391,10 @@ function paintComposerMirror(node) {
   if (mirror === null || mirror === undefined) {
     return;
   }
-  mirror.innerHTML = composerMirror(node.value);
+  mirror.innerHTML = composerMirror(
+    node.value,
+    channelParticipants(activeChannelId()),
+  );
   // A composer past its max height scrolls, and the mirror has to scroll with
   // it or the highlight slides off the text it belongs to.
   mirror.scrollTop = node.scrollTop;
@@ -1589,7 +1603,10 @@ function composer(repositoryId) {
              Hidden from assistive tech, because a screen reader should hear
              the textarea's value once and not twice. -->
         <div class="composer-mirror" data-composer-mirror aria-hidden="true"
-          >${composerMirror(draftText())}</div>
+          >${composerMirror(
+            draftText(),
+            channelParticipants(repositoryId),
+          )}</div>
         <textarea data-act="channel-input" rows="1" spellcheck="true"
           enterkeyhint="send"
           placeholder="${

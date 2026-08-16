@@ -4892,13 +4892,26 @@ svg {
 
 /* A ping is a quiet, static label in the reader's primary accent. The wash is
    derived from that same accent for both themes, so it stays light without
-   introducing a second colour or motion into the transcript. */
-.cmsg-text .mention-ping {
+   introducing a second colour or motion. The same rule paints the draft's
+   mirror and the posted transcript, keeping the two states visually aligned. */
+.cmsg-text .mention-ping,
+.composer-mirror .mention-ping {
   font-weight: 650;
   color: var(--accent-bright);
   background: var(--accent-wash);
   border-radius: 4px;
+}
+
+/* A posted label can spend a little inline space to read as a token. */
+.cmsg-text .mention-ping {
   padding: 1px 4px;
+}
+
+/* The mirror must stay character-for-character the width of the textarea or
+   the caret and every character after a ping drift sideways. A paint-only
+   halo supplies the same subtle backing without changing inline layout. */
+.composer-mirror .mention-ping {
+  box-shadow: 0 0 0 2px var(--accent-wash);
 }
 
 /* The request itself, at the top of the thinking it produced. Set apart from

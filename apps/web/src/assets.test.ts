@@ -931,16 +931,23 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
     /messageBody\(\s*entry\.content,\s*repositoryId,\s*entry\.mentions,/u,
   );
 
-  // One readable accent on its light wash, with no changing gradient.
+  // One readable accent on its light wash, shared with the live composer and
+  // with no changing gradient.
+  const sharedSelector =
+    ".cmsg-text .mention-ping,\n.composer-mirror .mention-ping {";
   const rule = css.slice(
-    css.indexOf(".cmsg-text .mention-ping {"),
-    css.indexOf("}", css.indexOf(".cmsg-text .mention-ping {")) + 1,
+    css.indexOf(sharedSelector),
+    css.indexOf("}", css.indexOf(sharedSelector)) + 1,
   );
+  assert.notEqual(css.indexOf(sharedSelector), -1);
   assert.match(rule, /color: var\(--accent-bright\);/u);
   assert.match(rule, /background: var\(--accent-wash\);/u);
   assert.match(rule, /border-radius:/u);
-  assert.match(rule, /padding:/u);
   assert.doesNotMatch(rule, /gradient|animation|background-clip|text-fill/iu);
+  assert.match(
+    css,
+    /\.cmsg-text \.mention-ping \{\n  padding: 1px 4px;\n\}/u,
+  );
   assert.doesNotMatch(css, /mention-wave/u);
 });
 
@@ -1183,13 +1190,51 @@ test("the composer paints its mentions on a layer that matches the textarea", as
   assert.match(chats, /paintComposerMirror\(node\);/u);
   assert.match(css, /\.composer-mirror \.mention-ping/u);
 
-  // Mentions only — none of richText's markdown. `**bold**` renders two
-  // characters shorter than it is typed, and a mirror that is shorter than
-  // the textarea wraps somewhere else and drags the highlight off the name.
-  const mirror = /function composerMirror\(value\) \{[\s\S]*?\n\}/u.exec(chats);
-  assert.ok(mirror !== null, "composerMirror is defined");
-  assert.equal(/richText/u.test(mirror[0]), false);
-  assert.match(mirror[0], /mentionMarkup\(esc\(/u);
+  // Mentions only — none of richText's markdown. Exercise the actual mirror,
+  // including the live participant list that the merge accidentally omitted.
+  const start = chats.indexOf("function mentionMarkup");
+  const end = chats.indexOf("\n/** Repaints the layer", start);
+  assert.notEqual(start, -1, "screen-chats.js declares mentionMarkup");
+  assert.notEqual(end, -1, "composerMirror has a testable boundary");
+  const createMirror = new Function(
+    "esc",
+    `${chats.slice(start, end)}\nreturn composerMirror;`,
+  );
+  const composerMirror = createMirror((value: unknown) => {
+    const entities: Record<string, string> = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return String(value ?? "").replace(
+      /[&<>"']/gu,
+      (character) => entities[character] ?? character,
+    );
+  }) as (value: string, participants: Array<{ name: string }>) => string;
+  const wrap = (value: string, names: string[]) =>
+    composerMirror(
+      value,
+      names.map((name) => ({ name })),
+    ).replace(/<span class="mention-ping">@([^<]+)<\/span>/gu, "[$1]");
+  assert.equal(
+    wrap("ask @Mary Jane and @Claude (Owner)", [
+      "Mary",
+      "Mary Jane",
+      "Claude (Owner)",
+    ]),
+    "ask [Mary Jane] and [Claude (Owner)]\n",
+  );
+  assert.equal(
+    wrap("mail nate@example.com; see docs/@notes", ["example.com", "notes"]),
+    "mail nate@example.com; see docs/@notes\n",
+  );
+  assert.equal(
+    wrap("<code>@agent</code>", ["agent"]),
+    "&lt;code&gt;@agent&lt;/code&gt;\n",
+  );
+  assert.equal(wrap("@agents review", []), "[agents] review\n");
 
   // The metrics the two share. Declared once, for both selectors, because a
   // single pixel of difference between them wraps the mirror at a different
@@ -1214,6 +1259,14 @@ test("the composer paints its mentions on a layer that matches the textarea", as
 
   // The caret is the one part of the textarea that must stay visible.
   assert.match(css, /caret-color: var\(--text\)/u);
+  const composerPing = /\.composer-mirror \.mention-ping \{([\s\S]*?)\n\}/u
+    .exec(css);
+  assert.ok(composerPing !== null, "the composer mention rule exists");
+  assert.doesNotMatch(
+    composerPing[1] ?? "",
+    /\b(?:margin|padding):/u,
+    "painting a mention must not move the textarea's following characters",
+  );
 });
 
 test("a phone's caret sits on its own letters, and a backlog arrives as one line", async () => {
