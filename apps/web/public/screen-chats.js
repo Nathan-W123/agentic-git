@@ -1379,7 +1379,11 @@ function messageRow(
       <div class="cmsg-text">${
         deleted
           ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
-          : messageBody(entry.content, repositoryId, entry.mentions)
+          : messageBody(
+              entry.content,
+              repositoryId,
+              entry.mentions,
+            )
       }</div>
       ${
         deleted || reactions.length === 0

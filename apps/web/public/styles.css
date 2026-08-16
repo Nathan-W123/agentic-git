@@ -2601,16 +2601,24 @@ svg {
   resize: none;
   padding: var(--composer-pad-top) var(--composer-pad-x) var(--composer-pad-bottom);
   /* Thread replies use the textarea itself to paint their text. Keep both
-     properties explicit so a transparent fill used by a mirrored composer
+     properties explicit so the unpainted fill a mirrored composer sets
      cannot make this shared control's characters disappear in WebKit. */
   color: var(--text);
   -webkit-text-fill-color: var(--text);
   font-size: 12.5px;
   line-height: 1.5;
   max-height: 148px;
-  /* Transparent, not hidden: the glyphs still lay out — which is what wraps
-     the mirror underneath and positions the caret — they simply are not
-     painted. `caret-color` puts the one part that must stay visible back. */
+}
+
+/* Only the composer that actually has a mirror under it.
+   Transparent, not hidden: the glyphs still lay out — which is what wraps
+   the mirror underneath and positions the caret — they simply are not
+   painted. `caret-color` puts the one part that must stay visible back.
+   Scoped to `.composer-field`, because `.composer textarea` is shared with
+   the thread reply and DM composers, which have no mirror: painting those
+   transparent left somebody typing into a box that showed nothing, which is
+   the bug the rule above exists to prevent. */
+.composer-field textarea {
   color: transparent;
   -webkit-text-fill-color: transparent;
   caret-color: var(--text);
