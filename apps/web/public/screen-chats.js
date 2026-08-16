@@ -324,6 +324,36 @@ function draftAttachmentPreviews(repositoryId) {
 }
 
 /**
+ * A ping as it appears in a posted message: the at sign and the handle.
+ *
+ * The same shape the composer completes into the draft — `pickMention` writes
+ * `@name ` — so what is highlighted when the message is read is exactly what
+ * the picker put there. A handle has to start with a letter, which keeps an
+ * email address (`nate@example.com`) and a path (`a/@b`) out: the character
+ * before the at sign must be the start of the line, a space or an opening
+ * bracket, so an at sign in the middle of a word is left alone.
+ *
+ * Applied to already-escaped text, after the inline patterns have run, so the
+ * only `>` in the string belongs to a tag this file built — and `>` is not a
+ * character the pattern accepts before an at sign, which is what keeps
+ * `<code>@agent</code>` from being painted inside its own code span.
+ */
+const MENTION_TEXT_PATTERN = /(^|[\s([])@([A-Za-z][\w-]*(?:\.[\w-]+)*)/gu;
+
+/**
+ * The wave is one span, not one per letter: the gradient is painted across the
+ * whole token and clipped to the glyphs, so the colour travels through the at
+ * sign and the letters as a single sweep. The text inside is untouched, so
+ * copying a message still yields `@name`.
+ */
+function mentionMarkup(value) {
+  return value.replace(
+    MENTION_TEXT_PATTERN,
+    (_match, before, handle) => `${before}<span class="mention-ping">@${handle}</span>`,
+  );
+}
+
+/**
  * A narrow, safe subset of Markdown for what an agent writes.
  *
  * Escaped first, patterns applied second. That order is the whole safety
@@ -341,9 +371,11 @@ function richText(text) {
     .map((block) => block.trim())
     .filter((block) => block.length > 0);
   const inline = (value) =>
-    value
-      .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>")
-      .replace(/`([^`]+)`/gu, "<code>$1</code>");
+    mentionMarkup(
+      value
+        .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>")
+        .replace(/`([^`]+)`/gu, "<code>$1</code>"),
+    );
   return blocks
     .map((block) => {
       const lines = block.split(/\n/u);

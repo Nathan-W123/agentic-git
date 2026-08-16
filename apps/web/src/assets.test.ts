@@ -863,6 +863,48 @@ test("the channel composer highlights mentions and previews pasted images", asyn
   assert.match(css, /\.composer-attachment img/u);
 });
 
+test("a ping in a posted message waves through both of the reader's accents", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // The wave is applied after the inline patterns, so a mention inside a code
+  // span stays code — the `>` that closes the tag is not a boundary the
+  // pattern accepts.
+  assert.match(chats, /mentionMarkup\(\s*value\s*\n?[\s\S]{0,160}<code>\$1<\/code>"\),/u);
+  assert.match(chats, /class="mention-ping">@\$\{handle\}<\/span>/u);
+
+  const literal = chats.match(/const MENTION_TEXT_PATTERN =\s*(\/[\s\S]*?\/)gu;/u)?.[1];
+  assert.ok(literal, "screen-chats.js declares MENTION_TEXT_PATTERN");
+  const wrap = (text: string) =>
+    text.replace(
+      new RegExp(literal.slice(1, -1), "gu"),
+      (_match, before: string, handle: string) => `${before}[${handle}]`,
+    );
+  assert.equal(wrap("ping @agent-one now"), "ping [agent-one] now");
+  assert.equal(wrap("@nate ship it"), "[nate] ship it");
+  // An address and a path are not pings, and neither is an at sign inside a
+  // word — only what the picker writes.
+  assert.equal(wrap("mail nate@example.com"), "mail nate@example.com");
+  assert.equal(wrap("see docs/@notes"), "see docs/@notes");
+  assert.equal(wrap("<code>@agent</code>"), "<code>@agent</code>");
+
+  // Both accents, clipped to the glyphs, and moving.
+  const rule = css.slice(
+    css.indexOf(".cmsg-text .mention-ping {"),
+    css.indexOf("}", css.indexOf("animation: mention-wave")),
+  );
+  assert.match(rule, /var\(--accent-bright\)/u);
+  assert.match(rule, /var\(--accent-2-bright\)/u);
+  assert.match(rule, /-webkit-background-clip: text;/u);
+  assert.match(rule, /\n  background-clip: text;/u);
+  assert.match(rule, /animation: mention-wave [\d.]+s linear infinite;/u);
+  assert.match(css, /@keyframes mention-wave \{[\s\S]{0,120}background-position: -200% 50%;/u);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\n  \.cmsg-text \.mention-ping \{\n    animation: none;/u,
+  );
+});
+
 test("the invite screen names the product, not only the team", async () => {
   const app = await browserSource();
   const start = app.indexOf("function renderInvite");
