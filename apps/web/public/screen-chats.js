@@ -657,9 +657,15 @@ function personRow(person) {
       </span>
       <span class="rr-body">
         <div class="rr-name">${esc(name)}${me ? " (you)" : ""}</div>
-        <div class="rr-role${role ? "" : " rr-role-empty"}">${
-          role === "" ? "No role set" : esc(role)
-        }</div>
+        ${
+          // Only when there is one. Most people in most rooms have no role,
+          // so "No role set" was a second line under every name in the list —
+          // a column of identical grey text saying nothing about anybody, and
+          // it made a one-line row two lines tall for the privilege. An agent
+          // keeps its empty state (see `rosterRow`): a role is what an agent
+          // is *for*, and its absence is worth prompting about.
+          role === "" ? "" : `<div class="rr-role">${esc(role)}</div>`
+        }
       </span>
       ${unread > 0 ? `<span class="rr-badge">${unread}</span>` : ""}
     </div>
@@ -815,6 +821,29 @@ export function rosterMenuItems(agentId) {
   return items;
 }
 
+/**
+ * One heading in the sidebar, and the one thing it adds.
+ *
+ * Three lists, three ways to add to them, and each used to look like something
+ * else: a filled accent square beside the search box for a new channel, and
+ * two full-width "Invite someone" / "Add an agent" rows sitting permanently at
+ * the bottom of the people and agent lists, indented to look like more rows.
+ * Three permanent elements, none of them the same shape, all saying "add one
+ * of these". They are one shape now — a "+" on the heading of the list it adds
+ * to — which costs no row of its own, holds still while the list under it
+ * grows, and puts the control where somebody counting the list is already
+ * looking.
+ */
+function section(label, act, value, title) {
+  return `<div class="chan-sec">
+    <span class="chan-sec-label">${esc(label)}</span>
+    <button type="button" class="chan-sec-add" data-act="${act}"
+      data-value="${value}" title="${esc(title)}" aria-label="${esc(title)}">
+      ${icon("plus")}
+    </button>
+  </div>`;
+}
+
 function chanSidebar(activeRepositoryId) {
   const query = state.chatQuery.trim().toLowerCase();
   const channels = [...state.repositories]
@@ -828,17 +857,19 @@ function chanSidebar(activeRepositoryId) {
   // the floor before the roster resolves.
   const people = channelPeopleFor(activeRepositoryId);
 
+  const channel = esc(activeRepositoryId ?? "");
   return `<aside class="chan-sidebar">
     <button type="button" class="chan-brand" data-act="nav" data-value="settings"
       title="Settings">
       ${brandMark(26)}
       <span class="brand-text"><b>Lattice</b></span>
+      <!-- The row goes to Settings and only its tooltip said so, which is a
+           tooltip doing the work of a glyph. The stylesheet had been carrying
+           the rule for this gear since the brand moved here. -->
+      ${icon("gear", 'class="chan-brand-gear"')}
     </button>
     <div class="chan-sidebar-head">
       ${searchBox("Search channels...", state.chatQuery, "channel-search")}
-      <button type="button" class="chan-new" data-act="channel-new" title="New chat">
-        ${icon("plus")}
-      </button>
       <!-- Phone only, where this column is an off-canvas drawer over the
            conversation. It could already be dismissed by tapping the scrim,
            by swiping it back, or by picking a channel — three gestures and
@@ -851,46 +882,45 @@ function chanSidebar(activeRepositoryId) {
         cls: "drawer-close",
       })}
     </div>
-    <div class="chan-list">
-      <div class="chan-list-label">Channels</div>
-      ${
-        channels.length === 0
-          ? `<div class="util-empty">No channel matches that search.</div>`
-          : channels.map((repo) => chanRow(repo, activeRepositoryId)).join("")
-      }
-    </div>
-    <div class="chan-roster">
-      <div class="chan-list-label">Users</div>
-      ${
-        // People first, then agents. The channel header already names the
-        // repository, so repeating it in the label said nothing the eye had
-        // not just read — and it grew with the name, which is why a long
-        // repository pushed the word "Agents" out of sight entirely.
-        people.length === 0
-          ? `<div class="util-empty">Nobody else has access to this repository yet.</div>`
-          : people.map((person) => personRow(person)).join("")
-      }
-      <!-- Adding somebody belongs under the list of who is already here,
-           where the question occurs to you, rather than only behind the
-           channel's menu. Each button adds the kind of participant it sits
-           beneath. -->
-      <button type="button" class="roster-add" data-act="invite-repo"
-        data-value="${esc(activeRepositoryId ?? "")}">
-        ${icon("plus")}<span>Invite someone</span>
-      </button>
-      <div class="chan-list-label">Agents</div>
-      ${
-        // No empty state. The "Add an agent" button sits directly beneath and
-        // already says what the absence means; a sentence saying the same
-        // thing above it is a line to read before reaching the thing to click.
-        roster.length === 0
-          ? ""
-          : roster.map((agent) => rosterRow(agent)).join("")
-      }
-      <button type="button" class="roster-add" data-act="channel-agent-menu"
-        data-value="${esc(activeRepositoryId ?? "")}">
-        ${icon("plus")}<span>Add an agent</span>
-      </button>
+    <!-- One scroller, not three.
+         The column used to be a four-row grid in which the channel list had
+         its own scrollbar capped at 38vh and the roster had a second one
+         underneath it, so a long list of channels and a long list of people
+         were two independent things to drag inside 256 pixels — and the cap
+         left a band of empty panel whenever neither list was long. Everything
+         now scrolls together, the way the conversation beside it does, and
+         each heading sticks to the top of the panel while its own section is
+         passing so the reader always knows which list they are in. -->
+    <div class="chan-scroll">
+      ${section("Channels", "channel-new", channel, "New channel")}
+      <div class="chan-list">
+        ${
+          channels.length === 0
+            ? `<div class="util-empty">No channel matches that search.</div>`
+            : channels.map((repo) => chanRow(repo, activeRepositoryId)).join("")
+        }
+      </div>
+      ${section("Users", "invite-repo", channel, "Invite someone")}
+      <div class="chan-roster">
+        ${
+          // People first, then agents. The channel header already names the
+          // repository, so repeating it in the label said nothing the eye had
+          // not just read — and it grew with the name, which is why a long
+          // repository pushed the word "Agents" out of sight entirely.
+          people.length === 0
+            ? `<div class="util-empty">Nobody else yet.</div>`
+            : people.map((person) => personRow(person)).join("")
+        }
+      </div>
+      ${section("Agents", "channel-agent-menu", channel, "Add an agent")}
+      <div class="chan-roster">
+        ${
+          // No empty state. The "+" on the heading directly above is both the
+          // explanation and the thing to press; a sentence between them is a
+          // line to read on the way past.
+          roster.map((agent) => rosterRow(agent)).join("")
+        }
+      </div>
     </div>
     ${
       state.health === undefined
@@ -998,8 +1028,10 @@ function chanHeader(repository, repositoryId) {
   const roster = channelAgentsFor(repositoryId);
   const people = channelPeopleFor(repositoryId);
   return `<header class="chan-head">
-    <button type="button" class="icon-btn menu-btn" data-act="nav-toggle"
-      title="Menu" aria-label="Menu">${icon("menu")}</button>
+    <!-- No hamburger. It opened the outer app rail, which stopped being
+         rendered when this sidebar became the navigation, so between 600 and
+         900 pixels the header led with a button that did nothing at all. The
+         channels button below is the one that opens something. -->
     <!-- Phone-only: the channel list and roster live in \`.chan-sidebar\`,
          which goes off-canvas below the 600px breakpoint the same way the
          outer app \`.sidebar\` already does at 900px. This is the only way
@@ -3078,7 +3110,7 @@ export function renderChats() {
     ${
       // Phone-only off-canvas drawer for `.chan-sidebar` — see the toggle
       // button in `chanHeader`. Tapping outside the drawer is how it closes,
-      // the same as the outer app sidebar's `.nav-scrim`.
+      // the same as `.tree-scrim` over the file tree.
       state.chanSidebarOpen === true
         ? `<div class="chan-sidebar-scrim" data-act="chan-sidebar-close"></div>`
         : ""

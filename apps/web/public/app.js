@@ -91,7 +91,6 @@ import {
   toggleChannelMessagePin,
   toggleChannelReaction,
   toggleFavourite,
-  unreadCount,
 } from "./data.js";
 import {
   $,
@@ -645,114 +644,20 @@ async function submitInviteSignIn(form) {
 
 /* -------------------------------------------------------------- shell ---- */
 
-const NAV = [
-  // Chats is the landing view now, so its icon — a chat bubble rather than a
-  // house — is the leftmost, primary item in the rail.
-  { route: "chats", label: "Chats", iconName: "chatBubble" },
-  // No "My Agents" here. Connecting an agent is an account-level act, not a
-  // place to spend time, and it now sits in Settings beside the other things
-  // that belong to the account. Talking to your own agent moved to the channel
-  // panel, which is where it was wanted.
-  //
-  // The route is deliberately still reachable by URL — the Task, Files and
-  // Metrics views live there and nothing has replaced them yet, so this drops
-  // the item without deleting the screen behind it.
-  // No "Notifications" here. The banner says the news when it happens, the
-  // topbar bell holds the unread count and the record, and the per-agent
-  // history panel (see docs/handoff/agent-identity-and-history.md) is where
-  // the tab's job is going. Route stays reachable through the bell.
-  { route: "settings", label: "Settings", iconName: "gear" },
-];
-
-function sidebar() {
-  const repository = currentRepository();
-  const unread = unreadCount();
-  const user = currentUserName();
-  const email = state.principal?.user?.email ?? "";
-
-  return `<aside class="sidebar">
-    <a class="brand" href="#chats">
-      ${brandMark(34)}
-      <span class="brand-text"><b>Lattice</b></span>
-    </a>
-
-    ${
-      repository === undefined
-        ? "<div></div>"
-        : `<button class="repo-switch" data-act="repo-switch">
-            ${icon("cloud")}
-            <span class="rs-body">
-              <span class="rs-name">${esc(repository.id)}</span>
-              <span class="rs-branch">${icon("branch")}${esc(
-                repository.branch ?? "main",
-              )}</span>
-            </span>
-            ${icon("chevronDown")}
-          </button>`
-    }
-
-    <nav class="nav">
-      ${NAV.filter(
-        (item) => item.needsRepo !== true || repository !== undefined,
-      )
-        .map(
-          (item) => `<a class="nav-item${
-            state.route === item.route ? " active" : ""
-          }" href="#${item.route}" data-act="nav" data-value="${item.route}">
-            ${icon(item.iconName)}
-            <span>${esc(item.label)}</span>
-            ${
-              item.route === "notifications" && unread > 0
-                ? `<span class="count">${unread}</span>`
-                : ""
-            }
-          </a>`,
-        )
-        .join("")}
-    </nav>
-
-    <div class="sidebar-foot">
-      <button class="user-card" data-act="user-menu">
-        ${avatar(user, 32, user, myAvatar())}
-        <span class="uc-body">
-          <span class="uc-name">${esc(user)}</span>
-          <span class="uc-mail">${esc(email)}</span>
-        </span>
-        ${icon("chevronDown")}
-      </button>
-      <div class="plan-card">
-        ${icon("cloud")}
-        <span class="pc-body">
-          <span class="pc-title">${esc(state.project?.name ?? "Project")}</span>
-          <span class="pc-sub">Cloud mode</span>
-        </span>
-        <span class="pc-star">${icon("star")}</span>
-      </div>
-      <!-- No "invite someone" here. An invitation names one repository, so
-           asking for one from under the project meant asking which repository
-           first; the channel's own header is where somebody already knows the
-           answer. -->
-      ${
-        // Silent while everything works. "All systems operational" was a line
-        // that never changed, which is a line nobody reads — and it cost a
-        // permanent row at the bottom of the sidebar to say nothing.
-        //
-        // The failure half stays. Losing the control plane is the one thing
-        // this corner knew that the rest of the screen cannot show, and a
-        // deployment that has gone unreachable failing silently would be worse
-        // than the noise this removes.
-        state.health === undefined
-          ? `<div class="sys-line">
-              <span class="dot grey"></span>Control plane unreachable
-            </div>`
-          : ""
-      }
-    </div>
-  </aside>`;
-}
+/* No `sidebar()` here any more, and no `NAV` list behind it.
+ *
+ * The outer rail — brand, repository switcher, Chats/Settings links, account
+ * card, plan card — stopped being rendered when the channel sidebar became the
+ * navigation, and then sat in this file for a while as markup nothing could
+ * reach. Everything it held has somewhere else to be: the brand and Settings
+ * are the crown of `chanSidebar` (screen-chats.js), the account is the topbar
+ * avatar's menu, and the failure-only health line is at that sidebar's foot.
+ * Its stylesheet block, its phone drawer, the `nav-scrim` and the hamburger
+ * that opened it went with it — a menu button that opens a panel which is no
+ * longer rendered is worse than no button at all.
+ */
 
 function topbar() {
-  const unread = unreadCount();
   const user = currentUserName();
   return `<header class="topbar">
     ${
@@ -2949,7 +2854,7 @@ function renderNow() {
     return;
   }
   if (state.projectId === "") {
-    root.innerHTML = `<div class="app no-sidebar"><div class="main">
+    root.innerHTML = `<div class="app"><div class="main">
       <div class="scroll"><div class="page">${emptyState(
         "folder",
         "No project yet",
@@ -2958,23 +2863,14 @@ function renderNow() {
     return;
   }
 
-  const classes = ["app"];
-  if (state.navOpen) {
-    classes.push("nav-open");
-  }
-  if (state.navCollapsed) {
-    classes.push("nav-collapsed");
-  }
   const focusedField = captureFocus();
   // Where the reader had the conversation, for the same reason focus is taken
   // here: the swap below throws both away, and neither is in `state`.
   const savedScroll = captureChannelScroll();
-  // No rail. The channel sidebar is the navigation now — channels are the
-  // app — and everything the rail held moved: the brand into that sidebar
-  // (clicking it opens Settings), the account block into the topbar avatar,
-  // and the failure-only health line to the sidebar's foot. `sidebar()` and
-  // the nav drawer stay in the file, unrendered, until the next sweep.
-  root.innerHTML = `<div class="${classes.join(" ")}">
+  // One column. There is no rail to open, collapse or scrim any more — the
+  // channel sidebar is the navigation — so the shell carries no `nav-open` or
+  // `nav-collapsed` modifier and the whole `sidebar()` block is gone.
+  root.innerHTML = `<div class="app">
     <div class="main${BARE.has(state.route) ? " bare" : ""}${
       state.loadError === undefined ? "" : " has-banner"
     }">
@@ -3076,7 +2972,6 @@ function navigate(route) {
     route = "chats";
   }
   state.route = route;
-  state.navOpen = false;
   // An open rename field belongs to the screen it was opened on; leaving and
   // coming back to Settings should not find it still open on an old value.
   state.settingsRenamingId = undefined;
@@ -3163,14 +3058,6 @@ document.addEventListener("click", (event) => {
       event.preventDefault();
       navigate(value);
       return;
-    case "nav-toggle":
-      state.navOpen = !state.navOpen;
-      render();
-      return;
-    case "nav-close":
-      state.navOpen = false;
-      render();
-      return;
     case "auth-mode":
       event.preventDefault();
       authMode = value;
@@ -3201,9 +3088,6 @@ document.addEventListener("click", (event) => {
     case "open-repo":
       invalidateCode();
       openRepository(value, navigate);
-      return;
-    case "repo-switch":
-      navigate("chats");
       return;
     case "repo-view":
       state.repoView = value;
@@ -3386,11 +3270,6 @@ document.addEventListener("click", (event) => {
       return;
     case "chan-sidebar-toggle":
       state.chanSidebarOpen = state.chanSidebarOpen !== true;
-      render();
-      return;
-    case "nav-collapse-toggle":
-      state.navCollapsed = state.navCollapsed !== true;
-      persist("ag.navCollapsed", state.navCollapsed);
       render();
       return;
     // Records which way the reader just flipped it, and lets the browser do
