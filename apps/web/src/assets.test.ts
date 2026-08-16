@@ -402,6 +402,51 @@ test("navigation is the four product routes and nothing invented", async () => {
   );
 });
 
+test("the sidebar collapses to an icon rail with account controls at its foot", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const sidebar = chats.slice(
+    chats.indexOf("function chanSidebar"),
+    chats.indexOf("/* ---------------------------------------------------------- chan main"),
+  );
+  const header = chats.slice(
+    chats.indexOf("function chanHeader"),
+    chats.indexOf("function chanSearchRow"),
+  );
+
+  // The control stays with the surface it changes; the conversation header
+  // keeps only the phone button that opens the off-canvas drawer.
+  assert.match(sidebar, /class="chan-sidebar-top"/u);
+  assert.match(sidebar, /data-act="chan-collapse-toggle"/u);
+  assert.doesNotMatch(header, /data-act="chan-collapse-toggle"/u);
+  assert.match(header, /data-act="chan-sidebar-toggle"/u);
+
+  // Settings and profile/account are stable footer rows and reuse the same
+  // delegated actions as the rest of the app.
+  assert.match(sidebar, /class="chan-sidebar-foot"/u);
+  assert.match(
+    sidebar,
+    /class="chan-foot-action" data-act="nav"\s*data-value="settings"/u,
+  );
+  assert.match(sidebar, /class="chan-account" data-act="user-menu"/u);
+
+  // Compact means narrow, never absent. The labels fold away while the links,
+  // channel icons, Settings and account avatar remain real controls.
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed > \.chan-sidebar \{\s*width: 64px;/u,
+  );
+  assert.doesNotMatch(
+    css,
+    /\.chats-shell\.chan-collapsed > \.chan-sidebar \{[^}]*display: none;/u,
+  );
+  assert.match(css, /\.chats-shell\.chan-collapsed \.chan-row \{/u);
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed :is\(\.chan-foot-action, \.chan-account\)/u,
+  );
+});
+
 test("the summary opens over the editor instead of navigating away", async () => {
   const source = await browserSource();
   assert.match(source, /case "code-summary":[\s\S]{0,120}showPopover\(/u);
@@ -472,7 +517,7 @@ test("an empty, unfocused composer collapses to one lean row", async () => {
     css,
     /\.composer-field textarea,\s*\.composer-mirror \{\s*padding: var\(--composer-pad-top\) var\(--composer-pad-x\) var\(--composer-pad-bottom\);/u,
   );
-  assert.match(css, /--composer-shape: 999px;/u);
+  assert.match(css, /--composer-shape: var\(--radius-lg\);/u);
   assert.match(css, /--composer-bar-layout: contents;/u);
   // Nothing on the folded row is dropped from the markup: it is unpainted, so
   // focusing the composer brings it back without waiting for a render.
@@ -514,8 +559,8 @@ test("the composer is one lean floating bar with a + and a send", async () => {
   const shape = /\n\.composer \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(shape, undefined, "the composer has a shape rule");
   assert.match(shape ?? "", /box-shadow: var\(--shadow-pop\);/u);
-  assert.match(shape ?? "", /--composer-shape: 999px;/u);
-  // The elastic gap is off while every control is on the pill, or it takes
+  assert.match(shape ?? "", /--composer-shape: var\(--radius-lg\);/u);
+  // The elastic gap is off while every control is on the compact bar, or it takes
   // half the width of the box away from the sentence being written in it.
   assert.match(shape ?? "", /--composer-spacer-layout: none;/u);
   assert.match(css, /\.composer-bar \.spacer \{\s*display: var\(--composer-spacer-layout/u);
@@ -1025,21 +1070,23 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
   );
 
   // One readable accent on its light wash, shared with the live composer and
-  // with no changing gradient.
-  const sharedSelector =
-    ".cmsg-text .mention-ping,\n.composer-mirror .mention-ping {";
-  const rule = css.slice(
-    css.indexOf(sharedSelector),
-    css.indexOf("}", css.indexOf(sharedSelector)) + 1,
-  );
-  assert.notEqual(css.indexOf(sharedSelector), -1);
-  assert.match(rule, /color: var\(--accent-bright\);/u);
-  assert.match(rule, /background: var\(--accent-wash\);/u);
-  assert.match(rule, /border-radius:/u);
-  assert.doesNotMatch(rule, /gradient|animation|background-clip|text-fill/iu);
+  // with no changing gradient. The rules are separate because posted tokens
+  // may be bold while mirror tokens must keep the textarea's glyph widths.
+  for (const selector of [
+    ".cmsg-text .mention-ping {",
+    ".composer-mirror .mention-ping {",
+  ]) {
+    const start = css.indexOf(selector);
+    const rule = css.slice(start, css.indexOf("}", start) + 1);
+    assert.notEqual(start, -1);
+    assert.match(rule, /color: var\(--accent-bright\);/u);
+    assert.match(rule, /background: var\(--accent-wash\);/u);
+    assert.match(rule, /border-radius:/u);
+    assert.doesNotMatch(rule, /gradient|animation|background-clip|text-fill/iu);
+  }
   assert.match(
     css,
-    /\.cmsg-text \.mention-ping \{\n  padding: 1px 4px;\n\}/u,
+    /\.cmsg-text \.mention-ping \{[\s\S]{0,180}padding: 1px 4px;/u,
   );
   assert.doesNotMatch(css, /mention-wave/u);
 
@@ -1048,7 +1095,10 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
   // token gets the same inline padding a posted ping does.
   assert.match(chats, /function slashMarkup/u);
   assert.match(chats, /const inline = \(value\) =>\s*\n\s*slashMarkup\(/u);
-  assert.match(css, /\.cmsg-text \.slash-ping \{\n  padding: 1px 4px;\n\}/u);
+  assert.match(
+    css,
+    /\.cmsg-text \.slash-ping \{[\s\S]{0,180}padding: 1px 4px;/u,
+  );
 });
 
 test("the invite screen names the product, not only the team", async () => {
@@ -1388,19 +1438,18 @@ test("the composer paints its mentions on a layer that matches the textarea", as
   assert.ok(composerPing !== null, "the composer mention rule exists");
   assert.doesNotMatch(
     composerPing[1] ?? "",
-    /\b(?:margin|padding):/u,
-    "painting a mention must not move the textarea's following characters",
+    /\b(?:font-weight|letter-spacing|margin|padding):/u,
+    "painting a mention must not change glyph advances or spacing",
   );
   // The command token is painted under the same constraint, in the second
   // accent so a command and a ping are not the same colour.
-  assert.match(css, /\.cmsg-text \.slash-ping,\n\.composer-mirror \.slash-ping \{/u);
   assert.match(css, /\.composer-mirror \.slash-ping \{[\s\S]{0,120}accent-2-wash/u);
   const composerSlash = /\.composer-mirror \.slash-ping \{([\s\S]*?)\n\}/u.exec(css);
   assert.ok(composerSlash !== null, "the composer command rule exists");
   assert.doesNotMatch(
     composerSlash[1] ?? "",
-    /\b(?:margin|padding):/u,
-    "painting a command must not move the textarea's following characters",
+    /\b(?:font-weight|letter-spacing|margin|padding):/u,
+    "painting a command must not change glyph advances or spacing",
   );
 });
 
@@ -1422,6 +1471,26 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
   assert.match(
     css.slice(css.lastIndexOf("@media", zoomAt), zoomAt),
     /max-width: 600px/u,
+  );
+
+  // The channel box grows without swapping layout modes underneath the
+  // caret. Its textarea supplies the animated height while the two edge
+  // controls stay in one flex row; reduced-motion still short-circuits it.
+  assert.match(
+    css,
+    /\.chan-composer-wrap \.composer \{[\s\S]{0,360}--composer-layout: flex;[\s\S]{0,220}--composer-bar-layout: contents;/u,
+  );
+  assert.match(
+    css,
+    /\.chan-composer-wrap \.composer-field textarea \{\s*min-height: 64px;\s*transition: min-height 0\.22s ease, padding 0\.2s ease;/u,
+  );
+  assert.match(
+    css,
+    /:has\(textarea:placeholder-shown\)[\s\S]{0,100}\.composer-field\s*textarea \{\s*min-height: 36px;/u,
+  );
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]{0,180}transition-duration: 0\.01ms !important;/u,
   );
 
   // The header counted the whole organization — and, before that had loaded,

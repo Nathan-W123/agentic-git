@@ -135,7 +135,10 @@ function chanRow(repo, activeRepositoryId) {
   const active = repo.id === activeRepositoryId;
   return `<div class="chan-row${active ? " active" : ""}${
     unread > 0 ? " unread" : ""
-  }" role="button" tabindex="0" data-act="channel-open" data-value="${esc(repo.id)}">
+  }" role="button" tabindex="0" data-act="channel-open" data-value="${esc(repo.id)}"
+    title="#${esc(repo.id)}" aria-label="Open channel ${esc(repo.id)}"${
+      active ? ' aria-current="page"' : ""
+    }>
     <span class="cr-hash">${icon("chatBubble")}</span>
     <span class="cr-name">${esc(repo.id)}</span>
     ${
@@ -856,31 +859,35 @@ function chanSidebar(activeRepositoryId) {
   // grantees the org member list has never heard of; the org list is only
   // the floor before the roster resolves.
   const people = channelPeopleFor(activeRepositoryId);
+  const user = currentUserName();
 
   const channel = esc(activeRepositoryId ?? "");
-  return `<aside class="chan-sidebar">
-    <button type="button" class="chan-brand" data-act="nav" data-value="settings"
-      title="Settings">
-      ${brandMark(26)}
-      <span class="brand-text"><b>Lattice</b></span>
-      <!-- The row goes to Settings and only its tooltip said so, which is a
-           tooltip doing the work of a glyph. The stylesheet had been carrying
-           the rule for this gear since the brand moved here. -->
-      ${icon("gear", 'class="chan-brand-gear"')}
-    </button>
-    <div class="chan-sidebar-head">
-      ${searchBox("Search channels...", state.chatQuery, "channel-search")}
-      <!-- Phone only, where this column is an off-canvas drawer over the
-           conversation. It could already be dismissed by tapping the scrim,
-           by swiping it back, or by picking a channel — three gestures and
-           no button, which left somebody who opened it just to read the
-           roster with nothing to press. Desktop hides it: there the column
-           covers nothing, and folding it away is the header's own control. -->
+  return `<aside class="chan-sidebar" aria-label="Channels and account">
+    <!-- The collapse control belongs to the surface it changes. It stays in
+         this crown when the sidebar becomes an icon rail, so expanding it
+         never requires hunting in the conversation header. -->
+    <div class="chan-sidebar-top">
+      <button type="button" class="chan-brand" data-act="nav" data-value="chats"
+        title="Lattice chats" aria-label="Lattice chats">
+        ${brandMark(26)}
+        <span class="brand-text"><b>Lattice</b></span>
+      </button>
+      <button type="button" class="icon-btn desk-only chan-collapse-btn${
+        state.chanCollapsed ? " on" : ""
+      }" data-act="chan-collapse-toggle"
+        title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
+        aria-pressed="${state.chanCollapsed === true}"
+        aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}">${icon(
+          "columns",
+        )}</button>
       ${iconButton("close", {
         act: "chan-sidebar-close",
         title: "Close",
         cls: "drawer-close",
       })}
+    </div>
+    <div class="chan-sidebar-head">
+      ${searchBox("Search channels...", state.chatQuery, "channel-search")}
     </div>
     <!-- One scroller, not three.
          The column used to be a four-row grid in which the channel list had
@@ -892,7 +899,13 @@ function chanSidebar(activeRepositoryId) {
          each heading sticks to the top of the panel while its own section is
          passing so the reader always knows which list they are in. -->
     <div class="chan-scroll">
-      ${section("Channels", "channel-new", channel, "New channel")}
+      <div class="chan-sec chan-sec-channels">
+        <span class="chan-sec-label">Channels</span>
+        <button type="button" class="chan-sec-add" data-act="channel-new"
+          data-value="${channel}" title="New channel" aria-label="New channel">
+          ${icon("plus")}
+        </button>
+      </div>
       <div class="chan-list">
         ${
           channels.length === 0
@@ -922,11 +935,27 @@ function chanSidebar(activeRepositoryId) {
         }
       </div>
     </div>
-    ${
-      state.health === undefined
-        ? `<div class="sys-line"><span class="dot grey"></span>Control plane unreachable</div>`
-        : ""
-    }
+    <!-- Account controls live at the foot like the products this shell is
+         modelled on. Both keep an icon in compact mode; the labels return on
+         expansion without changing actions or routes. -->
+    <div class="chan-sidebar-foot">
+      ${
+        state.health === undefined
+          ? `<div class="sys-line" title="Control plane unreachable"><span class="dot grey"></span>Control plane unreachable</div>`
+          : ""
+      }
+      <button type="button" class="chan-foot-action" data-act="nav"
+        data-value="settings" title="Settings" aria-label="Settings">
+        ${icon("gear")}
+        <span class="chan-foot-copy">Settings</span>
+      </button>
+      <button type="button" class="chan-account" data-act="user-menu"
+        title="Open profile menu" aria-label="Open profile menu for ${esc(user)}">
+        ${avatar(user, 32, user, myAvatar())}
+        <span class="chan-account-copy"><b>${esc(user)}</b><span>Profile</span></span>
+        ${icon("chevronRight", 'class="chan-account-more"')}
+      </button>
+    </div>
   </aside>`;
 }
 
@@ -1045,23 +1074,6 @@ function chanHeader(repository, repositoryId) {
          throws only when this header renders. -->
     <button type="button" class="icon-btn chan-sidebar-btn" data-act="chan-sidebar-toggle"
       title="Channels &amp; people" aria-label="Channels &amp; people">${icon("list")}</button>
-    <!-- The desktop counterpart of the button above: on a wide screen the
-         channel list is a column rather than a drawer, so folding it away is
-         a different act from opening it and gets its own control. Hidden
-         below the breakpoint where the drawer takes over.
-
-         Lit while the column is folded away. The aria-pressed below said so
-         to a screen reader and nothing said so to an eye: one grey glyph
-         meant both "hide this" and "the list you are missing is behind here",
-         which is the whole of "where did the channels go". The "on" modifier
-         is icon-btn's existing treatment for a toggle showing its state. -->
-    <button type="button" class="icon-btn desk-only${state.chanCollapsed ? " on" : ""}"
-      data-act="chan-collapse-toggle"
-      title="${state.chanCollapsed ? "Show channels &amp; people" : "Hide channels &amp; people"}"
-      aria-pressed="${state.chanCollapsed === true}"
-      aria-label="${state.chanCollapsed ? "Show channels and people" : "Hide channels and people"}">${icon(
-        "columns",
-      )}</button>
     ${icon("chatBubble", 'class="ch-hash"')}
     <div class="ch-title">
       <div class="ch-name">${esc(repositoryId ?? "")}</div>
@@ -1824,7 +1836,7 @@ function composer(repositoryId) {
   // pressed, and the bar stays the width of a sentence.
   //
   // Empty and unfocused, the composer shrinks further and its toolbar folds
-  // into the pill — the rest is in styles.css, off the textarea's own
+  // into the compact bar — the rest is in styles.css, off the textarea's own
   // `:placeholder-shown`, so typing opens it without waiting for a render.
   // Three things it cannot see from there, because all three live outside the
   // form: an image staged for the next message, a thread that message is
@@ -3540,7 +3552,7 @@ export function updateComposerInput(node) {
   // Emptied, it is cleared rather than measured: an empty box collapses to
   // the lean bar, whose padding is not the padding this measurement was taken
   // against, and a pixel height left behind from the open composer would hold
-  // the pill several rows tall with nothing in it.
+  // the bar several rows tall with nothing in it.
   node.style.height = "auto";
   if (node.value !== "") {
     node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
