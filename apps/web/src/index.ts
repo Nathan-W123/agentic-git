@@ -313,6 +313,9 @@ async function serve(
         repositoryId: input.repositoryId,
         projectId: input.projectId,
         actorId: input.actorId,
+        ...(input.conflictResolution === undefined
+          ? {}
+          : { conflictResolution: input.conflictResolution }),
         ...(connection === undefined
           ? {}
           : { credentials: { token: connection.token } }),
@@ -374,6 +377,9 @@ async function serve(
         projectId: input.projectId,
         ...(input.taskIds === undefined ? {} : { taskIds: input.taskIds }),
         ...(agentId === undefined ? {} : { agentId }),
+        // The persona's owner, when a name was targeted: agentId narrows to
+        // the vendor, and this narrows to whose work it was.
+        ...(input.ownerId === undefined ? {} : { submittedBy: input.ownerId }),
         reason: input.reason,
         ...(input.actorId === undefined ? {} : { actorId: input.actorId }),
         cancellations,

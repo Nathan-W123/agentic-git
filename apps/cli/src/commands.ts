@@ -557,6 +557,14 @@ export interface CancelTasksInput {
   taskIds?: string[];
   /** Stop every active task dispatched to this agent. */
   agentId?: string;
+  /**
+   * Stop only tasks this person submitted, narrowing `agentId`. A channel
+   * persona is an (owner, vendor) pair, but every persona of one vendor
+   * resolves to the same configured agent — so an `agentId` sweep alone
+   * takes other people's same-vendor work with it, which is exactly how
+   * "/stop @agent" once stopped everyone's tasks.
+   */
+  submittedBy?: string;
   /** Why, in the canceller's words — recorded on the lease and the audit. */
   reason: string;
   /** Who asked, for the audit trail. */
@@ -626,7 +634,11 @@ export async function cancelTasks(
     if (task.status === "open") {
       return false;
     }
-    return input.agentId === undefined || task.agentId === input.agentId;
+    return (
+      (input.agentId === undefined || task.agentId === input.agentId) &&
+      (input.submittedBy === undefined ||
+        task.submittedBy === input.submittedBy)
+    );
   });
   if (candidates.length === 0) {
     return [];

@@ -38,7 +38,11 @@ async function harness() {
   });
   const submit = async (
     objective: string,
-    options: { agentId?: string; planOnly?: boolean } = {},
+    options: {
+      agentId?: string;
+      planOnly?: boolean;
+      submittedBy?: string;
+    } = {},
   ) =>
     await store.submitTask({
       repositoryId: "repo",
@@ -46,8 +50,11 @@ async function harness() {
       agentId: options.agentId ?? "builder",
       validationCommands: [],
       ...(options.planOnly === true ? { planOnly: true } : {}),
+      ...(options.submittedBy === undefined
+        ? {}
+        : { submittedBy: options.submittedBy }),
     });
-  return { store, workerId: worker.id, submit };
+  return { store, ownerId: owner.id, workerId: worker.id, submit };
 }
 
 test("a repository-wide stop settles rows, lease, live session, and audit", async () => {
@@ -153,6 +160,40 @@ test("an agent-scoped stop leaves the other agents' work alone", async () => {
   );
   assert.equal(byId.get(mine.id), "cancelled");
   assert.equal(byId.get(theirs.id), "submitted");
+});
+
+test("a submitter-scoped stop spares another person's same-agent work", async () => {
+  // Two channel personas of one vendor share a configured agent id, so an
+  // agent-scoped sweep alone cannot tell their work apart — the submitter
+  // is what separates them.
+  const { store, ownerId, submit } = await harness();
+  const other = await store.createUser({
+    email: "other@example.invalid",
+    displayName: "Other",
+    passwordDigest: "unused",
+  });
+  const mine = await submit("my job", { submittedBy: ownerId });
+  const theirs = await submit("their job", { submittedBy: other.id });
+
+  const reports = await cancelTasks(store, {
+    repositoryId: "repo",
+    agentId: "builder",
+    submittedBy: ownerId,
+    reason: "Stopped from the channel",
+  });
+
+  assert.deepEqual(
+    reports.map((entry) => entry.id),
+    [mine.id],
+  );
+  const statuses = new Map(
+    (await store.listSubmittedTasks({ repositoryId: "repo" })).map((task) => [
+      task.id,
+      task.status,
+    ]),
+  );
+  assert.equal(statuses.get(mine.id), "cancelled");
+  assert.equal(statuses.get(theirs.id), "submitted");
 });
 
 test("naming an open conversation stops it, though no sweep would", async () => {
