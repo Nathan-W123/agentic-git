@@ -910,9 +910,8 @@ function chanSidebar(activeRepositoryId) {
         ${brandMark(26)}
         <span class="brand-text"><b>Lattice</b></span>
       </button>
-      <button type="button" class="icon-btn desk-only chan-collapse-btn${
-        state.chanCollapsed ? " on" : ""
-      }" data-act="chan-collapse-toggle"
+      <button type="button" class="icon-btn desk-only chan-collapse-btn"
+        data-act="chan-collapse-toggle"
         title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
         aria-pressed="${state.chanCollapsed === true}"
         aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}">${icon(
@@ -973,20 +972,15 @@ function chanSidebar(activeRepositoryId) {
         }
       </div>
     </div>
-    <!-- Account controls live at the foot like the products this shell is
-         modelled on. Both keep an icon in compact mode; the labels return on
-         expansion without changing actions or routes. -->
+    <!-- The profile is the one account control at the foot. Its menu already
+         contains Settings, so a second Settings row here would only make the
+         same destination compete with the account that owns it. -->
     <div class="chan-sidebar-foot">
       ${
         state.health === undefined
           ? `<div class="sys-line" title="Control plane unreachable"><span class="dot grey"></span>Control plane unreachable</div>`
           : ""
       }
-      <button type="button" class="chan-foot-action" data-act="nav"
-        data-value="settings" title="Settings" aria-label="Settings">
-        ${icon("gear")}
-        <span class="chan-foot-copy">Settings</span>
-      </button>
       <button type="button" class="chan-account" data-act="user-menu"
         title="Open profile menu" aria-label="Open profile menu for ${esc(user)}">
         ${avatar(user, 32, user, myAvatar())}

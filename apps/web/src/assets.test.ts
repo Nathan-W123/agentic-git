@@ -404,6 +404,7 @@ test("navigation is the four product routes and nothing invented", async () => {
 
 test("the sidebar collapses to an icon rail with account controls at its foot", async () => {
   const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
   const css = await publicFile("styles.css");
   const sidebar = chats.slice(
     chats.indexOf("function chanSidebar"),
@@ -421,14 +422,18 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
   assert.doesNotMatch(header, /data-act="chan-collapse-toggle"/u);
   assert.match(header, /data-act="chan-sidebar-toggle"/u);
 
-  // Settings and profile/account are stable footer rows and reuse the same
-  // delegated actions as the rest of the app.
+  // The account is the sole footer action. Its existing menu is the route to
+  // Settings, so the sidebar does not duplicate that destination with a gear.
   assert.match(sidebar, /class="chan-sidebar-foot"/u);
-  assert.match(
+  assert.doesNotMatch(
     sidebar,
     /class="chan-foot-action" data-act="nav"\s*data-value="settings"/u,
   );
   assert.match(sidebar, /class="chan-account" data-act="user-menu"/u);
+  assert.match(
+    app,
+    /case "user-menu":[\s\S]{0,180}value: "settings", label: "Settings"/u,
+  );
   assert.match(sidebar, /section\("People", "invite-repo"/u);
   assert.doesNotMatch(
     sidebar,
@@ -436,8 +441,8 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
     "the account action should not repeat its destination as a subtitle",
   );
 
-  // Compact means narrow, never absent. The labels fold away while the links,
-  // channel icons, Settings and account avatar remain real controls.
+  // Compact means narrow, never absent. The logo fades out, the collapse
+  // control remains in the crown, and the account avatar stays at the foot.
   assert.match(
     css,
     /\.chats-shell\.chan-collapsed > \.chan-sidebar \{\s*width: 64px;/u,
@@ -450,7 +455,31 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
   assert.match(css, /\.chan-row\.active::before \{/u);
   assert.match(
     css,
-    /\.chats-shell\.chan-collapsed :is\(\.chan-foot-action, \.chan-account\)/u,
+    /\.chats-shell\.chan-collapsed \.chan-brand \{[\s\S]{0,260}opacity: 0;[\s\S]{0,80}visibility: hidden;/u,
+  );
+  assert.match(css, /\.chan-collapse-btn \{\s*flex: none;\s*margin-left: auto;/u);
+  const sidebarRule = /\.chan-sidebar \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(sidebarRule, undefined, "the sidebar has a base layout rule");
+  assert.match(sidebarRule ?? "", /transition: width 0\.18s cubic-bezier/u);
+  assert.match(
+    css,
+    /grid-template-rows: auto auto minmax\(0, 1fr\) auto;/u,
+  );
+
+  // Changing the class on the existing shell gives the width transition an
+  // actual before/after. Persistence and accessible state still update, but
+  // this action must not replace the app with render().
+  const collapseAction = app.slice(
+    app.indexOf('case "chan-collapse-toggle"'),
+    app.indexOf('case "chan-sidebar-close"'),
+  );
+  assert.match(collapseAction, /classList\.toggle\(\s*"chan-collapsed"/u);
+  assert.match(collapseAction, /persist\("ag\.chanCollapsed"/u);
+  assert.match(collapseAction, /setAttribute\("aria-pressed"/u);
+  assert.doesNotMatch(collapseAction, /\brender\(\)/u);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]{0,180}transition-duration: 0\.01ms !important;/u,
   );
 });
 

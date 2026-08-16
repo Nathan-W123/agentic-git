@@ -3319,11 +3319,23 @@ document.addEventListener("click", (event) => {
         : !details.open;
       return;
     }
-    case "chan-collapse-toggle":
+    case "chan-collapse-toggle": {
       state.chanCollapsed = state.chanCollapsed !== true;
       persist("ag.chanCollapsed", state.chanCollapsed);
-      render();
+
+      // Keep this DOM in place while its width changes. A whole-screen render
+      // replaces the sidebar outright, which gives a newly inserted element
+      // its final width and leaves CSS with nothing to animate between.
+      node.closest(".chats-shell")?.classList.toggle(
+        "chan-collapsed",
+        state.chanCollapsed,
+      );
+      const label = state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar";
+      node.setAttribute("aria-pressed", String(state.chanCollapsed));
+      node.setAttribute("aria-label", label);
+      node.setAttribute("title", label);
       return;
+    }
     case "chan-sidebar-close":
       state.chanSidebarOpen = false;
       render();

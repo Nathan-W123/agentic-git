@@ -562,6 +562,10 @@ svg {
   align-items: center;
   gap: 6px;
   padding: 10px 10px 6px;
+  overflow: hidden;
+  transition:
+    gap 0.18s cubic-bezier(0.2, 0.8, 0.2, 1),
+    padding 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 .chan-brand {
@@ -573,20 +577,24 @@ svg {
   padding: 4px;
   text-align: left;
   color: var(--text);
+  transition:
+    opacity 0.12s ease,
+    transform 0.18s ease,
+    visibility 0s linear;
 }
 
 .chan-collapse-btn {
   flex: none;
+  margin-left: auto;
 }
 
 .chan-sidebar-foot {
   display: grid;
-  gap: 3px;
+  align-self: end;
   padding: 8px;
   border-top: 1px solid var(--border-soft);
 }
 
-.chan-foot-action,
 .chan-account {
   display: flex;
   align-items: center;
@@ -600,21 +608,9 @@ svg {
   transition: background 0.13s ease, color 0.13s ease;
 }
 
-.chan-foot-action:hover,
 .chan-account:hover {
   background: var(--bg-hover);
   color: var(--text);
-}
-
-.chan-foot-action svg {
-  width: 18px;
-  height: 18px;
-  flex: none;
-}
-
-.chan-foot-copy {
-  font-size: 12.5px;
-  font-weight: 550;
 }
 
 .chan-account .avatar {
@@ -3554,10 +3550,11 @@ svg {
      two things to drag inside 256 pixels and a band of dead panel whenever
      neither list was long enough to fill its share. `.chan-scroll` is the
      one that moves. */
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   min-height: 0;
   background: var(--bg-panel);
-  transition: width 0.18s ease;
+  overflow-x: hidden;
+  transition: width 0.18s cubic-bezier(0.2, 0.8, 0.2, 1);
   /* No border. This column is a shade off the conversation in both themes
      (`--bg-panel` against `--bg-chat`), and a whole page-height rule on top
      of that difference is one line of chrome doing a job the ground has
@@ -6179,37 +6176,39 @@ dialog.modal::backdrop {
   }
 }
 
-/* The desktop collapse leaves a real navigation rail behind. Channel links,
-   the product mark, Settings and the profile menu keep their icons; search,
-   roster detail and labels fold away. Phones use the full-width drawer below,
-   so none of these compact-rail rules apply there. */
+/* The desktop collapse leaves a real navigation rail behind. Channel links
+   and the profile menu keep their icons; search, roster detail and labels fold
+   away. The brand fades out while the collapse control rides the shrinking
+   rail's right edge into the top-left crown position. Phones use the full-width
+   drawer below, so none of these compact-rail rules apply there. */
 @media (min-width: 601px) {
   .chats-shell.chan-collapsed > .chan-sidebar {
     width: 64px;
   }
 
   .chats-shell.chan-collapsed .chan-sidebar-top {
-    flex-direction: column;
-    padding: 10px 0 6px;
+    gap: 0;
+    padding: 10px 16px 6px;
   }
 
   .chats-shell.chan-collapsed .chan-brand {
-    flex: none;
-    justify-content: center;
-    width: 40px;
-    height: 40px;
-    padding: 0;
+    opacity: 0;
+    visibility: hidden;
+    pointer-events: none;
+    transform: translateX(-4px);
+    transition:
+      opacity 0.1s ease,
+      transform 0.18s ease,
+      visibility 0s linear 0.18s;
   }
 
   .chats-shell.chan-collapsed :is(
-      .brand-text,
       .chan-sidebar-head,
       .chan-sec:not(.chan-sec-channels),
       .chan-roster,
       .chan-sec-label,
       .cr-name,
       .cr-more,
-      .chan-foot-copy,
       .chan-account-copy,
       .chan-account-more
     ) {
@@ -6281,7 +6280,7 @@ dialog.modal::backdrop {
     padding: 8px 0;
   }
 
-  .chats-shell.chan-collapsed :is(.chan-foot-action, .chan-account) {
+  .chats-shell.chan-collapsed .chan-account {
     justify-content: center;
     width: 40px;
     height: 40px;
@@ -6702,7 +6701,6 @@ dialog.modal::backdrop {
     height: 34px;
   }
 
-  .chan-foot-action,
   .chan-account {
     min-height: 44px;
   }
