@@ -1784,8 +1784,15 @@ function composerSuggestions(repositoryId) {
 
 
 function composer(repositoryId) {
-  // Empty and unfocused, the composer shrinks to one lean row and its toolbar
-  // folds into it — the rest is in styles.css, off the textarea's own
+  // One lean bar: a "+" on the left, the text, and send on the right. Every
+  // other affordance — attaching an image, running a command, addressing
+  // somebody — lives behind the "+", which is where the two chat apps people
+  // already use put them. A row of icons is a row of decisions offered before
+  // there is anything to decide about; one control asks nothing until it is
+  // pressed, and the bar stays the width of a sentence.
+  //
+  // Empty and unfocused, the composer shrinks further and its toolbar folds
+  // into the pill — the rest is in styles.css, off the textarea's own
   // `:placeholder-shown`, so typing opens it without waiting for a render.
   // Three things it cannot see from there, because all three live outside the
   // form: an image staged for the next message, a thread that message is
@@ -1824,16 +1831,17 @@ function composer(repositoryId) {
           }">${esc(draftText())}</textarea>
       </div>
       <div class="composer-bar">
-        <!-- The input is the control; the button only clicks it. A bare file
-             input cannot be styled into this bar, and a label would take the
-             click before the delegated handler ever saw it. -->
+        <!-- The input is the control; the menu entry only clicks it. A bare
+             file input cannot be styled into this bar, and a label would take
+             the click before the delegated handler ever saw it. -->
         <input type="file" data-act="channel-attach-input" accept="image/png,
           image/jpeg,image/gif,image/webp" multiple hidden>
-        ${iconButton("paperclip", {
-          act: "channel-attach",
-          title: "Attach an image",
+        ${iconButton("plus", {
+          act: "composer-plus",
+          value: "channel",
+          title: "Add to this message",
+          cls: "composer-plus",
         })}
-        ${iconButton("at", { act: "channel-mention-key", title: "Mention someone" })}
         ${state.attaching > 0
           ? `<span class="composer-note">attaching ${esc(String(state.attaching))} image(s)…</span>`
           : ""}

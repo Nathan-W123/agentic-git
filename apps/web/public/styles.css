@@ -2436,11 +2436,17 @@ svg {
 }
 
 /*
- * The desktop composer is deliberately one steady, lean row. Its controls
- * and text remain in the same places when it receives focus, matching the
- * compact prompt bar people use with a pointer and a wide viewport. Phones
+ * The desktop composer is deliberately one steady, lean row: "+" on the left,
+ * the sentence, send on the right, and nothing else asking to be read. Its
+ * controls and text remain in the same places when it receives focus, matching
+ * the compact prompt bar people use with a pointer and a wide viewport. Phones
  * override these variables below: they begin with this pill, then open into
  * a clearer two-row composer when somebody starts writing.
+ *
+ * It reads as floating over the conversation rather than as a panel bolted to
+ * the bottom of it — a lifted pill with a shadow under it, so the transcript
+ * looks like it continues underneath. That is the whole trick behind the bars
+ * this one is modelled on: one shape, raised, with the message in it.
  *
  * Every metric is a variable because the textarea and the mirror painted
  * underneath it cannot afford to disagree about padding by a pixel: they are
@@ -2448,14 +2454,19 @@ svg {
  * highlight slides off the name it belongs to.
  */
 .composer {
-  --composer-pad-top: 7px;
-  --composer-pad-bottom: 7px;
-  --composer-pad-x: 4px;
+  --composer-pad-top: 8px;
+  --composer-pad-bottom: 8px;
+  --composer-pad-x: 6px;
   --composer-shape: 999px;
   --composer-layout: flex;
   --composer-bar-layout: contents;
-  --composer-inset: 0 5px;
+  --composer-inset: 0 6px;
   --composer-send-shape: 999px;
+  /* The gap that pushes send to the far edge is only wanted on the two-row
+     phone bar. While every control is on the pill itself, an elastic gap
+     between the text and the send button steals half the width of the box
+     somebody is writing in. */
+  --composer-spacer-layout: none;
 
   margin: 0 12px 12px;
   display: var(--composer-layout);
@@ -2465,17 +2476,35 @@ svg {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--composer-shape);
-  transition: border-color 0.15s ease;
+  box-shadow: var(--shadow-pop);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
+/* Focus lifts it rather than repainting it: the same shadow with a soft ring
+   of the accent around it, which is the one moment this bar is the subject. */
 .composer:focus-within {
   border-color: var(--accent-line);
+  box-shadow: var(--shadow-pop), 0 0 0 3px var(--accent-wash);
 }
 
-/* Attach leads, text follows, send closes. A no-op in the expanded bar, where
-   the attach button is already the first thing on the row. */
+/* "+" leads, text follows, send closes. A no-op in the expanded bar, where
+   the "+" is already the first thing on the row. */
 .composer-bar > .icon-btn:first-of-type {
   order: -1;
+}
+
+/* The one control on the left, and the only thing standing in for what used to
+   be a row of icons. Round, like the send button facing it across the bar. */
+.composer-bar .composer-plus {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  color: var(--text-2);
+}
+
+.composer-bar .composer-plus:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 /* Stands in for the composer when there is no agent to talk to. */
@@ -2588,6 +2617,7 @@ svg {
 }
 
 .composer-bar .spacer {
+  display: var(--composer-spacer-layout, block);
   flex: 1;
 }
 
@@ -2660,6 +2690,15 @@ svg {
 .send-btn:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+
+/* Nothing written yet, so nothing to send. The button keeps its place — it is
+   what makes the right end of the bar read as an end — but it waits in grey
+   instead of sitting lit beside an empty box. `.is-expanded` is excluded
+   because a staged image is something to send with no text at all. */
+.composer:not(.is-expanded):has(textarea:placeholder-shown) .send-btn {
+  background: var(--bg-hover);
+  color: var(--text-3);
 }
 
 .send-btn svg {
@@ -4909,6 +4948,21 @@ svg {
   margin: 0 12px 12px;
 }
 
+/* The last inch of the transcript, faded into the page behind the bar. The
+   composer is drawn as a raised pill; this is what makes the conversation look
+   like it passes underneath it rather than stopping politely above. Same
+   colour as the column, so it is invisible until there is text under it. */
+.chan-composer-wrap::after {
+  content: "";
+  position: absolute;
+  left: -12px;
+  right: -12px;
+  bottom: 100%;
+  height: 18px;
+  background: linear-gradient(to top, var(--bg-chat), transparent);
+  pointer-events: none;
+}
+
 .chan-composer-wrap .composer {
   margin: 0;
 }
@@ -6406,6 +6460,9 @@ dialog.modal::backdrop {
     --composer-bar-layout: flex;
     --composer-inset: 0;
     --composer-send-shape: 8px;
+    /* The two-row bar is the one shape that wants the elastic gap: the text is
+       on its own line, so pushing send to the far edge costs it nothing. */
+    --composer-spacer-layout: block;
 
     max-height: 240px;
     overflow: hidden;
@@ -6421,30 +6478,25 @@ dialog.modal::backdrop {
   }
 
   .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown) {
-    --composer-pad-top: 7px;
-    --composer-pad-bottom: 7px;
-    --composer-pad-x: 4px;
+    --composer-pad-top: 8px;
+    --composer-pad-bottom: 8px;
+    --composer-pad-x: 6px;
     --composer-shape: 999px;
     --composer-layout: flex;
-    /* Lift the useful edge controls into the pill until it is opened. */
+    /* Lift the two edge controls into the pill until it is opened. */
     --composer-bar-layout: contents;
-    --composer-inset: 0 5px;
+    --composer-inset: 0 6px;
     --composer-send-shape: 999px;
+    --composer-spacer-layout: none;
 
     max-height: 52px;
   }
 
   /* The fuller toolbar is already in the markup. Keep it out of the idle
-     pill, then reveal it as part of the focus expansion without a render. */
+     pill, then reveal it as part of the focus expansion without a render.
+     What survives the fold is what the bar is for: the "+" and send. */
   .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown)
-    :is(
-      .mini-select,
-      .ctx,
-      .composer-note,
-      .composer-bar .spacer,
-      [data-act="chat-mention"],
-      [data-act="channel-mention-key"]
-    ) {
+    :is(.mini-select, .ctx, .composer-note, .composer-bar .spacer) {
     display: none;
   }
 

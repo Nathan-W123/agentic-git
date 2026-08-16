@@ -3112,6 +3112,35 @@ function refreshChannelInfoPopover() {
   }
 }
 
+/**
+ * Types one character into the channel composer, as if it had been pressed.
+ *
+ * The "@" and the "/" are the two characters that open a picker, and both are
+ * now reached from the "+" menu rather than from a button of their own. Going
+ * through the draft rather than through the textarea is what survives the
+ * render: the box is rebuilt from `state.chatDraft`, and any image already
+ * staged for this message lives in the draft as markdown the textarea never
+ * shows — so it is carried across rather than dropped on the floor.
+ */
+function typeIntoComposer(character, opened) {
+  const input = $("[data-act='channel-input']");
+  if (input === null) {
+    return;
+  }
+  const at = input.selectionStart ?? input.value.length;
+  const attachments = state.chatDraft.match(
+    /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
+  );
+  state.chatDraft = `${input.value.slice(0, at)}${character}${input.value.slice(at)}${
+    attachments === null ? "" : `\n${attachments.join("\n")}\n`
+  }`;
+  opened();
+  render();
+  const next = $("[data-act='channel-input']");
+  next?.focus();
+  next?.setSelectionRange(at + 1, at + 1);
+}
+
 function actionOf(event) {
   const node = event.target.closest("[data-act]");
   return node === null ? undefined : { node, act: node.dataset.act, value: node.dataset.value };
@@ -3226,10 +3255,47 @@ document.addEventListener("click", (event) => {
     case "channel-open":
       openChannel(value, render);
       return;
+    case "composer-plus": {
+      // The one control on the left of the bar. Everything that adds something
+      // to a message hangs off it: a picture, a command, a name. Ordering is
+      // by how often each is reached for, and the menu opens *upward* — the
+      // composer sits on the floor of the window, and `showPopover` hangs a
+      // menu below its anchor, which would put this one off the screen.
+      const menu =
+        value === "chat"
+          ? showMenu(node, [
+              {
+                act: "chat-attach-blocked",
+                label: "Photos & files",
+                hint: "Not available on this deployment",
+                iconName: "paperclip",
+                disabled: true,
+              },
+              { act: "chat-mention", label: "Mention a file or agent", iconName: "at" },
+            ])
+          : showMenu(node, [
+              { act: "channel-attach", label: "Photos & files", iconName: "paperclip" },
+              {
+                act: "channel-slash-key",
+                label: "Run a command",
+                hint: "Everything this channel answers to",
+                iconName: "terminal",
+              },
+              { act: "channel-mention-key", label: "Mention someone", iconName: "at" },
+            ]);
+      const box = node.getBoundingClientRect();
+      menu.style.left = `${Math.max(
+        12,
+        Math.min(box.left, window.innerWidth - menu.offsetWidth - 12),
+      )}px`;
+      menu.style.top = `${Math.max(12, box.top - menu.offsetHeight - 8)}px`;
+      return;
+    }
     case "channel-attach": {
       // Clicking the picker rather than being it: a bare file input cannot be
       // styled into the composer bar, and wrapping the button in a label would
       // swallow the click before the delegated handler saw it.
+      closePopover();
       $("[data-act='channel-attach-input']")?.click();
       return;
     }
@@ -3246,24 +3312,21 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "channel-mention-key": {
-      const input = $("[data-act='channel-input']");
-      if (input === null) {
-        return;
-      }
-      const at = input.selectionStart ?? input.value.length;
-      const attachments = state.chatDraft.match(
-        /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
-      );
-      state.chatDraft = `${input.value.slice(0, at)}@${input.value.slice(at)}${
-        attachments === null ? "" : `\n${attachments.join("\n")}\n`
-      }`;
-      state.mentionActive = true;
-      state.mentionQuery = "";
-      state.mentionIndex = 0;
-      render();
-      const next = $("[data-act='channel-input']");
-      next?.focus();
-      next?.setSelectionRange(at + 1, at + 1);
+      closePopover();
+      typeIntoComposer("@", () => {
+        state.mentionActive = true;
+        state.mentionQuery = "";
+        state.mentionIndex = 0;
+      });
+      return;
+    }
+    case "channel-slash-key": {
+      closePopover();
+      typeIntoComposer("/", () => {
+        state.slashActive = true;
+        state.slashQuery = "";
+        state.slashIndex = 0;
+      });
       return;
     }
     case "channel-mention-pick":
@@ -4275,6 +4338,7 @@ document.addEventListener("click", (event) => {
 
     /* Composer affordances */
     case "chat-mention": {
+      closePopover();
       const input = $("[data-act='chat-input']");
       if (input === null) {
         return;
