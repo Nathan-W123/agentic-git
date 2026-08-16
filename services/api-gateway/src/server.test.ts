@@ -3397,6 +3397,89 @@ test("an agent's own owner can always @mention it, personal or org-wide", async 
   assert.match(systemMessages[0].content, /On it/u);
 });
 
+test("a human channel participant can be @mentioned without an agent refusal", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "mention-human-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  await addColleague(runtime, "human-mention@example.com");
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Colleague could you take a look at this?" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 0);
+
+  const after = await owner.request(`${base}/messages`);
+  assert.deepEqual(
+    (after.data.messages as any[]).map((message) => message.content),
+    ["@Colleague could you take a look at this?"],
+  );
+});
+
+test("a human mention suppresses auto-claim but not an explicit agent mention", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "mention-human-agent-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  await addColleague(runtime, "mixed-mention@example.com");
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "@Colleague please update the release checklist" },
+    })).status,
+    201,
+  );
+  assert.equal(runtime.submittedTasks.length, 0);
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: {
+        content: "@Colleague please review while @Claude (Owner) updates the release checklist",
+      },
+    })).status,
+    201,
+  );
+  assert.equal(runtime.submittedTasks.length, 1);
+  assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
+});
+
+test("a user outside the repository cannot be resolved as a channel ping", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "mention-outsider-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  await runtime.store.createUser({
+    email: "outsider-mention@example.com",
+    displayName: "Outsider",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Outsider please review this" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 0);
+
+  const after = await owner.request(`${base}/messages`);
+  const coordinator = (after.data.messages as any[]).filter(
+    (message) => message.kind === "agent" || message.kind === "system",
+  );
+  assert.equal(coordinator.length, 1, JSON.stringify(after.data.messages));
+  assert.match(coordinator[0].content, /Nobody here answers/u);
+});
+
 /**
  * Auto-claim (the no-@mention path in `dispatchChannelMentions` /
  * `maybeAutoClaimTask`): when a channel message reads as a task and exactly
