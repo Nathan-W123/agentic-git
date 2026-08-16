@@ -4891,6 +4891,18 @@ svg {
   overflow-x: auto;
 }
 
+/* The thread's reply box and whatever is staged above it, as one block on the
+   floor of the panel. The row of thumbnails is indented to the composer's own
+   margin rather than the panel edge, so an attachment reads as belonging to
+   the box it will be sent from. */
+.thread-composer-wrap {
+  min-width: 0;
+}
+
+.thread-composer-wrap .composer-attachments {
+  margin: 0 12px;
+}
+
 .composer-attachment {
   display: grid;
   grid-template-columns: 38px minmax(70px, 120px) 22px;

@@ -181,6 +181,7 @@ import {
   submitComposerMessage,
   submitThreadReply,
   updateComposerInput,
+  updateThreadComposerInput,
 } from "./screen-chats.js";
 
 /* ---------------------------------------------------------- formatting ---- */
@@ -1623,6 +1624,28 @@ async function simplifySummaryAction(repositoryId, replyId) {
 }
 
 /**
+ * Which draft an upload lands in, and what the reader looks at while it does.
+ *
+ * Two composers stage images: the channel bar and the thread panel's reply
+ * box. Everything about the upload is identical, so the only difference worth
+ * naming is where the reference goes, which counter the "attaching…" note
+ * reads, and which textarea gets the caret back — three strings, rather than a
+ * second copy of the loop below drifting away from the first.
+ */
+const ATTACH_TARGETS = {
+  channel: {
+    draft: "chatDraft",
+    counter: "attaching",
+    input: "channel-input",
+  },
+  thread: {
+    draft: "threadDraft",
+    counter: "threadAttaching",
+    input: "channel-thread-input",
+  },
+};
+
+/**
  * Puts images in the draft, as the reference a message carries.
  *
  * Uploaded one at a time and appended as they land, so a slow one does not
@@ -1631,7 +1654,8 @@ async function simplifySummaryAction(repositoryId, replyId) {
  * anyway — this is one of the few places a composer render is the point
  * rather than the cost.
  */
-async function attachChannelImages(files) {
+async function attachChannelImages(files, target = "channel") {
+  const where = ATTACH_TARGETS[target] ?? ATTACH_TARGETS.channel;
   const repositoryId = activeChannelId();
   const images = files.filter((file) => file.type.startsWith("image/"));
   if (repositoryId === undefined || images.length === 0) {
@@ -1640,24 +1664,24 @@ async function attachChannelImages(files) {
     }
     return;
   }
-  state.attaching += images.length;
+  state[where.counter] += images.length;
   render();
   for (const file of images) {
     try {
       const id = await uploadAttachment(repositoryId, file);
       const alt = file.name.replace(/\.[^.]+$/u, "").slice(0, 60);
-      const draft = state.chatDraft ?? "";
-      state.chatDraft = `${draft}${
+      const draft = state[where.draft] ?? "";
+      state[where.draft] = `${draft}${
         draft === "" || draft.endsWith("\n") ? "" : "\n"
       }![${alt}](attachment:${id})\n`;
     } catch (error) {
       toast(error.message ?? "That image could not be attached.", "error");
     } finally {
-      state.attaching -= 1;
+      state[where.counter] -= 1;
       render();
     }
   }
-  $("[data-act='channel-input']")?.focus();
+  $(`[data-act='${where.input}']`)?.focus();
 }
 
 async function startPreviewAction(repositoryId, asked = false) {
@@ -3183,16 +3207,28 @@ document.addEventListener("click", (event) => {
       $("[data-act='channel-attach-input']")?.click();
       return;
     }
-    case "channel-attachment-remove": {
+    case "channel-attachment-remove":
+    case "thread-attachment-remove": {
+      const where =
+        act === "channel-attachment-remove"
+          ? ATTACH_TARGETS.channel
+          : ATTACH_TARGETS.thread;
       const escaped = value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-      state.chatDraft = state.chatDraft
+      state[where.draft] = String(state[where.draft] ?? "")
         .replace(
           new RegExp(`!?\\[[^\\]]*\\]\\(attachment:${escaped}\\)\\n?`, "gu"),
           "",
         )
         .trimEnd();
       render();
-      $("[data-act='channel-input']")?.focus();
+      $(`[data-act='${where.input}']`)?.focus();
+      return;
+    }
+    case "thread-attach": {
+      // The thread's paperclip, which — like the channel's menu entry — only
+      // clicks the hidden picker sitting beside it in the same bar.
+      closePopover();
+      $("[data-act='channel-thread-attach-input']")?.click();
       return;
     }
     case "channel-mention-key": {
@@ -4354,8 +4390,14 @@ document.addEventListener("change", (event) => {
     void pickAvatarFile(picker.files?.[0]);
     return;
   }
-  if (picker?.dataset?.act === "channel-attach-input") {
-    void attachChannelImages([...(picker.files ?? [])]);
+  if (
+    picker?.dataset?.act === "channel-attach-input" ||
+    picker?.dataset?.act === "channel-thread-attach-input"
+  ) {
+    void attachChannelImages(
+      [...(picker.files ?? [])],
+      picker.dataset.act === "channel-thread-attach-input" ? "thread" : "channel",
+    );
     // Cleared, or picking the same file twice in a row fires no change event
     // and the second attempt looks like a dead button.
     picker.value = "";
@@ -4445,7 +4487,10 @@ document.addEventListener("change", (event) => {
 /* Clipboard image files take the same validated upload path as the picker.
    Text-only clipboard data is left to the textarea's native paste behavior. */
 document.addEventListener("paste", (event) => {
-  if (event.target?.dataset?.act !== "channel-input") {
+  const act = event.target?.dataset?.act;
+  // Both composers, because pasting a screenshot is how most of these arrive
+  // and a thread is exactly where the screenshot being discussed belongs.
+  if (act !== "channel-input" && act !== "channel-thread-input") {
     return;
   }
   const files = [...(event.clipboardData?.items ?? [])]
@@ -4456,7 +4501,7 @@ document.addEventListener("paste", (event) => {
     return;
   }
   event.preventDefault();
-  void attachChannelImages(files);
+  void attachChannelImages(files, act === "channel-thread-input" ? "thread" : "channel");
 });
 
 document.addEventListener("input", (event) => {
@@ -4576,7 +4621,11 @@ document.addEventListener("input", (event) => {
     // textarea was already showing. Then it hunted down the replacement
     // textarea to put the caret back, and `restoreChannelScroll` forced a
     // layout of the freshly parsed transcript. Once per keystroke.
-    state.threadDraft = node.value;
+    //
+    // Through the helper rather than a bare assignment: the textarea shows
+    // only the visible half of the draft, and writing its value straight back
+    // would drop the reference lines a staged image lives on.
+    updateThreadComposerInput(node);
     return;
   }
 });

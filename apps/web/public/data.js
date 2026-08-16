@@ -243,6 +243,8 @@ export const state = {
   previews: {},
   /** Images being uploaded from the composer right now, for the note beside it. */
   attaching: 0,
+  /** The same, counted separately for the thread panel's own reply composer. */
+  threadAttaching: 0,
   /** The project whose inbox has been fetched, so it is fetched once. */
   dmLoadedProject: undefined,
   /** When the inbox was last fetched, for the refresh floor. */

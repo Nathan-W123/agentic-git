@@ -359,22 +359,31 @@ function statusDot(status, title) {
 const ATTACHMENT_PATTERN =
   /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu;
 
-function draftAttachments(repositoryId) {
+/**
+ * The three helpers below take the draft rather than reading one.
+ *
+ * Two composers stage images now — the channel bar and the thread panel's
+ * reply box — and they hold their text in two different places
+ * (`state.chatDraft` and `state.threadDraft`). The rules for where the
+ * references live inside a draft, and for what the textarea may show of it,
+ * are the same in both, so they are written once and passed the draft. The
+ * channel's is the default, because it is the caller that came first and
+ * every one of its call sites reads the same string it always did.
+ */
+function draftAttachments(repositoryId, draft = state.chatDraft) {
   const base =
     `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
     `/repositories/${encodeURIComponent(repositoryId ?? "")}/attachments/`;
-  return [...String(state.chatDraft ?? "").matchAll(ATTACHMENT_PATTERN)].map(
-    (match) => ({
-      reference: match[0],
-      alt: match[1] || "Attached image",
-      id: match[2],
-      src: base + match[2],
-    }),
-  );
+  return [...String(draft ?? "").matchAll(ATTACHMENT_PATTERN)].map((match) => ({
+    reference: match[0],
+    alt: match[1] || "Attached image",
+    id: match[2],
+    src: base + match[2],
+  }));
 }
 
-function draftText() {
-  const draft = String(state.chatDraft ?? "");
+function draftText(source = state.chatDraft) {
+  const draft = String(source ?? "");
   const attachmentAt = draft.search(ATTACHMENT_PATTERN);
   if (attachmentAt === -1) {
     // This value is written back into the textarea after any background
@@ -392,8 +401,11 @@ function draftText() {
   return visible.endsWith("\n") ? visible.slice(0, -1) : visible;
 }
 
-function draftAttachmentPreviews(repositoryId) {
-  const attachments = draftAttachments(repositoryId);
+function draftAttachmentPreviews(
+  repositoryId,
+  { draft = state.chatDraft, removeAct = "channel-attachment-remove" } = {},
+) {
+  const attachments = draftAttachments(repositoryId, draft);
   if (attachments.length === 0) {
     return "";
   }
@@ -403,7 +415,7 @@ function draftAttachmentPreviews(repositoryId) {
         <img src="${esc(attachment.src)}" alt="${esc(attachment.alt)}">
         <span title="${esc(attachment.alt)}">${esc(attachment.alt)}</span>
         <button type="button" class="composer-attachment-remove"
-          data-act="channel-attachment-remove" data-value="${esc(attachment.id)}"
+          data-act="${esc(removeAct)}" data-value="${esc(attachment.id)}"
           aria-label="Remove ${esc(attachment.alt)}">&times;</button>
       </div>`,
     )
@@ -2621,6 +2633,13 @@ function threadPanel(repositoryId) {
   // when nothing names it — and the title being here is what the fold
   // comment inside threadReplies has assumed all along.
   const title = threadTitle(root) || "Thread";
+  // The same pending state the channel bar keeps itself open over, for the
+  // same reason: an image staged for the next reply, or one still uploading,
+  // is something to send with no text at all — and on a phone the idle bar
+  // folds its note away unless it is told the box is not idle.
+  const threadPending =
+    state.threadAttaching > 0 ||
+    draftAttachments(repositoryId, state.threadDraft).length > 0;
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
@@ -2645,15 +2664,38 @@ function threadPanel(repositoryId) {
       ${threadTyping(root)}
       ${typingIndicator(repositoryId, root.id)}
     </div>
-    <form class="composer" data-act="channel-thread-submit" style="margin:0 12px 12px">
-      <textarea data-act="channel-thread-input" rows="1"
-        enterkeyhint="send"
-        placeholder="Reply in thread...">${esc(state.threadDraft)}</textarea>
-      <div class="composer-bar">
-        <span class="spacer"></span>
-        <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
-      </div>
-    </form>
+    <div class="thread-composer-wrap">
+      ${draftAttachmentPreviews(repositoryId, {
+        draft: state.threadDraft,
+        removeAct: "thread-attachment-remove",
+      })}
+      <form class="composer${threadPending ? " is-expanded" : ""}" data-act="channel-thread-submit">
+        <textarea data-act="channel-thread-input" rows="1"
+          enterkeyhint="send"
+          placeholder="Reply in thread...">${esc(draftText(state.threadDraft))}</textarea>
+        <div class="composer-bar">
+          <!-- Same arrangement as the channel bar: the input is the control
+               and the button only clicks it, because a bare file input cannot
+               be styled into the bar and a label would swallow the click
+               before the delegated handler saw it. One paperclip rather than
+               the channel's "+" menu — attaching is the only thing this
+               composer adds to a message, and a menu holding one item is a
+               click asking to be skipped. -->
+          <input type="file" data-act="channel-thread-attach-input" accept="image/png,
+            image/jpeg,image/gif,image/webp" multiple hidden>
+          ${iconButton("paperclip", {
+            act: "thread-attach",
+            title: "Attach images",
+            small: true,
+          })}
+          ${state.threadAttaching > 0
+            ? `<span class="composer-note">attaching ${esc(String(state.threadAttaching))} image(s)…</span>`
+            : ""}
+          <span class="spacer"></span>
+          <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
+        </div>
+      </form>
+    </div>
   </aside>`;
 }
 
@@ -3538,9 +3580,29 @@ export function submitThreadReply(rerender) {
   if (state.activeChannelThread === undefined) {
     return;
   }
+  // The whole draft, references included: the reply carries its images the
+  // same way a channel message does, and `messageBody` reads them back out.
   postChannelReply(activeChannelId(), state.activeChannelThread, state.threadDraft);
   state.threadDraft = "";
   rerender();
+}
+
+/**
+ * A keystroke in the thread reply box, without losing a staged image.
+ *
+ * The textarea only ever shows the visible half of the draft, so writing its
+ * value straight into `state.threadDraft` — which is what this used to do,
+ * back when a thread had nothing to stage — would drop the reference lines an
+ * upload appended and post the words without the picture. Same split, and the
+ * same reasoning, as `updateComposerInput` beside it; no render, because the
+ * textarea is already showing the character that was just typed and rebuilding
+ * the screen for it is what made typing lag.
+ */
+export function updateThreadComposerInput(node) {
+  const references = draftAttachments(activeChannelId(), state.threadDraft)
+    .map((attachment) => attachment.reference)
+    .join("\n");
+  state.threadDraft = `${node.value}${references === "" ? "" : `\n${references}\n`}`;
 }
 
 function updateMentionState(node) {
