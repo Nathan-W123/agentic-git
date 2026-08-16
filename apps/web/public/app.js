@@ -4493,6 +4493,56 @@ function showInvite() {
   $("#auth-root").innerHTML = renderInvite();
 }
 
+/**
+ * How long news waits to see whether more of it is arriving.
+ *
+ * Long enough to swallow a backlog, short enough that a single event still
+ * reads as immediate.
+ */
+const NEWS_COALESCE_MS = 350;
+
+/**
+ * The same idea for the channel reconcile, and deliberately shorter: this one
+ * is what puts a message on screen, so it is the delay somebody notices when
+ * a teammate is typing to them.
+ */
+const CHANNEL_FRAME_COALESCE_MS = 120;
+
+let pendingNews = [];
+let newsTimer;
+let channelFrameTimer;
+
+/**
+ * One line of news, or one line about several.
+ *
+ * The socket opens with `after` set to the last event this browser knows, so
+ * reconnecting delivers everything that happened while it was closed — which
+ * on a phone opened the next morning is every task that finished or was
+ * stopped overnight. Each of those raised its own banner, five seconds each,
+ * stacked down the screen: the reader could not read them, could not dismiss
+ * them, and the app appeared to hang while it rendered them.
+ *
+ * The backlog is not less interesting than one event, but it is not more
+ * interesting a hundred times over. Anything arriving inside the window
+ * collapses into a count plus the most recent line, and the notifications tab
+ * still has all of it in full.
+ */
+function announceNews(line) {
+  pendingNews.push(line);
+  window.clearTimeout(newsTimer);
+  newsTimer = window.setTimeout(() => {
+    const lines = pendingNews;
+    pendingNews = [];
+    const latest = lines.at(-1);
+    if (latest === undefined) {
+      return;
+    }
+    popupBanner(
+      lines.length === 1 ? latest : `${lines.length} updates — latest: ${latest}`,
+    );
+  }, NEWS_COALESCE_MS);
+}
+
 async function boot() {
   if (await handleInviteLink()) {
     return;
@@ -4600,7 +4650,17 @@ async function boot() {
       channelRepositoryId === activeChannelId() &&
       state.route === "chats"
     ) {
-      void refreshChannelMessages(channelRepositoryId).then(() => render());
+      // Coalesced for the same reason the banners above are. A reconnect
+      // delivers every channel event this browser missed, and each one used
+      // to re-read the channel and rebuild the whole app — a backlog of forty
+      // meant forty full renders back to back, which is the few seconds the
+      // screen spent refusing to respond to a tap. The reconcile is
+      // idempotent, so the last one in a burst produces the same answer as
+      // all of them.
+      window.clearTimeout(channelFrameTimer);
+      channelFrameTimer = window.setTimeout(() => {
+        void refreshChannelMessages(channelRepositoryId).then(() => render());
+      }, CHANNEL_FRAME_COALESCE_MS);
     }
     // News gets a banner before the store gets re-read: an ending or a
     // question is worth a sentence in the corner wherever the reader is,
@@ -4608,7 +4668,7 @@ async function boot() {
     if (frame?.type === "audit") {
       const line = bannerLineForAudit(frame.event);
       if (line !== undefined) {
-        popupBanner(line);
+        announceNews(line);
       }
     }
     // Canonical moved, so the file tree on screen is history now.

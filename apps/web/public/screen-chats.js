@@ -470,6 +470,24 @@ function messageBody(content, repositoryId) {
   );
 }
 
+/**
+ * Who is in this room, for anything that counts or lists them.
+ *
+ * The server's room list when it has arrived — it includes repo-scoped
+ * grantees the org member list has never heard of; the org list is only the
+ * floor before the roster resolves.
+ *
+ * One function because the header and the sidebar disagreed. The sidebar read
+ * this; the header read `collaborators()`, which is the whole *organization*
+ * and, when that had not loaded, a list containing only the reader. So a room
+ * with two people in its sidebar had a "1" in its header, and the number never
+ * moved no matter who joined — it was not a count of this room at all.
+ */
+function channelPeopleFor(repositoryId) {
+  const room = state.channelPeople[repositoryId];
+  return room !== undefined && room.length > 0 ? room : (state.members ?? []);
+}
+
 function personRow(person) {
   // Two shapes reach here. The organization member list nests the account
   // under `user`; the room's own people list flattens it to `id`/`name`. Only
@@ -666,10 +684,7 @@ function chanSidebar(activeRepositoryId) {
   // The server's room list when it has arrived — it includes repo-scoped
   // grantees the org member list has never heard of; the org list is only
   // the floor before the roster resolves.
-  const people =
-    state.channelPeople[activeRepositoryId]?.length > 0
-      ? state.channelPeople[activeRepositoryId]
-      : (state.members ?? []);
+  const people = channelPeopleFor(activeRepositoryId);
 
   return `<aside class="chan-sidebar">
     <button type="button" class="chan-brand" data-act="nav" data-value="settings"
@@ -828,7 +843,7 @@ function previewLink(repositoryId) {
 
 function chanHeader(repository, repositoryId) {
   const roster = channelAgentsFor(repositoryId);
-  const people = collaborators();
+  const people = channelPeopleFor(repositoryId);
   return `<header class="chan-head">
     <button type="button" class="icon-btn menu-btn" data-act="nav-toggle"
       title="Menu" aria-label="Menu">${icon("menu")}</button>
