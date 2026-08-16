@@ -1023,6 +1023,95 @@ test("slash and mention filtering does not rebuild the app while typing", async 
   );
 });
 
+test("composer keystrokes stay on their existing DOM nodes", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const threadStart = chats.indexOf("export function updateThreadComposerInput");
+  const threadEnd = chats.indexOf("\nfunction updateMentionState", threadStart);
+  assert.notEqual(threadStart, -1, "the thread composer input handler should exist");
+  assert.notEqual(threadEnd, -1, "the thread composer input handler should have a boundary");
+
+  const threadHandler = chats.slice(threadStart, threadEnd);
+  assert.match(threadHandler, /state\.threadDraft =/u);
+  assert.doesNotMatch(
+    threadHandler,
+    /\b(?:render|rerender)\s*\(/u,
+    "typing a thread reply must not rebuild the transcript",
+  );
+
+  const channelStart = chats.indexOf("export function updateComposerInput");
+  const channelEnd = chats.indexOf("\nexport function pickSlashCommand", channelStart);
+  assert.notEqual(channelStart, -1, "the channel composer input handler should exist");
+  assert.notEqual(channelEnd, -1, "the channel composer input handler should have a boundary");
+  assert.doesNotMatch(
+    chats.slice(channelStart, channelEnd),
+    /\b(?:render|rerender)\s*\(/u,
+    "typing in the channel must only repaint the local composer",
+  );
+});
+
+test("conversation restores cannot overrule a newer scroll", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const capture = chats.slice(
+    chats.indexOf("export function captureChannelScroll"),
+    chats.indexOf("\nexport function restoreChannelAnchor"),
+  );
+  const restore = chats.slice(
+    chats.indexOf("export function restoreChannelScroll"),
+    chats.indexOf("\nexport function openChannel"),
+  );
+
+  // A render snapshots whether this exact channel was at the bottom from the
+  // live geometry. Relying on the previous scroll event leaves a race where a
+  // wheel/touch move has happened but its event has not updated the old flag.
+  assert.match(capture, /key: scroller\.dataset\.scrollKey/u);
+  assert.match(
+    capture,
+    /scroller\.scrollHeight - scroller\.scrollTop - scroller\.clientHeight <=\s*FOLLOW_SLACK_PX/u,
+  );
+  assert.match(app, /restoreChannelScroll\(savedScroll\);/u);
+  assert.match(restore, /entry\.key === list\.dataset\.scrollKey/u);
+
+  // Every replaceable scroll surface carries an identity. A raw offset from
+  // one thread, DM, file, or channel must never be restored into another one
+  // merely because both nodes use `.thread-body`.
+  for (const key of ["channel:", "thread:", "thread-list:", "dm:", "file:", "tree:"]) {
+    assert.match(chats, new RegExp(`data-scroll-key="${key}`, "u"), `${key} has a scroll identity`);
+  }
+  assert.match(
+    chats,
+    /scroller\.dataset\.scrollKey !== entry\.key/u,
+    "anchor restoration is scoped to the same surface",
+  );
+
+  // The next-frame settle belongs only to the node that scheduled it. An old
+  // render must not query a replacement transcript and pull that one down.
+  assert.match(restore, /settled === list && followingChannel/u);
+  // On mobile a drag and a viewport resize may share one scroll event. User
+  // intent turns following off before the resize branch can pin the bottom.
+  assert.match(restore, /"wheel"[\s\S]*event\.deltaY < 0[\s\S]*followingChannel = false/u);
+  assert.match(restore, /"touchmove"[\s\S]*y > touchStartY \+ 4[\s\S]*followingChannel = false/u);
+});
+
+test("composer refocus never moves the conversation", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const typeInto = app.slice(
+    app.indexOf("function typeIntoComposer"),
+    app.indexOf("\nfunction actionOf", app.indexOf("function typeIntoComposer")),
+  );
+  const pickers = chats.slice(
+    chats.indexOf("export function pickSlashCommand"),
+    chats.indexOf("\nexport function handleComposerKeydown"),
+  );
+  assert.match(typeInto, /focus\(\{ preventScroll: true \}\)/u);
+  assert.equal(
+    [...pickers.matchAll(/focus\(\{ preventScroll: true \}\)/gu)].length,
+    2,
+    "slash and mention insertion both restore the caret without scrolling",
+  );
+});
+
 test("a composer refresh keeps rapid edits, whitespace, and the caret's value", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await browserSource();

@@ -2925,7 +2925,7 @@ function renderNow() {
     // reading history keeps their message, and somebody at the bottom of a
     // live conversation still gets the bottom.
     restoreChannelAnchor(savedScroll);
-    restoreChannelScroll();
+    restoreChannelScroll(savedScroll);
     void ensureCodeData(render);
     scrollThread();
   }
@@ -3067,7 +3067,7 @@ function typeIntoComposer(character, opened) {
   opened();
   render();
   const next = $("[data-act='channel-input']");
-  next?.focus();
+  next?.focus({ preventScroll: true });
   next?.setSelectionRange(at + 1, at + 1);
 }
 
