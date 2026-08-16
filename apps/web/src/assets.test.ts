@@ -449,6 +449,59 @@ test("every composer control sits on one row with an icon-sized context dial", a
   assert.match(css, /\.ctx svg \{\s*width: 15px;\s*height: 15px;/u);
 });
 
+test("an empty, unfocused composer collapses to one lean row", async () => {
+  const css = await publicFile("styles.css");
+  // The collapse is driven by the textarea's own emptiness rather than by a
+  // flag in state, because every render replaces the whole app's markup and a
+  // flag would have to be carried across it.
+  const collapsed =
+    /\.composer:not\(\.is-expanded\):not\(:focus-within\):has\(textarea:placeholder-shown\)/gu;
+  assert.ok(
+    (css.match(collapsed) ?? []).length >= 2,
+    "the lean bar should be selected off :placeholder-shown",
+  );
+  // Every metric the lean bar changes goes through a variable. Two copies of
+  // these paddings — one for the textarea and one for the mirror painted
+  // under it — is how the highlight slides off the name it belongs to.
+  assert.match(
+    css,
+    /\.composer-field textarea,\s*\.composer-mirror \{\s*padding: var\(--composer-pad-top\) var\(--composer-pad-x\) var\(--composer-pad-bottom\);/u,
+  );
+  assert.match(css, /--composer-shape: 999px;/u);
+  assert.match(css, /--composer-bar-layout: contents;/u);
+  // Nothing on the folded row is dropped from the markup: it is unpainted, so
+  // focusing the composer brings it back without waiting for a render.
+  const hidden = /:has\(textarea:placeholder-shown\)\s*:is\(([\s\S]*?)\)\s*\{\s*display: none;/u
+    .exec(css)?.[1];
+  assert.notEqual(hidden, undefined, "the folded controls should be one list");
+  for (const control of [
+    "mini-select",
+    "ctx",
+    "composer-note",
+    "chat-mention",
+    "channel-mention-key",
+  ]) {
+    assert.match(hidden ?? "", new RegExp(control, "u"), `${control} folds away, not out`);
+  }
+});
+
+test("the composer stays open over a decision the textarea cannot see", async () => {
+  const source = await publicFile("screen-chats.js");
+  const start = source.indexOf("function composer(repositoryId)");
+  const body = source.slice(start, source.indexOf("\n}", start));
+  // Staged images, an upload in flight and a thread the next message is aimed
+  // at all live outside the form, so an empty box would otherwise collapse the
+  // bar carrying the controls that answer them.
+  assert.match(body, /is-expanded/u);
+  for (const pending of [
+    /state\.attaching > 0/u,
+    /state\.composerThreadId !== undefined/u,
+    /draftAttachments\(repositoryId\)\.length > 0/u,
+  ]) {
+    assert.match(body, pending);
+  }
+});
+
 test("the chat panel shows a bare progress bar and no token statistics", async () => {
   const source = await publicFile("chat.js");
   const start = source.indexOf("export function chatProgress");

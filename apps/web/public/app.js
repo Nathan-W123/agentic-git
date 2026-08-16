@@ -2851,9 +2851,15 @@ function restoreFocus(saved) {
       // Not a field with a selection. Focus is enough.
     }
   }
-  if (saved.height !== "") {
+  if (saved.height !== "" && next.value !== "") {
     // The composer grows by having its height set imperatively, which is not
     // in the markup and so does not survive the rebuild on its own.
+    //
+    // Not onto a field that came back empty, though — which is what a
+    // composer looks like on the render immediately after it is sent, still
+    // focused for the next message. Restoring the height the sent message had
+    // grown to would leave a lean, empty bar standing several rows tall until
+    // something else happened to redraw it.
     next.style.height = saved.height;
   }
   next.scrollTop = saved.top;
@@ -4546,8 +4552,13 @@ document.addEventListener("input", (event) => {
     return;
   }
   if (act === "chat-input") {
+    // Cleared rather than measured once the box is empty: an empty composer
+    // collapses to the lean bar, and a height measured against the open one
+    // would hold the pill open with nothing in it.
     node.style.height = "auto";
-    node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+    if (node.value !== "") {
+      node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+    }
   }
   if (act === "channel-search") {
     state.chatQuery = node.value;

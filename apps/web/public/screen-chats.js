@@ -1765,11 +1765,23 @@ function composerSuggestions(repositoryId) {
 
 
 function composer(repositoryId) {
+  // Empty and unfocused, the composer shrinks to one lean row and its toolbar
+  // folds into it — the rest is in styles.css, off the textarea's own
+  // `:placeholder-shown`, so typing opens it without waiting for a render.
+  // Three things it cannot see from there, because all three live outside the
+  // form: an image staged for the next message, a thread that message is
+  // aimed at, and an upload still in flight. Each of them is a pending
+  // decision the bar has to stay open over, and each has a control on the row
+  // that answers it.
+  const pending =
+    state.attaching > 0 ||
+    state.composerThreadId !== undefined ||
+    draftAttachments(repositoryId).length > 0;
   return `<div class="chan-composer-wrap${state.mentionActive ? " mention-active" : ""}">
     <div data-composer-suggestions>${composerSuggestions(repositoryId)}</div>
     ${composerThreadChip(repositoryId)}
     ${draftAttachmentPreviews(repositoryId)}
-    <form class="composer" data-act="channel-submit">
+    <form class="composer${pending ? " is-expanded" : ""}" data-act="channel-submit">
       <div class="composer-field">
         <!-- The ping colours the letters, which a textarea cannot do: it has
              one colour for all of its text. So the highlighting is painted by
@@ -3441,8 +3453,15 @@ export function updateComposerInput(node) {
   paintComposerMirror(node);
   // The height is a property of this element, not of the app, so it is set
   // directly whether or not anything else is rebuilt.
+  //
+  // Emptied, it is cleared rather than measured: an empty box collapses to
+  // the lean bar, whose padding is not the padding this measurement was taken
+  // against, and a pixel height left behind from the open composer would hold
+  // the pill several rows tall with nothing in it.
   node.style.height = "auto";
-  node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+  if (node.value !== "") {
+    node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+  }
   if (!changed) {
     return;
   }
