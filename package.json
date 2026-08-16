@@ -26,6 +26,7 @@
     "verify:docker": "npm run build --silent && node scripts/verify-docker-sandbox.mjs",
     "verify:remote-docker": "npm run build --silent && node scripts/verify-remote-docker.mjs",
     "verify:egress": "npm run build --silent && node scripts/verify-egress-allowlist.mjs",
+    "audit:loc": "node scripts/loc-audit.mjs",
     "clean": "turbo run clean"
   },
   "devDependencies": {
