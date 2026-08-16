@@ -81,6 +81,50 @@ test("a person's response takes its place at the end of the transcript", async (
   );
 });
 
+test("a person's response renders inline with the message it answers", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const row = chats.slice(
+    chats.indexOf("function messageRow("),
+    chats.indexOf("function typingIndicator("),
+  );
+
+  assert.match(row, /const inlineReply = inlineReplyTo !== undefined;/u);
+  assert.match(row, /messageReference\(inlineReplyTo, repositoryId\)/u);
+  assert.match(row, /inlineReply \? " cmsg-inline-reply" : ""/u);
+  assert.match(
+    row,
+    /const hasTaskThread = entry\.kind !== "user" && replies\.length > 0;/u,
+    "a human reply must not become task-thread navigation",
+  );
+});
+
+test("an agent root keeps its chronological place while referencing the request", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const row = chats.slice(
+    chats.indexOf("function messageRow("),
+    chats.indexOf("function typingIndicator("),
+  );
+  const list = chats.slice(
+    chats.indexOf("function messageList("),
+    chats.indexOf("function isThreadEnding("),
+  );
+
+  assert.match(row, /entry\.referencedMessageId !== undefined/u);
+  assert.match(row, /AGENT_AUTHORED_ROOT_KINDS\.has\(entry\.kind\)/u);
+  assert.match(row, /message\.id === entry\.referencedMessageId/u);
+  assert.match(row, /messageReference\(referencedRoot, repositoryId\)/u);
+  assert.match(
+    row,
+    /const hasTaskThread = entry\.kind !== "user" && replies\.length > 0;/u,
+    "the persisted reference must not replace an acknowledgement's task thread",
+  );
+  assert.match(
+    list,
+    /timeline\.push\(\{ entry, inlineReplyTo: undefined, at: entry\.at \}\)/u,
+    "agent roots stay in the canonical root timeline",
+  );
+});
+
 test("person-to-person replies stay out of task thread navigation", async () => {
   const [app, chats] = await Promise.all([
     publicFile("app.js"),

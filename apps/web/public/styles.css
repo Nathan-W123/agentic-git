@@ -4549,8 +4549,9 @@ svg {
 }
 
 /* 16px in: half of the 32px avatar, so the stroke comes down the middle of the
-   avatar column and stops just above the face rather than crossing it, and the
-   name past the corner (16 + 22 + 6) lands on the body's own left edge. */
+   avatar column and stops just above the face rather than crossing it. The
+   two-pixel stroke and broad rounded corner make this a short floating path,
+   not another divider competing with the transcript. */
 .cmsg-ref-elbow {
   flex: none;
   align-self: flex-start;
@@ -4558,9 +4559,9 @@ svg {
   height: 8px;
   margin-top: 8px;
   margin-left: 16px;
-  border-left: 1px solid var(--border-soft);
-  border-top: 1px solid var(--border-soft);
-  border-top-left-radius: 8px;
+  border-left: 2px solid var(--border-soft);
+  border-top: 2px solid var(--border-soft);
+  border-top-left-radius: 10px;
   pointer-events: none;
 }
 

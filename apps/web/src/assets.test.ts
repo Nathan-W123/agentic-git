@@ -2030,6 +2030,11 @@ test("the room's hold line carries a way back to the thread it is about", async 
   assert.match(chats, /const HOLD_NOTICE_PREFIX = "⏸ Waiting on you"/u);
   assert.match(chats, /function holdNoticeTarget\(/u);
   assert.match(chats, /class="cmsg-ref" data-act="channel-pin-jump"/u);
+  // New agent roots use their durable reference first; the hold parser stays
+  // as the fallback for notices written before references were persisted.
+  assert.match(chats, /entry\.referencedMessageId !== undefined/u);
+  assert.match(chats, /messageReference\(referencedRoot, repositoryId\)/u);
+  assert.match(chats, /holdNoticeRef\(entry, repositoryId\)/u);
   // Not invented navigation: `channel-pin-jump` already opens a target that
   // has a thread and scrolls to one that does not.
   assert.match(await browserSource(), /case "channel-pin-jump":/u);
@@ -2039,4 +2044,6 @@ test("the room's hold line carries a way back to the thread it is about", async 
   const elbow = /\n\.cmsg-ref-elbow \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(elbow, undefined, "the reference draws a line back");
   assert.match(elbow ?? "", /border-top-left-radius/u);
+  assert.match(elbow ?? "", /border-left: 2px solid/u);
+  assert.match(elbow ?? "", /border-top: 2px solid/u);
 });

@@ -2864,11 +2864,17 @@ test("the repository channel round-trips messages, replies, reactions, reads, an
 
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
-    body: { content: "  Kicking off this channel.  " },
+    // References are trusted server metadata, not a new client-authored
+    // field. An extra body key is ignored just as unknown keys were before.
+    body: {
+      content: "  Kicking off this channel.  ",
+      referencedMessageId: "chanmsg_spoofed",
+    },
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
   assert.equal(posted.data.message.content, "Kicking off this channel.");
   assert.equal(posted.data.message.kind, "user");
+  assert.equal(posted.data.message.referencedMessageId, undefined);
   const messageId = posted.data.message.id;
 
   // An empty message is not a message at all.
@@ -3430,6 +3436,38 @@ test("an agent that answers nothing still acknowledges", async (t) => {
   assert.equal(agentMessages[0].content, "On it.");
 });
 
+test("an agent's work acknowledgement references its request without replacing the task thread", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "ack-reference");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) tighten the retry policy" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const listed = await owner.request(`${base}/messages`);
+  const acknowledgement = (listed.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+
+  assert.equal(acknowledgement?.referencedMessageId, posted.data.message.id);
+  assert.deepEqual(acknowledgement?.replies ?? [], []);
+  assert.equal(runtime.submittedTasks.length, 1);
+  const event = (await runtime.store.listAudit()).find(
+    (entry) =>
+      entry.type === "channel_message_posted" &&
+      entry.data["messageId"] === acknowledgement?.id,
+  );
+  assert.equal(event?.data["referencedMessageId"], posted.data.message.id);
+});
+
 test("an agent's own owner can always @mention it, personal or org-wide", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -3933,6 +3971,34 @@ test("a question to an agent is answered in the channel, not turned into a task"
   );
   assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
   assert.deepEqual(agentMessages[0].replies ?? [], []);
+});
+
+test("an agent's answer carries a reference to the message it answers", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "answer-reference");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text = "I am checking the current task queue.";
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) what are you working on?" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const listed = await owner.request(`${base}/messages`);
+  const answer = (listed.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+
+  assert.equal(answer?.content, runtime.chatAnswer.text);
+  assert.equal(answer?.referencedMessageId, posted.data.message.id);
+  assert.deepEqual(answer?.replies ?? [], []);
+  assert.equal(runtime.submittedTasks.length, 0);
 });
 
 test("a request that names no verb this list knows is still work when an agent is named", async (t) => {

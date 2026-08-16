@@ -1381,6 +1381,9 @@ function threadSummaryLink(entry, replies, repositoryId) {
  */
 const HOLD_NOTICE_PREFIX = "⏸ Waiting on you";
 
+/** Root kinds spoken by an agent rather than a person or the coordinator. */
+const AGENT_AUTHORED_ROOT_KINDS = new Set(["agent", "outcome"]);
+
 /**
  * The thread a room-level hold line is about, if it is about one.
  *
@@ -1647,6 +1650,20 @@ function messageRow(
   // retain the task thread they have always used.
   const inlineReply = inlineReplyTo !== undefined;
   const hasTaskThread = entry.kind !== "user" && replies.length > 0;
+  // Agent answers and acknowledgements remain ordinary roots in the room's
+  // chronological transcript. Their stored reference is the address back to
+  // the request that prompted them; it does not replace the task thread the
+  // acknowledgement may also grow below itself. Resolve against the complete
+  // loaded channel rather than the filtered `messageList`, so searching for
+  // the answer does not make its address disappear.
+  const referencedRoot =
+    !isReply &&
+    AGENT_AUTHORED_ROOT_KINDS.has(entry.kind) &&
+    entry.referencedMessageId !== undefined
+      ? channelMessagesFor(repositoryId).find(
+          (message) => message.id === entry.referencedMessageId,
+        )
+      : undefined;
   // A message somebody unsaid, whose thread is still standing. The row stays
   // where it was — the replies under it are answers to something, and closing
   // the gap would leave them answering the message above — but everything the
@@ -1688,7 +1705,9 @@ function messageRow(
           ? messageReference(inlineReplyTo, repositoryId)
           : isReply
             ? ""
-            : holdNoticeRef(entry, repositoryId)
+            : referencedRoot !== undefined
+              ? messageReference(referencedRoot, repositoryId)
+              : holdNoticeRef(entry, repositoryId)
     }
     <span class="cmsg-avatar">${
       author.agent !== undefined ? agentFace(author.agent, 32) : avatar(author.name, 32, author.name, author.name === currentUserName() ? myAvatar() : undefined)
