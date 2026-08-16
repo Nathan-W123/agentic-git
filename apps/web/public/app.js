@@ -3280,9 +3280,9 @@ document.addEventListener("click", (event) => {
       state.pinsOpen = state.pinsOpen !== true;
       render();
       return;
-    // A pinned thread opens as a thread; a plain pinned message scrolls
-    // into view. The banner's copy answers for pins whose transcript row
-    // has aged past the loaded page.
+    // A pinned task opens as a thread; a person's message (including one with
+    // inline replies) scrolls into view. The banner's copy answers for pins
+    // whose transcript row has aged past the loaded page.
     case "channel-pin-jump": {
       const repositoryId = activeChannelId();
       const entry =
@@ -3290,6 +3290,7 @@ document.addEventListener("click", (event) => {
         (state.channelPins[repositoryId] ?? []).find((m) => m.id === value);
       if (
         entry !== undefined &&
+        entry.kind !== "user" &&
         ((entry.replies ?? []).length > 0 || entry.taskId !== undefined)
       ) {
         if (!confirmDiscardEdit()) {
@@ -3387,6 +3388,14 @@ document.addEventListener("click", (event) => {
     case "channel-threads-close":
       state.chanThreadList = false;
       render();
+      return;
+    case "channel-message-reply":
+      // Person-to-person replies stay in the channel. Aim the channel
+      // composer at the message without opening the task-thread panel.
+      state.composerThreadId = value;
+      state.activeChannelThread = undefined;
+      render();
+      $("[data-act='channel-input']")?.focus();
       return;
     case "channel-thread-open":
       // One panel, one owner: opening a thread puts away an open file.

@@ -4492,6 +4492,17 @@ svg {
   pointer-events: none;
 }
 
+/* A person's reply remains part of the channel transcript. The slight inset
+   groups it with the quoted message while the reference above the response
+   carries the exact relationship. */
+.cmsg-row.cmsg-inline-reply {
+  margin-left: 28px;
+}
+
+.cmsg-row.cmsg-inline-reply .cmsg-ref {
+  margin-left: -28px;
+}
+
 /* The mirror of that branch, drawn above a message instead of below one: a
    line that answers a thread further up turns *up* out of the same avatar
    gutter and into a one-line quote of what it is answering. Pulled left past

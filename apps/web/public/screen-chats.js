@@ -1424,12 +1424,19 @@ function holdNoticeRef(entry, repositoryId) {
   if (root === undefined) {
     return "";
   }
+  return messageReference(root, repositoryId);
+}
+
+/** The compact address above an inline reply. */
+function messageReference(root, repositoryId) {
   const author = channelAuthor(repositoryId, root);
   const line =
-    String(root.content ?? "")
-      .split(/\n/u)
-      .map((part) => part.trim())
-      .find((part) => part.length > 0) ?? "";
+    root.deletedAt !== undefined
+      ? "This message was deleted"
+      : (String(root.content ?? "")
+          .split(/\n/u)
+          .map((part) => part.trim())
+          .find((part) => part.length > 0) ?? "");
   return `<button type="button" class="cmsg-ref" data-act="channel-pin-jump"
       data-value="${esc(root.id)}">
       <span class="cmsg-ref-elbow" aria-hidden="true"></span>
@@ -1618,7 +1625,12 @@ function threadProgress(entry) {
 function messageRow(
   entry,
   repositoryId,
-  { isReply = false, hideChanges = false, actions = "" } = {},
+  {
+    isReply = false,
+    inlineReplyTo = undefined,
+    hideChanges = false,
+    actions = "",
+  } = {},
 ) {
   const author = channelAuthor(repositoryId, entry);
   // System messages are the coordinator narrating, not a participant in the
@@ -1631,6 +1643,10 @@ function messageRow(
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
+  // Person-to-person replies live in the channel itself. Agent-authored roots
+  // retain the task thread they have always used.
+  const inlineReply = inlineReplyTo !== undefined;
+  const hasTaskThread = entry.kind !== "user" && replies.length > 0;
   // A message somebody unsaid, whose thread is still standing. The row stays
   // where it was — the replies under it are answers to something, and closing
   // the gap would leave them answering the message above — but everything the
@@ -1638,7 +1654,8 @@ function messageRow(
   // all act on a line that is no longer there.
   const deleted = entry.deletedAt !== undefined;
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
-    replies.length > 0 && !isReply ? " cmsg-threaded" : ""
+    inlineReply ? " cmsg-inline-reply" : ""
+  }${hasTaskThread && !isReply ? " cmsg-threaded" : ""
   }${deleted ? " cmsg-deleted" : ""}${
     // The auditor reads every merge without being asked, so its lines arrive
     // among work nobody is looking at yet. Drawn in the accent so they are
@@ -1662,7 +1679,13 @@ function messageRow(
         // how the reader gets back to it. Only on the channel copy — inside
         // the thread panel there is nothing to navigate to — and never on a
         // message whose words have been taken away.
-        isReply || deleted ? "" : holdNoticeRef(entry, repositoryId)
+        deleted
+          ? ""
+          : inlineReply
+            ? messageReference(inlineReplyTo, repositoryId)
+            : isReply
+              ? ""
+              : holdNoticeRef(entry, repositoryId)
       }
       <div class="cmsg-top">
         <span class="cmsg-name${author.agent !== undefined ? " agent-name" : ""}">${esc(
@@ -1700,7 +1723,7 @@ function messageRow(
         // the open thread keeps it because that is the thread. Crucially, the
         // root does not repeat the channel's "N replies" link inside the panel
         // those replies are already open in.
-        replies.length === 0 || isReply
+        !hasTaskThread || isReply
           ? hideChanges
             ? ""
             : changedFilesBlock(entry, repositoryId)
@@ -1754,7 +1777,7 @@ function messageRow(
         // server had no record of. The thread's own header carries the pin for
         // everything inside it, which is the affordance a reader wants anyway:
         // you pin the conversation, not one line of it.
-        isReply || deleted
+        isReply || inlineReply || deleted
           ? ""
           : iconButton("pin", {
               act: "channel-pin",
@@ -1795,10 +1818,9 @@ function messageRow(
         actions
       }
       ${
-        // Every message can be replied to, agent's and person's alike. A
-        // channel message replies by opening its thread; a message already
-        // inside one replies by quoting it into the thread's composer —
-        // there is no third place for the answer to go.
+        // A reply to a person stays in the channel and names the message it
+        // answers. Agent work keeps its task thread; replies already inside a
+        // task thread still quote into that thread's composer.
         isReply
           ? iconButton("reply", {
               act: "thread-reply-quote",
@@ -1806,12 +1828,19 @@ function messageRow(
               title: "Reply to this message",
               small: true,
             })
-          : iconButton("reply", {
-              act: "channel-thread-open",
-              value: entry.id,
-              title: "Reply in thread",
-              small: true,
-            })
+          : inlineReply || entry.kind === "user"
+            ? iconButton("reply", {
+                act: "channel-message-reply",
+                value: inlineReply ? inlineReplyTo.id : entry.id,
+                title: "Reply to this message",
+                small: true,
+              })
+            : iconButton("reply", {
+                act: "channel-thread-open",
+                value: entry.id,
+                title: "Reply in thread",
+                small: true,
+              })
       }
     </span>
   </div>`;
@@ -1900,7 +1929,19 @@ function messageList(repositoryId) {
       (entry.replies ?? []).length === 0 &&
       entry.taskId !== undefined &&
       threadedTasks.has(entry.taskId);
-    return separator + messageRow(entry, repositoryId, { hideChanges });
+    const inlineReplies =
+      entry.kind === "user"
+        ? (entry.replies ?? [])
+            .map((reply) =>
+              messageRow(reply, repositoryId, { inlineReplyTo: entry }),
+            )
+            .join("")
+        : "";
+    return (
+      separator +
+      messageRow(entry, repositoryId, { hideChanges }) +
+      inlineReplies
+    );
   });
   return `<div class="chan-messages" id="chan-messages"
     data-scroll-key="channel:${esc(repositoryId)}">${rows.join(
@@ -2087,6 +2128,12 @@ function composer(repositoryId) {
     state.attaching > 0 ||
     state.composerThreadId !== undefined ||
     draftAttachments(repositoryId).length > 0;
+  const replyTarget =
+    state.composerThreadId === undefined
+      ? undefined
+      : channelMessagesFor(repositoryId).find(
+          (entry) => entry.id === state.composerThreadId,
+        );
   return `<div class="chan-composer-wrap${state.mentionActive ? " mention-active" : ""}">
     <div data-composer-suggestions>${composerSuggestions(repositoryId)}</div>
     ${composerThreadChip(repositoryId)}
@@ -2111,7 +2158,9 @@ function composer(repositoryId) {
           placeholder="${
             state.composerThreadId === undefined
               ? `Message #${esc(repositoryId ?? "")}`
-              : "Add to this thread..."
+              : replyTarget?.kind === "user"
+                ? "Write a reply..."
+                : "Add to this thread..."
           }">${esc(draftText())}</textarea>
       </div>
       <div class="composer-bar">
@@ -2318,7 +2367,9 @@ function threadListPanel(repositoryId) {
     return String(last?.at ?? last?.createdAt ?? entry.at ?? "");
   };
   const threads = channelMessagesFor(repositoryId)
-    .filter((entry) => (entry.replies ?? []).length > 0)
+    .filter(
+      (entry) => entry.kind !== "user" && (entry.replies ?? []).length > 0,
+    )
     .slice()
     .sort((left, right) => lastActivity(right).localeCompare(lastActivity(left)));
   return `<aside class="thread-panel">
@@ -3778,12 +3829,21 @@ export function submitComposerMessage(rerender) {
   // thread it arrived in, so this needs nothing further to route.
   const continuing = state.composerThreadId;
   if (continuing !== undefined) {
+    const target = channelMessagesFor(repositoryId).find(
+      (entry) => entry.id === continuing,
+    );
     const posted = postChannelReply(repositoryId, continuing, state.chatDraft);
     if (posted === undefined) {
       return;
     }
     state.chatDraft = "";
     state.mentionActive = false;
+    // A direct reply is one message, not a mode the composer stays trapped
+    // in. Continuing an agent task remains sticky as before.
+    if (target?.kind === "user") {
+      state.composerThreadId = undefined;
+      state.scrollToMessage = continuing;
+    }
     markChannelRead(repositoryId);
     rerender();
     return;
@@ -3872,10 +3932,12 @@ function composerThreadChip(repositoryId) {
   if (root === undefined) {
     return "";
   }
-  const title = threadTitle(root);
+  const directReply = root.kind === "user";
+  const author = channelAuthor(repositoryId, root);
+  const title = `${directReply ? `${author.name}: ` : ""}${threadTitle(root)}`;
   return `<div class="composer-thread">
     ${icon("reply")}
-    <span class="ct-label">Continuing in</span>
+    <span class="ct-label">${directReply ? "Replying to" : "Continuing in"}</span>
     <span class="ct-title" title="${esc(title)}">${esc(title.slice(0, 70))}</span>
     <span class="spacer"></span>
     ${iconButton("close", {

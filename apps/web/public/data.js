@@ -3021,6 +3021,7 @@ export function postChannelReply(repositoryId, messageId, text) {
   message.replies ??= [];
   const reply = {
     id: `${messageId}-r${message.replies.length + 1}-${Date.now()}`,
+    messageId,
     kind: "user",
     authorId: currentUserId() || "you",
     content: trimmed,
