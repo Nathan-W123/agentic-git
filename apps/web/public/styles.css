@@ -4927,6 +4927,12 @@ svg {
   display: block;
   width: 100%;
   height: auto;
+  /* Until the bytes arrive the picture has no intrinsic size, `height: auto`
+     resolves to nothing, and the transcript grows by the whole thumbnail the
+     moment it decodes — which on a phone is enough to shove the message being
+     read off the screen. `auto` keeps the real ratio once it is known, so the
+     fallback only ever describes the box nobody has seen yet. */
+  aspect-ratio: auto 4 / 3;
   max-height: 320px;
   object-fit: contain;
   object-position: left top;

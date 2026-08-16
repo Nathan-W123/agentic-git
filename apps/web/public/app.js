@@ -155,6 +155,7 @@ import {
   signInForInvitation,
 } from "./data.js";
 import {
+  captureChannelScroll,
   channelInfoPopoverHtml,
   handleComposerKeydown,
   handleTerminalKeydown,
@@ -163,6 +164,7 @@ import {
   pickMention,
   pickSlashCommand,
   renderChats,
+  restoreChannelAnchor,
   restoreChannelScroll,
   runTerminalCommand,
   startTerminalResize,
@@ -2679,6 +2681,9 @@ function renderNow() {
     classes.push("nav-collapsed");
   }
   const focusedField = captureFocus();
+  // Where the reader had the conversation, for the same reason focus is taken
+  // here: the swap below throws both away, and neither is in `state`.
+  const savedScroll = captureChannelScroll();
   // No rail. The channel sidebar is the navigation now — channels are the
   // app — and everything the rail held moved: the brand into that sidebar
   // (clicking it opens Settings), the account block into the topbar avatar,
@@ -2699,7 +2704,11 @@ function renderNow() {
   // rather than inherit one a separate Code screen happened to fetch first.
   if (state.route === "chats") {
     // The transcript is replaced on every render, which resets it to the top.
-    // Put it back where the reader had it before anything else runs.
+    // Put it back where the reader had it before anything else runs. The
+    // anchor first and the follow pin second, in that order: somebody
+    // reading history keeps their message, and somebody at the bottom of a
+    // live conversation still gets the bottom.
+    restoreChannelAnchor(savedScroll);
     restoreChannelScroll();
     void ensureCodeData(render);
     scrollThread();

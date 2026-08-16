@@ -2603,11 +2603,92 @@ export function renderChats() {
 let followingChannel = true;
 const FOLLOW_SLACK_PX = 80;
 
+/**
+ * The transcript's height as the follow flag last saw it.
+ *
+ * The soft keyboard, the collapsing address bar and the composer growing an
+ * attachment thumbnail all change how tall the scroller is, and the browser
+ * answers by firing `scroll` on a container the reader never touched. Measured
+ * against a stale height that reads as "they scrolled a long way up", so the
+ * conversation stopped following itself because somebody opened the keyboard.
+ */
+let followHeight = 0;
+
 export function scrollChannel() {
   const list = document.querySelector("#chan-messages");
   if (list !== null) {
     list.scrollTop = list.scrollHeight;
+    followHeight = list.clientHeight;
     followingChannel = true;
+  }
+}
+
+/**
+ * Where the reader had a transcript, in terms of what they were reading.
+ *
+ * Taken before the render that replaces the DOM; `restoreChannelAnchor` puts
+ * it back afterwards. A message id rather than a pixel offset, because
+ * history loading in above the reader moves every offset but not the line
+ * they had their eyes on. The offset is kept as the tie-breaker for the
+ * scrollers whose rows carry no id, and for a message that has since gone.
+ */
+const SCROLL_SURFACES = ["#chan-messages", ".thread-body"];
+
+export function captureChannelScroll() {
+  return SCROLL_SURFACES.map((selector) => {
+    const scroller = document.querySelector(selector);
+    if (scroller === null) {
+      return undefined;
+    }
+    const edge = scroller.getBoundingClientRect().top;
+    // The first row still on screen: what the reader is looking at, as
+    // opposed to the rows that have scrolled off above it.
+    const anchor = [...scroller.querySelectorAll("[id]")].find(
+      (node) => node.getBoundingClientRect().bottom > edge,
+    );
+    return {
+      selector,
+      // Panels share `.thread-body` — a thread, a direct message, the file
+      // editor. Restoring one panel's offset into the next would be a
+      // position the reader never had, so the shape has to match too.
+      shape: scroller.className,
+      top: scroller.scrollTop,
+      id: anchor?.id,
+      offset:
+        anchor === undefined ? 0 : anchor.getBoundingClientRect().top - edge,
+    };
+  }).filter((saved) => saved !== undefined);
+}
+
+/**
+ * Puts a transcript back where `captureChannelScroll` found it.
+ *
+ * Called with the new DOM in place, before `restoreChannelScroll` — following
+ * the bottom and a requested jump both outrank standing still, and both are
+ * that function's job. This is what happens the rest of the time, and what
+ * used to happen instead was nothing at all: the replaced node starts at
+ * `scrollTop` 0, so a reader who was scrolled up anywhere in the history got
+ * the first message ever sent, every time anything rendered.
+ */
+export function restoreChannelAnchor(saved) {
+  for (const entry of saved ?? []) {
+    const scroller = document.querySelector(entry.selector);
+    if (scroller === null || scroller.className !== entry.shape) {
+      continue;
+    }
+    const anchor =
+      entry.id === undefined ? null : document.getElementById(entry.id);
+    if (anchor === null) {
+      // The message is gone — filtered out by a search, or off the end of the
+      // loaded history. The raw offset is still closer than the top.
+      scroller.scrollTop = entry.top;
+      continue;
+    }
+    scroller.scrollTop =
+      anchor.getBoundingClientRect().top -
+      scroller.getBoundingClientRect().top +
+      scroller.scrollTop -
+      entry.offset;
   }
 }
 
@@ -2620,6 +2701,7 @@ export function restoreChannelScroll() {
   if (list === null) {
     return;
   }
+  followHeight = list.clientHeight;
   // A requested jump outranks following: the reader asked for one message,
   // and snapping to the bottom over it would answer a different question.
   // One-shot, and following turns off so the next arriving message does not
@@ -2636,13 +2718,49 @@ export function restoreChannelScroll() {
   }
   if (followingChannel) {
     list.scrollTop = list.scrollHeight;
+    // The pin above measured a transcript whose images have no height yet:
+    // `loading="lazy"` with no intrinsic size is a zero-tall box until the
+    // bytes arrive. Settling on the next frame catches the text that laid
+    // itself out late; the `load` handler below catches the pictures.
+    requestAnimationFrame(() => {
+      const settled = document.querySelector("#chan-messages");
+      if (settled !== null && followingChannel) {
+        settled.scrollTop = settled.scrollHeight;
+        followHeight = settled.clientHeight;
+      }
+    });
   }
   if (list.dataset.followBound === "1") {
     return;
   }
   list.dataset.followBound = "1";
+  // `load` does not bubble, so the transcript listens for it on the way down
+  // rather than binding every image. An attachment that decodes after the
+  // pin adds its full height above the newest message otherwise, which reads
+  // as the conversation drifting upward on its own.
+  list.addEventListener(
+    "load",
+    () => {
+      if (followingChannel) {
+        list.scrollTop = list.scrollHeight;
+        followHeight = list.clientHeight;
+      }
+    },
+    true,
+  );
   list.addEventListener("scroll", () => {
-    const distance = list.scrollHeight - list.scrollTop - list.clientHeight;
+    const height = list.clientHeight;
+    // Not the reader: the scroller changed size under them and the browser
+    // adjusted. Following is theirs to turn off by scrolling away, and a
+    // keyboard opening is not that.
+    if (height !== followHeight) {
+      followHeight = height;
+      if (followingChannel) {
+        list.scrollTop = list.scrollHeight;
+      }
+      return;
+    }
+    const distance = list.scrollHeight - list.scrollTop - height;
     followingChannel = distance <= FOLLOW_SLACK_PX;
   });
 }
