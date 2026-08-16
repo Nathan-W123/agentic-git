@@ -4480,6 +4480,60 @@ svg {
   pointer-events: none;
 }
 
+/* The mirror of that branch, drawn above a message instead of below one: a
+   line that answers a thread further up turns *up* out of the same avatar
+   gutter and into a one-line quote of what it is answering. Pulled left past
+   the body's own edge so the corner lands over the avatar column, which is
+   what makes it read as coming from the conversation rather than starting in
+   this message.
+
+   Quiet on purpose — `--border-soft` and `--text-3`, a size under the
+   message's own. It is an address, not a second copy of the message: the
+   words are still up there, and this is how the reader gets to them. */
+.cmsg-ref {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 2px -28px;
+  padding: 0;
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cmsg-ref:hover {
+  color: var(--text-2);
+}
+
+.cmsg-ref-elbow {
+  flex: none;
+  align-self: flex-start;
+  width: 22px;
+  height: 8px;
+  margin-top: 8px;
+  border-left: 1px solid var(--border-soft);
+  border-top: 1px solid var(--border-soft);
+  border-top-left-radius: 8px;
+  pointer-events: none;
+}
+
+.cmsg-ref-name {
+  flex: none;
+  font-weight: 600;
+  color: var(--text-2);
+}
+
+/* One line, however long the message it points at. */
+.cmsg-ref-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .cmsg-row .cmsg-avatar {
   flex: none;
   margin-top: 1px;
@@ -7273,38 +7327,32 @@ dialog.modal::backdrop {
 }
 
 /* The same fact on the channel row the thread hangs off, where a reader who
-   never opens the thread still meets it. A button, because the answer is one
-   click away — it opens the thread the go-ahead has to be typed into. */
-.thread-held {
-  /* Block-level, so it takes the line under the thread link rather than
-     sitting beside it — the two are different questions and reading them as
-     one row makes the second look like part of the first. */
-  display: flex;
-  width: fit-content;
-  max-width: 100%;
-  align-items: center;
-  gap: 6px;
-  margin-top: 6px;
-  padding: 5px 10px;
-  border: 1px solid var(--orange);
-  border-radius: var(--radius);
-  background: var(--orange-wash);
-  color: var(--orange);
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
-  text-align: left;
-}
+   never opens the thread still meets it — as one dot beside the reply count,
+   not the bordered amber banner that used to take the line underneath. The
+   banner spelled out "open the thread and reply go ahead" immediately above
+   the room's own line saying exactly that, so the loudest thing on the row
+   was its second copy.
 
-.thread-held:hover {
-  background: var(--orange-wash);
-  border-color: var(--orange);
-}
-
-.thread-held svg {
-  width: 14px;
-  height: 14px;
+   Shaped like `.thread-item-active .ti-live` and breathing on the same clock,
+   in amber rather than the accent because that is the difference between
+   "moving" and "stopped until you answer" everywhere else here — `.cr-held`
+   in the room list, `.thread-item-held` in the pullout. The words are still
+   said, in `.sr-only` text, where there is no colour or motion to read. */
+.cmsg-thread-link .ctl-held {
   flex: none;
+  align-self: center;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--orange);
+  box-shadow: 0 0 0 3px var(--orange-wash);
+  animation: status-breathe 2.4s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cmsg-thread-link .ctl-held {
+    animation: none;
+  }
 }
 
 /* ------------------------------------------------------ avatar and theme ---- */

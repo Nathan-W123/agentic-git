@@ -1231,6 +1231,14 @@ function threadSaidCount(said) {
  * The count still excludes the run's own narration and the `Task:` title
  * reply: those are the thread naming itself and thinking aloud, not replies,
  * and counting them made a one-line edit look like a long conversation.
+ *
+ * A held run adds one breathing amber dot beside the count and nothing else.
+ * This used to be a bordered amber banner on its own line under the link,
+ * spelling out "open the thread and reply go ahead" — directly above the
+ * room's own line saying the same sentence in words. Two paragraphs and a
+ * link for one fact. The dot keeps the fact and drops the repetition; the
+ * words survive for screen readers, and the sentence itself is still in the
+ * room, one message down, now pointing back here.
  */
 function threadSummaryLink(entry, replies, repositoryId) {
   const titled = threadTitleReply(entry);
@@ -1253,7 +1261,90 @@ function threadSummaryLink(entry, replies, repositoryId) {
   return `<button type="button" class="cmsg-thread-link" data-act="channel-thread-open"
       data-value="${esc(entry.id)}">
       <span class="avatar-stack ctl-faces">${faces}</span>
-      <span class="cmsg-thread-replies">${esc(threadSaidCount(said.length))}</span>
+      <span class="cmsg-thread-replies">${esc(threadSaidCount(said.length))}</span>${
+        threadAwaitsGoAhead(entry)
+          ? `<span class="ctl-held" aria-hidden="true"></span>
+      <span class="sr-only">Waiting for your go-ahead</span>`
+          : ""
+      }
+    </button>`;
+}
+
+/**
+ * How the room's own hold line opens, as the gateway writes it.
+ *
+ * Mirrors `CHANNEL_HOLD_PREFIX` in `services/api-gateway/src/server.ts`. The
+ * line is already addressed to the reader in words; what the browser adds is
+ * the one thing the text cannot carry — which thread it is talking about.
+ */
+const HOLD_NOTICE_PREFIX = "⏸ Waiting on you";
+
+/**
+ * The thread a room-level hold line is about, if it is about one.
+ *
+ * Walked backwards from the line itself: a hold is announced immediately
+ * after the run that raised it stops, so the nearest held thread above it is
+ * the one being waited on. Nothing found is not an error — the announcement
+ * can outlive the loaded page, and a line with no target simply renders as
+ * the plain message it has always been.
+ */
+function holdNoticeTarget(entry, repositoryId) {
+  if (
+    entry.kind !== "outcome" ||
+    !String(entry.content ?? "").startsWith(HOLD_NOTICE_PREFIX)
+  ) {
+    return undefined;
+  }
+  const messages = channelMessagesFor(repositoryId);
+  const at = messages.findIndex((message) => message.id === entry.id);
+  for (let index = (at === -1 ? messages.length : at) - 1; index >= 0; index -= 1) {
+    if (threadAwaitsGoAhead(messages[index])) {
+      return messages[index];
+    }
+  }
+  return undefined;
+}
+
+/**
+ * A line back to the message this one is answering, above the message itself.
+ *
+ * The hold announcement says "the plan is in the thread" and then leaves the
+ * reader to find it: the thread is somewhere above, collapsed, among however
+ * much else the room has said since. So the line wears the reference every
+ * chat app draws for a reply — a hairline turning up out of the avatar gutter
+ * into a quiet one-line quote of the message it points at — and clicking it
+ * goes there. `channel-pin-jump` is exactly that navigation already: open the
+ * target as a thread if it has one, scroll to it if it does not, and say so
+ * when it has aged out of the loaded history.
+ */
+function holdNoticeRef(entry, repositoryId) {
+  const root = holdNoticeTarget(entry, repositoryId);
+  if (root === undefined) {
+    return "";
+  }
+  const author = channelAuthor(repositoryId, root);
+  const line =
+    String(root.content ?? "")
+      .split(/\n/u)
+      .map((part) => part.trim())
+      .find((part) => part.length > 0) ?? "";
+  return `<button type="button" class="cmsg-ref" data-act="channel-pin-jump"
+      data-value="${esc(root.id)}">
+      <span class="cmsg-ref-elbow" aria-hidden="true"></span>
+      ${
+        author.agent !== undefined
+          ? agentFace(author.agent, 16)
+          : avatar(
+              author.name,
+              16,
+              author.name,
+              author.name === currentUserName() ? myAvatar() : undefined,
+            )
+      }
+      <span class="cmsg-ref-name">${esc(author.name)}</span>
+      <span class="cmsg-ref-text">${esc(
+        line.length > 80 ? `${line.slice(0, 77)}…` : line,
+      )}</span>
     </button>`;
 }
 
@@ -1463,6 +1554,14 @@ function messageRow(
       author.agent !== undefined ? agentFace(author.agent, 32) : avatar(author.name, 32, author.name, author.name === currentUserName() ? myAvatar() : undefined)
     }</span>
     <div class="cmsg-body">
+      ${
+        // Above the name, the way a reply's reference sits above the reply:
+        // this line is an answer to a thread further up, and the reference is
+        // how the reader gets back to it. Only on the channel copy — inside
+        // the thread panel there is nothing to navigate to — and never on a
+        // message whose words have been taken away.
+        isReply || deleted ? "" : holdNoticeRef(entry, repositoryId)
+      }
       <div class="cmsg-top">
         <span class="cmsg-name${author.agent !== undefined ? " agent-name" : ""}">${esc(
           author.name,
@@ -1504,17 +1603,6 @@ function messageRow(
             ? ""
             : changedFilesBlock(entry, repositoryId)
           : threadSummaryLink(entry, replies, repositoryId) +
-            // The thread said "reply go ahead" — inside itself, where a
-            // collapsed thread keeps it. Said again here, on the row that is
-            // always visible, because a held run is otherwise indistinguishable
-            // in the channel from one still going: same request, same
-            // acknowledgement, and then nothing either way.
-            (threadAwaitsGoAhead(entry)
-              ? `<button type="button" class="thread-held" data-act="channel-thread-open"
-                   data-value="${esc(entry.id)}">${icon(
-                     "clock",
-                   )} Waiting for your go-ahead — open the thread and reply "go ahead"</button>`
-              : "") +
             (() => {
               // A few pixels of accent under the thread: how far its run has
               // got, present only while there is a run to speak of. Quiet by

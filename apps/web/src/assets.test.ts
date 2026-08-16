@@ -1902,10 +1902,14 @@ test("a run waiting on a person is marked as waiting, not as finished", async ()
   // they happen to be looking at: the room list, the message in the channel,
   // and the thread list.
   assert.match(chats, /class="cr-held"/u);
-  assert.match(chats, /class="thread-held" data-act="channel-thread-open"/u);
+  assert.match(chats, /class="ctl-held"/u);
   assert.match(chats, /class="ti-held"/u);
-  // The channel line is the one that has to say what to do about it.
-  assert.match(chats, /Waiting for your go-ahead/u);
+  // The channel's mark is a dot beside the reply count, not a bordered banner
+  // repeating in full the sentence the room's own hold line already says one
+  // message below it. The words survive where colour and motion cannot be
+  // read.
+  assert.equal(/class="thread-held"/u.test(chats), false);
+  assert.match(chats, /class="sr-only">Waiting for your go-ahead/u);
 
   // Amber, not the accent: "moving" and "stopped until you answer" are the two
   // states this list exists to tell apart, and one colour for both is no answer.
@@ -1913,4 +1917,37 @@ test("a run waiting on a person is marked as waiting, not as finished", async ()
   assert.notEqual(held, undefined, "a held thread has a shape rule");
   assert.match(held ?? "", /var\(--orange\)/u);
   assert.equal(/var\(--accent\)/u.test(held ?? ""), false);
+
+  // Same amber on the channel's dot, and the same clock every other live
+  // signal in the app breathes on — with the motion reducible, because the
+  // fade is the whole of what it says.
+  const dot = /\n\.cmsg-thread-link \.ctl-held \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(dot, undefined, "the channel's held mark has a shape rule");
+  assert.match(dot ?? "", /var\(--orange\)/u);
+  assert.match(dot ?? "", /animation: status-breathe/u);
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\n {2}\.cmsg-thread-link \.ctl-held \{\n {4}animation: none;/u,
+  );
+});
+
+test("the room's hold line carries a way back to the thread it is about", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // The line says "the plan is in the thread" and the thread is somewhere
+  // above, collapsed. Recognised by the prefix the gateway writes, resolved to
+  // the nearest held thread before it, and drawn as a reference back to it.
+  assert.match(chats, /const HOLD_NOTICE_PREFIX = "⏸ Waiting on you"/u);
+  assert.match(chats, /function holdNoticeTarget\(/u);
+  assert.match(chats, /class="cmsg-ref" data-act="channel-pin-jump"/u);
+  // Not invented navigation: `channel-pin-jump` already opens a target that
+  // has a thread and scrolls to one that does not.
+  assert.match(await browserSource(), /case "channel-pin-jump":/u);
+
+  // The elbow is the channel's own thread branch, turned upward — same gutter,
+  // same hairline, a rounded corner instead of a straight drop.
+  const elbow = /\n\.cmsg-ref-elbow \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(elbow, undefined, "the reference draws a line back");
+  assert.match(elbow ?? "", /border-top-left-radius/u);
 });
