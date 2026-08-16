@@ -2441,7 +2441,11 @@ svg {
   outline: none;
   resize: none;
   padding: 11px 13px 6px;
+  /* Thread replies use the textarea itself to paint their text. Keep both
+     properties explicit so a transparent fill used by a mirrored composer
+     cannot make this shared control's characters disappear in WebKit. */
   color: var(--text);
+  -webkit-text-fill-color: var(--text);
   font-size: 12.5px;
   line-height: 1.5;
   max-height: 148px;

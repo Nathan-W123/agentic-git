@@ -863,6 +863,24 @@ test("the channel composer highlights mentions and previews pasted images", asyn
   assert.match(css, /\.composer-attachment img/u);
 });
 
+test("thread composer characters stay visible without a painted text layer", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // Thread replies are a plain textarea, not a transparent control laid over
+  // a mirror. The shared composer rule must therefore paint both ordinary CSS
+  // text and WebKit's separate text fill rather than relying on inheritance.
+  assert.match(
+    chats,
+    /<form class="composer" data-act="channel-thread-submit"[\s\S]{0,240}<textarea data-act="channel-thread-input"/u,
+  );
+  const rule = /\.composer textarea \{([\s\S]*?)\n\}/u.exec(css);
+  assert.ok(rule !== null, "the shared composer textarea rule exists");
+  assert.match(rule[1] ?? "", /\n\s*color: var\(--text\);/u);
+  assert.match(rule[1] ?? "", /\n\s*-webkit-text-fill-color: var\(--text\);/u);
+  assert.doesNotMatch(rule[1] ?? "", /transparent/u);
+});
+
 test("a posted ping highlights its full name with a quiet static treatment", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
