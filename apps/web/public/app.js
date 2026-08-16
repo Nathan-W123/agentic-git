@@ -1623,12 +1623,29 @@ async function revertTaskAction(repositoryId, taskId) {
   }
   try {
     const result = await rollbackTask(repositoryId, taskId);
-    const status = result?.status;
-    if (status === "blocked" || status === "noop" || status === "policy_failed") {
+    // Success is one status, so it is the one named. This used to list the
+    // failures instead — blocked, noop, policy_failed — and treat everything
+    // else as progress, which quietly made `conflict`, `validation_failed`,
+    // `stale` and `empty` read as "reverting…". A revert that failed
+    // validation announced itself as one that was on its way, and the reader
+    // went looking in the channel for a result that was never coming.
+    //
+    // The endpoint is synchronous — it plans, validates and promotes before
+    // it answers — so there is no case where the outcome is genuinely still
+    // unknown here.
+    if (result?.status !== "integrated") {
       toast(result?.explanation ?? "The revert was refused", "error");
       return;
     }
-    toast("Reverting — the channel will report how it goes", "ok");
+    const reverted = result?.files?.length ?? 0;
+    toast(
+      reverted === 0
+        ? "Reverted — the repository is back to where it was"
+        : `Reverted — ${reverted} file${reverted === 1 ? "" : "s"} back to ` +
+            `where they were`,
+      "ok",
+    );
+    await refresh({ quiet: true });
     render();
   } catch (error) {
     toast(error.message, "error");
