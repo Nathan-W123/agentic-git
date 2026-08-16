@@ -33,7 +33,7 @@ test("replying to a person aims the channel composer", async () => {
   assert.match(action, /\$\("\[data-act='channel-input'\]"\)\?\.focus\(\);/u);
 });
 
-test("a person's response renders inline with the message it answers", async () => {
+test("a person's response takes its place at the end of the transcript", async () => {
   const [chats, data, css] = await Promise.all([
     publicFile("screen-chats.js"),
     publicFile("data.js"),
@@ -44,9 +44,27 @@ test("a person's response renders inline with the message it answers", async () 
     chats.indexOf("function isThreadEnding("),
   );
 
+  // Replies are collected, ordered by when they were written, and merged into
+  // the one timeline — not printed straight after the row they answer, which
+  // is what put a just-sent message back up in the middle of history.
   assert.match(
     list,
-    /entry\.kind === "user"[\s\S]*messageRow\(reply, repositoryId, \{ inlineReplyTo: entry \}\)/u,
+    /if \(entry\.kind !== "user"\) \{\s*continue;[\s\S]*inlineReplyTo: entry,/u,
+  );
+  assert.match(list, /pending\.sort\(\(a, b\) => stamp\(a\.at\) - stamp\(b\.at\)\)/u);
+  assert.match(
+    list,
+    /stamp\(pending\[next\]\.at\) < stamp\(entry\.at\)[\s\S]*timeline\.push\(pending\[next\]\)/u,
+  );
+  assert.match(list, /timeline\.push\(\.\.\.pending\.slice\(next\)\)/u);
+  assert.doesNotMatch(
+    list,
+    /messageRow\(entry, repositoryId, \{ hideChanges \}\) \+\s*inlineReplies/u,
+  );
+  // The relationship is still drawn — the quoted reference above the reply.
+  assert.match(
+    list,
+    /messageRow\(entry, repositoryId, \{ inlineReplyTo: item\.inlineReplyTo \}\)/u,
   );
   assert.match(
     chats,
@@ -54,7 +72,9 @@ test("a person's response renders inline with the message it answers", async () 
   );
   assert.match(chats, /messageReference\(inlineReplyTo, repositoryId\)/u);
   assert.match(chats, /cmsg-inline-reply/u);
-  assert.match(css, /\.cmsg-row\.cmsg-inline-reply \{/u);
+  // No inset: a reply that can sit far below what it answers should read as a
+  // normal line of the room, not a stray indent.
+  assert.match(css, /\.cmsg-row\.cmsg-inline-reply \{\s*margin-left: 0;/u);
   assert.match(
     data,
     /const reply = \{\s*id: [^\n]+,\s*messageId,\s*kind: "user",/u,
@@ -97,9 +117,12 @@ test("the direct-reply composer names its target and resets after sending", asyn
   assert.match(chip, /directReply \? "Replying to" : "Continuing in"/u);
   assert.match(chip, /directReply \? `\$\{author\.name\}: ` : ""/u);
   assert.match(chip, /title\.slice\(0, 70\)/u);
-  assert.match(submit, /if \(target\?\.kind === "user"\)/u);
+  assert.match(submit, /const directReply = target\?\.kind === "user";/u);
   assert.match(submit, /state\.composerThreadId = undefined;/u);
-  assert.match(submit, /state\.scrollToMessage = continuing;/u);
+  // Sending a reply ends at the bottom of the chat, where the reply now is —
+  // not back at the message it answers.
+  assert.match(submit, /if \(directReply\) \{\s*scrollChannel\(\);/u);
+  assert.doesNotMatch(submit, /state\.scrollToMessage = continuing;/u);
 });
 
 test("a reply's reference keeps clear of the avatar it sits above", async () => {

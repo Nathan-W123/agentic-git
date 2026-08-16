@@ -1923,32 +1923,75 @@ function messageList(repositoryId) {
       )
       .map((entry) => entry.taskId),
   );
+  // A person's reply is a message in the room, not a branch off the message
+  // it answers. Sitting it directly under its target pushed the newest thing
+  // said back up into history — you replied and your own words appeared
+  // somewhere above the bottom of the chat, sometimes off screen entirely.
+  // So replies are folded into the one timeline by when they were written and
+  // land where every other new message lands: at the end. The relationship is
+  // not lost, it is carried by the reference line above the reply
+  // (`inlineReplyTo`), which quotes the message and jumps to it when clicked —
+  // the same way every other chat app does it.
+  //
+  // A merge rather than a sort of everything: the roots keep exactly the
+  // order the transcript arrived in — reordering those on a clock the server
+  // and the optimistic local copy do not always agree on would shuffle
+  // history — and only the replies are placed, each after the last message
+  // written before it. A reply newer than every root therefore ends up last,
+  // which is the whole point.
+  const stamp = (value) => {
+    const parsed = Date.parse(value ?? "");
+    return Number.isNaN(parsed) ? 0 : parsed;
+  };
+  const pending = [];
+  for (const entry of entries) {
+    if (entry.kind !== "user") {
+      continue;
+    }
+    for (const reply of entry.replies ?? []) {
+      // A reply with no stamp of its own borrows its parent's, so it settles
+      // next to the message it answers rather than at the top of the room.
+      pending.push({
+        entry: reply,
+        inlineReplyTo: entry,
+        at: reply.at ?? entry.at,
+      });
+    }
+  }
+  pending.sort((a, b) => stamp(a.at) - stamp(b.at));
+  const timeline = [];
+  let next = 0;
+  for (const entry of entries) {
+    // Strictly earlier, so a reply stamped the same millisecond as the
+    // message it answers still lands after it rather than in front of it.
+    while (next < pending.length && stamp(pending[next].at) < stamp(entry.at)) {
+      timeline.push(pending[next]);
+      next += 1;
+    }
+    timeline.push({ entry, inlineReplyTo: undefined, at: entry.at });
+  }
+  timeline.push(...pending.slice(next));
   let lastDay = "";
-  const rows = entries.map((entry) => {
-    const day = new Date(entry.at ?? Date.now()).toDateString();
+  const rows = timeline.map((item) => {
+    const entry = item.entry;
+    const day = new Date(item.at ?? Date.now()).toDateString();
     let separator = "";
     if (day !== lastDay) {
       lastDay = day;
       const isToday = day === new Date().toDateString();
       separator = `<div class="chan-day">${isToday ? "Today" : esc(day)}</div>`;
     }
+    if (item.inlineReplyTo !== undefined) {
+      return (
+        separator +
+        messageRow(entry, repositoryId, { inlineReplyTo: item.inlineReplyTo })
+      );
+    }
     const hideChanges =
       (entry.replies ?? []).length === 0 &&
       entry.taskId !== undefined &&
       threadedTasks.has(entry.taskId);
-    const inlineReplies =
-      entry.kind === "user"
-        ? (entry.replies ?? [])
-            .map((reply) =>
-              messageRow(reply, repositoryId, { inlineReplyTo: entry }),
-            )
-            .join("")
-        : "";
-    return (
-      separator +
-      messageRow(entry, repositoryId, { hideChanges }) +
-      inlineReplies
-    );
+    return separator + messageRow(entry, repositoryId, { hideChanges });
   });
   return `<div class="chan-messages" id="chan-messages"
     data-scroll-key="channel:${esc(repositoryId)}">${rows.join(
@@ -3847,12 +3890,20 @@ export function submitComposerMessage(rerender) {
     state.mentionActive = false;
     // A direct reply is one message, not a mode the composer stays trapped
     // in. Continuing an agent task remains sticky as before.
-    if (target?.kind === "user") {
+    const directReply = target?.kind === "user";
+    if (directReply) {
       state.composerThreadId = undefined;
-      state.scrollToMessage = continuing;
     }
     markChannelRead(repositoryId);
     rerender();
+    // The reply is now the last line of the room, so it gets the same ending
+    // as any other message sent: the transcript goes to the bottom, where the
+    // words that were just typed are. Jumping to the message being answered —
+    // which is what this did while replies were drawn underneath it — sent
+    // the reader back up into history the moment they hit send.
+    if (directReply) {
+      scrollChannel();
+    }
     return;
   }
   const sent = sendChannelMessage(repositoryId, state.chatDraft, "user");

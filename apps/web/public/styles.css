@@ -4506,22 +4506,16 @@ svg {
   top: 58px;
 }
 
-/* A person's reply remains part of the channel transcript. The slight inset
-   groups it with the quoted message while the reference above the response
-   carries the exact relationship. */
+/* A person's reply is an ordinary line of the transcript, sitting in time
+   order at the end of the room rather than tucked under the message it
+   answers — so it takes no inset. It used to carry one, back when it was
+   drawn directly beneath its target and the indent was what said "these two
+   go together"; now that the reply can be a long way below what it answers,
+   an indent would only look like a stray margin. The quoted reference line
+   above the reply carries the whole relationship, and clicking it goes to
+   the message being answered. */
 .cmsg-row.cmsg-inline-reply {
-  margin-left: 28px;
-}
-
-/* The inset moves the whole reply right, so its reference line reaches back
-   left to stand in the quoted message's own avatar column — the elbow then
-   falls towards the message being answered rather than towards the replier.
-   The basis grows by the same 28px so the line still ends at the row's right
-   edge instead of hanging off it. */
-.cmsg-row.cmsg-inline-reply .cmsg-ref {
-  margin-left: -28px;
-  flex-basis: calc(100% + 28px);
-  max-width: calc(100% + 28px);
+  margin-left: 0;
 }
 
 /* The mirror of that branch, drawn above a message instead of below one: a
