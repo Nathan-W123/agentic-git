@@ -31,7 +31,6 @@ api,
   channelParticipants,
   channelUnreadCount,
   collaborators,
-  currentRepository,
   currentUserId,
   currentUserName,
   dmUnreadFrom,
@@ -43,9 +42,6 @@ api,
   personOnline,
   phoneLayout,
   postChannelReply,
-  providerEffortOptions,
-  providerModelOptions,
-  providerOptionsNote,
   sendChannelMessage,
   state,
   threadAwaitsGoAhead,
@@ -74,52 +70,11 @@ import {
   iconButton,
   imeComposing,
   emptyState,
-  miniSelect,
   relativeTime,
   searchBox,
   tabs,
   toast,
 } from "./ui.js";
-
-/* ------------------------------------------------------------- options ---- */
-
-/**
- * What this agent's vendor really offers, or nothing.
- *
- * There used to be a hardcoded model and effort list here, meant as a stopgap
- * until the real one arrived. It became the answer almost everybody got: it
- * named two OpenAI models that no deployment had reported, and three Claude
- * reasoning levels out of the five that exist — and it looked exactly like
- * real data, so nobody could tell they were reading a placeholder. Both
- * pickers now read the same loaded options the Code and My Agents screens
- * read, through the shared helpers, and show nothing at all rather than
- * something invented.
- */
-function optionsFor(agent) {
-  return {
-    models: providerModelOptions(agent.provider),
-    efforts: providerEffortOptions(agent.provider, agent.model),
-    note: providerOptionsNote(agent.provider),
-  };
-}
-
-/**
- * One setting, as a dropdown that always has something in it.
- *
- * The list is the account's own reported one where there is one and a curated
- * one where there is not — `providerModelOptions` resolves that, so nothing
- * here has to care which it got. An empty row is not rendered at all rather
- * than leaving a label with nothing under it.
- */
-function settingRow(label, act, options, current) {
-  if (options.length === 0) {
-    return "";
-  }
-  return `<div>
-    <div class="rs-label">${esc(label)}</div>
-    ${miniSelect(act, options, current || options[0]?.value || "", label)}
-  </div>`;
-}
 
 /* ------------------------------------------------------------- sidebar ---- */
 
@@ -165,120 +120,6 @@ function chanRow(repo, activeRepositoryId) {
       title: `More for #${repo.id}`,
       small: true,
     })}</span>
-  </div>`;
-}
-
-/**
- * Everything there is to change about one agent, in one place.
- *
- * It used to be two menu entries opening two different panels — a rename form
- * and a settings panel — with removal a third entry in the menu above them.
- * Three ways in for what is one question ("what do I want this agent to be
- * here?") meant the menu had to name each of them, and naming them is what
- * made a short menu long. One entry opens this, and everything is a labelled
- * field with the one destructive thing last and red.
- *
- * The name and role stay a `<form>`, because that is what commits them: Enter
- * or blur, both handled in app.js against `channel-rename-form`. Model and
- * effort are selects and write on change, so they are outside it — a select
- * inside a form that submits on Enter would commit the text fields as a side
- * effect of picking a model.
- */
-function rosterSettings(agent) {
-  const options = optionsFor(agent);
-  const removeAct =
-    agent.mine === true ? "channel-agent-remove" : "channel-agent-remove-any";
-  return `<div class="roster-settings" data-agent="${esc(agent.id)}">
-    <form class="roster-rename" data-act="channel-rename-form"
-      data-value="${esc(agent.id)}">
-      <div class="rs-label">Name</div>
-      <input data-act="channel-rename-input" data-value="${esc(agent.id)}"
-        value="${esc(agent.name)}" placeholder="${esc(agent.name)}"
-        ${agent.mine ? 'maxlength="40" title="Its name in every repository"' : ""}
-        autocomplete="off" enterkeyhint="done">
-      <div class="rs-hint">${
-        // A name and a role are not the same kind of thing: your own agent's
-        // name is the account's, and renaming it here changes it in every
-        // repository (and in Settings), while the role stays this channel's
-        // decision.
-        agent.mine === true
-          ? "Renames it in every repository."
-          : "In this channel only."
-      }</div>
-      <div class="rs-label">Role</div>
-      <input data-act="channel-role-input" data-value="${esc(agent.id)}"
-        value="${esc(agent.role ?? "")}" placeholder="Role in this channel"
-        list="channel-role-options" autocomplete="off" enterkeyhint="done">
-      <datalist id="channel-role-options">
-        <!-- Every other role is free text that reaches the agent as a
-             sentence and nothing else, so there is nothing to offer.
-             These two are the ones the code acts on, and a reserved word
-             nobody can discover is a reserved word nobody uses —
-             \`investigator\` had been exactly that since it was built. -->
-        <option value="${AUDITOR_ROLE}">Audits every merge, unprompted</option>
-        <option value="${INVESTIGATOR_ROLE}">Explains why a task failed</option>
-      </datalist>
-    </form>
-    ${settingRow("Model", "channel-agent-model", options.models, agent.model ?? "")}
-    ${
-      // Where the list above came from, in the words of the thing that knows:
-      // either the file the account's own models were read from, or the
-      // admission that none were and these are suggestions. The server has
-      // always sent this and nothing ever displayed it, so a deployment whose
-      // CLI had never cached a model list looked identical to one offering a
-      // considered shortlist. Not gated on the list being empty any more —
-      // it never is now, which is exactly why saying where it came from
-      // matters.
-      options.note === ""
-        ? ""
-        : `<div class="rs-note">${esc(options.note)}</div>`
-    }
-    ${settingRow(
-      "Reasoning effort",
-      "channel-agent-effort",
-      options.efforts,
-      agent.effort ?? "",
-    )}
-    ${
-      // Unlike model and effort, this is not how the agent presents itself in
-      // this room — it decides whose credential a teammate's prompt spends, so
-      // it is account-wide and offered only for one's own agent.
-      agent.mine === true
-        ? `<div>
-            <div class="rs-label">Available to</div>
-            ${miniSelect(
-              "channel-agent-visibility",
-              [
-                { value: "personal", label: "Only me" },
-                { value: "org", label: "Everyone in the org" },
-              ],
-              agent.visibility === "org" ? "org" : "personal",
-              "Available to",
-            )}
-            <div class="rs-hint">${
-              agent.visibility === "org"
-                ? "Teammates can send prompts that spend this account."
-                : "Only you can use this agent."
-            }</div>
-          </div>`
-        : ""
-    }
-    ${
-      // Last, and the only red thing here. Whether it is the viewer's own
-      // agent decides which act removes it: `channel-agent-remove` takes the
-      // account's own provider id, while a teammate's entry is already keyed
-      // `${userId}:${provider}` (see `channelAgentsFor` in data.js), which is
-      // exactly the pair `removeChannelAgentForUser` needs. Moderators only
-      // for that second one, matching the server's `manage_project`/creator
-      // check on the `?userId=` path of the membership DELETE route; one's own
-      // agent is unconditional, as it is on the server.
-      agent.mine === true || canManageRepository(activeChannelId())
-        ? `<button type="button" class="rs-remove" data-act="${removeAct}"
-            data-value="${esc(agent.id)}">
-            ${icon("trash")}<span>Remove from this chat</span>
-          </button>`
-        : ""
-    }
   </div>`;
 }
 
@@ -815,9 +656,8 @@ function personRow(person) {
   </div>`;
 }
 
-/** The roles the system acts on, so the roles worth offering. */
+/** The role the roster acts on. */
 const AUDITOR_ROLE = "auditor";
-const INVESTIGATOR_ROLE = "investigator";
 
 function isAuditor(agent) {
   return (agent.role ?? "").trim().toLowerCase() === AUDITOR_ROLE;
@@ -833,15 +673,8 @@ const AGENT_STATUS_TITLE = {
  * One agent in the roster: a face, a name, what it is here for, and one
  * button.
  *
- * The row used to carry four controls of its own — an auditor switch, rename,
- * model & effort, and a close button that removed the agent outright. Four
- * targets in twenty-two pixels of a narrow sidebar, one of them destructive
- * and indistinguishable from the three that were not. Everything now lives
- * behind the same "..." the channel rows above already use (`chanRow`), which
- * is where the eye has learned to look for what a row can do, and everything
- * there is to change about the agent — name, role, model, effort, and removal
- * in red — is one entry in it opening `rosterSettings` underneath the row.
- * See `rosterMenuItems`.
+ * Rename replaces the name itself. It does not grow a second settings panel
+ * under the row or retain a duplicate input after the edit is done.
  */
 function rosterRow(agent) {
   const settingsOpen = state.chatSettingsOpenId === agent.id;
@@ -875,7 +708,17 @@ function rosterRow(agent) {
         ${statusDot(status, AGENT_STATUS_TITLE[status])}
       </span>
       <span class="rr-body">
-        <div class="rr-name">${esc(agent.name)}</div>
+        ${
+          settingsOpen
+            ? `<form class="roster-rename" data-act="channel-rename-form"
+                data-value="${esc(agent.id)}">
+                <input class="rr-name-input" data-act="channel-rename-input"
+                  data-value="${esc(agent.id)}" value="${esc(agent.name)}"
+                  aria-label="Rename ${esc(agent.name)}" autocomplete="off"
+                  enterkeyhint="done"${agent.mine ? ' maxlength="40"' : ""}>
+              </form>`
+            : `<div class="rr-name">${esc(agent.name)}</div>`
+        }
         <div class="rr-role${agent.role ? "" : " rr-role-empty"}">${
           agent.role
             ? `${esc(agent.role)}${auditor && paused ? " · paused" : ""}${
@@ -893,7 +736,6 @@ function rosterRow(agent) {
         small: true,
       })}</span>
     </div>
-    ${settingsOpen ? rosterSettings(agent) : ""}
   </div>`;
 }
 
@@ -905,12 +747,8 @@ function rosterRow(agent) {
  * the auditor, whether this account may moderate the channel. Splitting that
  * across two files is how a menu ends up offering what the row would not.
  *
- * Deliberately short. Everything that edits the agent — name, role, model,
- * effort, visibility, and the red removal — is one "Settings" entry opening
- * `rosterSettings` under the row, rather than three entries here naming three
- * halves of the same decision. What is left beside it are the two things that
- * are not edits: talking to the agent, and pausing what the auditor does on
- * its own.
+ * Deliberately short: rename and delete are the two row edits. Messaging and
+ * the auditor switch remain only where those capabilities actually apply.
  */
 export function rosterMenuItems(agentId) {
   const repositoryId = activeChannelId();
@@ -937,9 +775,8 @@ export function rosterMenuItems(agentId) {
   items.push({
     act: "channel-settings-toggle",
     value: agent.id,
-    label: "Settings",
-    hint: "Name, role, model — and removal",
-    iconName: "sliders",
+    label: "Rename",
+    iconName: "pencil",
   });
   // Only the auditor gets this, because it is the only role that spends
   // without being asked. Moderators only: turning it back on starts an audit,
@@ -957,10 +794,19 @@ export function rosterMenuItems(agentId) {
       iconName: paused ? "play" : "pause",
     });
   }
-  // Removal is not here any more: it is the red button at the bottom of the
-  // settings panel, one level in from a menu that opens on a single click
-  // next to the row it destroys. Same rule about who may do it, applied in
-  // `rosterSettings` where the button is drawn.
+  if (agent.mine === true || canModerate) {
+    const removeAct =
+      agent.mine === true
+        ? "channel-agent-remove"
+        : "channel-agent-remove-any";
+    items.push({
+      act: removeAct,
+      value: agent.id,
+      label: "Delete",
+      iconName: "trash",
+      danger: true,
+    });
+  }
   return items;
 }
 
@@ -1187,7 +1033,7 @@ function previewLink(repositoryId) {
   </span>`;
 }
 
-function chanHeader(repository, repositoryId) {
+function chanHeader(repositoryId) {
   const roster = channelAgentsFor(repositoryId);
   const people = channelPeopleFor(repositoryId);
   return `<header class="chan-head">
@@ -1212,8 +1058,6 @@ function chanHeader(repository, repositoryId) {
     <div class="ch-title">
       <div class="ch-name">${esc(repositoryId ?? "")}</div>
       <div class="ch-desc">
-        <span>${esc(repository?.branch ?? "main")} branch</span>
-        <span class="ch-sep">·</span>
         <!-- Counted, not spelled out. "3 agents, 2 teammates" is six words
              for two numbers, and it grew or shrank with the plural — the two
              figures are easier to read as figures. The titles carry the
@@ -1235,8 +1079,8 @@ function chanHeader(repository, repositoryId) {
       previewLink(repositoryId)
     }
     <!-- No faces here. Six cropped circles said "some agents and some people
-         are in this room", which the two counts beside the branch name
-         already say exactly, in less space and without the guessing. -->
+         are in this room", which the two counts already say exactly, in less
+         space and without the guessing. -->
     ${
       // Six controls sat permanently in a header that is 44 pixels tall on a
       // phone, and on any given visit a reader wants none of them. Behind one
@@ -3529,7 +3373,6 @@ export function renderChats() {
       )}
     </div></div></div>`;
   }
-  const repository = currentRepository();
   const repositoryId = activeChannelId();
 
   return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}">
@@ -3543,7 +3386,7 @@ export function renderChats() {
         : ""
     }
     <div class="chan-main">
-      ${chanHeader(repository, repositoryId)}
+      ${chanHeader(repositoryId)}
       ${chanSearchRow()}
       ${pinnedBanner(repositoryId)}
       ${messageList(repositoryId)}

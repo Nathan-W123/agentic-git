@@ -1325,6 +1325,45 @@ async function showInviteLink(token, email, repositoryId) {
 }
 
 /**
+ * Removes one agent membership after naming the exact, limited consequence.
+ * "Delete" in the compact row menu means delete it from this chat; the agent
+ * account and its work elsewhere remain intact.
+ */
+async function removeChannelAgentAction(agentId, removeAny = false) {
+  const repositoryId = activeChannelId();
+  const agent = channelAgentsFor(repositoryId).find(
+    (candidate) => candidate.id === agentId,
+  );
+  if (!repositoryId || agent === undefined) {
+    return;
+  }
+  const confirmed = await showModal({
+    title: `Delete ${agent.name} from this chat?`,
+    subtitle: "Its account and work in other chats stay intact.",
+    confirm: "Delete",
+  });
+  if (confirmed === undefined) {
+    return;
+  }
+  if (removeAny) {
+    // Teammate entries are keyed `${userId}:${provider}` by
+    // `channelAgentsFor`; the existing moderation operation takes the same
+    // two values separately.
+    const separatorIndex = agentId.indexOf(":");
+    removeChannelAgentForUser(
+      repositoryId,
+      agentId.slice(0, separatorIndex),
+      agentId.slice(separatorIndex + 1),
+    );
+  } else {
+    removeChannelAgent(repositoryId, agentId);
+  }
+  state.chatSettingsOpenId = undefined;
+  render();
+  refreshChannelInfoPopover();
+}
+
+/**
  * Leaving a repository's chat — self-service, and only offered at all when
  * access here is a per-repository grant (see `canLeaveRepository` in
  * data.js). Destructive and hard to undo without someone re-granting access,
@@ -2851,7 +2890,6 @@ function renameFieldFocused() {
   const act = document.activeElement?.dataset?.act;
   return (
     act === "channel-rename-input" ||
-    act === "channel-role-input" ||
     act === "settings-rename-input"
   );
 }
@@ -3690,23 +3728,12 @@ document.addEventListener("click", (event) => {
     case "roster-agent-menu":
       showMenu(node, rosterMenuItems(value));
       return;
-    /**
-     * The one entry that edits an agent, opening the panel that holds all of
-     * it — name, role, model, effort and the red removal (`rosterSettings` in
-     * screen-chats.js). It used to be two entries opening two panels, with a
-     * third entry above them doing the destructive thing on a single click.
-     *
-     * Reached from the roster's menu, so the menu goes first: `render()`
-     * rebuilds the row behind it, and a popover left open over the result is
-     * anchored to a button that no longer exists.
-     */
+    /** Replaces the rendered name with its inline editor. */
     case "channel-settings-toggle":
       closePopover();
       state.chatSettingsOpenId = state.chatSettingsOpenId === value ? undefined : value;
       render();
       if (state.chatSettingsOpenId === value) {
-        // The name is the field somebody most often came here for, and it is
-        // the first one in the panel.
         const input = $("[data-act='channel-rename-input']");
         input?.focus();
         input?.select();
@@ -3745,30 +3772,16 @@ document.addEventListener("click", (event) => {
       render();
       refreshChannelInfoPopover();
       return;
-    // Both removals are reached from the roster row's menu — see
-    // `rosterMenuItems` — so the menu is dismissed before the roster it
-    // described is rebuilt without the agent in it.
+    // A selection or dismissal closes the menu. Deletion itself still asks
+    // for confirmation before invoking the existing membership operation.
     case "channel-agent-remove":
       closePopover();
-      removeChannelAgent(activeChannelId(), value);
-      render();
-      refreshChannelInfoPopover();
+      void removeChannelAgentAction(value);
       return;
-    case "channel-agent-remove-any": {
-      // `value` is `${userId}:${provider}` — see `rosterMenuItems` in
-      // screen-chats.js, which mints it from the same pair
-      // `channelAgentsFor` already attaches to every non-mine entry.
+    case "channel-agent-remove-any":
       closePopover();
-      const separatorIndex = value.indexOf(":");
-      removeChannelAgentForUser(
-        activeChannelId(),
-        value.slice(0, separatorIndex),
-        value.slice(separatorIndex + 1),
-      );
-      render();
-      refreshChannelInfoPopover();
+      void removeChannelAgentAction(value, true);
       return;
-    }
     case "channel-leave":
       void leaveRepositoryAction(value);
       return;
@@ -4362,29 +4375,15 @@ document.addEventListener("submit", (event) => {
       }
       return;
     }
-    /**
-     * The name and role fields inside the settings panel. Committed here, and
-     * on blur below.
-     *
-     * Only what actually changed is written, and nothing is rendered if
-     * nothing did: the panel stays open around these fields now, and a
-     * rebuild for a field somebody merely tabbed through would take the
-     * select they were reaching for out from under the pointer.
-     */
+    /** The inline name edit commits on Enter; blur uses the same operation. */
     case "channel-rename-form": {
       const input = $("[data-act='channel-rename-input']", form);
-      const roleInput = $("[data-act='channel-role-input']", form);
       const renamed = input !== null && input.value !== input.defaultValue;
-      const rerolled = roleInput !== null && roleInput.value !== roleInput.defaultValue;
       if (renamed) {
         renameChannelAgent(activeChannelId(), form.dataset.value, input.value);
       }
-      if (rerolled) {
-        setChannelAgentSetting(activeChannelId(), form.dataset.value, "role", roleInput.value.trim());
-      }
-      if (renamed || rerolled) {
-        render();
-      }
+      state.chatSettingsOpenId = undefined;
+      render();
       return;
     }
     default:
@@ -4677,6 +4676,12 @@ document.addEventListener("input", (event) => {
 
 /* Rows that are divs for markup reasons still have to answer the keyboard. */
 document.addEventListener("keydown", (event) => {
+  // A real control nested in the row keeps its native keyboard behaviour.
+  // In particular, the inline agent-name input must accept Space and submit
+  // on Enter rather than activating the row behind it.
+  if (event.target.closest?.("button, input, select, textarea, a[href]")) {
+    return;
+  }
   const row = event.target.closest?.('[role="button"][data-act]');
   if (row !== null && row !== undefined && ["Enter", " "].includes(event.key)) {
     event.preventDefault();
@@ -4721,17 +4726,18 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-/**
- * Enter commits an in-progress agent rename or role edit, same as blurring
- * the field — both live in the same form (see `rosterSettings` in
- * screen-chats.js), so both are handled here.
- */
+/** Enter or Escape finishes the inline agent-name edit. */
 document.addEventListener("keydown", (event) => {
   const node = event.target;
   const act = node?.dataset?.act;
+  if (act === "channel-rename-input" && event.key === "Escape") {
+    event.preventDefault();
+    state.chatSettingsOpenId = undefined;
+    render();
+    return;
+  }
   if (
     (act === "channel-rename-input" ||
-      act === "channel-role-input" ||
       act === "settings-rename-input") &&
     event.key === "Enter" &&
     !imeComposing(event)
@@ -4741,17 +4747,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-/**
- * A rename or role edit also commits on blur, not only Enter — clicking away
- * from the field should not discard what was typed. `focusout` bubbles where
- * `blur` does not, so this is the one place delegation can catch it.
- *
- * Checked against `relatedTarget` (the element gaining focus) so tabbing
- * from the name field to the role field within the same form does not itself
- * read as "left the form" — without that check, moving focus from one field
- * to the other inside a two-field form would close the form before the
- * second field could ever be edited.
- */
+/** The inline rename also saves and closes on blur. */
 document.addEventListener("focusout", (event) => {
   const node = event.target;
   const act = node?.dataset?.act;
@@ -4765,38 +4761,22 @@ document.addEventListener("focusout", (event) => {
     }
     return;
   }
-  if (act !== "channel-rename-input" && act !== "channel-role-input") {
+  if (act !== "channel-rename-input") {
     return;
   }
-  // Enter already committed and rebuilt the panel, and the field this event
+  // Enter already committed and rebuilt the row, and the field this event
   // came from is the one that rebuild threw away. Reading a value off it
   // would commit the same edit a second time.
   if (!node.isConnected) {
     return;
   }
-  const form = node.closest("form");
-  if (form !== null && form.contains(event.relatedTarget)) {
-    return;
-  }
   const agentId = node.dataset.value;
   if (activeChannelId() && agentId && state.chatSettingsOpenId === agentId) {
-    const nameInput = form === null ? null : $("[data-act='channel-rename-input']", form);
-    const roleInput = form === null ? null : $("[data-act='channel-role-input']", form);
-    // Unchanged fields are not written and, more to the point, do not render:
-    // the settings panel these live in stays open, and rebuilding it as focus
-    // leaves a field somebody only looked at would move the model picker they
-    // were on their way to.
-    const renamed = nameInput !== null && nameInput.value !== nameInput.defaultValue;
-    const rerolled = roleInput !== null && roleInput.value !== roleInput.defaultValue;
-    if (renamed) {
-      renameChannelAgent(activeChannelId(), agentId, nameInput.value);
+    if (node.value !== node.defaultValue) {
+      renameChannelAgent(activeChannelId(), agentId, node.value);
     }
-    if (rerolled) {
-      setChannelAgentSetting(activeChannelId(), agentId, "role", roleInput.value.trim());
-    }
-    if (renamed || rerolled) {
-      render();
-    }
+    state.chatSettingsOpenId = undefined;
+    render();
   }
 });
 

@@ -4149,9 +4149,7 @@ svg {
 }
 
 /* One button, revealed the same way a channel row's is — see `.chan-row
-   .cr-more`. The row used to carry four controls at once (a switch, rename,
-   settings, and a remove that was one mis-click from taking the agent out of
-   the channel); everything they did is in the menu behind this. */
+   .cr-more`. Rename and delete live in the compact menu behind it. */
 .roster-row .rr-more {
   flex: none;
   display: inline-flex;
@@ -4178,110 +4176,23 @@ svg {
 }
 
 .roster-rename {
-  padding: 6px 8px 8px 41px;
+  min-width: 0;
+  width: 100%;
 }
 
 .roster-rename input {
+  display: block;
   width: 100%;
+  min-width: 0;
+  margin: -2px 0;
   background: var(--bg-inset);
   border: 1px solid var(--accent-line);
-  border-radius: 7px;
-  padding: 5px 8px;
-  font-size: 12px;
+  border-radius: 5px;
+  padding: 1px 4px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 500;
   color: var(--text);
-}
-
-/* The role input sits below the name input in the same form — see
-   `rosterRow` in screen-chats.js. */
-.roster-rename input + input {
-  margin-top: 6px;
-}
-
-.roster-settings {
-  display: grid;
-  gap: 8px;
-  padding: 2px 8px 10px 41px;
-}
-
-.roster-settings .rs-label {
-  font-size: 10.5px;
-  color: var(--text-4);
-  text-transform: uppercase;
-  letter-spacing: 0.05em;
-  margin-bottom: 4px;
-}
-
-/* Spells out what the choice above actually costs — "org" means a teammate's
-   prompt spends this account, which the word alone does not say. */
-.roster-settings .rs-hint {
-  margin-top: 4px;
-  font-size: 10.5px;
-  line-height: 1.45;
-  color: var(--text-3);
-}
-
-/* Why the picker above it is empty, in the words of the component that knows.
-   Set apart from `.rs-hint`, which explains a choice that exists; this one
-   explains the absence of one. */
-.roster-settings .rs-note {
-  margin: -2px 0 2px;
-  font-size: 10.5px;
-  line-height: 1.45;
-  color: var(--text-4);
-}
-
-.roster-settings .mini-select {
-  max-width: 100%;
-  width: 100%;
-}
-
-.roster-settings .mini-select select {
-  max-width: 100%;
-}
-
-/* The name and role are the first fields of the settings panel rather than a
-   second surface of their own, so the form supplies no indentation — the
-   panel around it already has the row's. */
-.roster-settings .roster-rename {
-  padding: 0;
-}
-
-/* Two labelled fields in one form: the second needs the same air between it
-   and the hint above it that the panel's own `gap` gives its other rows. */
-.roster-settings .roster-rename .rs-label ~ .rs-label {
-  margin-top: 8px;
-}
-
-/* The one destructive control in the panel, and the only red thing in it.
-   Shaped like `.menu-item-danger` — the same red, the same trash glyph, the
-   same wash on hover — because it is the same decision that used to sit in
-   the menu, moved to the bottom of the panel that decides everything else
-   about this agent. */
-.rs-remove {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  width: 100%;
-  margin-top: 2px;
-  padding: 6px 8px;
-  background: transparent;
-  border: 1px solid var(--red-wash);
-  border-radius: 7px;
-  color: var(--red);
-  font-size: 12px;
-  font-weight: 550;
-  text-align: left;
-  cursor: pointer;
-}
-
-.rs-remove svg {
-  width: 14px;
-  height: 14px;
-  color: var(--red);
-}
-
-.rs-remove:hover {
-  background: var(--red-wash);
 }
 
 /* --------------------------------------------------------- chat main ---- */
@@ -7297,10 +7208,6 @@ dialog.modal::backdrop {
 .ch-count svg {
   width: 13px;
   height: 13px;
-}
-
-.ch-sep {
-  opacity: 0.5;
 }
 
 /* One thread in the pullout, as a card: glyph, name, one metadata line,

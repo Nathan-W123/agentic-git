@@ -1871,110 +1871,113 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
   assert.match(app, /\$\{lines\.length\} updates/u);
 });
 
-test("a roster row carries one button, and one settings panel behind it", async () => {
+test("people and agents render directly without a main branch node", async () => {
   const chats = await publicFile("screen-chats.js");
-  const app = await browserSource();
+  const sidebar = chats.slice(
+    chats.indexOf("function chanSidebar"),
+    chats.indexOf("/* ---------------------------------------------------------- chan main"),
+  );
+  const header = chats.slice(
+    chats.indexOf("function chanHeader"),
+    chats.indexOf("function chanSearchRow"),
+  );
+
+  assert.match(sidebar, /section\("People", "invite-repo"/u);
+  assert.match(sidebar, /section\("Agents", "channel-agent-menu"/u);
+  assert.ok(
+    sidebar.indexOf('section("People"') < sidebar.indexOf('section("Agents"'),
+    "people and agents are direct, ordered sidebar sections",
+  );
+  assert.doesNotMatch(header, /repository\?\.branch/u);
+  assert.doesNotMatch(header, /class="ch-sep"/u);
+  assert.match(header, /class="ch-count" title="\$\{people\.length\}/u);
+  assert.match(header, /class="ch-count" title="\$\{roster\.length\}/u);
+});
+
+test("a roster row carries one ellipsis and a compact rename delete menu", async () => {
+  const chats = await publicFile("screen-chats.js");
   const ui = await publicFile("ui.js");
   const css = await publicFile("styles.css");
-
   const row = chats.slice(
     chats.indexOf("function rosterRow(agent)"),
     chats.indexOf("/**\n * What the \"...\" on a roster row offers"),
   );
-  assert.notEqual(row, "", "the roster row should still be drawn here");
-  // The four controls the row used to carry — a switch, rename, model &
-  // effort, and a close button one mis-click from removing the agent —
-  // collapse into the same "..." the channel rows above already use.
-  assert.match(row, /act: "roster-agent-menu"/u);
-  for (const gone of [
-    "rr-switch",
-    'act: "channel-rename-toggle"',
-    'act: "channel-settings-toggle"',
-    'act: "channel-agent-remove"',
-  ]) {
-    assert.equal(
-      row.includes(gone),
-      false,
-      `${gone} should live in the menu, not on the row`,
-    );
-  }
-  // The row's only expandable is the one panel; the separate rename form it
-  // used to grow instead is gone.
-  assert.match(row, /settingsOpen \? rosterSettings\(agent\) : ""/u);
-  assert.equal(row.includes("chatRenamingId"), false);
-
-  // The menu is now short on purpose: editing the agent at all is one entry,
-  // beside the two things that are not edits.
   const menu = chats.slice(
     chats.indexOf("export function rosterMenuItems"),
     chats.indexOf("function chanSidebar"),
   );
-  assert.match(menu, /"channel-settings-toggle"/u);
-  assert.match(menu, /label: "Settings"/u);
-  assert.match(menu, /"auditor-toggle"/u);
-  assert.match(menu, /"agent-chat-open"/u);
-  // Rename, model and removal are no longer three ways into the same
-  // question — the panel holds all of them.
-  for (const gone of [
-    "channel-rename-toggle",
-    "channel-agent-remove",
-    "separator: true",
-  ]) {
-    assert.equal(
-      menu.includes(gone),
-      false,
-      `${gone} belongs to the settings panel, not the menu`,
-    );
-  }
 
-  // And the panel is where they went: the name and role in a form that
-  // commits them, the model and effort as dropdowns, removal last and red.
-  const settings = chats.slice(
-    chats.indexOf("function rosterSettings(agent)"),
-    chats.indexOf("/**\n * The hover card for one roster entry"),
-  );
-  assert.notEqual(settings, "", "the settings panel is drawn here");
-  assert.match(settings, /data-act="channel-rename-form"/u);
-  assert.match(settings, /data-act="channel-rename-input"/u);
-  assert.match(settings, /data-act="channel-role-input"/u);
-  assert.match(settings, /settingRow\("Model", "channel-agent-model"/u);
-  assert.match(settings, /"channel-agent-effort"/u);
-  assert.match(settings, /class="rs-remove" data-act="\$\{removeAct\}"/u);
-  // A teammate's agent may only be removed by somebody the server would let,
-  // and one's own is unconditional — the same rule the menu applied before.
+  assert.equal(row.match(/act: "roster-agent-menu"/gu)?.length, 1);
+  assert.match(row, /settingsOpen\s*\? `<form class="roster-rename"/u);
+  assert.match(row, /: `<div class="rr-name">\$\{esc\(agent\.name\)\}<\/div>`/u);
+  assert.match(row, /class="rr-name-input" data-act="channel-rename-input"/u);
+  assert.doesNotMatch(row, /rosterSettings|channel-role-input/u);
+
+  assert.match(menu, /label: "Rename"/u);
+  assert.match(menu, /iconName: "pencil"/u);
+  assert.match(menu, /label: "Delete"/u);
+  assert.match(menu, /danger: true/u);
   assert.match(
-    settings,
-    /agent\.mine === true \|\| canManageRepository\(activeChannelId\(\)\)/u,
-  );
-  assert.match(
-    settings,
+    menu,
     /agent\.mine === true\s*\?\s*"channel-agent-remove"\s*:\s*"channel-agent-remove-any"/u,
   );
-  // Red, and the only red thing in the panel.
-  assert.match(css, /\.rs-remove \{[\s\S]{0,240}color: var\(--red\)/u);
-  assert.match(css, /\.rs-remove:hover \{[\s\S]{0,80}background: var\(--red-wash\)/u);
+  assert.doesNotMatch(menu, /label: "Settings"|iconName: "sliders"/u);
+  assert.doesNotMatch(chats, /function rosterSettings|function settingRow/u);
 
-  // `danger` is still the flag the shared menu paints its destructive entries
-  // with, so anything that goes back into a menu is the same red.
+  assert.match(css, /\.roster-rename \{\s*min-width: 0;\s*width: 100%;/u);
+  assert.match(css, /\.roster-rename input \{[\s\S]{0,400}font-size: 12\.5px;/u);
+  assert.doesNotMatch(css, /\.roster-settings|\.rs-remove/u);
   assert.match(ui, /item\.danger === true \? " menu-item-danger"/u);
   assert.match(css, /\.menu-item-danger[\s\S]{0,120}color: var\(--red\)/u);
+});
 
-  // The menu is dismissed by everything it dispatches: `render()` rebuilds
-  // the row underneath it, and a popover anchored to a button that no longer
-  // exists is left floating over the result.
-  assert.match(app, /case "roster-agent-menu":[\s\S]{0,160}rosterMenuItems\(value\)/u);
+test("inline rename and delete finish without retaining extra UI", async () => {
+  const app = await browserSource();
+  const ui = await publicFile("ui.js");
+  const remove = app.slice(
+    app.indexOf("async function removeChannelAgentAction"),
+    app.indexOf("async function leaveRepositoryAction"),
+  );
+  const submit = app.slice(
+    app.indexOf('case "channel-rename-form"'),
+    app.indexOf("default:", app.indexOf('case "channel-rename-form"')),
+  );
+  const renameKeys = app.slice(
+    app.indexOf("/** Enter or Escape finishes the inline agent-name edit."),
+    app.indexOf("/** The inline rename also saves and closes on blur."),
+  );
+  const renameBlur = app.slice(
+    app.indexOf("/** The inline rename also saves and closes on blur."),
+    app.indexOf('window.addEventListener("hashchange"'),
+  );
+
+  assert.match(remove, /await showModal\(/u);
+  assert.match(remove, /if \(confirmed === undefined\) \{\s*return;/u);
+  assert.match(remove, /removeChannelAgent\(repositoryId, agentId\)/u);
+  assert.match(remove, /removeChannelAgentForUser\(/u);
   assert.match(app, /case "channel-agent-remove":\s*\n\s*closePopover\(\);/u);
+  assert.match(app, /case "channel-agent-remove-any":\s*\n\s*closePopover\(\);/u);
+  // The shared popover closes on its scrim or Escape, covering dismissal as
+  // well as either menu selection above.
+  assert.match(ui, /data-act="pop-close"/u);
+  assert.match(ui, /event\.key === "Escape"[\s\S]{0,60}closePopover\(\)/u);
+
+  assert.match(submit, /renameChannelAgent\(/u);
+  assert.match(submit, /state\.chatSettingsOpenId = undefined;/u);
+  assert.match(submit, /render\(\);/u);
+  const escape = /if \(act === "channel-rename-input" && event\.key === "Escape"\) \{([\s\S]*?)\n  \}/u.exec(
+    renameKeys,
+  )?.[1];
+  assert.notEqual(escape, undefined, "Escape has an inline-rename branch");
+  assert.match(escape ?? "", /state\.chatSettingsOpenId = undefined;/u);
+  assert.doesNotMatch(escape ?? "", /renameChannelAgent/u);
+  assert.match(renameKeys, /event\.key === "Enter"[\s\S]{0,240}requestSubmit\(\)/u);
+  assert.match(renameBlur, /renameChannelAgent\(activeChannelId\(\), agentId, node\.value\)/u);
+  assert.match(renameBlur, /state\.chatSettingsOpenId = undefined;\s*\n\s*render\(\);/u);
   assert.match(
     app,
-    /case "channel-settings-toggle":\s*\n\s*closePopover\(\);/u,
+    /event\.target\.closest\?\.\("button, input, select, textarea, a\[href\]"\)[\s\S]{0,80}return;/u,
   );
-  // Opening the panel puts the cursor in the field somebody most often came
-  // for, and a commit that changes nothing must not rebuild the panel around
-  // the picker they were reaching for.
-  assert.match(app, /channel-rename-input'\]"\);\s*\n\s*input\?\.focus\(\)/u);
-  assert.match(app, /input\.value !== input\.defaultValue/u);
-  assert.match(app, /nameInput\.value !== nameInput\.defaultValue/u);
-  assert.match(app, /state\.chatSettingsOpenId === agentId/u);
 });
 
 test("a slash command is offered wherever it is typed, not only at the start", async () => {
