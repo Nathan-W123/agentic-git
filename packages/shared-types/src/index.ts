@@ -945,6 +945,14 @@ export type AuditEventType =
    */
   | "channel_message_deleted"
   /**
+   * One reply removed from a thread that survives it. Its own type rather
+   * than folded into the event above, because the two answer different
+   * questions after the fact: that one says a conversation stopped
+   * existing, this one says a turn inside a still-readable conversation
+   * was taken out of it.
+   */
+  | "channel_reply_deleted"
+  /**
    * A repository (and its cascaded channel state and grants) was removed.
    * Runs and submitted tasks are never cascaded — see `removeRepository`'s
    * doc comment in `@coord/persistence` — so this event marks the one
