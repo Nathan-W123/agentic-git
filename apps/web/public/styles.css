@@ -2436,29 +2436,26 @@ svg {
 }
 
 /*
- * The composer, in its two sizes.
+ * The desktop composer is deliberately one steady, lean row. Its controls
+ * and text remain in the same places when it receives focus, matching the
+ * compact prompt bar people use with a pointer and a wide viewport. Phones
+ * override these variables below: they begin with this pill, then open into
+ * a clearer two-row composer when somebody starts writing.
  *
- * Every metric the lean bar changes is a variable set here and overridden in
- * exactly one place — the collapse rule below. The alternative was a second
- * copy of that rule's condition in front of each property it touches, and the
- * textarea and the mirror painted underneath it cannot afford to disagree
- * about padding by a pixel: they are the same string drawn twice, and the
- * moment their metrics drift the highlight slides off the name it belongs to.
- * A variable cannot drift the way two selectors can.
- *
- * `flex` values on the children are unconditional and cost nothing while the
- * composer is a block — they only start meaning something once `--composer-
- * layout` turns the box into a row.
+ * Every metric is a variable because the textarea and the mirror painted
+ * underneath it cannot afford to disagree about padding by a pixel: they are
+ * the same string drawn twice, and the moment their metrics drift the
+ * highlight slides off the name it belongs to.
  */
 .composer {
-  --composer-pad-top: 11px;
-  --composer-pad-bottom: 6px;
-  --composer-pad-x: 13px;
-  --composer-shape: var(--radius-lg);
-  --composer-layout: block;
-  --composer-bar-layout: flex;
-  --composer-inset: 0;
-  --composer-send-shape: 8px;
+  --composer-pad-top: 7px;
+  --composer-pad-bottom: 7px;
+  --composer-pad-x: 4px;
+  --composer-shape: 999px;
+  --composer-layout: flex;
+  --composer-bar-layout: contents;
+  --composer-inset: 0 5px;
+  --composer-send-shape: 999px;
 
   margin: 0 12px 12px;
   display: var(--composer-layout);
@@ -2468,67 +2465,11 @@ svg {
   background: var(--bg-card);
   border: 1px solid var(--border);
   border-radius: var(--composer-shape);
-  transition: border-color 0.15s ease, border-radius 0.15s ease;
+  transition: border-color 0.15s ease;
 }
 
 .composer:focus-within {
   border-color: var(--accent-line);
-}
-
-/*
- * The lean bar.
- *
- * Empty, unfocused and with nothing pending, the composer is one pill about
- * the height of its own send button: attach on the left, the placeholder
- * across the middle, send on the right. The second row and everything on it
- * — the mention key, the context dial, the model and effort pickers — come
- * back the instant it is pressed, which is also the first instant any of them
- * can be used: nothing can be typed, mentioned or configured into a composer
- * that is not focused, so the collapsed state hides no control at a moment it
- * could have been reached. What it buys is the roughly forty pixels of
- * transcript that a permanently two-row box was spending on a toolbar nobody
- * was looking at.
- *
- * `:placeholder-shown` is the emptiness test, rather than a flag in state,
- * because every render is one `innerHTML` assignment over the whole app: a
- * flag would have to be captured and restored across it, while the textarea's
- * own value is what the markup is built from and survives on its own. It is
- * also live — the bar opens on the first character typed, not on the render
- * that character eventually causes.
- *
- * `.is-expanded` is for the things the textarea cannot see: staged
- * attachments and a thread the next message is aimed at both sit outside this
- * form, and both have to keep their bar open over an empty box.
- */
-.composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown) {
-  --composer-pad-top: 7px;
-  --composer-pad-bottom: 7px;
-  --composer-pad-x: 4px;
-  --composer-shape: 999px;
-  --composer-layout: flex;
-  /* `contents` rather than a nested row: it lifts the toolbar's buttons into
-     the pill itself, which is what lets the attach button sit to the left of
-     the text and the send button to the right of it without either composer
-     rearranging its markup. */
-  --composer-bar-layout: contents;
-  --composer-inset: 0 5px;
-  --composer-send-shape: 999px;
-}
-
-/* The second row's contents, while there is no second row. Kept in the
-   markup and merely unpainted, so focusing the composer reveals them without
-   a render — and so nothing here has to know which controls a given composer
-   happens to carry. */
-.composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown)
-  :is(
-    .mini-select,
-    .ctx,
-    .composer-note,
-    .composer-bar .spacer,
-    [data-act="chat-mention"],
-    [data-act="channel-mention-key"]
-  ) {
-  display: none;
 }
 
 /* Attach leads, text follows, send closes. A no-op in the expanded bar, where
@@ -6444,6 +6385,69 @@ dialog.modal::backdrop {
    "message composer with two inline mini-selects" are still fine at 820px
    and are not fine at 380px. */
 @media (max-width: 600px) {
+  /*
+   * A phone gets the space-efficient pill only while it is idle. Focus,
+   * text, an attachment, or a targeted thread opens it into a two-row bar so
+   * the textarea and touch controls each have room. `max-height` supplies the
+   * visible expansion while the layout changes underneath it; the global
+   * reduced-motion rule later in this file reduces that transition to an
+   * effectively immediate state change when requested.
+   *
+   * `:placeholder-shown` is the live emptiness test. It opens on the first
+   * character without waiting for the app's full `innerHTML` render cycle,
+   * and `.is-expanded` covers pending state that lives outside the textarea.
+   */
+  .composer {
+    --composer-pad-top: 11px;
+    --composer-pad-bottom: 6px;
+    --composer-pad-x: 13px;
+    --composer-shape: var(--radius-lg);
+    --composer-layout: block;
+    --composer-bar-layout: flex;
+    --composer-inset: 0;
+    --composer-send-shape: 8px;
+
+    max-height: 240px;
+    overflow: hidden;
+    transition:
+      border-color 0.15s ease,
+      border-radius 0.2s ease,
+      max-height 0.22s ease;
+  }
+
+  .composer textarea,
+  .composer-mirror {
+    transition: padding 0.2s ease;
+  }
+
+  .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown) {
+    --composer-pad-top: 7px;
+    --composer-pad-bottom: 7px;
+    --composer-pad-x: 4px;
+    --composer-shape: 999px;
+    --composer-layout: flex;
+    /* Lift the useful edge controls into the pill until it is opened. */
+    --composer-bar-layout: contents;
+    --composer-inset: 0 5px;
+    --composer-send-shape: 999px;
+
+    max-height: 52px;
+  }
+
+  /* The fuller toolbar is already in the markup. Keep it out of the idle
+     pill, then reveal it as part of the focus expansion without a render. */
+  .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown)
+    :is(
+      .mini-select,
+      .ctx,
+      .composer-note,
+      .composer-bar .spacer,
+      [data-act="chat-mention"],
+      [data-act="channel-mention-key"]
+    ) {
+    display: none;
+  }
+
   /* `.chan-sidebar` (channel list + roster) goes off-canvas the same way
      the outer app `.sidebar` already does at 900px — toggled by the new
      `.chan-sidebar-btn` in `chanHeader` (screen-chats.js), closed by the
