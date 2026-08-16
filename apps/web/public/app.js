@@ -2937,6 +2937,8 @@ document.addEventListener("click", (event) => {
       ]);
       return;
     case "repo-sync":
+    case "channel-sync":
+      closePopover();
       void syncRepositoryFromGitHub(value, render);
       return;
     /* Chats */
@@ -3711,17 +3713,35 @@ document.addEventListener("click", (event) => {
       void inviteSomebody(render, value);
       return;
     /**
-     * The menu on a channel row: leaving, and nothing else.
+     * The menu on a channel row: the few things with nowhere else to live.
      *
      * It used to also offer inviting somebody, adding an agent, and opening
      * the channel. Opening duplicated clicking the row itself, and the other
      * two are already in the channel's own header where somebody is looking
      * when they think of them. A menu that repeats what is one click away
-     * costs a decision every time it is opened. Leaving is the one action
-     * with nowhere else to live.
+     * costs a decision every time it is opened.
+     *
+     * Syncing earns its place by the same rule. It used to sit on the
+     * repositories screen, which this interface no longer has — so the one
+     * way to settle a repository that has diverged from GitHub was
+     * unreachable, and a person watching a pull get refused in the channel
+     * had nowhere at all to go.
      */
     case "channel-menu":
       showMenu(node, [
+        // Only for repositories that actually have a GitHub origin: a menu
+        // must never offer what the platform cannot do for this one.
+        ...(state.repositories.find((repo) => repo.id === value)?.provider ===
+        "github"
+          ? [
+              {
+                act: "channel-sync",
+                value,
+                label: "Sync from GitHub",
+                iconName: "sync",
+              },
+            ]
+          : []),
         // Leaving is only offered to somebody who can actually leave. Access
         // that comes from an organization role reaches every repository the
         // organization owns, so there is no per-repository grant to give up —
