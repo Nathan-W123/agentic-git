@@ -8,7 +8,13 @@ import { repoAdd } from "@coord/cli/commands";
 import { CoordinatorProject } from "@coord/cli/project";
 import { RepositoryService } from "@coord/repository-service";
 
-import { isStaticSite, PreviewService, startStaticServer } from "./preview.js";
+import {
+  describeUndetectable,
+  detectPreviewCommand,
+  isStaticSite,
+  PreviewService,
+  startStaticServer,
+} from "./preview.js";
 
 /**
  * The static preview exists so a page with nothing that builds it can be
@@ -240,6 +246,9 @@ async function environmentReportingRepository(scripts: {
       'say("COORD_HOST");',
       'say("SECRET_FROM_CONFIG");',
       'say("COORD_BOOTSTRAP_TOKEN");',
+      // How the container was deployed, which must not reach a preview: with
+      // it set, the preview's own `npm ci` omits devDependencies.
+      'say("NODE_ENV");',
       'createServer((_, response) => response.end("ok")).listen(',
       '  Number(process.env["PORT"]), "127.0.0.1");',
       "",
@@ -282,6 +291,10 @@ test("a previewed app is given its own project, not the control plane's", async 
   const inherited = path.join(root, "live-project");
   process.env["COORD_PROJECT_ROOT"] = inherited;
   process.env["COORD_BOOTSTRAP_TOKEN"] = "not-for-the-child";
+  // How the *container* was deployed. The image sets this, and it is the one
+  // that broke previewing a repository whose dev server has to be built.
+  const previousNodeEnv = process.env["NODE_ENV"];
+  process.env["NODE_ENV"] = "production";
   try {
     const repository = await repoAdd(project, store, {
       sourcePath,
@@ -317,12 +330,24 @@ test("a previewed app is given its own project, not the control plane's", async 
         await reported(previews, repository.id, "COORD_HOST"),
         "127.0.0.1",
       );
+      // And the deployment's own NODE_ENV does not travel. With it set, the
+      // preview's `npm ci` omits devDependencies, so a repository whose dev
+      // server is built by anything installs cleanly and then dies with
+      // "turbo: not found" — which reads as the start command being wrong, so
+      // the obvious fix is to type a different start command, and that cannot
+      // work either. The command was never the problem.
+      assert.equal(await reported(previews, repository.id, "NODE_ENV"), "");
 
       const response = await fetch(status.url);
       assert.equal(response.status, 200);
       assert.equal(await response.text(), "ok");
     } finally {
       await previews.close();
+      if (previousNodeEnv === undefined) {
+        delete process.env["NODE_ENV"];
+      } else {
+        process.env["NODE_ENV"] = previousNodeEnv;
+      }
     }
   } finally {
     delete process.env["COORD_PROJECT_ROOT"];
@@ -368,6 +393,158 @@ test("a repository can supply its own configuration, and it wins", async () => {
     }
   } finally {
     await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+/**
+ * The play button has to start whatever somebody committed, not only the one
+ * ecosystem it was written for. Every rung wants a named file saying what the
+ * project is, so these fixtures are exactly that file and nothing else.
+ */
+async function detectIn(
+  files: Record<string, string>,
+): Promise<{ label?: string; executable?: string; args?: string[] }> {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cpreview-detect-"));
+  try {
+    for (const [name, body] of Object.entries(files)) {
+      const target = path.join(root, name);
+      await mkdir(path.dirname(target), { recursive: true });
+      await writeFile(target, body, "utf8");
+    }
+    const found = await detectPreviewCommand(root);
+    return {
+      ...(found?.label === undefined ? {} : { label: found.label }),
+      ...(found?.executable === undefined ? {} : { executable: found.executable }),
+      ...(found?.args === undefined ? {} : { args: [...found.args] }),
+    };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
+test("a start command is found from whatever the project actually is", async () => {
+  // Node, and the package manager the repository pinned — running npm in a
+  // pnpm workspace fails on the lockfile, so the lockfile decides.
+  assert.match(
+    (await detectIn({ "package.json": '{"scripts":{"dev":"vite"}}' })).label ?? "",
+    /npm(\.cmd)? run dev/u,
+  );
+  assert.equal(
+    (
+      await detectIn({
+        "package.json": '{"scripts":{"dev":"vite"}}',
+        "pnpm-lock.yaml": "lockfileVersion: 9",
+      })
+    ).label,
+    "pnpm run dev",
+  );
+  // `dev` over `start` where both exist: that is the one meant to be watched.
+  assert.match(
+    (
+      await detectIn({
+        "package.json": '{"scripts":{"start":"node .","dev":"vite"}}',
+      })
+    ).label ?? "",
+    /run dev$/u,
+  );
+
+  // Python, where the framework names itself.
+  assert.match(
+    (await detectIn({ "manage.py": "# django" })).label ?? "",
+    /manage\.py runserver/u,
+  );
+  assert.equal(
+    (
+      await detectIn({
+        "requirements.txt": "fastapi\nuvicorn\n",
+        "main.py": "app = FastAPI()",
+      })
+    ).label,
+    "uvicorn main:app",
+  );
+  assert.match(
+    (
+      await detectIn({ "requirements.txt": "flask\n", "app.py": "app = Flask(__name__)" })
+    ).label ?? "",
+    /flask run/u,
+  );
+
+  // Compiled languages, where the toolchain fetches its own dependencies.
+  assert.equal((await detectIn({ "go.mod": "module x" })).label, "go run .");
+  assert.equal((await detectIn({ "Cargo.toml": "[package]" })).label, "cargo run");
+
+  // Ruby: the Rails binstub before config.ru, because a Rails app has both.
+  assert.equal(
+    (await detectIn({ "bin/rails": "#!/usr/bin/env ruby", "config.ru": "run App" }))
+      .label,
+    "bin/rails server",
+  );
+  assert.equal((await detectIn({ "config.ru": "run App" })).label, "rackup");
+
+  // PHP's own server, with the docroot it should actually serve.
+  assert.equal(
+    (await detectIn({ "public/index.php": "<?php" })).label,
+    "php -S -t public",
+  );
+
+  // Nothing that names a way to start.
+  assert.deepEqual(await detectIn({ "README.md": "# a library" }), {});
+});
+
+test("a Procfile wins, because it is the project saying so outright", async () => {
+  // Inferred answers are guesses about a manifest; a web: line is the command.
+  const found = await detectIn({
+    Procfile: "web: gunicorn app:server --bind 0.0.0.0:$PORT\nworker: rq worker\n",
+    "package.json": '{"scripts":{"dev":"vite"}}',
+    "requirements.txt": "flask\n",
+  });
+  assert.equal(found.executable, "sh");
+  // Through a shell, unsplit: the line can carry quotes, `&&` or a $PORT of
+  // its own, and splitting on spaces would mangle all three.
+  assert.deepEqual(found.args, [
+    "-c",
+    "gunicorn app:server --bind 0.0.0.0:$PORT",
+  ]);
+  // `worker:` is not a web process and must not be picked up.
+  assert.doesNotMatch(found.label ?? "", /rq worker/u);
+});
+
+test("the port is written into arguments that spell it out", async () => {
+  // PORT is in the child's environment and most servers read it, but Django,
+  // php -S and rails take the address as an argument — and spawn performs no
+  // shell expansion, so a literal ${PORT} would reach the process unexpanded.
+  for (const files of [
+    { "manage.py": "# django" },
+    { "public/index.php": "<?php" },
+    { "bin/rails": "#!/usr/bin/env ruby" },
+  ]) {
+    const found = await detectIn(files);
+    assert.ok(
+      (found.args ?? []).some((arg) => arg.includes("${PORT}")),
+      `${found.label ?? "?"} carries a port placeholder`,
+    );
+  }
+});
+
+test("a repository that cannot be started says what was looked for", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "cpreview-why-"));
+  try {
+    // "Nothing here looks like an app" is true and useless.
+    const bare = await describeUndetectable(root);
+    assert.match(bare, /Procfile/u);
+    assert.match(bare, /go\.mod/u);
+    assert.match(bare, /index\.html/u);
+
+    await writeFile(
+      path.join(root, "package.json"),
+      '{"scripts":{"build":"tsc","test":"node --test"}}',
+      "utf8",
+    );
+    const scripted = await describeUndetectable(root);
+    assert.match(scripted, /no dev\/start\/serve\/preview script/u);
+    assert.match(scripted, /build, test/u);
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

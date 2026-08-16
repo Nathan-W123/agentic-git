@@ -179,6 +179,19 @@ interface WatchedChannelTask {
    * open. Flushed in order the moment something substantive does arrive.
    */
   pending: string[];
+  /**
+   * The request that caused this work, held until the thread actually opens.
+   *
+   * Posted eagerly it would *create* the thread, and a task small enough to
+   * finish without narrating itself is deliberately two lines in the room
+   * with no thread at all. So it waits with the rest of the held narration
+   * and leads it when something finally opens the room.
+   *
+   * Absent when the request was already made inside the thread, or when the
+   * dispatch joined a thread that exists — both are cases where it is either
+   * in there already or was posted outright.
+   */
+  opener?: { authorId: string; content: string };
   /** Whether a thread has been opened, after which everything goes into it. */
   threaded: boolean;
 }
@@ -1404,6 +1417,88 @@ const THREAD_MERGE_MIN_OVERLAP = 0.42;
 /** Threads older than this are finished business, however well they match. */
 const THREAD_MERGE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * Phrasings that address a request to somebody, rather than merely mentioning
+ * work. Broad on the "someone" forms on purpose: "can someone start building
+ * the chess engine" is a request to the room, and the room is who is reading.
+ */
+const REQUEST_OPENER_RE =
+  /\b(please|can you|could you|would you|will you|can we|could we|shall we|can (?:someone|somebody|anyone|anybody)|could (?:someone|somebody|anyone|anybody)|(?:someone|somebody|anyone|anybody) (?:should|able to|want to)|we need to|i need (?:you|someone|somebody)|let'?s|go ahead and)\b/iu;
+
+/** A sentence that opens with the work verb itself — an instruction. */
+const IMPERATIVE_OPENER_RE = new RegExp(`^(?:${TASK_VERB_RE.source})`, "iu");
+
+/**
+ * Words that, following the opening one, prove it was the subject.
+ *
+ * Half the work vocabulary is also ordinary nouns — changes, updates, a
+ * build, a review, a patch, a fix — so "Changes look good" opens with a word
+ * from the verb list and is not an instruction, it is somebody saying the
+ * changes look good. It was offered an agent, which is the complaint.
+ *
+ * English separates the two by what comes next: an imperative takes an object
+ * or a preposition ("fix the login bug", "deploy to staging"), while a
+ * finite verb after the opening word means that word was the thing doing it.
+ * A closed list, because guessing is what got this wrong in the first place.
+ */
+const SUBJECT_TAIL_RE =
+  /^(is|are|was|were|look|looks|looked|seem|seems|seemed|have|has|had|went|work|works|worked|came|come|comes|will|would|should|can|could|do|does|did|and|but|so)\b/iu;
+
+/**
+ * Whether this is a request *addressed to somebody*, not just a sentence with
+ * work vocabulary in it.
+ *
+ * {@link looksLikeTaskRequest} asks whether a message is about work at all,
+ * which is the right question when an agent has been named — the sender chose
+ * it, so the only doubt is what they want. It is too loose for the unnamed
+ * path, where the same evidence has to answer a different question: is this
+ * addressed to anyone? "The retry loop was rewritten last week" is about work
+ * and asks for none, and an agent that opens a run on it has spent somebody's
+ * account on a remark.
+ *
+ * So the unnamed path additionally wants either an instruction — a sentence
+ * that opens with the verb — or a phrase that hands the work to somebody.
+ * Both are things a person does deliberately; neither happens by accident in
+ * conversation about a repository.
+ */
+export function readsAsDirectRequest(content: string): boolean {
+  const text = withoutMentions(content).trim();
+  if (text.length === 0) {
+    return false;
+  }
+  if (REQUEST_OPENER_RE.test(text)) {
+    return true;
+  }
+  const opening = IMPERATIVE_OPENER_RE.exec(text);
+  if (opening === null) {
+    return false;
+  }
+  // Only an instruction if the opening word is doing the instructing rather
+  // than being talked about — see SUBJECT_TAIL_RE.
+  return !SUBJECT_TAIL_RE.test(text.slice(opening[0].length).trimStart());
+}
+
+/**
+ * How an unnamed request is offered, and how the acceptance below finds it
+ * again. A prefix rather than a stored flag: a channel message carries no
+ * metadata of its own, and the offer has to be recognisable in the transcript
+ * by the same reading a person gives it.
+ */
+const AUTO_CLAIM_OFFER_OPENING = "Want me to take care of this?";
+
+/**
+ * How long the "is this a request" check may take.
+ *
+ * Short on purpose: it runs between somebody pressing send and the channel
+ * saying anything, and a check that outlives the reader's attention has
+ * failed whatever it answers. Timing out reads as "no", which is the
+ * direction that costs nothing.
+ */
+const CLASSIFY_TIMEOUT_MS = 20_000;
+
+/** How far back an acceptance will look for the offer it is answering. */
+const AUTO_CLAIM_OFFER_LOOKBACK = 6;
+
 export function looksLikeTaskRequest(content: string): boolean {
   const text = content.trim();
   if (text.length < 6) {
@@ -1666,6 +1761,8 @@ export interface ApiOperations {
     projectId: string;
     repositoryId: string;
     actorId: string;
+    /** A person's answer to "which side wins" for files that collide. */
+    conflictResolution?: "refuse" | "prefer-remote" | "prefer-local";
   }): Promise<{
     status: "already_current" | "fast_forwarded" | "merged";
     remoteUrl: string;
@@ -1673,6 +1770,7 @@ export interface ApiOperations {
     upstreamRevision: string;
     previousRevision: string;
     revision: string;
+    resolved?: { side: "remote" | "local"; files: string[] };
   }>;
   submitTask(input: {
     projectId: string;
@@ -1750,6 +1848,13 @@ export interface ApiOperations {
     taskIds?: string[];
     agentId?: string;
     vendor?: "claude" | "codex" | "gemini";
+    /**
+     * Narrow a vendor-scoped stop to one persona's work. A channel persona
+     * is an (owner, vendor) pair, and every persona of one vendor resolves
+     * to the same configured agent — without this, "/stop @agent" also
+     * stopped every other persona's same-vendor tasks.
+     */
+    ownerId?: string;
     reason: string;
     actorId: string;
   }): Promise<{
@@ -4560,15 +4665,49 @@ export class ApiGateway {
           "This deployment does not support syncing from a remote",
         );
       }
-      const synced = await this.performOperation(
-        "repository_sync_failed",
-        async () =>
-          await syncRepository({
-            projectId,
-            repositoryId,
-            actorId: principal.user.id,
-          }),
-      );
+      const body = objectBody(await this.readJson(request));
+      const resolve = stringField(body["resolve"], "resolve", {
+        max: 20,
+        optional: true,
+      });
+      if (
+        resolve !== undefined &&
+        !["refuse", "prefer-remote", "prefer-local"].includes(resolve)
+      ) {
+        throw new HttpError(
+          400,
+          "invalid_request",
+          "resolve must be refuse, prefer-remote, or prefer-local",
+        );
+      }
+      let synced;
+      try {
+        synced = await syncRepository({
+          projectId,
+          repositoryId,
+          actorId: principal.user.id,
+          ...(resolve === undefined
+            ? {}
+            : {
+                conflictResolution: resolve as
+                  | "refuse"
+                  | "prefer-remote"
+                  | "prefer-local",
+              }),
+        });
+      } catch (error) {
+        // A collision is not a malfunction: it is a question for the person
+        // who asked, and the screen can only offer them the choice if the
+        // refusal is distinguishable from a sync that actually broke.
+        if ((error as { name?: unknown }).name === "SyncDivergedError") {
+          throw new HttpError(
+            409,
+            "sync_conflict",
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+        throw error;
+      }
       this.sendJson(response, 200, { sync: synced });
       return;
     }
@@ -5570,6 +5709,21 @@ export class ApiGateway {
       });
       // A rollback that was refused is a legitimate answer, not a transport
       // error, so the outcome travels in the body with a 200.
+      if (result.status === "integrated" && taskId !== undefined) {
+        // Recorded before the summary is cleared, because clearing it is not
+        // durable on its own: a thread with no file list is exactly what the
+        // backfill in `withChangedFileSummaries` goes looking for, and it
+        // would rebuild the list from the very events this revert undid. The
+        // event is what tells it not to.
+        await this.options.store
+          .appendAudit(undefined, {
+            type: "task_reverted",
+            taskId,
+            data: { projectId, repositoryId, revision: targetRevision },
+          })
+          .catch(() => undefined);
+        await this.forgetThreadChangedFiles(repositoryId, taskId);
+      }
       this.sendJson(response, 200, { rollback: result });
       return;
     }
@@ -8343,8 +8497,25 @@ export class ApiGateway {
       );
       return;
     }
-    const target = input.rest.trim().replace(/^@/u, "");
+    // The name, and only the name. "/stop @Hera" and "/stop @Hera please" and
+    // "/stop @Hera, that's wrong" are one person saying the same thing, and
+    // matching the whole remainder against the roster meant the last two
+    // found nobody and stopped nothing — announcing "nobody here answers to
+    // that" while the agent carried on working.
+    //
+    // The optional bracket is not optional in practice: an agent nobody has
+    // named is "Claude (Nathan)", so a first-word split would have taken
+    // "Claude" and missed every unnamed agent in the product. Same shape
+    // `withoutMentions` already strips, so the two agree about where a
+    // mention ends.
+    const target = (
+      /^@?([\w.-]+(?:\s*\([^)]*\))?)/u.exec(input.rest.trim())?.[1] ?? ""
+    ).replace(/[,.:;!?]+$/u, "");
     let vendor: "claude" | "codex" | "gemini" | undefined;
+    // The named persona's owner. The vendor alone is not a persona: every
+    // persona of one vendor runs through the same configured agent, so a
+    // vendor-only stop would take other people's same-vendor work with it.
+    let ownerId: string | undefined;
     let scope = "in this channel";
     if (target !== "") {
       const candidates = await this.resolveChannelMentionCandidates(
@@ -8369,12 +8540,14 @@ export class ApiGateway {
         return;
       }
       vendor = named.vendor;
+      ownerId = named.userId;
       scope = `for @${named.name}`;
     }
     const { cancelled } = await operation({
       projectId,
       repositoryId,
       ...(vendor === undefined ? {} : { vendor }),
+      ...(ownerId === undefined ? {} : { ownerId }),
       reason: "Stopped from the channel",
       actorId: input.senderId,
     });
@@ -8575,6 +8748,20 @@ export class ApiGateway {
           ...(parsed?.command.name === "plan" ? { planOnly: true } : {}),
         });
       }
+      return;
+    }
+    // "Yes" answers the offer below before it is read as anything else — an
+    // approval is a short sentence with no work verb in it, so nothing would
+    // claim it, and the offer would sit there agreed to and unstarted.
+    if (
+      await this.maybeAcceptAutoClaim({
+        projectId,
+        repositoryId,
+        content,
+        senderId,
+        candidates,
+      })
+    ) {
       return;
     }
     await this.maybeAutoClaimTask({
@@ -8933,6 +9120,40 @@ export class ApiGateway {
           content: openingLine,
         })
       ).id;
+    // The request that caused this, in the words it was asked in, at the top
+    // of the thread it produced.
+    //
+    // The thread used to open on the agent's restatement — "Task: rework the
+    // retry loop" — which is a good name and not what anybody said. Opening a
+    // thread panel showed the work with no visible cause: the sentence that
+    // started it was back in the channel, and on a phone, where the panel is
+    // the whole screen, it was not visible at all.
+    //
+    // It matters more, not less, when the work joins a thread that already
+    // exists. A merged request never appeared in the thread it was merged
+    // into, so a conversation would grow a second task with nothing in it
+    // saying why — which is the case `findThreadToContinue` creates on
+    // purpose, and the one hardest to read after the fact.
+    //
+    // Skipped only when the request was made inside the thread already, since
+    // then it is a reply and is in it by definition.
+    const opener =
+      input.threadMessageId === undefined
+        ? { authorId: senderId, content }
+        : undefined;
+    if (opener !== undefined && continuing !== undefined) {
+      // The room is already there, so there is nothing to protect it from —
+      // and this is the case that needed it most: work merged into an
+      // existing thread used to arrive with nothing in the thread saying why.
+      await this.appendChannelThreadReply({
+        projectId,
+        repositoryId,
+        messageId: threadRootId,
+        authorId: opener.authorId,
+        kind: "user",
+        content: opener.content,
+      }).catch(() => undefined);
+    }
     // The agent's own wording, fetched now that the thread it belongs to is
     // already on the screen. Not awaited: a slow model must not hold up
     // queueing the work, and the only thing riding on it is how the first
@@ -9190,6 +9411,11 @@ export class ApiGateway {
         // substantive first, they simply arrive with the next line rather than
         // holding one up.
         pending: [],
+        // Held with the narration for the reason above: posting it now would
+        // open a thread this task may never deserve.
+        ...(opener === undefined || continuing !== undefined
+          ? {}
+          : { opener }),
         // Whether a room already exists, not whether one is deserved. The
         // held-narration rule is about sparing the channel a thread nobody
         // needs — but when this dispatch joined an existing thread the room is
@@ -11808,7 +12034,13 @@ export class ApiGateway {
         try {
           const filter: AuditEventFilter = {
             taskId,
-            types: ["workspace_changed", "changeset_collected"],
+            types: [
+              "workspace_changed",
+              "changeset_collected",
+              // Read alongside the reports so the loop below can tell a
+              // report that still stands from one that has been put back.
+              "task_reverted",
+            ],
           };
           // Both halves of the log, because archiving moves rows out of the
           // live table and the CLI's `audit archive` is a thing somebody
@@ -11832,15 +12064,31 @@ export class ApiGateway {
           // file can stop being changed when an agent reverts itself, and
           // accumulating across reports would claim edits that no longer
           // exist.
-          const files = events.reduce<ChannelChangedFile[]>(
-            (latest, record) => {
-              const found = changedFilesFrom(
-                (record.event.data ?? {}) as Record<string, unknown>,
-              );
-              return found.length > 0 ? found : latest;
-            },
-            [],
-          );
+          let files: ChannelChangedFile[] = [];
+          let revertedSinceLastReport = false;
+          for (const record of events) {
+            if (record.event.type === "task_reverted") {
+              // Everything reported before this is no longer true. Not a
+              // `break`: a conversational task can land again after being
+              // reverted, and a later report is the current answer.
+              files = [];
+              revertedSinceLastReport = true;
+              continue;
+            }
+            const found = changedFilesFrom(
+              (record.event.data ?? {}) as Record<string, unknown>,
+            );
+            if (found.length > 0) {
+              files = found;
+              revertedSinceLastReport = false;
+            }
+          }
+          // Reverted and nothing since: the summary is empty because the work
+          // is gone, not because it was never recorded, so this pass must
+          // leave it alone rather than rebuild it from the undone reports.
+          if (revertedSinceLastReport) {
+            return;
+          }
           // Prefer what is already stored when the log has nothing newer —
           // this pass may be running only to add counts to it.
           const bare =
@@ -12623,6 +12871,20 @@ export class ApiGateway {
             // start — as one entry rather than one per thought, because it is
             // one train of reasoning and arrived as a paragraph in the
             // agent's head before it arrived as lines in ours.
+            // What was asked, before what was thought about it. The thread
+            // exists as of this moment, so the request that caused it can go
+            // in without having been what created it.
+            if (watched.opener !== undefined) {
+              await this.appendChannelThreadReply({
+                projectId: watched.projectId,
+                repositoryId: watched.repositoryId,
+                messageId: watched.messageId,
+                authorId: watched.opener.authorId,
+                content: watched.opener.content,
+                kind: "user",
+              });
+              delete watched.opener;
+            }
             if (watched.pending.length > 0) {
               await this.appendChannelThreadReply({
                 projectId: watched.projectId,
@@ -12739,7 +13001,7 @@ export class ApiGateway {
      * than an agent's. Each reads differently and counts differently — see
      * `ChannelEntryKind`.
      */
-    kind?: "agent" | "progress" | "system" | "outcome";
+    kind?: "agent" | "progress" | "system" | "outcome" | "user";
   }): Promise<void> {
     await this.options.store.addChannelReply({
       repositoryId: input.repositoryId,
@@ -12792,15 +13054,175 @@ export class ApiGateway {
     candidates: ChannelMentionCandidate[];
   }): Promise<void> {
     const { projectId, repositoryId, content, senderId, candidates } = input;
-    if (!looksLikeTaskRequest(content)) {
+    // Two gates now, not one. `looksLikeTaskRequest` asks whether this is
+    // about work; on the unnamed path the question is whether it is addressed
+    // to anybody, and a remark about work is not.
+    if (!looksLikeTaskRequest(content) || !readsAsDirectRequest(content)) {
       return;
     }
+    const chosen = await this.chooseAutoClaimCandidate({
+      repositoryId,
+      content,
+      senderId,
+      candidates,
+    });
+    if (chosen === undefined) {
+      return;
+    }
+    // Offered, not started. Picking the agent is a guess — the scoring below
+    // breaks ties rather than refusing them, deliberately — and a guess that
+    // is wrong costs a checkout, a run and somebody's usage. A guess that is
+    // merely slow costs one line and a "yes". The sender can also ignore it
+    // and @mention whoever should have it, which was always the escape and is
+    // now the faster path when the pick is wrong.
+    // The word list gets the easy half right and cannot get the rest right:
+    // most of the work vocabulary is also ordinary nouns, and no list of
+    // words distinguishes "update the readme" from "the update went out".
+    // So the agent that would take it reads the message first, on the cheap
+    // model — see CEREMONIAL_MODELS. It is a sentence in, a word out, and it
+    // only runs for messages the free checks already think are requests, so
+    // an ordinary conversation costs nothing.
+    if (!(await this.readsAsWorkToAgent(chosen, content))) {
+      return;
+    }
+    // In the agent's own voice, not the channel's. It is the one being asked
+    // to do it, the reader can see whose usage is about to be spent, and a
+    // system aside saying an agent "looks like the closest fit" was the
+    // system talking about an agent standing right there.
+    await this.appendChannelEntry({
+      projectId,
+      repositoryId,
+      kind: "agent",
+      authorId: `${chosen.userId}:${chosen.provider}`,
+      content:
+        `${AUTO_CLAIM_OFFER_OPENING} Reply "yes" and I'll start — or ` +
+        `@mention someone else.`,
+    });
+  }
+
+  /**
+   * Whether the agent that would take this reads it as work.
+   *
+   * The last gate, and the only one that reads the sentence rather than
+   * matching against it. Everything before it is free and stays first: this
+   * runs on the account whose agent would do the work, so an ordinary remark
+   * must never reach it, and the word list is what keeps the bill at zero for
+   * a channel that is just talking.
+   *
+   * Anything other than a plain yes is a no — a timeout, an unreachable CLI,
+   * an expired sign-in, a model that answered with a paragraph. Not offering
+   * costs a re-ask; offering wrongly is the noise this exists to remove.
+   */
+  private async readsAsWorkToAgent(
+    candidate: ChannelMentionCandidate,
+    content: string,
+  ): Promise<boolean> {
+    const answer = await this.askAgent(
+      candidate,
+      "Someone wrote this in a team chat for a software project.\n\n" +
+        "Is it asking for work to be done on the repository — a change, a " +
+        "fix, an investigation, something built? A remark, an opinion, a " +
+        "greeting, a status question, or a comment about work already " +
+        "finished is not.\n\n" +
+        "Answer with one word: yes or no.\n\nMessage: " +
+        content,
+      CLASSIFY_TIMEOUT_MS,
+      true,
+    ).catch(() => ({ text: undefined }));
+    return /^\s*yes\b/iu.test(answer.text ?? "");
+  }
+
+  /**
+   * Dispatches an offer the sender has just agreed to. True when it did.
+   *
+   * The offer carries no stored state, so acceptance re-reads the transcript:
+   * the most recent offer, and the message before it, which is the request in
+   * the sender's own words — which is what the dispatch wants as its
+   * objective anyway. The agent is chosen again rather than parsed back out
+   * of the offer's prose; the scoring is deterministic, so it lands on the
+   * same one it named.
+   *
+   * Only the person who asked may accept. Anyone could type "yes" in a busy
+   * channel and mean something else entirely, and the pick was made on the
+   * question of whose account pays.
+   */
+  private async maybeAcceptAutoClaim(input: {
+    projectId: string;
+    repositoryId: string;
+    content: string;
+    senderId: string;
+    candidates: ChannelMentionCandidate[];
+  }): Promise<boolean> {
+    const { projectId, repositoryId, senderId, candidates } = input;
+    if (!readsAsApproval(input.content)) {
+      return false;
+    }
+    const recent = await this.options.store.listChannelMessages(
+      repositoryId,
+      senderId,
+      { limit: AUTO_CLAIM_OFFER_LOOKBACK + 1 },
+    );
+    // Oldest first, so the offer is the last one of ours in the window, and
+    // the request is the last thing a person said before it.
+    let offerAt = -1;
+    for (let index = recent.length - 1; index >= 0; index -= 1) {
+      const message = recent[index];
+      if (
+        message?.kind === "agent" &&
+        message.content.startsWith(AUTO_CLAIM_OFFER_OPENING)
+      ) {
+        offerAt = index;
+        break;
+      }
+    }
+    if (offerAt < 0) {
+      return false;
+    }
+    let request: ChannelMessage | undefined;
+    for (let index = offerAt - 1; index >= 0; index -= 1) {
+      const message = recent[index];
+      if (message?.kind === "user") {
+        request = message;
+        break;
+      }
+    }
+    if (request === undefined || request.authorId !== senderId) {
+      return false;
+    }
+    const chosen = await this.chooseAutoClaimCandidate({
+      repositoryId,
+      content: request.content,
+      senderId,
+      candidates,
+    });
+    if (chosen === undefined) {
+      return false;
+    }
+    await this.dispatchOneMention({
+      projectId,
+      repositoryId,
+      content: request.content,
+      senderId,
+      candidate: chosen,
+      trigger: "auto_claim",
+    });
+    return true;
+  }
+
+  /** Which agent an unnamed request would go to, or none. */
+  private async chooseAutoClaimCandidate(input: {
+    repositoryId: string;
+    content: string;
+    senderId: string;
+    candidates: ChannelMentionCandidate[];
+  }): Promise<ChannelMentionCandidate | undefined> {
+    const { repositoryId, content, senderId, candidates } = input;
     const dispatchable = candidates.filter(
       (candidate) =>
         candidate.visibility === "org" || candidate.userId === senderId,
     );
     if (dispatchable.length === 0) {
-      return;
+      return undefined;
     }
     const messageTokens = relevanceTokens(content);
     // The only reasonably cheap "recent activity" signal that already
@@ -12824,7 +13246,7 @@ export class ApiGateway {
     // less apt agent, and the sender can always name someone to override it.
     const [best] = scored;
     if (best === undefined) {
-      return;
+      return undefined;
     }
     // A tie no longer means silence. The margin rules were written so that
     // "two similarly relevant agents" failed closed, on the reasoning that
@@ -12847,21 +13269,7 @@ export class ApiGateway {
     const chosen = clearWinner
       ? best
       : (tied.find((entry) => entry.candidate.userId === senderId) ?? tied[0]);
-    if (chosen === undefined) {
-      return;
-    }
-    await this.dispatchOneMention({
-      projectId,
-      repositoryId,
-      content,
-      senderId,
-      candidate: chosen.candidate,
-      trigger: "auto_claim",
-      // No parenthetical explaining the auto-claim. The acknowledgement
-      // already names the agent that took it, which is the whole of what a
-      // reader needs; a sentence of process justification on every unpinged
-      // request read as the system apologising for working.
-    });
+    return chosen?.candidate;
   }
 
   /** A coordinator-authored line in the channel, broadcast the same way a real post is. */
@@ -12873,6 +13281,52 @@ export class ApiGateway {
    * Work only reaches canonical at settlement, so a cancelled run's edits die
    * with its workspace and no revert is needed or wanted.
    */
+  /**
+   * Drops one task's contribution to its thread's changed-file summary.
+   *
+   * The summary is what a task changed, and after a revert this task changed
+   * nothing — the files are back. It is stored as one flat set per thread
+   * with no record of who contributed what, so the per-task map is what makes
+   * removing one task's share possible without taking a second dispatch's
+   * work in the same thread with it.
+   *
+   * Writing an empty list clears the field: the stores normalise `[]` to
+   * "nothing recorded" on purpose, and all three agree about it. That is the
+   * right outcome here — the thread stops claiming files it no longer
+   * changes — but it is only half the job, because "nothing recorded" is
+   * also the state the backfill treats as a summary worth rebuilding. The
+   * `task_reverted` event written beside this is the other half.
+   *
+   * The watch map is the fast path and holds only tasks this process is still
+   * narrating, so a revert of anything older falls back to finding the thread
+   * by the task it names. Bounded, because a revert is something somebody
+   * does to work they can see.
+   */
+  private async forgetThreadChangedFiles(
+    repositoryId: string,
+    taskId: string,
+  ): Promise<void> {
+    let messageId = this.watchedChannelTasks.get(taskId)?.messageId;
+    if (messageId === undefined) {
+      const recent = await this.options.store
+        .listChannelMessages(repositoryId, "", { limit: 200 })
+        .catch(() => []);
+      messageId = recent.find((message) => message.taskId === taskId)?.id;
+    }
+    if (messageId === undefined) {
+      return;
+    }
+    const perTask = this.threadChangedFiles.get(messageId);
+    perTask?.delete(taskId);
+    await this.options.store
+      .setChannelMessageChangedFiles(
+        repositoryId,
+        messageId,
+        unionChangedFiles([...(perTask?.values() ?? [])]),
+      )
+      .catch(() => undefined);
+  }
+
   private async undoTask(
     projectId: string,
     repositoryId: string,

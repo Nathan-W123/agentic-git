@@ -159,16 +159,12 @@ import {
   captureChannelScroll,
   channelInfoPopoverHtml,
   handleComposerKeydown,
-  handleTerminalKeydown,
-  nudgeTerminalHeight,
   openChannel,
   pickMention,
   pickSlashCommand,
   renderChats,
   restoreChannelAnchor,
   restoreChannelScroll,
-  runTerminalCommand,
-  startTerminalResize,
   submitComposerMessage,
   submitThreadReply,
   updateComposerInput,
@@ -1672,12 +1668,29 @@ async function revertTaskAction(repositoryId, taskId) {
   }
   try {
     const result = await rollbackTask(repositoryId, taskId);
-    const status = result?.status;
-    if (status === "blocked" || status === "noop" || status === "policy_failed") {
+    // Success is one status, so it is the one named. This used to list the
+    // failures instead — blocked, noop, policy_failed — and treat everything
+    // else as progress, which quietly made `conflict`, `validation_failed`,
+    // `stale` and `empty` read as "reverting…". A revert that failed
+    // validation announced itself as one that was on its way, and the reader
+    // went looking in the channel for a result that was never coming.
+    //
+    // The endpoint is synchronous — it plans, validates and promotes before
+    // it answers — so there is no case where the outcome is genuinely still
+    // unknown here.
+    if (result?.status !== "integrated") {
       toast(result?.explanation ?? "The revert was refused", "error");
       return;
     }
-    toast("Reverting — the channel will report how it goes", "ok");
+    const reverted = result?.files?.length ?? 0;
+    toast(
+      reverted === 0
+        ? "Reverted — the repository is back to where it was"
+        : `Reverted — ${reverted} file${reverted === 1 ? "" : "s"} back to ` +
+            `where they were`,
+      "ok",
+    );
+    await refresh({ quiet: true });
     render();
   } catch (error) {
     toast(error.message, "error");
@@ -2980,6 +2993,8 @@ document.addEventListener("click", (event) => {
       ]);
       return;
     case "repo-sync":
+    case "channel-sync":
+      closePopover();
       void syncRepositoryFromGitHub(value, render);
       return;
     /* Chats */
@@ -3037,13 +3052,6 @@ document.addEventListener("click", (event) => {
       return;
     case "channel-slash-pick":
       pickSlashCommand(value, render);
-      return;
-    case "chan-term-toggle":
-      state.termOpen = !state.termOpen;
-      render();
-      if (state.termOpen) {
-        $("[data-act='chan-term-input']")?.focus();
-      }
       return;
     case "channel-react":
       toggleChannelReaction(activeChannelId(), value, "👍");
@@ -3614,10 +3622,6 @@ document.addEventListener("click", (event) => {
       closePopover();
       void runTests();
       return;
-    case "sum-terminal":
-      closePopover();
-      toast("Terminal commands run in your sandboxed overlay workspace.");
-      return;
     case "sum-diff":
       closePopover();
       setDiffMode("split", render);
@@ -3775,17 +3779,35 @@ document.addEventListener("click", (event) => {
       void inviteSomebody(render, value);
       return;
     /**
-     * The menu on a channel row: leaving, and nothing else.
+     * The menu on a channel row: the few things with nowhere else to live.
      *
      * It used to also offer inviting somebody, adding an agent, and opening
      * the channel. Opening duplicated clicking the row itself, and the other
      * two are already in the channel's own header where somebody is looking
      * when they think of them. A menu that repeats what is one click away
-     * costs a decision every time it is opened. Leaving is the one action
-     * with nowhere else to live.
+     * costs a decision every time it is opened.
+     *
+     * Syncing earns its place by the same rule. It used to sit on the
+     * repositories screen, which this interface no longer has — so the one
+     * way to settle a repository that has diverged from GitHub was
+     * unreachable, and a person watching a pull get refused in the channel
+     * had nowhere at all to go.
      */
     case "channel-menu":
       showMenu(node, [
+        // Only for repositories that actually have a GitHub origin: a menu
+        // must never offer what the platform cannot do for this one.
+        ...(state.repositories.find((repo) => repo.id === value)?.provider ===
+        "github"
+          ? [
+              {
+                act: "channel-sync",
+                value,
+                label: "Sync from GitHub",
+                iconName: "sync",
+              },
+            ]
+          : []),
         // Leaving is only offered to somebody who can actually leave. Access
         // that comes from an organization role reaches every repository the
         // organization owns, so there is no per-repository grant to give up —
@@ -4039,9 +4061,6 @@ document.addEventListener("submit", (event) => {
     case "channel-submit":
       submitComposerMessage(render);
       return;
-    case "chan-term-submit":
-      void runTerminalCommand(render);
-      return;
     case "channel-thread-submit":
       submitThreadReply(render);
       return;
@@ -4289,15 +4308,6 @@ document.addEventListener("input", (event) => {
     updateComposerInput(node, render);
     return;
   }
-  if (act === "chan-term-input") {
-    // Deliberately no render: the drawer's transcript does not depend on
-    // what is half-typed, and re-rendering would cost a caret restore on
-    // every keystroke for nothing. Typing also leaves command recall, so
-    // Up after editing starts from the newest entry again.
-    state.termDraft = node.value;
-    state.termSeek = undefined;
-    return;
-  }
   if (act === "chan-file-edit") {
     // Deliberately no render. Every other input on this screen rebuilds the
     // whole screen and puts the caret back afterwards, which is affordable for
@@ -4377,24 +4387,6 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-/* Up and Down recall previously run commands in the terminal drawer. */
-document.addEventListener("keydown", (event) => {
-  if (event.target?.dataset?.act === "chan-term-input") {
-    handleTerminalKeydown(event, render);
-  }
-  if (event.target?.dataset?.act === "chan-term-resize") {
-    nudgeTerminalHeight(event, render);
-  }
-});
-
-/* The terminal drawer's top edge is a drag handle. Started on pointerdown
-   rather than click, and tracked on `window`, so the pointer outrunning the
-   4px grip mid-drag does not drop the resize. */
-document.addEventListener("pointerdown", (event) => {
-  if (event.target?.dataset?.act === "chan-term-resize") {
-    startTerminalResize(event, render);
-  }
-});
 
 /* Enter sends a thread reply the same way it sends a channel message. */
 document.addEventListener("keydown", (event) => {
@@ -4560,6 +4552,56 @@ function showInvite() {
   $("#auth-root").innerHTML = renderInvite();
 }
 
+/**
+ * How long news waits to see whether more of it is arriving.
+ *
+ * Long enough to swallow a backlog, short enough that a single event still
+ * reads as immediate.
+ */
+const NEWS_COALESCE_MS = 350;
+
+/**
+ * The same idea for the channel reconcile, and deliberately shorter: this one
+ * is what puts a message on screen, so it is the delay somebody notices when
+ * a teammate is typing to them.
+ */
+const CHANNEL_FRAME_COALESCE_MS = 120;
+
+let pendingNews = [];
+let newsTimer;
+let channelFrameTimer;
+
+/**
+ * One line of news, or one line about several.
+ *
+ * The socket opens with `after` set to the last event this browser knows, so
+ * reconnecting delivers everything that happened while it was closed — which
+ * on a phone opened the next morning is every task that finished or was
+ * stopped overnight. Each of those raised its own banner, five seconds each,
+ * stacked down the screen: the reader could not read them, could not dismiss
+ * them, and the app appeared to hang while it rendered them.
+ *
+ * The backlog is not less interesting than one event, but it is not more
+ * interesting a hundred times over. Anything arriving inside the window
+ * collapses into a count plus the most recent line, and the notifications tab
+ * still has all of it in full.
+ */
+function announceNews(line) {
+  pendingNews.push(line);
+  window.clearTimeout(newsTimer);
+  newsTimer = window.setTimeout(() => {
+    const lines = pendingNews;
+    pendingNews = [];
+    const latest = lines.at(-1);
+    if (latest === undefined) {
+      return;
+    }
+    popupBanner(
+      lines.length === 1 ? latest : `${lines.length} updates — latest: ${latest}`,
+    );
+  }, NEWS_COALESCE_MS);
+}
+
 async function boot() {
   if (await handleInviteLink()) {
     return;
@@ -4667,7 +4709,17 @@ async function boot() {
       channelRepositoryId === activeChannelId() &&
       state.route === "chats"
     ) {
-      void refreshChannelMessages(channelRepositoryId).then(() => render());
+      // Coalesced for the same reason the banners above are. A reconnect
+      // delivers every channel event this browser missed, and each one used
+      // to re-read the channel and rebuild the whole app — a backlog of forty
+      // meant forty full renders back to back, which is the few seconds the
+      // screen spent refusing to respond to a tap. The reconcile is
+      // idempotent, so the last one in a burst produces the same answer as
+      // all of them.
+      window.clearTimeout(channelFrameTimer);
+      channelFrameTimer = window.setTimeout(() => {
+        void refreshChannelMessages(channelRepositoryId).then(() => render());
+      }, CHANNEL_FRAME_COALESCE_MS);
     }
     // News gets a banner before the store gets re-read: an ending or a
     // question is worth a sentence in the corner wherever the reader is,
@@ -4675,7 +4727,7 @@ async function boot() {
     if (frame?.type === "audit") {
       const line = bannerLineForAudit(frame.event);
       if (line !== undefined) {
-        popupBanner(line);
+        announceNews(line);
       }
     }
     // Canonical moved, so the file tree on screen is history now.

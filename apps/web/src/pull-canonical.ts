@@ -95,6 +95,21 @@ export async function pullCanonical(
         "was lost, and pushing is unblocked.",
     };
   } catch (error) {
+    // A collision is a decision, and an agent is the wrong one to make it:
+    // choosing whose version of a file survives belongs to a person. The
+    // refusal names where that choice lives rather than leaving the reader
+    // to guess — the earlier version of this message listed remedies a
+    // dashboard could not reach at all.
+    if ((error as { name?: unknown }).name === "SyncDivergedError") {
+      return {
+        outcome: "refused",
+        explanation:
+          `${describeError(error)} You can settle it from the repository's ` +
+          "menu: Sync from GitHub offers both choices — take GitHub's " +
+          "version of the clashing files, or keep this project's — and " +
+          "either way the other side stays in the history.",
+      };
+    }
     const explanation = describeError(error);
     if (/authentication failed|error: 40[13]\b|returned error: 40[13]\b/iu.test(explanation)) {
       if (connection !== undefined && submitter !== undefined) {

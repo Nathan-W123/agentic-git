@@ -42,6 +42,9 @@ const LOG_LINES = 200;
  */
 const IDLE_TIMEOUT_MS = 60 * 60 * 1000;
 
+/** How long the play button waits for a port before reporting "starting". */
+const START_READY_TIMEOUT_MS = 120_000;
+
 export interface PreviewStatus {
   repositoryId: string;
   /** Where to look. Always loopback; see the class doc. */
@@ -78,43 +81,204 @@ interface Running {
 }
 
 /**
+ * The port, written into the arguments that need it spelled out.
+ *
+ * `PORT` is in the child's environment already and most servers read it, but
+ * several of the commands detected below take the address as an argument —
+ * Django's `runserver`, `php -S`, `rails server` — and `spawn` performs no
+ * shell expansion, so `${PORT}` would arrive at the process as those seven
+ * literal characters. Substituted here rather than at detection time because
+ * detection runs before a port has been chosen.
+ */
+function withPort(args: readonly string[], port: number): string[] {
+  return args.map((arg) => arg.replaceAll("${PORT}", String(port)));
+}
+
+/** Reads a file, or nothing when it is not there. */
+async function textOf(
+  workspacePath: string,
+  ...names: string[]
+): Promise<string | undefined> {
+  for (const name of names) {
+    try {
+      return await readFile(path.join(workspacePath, name), "utf8");
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+/** Whether any of these exist in the checkout. */
+async function anyOf(
+  workspacePath: string,
+  ...names: string[]
+): Promise<string | undefined> {
+  for (const name of names) {
+    try {
+      await access(path.join(workspacePath, name));
+      return name;
+    } catch {
+      continue;
+    }
+  }
+  return undefined;
+}
+
+/** The package manager a Node repository pinned, by the lockfile it committed. */
+async function nodeRunner(workspacePath: string): Promise<string[]> {
+  const lock = await anyOf(
+    workspacePath,
+    "pnpm-lock.yaml",
+    "yarn.lock",
+    "bun.lockb",
+  );
+  if (lock === "pnpm-lock.yaml") {
+    return ["pnpm", "run"];
+  }
+  if (lock === "yarn.lock") {
+    return ["yarn", "run"];
+  }
+  if (lock === "bun.lockb") {
+    return ["bun", "run"];
+  }
+  return [process.platform === "win32" ? "npm.cmd" : "npm", "run"];
+}
+
+/**
  * Works out how to start a repository nobody has configured.
  *
- * Deliberately narrow. Node is the one ecosystem with a real convention — a
- * `dev` or `start` script in package.json — and guessing beyond it does more
- * harm than good: Python, Go and Rust each have several plausible answers and
- * a wrong guess spawns something that fails in a way nobody can read.
+ * Every rung wants a *named file* that says what the project is — a
+ * `manage.py`, a `Cargo.toml`, a `web:` line in a Procfile — rather than a
+ * guess from the shape of the tree. That is the difference between this and
+ * guessing: a wrong answer here spawns something that fails in a way nobody
+ * can read, so a rung that cannot point at its evidence does not exist.
  *
- * `undefined` means "say so", not "try something". A repository with no app in
- * it — a library, a CLI like taskman — has no localhost to boot, and telling
- * somebody that is more use than a process that exits with a usage message.
+ * `undefined` still means "say so". A repository with no app in it — a
+ * library, a CLI — has no localhost to boot, and {@link describeUndetectable}
+ * tells the reader what was looked for.
+ *
+ * Ordered by how explicit the evidence is, not by popularity. A Procfile is
+ * the project stating its own start command and wins over anything inferred
+ * from a manifest.
  */
-async function detectPreviewCommand(
+export async function detectPreviewCommand(
   workspacePath: string,
 ): Promise<PreviewCommand | undefined> {
-  let manifest: { scripts?: Record<string, unknown> };
-  try {
-    manifest = JSON.parse(
-      await readFile(path.join(workspacePath, "package.json"), "utf8"),
-    ) as { scripts?: Record<string, unknown> };
-  } catch {
-    return undefined;
+  // 1. The project saying it outright. A Procfile's `web:` line is a start
+  //    command by definition, in every language that uses one.
+  const procfile = await textOf(workspacePath, "Procfile");
+  const web = /^web:\s*(.+)$/mu.exec(procfile ?? "")?.[1]?.trim();
+  if (web !== undefined && web.length > 0) {
+    return {
+      // Through a shell because a Procfile line is a shell line — it may
+      // carry `&&`, quotes or a `$PORT` of its own, and splitting it on
+      // spaces would mangle all three.
+      executable: "sh",
+      args: ["-c", web],
+      label: `Procfile: ${web}`,
+    };
   }
-  const scripts = manifest.scripts ?? {};
-  // `dev` first: where a repository has several, that is the one meant to be
-  // watched. The rest are in the order they are usually meant — `start` is
-  // often the production entry point, and the last two are what static-site
-  // tooling tends to call it.
-  const script = PREVIEW_SCRIPTS.find(
-    (name) => typeof scripts[name] === "string",
-  );
-  return script === undefined
-    ? undefined
-    : {
-        executable: process.platform === "win32" ? "npm.cmd" : "npm",
-        args: ["run", script],
-        label: `npm run ${script}`,
+
+  // 2. Node, and the package manager the repository actually pinned. Running
+  //    `npm` in a pnpm workspace fails on the lockfile, so the lockfile picks.
+  const manifest = await textOf(workspacePath, "package.json");
+  if (manifest !== undefined) {
+    let scripts: Record<string, unknown> = {};
+    try {
+      scripts =
+        ((JSON.parse(manifest) as { scripts?: Record<string, unknown> })
+          .scripts ?? {});
+    } catch {
+      scripts = {};
+    }
+    // `dev` first: where a repository has several, that is the one meant to
+    // be watched. `start` is often the production entry point, and the last
+    // two are what static-site tooling tends to call it.
+    const script = PREVIEW_SCRIPTS.find(
+      (name) => typeof scripts[name] === "string",
+    );
+    if (script !== undefined) {
+      const [executable, run] = await nodeRunner(workspacePath);
+      return {
+        executable: executable ?? "npm",
+        args: [run ?? "run", script],
+        label: `${executable ?? "npm"} ${run ?? "run"} ${script}`,
       };
+    }
+  }
+
+  // 3. Python, where the framework names itself in a file.
+  if ((await anyOf(workspacePath, "manage.py")) !== undefined) {
+    // Django's runserver takes the address as an argument rather than PORT.
+    return {
+      executable: "python3",
+      args: ["manage.py", "runserver", "0.0.0.0:${PORT}"],
+      label: "python3 manage.py runserver",
+    };
+  }
+  const pythonDeps =
+    (await textOf(workspacePath, "requirements.txt", "pyproject.toml")) ?? "";
+  const appModule = await anyOf(
+    workspacePath,
+    "main.py",
+    "app.py",
+    "asgi.py",
+    "wsgi.py",
+  );
+  if (/\bfastapi\b|\buvicorn\b/iu.test(pythonDeps) && appModule !== undefined) {
+    const module = appModule.replace(/\.py$/u, "");
+    return {
+      executable: "uvicorn",
+      args: [`${module}:app`, "--host", "0.0.0.0", "--port", "${PORT}"],
+      label: `uvicorn ${module}:app`,
+    };
+  }
+  if (/\bflask\b/iu.test(pythonDeps) && appModule !== undefined) {
+    return {
+      executable: "python3",
+      args: ["-m", "flask", "--app", appModule, "run", "--host", "0.0.0.0", "--port", "${PORT}"],
+      label: `flask run --app ${appModule}`,
+    };
+  }
+
+  // 4. Compiled languages, where the manifest is the evidence and the
+  //    toolchain resolves its own dependencies on the way.
+  if ((await anyOf(workspacePath, "go.mod")) !== undefined) {
+    return { executable: "go", args: ["run", "."], label: "go run ." };
+  }
+  if ((await anyOf(workspacePath, "Cargo.toml")) !== undefined) {
+    return { executable: "cargo", args: ["run"], label: "cargo run" };
+  }
+
+  // 5. Ruby. `bin/rails` before `config.ru`: a Rails app has both, and its
+  //    own binstub is the one that loads the framework.
+  if ((await anyOf(workspacePath, "bin/rails")) !== undefined) {
+    return {
+      executable: "bin/rails",
+      args: ["server", "-b", "0.0.0.0", "-p", "${PORT}"],
+      label: "bin/rails server",
+    };
+  }
+  if ((await anyOf(workspacePath, "config.ru")) !== undefined) {
+    return {
+      executable: "bundle",
+      args: ["exec", "rackup", "--host", "0.0.0.0", "--port", "${PORT}"],
+      label: "rackup",
+    };
+  }
+
+  // 6. PHP's own server, which needs no framework and no install.
+  const phpRoot = await anyOf(workspacePath, "public/index.php", "index.php");
+  if (phpRoot !== undefined) {
+    const docroot = phpRoot.startsWith("public/") ? "public" : ".";
+    return {
+      executable: "php",
+      args: ["-S", "0.0.0.0:${PORT}", "-t", docroot],
+      label: `php -S -t ${docroot}`,
+    };
+  }
+  return undefined;
 }
 
 const PREVIEW_SCRIPTS = ["dev", "start", "serve", "preview"];
@@ -221,19 +385,31 @@ export function startStaticServer(root: string, port: number): Server {
  * config file lives on the server, which for a hosted deployment is somewhere
  * the reader cannot open, so the message has to carry the diagnosis.
  */
-async function describeUndetectable(workspacePath: string): Promise<string> {
-  try {
-    const manifest = JSON.parse(
-      await readFile(path.join(workspacePath, "package.json"), "utf8"),
-    ) as { scripts?: Record<string, unknown> };
-    const names = Object.keys(manifest.scripts ?? {});
+export async function describeUndetectable(workspacePath: string): Promise<string> {
+  const manifest = await textOf(workspacePath, "package.json");
+  if (manifest !== undefined) {
+    let names: string[] = [];
+    try {
+      names = Object.keys(
+        (JSON.parse(manifest) as { scripts?: Record<string, unknown> })
+          .scripts ?? {},
+      );
+    } catch {
+      return "Its package.json could not be parsed, so no script could be read.";
+    }
     return names.length === 0
       ? "Its package.json has no scripts at all."
       : `Its package.json has no ${PREVIEW_SCRIPTS.join("/")} script — ` +
           `only ${names.slice(0, 8).join(", ")}.`;
-  } catch {
-    return "There is no package.json in it, so there is nothing to detect.";
   }
+  // Named individually rather than as "nothing matched": the reader can add
+  // whichever one their project should have had, or set the command outright.
+  return (
+    "Nothing in it names a way to start: no Procfile web: line, no " +
+    "package.json, no manage.py or FastAPI/Flask entry point, no go.mod, " +
+    "no Cargo.toml, no config.ru or bin/rails, no index.php, and no " +
+    "index.html to serve as a static site."
+  );
 }
 
 /**
@@ -371,6 +547,28 @@ const CONTROL_PLANE_VARIABLES = [
   "COORD_BOOTSTRAP_TOKEN",
   "COORD_SECURE_COOKIES",
   "COORD_ALLOWED_ORIGINS",
+  // How the control plane was deployed, which is not how a preview is run.
+  //
+  // The container image sets `NODE_ENV=production`, and inheriting it made
+  // `npm ci` in the preview's checkout omit devDependencies — so a repository
+  // whose dev server is built by anything (`turbo`, `vite`, `tsc`) installed
+  // successfully and then failed with `turbo: not found`. Which reads as the
+  // start command being wrong, so the obvious thing to try is a different
+  // start command, and that cannot work either: the command was never the
+  // problem, the install was.
+  //
+  // Deleted rather than set to "development": unset is what npm needs to
+  // install dev dependencies, and it lets the app pick its own default rather
+  // than this deciding one for it.
+  "NODE_ENV",
+  "NPM_CONFIG_PRODUCTION",
+  "npm_config_production",
+  // npm exports its own invocation into the child environment, so a preview
+  // spawned from a control plane that was itself started by `npm start`
+  // inherits that run's config and lifecycle variables.
+  "npm_config_argv",
+  "npm_lifecycle_event",
+  "npm_lifecycle_script",
 ];
 
 /**
@@ -571,7 +769,7 @@ export class PreviewService {
       }
     }
 
-    const child = spawn(command.executable, [...command.args], {
+    const child = spawn(command.executable, withPort(command.args, port), {
       cwd: workspace.path,
       // The command's own `env` is applied last, so a repository that needs
       // something specific always wins over what is inferred for it.
@@ -646,7 +844,18 @@ export class PreviewService {
     // the bug being fixed — so the wait ends the instant the child dies, and
     // otherwise gives up quietly and reports the preview as started. This is
     // the same reading `startForTask` has always taken.
-    status.ready = await waitForPort(port, () => status.exited !== undefined);
+    // Longer than the agent path below, because the waits are different
+    // things. This one is a person who pressed play, and a repository whose
+    // dev server builds before it listens — a turbo or vite pipeline from a
+    // cold cache — routinely needs more than twenty seconds to reach a port.
+    // Timing out here does not stop it; the status simply reads "starting"
+    // when it is in fact starting. The agent path stays short because it is
+    // holding a workspace and its leases while it waits.
+    status.ready = await waitForPort(
+      port,
+      () => status.exited !== undefined,
+      START_READY_TIMEOUT_MS,
+    );
     const exit = status.exited;
     if (exit !== undefined) {
       const said = status.recentOutput.slice(-4).join(" ").trim();

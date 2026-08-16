@@ -286,20 +286,6 @@ export const state = {
   chanMsgQuery: "",
   chanMsgSearchOpen: false,
 
-  /* The sandbox terminal drawer. `termLog` is the transcript as rendered
-     blocks rather than a flat string, so a command and what it printed stay
-     associated and an exit code can be shown against the line that produced
-     it. `termPast` is command recall (Up/Down), newest last, and `termSeek`
-     is where the caret currently sits in it -- undefined meaning "at the
-     live line, not recalling". */
-  termOpen: false,
-  termBusy: false,
-  /* Drawer height in pixels, dragged by its top edge and remembered. */
-  termHeight: Number(localStorage.getItem("ag.termHeight")) || 260,
-  termDraft: "",
-  termLog: [],
-  termPast: [],
-  termSeek: undefined,
 
   socket: undefined,
   timer: undefined,
