@@ -7161,10 +7161,6 @@ dialog.modal::backdrop {
   background: var(--accent-wash-strong);
 }
 
-.thread-item-active .ti-icon {
-  color: var(--accent-bright);
-}
-
 /* "Working", breathing, in the same accent as the bar under a running thread
    in the channel — one word, because the row's own name already says what the
    work is. */
@@ -7483,25 +7479,16 @@ dialog.modal::backdrop {
 }
 
 /* ------------------------------------------------- thread summary ---- */
-/* One thread in the pullout: a glyph, what the work is called, and a quiet
-   second line saying who is in it and how much was actually said. This shape
-   belongs to the pullout alone. The channel used to share these rules, so the
-   two surfaces were one design seen twice — but a card in the channel repeats
-   the message directly above it, which is why the channel now gets a plain
-   tinted count (`.cmsg-thread-link`) and these selectors name only
-   `.thread-item`. */
-.thread-item .ti-icon {
-  display: flex;
-  flex: none;
-  align-self: flex-start;
-  margin-top: 1px;
-  color: var(--text-3);
-}
+/* One thread in the pullout: what the work is called, and a quiet second line
+   saying who is in it and how much was actually said. This shape belongs to
+   the pullout alone. The channel used to share these rules, so the two
+   surfaces were one design seen twice — but a card in the channel repeats the
+   message directly above it, which is why the channel now gets a plain tinted
+   count (`.cmsg-thread-link`) and these selectors name only `.thread-item`.
 
-.thread-item .ti-icon svg {
-  width: 17px;
-  height: 17px;
-}
+   The row used to open with a glyph, and there is deliberately no rule for one
+   now: it was the same terminal mark on every thread, which described none of
+   them and misdescribed all of them. The name starts the row instead. */
 
 /* The chevron only promises there is somewhere to go, so it is the dimmest
    thing in the row and never competes with the name. */
