@@ -4905,19 +4905,26 @@ svg {
   transition: width 0.4s ease;
 }
 
-/* The way into the thread, in the thread's colour rather than the interface's,
-   so a channel full of primary-accented chrome does not swallow it. */
+/* The way into the thread: a card, not a tinted sentence.
+   It used to be an accent-coloured inline link carrying a stack of faces, so
+   the one row that answers "what is this and how do I open it" was also the
+   loudest thing under the message. A quiet surface with a chevron says the
+   same thing and lets the conversation stay the brightest surface. */
 .cmsg-thread-link {
-  display: inline-flex;
+  display: flex;
   align-items: center;
-  gap: 6px;
-  margin-top: 7px;
-  font-size: 12px;
-  color: var(--accent-2-bright);
+  gap: 10px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 10px;
+  border-radius: var(--radius);
+  background: var(--bg-card);
+  color: var(--text);
+  text-align: left;
 }
 
 .cmsg-thread-link:hover {
-  text-decoration: underline;
+  background: var(--bg-card-2);
 }
 
 /* ------------------------------------------------------------ mention ---- */
@@ -7050,16 +7057,47 @@ dialog.modal::backdrop {
   opacity: 0.5;
 }
 
-/* One thread in the pullout. Three lines: who and when, what was said, and
-   how much is in it — enough to recognise a thread without opening it. */
+/* One thread in the pullout, as a card: glyph, name, one metadata line,
+   chevron. It was three stacked lines plus an avatar plus a delete button that
+   fell onto a fourth line of its own, on a divider-ruled list — five bands of
+   chrome per thread. Cards separated by space need no rules between them, and
+   the delete button now sits on the row it belongs to. */
+.thread-item-row {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-bottom: 8px;
+}
+
+/* The trash stays out of the way until the row is under the pointer; on touch,
+   where there is no hover, it is simply always there. */
+.thread-item-row > .icon-btn {
+  flex: none;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.thread-item-row:hover > .icon-btn,
+.thread-item-row > .icon-btn:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  .thread-item-row > .icon-btn {
+    opacity: 1;
+  }
+}
+
 .thread-item {
-  display: grid;
-  gap: 3px;
-  width: 100%;
-  padding: 9px 12px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  padding: 10px 12px;
   border: 0;
-  border-bottom: 1px solid var(--border-soft);
-  background: none;
+  border-radius: var(--radius);
+  background: var(--bg-card);
   color: var(--text);
   font: inherit;
   text-align: left;
@@ -7067,42 +7105,7 @@ dialog.modal::backdrop {
 }
 
 .thread-item:hover {
-  background: var(--bg-hover);
-}
-
-/* The subject leads the row now; who and when are the metadata beneath it.
-   Same classes, swapped weights — the row was agent-first and readers scan
-   this log for a piece of work, not for a colleague. */
-.ti-top {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11.5px;
-}
-
-.ti-who {
-  font-weight: 400;
-  color: var(--text-2);
-}
-
-.ti-time {
-  color: var(--text-4);
-  font-size: 11px;
-}
-
-.ti-text {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--text);
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-.ti-count {
-  font-size: 11px;
-  color: var(--accent);
+  background: var(--bg-card-2);
 }
 
 /* ------------------------------------------------------ avatar and theme ---- */
@@ -7413,39 +7416,86 @@ dialog.modal::backdrop {
 }
 
 /* ------------------------------------------------- thread summary ---- */
-/* The line under a message that stands for its thread: who is in it, what it
-   is called, and how much was actually said. It replaced a bare reply count
-   that counted a run's own narration, so a one-line edit advertised itself as
-   an eight-message conversation. */
-.cmsg-thread-link .ctl-faces {
-  display: inline-flex;
-  align-items: center;
+/* The card under a message that stands for its thread: one glyph, what the
+   work is called, and a quiet second line saying who is in it and how much
+   was actually said. Two lines and nothing else — the same shape a background
+   task gets in the threads pullout, so the two surfaces read as one thing
+   seen twice rather than as two designs. */
+.cmsg-thread-link .ctl-icon,
+.thread-item .ti-icon {
+  display: flex;
+  flex: none;
+  align-self: flex-start;
+  margin-top: 1px;
+  color: var(--text-3);
 }
 
-/* Overlapped, the way a stack of participants reads everywhere else — this is
-   a glance at who is here, not a list to be read left to right. */
-.cmsg-thread-link .ctl-faces > * {
-  margin-right: -6px;
-  border-radius: 50%;
-  box-shadow: 0 0 0 2px var(--bg-panel);
+.cmsg-thread-link .ctl-icon svg,
+.thread-item .ti-icon svg {
+  width: 17px;
+  height: 17px;
 }
 
-.cmsg-thread-link .ctl-faces > *:last-child {
-  margin-right: 2px;
+/* The chevron only promises there is somewhere to go, so it is the dimmest
+   thing in the row and never competes with the name. */
+.cmsg-thread-link .ctl-go,
+.thread-item .ti-go {
+  display: flex;
+  flex: none;
+  color: var(--text-4);
 }
 
-/* The name the agent gave the task carries the line; the count is secondary
-   and reads as metadata rather than as the point. */
-.cmsg-thread-link .ctl-name {
+.cmsg-thread-link .ctl-go svg,
+.thread-item .ti-go svg {
+  width: 16px;
+  height: 16px;
+}
+
+.cmsg-thread-link .ctl-main,
+.thread-item .ti-main {
+  display: grid;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+/* The name the agent gave the task carries the card. Wrapped to two lines
+   rather than truncated at one: a task name is a sentence, and the half of it
+   that fits is rarely the half that identifies the work. */
+.cmsg-thread-link .ctl-name,
+.thread-item .ti-text {
+  font-size: 13px;
   font-weight: 600;
-  max-width: 30ch;
+  line-height: 1.35;
+  color: var(--text);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Who, then how much — metadata, in the size and colour that says so. */
+.cmsg-thread-link .ctl-meta,
+.thread-item .ti-meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 11.5px;
+  min-width: 0;
+}
+
+.cmsg-thread-link .ctl-who,
+.thread-item .ti-who {
+  color: var(--text-2);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.cmsg-thread-link .ctl-count {
-  color: var(--text-3);
+.cmsg-thread-link .ctl-count,
+.thread-item .ti-count {
+  color: var(--text-4);
+  flex: none;
 }
 
 /* Thinking, as one passage rather than as a stack of messages from somebody
