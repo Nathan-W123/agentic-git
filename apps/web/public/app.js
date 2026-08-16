@@ -2601,8 +2601,26 @@ const SWIPE_MAX_SLOPE = 0.6;
 
 let swipeStart;
 
-/** Whichever side panel is showing, closed the way its own button closes it. */
+/**
+ * Whichever side panel is showing, closed the way its own button closes it.
+ *
+ * The order is `renderChats`'s order, not an order of its own. Six things can
+ * occupy the one panel and only the first of them is on screen, so anything
+ * closing by a different precedence closes something invisible. The two this
+ * did not know about at all — an agent conversation and a direct message —
+ * outrank the rest there, which meant a swipe with one of them open put away
+ * the thread behind it and left the panel exactly where it was.
+ */
 function closeSidePanel() {
+  if (state.activeAgentPanel !== undefined) {
+    state.activeAgentPanel = undefined;
+    return true;
+  }
+  if (state.activeDm !== undefined) {
+    state.activeDm = undefined;
+    state.dmDraft = "";
+    return true;
+  }
   if (state.chanFileView !== undefined) {
     // The same question the close button asks. A swipe is easy to do by
     // accident, which makes silently discarding an edit worse here, not
@@ -2631,12 +2649,60 @@ function closeSidePanel() {
 
 function sidePanelOpen() {
   return (
+    state.activeAgentPanel !== undefined ||
+    state.activeDm !== undefined ||
     state.chanFileView !== undefined ||
     state.chanTree === true ||
     state.activeChannelThread !== undefined ||
     state.chanThreadList === true
   );
 }
+
+/**
+ * Escape closes whatever is stacked over the conversation, one layer a press.
+ *
+ * The panel had a close button and a swipe and nothing for a keyboard, which
+ * on a desktop — where there is no swipe — left the mouse as the only way out
+ * of a surface that covers half the window. This is the third way, and it
+ * unwinds in the order the layers were put on: the phone's channel drawer,
+ * then the side panel.
+ *
+ * Deliberately last in line. A field owns its own Escape (the file editor
+ * blurs, the mention and slash pickers dismiss), a `<dialog>` closes itself,
+ * and a popover traps its own keys — so this stands down whenever any of them
+ * is what the press was for, and a reader in the reply box presses Escape
+ * once to leave it and again to close the panel.
+ */
+document.addEventListener("keydown", (event) => {
+  if (
+    event.key !== "Escape" ||
+    event.defaultPrevented ||
+    state.route !== "chats"
+  ) {
+    return;
+  }
+  if ($("#modal")?.open === true || $("#layer-root")?.childElementCount > 0) {
+    return;
+  }
+  // The element the key was pressed on, not the one focused now. The file
+  // editor's own Escape handler runs before this one and blurs the textarea,
+  // so by the time this reads `document.activeElement` the field it should
+  // have stood down for is already gone — and one press would both leave the
+  // editor and throw the panel away, which is the opposite of a ladder.
+  // `event.target` still names the textarea either way.
+  const field = event.target;
+  if (field instanceof Element && FOCUSABLE_FIELDS.has(field.tagName)) {
+    return;
+  }
+  if (state.chanSidebarOpen === true) {
+    state.chanSidebarOpen = false;
+    render();
+    return;
+  }
+  if (sidePanelOpen() && closeSidePanel()) {
+    render();
+  }
+});
 
 document.addEventListener(
   "touchstart",

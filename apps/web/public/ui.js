@@ -1060,12 +1060,23 @@ export function tabs(act, items, current) {
     .join("")}</div>`;
 }
 
-export function iconButton(name, { act = "", title = "", value = "", small = false } = {}) {
-  return `<button type="button" class="icon-btn${small ? " sm" : ""}"${
-    act ? ` data-act="${act}"` : ""
-  }${value ? ` data-value="${esc(value)}"` : ""} title="${esc(title)}" aria-label="${esc(
-    title,
-  )}">${icon(name)}</button>`;
+/**
+ * `cls` is for the handful of icon buttons that are not one of a row.
+ *
+ * A panel's close button is the example: it does the same thing every icon
+ * button does, but it is the one control a reader looks for when a surface is
+ * covering what they were reading, and it earns a treatment the tools beside
+ * it do not get. Cheaper than a second near-identical helper.
+ */
+export function iconButton(
+  name,
+  { act = "", title = "", value = "", small = false, cls = "" } = {},
+) {
+  return `<button type="button" class="icon-btn${small ? " sm" : ""}${
+    cls ? ` ${cls}` : ""
+  }"${act ? ` data-act="${act}"` : ""}${
+    value ? ` data-value="${esc(value)}"` : ""
+  } title="${esc(title)}" aria-label="${esc(title)}">${icon(name)}</button>`;
 }
 
 export function statTile({ value, label, foot, iconName, tone = "purple" }) {

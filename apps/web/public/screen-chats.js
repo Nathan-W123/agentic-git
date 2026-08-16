@@ -838,6 +838,17 @@ function chanSidebar(activeRepositoryId) {
       <button type="button" class="chan-new" data-act="channel-new" title="New chat">
         ${icon("plus")}
       </button>
+      <!-- Phone only, where this column is an off-canvas drawer over the
+           conversation. It could already be dismissed by tapping the scrim,
+           by swiping it back, or by picking a channel — three gestures and
+           no button, which left somebody who opened it just to read the
+           roster with nothing to press. Desktop hides it: there the column
+           covers nothing, and folding it away is the header's own control. -->
+      ${iconButton("close", {
+        act: "chan-sidebar-close",
+        title: "Close",
+        cls: "drawer-close",
+      })}
     </div>
     <div class="chan-list">
       <div class="chan-list-label">Channels</div>
@@ -1004,8 +1015,15 @@ function chanHeader(repository, repositoryId) {
     <!-- The desktop counterpart of the button above: on a wide screen the
          channel list is a column rather than a drawer, so folding it away is
          a different act from opening it and gets its own control. Hidden
-         below the breakpoint where the drawer takes over. -->
-    <button type="button" class="icon-btn desk-only" data-act="chan-collapse-toggle"
+         below the breakpoint where the drawer takes over.
+
+         Lit while the column is folded away. The aria-pressed below said so
+         to a screen reader and nothing said so to an eye: one grey glyph
+         meant both "hide this" and "the list you are missing is behind here",
+         which is the whole of "where did the channels go". The "on" modifier
+         is icon-btn's existing treatment for a toggle showing its state. -->
+    <button type="button" class="icon-btn desk-only${state.chanCollapsed ? " on" : ""}"
+      data-act="chan-collapse-toggle"
       title="${state.chanCollapsed ? "Show channels &amp; people" : "Hide channels &amp; people"}"
       aria-pressed="${state.chanCollapsed === true}"
       aria-label="${state.chanCollapsed ? "Show channels and people" : "Hide channels and people"}">${icon(
@@ -1810,6 +1828,31 @@ function panelGrip() {
 }
 
 /**
+ * What kind of thing this panel is, said in one word above what it is called.
+ *
+ * Six different surfaces share the one column and each of them used to open
+ * with nothing but a name in it — a repository path, a person, a thread's
+ * first sentence — which are all things the transcript underneath is also full
+ * of. So the panel arriving read as the conversation changing rather than as a
+ * second surface over it. The word is the smallest thing that says "you
+ * stepped aside into this, and it closes".
+ */
+function panelKind(label) {
+  return `<span class="panel-kind">${esc(label)}</span>`;
+}
+
+/**
+ * The control every one of those six surfaces is looked for first.
+ *
+ * One call rather than six spellings of the same `iconButton`, so the close
+ * cannot drift apart from panel to panel — it was already three different
+ * tooltips for the identical act.
+ */
+function panelClose(act, title) {
+  return iconButton("close", { act, title, cls: "panel-close" });
+}
+
+/**
  * Every thread in the channel, as a way back into one.
  *
  * Threads are where the work actually happens, and once a few messages have
@@ -1886,9 +1929,9 @@ function chanTreePanel(repositoryId) {
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
-      <span>Files</span>
+      ${panelKind("Files")}
       <span class="spacer"></span>
-      ${iconButton("close", { act: "chan-tree-close", title: "Close" })}
+      ${panelClose("chan-tree-close", "Close files (Esc)")}
     </header>
     <div class="thread-body tree-body">
       ${
@@ -1958,7 +2001,7 @@ function threadListPanel(repositoryId) {
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
-      <span>Threads</span>
+      ${panelKind("Threads")}
       <span class="spacer"></span>
       ${
         threads.length === 0 || !canManageRepository(repositoryId)
@@ -1969,7 +2012,7 @@ function threadListPanel(repositoryId) {
               small: true,
             })
       }
-      ${iconButton("close", { act: "channel-threads-close", title: "Close" })}
+      ${panelClose("channel-threads-close", "Close threads (Esc)")}
     </header>
     <div class="thread-body">
       ${
@@ -2280,16 +2323,14 @@ function agentPanel() {
     ${panelGrip()}
     <div class="agent-panel-head">
       <header class="thread-head">
+        ${panelKind("Agent")}
         <span class="dm-head-name">
           ${agentFace(agent, 20)}
           ${esc(agent.name)}
           ${statusDot(status, AGENT_STATUS_TITLE[status])}
         </span>
         <span class="spacer"></span>
-        ${iconButton("close", {
-          act: "agent-panel-close",
-          title: "Close this conversation",
-        })}
+        ${panelClose("agent-panel-close", "Close this conversation (Esc)")}
       </header>
       ${
         canChatPrivately
@@ -2348,13 +2389,14 @@ function dmPanel() {
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
+      ${panelKind("Direct")}
       <span class="dm-head-name">
         ${avatar(name, 20)}
         ${esc(name)}
         ${statusDot(online ? "working" : "away", online ? "Here" : "Away")}
       </span>
       <span class="spacer"></span>
-      ${iconButton("close", { act: "dm-close", title: "Close conversation" })}
+      ${panelClose("dm-close", "Close conversation (Esc)")}
     </header>
     <div class="thread-body dm-body">
       ${
@@ -2423,6 +2465,7 @@ function threadPanel(repositoryId) {
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
+      ${panelKind("Thread")}
       <span class="thread-title" title="${esc(title)}">${esc(title)}</span>
       <span class="spacer"></span>
       ${iconButton("pin", {
@@ -2435,7 +2478,7 @@ function threadPanel(repositoryId) {
         value: messageId,
         title: "Send the next channel message into this thread",
       })}
-      ${iconButton("close", { act: "channel-thread-close", title: "Close thread" })}
+      ${panelClose("channel-thread-close", "Close thread (Esc)")}
     </header>
     <div class="thread-body">
       <div class="thread-root">${messageRow(root, repositoryId, { isReply: true })}</div>
@@ -2705,6 +2748,7 @@ function filePanel() {
   return `<aside class="thread-panel file-panel${dirty ? " dirty" : ""}">
     ${panelGrip()}
     <header class="thread-head">
+      ${panelKind("File")}
       <span class="fp-path" title="${esc(path)}">${esc(path)}</span>
       ${
         stats === undefined
@@ -2728,10 +2772,7 @@ function filePanel() {
         act: "chan-file-back",
         title: "Back to files",
       })}
-      ${iconButton("close", {
-        act: "chan-file-close",
-        title: "Close files",
-      })}
+      ${panelClose("chan-file-close", "Close files (Esc)")}
     </header>
     ${
       editing

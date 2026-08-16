@@ -3634,7 +3634,7 @@ svg {
 }
 
 .chan-sidebar {
-  width: 268px;
+  width: 256px;
   flex: none;
   display: grid;
   /* Brand, search, channels, then the roster takes what remains — so Users
@@ -3643,14 +3643,21 @@ svg {
   grid-template-rows: auto auto auto 1fr;
   min-height: 0;
   background: var(--bg-panel);
-  border-right: 1px solid var(--border-soft);
+  /* No border. This column is a shade off the conversation in both themes
+     (`--bg-panel` against `--bg-chat`), and a whole page-height rule on top
+     of that difference is one line of chrome doing a job the ground has
+     already done. The right-hand `.thread-panel` keeps its border and gains a
+     shadow for the opposite reason: it comes and goes, so it has to announce
+     itself as something laid over the conversation rather than beside it.
+     Off-canvas on a phone it carries `--shadow-pop` instead, which is the
+     same argument — a drawer is over the page, a column is the page. */
 }
 
 .chan-sidebar-head {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 14px 12px 10px;
+  padding: 12px 10px 8px;
 }
 
 .chan-sidebar-head .search {
@@ -5289,6 +5296,22 @@ svg {
 
 /* -------------------------------------------------------------- thread ---- */
 
+/*
+ * A surface over the conversation, not another column of it.
+ *
+ * This used to be told apart from the transcript by one hairline of
+ * `--border-soft`, which is the same hairline that separates a message from
+ * the next message — so a thread opening beside the channel read as the
+ * channel having changed rather than as somewhere you had stepped aside into.
+ * Two things say otherwise now, and neither costs layout: the border is the
+ * strong one rather than the hairline the transcript already uses between its
+ * own messages, and a shadow falls left onto the conversation so the panel
+ * reads as in front of it rather than tiled beside it.
+ *
+ * The shadow is spread with a negative offset so it only ever paints on the
+ * left edge — a glow around a full-height element that reaches the window's
+ * own edges is just a smudge under the browser chrome.
+ */
 .thread-panel {
   /* Dragged, and remembered — see `panel-grip` handling in app.js. The floor
      keeps a diff readable; the ceiling lets it take the whole conversation
@@ -5302,7 +5325,9 @@ svg {
   grid-template-rows: auto 1fr auto;
   min-height: 0;
   background: var(--bg-panel);
-  border-left: 1px solid var(--border-soft);
+  border-left: 1px solid var(--border-strong);
+  box-shadow: -14px 0 30px -22px rgba(0, 0, 0, 0.9);
+  z-index: 4;
 }
 
 .panel-grip {
@@ -5345,10 +5370,55 @@ body.resizing-panel {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 13px 14px;
+  padding: 11px 10px 11px 14px;
   border-bottom: 1px solid var(--border-soft);
   font-size: 13.5px;
   font-weight: 600;
+}
+
+/* One quiet word saying which of the six surfaces this is — see `panelKind`.
+   Sized and coloured to be read second: the thing that follows it is the name
+   somebody came here for, and this is only the category it belongs to. */
+.thread-head .panel-kind {
+  flex: none;
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--text-3);
+  /* Butted against what it labels rather than spaced evenly among the
+     header's other children, which read as two peers otherwise. */
+  margin-right: -4px;
+}
+
+/* The one control the eye goes to when something is covering what was being
+   read. It starts brighter than the tools beside it and is fenced off from
+   them by a rule, so "close this" is never the fifth identical glyph in a row
+   — the file panel puts Diff/Edit, a back arrow and this on the same line.
+
+   The rule is a pseudo-element rather than a border, because `.icon-btn` is a
+   fixed 30px box centring its glyph: a border and padding come out of that
+   width under `border-box` and push the cross off its own centre. */
+.thread-head .panel-close {
+  flex: none;
+  position: relative;
+  margin-left: 9px;
+  color: var(--text-2);
+}
+
+.thread-head .panel-close::before {
+  content: "";
+  position: absolute;
+  left: -9px;
+  top: 5px;
+  bottom: 5px;
+  width: 1px;
+  background: var(--border-soft);
+}
+
+/* Nothing to fence off when it is the only control there. */
+.thread-head .panel-close:first-of-type::before {
+  display: none;
 }
 
 /* The thread's subject, in the slot that used to say "Thread". Ellipsized
@@ -6044,6 +6114,12 @@ dialog.modal::backdrop {
   display: none;
 }
 
+/* The mirror image of `.desk-only`: only there once the surface it closes is
+   a drawer covering the conversation. Turned back on in the 600px tier. */
+.drawer-close {
+  display: none;
+}
+
 @media (min-width: 601px) {
   .desk-only {
     display: inline-grid;
@@ -6221,6 +6297,12 @@ dialog.modal::backdrop {
      affordances if the platform supplies them. */
   .chan-sidebar-btn {
     display: inline-grid !important;
+  }
+
+  /* See `.drawer-close` above — the drawer's own way out, next to the search
+     box it opens with. */
+  .drawer-close {
+    display: inline-grid;
   }
 
   .chan-sidebar {
