@@ -862,7 +862,7 @@ export class Coordinator {
         const waveVersion = await this.repositories.getCanonicalVersion(
           input.repository,
         );
-        const needsReplan = pending.filter(
+        const moved = pending.filter(
           (entry) => entry.plannedVersion.revision !== waveVersion.revision,
         );
         // The index inside the wave loop exists for replanning, and a wave
@@ -871,11 +871,26 @@ export class Coordinator {
         // git is the single most expensive control-plane step, and a task
         // with nobody to be replanned against should not pay it.
         const index =
-          needsReplan.length === 0
+          moved.length === 0
             ? undefined
             : await this.intelligence.index(
                 input.repository,
                 waveVersion.revision,
+              );
+        // Canonical moving is not the same as canonical moving *under this
+        // plan*. The worker path learned that separately — see
+        // `COORD_STRICT_PLAN_REBASE` in `worker-operations.ts`, where the
+        // measurement was 16 to 26 replans a run at roughly 145k tokens each,
+        // "most of those advances never touched the plan discarded for them".
+        // This loop kept the old rule, so it is where the n(n-1)/2 came from.
+        const needsReplan =
+          index === undefined
+            ? []
+            : await this.replansDisturbedBy(
+                input.repository,
+                moved,
+                waveVersion,
+                index,
               );
         // Every task still queued has to see the canonical state the previous
         // wave produced, and each of those replans is a full round trip to an
@@ -1782,6 +1797,81 @@ export class Coordinator {
       ]),
       reason,
     };
+  }
+
+  /**
+   * Of the tasks whose canonical moved, the ones it actually moved *under*.
+   *
+   * A replan is a full round trip to an agent, and every queued task took one
+   * after every wave regardless of what the wave had touched — which is
+   * exactly the n(n-1)/2 the profiling found. Graded with `assessReplay`, the
+   * same machinery integration uses, so "disturbs this plan" means one thing
+   * in this system rather than one per caller.
+   *
+   * The empty patch list is the honest input rather than a placeholder:
+   * nothing has executed yet, so the only question is whether the advance
+   * touches what the plan claims or depends on. Deliberately stricter than
+   * the result path, which tolerates `textual` overlap because a three-way
+   * apply absorbs it — that reasoning holds for a changeset already written
+   * against the old tree, and letting an agent *write* against a file whose
+   * current contents it has never seen is a different bet.
+   *
+   * `plannedVersion` is deliberately not advanced for a task that skips. It
+   * records the revision the agent's plan was actually written against, and
+   * keeping it true means the next wave assesses the whole delta since the
+   * agent last looked rather than one wave of it — so advances that are each
+   * irrelevant alone but relevant together are still caught.
+   *
+   * `COORD_STRICT_PLAN_REBASE=1` restores the unconditional replan, the same
+   * switch and the same spelling the worker path already uses.
+   */
+  private async replansDisturbedBy(
+    repository: CanonicalRepository,
+    moved: readonly PlannedTask[],
+    version: CanonicalVersion,
+    index: RepositoryIndex,
+  ): Promise<PlannedTask[]> {
+    if (process.env["COORD_STRICT_PLAN_REBASE"] === "1") {
+      return [...moved];
+    }
+    const required: PlannedTask[] = [];
+    for (const entry of moved) {
+      const advance = await this.describeCanonicalAdvance(
+        repository,
+        entry.plannedVersion,
+        version,
+        "Blocking work changed canonical state before this task started",
+        index,
+      ).catch(() => undefined);
+      if (advance === undefined) {
+        // Unreadable advance is not evidence of irrelevance. Replan, which is
+        // what this loop did for every task before any of this existed.
+        required.push(entry);
+        continue;
+      }
+      const assessment = assessReplay(
+        entry.plan,
+        {
+          id: "",
+          taskId: entry.task.id,
+          baseVersion: entry.plannedVersion.sequence,
+          baseRevision: entry.plannedVersion.revision,
+          patches: [],
+          commandsRun: [],
+          tests: [],
+          dependenciesChanged: [],
+          symbolsChanged: [],
+          riskAssessment: { level: "low", reasons: [] },
+          agentExplanation: "",
+          createdAt: new Date().toISOString(),
+        },
+        advance,
+      );
+      if (assessment.semantic.length > 0 || assessment.textual.length > 0) {
+        required.push(entry);
+      }
+    }
+    return required;
   }
 
   private async replanTask(
