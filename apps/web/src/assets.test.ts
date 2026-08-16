@@ -949,6 +949,13 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
     /\.cmsg-text \.mention-ping \{\n  padding: 1px 4px;\n\}/u,
   );
   assert.doesNotMatch(css, /mention-wave/u);
+
+  // A command keeps the colour it had in the composer once it is posted:
+  // `richText` runs the same `slashMarkup` the mirror does, and the posted
+  // token gets the same inline padding a posted ping does.
+  assert.match(chats, /function slashMarkup/u);
+  assert.match(chats, /const inline = \(value\) =>\s*\n\s*slashMarkup\(/u);
+  assert.match(css, /\.cmsg-text \.slash-ping \{\n  padding: 1px 4px;\n\}/u);
 });
 
 test("the invite screen names the product, not only the team", async () => {
@@ -1217,7 +1224,9 @@ test("the composer paints its mentions on a layer that matches the textarea", as
     composerMirror(
       value,
       names.map((name) => ({ name })),
-    ).replace(/<span class="mention-ping">@([^<]+)<\/span>/gu, "[$1]");
+    )
+      .replace(/<span class="mention-ping">@([^<]*)<\/span>/gu, "[$1]")
+      .replace(/<span class="slash-ping">\/([^<]*)<\/span>/gu, "{$1}");
   assert.equal(
     wrap("ask @Mary Jane and @Claude (Owner)", [
       "Mary",
@@ -1235,6 +1244,28 @@ test("the composer paints its mentions on a layer that matches the textarea", as
     "&lt;code&gt;@agent&lt;/code&gt;\n",
   );
   assert.equal(wrap("@agents review", []), "[agents] review\n");
+
+  // The point of the mirror is that it colours what is being typed *now*. A
+  // ping only lit up once its last character landed, and a name that never
+  // resolved never lit up at all, so the composer looked broken next to the
+  // transcript above it. The half-typed token is a ping too.
+  assert.equal(wrap("ask @Mar", ["Mary Jane"]), "ask [Mar]\n");
+  assert.equal(wrap("@", []), "[]\n");
+  // ...and a command is coloured from the first character after the slash,
+  // wherever in the message it was written.
+  assert.equal(wrap("/plan the migration", []), "{plan} the migration\n");
+  assert.equal(wrap("@agents /plan it", []), "[agents] {plan} it\n");
+  // A path is not a command, and neither is a slash inside a word — the same
+  // boundary the picker itself opens on.
+  assert.equal(wrap("edit src/retry.ts", []), "edit src/retry.ts\n");
+  assert.equal(wrap("ls /usr/bin", []), "ls /usr/bin\n");
+  // The markup the passes before it produced is not re-read by the ones
+  // after: a resolved multi-word name stays whole, and no closing tag is
+  // mistaken for a command.
+  assert.equal(
+    wrap("/plan with @Mary Jane", ["Mary Jane"]),
+    "{plan} with [Mary Jane]\n",
+  );
 
   // The metrics the two share. Declared once, for both selectors, because a
   // single pixel of difference between them wraps the mirror at a different
@@ -1266,6 +1297,17 @@ test("the composer paints its mentions on a layer that matches the textarea", as
     composerPing[1] ?? "",
     /\b(?:margin|padding):/u,
     "painting a mention must not move the textarea's following characters",
+  );
+  // The command token is painted under the same constraint, in the second
+  // accent so a command and a ping are not the same colour.
+  assert.match(css, /\.cmsg-text \.slash-ping,\n\.composer-mirror \.slash-ping \{/u);
+  assert.match(css, /\.composer-mirror \.slash-ping \{[\s\S]{0,120}accent-2-wash/u);
+  const composerSlash = /\.composer-mirror \.slash-ping \{([\s\S]*?)\n\}/u.exec(css);
+  assert.ok(composerSlash !== null, "the composer command rule exists");
+  assert.doesNotMatch(
+    composerSlash[1] ?? "",
+    /\b(?:margin|padding):/u,
+    "painting a command must not move the textarea's following characters",
   );
 });
 
@@ -1312,7 +1354,7 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
   assert.match(app, /\$\{lines\.length\} updates/u);
 });
 
-test("a roster row carries one button, and removal is the red item behind it", async () => {
+test("a roster row carries one button, and one settings panel behind it", async () => {
   const chats = await publicFile("screen-chats.js");
   const app = await browserSource();
   const ui = await publicFile("ui.js");
@@ -1320,7 +1362,7 @@ test("a roster row carries one button, and removal is the red item behind it", a
 
   const row = chats.slice(
     chats.indexOf("function rosterRow(agent)"),
-    chats.indexOf("export function rosterMenuItems"),
+    chats.indexOf("/**\n * What the \"...\" on a roster row offers"),
   );
   assert.notEqual(row, "", "the roster row should still be drawn here");
   // The four controls the row used to carry — a switch, rename, model &
@@ -1339,23 +1381,64 @@ test("a roster row carries one button, and removal is the red item behind it", a
       `${gone} should live in the menu, not on the row`,
     );
   }
+  // The row's only expandable is the one panel; the separate rename form it
+  // used to grow instead is gone.
+  assert.match(row, /settingsOpen \? rosterSettings\(agent\) : ""/u);
+  assert.equal(row.includes("chatRenamingId"), false);
 
-  // And the menu is where all four went, with removal last and red.
+  // The menu is now short on purpose: editing the agent at all is one entry,
+  // beside the two things that are not edits.
   const menu = chats.slice(
     chats.indexOf("export function rosterMenuItems"),
     chats.indexOf("function chanSidebar"),
   );
-  assert.match(menu, /"channel-rename-toggle"/u);
   assert.match(menu, /"channel-settings-toggle"/u);
+  assert.match(menu, /label: "Settings"/u);
   assert.match(menu, /"auditor-toggle"/u);
-  assert.match(menu, /separator: true/u);
-  assert.match(menu, /channel-agent-remove-any[\s\S]{0,200}danger: true/u);
-  // A teammate's agent may only be removed by somebody the server would let,
-  // and one's own is unconditional — the same rule the row was drawn by.
-  assert.match(menu, /agent\.mine === true \|\| canModerate/u);
+  assert.match(menu, /"agent-chat-open"/u);
+  // Rename, model and removal are no longer three ways into the same
+  // question — the panel holds all of them.
+  for (const gone of [
+    "channel-rename-toggle",
+    "channel-agent-remove",
+    "separator: true",
+  ]) {
+    assert.equal(
+      menu.includes(gone),
+      false,
+      `${gone} belongs to the settings panel, not the menu`,
+    );
+  }
 
-  // `danger` is a flag on the shared menu, so every destructive entry in the
-  // app is the same red rather than a colour chosen per caller.
+  // And the panel is where they went: the name and role in a form that
+  // commits them, the model and effort as dropdowns, removal last and red.
+  const settings = chats.slice(
+    chats.indexOf("function rosterSettings(agent)"),
+    chats.indexOf("/**\n * The hover card for one roster entry"),
+  );
+  assert.notEqual(settings, "", "the settings panel is drawn here");
+  assert.match(settings, /data-act="channel-rename-form"/u);
+  assert.match(settings, /data-act="channel-rename-input"/u);
+  assert.match(settings, /data-act="channel-role-input"/u);
+  assert.match(settings, /settingRow\("Model", "channel-agent-model"/u);
+  assert.match(settings, /"channel-agent-effort"/u);
+  assert.match(settings, /class="rs-remove" data-act="\$\{removeAct\}"/u);
+  // A teammate's agent may only be removed by somebody the server would let,
+  // and one's own is unconditional — the same rule the menu applied before.
+  assert.match(
+    settings,
+    /agent\.mine === true \|\| canManageRepository\(activeChannelId\(\)\)/u,
+  );
+  assert.match(
+    settings,
+    /agent\.mine === true\s*\?\s*"channel-agent-remove"\s*:\s*"channel-agent-remove-any"/u,
+  );
+  // Red, and the only red thing in the panel.
+  assert.match(css, /\.rs-remove \{[\s\S]{0,240}color: var\(--red\)/u);
+  assert.match(css, /\.rs-remove:hover \{[\s\S]{0,80}background: var\(--red-wash\)/u);
+
+  // `danger` is still the flag the shared menu paints its destructive entries
+  // with, so anything that goes back into a menu is the same red.
   assert.match(ui, /item\.danger === true \? " menu-item-danger"/u);
   assert.match(css, /\.menu-item-danger[\s\S]{0,120}color: var\(--red\)/u);
 
@@ -1364,6 +1447,17 @@ test("a roster row carries one button, and removal is the red item behind it", a
   // exists is left floating over the result.
   assert.match(app, /case "roster-agent-menu":[\s\S]{0,160}rosterMenuItems\(value\)/u);
   assert.match(app, /case "channel-agent-remove":\s*\n\s*closePopover\(\);/u);
+  assert.match(
+    app,
+    /case "channel-settings-toggle":\s*\n\s*closePopover\(\);/u,
+  );
+  // Opening the panel puts the cursor in the field somebody most often came
+  // for, and a commit that changes nothing must not rebuild the panel around
+  // the picker they were reaching for.
+  assert.match(app, /channel-rename-input'\]"\);\s*\n\s*input\?\.focus\(\)/u);
+  assert.match(app, /input\.value !== input\.defaultValue/u);
+  assert.match(app, /nameInput\.value !== nameInput\.defaultValue/u);
+  assert.match(app, /state\.chatSettingsOpenId === agentId/u);
 });
 
 test("a slash command is offered wherever it is typed, not only at the start", async () => {

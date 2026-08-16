@@ -152,9 +152,57 @@ function chanRow(repo, activeRepositoryId) {
   </div>`;
 }
 
+/**
+ * Everything there is to change about one agent, in one place.
+ *
+ * It used to be two menu entries opening two different panels — a rename form
+ * and a settings panel — with removal a third entry in the menu above them.
+ * Three ways in for what is one question ("what do I want this agent to be
+ * here?") meant the menu had to name each of them, and naming them is what
+ * made a short menu long. One entry opens this, and everything is a labelled
+ * field with the one destructive thing last and red.
+ *
+ * The name and role stay a `<form>`, because that is what commits them: Enter
+ * or blur, both handled in app.js against `channel-rename-form`. Model and
+ * effort are selects and write on change, so they are outside it — a select
+ * inside a form that submits on Enter would commit the text fields as a side
+ * effect of picking a model.
+ */
 function rosterSettings(agent) {
   const options = optionsFor(agent);
+  const removeAct =
+    agent.mine === true ? "channel-agent-remove" : "channel-agent-remove-any";
   return `<div class="roster-settings" data-agent="${esc(agent.id)}">
+    <form class="roster-rename" data-act="channel-rename-form"
+      data-value="${esc(agent.id)}">
+      <div class="rs-label">Name</div>
+      <input data-act="channel-rename-input" data-value="${esc(agent.id)}"
+        value="${esc(agent.name)}" placeholder="${esc(agent.name)}"
+        ${agent.mine ? 'maxlength="40" title="Its name in every repository"' : ""}
+        autocomplete="off" enterkeyhint="done">
+      <div class="rs-hint">${
+        // A name and a role are not the same kind of thing: your own agent's
+        // name is the account's, and renaming it here changes it in every
+        // repository (and in Settings), while the role stays this channel's
+        // decision.
+        agent.mine === true
+          ? "Renames it in every repository."
+          : "In this channel only."
+      }</div>
+      <div class="rs-label">Role</div>
+      <input data-act="channel-role-input" data-value="${esc(agent.id)}"
+        value="${esc(agent.role ?? "")}" placeholder="Role in this channel"
+        list="channel-role-options" autocomplete="off" enterkeyhint="done">
+      <datalist id="channel-role-options">
+        <!-- Every other role is free text that reaches the agent as a
+             sentence and nothing else, so there is nothing to offer.
+             These two are the ones the code acts on, and a reserved word
+             nobody can discover is a reserved word nobody uses —
+             \`investigator\` had been exactly that since it was built. -->
+        <option value="${AUDITOR_ROLE}">Audits every merge, unprompted</option>
+        <option value="${INVESTIGATOR_ROLE}">Explains why a task failed</option>
+      </datalist>
+    </form>
     ${settingRow("Model", "channel-agent-model", options.models, agent.model ?? "")}
     ${
       // Where the list above came from, in the words of the thing that knows:
@@ -197,6 +245,22 @@ function rosterSettings(agent) {
                 : "Only you can use this agent."
             }</div>
           </div>`
+        : ""
+    }
+    ${
+      // Last, and the only red thing here. Whether it is the viewer's own
+      // agent decides which act removes it: `channel-agent-remove` takes the
+      // account's own provider id, while a teammate's entry is already keyed
+      // `${userId}:${provider}` (see `channelAgentsFor` in data.js), which is
+      // exactly the pair `removeChannelAgentForUser` needs. Moderators only
+      // for that second one, matching the server's `manage_project`/creator
+      // check on the `?userId=` path of the membership DELETE route; one's own
+      // agent is unconditional, as it is on the server.
+      agent.mine === true || canManageRepository(activeChannelId())
+        ? `<button type="button" class="rs-remove" data-act="${removeAct}"
+            data-value="${esc(agent.id)}">
+            ${icon("trash")}<span>Remove from this chat</span>
+          </button>`
         : ""
     }
   </div>`;
@@ -348,13 +412,57 @@ function mentionMarkup(value, names = []) {
 }
 
 /**
+ * Marks a slash command wherever one is written.
+ *
+ * The same boundary the picker opens on (`updateMentionState`) and the same
+ * one the server parses by, so what is coloured is exactly what the channel
+ * will treat as a command: a slash that starts a word. `src/retry.ts` and
+ * `and/or` have no boundary before the slash and stay plain, and the trailing
+ * boundary keeps `/usr/bin` out — a path is not a command, and colouring one
+ * would promise something the channel is not going to do.
+ *
+ * `value` is already escaped, and applying this after mentions and inline
+ * markup is safe for the same reason `mentionMarkup` is: every slash in the
+ * markup those produced (`</span>`, `</code>`) is preceded by `<`, which is
+ * not a boundary this accepts.
+ */
+function slashMarkup(value) {
+  return value.replace(
+    /(^|[\s([])\/([a-z0-9-]+)(?=$|[\s,.:;!?()[\]{}])/giu,
+    (_match, before, name) => `${before}<span class="slash-ping">/${name}</span>`,
+  );
+}
+
+/**
+ * Marks the `@…` a person is part-way through typing.
+ *
+ * `mentionMarkup` can only colour a name it recognises, which is the right
+ * rule for a posted message and the wrong one for a draft: it means the ping
+ * a person is typing stays grey until its last character lands, and a name
+ * that never resolves stays grey forever. In the composer the `@` itself is
+ * the thing being written, so it is coloured from the first character.
+ *
+ * Run after `mentionMarkup`, never before: a resolved multi-word name is
+ * already inside a span by then, and the `@` in it is preceded by `>` rather
+ * than a boundary this accepts, so it is left alone rather than being cut
+ * back to its first word.
+ */
+function draftMentionMarkup(value) {
+  return value.replace(
+    /(^|[\s([])@([\w.-]*)/gu,
+    (_match, before, name) => `${before}<span class="mention-ping">@${name}</span>`,
+  );
+}
+
+/**
  * The composer's text, marked up for the layer painted under the textarea.
  *
- * Only mentions — none of `richText`'s markdown. What is on screen while
- * somebody types has to be character-for-character what they typed, or the
- * mirror and the textarea wrap at different points and the caret stops
+ * Mentions and commands, and none of `richText`'s markdown. What is on screen
+ * while somebody types has to be character-for-character what they typed, or
+ * the mirror and the textarea wrap at different points and the caret stops
  * landing where the letters are. `**bold**` collapsing to two fewer
- * characters would do exactly that.
+ * characters would do exactly that; a span around characters that are all
+ * still there does not.
  *
  * The trailing newline is deliberate. A textarea keeps a final empty line
  * visible and a div collapses it, so without this the mirror is one line
@@ -372,7 +480,13 @@ function composerMirror(value, participants = []) {
       .map((participant) => participant?.name)
       .filter((name) => typeof name === "string" && name.length > 0),
   ].map((name) => esc(name));
-  return `${mentionMarkup(esc(String(value ?? "")), names)}\n`;
+  // Resolved names first, so a multi-word one is coloured whole; then the
+  // half-typed `@` that has no name to match yet; then commands. The draft
+  // pass cannot undo the first because what that produced is already inside a
+  // span — see `draftMentionMarkup`.
+  return `${slashMarkup(
+    draftMentionMarkup(mentionMarkup(esc(String(value ?? "")), names)),
+  )}\n`;
 }
 
 /** Repaints the layer under the textarea. Called on every keystroke. */
@@ -416,12 +530,17 @@ function richText(text, mentions) {
     .split(/\n{2,}/u)
     .map((block) => block.trim())
     .filter((block) => block.length > 0);
+  // The command keeps the colour it had in the composer. A message whose
+  // first word turned grey the moment it was sent read as though the channel
+  // had stopped recognising it, when what it had done was run it.
   const inline = (value) =>
-    mentionMarkup(
-      value
-        .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>")
-        .replace(/`([^`]+)`/gu, "<code>$1</code>"),
-      mentionNames,
+    slashMarkup(
+      mentionMarkup(
+        value
+          .replace(/\*\*([^*]+)\*\*/gu, "<strong>$1</strong>")
+          .replace(/`([^`]+)`/gu, "<code>$1</code>"),
+        mentionNames,
+      ),
     );
   return blocks
     .map((block) => {
@@ -568,11 +687,12 @@ const AGENT_STATUS_TITLE = {
  * targets in twenty-two pixels of a narrow sidebar, one of them destructive
  * and indistinguishable from the three that were not. Everything now lives
  * behind the same "..." the channel rows above already use (`chanRow`), which
- * is where the eye has learned to look for what a row can do, and removal is
- * the one red item in it. See `rosterMenuItems`.
+ * is where the eye has learned to look for what a row can do, and everything
+ * there is to change about the agent — name, role, model, effort, and removal
+ * in red — is one entry in it opening `rosterSettings` underneath the row.
+ * See `rosterMenuItems`.
  */
 function rosterRow(agent) {
-  const renaming = state.chatRenamingId === agent.id;
   const settingsOpen = state.chatSettingsOpenId === agent.id;
   const auditor = isAuditor(agent);
   const paused = state.auditorPaused[activeChannelId()] === true;
@@ -622,28 +742,6 @@ function rosterRow(agent) {
         small: true,
       })}</span>
     </div>
-    ${
-      renaming
-        ? `<form class="roster-rename" data-act="channel-rename-form" data-value="${esc(agent.id)}">
-            <input data-act="channel-rename-input" data-value="${esc(agent.id)}"
-              value="${esc(agent.name)}" placeholder="${esc(agent.name)}"
-              ${agent.mine ? 'maxlength="40" title="Its name in every repository"' : ""}
-              autocomplete="off" enterkeyhint="done">
-            <input data-act="channel-role-input" data-value="${esc(agent.id)}"
-              value="${esc(agent.role ?? "")}" placeholder="Role in this channel"
-              list="channel-role-options" autocomplete="off" enterkeyhint="done">
-            <datalist id="channel-role-options">
-              <!-- Every other role is free text that reaches the agent as a
-                   sentence and nothing else, so there is nothing to offer.
-                   These two are the ones the code acts on, and a reserved word
-                   nobody can discover is a reserved word nobody uses —
-                   \`investigator\` had been exactly that since it was built. -->
-              <option value="${AUDITOR_ROLE}">Audits every merge, unprompted</option>
-              <option value="${INVESTIGATOR_ROLE}">Explains why a task failed</option>
-            </datalist>
-          </form>`
-        : ""
-    }
     ${settingsOpen ? rosterSettings(agent) : ""}
   </div>`;
 }
@@ -656,14 +754,12 @@ function rosterRow(agent) {
  * the auditor, whether this account may moderate the channel. Splitting that
  * across two files is how a menu ends up offering what the row would not.
  *
- * Removal is last, after a separator, and red. Whether it is the viewer's own
- * agent decides which act removes it: `channel-agent-remove` takes the
- * account's own provider id, while a teammate's entry is already keyed
- * `${userId}:${provider}` (see `channelAgentsFor` in data.js), which is
- * exactly the pair `removeChannelAgentForUser` needs. Moderators only for
- * that second one, matching the server's `manage_project`/creator check on
- * the `?userId=` path of the membership DELETE route; one's own agent is
- * unconditional, as it is on the server.
+ * Deliberately short. Everything that edits the agent — name, role, model,
+ * effort, visibility, and the red removal — is one "Settings" entry opening
+ * `rosterSettings` under the row, rather than three entries here naming three
+ * halves of the same decision. What is left beside it are the two things that
+ * are not edits: talking to the agent, and pausing what the auditor does on
+ * its own.
  */
 export function rosterMenuItems(agentId) {
   const repositoryId = activeChannelId();
@@ -688,21 +784,10 @@ export function rosterMenuItems(agentId) {
     });
   }
   items.push({
-    act: "channel-rename-toggle",
-    value: agent.id,
-    // A name and a role are not the same kind of thing: your own agent's name
-    // is the account's, and renaming it here changes it in every repository
-    // (and in Settings), while the role stays this channel's decision.
-    label: "Rename & role",
-    hint: agent.mine === true
-      ? "Renames it everywhere; the role is this channel's"
-      : "In this channel only",
-    iconName: "pencil",
-  });
-  items.push({
     act: "channel-settings-toggle",
     value: agent.id,
-    label: "Model & effort",
+    label: "Settings",
+    hint: "Name, role, model — and removal",
     iconName: "sliders",
   });
   // Only the auditor gets this, because it is the only role that spends
@@ -721,16 +806,10 @@ export function rosterMenuItems(agentId) {
       iconName: paused ? "play" : "pause",
     });
   }
-  if (agent.mine === true || canModerate) {
-    items.push({ separator: true });
-    items.push({
-      act: agent.mine === true ? "channel-agent-remove" : "channel-agent-remove-any",
-      value: agent.id,
-      label: "Remove from this chat",
-      iconName: "trash",
-      danger: true,
-    });
-  }
+  // Removal is not here any more: it is the red button at the bottom of the
+  // settings panel, one level in from a menu that opens on a single click
+  // next to the row it destroys. Same rule about who may do it, applied in
+  // `rosterSettings` where the button is drawn.
   return items;
 }
 

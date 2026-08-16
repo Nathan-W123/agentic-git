@@ -3434,23 +3434,27 @@ document.addEventListener("click", (event) => {
     case "roster-agent-menu":
       showMenu(node, rosterMenuItems(value));
       return;
-    case "channel-rename-toggle":
-      // Reached from the roster's menu, so the menu goes first: `render()`
-      // rebuilds the row behind it, and a popover left open over the result
-      // is anchored to a button that no longer exists.
-      closePopover();
-      state.chatRenamingId = state.chatRenamingId === value ? undefined : value;
-      render();
-      if (state.chatRenamingId === value) {
-        const input = $("[data-act='channel-rename-input']");
-        input?.focus();
-        input?.select();
-      }
-      return;
+    /**
+     * The one entry that edits an agent, opening the panel that holds all of
+     * it — name, role, model, effort and the red removal (`rosterSettings` in
+     * screen-chats.js). It used to be two entries opening two panels, with a
+     * third entry above them doing the destructive thing on a single click.
+     *
+     * Reached from the roster's menu, so the menu goes first: `render()`
+     * rebuilds the row behind it, and a popover left open over the result is
+     * anchored to a button that no longer exists.
+     */
     case "channel-settings-toggle":
       closePopover();
       state.chatSettingsOpenId = state.chatSettingsOpenId === value ? undefined : value;
       render();
+      if (state.chatSettingsOpenId === value) {
+        // The name is the field somebody most often came here for, and it is
+        // the first one in the panel.
+        const input = $("[data-act='channel-rename-input']");
+        input?.focus();
+        input?.select();
+      }
       return;
     case "agent-rename-toggle":
       state.settingsRenamingId =
@@ -4098,17 +4102,29 @@ document.addEventListener("submit", (event) => {
       }
       return;
     }
+    /**
+     * The name and role fields inside the settings panel. Committed here, and
+     * on blur below.
+     *
+     * Only what actually changed is written, and nothing is rendered if
+     * nothing did: the panel stays open around these fields now, and a
+     * rebuild for a field somebody merely tabbed through would take the
+     * select they were reaching for out from under the pointer.
+     */
     case "channel-rename-form": {
       const input = $("[data-act='channel-rename-input']", form);
-      if (input !== null) {
+      const roleInput = $("[data-act='channel-role-input']", form);
+      const renamed = input !== null && input.value !== input.defaultValue;
+      const rerolled = roleInput !== null && roleInput.value !== roleInput.defaultValue;
+      if (renamed) {
         renameChannelAgent(activeChannelId(), form.dataset.value, input.value);
       }
-      const roleInput = $("[data-act='channel-role-input']", form);
-      if (roleInput !== null) {
+      if (rerolled) {
         setChannelAgentSetting(activeChannelId(), form.dataset.value, "role", roleInput.value.trim());
       }
-      state.chatRenamingId = undefined;
-      render();
+      if (renamed || rerolled) {
+        render();
+      }
       return;
     }
     default:
@@ -4429,7 +4445,7 @@ document.addEventListener("keydown", (event) => {
 
 /**
  * Enter commits an in-progress agent rename or role edit, same as blurring
- * the field — both live in the same form (see `rosterRow` in
+ * the field — both live in the same form (see `rosterSettings` in
  * screen-chats.js), so both are handled here.
  */
 document.addEventListener("keydown", (event) => {
@@ -4474,22 +4490,35 @@ document.addEventListener("focusout", (event) => {
   if (act !== "channel-rename-input" && act !== "channel-role-input") {
     return;
   }
+  // Enter already committed and rebuilt the panel, and the field this event
+  // came from is the one that rebuild threw away. Reading a value off it
+  // would commit the same edit a second time.
+  if (!node.isConnected) {
+    return;
+  }
   const form = node.closest("form");
   if (form !== null && form.contains(event.relatedTarget)) {
     return;
   }
   const agentId = node.dataset.value;
-  if (activeChannelId() && agentId && state.chatRenamingId === agentId) {
+  if (activeChannelId() && agentId && state.chatSettingsOpenId === agentId) {
     const nameInput = form === null ? null : $("[data-act='channel-rename-input']", form);
     const roleInput = form === null ? null : $("[data-act='channel-role-input']", form);
-    if (nameInput !== null) {
+    // Unchanged fields are not written and, more to the point, do not render:
+    // the settings panel these live in stays open, and rebuilding it as focus
+    // leaves a field somebody only looked at would move the model picker they
+    // were on their way to.
+    const renamed = nameInput !== null && nameInput.value !== nameInput.defaultValue;
+    const rerolled = roleInput !== null && roleInput.value !== roleInput.defaultValue;
+    if (renamed) {
       renameChannelAgent(activeChannelId(), agentId, nameInput.value);
     }
-    if (roleInput !== null) {
+    if (rerolled) {
       setChannelAgentSetting(activeChannelId(), agentId, "role", roleInput.value.trim());
     }
-    state.chatRenamingId = undefined;
-    render();
+    if (renamed || rerolled) {
+      render();
+    }
   }
 });
 

@@ -4217,6 +4217,51 @@ svg {
   max-width: 100%;
 }
 
+/* The name and role are the first fields of the settings panel rather than a
+   second surface of their own, so the form supplies no indentation — the
+   panel around it already has the row's. */
+.roster-settings .roster-rename {
+  padding: 0;
+}
+
+/* Two labelled fields in one form: the second needs the same air between it
+   and the hint above it that the panel's own `gap` gives its other rows. */
+.roster-settings .roster-rename .rs-label ~ .rs-label {
+  margin-top: 8px;
+}
+
+/* The one destructive control in the panel, and the only red thing in it.
+   Shaped like `.menu-item-danger` — the same red, the same trash glyph, the
+   same wash on hover — because it is the same decision that used to sit in
+   the menu, moved to the bottom of the panel that decides everything else
+   about this agent. */
+.rs-remove {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 2px;
+  padding: 6px 8px;
+  background: transparent;
+  border: 1px solid var(--red-wash);
+  border-radius: 7px;
+  color: var(--red);
+  font-size: 12px;
+  font-weight: 550;
+  text-align: left;
+  cursor: pointer;
+}
+
+.rs-remove svg {
+  width: 14px;
+  height: 14px;
+  color: var(--red);
+}
+
+.rs-remove:hover {
+  background: var(--red-wash);
+}
+
 /* --------------------------------------------------------- chat main ---- */
 
 /* Flex rather than fixed grid rows. The rows were positional — header, search,
@@ -4899,6 +4944,29 @@ svg {
    halo supplies the same subtle backing without changing inline layout. */
 .composer-mirror .mention-ping {
   box-shadow: 0 0 0 2px var(--accent-wash);
+}
+
+/* A command is the same kind of token as a ping and gets the same treatment,
+   in the second accent so the two are told apart at a glance: one addresses
+   somebody, the other tells the channel to do something. Both are painted the
+   moment they are typed, from the composer's mirror, and keep that colour once
+   the message is posted. */
+.cmsg-text .slash-ping,
+.composer-mirror .slash-ping {
+  font-weight: 650;
+  color: var(--accent-2-bright);
+  background: var(--accent-2-wash);
+  border-radius: 4px;
+}
+
+.cmsg-text .slash-ping {
+  padding: 1px 4px;
+}
+
+/* Paint only, for the same reason as the mention above it: padding here would
+   move every character after the command and take the caret with it. */
+.composer-mirror .slash-ping {
+  box-shadow: 0 0 0 2px var(--accent-2-wash);
 }
 
 /* The request itself, at the top of the thinking it produced. Set apart from
