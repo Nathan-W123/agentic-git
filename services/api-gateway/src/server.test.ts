@@ -3504,7 +3504,7 @@ function agentSpeech(messages: unknown[]): any[] {
   return (messages as any[]).filter(
     (message) =>
       message.kind === "agent" &&
-      !/^Want me to take care of this\?/u.test(String(message.content ?? "")),
+      !/^Want me to take this/u.test(String(message.content ?? "")),
   );
 }
 
@@ -3853,6 +3853,11 @@ test("an explicit @mention suppresses auto-claim even when an unmentioned agent 
   assert.ok(task !== undefined);
   assert.equal(task.actorId, backend.id);
   assert.equal(task.vendor, "codex");
+  assert.equal(
+    task.context,
+    undefined,
+    "explicit mentions must not inherit ambient channel context",
+  );
 
   const after = await owner.request(`${base}/messages`);
   const systemMessages = (after.data.messages as any[]).filter(
@@ -9278,8 +9283,8 @@ test("an unnamed request is offered before it is started, and yes starts it", as
     (message) => message.kind === "agent",
   );
   assert.ok(offer !== undefined, JSON.stringify(offered.data.messages));
-  assert.match(offer.content, /Want me to take care of this\?/u);
-  assert.match(offer.content, /Reply "yes"/u);
+  assert.match(offer.content, /Want me to take this, Owner\?/u);
+  assert.match(offer.content, /Say "yes"/u);
   assert.match(offer.content, /@mention someone else/u);
 
   const agreed = await owner.request(`${base}/messages`, {
@@ -9293,6 +9298,138 @@ test("an unnamed request is offered before it is started, and yes starts it", as
     String(runtime.submittedTasks[0]?.objective),
     /settings page layout/u,
   );
+});
+
+test("a proactive offer reads lean channel context and carries it into accepted work", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "offer-context");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // More than the bound, so this proves the model gets the nearby exchange
+  // rather than the whole room. Stored directly because these are setup
+  // conversation lines, not requests whose dispatch behaviour is under test.
+  for (let index = 0; index < 10; index += 1) {
+    await runtime.store.appendChannelMessage({
+      repositoryId,
+      projectId: DEFAULT_PROJECT_ID,
+      kind: "user",
+      authorId: ownerId,
+      content: `context marker ${index}: checkout flow detail`,
+    });
+  }
+
+  const request = "please fix that flow";
+  const before = runtime.chatPrompts.length;
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: request },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  const classification = runtime.chatPrompts.slice(before).at(-1)?.prompt ?? "";
+  assert.match(classification, /Recent channel context before this request/u);
+  assert.doesNotMatch(classification, /context marker 1:/u);
+  assert.match(classification, /context marker 2:/u);
+  assert.match(classification, /context marker 9:/u);
+  assert.ok(
+    classification.indexOf("context marker 9:") <
+      classification.indexOf("Current message:"),
+    classification,
+  );
+  assert.equal(
+    classification.match(/please fix that flow/gu)?.length,
+    1,
+    "the current request should be classified once, outside the background",
+  );
+
+  const offered = await owner.request(`${base}/messages`);
+  const offer = (offered.data.messages as any[]).find((message) =>
+    /^Want me to take this/u.test(String(message.content)),
+  );
+  assert.ok(offer !== undefined, JSON.stringify(offered.data.messages));
+  assert.match(String(offer.content), /Want me to take this, Owner\?/u);
+
+  const agreed = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "yes" },
+  });
+  assert.equal(agreed.status, 201, JSON.stringify(agreed.data));
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const task = runtime.submittedTasks[0];
+  assert.match(String(task?.objective), /please fix that flow/u);
+  const context = task?.context ?? "";
+  assert.doesNotMatch(context, /context marker 1:/u);
+  assert.match(context, /context marker 2:/u);
+  assert.match(context, /context marker 9:/u);
+  assert.doesNotMatch(context, /please fix that flow/u);
+  assert.doesNotMatch(context, /Want me to take this/u);
+  assert.doesNotMatch(context, /\byes\b/iu);
+});
+
+test("a generic proactive follow-up uses recent context to choose its agent", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "offer-context-route");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const settings = await addColleague(runtime, "context-settings@example.com");
+  const database = await addColleague(runtime, "context-database@example.com");
+  runtime.chatConnections.set(settings.id, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  runtime.chatConnections.set(database.id, [
+    { provider: "google", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // The unrelated agent has the longer name and therefore wins the stable
+  // zero-score fallback. Only the preceding database discussion can make the
+  // database agent the better fit for the deliberately generic request.
+  assert.equal(
+    (await owner.request(`${base}/agents/${settings.id}:openai`, {
+      method: "POST",
+      body: { name: "Settings Page Layout Frontend Accessibility Assistant" },
+    })).status,
+    200,
+  );
+  assert.equal(
+    (await owner.request(`${base}/agents/${database.id}:google`, {
+      method: "POST",
+      body: { name: "Database Migration Agent" },
+    })).status,
+    200,
+  );
+  await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "user",
+    authorId: bootstrapped.user.id,
+    content: "The billing database migration keeps failing in CI.",
+  });
+
+  await autoClaim(owner, base, "please fix that");
+
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.equal(runtime.submittedTasks[0]?.actorId, database.id);
+  assert.equal(runtime.submittedTasks[0]?.vendor, "gemini");
+  assert.match(
+    runtime.submittedTasks[0]?.context ?? "",
+    /billing database migration keeps failing/u,
+  );
+
+  // Context is only the fallback for a generic request. Once the current
+  // message names a lane, its own words win over the database discussion.
+  await autoClaim(owner, base, "please update the settings page layout");
+  assert.equal(runtime.submittedTasks.length, 2);
+  assert.equal(runtime.submittedTasks[1]?.actorId, settings.id);
+  assert.equal(runtime.submittedTasks[1]?.vendor, "codex");
 });
 
 test("only the person who asked can accept the offer", async (t) => {
@@ -9376,7 +9513,7 @@ test("a remark about work is not a request, and is offered nothing", async (t) =
   const offers = (after.data.messages as any[]).filter(
     (message) =>
       message.kind === "agent" &&
-      /Want me to take care of this\?/u.test(message.content),
+      /Want me to take this/u.test(message.content),
   );
   assert.deepEqual(offers, [], JSON.stringify(offers));
 });
@@ -9581,7 +9718,7 @@ test("the agent reads the message before offering, and a remark gets no offer", 
   assert.deepEqual(agentSpeech(after.data.messages), []);
   assert.deepEqual(
     (after.data.messages as any[]).filter((message) =>
-      /Want me to take care of this\?/u.test(String(message.content)),
+      /Want me to take this/u.test(String(message.content)),
     ),
     [],
   );
