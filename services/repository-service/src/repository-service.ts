@@ -190,6 +190,22 @@ export interface SyncFromRemoteOptions {
   upstreamBranch?: string;
   credentials?: RemoteRepositoryCredentials;
   /**
+   * What to do when both sides changed the same files.
+   *
+   * `refuse` (the default) changes nothing and throws
+   * {@link SyncDivergedError} — right when nobody has decided yet, and
+   * wrong as the only option: it left a person with a diverged repository
+   * and no way forward that a dashboard could reach.
+   *
+   * The other two are a person's explicit answer to "which side wins for
+   * the files that collide", and neither destroys anything: the merge
+   * commit keeps both sides as parents, so the losing version stays in
+   * history and in the diff. Files that did *not* collide merge normally
+   * either way — a resolution decides only the overlap, and the result
+   * names exactly which files it decided.
+   */
+  conflictResolution?: "refuse" | "prefer-remote" | "prefer-local";
+  /**
    * Where the merge worktree is created when both sides moved. Defaults to
    * the system temp directory; callers with a project scratch area pass it
    * so partial state never lands somewhere surprising.
@@ -206,6 +222,12 @@ export interface SyncFromRemoteResult {
   /** Canonical's tip before and after the sync. Equal on already_current. */
   previousRevision: string;
   revision: string;
+  /**
+   * Files that collided and were settled by an explicit
+   * `conflictResolution`, with the side that won. Absent when nothing
+   * collided — a clean merge decides nothing and should not imply it did.
+   */
+  resolved?: { side: "remote" | "local"; files: string[] };
 }
 
 export interface PushToRemoteOptions {
@@ -740,15 +762,23 @@ export class RepositoryService {
         return { ...result, status: "fast_forwarded", revision: upstreamRevision };
       }
 
-      const revision = await this.mergeUpstream(
+      const merged = await this.mergeUpstream(
         repository,
         upstreamRef,
         upstreamRevision,
         upstreamBranch,
         options.workspaceRoot,
+        options.conflictResolution ?? "refuse",
       );
       await this.recordImportPoint(repository, upstreamBranch, upstreamRevision);
-      return { ...result, status: "merged", revision };
+      return {
+        ...result,
+        status: "merged",
+        revision: merged.revision,
+        ...(merged.resolved === undefined
+          ? {}
+          : { resolved: merged.resolved }),
+      };
     } finally {
       // Scaffolding, like a finished lease: the fetched ref has served its
       // purpose, and `refs/coord/` should list only what still means
@@ -810,7 +840,11 @@ export class RepositoryService {
     upstreamRevision: string,
     upstreamBranch: string,
     workspaceRoot: string | undefined,
-  ): Promise<string> {
+    conflictResolution: "refuse" | "prefer-remote" | "prefer-local",
+  ): Promise<{
+    revision: string;
+    resolved?: { side: "remote" | "local"; files: string[] };
+  }> {
     assertIdentity(this.identity);
     const scratchRoot = workspaceRoot ?? os.tmpdir();
     await mkdir(scratchRoot, { recursive: true });
@@ -831,7 +865,7 @@ export class RepositoryService {
         repository.branch,
       ]);
       worktreeAdded = true;
-      const mergeArgs = [
+      const mergeArgs = (strategy?: "theirs" | "ours"): string[] => [
         "-C",
         worktreePath,
         "-c",
@@ -845,28 +879,63 @@ export class RepositoryService {
         "--no-edit",
         "--no-gpg-sign",
         "--no-verify",
+        ...(strategy === undefined ? [] : ["-X", strategy]),
         "-m",
-        `Sync ${upstreamBranch} from origin: merge ${upstreamRevision.slice(0, 12)} into canonical`,
+        strategy === undefined
+          ? `Sync ${upstreamBranch} from origin: merge ${upstreamRevision.slice(0, 12)} into canonical`
+          : `Sync ${upstreamBranch} from origin: merge ${upstreamRevision.slice(0, 12)} into canonical, ` +
+            `taking ${strategy === "theirs" ? "GitHub's" : "canonical's"} side where they collided`,
         "--end-of-options",
         upstreamRef,
-      ] as const;
-      const merge = await this.git.run(mergeArgs, { allowFailure: true });
-      if (merge.exitCode !== 0) {
-        const conflicted = await this.git.run(
-          ["-C", worktreePath, "diff", "--name-only", "--diff-filter=U"],
-          { allowFailure: true },
-        );
-        const conflicts = conflicted.stdout
-          .split(/\r?\n/u)
-          .map((line) => line.trim())
-          .filter((line) => line.length > 0);
+      ];
+      // Always tried clean first, even when a resolution is on offer: a
+      // strategy must decide only the files that genuinely collide, and
+      // this pass is also what names them for the record.
+      const plain = mergeArgs();
+      const merge = await this.git.run(plain, { allowFailure: true });
+      if (merge.exitCode === 0) {
+        const merged = await this.git.run([
+          "-C",
+          worktreePath,
+          "rev-parse",
+          "HEAD",
+        ]);
+        return { revision: merged.stdout.trim() };
+      }
+      const conflicted = await this.git.run(
+        ["-C", worktreePath, "diff", "--name-only", "--diff-filter=U"],
+        { allowFailure: true },
+      );
+      const conflicts = conflicted.stdout
+        .split(/\r?\n/u)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+      await this.git.run(["-C", worktreePath, "merge", "--abort"], {
+        allowFailure: true,
+      });
+      if (conflicts.length === 0) {
+        throw new GitCommandError(plain, merge);
+      }
+      if (conflictResolution === "refuse") {
+        throw new SyncDivergedError(upstreamBranch, conflicts);
+      }
+      // `-X` is git's own per-hunk preference, not a wholesale checkout: a
+      // file that collides in one place and merges cleanly in another keeps
+      // both, and the losing content stays reachable through the merge's
+      // other parent either way.
+      const strategy =
+        conflictResolution === "prefer-remote" ? "theirs" : "ours";
+      const resolvedMerge = await this.git.run(mergeArgs(strategy), {
+        allowFailure: true,
+      });
+      if (resolvedMerge.exitCode !== 0) {
         await this.git.run(["-C", worktreePath, "merge", "--abort"], {
           allowFailure: true,
         });
-        if (conflicts.length > 0) {
-          throw new SyncDivergedError(upstreamBranch, conflicts);
-        }
-        throw new GitCommandError(mergeArgs, merge);
+        // A collision `-X` cannot settle — the same file deleted on one side
+        // and edited on the other is the usual one — is still a refusal,
+        // because there is no version of it for a preference to pick.
+        throw new SyncDivergedError(upstreamBranch, conflicts);
       }
       const merged = await this.git.run([
         "-C",
@@ -874,7 +943,13 @@ export class RepositoryService {
         "rev-parse",
         "HEAD",
       ]);
-      return merged.stdout.trim();
+      return {
+        revision: merged.stdout.trim(),
+        resolved: {
+          side: strategy === "theirs" ? "remote" : "local",
+          files: conflicts,
+        },
+      };
     } finally {
       if (worktreeAdded) {
         await this.git.run(

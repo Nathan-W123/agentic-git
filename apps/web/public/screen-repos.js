@@ -304,28 +304,65 @@ export async function connectRepository(rerender) {
   }
 }
 
-export async function syncRepositoryFromGitHub(repositoryId, rerender) {
+export async function syncRepositoryFromGitHub(repositoryId, rerender, resolve) {
   toast("Syncing from GitHub…");
   try {
     const result = await api(
       `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/sync`,
-      { method: "POST", body: {} },
+      { method: "POST", body: resolve === undefined ? {} : { resolve } },
     );
     const sync = result.sync ?? {};
     const moved = `${String(sync.previousRevision ?? "").slice(0, 8)} → ${String(
       sync.revision ?? "",
     ).slice(0, 8)}`;
+    const settled = sync.resolved?.files?.length ?? 0;
     toast(
       sync.status === "already_current"
         ? "Already up to date with GitHub"
         : sync.status === "fast_forwarded"
           ? `Synced from GitHub (${moved})`
-          : `Synced from GitHub — local work and GitHub's merged (${moved})`,
+          : settled > 0
+            ? `Synced — ${settled} clashing file${settled === 1 ? "" : "s"} took ` +
+              `${sync.resolved.side === "remote" ? "GitHub's" : "this project's"} side (${moved})`
+            : `Synced from GitHub — local work and GitHub's merged (${moved})`,
       "ok",
     );
     await loadContext();
     rerender();
   } catch (error) {
+    // A collision is a question, not a failure: the same files changed on
+    // both sides, and only a person can say which version survives. Asked
+    // here rather than reported, because the alternative — the remedies the
+    // refusal used to list — is not reachable from a phone at all.
+    if (error.code === "sync_conflict") {
+      const choice = await showModal({
+        title: "Both sides changed the same files",
+        subtitle:
+          "Pick which version wins for those files. Everything else merges " +
+          "normally, and the version you don't pick stays in the history.",
+        confirm: "Take GitHub's version",
+        cancel: "Keep this project's",
+        body: `<p class="modal-hint">${esc(error.message)}</p>`,
+      });
+      if (choice === undefined) {
+        // Cancel is the second answer here, not a way out — the dialog's
+        // two buttons are the two sides. Nothing has changed yet either way.
+        const keep = await showModal({
+          title: "Keep this project's version?",
+          subtitle: "For the clashing files only.",
+          confirm: "Keep this project's version",
+          body: `<p class="modal-hint">GitHub's version of those files stays
+            in the history and in the merge, but this project's content is
+            what the files hold afterwards.</p>`,
+        });
+        if (keep !== undefined) {
+          await syncRepositoryFromGitHub(repositoryId, rerender, "prefer-local");
+        }
+        return;
+      }
+      await syncRepositoryFromGitHub(repositoryId, rerender, "prefer-remote");
+      return;
+    }
     toast(error.message, "error");
   }
 }
