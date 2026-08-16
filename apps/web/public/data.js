@@ -265,6 +265,12 @@ export const state = {
   workspaceRepo: undefined,
   chatRenamingId: undefined,
   chatSettingsOpenId: undefined,
+  /**
+   * Which agent the Settings screen is renaming, by provider id. The same
+   * shape as `chatRenamingId` above, kept separate because the two fields can
+   * be open at once and neither should close the other.
+   */
+  settingsRenamingId: undefined,
   chatDraft: "",
   threadDraft: "",
   mentionActive: false,
@@ -1678,6 +1684,11 @@ export function myAgents() {
       name:
         provider.callSign ??
         `${AGENT_LABEL[provider.id] ?? provider.name ?? provider.id} (${shortUser()})`,
+      // Whether that name is one the account actually holds or the vendor
+      // fallback. The Settings screen trims the "(owner)" suffix off the
+      // fallback and must not trim a chosen name that happens to end in
+      // brackets.
+      hasName: provider.callSign !== undefined,
       // No default label. An agent is unlabeled until someone in a given
       // channel actually names its role there — see `withOverride` — rather
       // than inheriting a vendor-guessed title like "Lead Developer" it never
@@ -2914,13 +2925,114 @@ export function toggleChannelReaction(repositoryId, messageId, emoji = "👍") {
 }
 
 /**
- * Renames an agent as it appears in one channel.
+ * The provider behind an agent id, when the agent is this account's own.
  *
- * Scoped to the channel rather than to the agent's account-wide connection:
- * this is how the agent presents itself in this room, which two different
- * channels are free to disagree about, the same way a person can pick a
- * different display name per Slack workspace. Persisted server-side keyed by
- * (repository, agent), not by the agent's global identity.
+ * A channel roster carries both shapes: `myAgents` mints a bare provider id
+ * ("anthropic") for one's own agents, while a teammate's is
+ * `${userId}:${provider}`. Only the first is renameable account-wide from
+ * here, so this answers "is this mine, and of what vendor" in one place.
+ */
+function ownProviderId(agentId) {
+  const myId = currentUserId();
+  const bare = String(agentId ?? "").startsWith(`${myId}:`)
+    ? String(agentId).slice(myId.length + 1)
+    : String(agentId ?? "");
+  return state.providers.some((provider) => provider.id === bare)
+    ? bare
+    : undefined;
+}
+
+/**
+ * Applies an account-wide rename to everything the browser is already holding
+ * a name in, so one write shows up everywhere at once.
+ *
+ * Three places hold a name: the account's own connection record (what
+ * `myAgents` and therefore the Settings screen read), each repository's
+ * resolved roster (what `channelAgentsFor` prefers), and each repository's
+ * local overrides (which shadow both). The server has just done the same
+ * three things durably — see the `/chat/providers/{id}/settings` route and
+ * `clearChannelAgentNameOverrides` — and this keeps the screen from waiting
+ * on a refetch of every channel to agree with it.
+ */
+function applyAgentRenameLocally(providerId, name) {
+  const myId = currentUserId();
+  const keys = [providerId, `${myId}:${providerId}`];
+  state.providers = state.providers.map((provider) =>
+    provider.id === providerId ? { ...provider, callSign: name } : provider,
+  );
+  for (const repositoryId of Object.keys(state.channelAgentOverrides)) {
+    const overrides = state.channelAgentOverrides[repositoryId] ?? {};
+    let changed = false;
+    const next = { ...overrides };
+    for (const key of keys) {
+      if (next[key]?.name === undefined) {
+        continue;
+      }
+      const { name: _dropped, ...rest } = next[key];
+      next[key] = rest;
+      changed = true;
+    }
+    if (changed) {
+      state.channelAgentOverrides[repositoryId] = next;
+    }
+  }
+  for (const repositoryId of Object.keys(state.channelRoster)) {
+    state.channelRoster[repositoryId] = (
+      state.channelRoster[repositoryId] ?? []
+    ).map((entry) =>
+      entry.userId === myId && entry.provider === providerId
+        ? { ...entry, name }
+        : entry,
+    );
+  }
+}
+
+/**
+ * Renames one of this account's own agents, everywhere.
+ *
+ * The name is the agent's own — a call sign held on the account — not a
+ * per-room label, so this writes the same record the channel roster's rename
+ * writes and the Settings screen reads. Answering to one name in one
+ * repository and another name in the next is the thing this is here to stop.
+ */
+export async function renameAgent(providerId, name) {
+  const trimmed = String(name ?? "").trim();
+  if (!providerId || trimmed === "") {
+    return false;
+  }
+  const agents = myAgents();
+  if (agents.find((agent) => agent.id === providerId)?.name === trimmed) {
+    return true; // Committed unchanged — a blur after opening the field.
+  }
+  // Two of your own agents sharing a name makes `@name` ambiguous in every
+  // room they are both in, which is the same reason the channel rename
+  // refuses a duplicate.
+  if (agents.some((agent) => agent.id !== providerId && agent.name === trimmed)) {
+    toast(`${trimmed} is already one of your agents — pick another name.`, "error");
+    return false;
+  }
+  try {
+    await applyProviderSetting(providerId, "callSign", trimmed);
+  } catch (error) {
+    toast(`Rename did not save: ${error.message}`, "error");
+    return false;
+  }
+  applyAgentRenameLocally(providerId, trimmed);
+  return true;
+}
+
+/**
+ * Renames an agent from a channel roster.
+ *
+ * Your own agent is renamed account-wide: an agent answers to one name, and
+ * the server turns this into the same call-sign write the Settings screen
+ * makes, clearing whatever per-repository names were shadowing it. The old
+ * behaviour — Athena here, Vesta next door — is what people reported as the
+ * rename not sticking.
+ *
+ * A teammate's agent is still renamed for this channel alone, keyed
+ * (repository, agent) server-side: their agent's name is theirs, and nobody
+ * with mere `view` here gets to change it in every repository they work in.
  */
 export function renameChannelAgent(repositoryId, agentId, name) {
   const trimmed = String(name ?? "").trim();
@@ -2938,11 +3050,26 @@ export function renameChannelAgent(repositoryId, agentId, name) {
     );
     return;
   }
-  state.channelAgentOverrides[repositoryId] ??= {};
-  state.channelAgentOverrides[repositoryId][agentId] = {
-    ...state.channelAgentOverrides[repositoryId][agentId],
-    name: trimmed,
-  };
+  const providerId = ownProviderId(agentId);
+  if (providerId === undefined) {
+    state.channelAgentOverrides[repositoryId] ??= {};
+    state.channelAgentOverrides[repositoryId][agentId] = {
+      ...state.channelAgentOverrides[repositoryId][agentId],
+      name: trimmed,
+    };
+    // The roster's resolved name wins over the local override in
+    // `channelAgentsFor`, so without this the rename would not show until the
+    // roster was fetched again.
+    state.channelRoster[repositoryId] = (
+      state.channelRoster[repositoryId] ?? []
+    ).map((entry) =>
+      `${entry.userId}:${entry.provider}` === agentId
+        ? { ...entry, name: trimmed }
+        : entry,
+    );
+  } else {
+    applyAgentRenameLocally(providerId, trimmed);
+  }
   if (state.projectId) {
     void api(channelPath(repositoryId, `/agents/${encodeURIComponent(agentId)}`), {
       method: "POST",

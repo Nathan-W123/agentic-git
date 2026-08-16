@@ -568,7 +568,14 @@ function rosterRow(agent, canModerate) {
         ${iconButton("pencil", {
           act: "channel-rename-toggle",
           value: agent.id,
-          title: "Rename or set role in this channel",
+          // A name and a role are not the same kind of thing any more: your
+          // own agent's name is the account's, and renaming it here changes
+          // it in every repository (and in Settings), while the role stays
+          // this channel's decision. Somebody else's agent is still renamed
+          // here alone.
+          title: agent.mine
+            ? "Rename everywhere, or set its role in this channel"
+            : "Rename or set role in this channel",
           small: true,
         })}
         ${iconButton("sliders", {
@@ -604,6 +611,7 @@ function rosterRow(agent, canModerate) {
         ? `<form class="roster-rename" data-act="channel-rename-form" data-value="${esc(agent.id)}">
             <input data-act="channel-rename-input" data-value="${esc(agent.id)}"
               value="${esc(agent.name)}" placeholder="${esc(agent.name)}"
+              ${agent.mine ? 'maxlength="40" title="Its name in every repository"' : ""}
               autocomplete="off" enterkeyhint="done">
             <input data-act="channel-role-input" data-value="${esc(agent.id)}"
               value="${esc(agent.role ?? "")}" placeholder="Role in this channel"

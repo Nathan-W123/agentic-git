@@ -2352,6 +2352,29 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     return copy(override);
   }
 
+  public async clearChannelAgentNameOverrides(agentId: string): Promise<void> {
+    for (const [key, override] of this.channelAgentOverrides) {
+      if (override.agentId !== agentId || override.name === undefined) {
+        continue;
+      }
+      const { name: _dropped, ...rest } = override;
+      // A row that only ever carried a name has nothing left to say once the
+      // name is the account's again, so it goes rather than lingering empty.
+      if (
+        (rest.role ?? "") === "" &&
+        (rest.model ?? "") === "" &&
+        (rest.effort ?? "") === ""
+      ) {
+        this.channelAgentOverrides.delete(key);
+      } else {
+        this.channelAgentOverrides.set(key, {
+          ...rest,
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
+  }
+
   public async listAgentCallSigns(): Promise<AgentCallSign[]> {
     return [...this.agentCallSigns.values()].map((sign) => copy(sign));
   }

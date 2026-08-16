@@ -336,7 +336,39 @@ async function startRuntime(
       async usage() {
         return {};
       },
-      async setSettings() {
+      async setSettings(input) {
+        // Only the call sign, which is the one setting the gateway does more
+        // than relay: a rename is account-wide, so the fixture has to behave
+        // like the real service — refuse a vendor this account has not
+        // connected, and otherwise write the name where both readers of it
+        // look (the connection the roster resolves through, and the durable
+        // store).
+        const connections = chatConnections.get(input.userId) ?? [];
+        const connection = connections.find(
+          (entry) => entry.provider === input.provider,
+        );
+        if (connection === undefined) {
+          throw Object.assign(
+            new Error(`Connect ${input.provider} before changing its settings`),
+            { status: 409, code: "not_connected" },
+          );
+        }
+        if (input.callSign !== undefined) {
+          const trimmed = input.callSign.trim();
+          if (trimmed.length > 40) {
+            throw Object.assign(
+              new Error("A call sign is at most 40 characters"),
+              { status: 400, code: "invalid_call_sign" },
+            );
+          }
+          if (trimmed === "") {
+            delete connection.callSign;
+            await store.clearAgentCallSign(input.userId, input.provider);
+          } else {
+            connection.callSign = trimmed;
+            await store.setAgentCallSign(input.userId, input.provider, trimmed);
+          }
+        }
         return {};
       },
       async complete(input: any) {
@@ -7556,17 +7588,105 @@ test("the roster falls back to the stored call sign, not the vendor label", asyn
   assert.equal(roster.data.agents.length, 1);
   assert.equal(roster.data.agents[0].name, "Athena");
 
-  // A channel rename still wins over it: the per-room override is the one
-  // thing that is allowed to disagree with an agent's account-wide name.
+  // Renaming your own agent from a channel renames it everywhere: the name is
+  // the account's call sign, not a label this room happens to use, so the
+  // second repository below answers to it without ever having been told.
+  const second = await invitableRepository(owner, "named-too");
+  await joinAllConnectedAgents(runtime, second);
   const renamed = await owner.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents/${ownerId}:anthropic`,
     { method: "POST", body: { name: "Scout" } },
   );
   assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+  assert.equal(renamed.data.scope, "account");
+  assert.equal(renamed.data.override.name, "Scout");
   const afterRename = await owner.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`,
   );
   assert.equal(afterRename.data.agents[0].name, "Scout");
+  const elsewhere = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${second}/channel/agents`,
+  );
+  assert.equal(elsewhere.data.agents[0].name, "Scout");
+  // Written where the account holds it, not as a per-room shadow of it.
+  const signs = await runtime.store.listAgentCallSigns();
+  assert.equal(signs.find((sign) => sign.userId === ownerId)?.callSign, "Scout");
+  const overrides = await runtime.store.listChannelAgentOverrides(repo);
+  assert.equal(overrides[`${ownerId}:anthropic`]?.name, undefined);
+});
+
+test("renaming an agent in Settings renames it in every repository", async (t) => {
+  // The reported bug, from the other side: an agent renamed in one channel
+  // kept its old name in the next, and Settings — which reads the account's
+  // own connection — never showed the new one at all. One name, written
+  // account-wide, and the per-repository names that used to shadow it are
+  // cleared as part of the same write.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const first = await invitableRepository(owner, "one");
+  const second = await invitableRepository(owner, "two");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "personal", callSign: "Athena" },
+  ]);
+  await joinAllConnectedAgents(runtime, first);
+  await joinAllConnectedAgents(runtime, second);
+  // A name this room had given it before any of this existed, which is
+  // exactly what used to survive a rename and keep answering to the old name.
+  await runtime.store.setChannelAgentOverride(second, `${ownerId}:anthropic`, {
+    name: "Vesta",
+    role: "Backend Engineer",
+  });
+
+  const renamed = await owner.request("/api/v1/chat/providers/anthropic/settings", {
+    method: "POST",
+    body: { callSign: "Hermes" },
+  });
+  assert.equal(renamed.status, 200, JSON.stringify(renamed.data));
+
+  for (const repositoryId of [first, second]) {
+    const roster = await owner.request(
+      `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel/agents`,
+    );
+    assert.equal(roster.status, 200, JSON.stringify(roster.data));
+    assert.equal(roster.data.agents[0].name, "Hermes");
+  }
+  // The role that room set is its own decision and survives the rename.
+  const overrides = await runtime.store.listChannelAgentOverrides(second);
+  assert.equal(overrides[`${ownerId}:anthropic`]?.name, undefined);
+  assert.equal(overrides[`${ownerId}:anthropic`]?.role, "Backend Engineer");
+
+  // And the name is the one a mention resolves against, everywhere.
+  const posted = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${second}/channel/messages`,
+    { method: "POST", body: { content: "@Hermes please look at this" } },
+  );
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 1);
+});
+
+test("a call sign longer than the account allows is refused, not half-written", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "long-name");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "personal", callSign: "Athena" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+
+  const refused = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents/${ownerId}:anthropic`,
+    { method: "POST", body: { name: "N".repeat(41) } },
+  );
+  assert.equal(refused.status, 400, JSON.stringify(refused.data));
+  assert.equal(refused.data.error.code, "invalid_call_sign");
+  const roster = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/agents`,
+  );
+  assert.equal(roster.data.agents[0].name, "Athena");
 });
 
 test("the roster reports the connection's own call sign, and that name answers", async (t) => {

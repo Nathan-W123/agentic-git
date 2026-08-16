@@ -3477,6 +3477,23 @@ svg {
 .set-row .sr-ctl {
   margin-left: auto;
   flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* Renaming an agent in Settings, in the place its name was: the field takes
+   the row's own title line so the row does not jump as it opens. */
+.agent-rename {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-rename input {
+  width: 180px;
+  padding: 4px 8px;
+  font-size: 13px;
 }
 
 .switch {

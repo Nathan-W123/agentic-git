@@ -2049,6 +2049,13 @@ export interface ChatProviderOperations {
     provider: string;
     model?: string;
     effort?: string;
+    /**
+     * The agent's name, held on the account and therefore the same in every
+     * repository — see `ProviderSettings.callSign` in `apps/web/src/providers.ts`.
+     * An empty string clears it back to the vendor label, the way model and
+     * effort clear.
+     */
+    callSign?: string;
     visibility?: "personal" | "org";
   }): Promise<unknown>;
   complete(input: {
@@ -6672,11 +6679,57 @@ export class ApiGateway {
           );
         }
       }
+      // A name is the agent's own, not this room's.
+      //
+      // An agent answers to one name, everywhere: renaming your own agent
+      // here writes the account's call sign — the same record the Settings
+      // screen writes through `/chat/providers/{id}/settings` — and clears
+      // the per-repository names that would otherwise go on shadowing it in
+      // the other channels. Renaming in one room and finding the old name
+      // still up in the next is what this replaces.
+      //
+      // Only your own. A teammate's agent is still renamed for this channel
+      // alone: their name is theirs, and renaming it in every repository they
+      // work in is not a decision anyone with `view` here gets to make.
+      const chatProviders = this.options.operations.chatProviders;
+      const ownPrefix = `${principal.user.id}:`;
+      const ownProvider = agentId.startsWith(ownPrefix)
+        ? agentId.slice(ownPrefix.length)
+        : undefined;
+      let namedAccountWide = false;
+      if (name !== undefined && ownProvider !== undefined && chatProviders !== undefined) {
+        try {
+          await chatProviders.setSettings({
+            userId: principal.user.id,
+            provider: ownProvider,
+            callSign: name,
+          });
+          namedAccountWide = true;
+        } catch (error) {
+          const status = (error as { status?: unknown }).status;
+          const code = (error as { code?: unknown }).code;
+          // A vendor this deployment cannot see a connection for still gets
+          // the old per-channel rename rather than an error: the roster is
+          // showing the agent, so refusing to rename what is plainly there
+          // would be the worse answer. Everything else — a name too long for
+          // a call sign, most of all — is reported, because silently storing
+          // it in one channel is how the two came to disagree.
+          if (code !== "not_connected") {
+            if (error instanceof Error && typeof status === "number" && typeof code === "string") {
+              throw new HttpError(status, code, error.message);
+            }
+            throw error;
+          }
+        }
+      }
+      if (namedAccountWide) {
+        await this.options.store.clearChannelAgentNameOverrides(agentId);
+      }
       const override = await this.options.store.setChannelAgentOverride(
         repositoryId,
         agentId,
         {
-          ...(name === undefined ? {} : { name }),
+          ...(name === undefined || namedAccountWide ? {} : { name }),
           ...(role === undefined ? {} : { role }),
           ...(model === undefined ? {} : { model }),
           ...(effort === undefined ? {} : { effort }),
@@ -6684,9 +6737,20 @@ export class ApiGateway {
       );
       await this.options.store.appendAudit(undefined, {
         type: "channel_agent_overridden",
-        data: { projectId, repositoryId, agentId },
+        data: {
+          projectId,
+          repositoryId,
+          agentId,
+          ...(namedAccountWide ? { name, scope: "account" } : {}),
+        },
       });
-      this.sendJson(response, 200, { override });
+      this.sendJson(response, 200, {
+        // The name the agent now answers to, whichever record holds it: an
+        // account-wide rename leaves no `name` on the override, and a client
+        // reading only the override would have seen its own rename vanish.
+        override: namedAccountWide ? { ...override, name } : override,
+        ...(namedAccountWide ? { scope: "account" as const } : {}),
+      });
       return;
     }
 
@@ -7018,6 +7082,15 @@ export class ApiGateway {
             max: 20,
             optional: true,
           });
+          // The agent's name, and the reason this route is what Settings
+          // renames through: a call sign is held on the account, so one write
+          // here is the agent's name in every repository at once. `min: 0`
+          // because an empty string is the documented "clear it" value.
+          const callSign = stringField(body["callSign"], "callSign", {
+            max: 40,
+            min: 0,
+            optional: true,
+          });
           // Only the two the credential store understands. A free string here
           // would reach the connection file and decide, wrongly, whose
           // credential a teammate's prompt spends.
@@ -7036,17 +7109,36 @@ export class ApiGateway {
               "Visibility must be personal or org",
             );
           }
-          this.sendJson(response, 200, {
-            providers: await performChat(() =>
-              chatOperations.setSettings({
-                userId: identity.userId,
-                provider,
-                ...(model === undefined ? {} : { model }),
-                ...(effort === undefined ? {} : { effort }),
-                ...(visibility === undefined ? {} : { visibility }),
-              }),
-            ),
-          });
+          const providers = await performChat(() =>
+            chatOperations.setSettings({
+              userId: identity.userId,
+              provider,
+              ...(model === undefined ? {} : { model }),
+              ...(effort === undefined ? {} : { effort }),
+              ...(callSign === undefined ? {} : { callSign }),
+              ...(visibility === undefined ? {} : { visibility }),
+            }),
+          );
+          // A rename is account-wide, so nothing per-repository may go on
+          // shadowing it: an override naming this agent in one channel wins
+          // over the call sign there (`resolveChannelAgentPresentation`), and
+          // leaving those standing is exactly the "renamed it and the other
+          // repositories kept the old name" complaint. Roles, models and
+          // efforts set in a channel are that channel's decision and stay.
+          if (callSign !== undefined) {
+            await this.options.store.clearChannelAgentNameOverrides(
+              `${identity.userId}:${provider}`,
+            );
+            await this.options.store.appendAudit(undefined, {
+              type: "channel_agent_overridden",
+              data: {
+                agentId: `${identity.userId}:${provider}`,
+                name: callSign,
+                scope: "account",
+              },
+            });
+          }
+          this.sendJson(response, 200, { providers });
           return;
         }
         throw new HttpError(405, "method_not_allowed", "Unsupported method");

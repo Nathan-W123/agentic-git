@@ -61,6 +61,7 @@ import {
   addChannelAgent,
   removeChannelAgent,
   removeChannelAgentForUser,
+  renameAgent,
   renameChannelAgent,
   setChannelAgentSetting,
   deleteRepository,
@@ -1051,7 +1052,15 @@ function agentsCard() {
                deployment.</div></span></div>`
         : agents
             .map((agent) => {
-              const label = agent.name.replace(/\s*\(.*\)$/u, "");
+              // The owner suffix is dropped from a vendor-label fallback
+              // ("Claude (Nathan)" reads as "Claude" in your own settings),
+              // but never from a name somebody chose — an agent called
+              // "Athena (night shift)" keeps every word of it.
+              const label =
+                agent.hasName === true
+                  ? agent.name
+                  : agent.name.replace(/\s*\(.*\)$/u, "");
+              const renaming = state.settingsRenamingId === agent.id;
               // Three states, not two: a credential that has stopped
               // authenticating is stored but useless, and saying "connected"
               // about it is what let every task it was given fail in silence.
@@ -1062,12 +1071,38 @@ function agentsCard() {
                   : { text: "Not connected", cls: "" };
               return `<div class="set-row">
                 <span class="sr-body">
-                  <div class="sr-title">${esc(label)}</div>
+                  ${
+                    renaming
+                      ? `<form class="agent-rename" data-act="agent-rename-form"
+                          data-value="${esc(agent.id)}">
+                          <input class="input" data-act="settings-rename-input"
+                            data-value="${esc(agent.id)}" maxlength="40"
+                            aria-label="Agent name" value="${esc(label)}">
+                          <button class="btn btn-sm btn-primary" type="submit">Save</button>
+                        </form>`
+                      : `<div class="sr-title">${esc(label)}</div>`
+                  }
                   <div class="sr-sub${state_.cls}">${esc(state_.text)}${
                     agent.detail ? ` — ${esc(agent.detail)}` : ""
+                  }${
+                    renaming
+                      ? " — this name is what it answers to in every repository"
+                      : ""
                   }</div>
                 </span>
                 <span class="sr-ctl">
+                  ${
+                    // A name belongs to a connection: there is nothing to
+                    // rename on a vendor this account has never connected,
+                    // and the server says so rather than guessing. An expired
+                    // sign-in still has one, so it can still be renamed.
+                    renaming || !(agent.connected || agent.needsReconnect)
+                      ? ""
+                      : `<button type="button" class="btn btn-sm"
+                          data-act="agent-rename-toggle"
+                          data-value="${esc(agent.id)}"
+                          title="Rename this agent everywhere">Rename</button>`
+                  }
                   ${
                     agent.connected
                       ? `<button type="button" class="btn btn-sm"
@@ -1085,6 +1120,20 @@ function agentsCard() {
             .join("")
     }
   </section>`;
+}
+
+/**
+ * Commits a rename typed in Settings.
+ *
+ * The field closes first and the screen redraws from the optimistic local
+ * name `renameAgent` applies, then again when the server has answered — a
+ * refused name (a duplicate, or one the provider rejects) toasts and the old
+ * name comes back on that second render.
+ */
+function commitAgentRename(providerId, name) {
+  state.settingsRenamingId = undefined;
+  render();
+  void renameAgent(providerId, name).then(() => render());
 }
 
 function appearanceCard() {
@@ -2628,7 +2677,11 @@ let renderAgain = false;
  */
 function renameFieldFocused() {
   const act = document.activeElement?.dataset?.act;
-  return act === "channel-rename-input" || act === "channel-role-input";
+  return (
+    act === "channel-rename-input" ||
+    act === "channel-role-input" ||
+    act === "settings-rename-input"
+  );
 }
 
 export function render() {
@@ -2792,6 +2845,9 @@ function navigate(route) {
   }
   state.route = route;
   state.navOpen = false;
+  // An open rename field belongs to the screen it was opened on; leaving and
+  // coming back to Settings should not find it still open on an old value.
+  state.settingsRenamingId = undefined;
   closePopover();
   if (window.location.hash !== `#${route}`) {
     window.location.hash = `#${route}`;
@@ -3366,6 +3422,16 @@ document.addEventListener("click", (event) => {
     case "channel-settings-toggle":
       state.chatSettingsOpenId = state.chatSettingsOpenId === value ? undefined : value;
       render();
+      return;
+    case "agent-rename-toggle":
+      state.settingsRenamingId =
+        state.settingsRenamingId === value ? undefined : value;
+      render();
+      if (state.settingsRenamingId === value) {
+        const input = $("[data-act='settings-rename-input']");
+        input?.focus();
+        input?.select();
+      }
       return;
     case "chan-revert-task":
       void revertTaskAction(activeChannelId(), value);
@@ -3997,6 +4063,13 @@ document.addEventListener("submit", (event) => {
       beginThreadTurn(state.activeChannelThread, state.threadDraft);
       submitThreadReply(render);
       return;
+    case "agent-rename-form": {
+      const input = $("[data-act='settings-rename-input']", form);
+      if (input !== null) {
+        commitAgentRename(form.dataset.value, input.value);
+      }
+      return;
+    }
     case "channel-rename-form": {
       const input = $("[data-act='channel-rename-input']", form);
       if (input !== null) {
@@ -4362,7 +4435,9 @@ document.addEventListener("keydown", (event) => {
   const node = event.target;
   const act = node?.dataset?.act;
   if (
-    (act === "channel-rename-input" || act === "channel-role-input") &&
+    (act === "channel-rename-input" ||
+      act === "channel-role-input" ||
+      act === "settings-rename-input") &&
     event.key === "Enter" &&
     !imeComposing(event)
   ) {
@@ -4385,6 +4460,16 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("focusout", (event) => {
   const node = event.target;
   const act = node?.dataset?.act;
+  // The Settings rename is the same bargain — clicking away commits rather
+  // than discards — but it writes account-wide and has no role field beside
+  // it, so it commits on its own here.
+  if (act === "settings-rename-input") {
+    const providerId = node.dataset.value;
+    if (providerId && state.settingsRenamingId === providerId) {
+      commitAgentRename(providerId, node.value);
+    }
+    return;
+  }
   if (act !== "channel-rename-input" && act !== "channel-role-input") {
     return;
   }

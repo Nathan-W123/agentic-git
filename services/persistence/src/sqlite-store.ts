@@ -3576,6 +3576,28 @@ export class SqliteCoordinationStore implements CoordinationStore {
     return override;
   }
 
+  public async clearChannelAgentNameOverrides(agentId: string): Promise<void> {
+    // Two statements rather than one UPDATE: a row whose only content was the
+    // name has nothing left to say afterwards, and leaving it empty would keep
+    // an override in every list for no reason.
+    this.db
+      .prepare(
+        `DELETE FROM channel_agent_overrides
+          WHERE agent_id = ? AND name IS NOT NULL
+            AND (role IS NULL OR role = '')
+            AND (model IS NULL OR model = '')
+            AND (effort IS NULL OR effort = '')`,
+      )
+      .run(agentId);
+    this.db
+      .prepare(
+        `UPDATE channel_agent_overrides
+            SET name = NULL, updated_at = ?
+          WHERE agent_id = ? AND name IS NOT NULL`,
+      )
+      .run(new Date().toISOString(), agentId);
+  }
+
   public async listAgentCallSigns(): Promise<AgentCallSign[]> {
     const rows = this.db
       .prepare("SELECT * FROM agent_call_signs ORDER BY assigned_at, user_id")
