@@ -554,27 +554,93 @@ svg {
   overflow: hidden;
 }
 
-/* The brand, now the channel sidebar's crown. A button because it goes
-   somewhere (Settings); the gear on the right says so without a label. */
+/* The sidebar crown owns both the product home and the control that changes
+   its width. Keeping those together means the control remains at the top of
+   the rail in both states instead of jumping into the conversation header. */
+.chan-sidebar-top {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 10px 6px;
+}
+
 .chan-brand {
   display: flex;
   align-items: center;
   gap: 9px;
-  padding: 14px 14px 10px;
-  width: 100%;
+  min-width: 0;
+  flex: 1;
+  padding: 4px;
   text-align: left;
   color: var(--text);
 }
 
-.chan-brand-gear {
-  width: 14px;
-  height: 14px;
-  margin-left: auto;
-  color: var(--text-4);
+.chan-collapse-btn {
+  flex: none;
 }
 
-.chan-brand:hover .chan-brand-gear {
+.chan-sidebar-foot {
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  border-top: 1px solid var(--border-soft);
+}
+
+.chan-foot-action,
+.chan-account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 40px;
+  padding: 5px 7px;
+  border-radius: 9px;
   color: var(--text-2);
+  text-align: left;
+  transition: background 0.13s ease, color 0.13s ease;
+}
+
+.chan-foot-action:hover,
+.chan-account:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.chan-foot-action svg {
+  width: 18px;
+  height: 18px;
+  flex: none;
+}
+
+.chan-foot-copy {
+  font-size: 12.5px;
+  font-weight: 550;
+}
+
+.chan-account .avatar {
+  flex: none;
+}
+
+.chan-account-copy {
+  display: block;
+  min-width: 0;
+  flex: 1;
+}
+
+.chan-account-copy b {
+  display: block;
+  overflow: hidden;
+  font-size: 12.5px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chan-account-more {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  color: var(--text-4);
 }
 
 /* ------------------------------------------------------------- brand ---- */
@@ -2196,13 +2262,14 @@ svg {
  * the sentence, send on the right, and nothing else asking to be read. Its
  * controls and text remain in the same places when it receives focus, matching
  * the compact prompt bar people use with a pointer and a wide viewport. Phones
- * override these variables below: they begin with this pill, then open into
- * a clearer two-row composer when somebody starts writing.
+ * override these variables below: they begin with a short bar, then open into
+ * a roomier composer when somebody starts writing.
  *
  * It reads as floating over the conversation rather than as a panel bolted to
- * the bottom of it — a lifted pill with a shadow under it, so the transcript
- * looks like it continues underneath. That is the whole trick behind the bars
- * this one is modelled on: one shape, raised, with the message in it.
+ * the bottom of it — a lifted, softly rounded box with a shadow under it, so
+ * the transcript looks like it continues underneath. That is the whole trick
+ * behind the bars this one is modelled on: one shape, raised, with the message
+ * in it.
  *
  * Every metric is a variable because the textarea and the mirror painted
  * underneath it cannot afford to disagree about padding by a pixel: they are
@@ -2213,13 +2280,13 @@ svg {
   --composer-pad-top: 8px;
   --composer-pad-bottom: 8px;
   --composer-pad-x: 6px;
-  --composer-shape: 999px;
+  --composer-shape: var(--radius-lg);
   --composer-layout: flex;
   --composer-bar-layout: contents;
   --composer-inset: 0 6px;
-  --composer-send-shape: 999px;
+  --composer-send-shape: 9px;
   /* The gap that pushes send to the far edge is only wanted on the two-row
-     phone bar. While every control is on the pill itself, an elastic gap
+     phone bar. While every control is on the compact bar itself, an elastic gap
      between the text and the send button steals half the width of the box
      somebody is writing in. */
   --composer-spacer-layout: none;
@@ -2317,7 +2384,7 @@ svg {
   position: relative;
   width: 100%;
   /* `flex-basis: 0` rather than `auto`, or the 100% above would be the
-     starting width of a row that also has buttons on it and the pill would
+     starting width of a row that also has buttons on it and the bar would
      overflow its own border. Inert while the composer is a block. */
   flex: 1 1 0;
   min-width: 0;
@@ -2364,7 +2431,7 @@ svg {
 }
 
 /* Every composer control sits on one row — and while the composer is lean,
-   that row is the pill itself rather than a second one under the text. */
+   that row is the box itself rather than a second one under the text. */
 .composer-bar {
   display: var(--composer-bar-layout);
   align-items: center;
@@ -2431,7 +2498,7 @@ svg {
   place-items: center;
   width: 30px;
   height: 30px;
-  /* Round in the pill, rounded-square in the open composer. The fallback is
+  /* Softly squared in both composer states. The fallback is
      for the send buttons that live outside a composer entirely. */
   border-radius: var(--composer-send-shape, 8px);
   background: var(--accent);
@@ -3481,16 +3548,16 @@ svg {
   width: 256px;
   flex: none;
   display: grid;
-  /* Brand, search, then everything else in one scroller that takes what
-     remains. The panel used to be four rows with two scrollbars in it — a
+  /* Crown, search, everything else in one scroller, then the account footer.
+     The panel used to be four rows with two scrollbars in it — a
      capped channel list above an independently scrolling roster — which is
      two things to drag inside 256 pixels and a band of dead panel whenever
      neither list was long enough to fill its share. `.chan-scroll` is the
-     one that moves; `auto` on the last row is the failure-only `.sys-line`,
-     which is absent almost always. */
+     one that moves. */
   grid-template-rows: auto auto 1fr auto;
   min-height: 0;
   background: var(--bg-panel);
+  transition: width 0.18s ease;
   /* No border. This column is a shade off the conversation in both themes
      (`--bg-panel` against `--bg-chat`), and a whole page-height rule on top
      of that difference is one line of chrome doing a job the ground has
@@ -3580,6 +3647,7 @@ svg {
 }
 
 .chan-row {
+  position: relative;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -3735,6 +3803,21 @@ svg {
   color: var(--text);
 }
 
+/* A narrow marker makes selection legible even when the accent wash is close
+   to the panel colour. It costs no extra label or badge, and survives the
+   compact rail where the channel name folds away. */
+.chan-row.active::before {
+  content: "";
+  position: absolute;
+  left: 1px;
+  top: 50%;
+  width: 2px;
+  height: 18px;
+  border-radius: 2px;
+  background: linear-gradient(var(--accent), var(--accent-2));
+  transform: translateY(-50%);
+}
+
 .chan-row .cr-hash {
   width: 14px;
   height: 14px;
@@ -3758,6 +3841,21 @@ svg {
 .chan-row.unread .cr-name {
   color: var(--text);
   font-weight: 600;
+}
+
+/* A room where something has stopped and is waiting for a person — a held
+   `/plan`, or a run gated on a review. Amber, because amber already means
+   waiting everywhere else in this app, and a dot rather than a count because
+   there is nothing to count: one held run is the whole message, and the room
+   is where the sentence saying so lives. Sits before the unread badge so the
+   two read as "this needs you" then "this much is new". */
+.chan-row .cr-held {
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--orange);
+  box-shadow: 0 0 0 3px var(--orange-wash);
 }
 
 .chan-row .cr-badge {
@@ -4361,6 +4459,22 @@ svg {
   background: var(--bg-hover);
 }
 
+/* A thread branches from the root avatar into its compact reply summary.
+   The single hairline is deliberately quieter than the link text: it should
+   explain the relationship after a glance, not compete with the message. */
+.cmsg-row.cmsg-threaded::before {
+  content: "";
+  position: absolute;
+  left: 23px;
+  top: 40px;
+  bottom: 18px;
+  width: 20px;
+  border-left: 1px solid var(--accent-line);
+  border-bottom: 1px solid var(--accent-line);
+  border-bottom-left-radius: 9px;
+  pointer-events: none;
+}
+
 .cmsg-row .cmsg-avatar {
   flex: none;
   margin-top: 1px;
@@ -4735,7 +4849,7 @@ svg {
 }
 
 /* The last inch of the transcript, faded into the page behind the bar. The
-   composer is drawn as a raised pill; this is what makes the conversation look
+   composer is drawn as a raised box; this is what makes the conversation look
    like it passes underneath it rather than stopping politely above. Same
    colour as the column, so it is invisible until there is text under it. */
 .chan-composer-wrap::after {
@@ -4775,6 +4889,18 @@ svg {
   gap: 7px;
   padding: 0 0 7px;
   overflow-x: auto;
+}
+
+/* The thread's reply box and whatever is staged above it, as one block on the
+   floor of the panel. The row of thumbnails is indented to the composer's own
+   margin rather than the panel edge, so an attachment reads as belonging to
+   the box it will be sent from. */
+.thread-composer-wrap {
+  min-width: 0;
+}
+
+.thread-composer-wrap .composer-attachments {
+  margin: 0 12px;
 }
 
 .composer-attachment {
@@ -4926,23 +5052,23 @@ svg {
    derived from that same accent for both themes, so it stays light without
    introducing a second colour or motion. The same rule paints the draft's
    mirror and the posted transcript, keeping the two states visually aligned. */
-.cmsg-text .mention-ping,
-.composer-mirror .mention-ping {
+.cmsg-text .mention-ping {
   font-weight: 650;
   color: var(--accent-bright);
   background: var(--accent-wash);
   border-radius: 4px;
-}
-
-/* A posted label can spend a little inline space to read as a token. */
-.cmsg-text .mention-ping {
   padding: 1px 4px;
 }
 
 /* The mirror must stay character-for-character the width of the textarea or
-   the caret and every character after a ping drift sideways. A paint-only
-   halo supplies the same subtle backing without changing inline layout. */
+   the caret and every character after a ping drift sideways. That includes
+   font weight: bold glyphs have different advances from the transparent
+   textarea glyphs underneath. A paint-only halo supplies emphasis without
+   changing inline layout or typography. */
 .composer-mirror .mention-ping {
+  color: var(--accent-bright);
+  background: var(--accent-wash);
+  border-radius: 4px;
   box-shadow: 0 0 0 2px var(--accent-wash);
 }
 
@@ -4951,21 +5077,20 @@ svg {
    somebody, the other tells the channel to do something. Both are painted the
    moment they are typed, from the composer's mirror, and keep that colour once
    the message is posted. */
-.cmsg-text .slash-ping,
-.composer-mirror .slash-ping {
+.cmsg-text .slash-ping {
   font-weight: 650;
   color: var(--accent-2-bright);
   background: var(--accent-2-wash);
   border-radius: 4px;
-}
-
-.cmsg-text .slash-ping {
   padding: 1px 4px;
 }
 
-/* Paint only, for the same reason as the mention above it: padding here would
-   move every character after the command and take the caret with it. */
+/* Paint only, for the same reason as the mention above it: padding or heavier
+   glyphs here would move every following character away from the caret. */
 .composer-mirror .slash-ping {
+  color: var(--accent-2-bright);
+  background: var(--accent-2-wash);
+  border-radius: 4px;
   box-shadow: 0 0 0 2px var(--accent-2-wash);
 }
 
@@ -5373,9 +5498,49 @@ body.resizing-panel {
 }
 
 .thread-root {
-  padding-bottom: 12px;
-  margin-bottom: 10px;
-  border-bottom: 1px solid var(--border-soft);
+  position: relative;
+  padding-bottom: 5px;
+  margin-bottom: 0;
+}
+
+/* Continue the root avatar's stem into the reply label, then turn toward the
+   words. This is the same branch used in the channel transcript at a scale
+   suited to the thread panel. */
+.thread-root.has-replies::after {
+  content: "";
+  position: absolute;
+  left: 16px;
+  top: 40px;
+  bottom: -15px;
+  width: 13px;
+  border-left: 1px solid var(--accent-line);
+  border-bottom: 1px solid var(--accent-line);
+  border-bottom-left-radius: 8px;
+  pointer-events: none;
+}
+
+.thread-replies-head {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 28px;
+  padding-left: 35px;
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.thread-replies-head::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: linear-gradient(90deg, var(--border-soft), transparent);
+}
+
+.thread-replies-flow {
+  padding-top: 2px;
 }
 
 .thread-count {
@@ -6014,20 +6179,121 @@ dialog.modal::backdrop {
   }
 }
 
-/* Folding the channel column away, wide screens only.
- *
- * Above the breakpoint it is a real flex column and hiding it gives its width
- * to the conversation. Below it the column is an off-canvas drawer already,
- * and `display: none` here would fight the transform that slides it in — so
- * the idea is scoped to the sizes where a column exists to fold.
- *
- * `.desk-only` is the button that does it, hidden on phones for the same
- * reason: there is nothing there to collapse. There is no `.wide-only` pair
- * any more — its half of the job was folding the outer rail, which no longer
- * exists. */
+/* The desktop collapse leaves a real navigation rail behind. Channel links,
+   the product mark, Settings and the profile menu keep their icons; search,
+   roster detail and labels fold away. Phones use the full-width drawer below,
+   so none of these compact-rail rules apply there. */
 @media (min-width: 601px) {
   .chats-shell.chan-collapsed > .chan-sidebar {
+    width: 64px;
+  }
+
+  .chats-shell.chan-collapsed .chan-sidebar-top {
+    flex-direction: column;
+    padding: 10px 0 6px;
+  }
+
+  .chats-shell.chan-collapsed .chan-brand {
+    flex: none;
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+  }
+
+  .chats-shell.chan-collapsed :is(
+      .brand-text,
+      .chan-sidebar-head,
+      .chan-sec:not(.chan-sec-channels),
+      .chan-roster,
+      .chan-sec-label,
+      .cr-name,
+      .cr-more,
+      .chan-foot-copy,
+      .chan-account-copy,
+      .chan-account-more
+    ) {
     display: none;
+  }
+
+  .chats-shell.chan-collapsed .chan-scroll {
+    padding: 4px 0 8px;
+  }
+
+  .chats-shell.chan-collapsed .chan-sec-channels {
+    position: static;
+    justify-content: center;
+    padding: 4px 0 6px;
+  }
+
+  .chats-shell.chan-collapsed .chan-sec-add {
+    width: 40px;
+    height: 40px;
+    border-radius: 9px;
+  }
+
+  .chats-shell.chan-collapsed .chan-list {
+    justify-items: center;
+    padding: 0;
+    gap: 4px;
+  }
+
+  .chats-shell.chan-collapsed .chan-row {
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+  }
+
+  .chats-shell.chan-collapsed .chan-row.active::before {
+    left: -6px;
+    height: 22px;
+  }
+
+  .chats-shell.chan-collapsed .chan-row .cr-hash svg {
+    width: 18px;
+    height: 18px;
+  }
+
+  .chats-shell.chan-collapsed .chan-row .cr-badge {
+    position: absolute;
+    top: -2px;
+    right: -5px;
+    min-width: 16px;
+    height: 16px;
+    padding: 0 4px;
+    font-size: 9.5px;
+    line-height: 16px;
+  }
+
+  /* The rail keeps both marks, in opposite corners: unread is a count and
+     rides the badge above, a hold is a dot and sits under it. Losing this one
+     to the collapse would hide the only signal that says a room has stopped
+     for a person — which is the state somebody scanning a rail most needs. */
+  .chats-shell.chan-collapsed .chan-row .cr-held {
+    position: absolute;
+    bottom: 0;
+    right: -1px;
+  }
+
+  .chats-shell.chan-collapsed .chan-sidebar-foot {
+    justify-items: center;
+    padding: 8px 0;
+  }
+
+  .chats-shell.chan-collapsed :is(.chan-foot-action, .chan-account) {
+    justify-content: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+  }
+
+  .chats-shell.chan-collapsed .sys-line {
+    justify-content: center;
+    width: 40px;
+    padding: 5px 0;
+    gap: 0;
+    font-size: 0;
   }
 }
 
@@ -6180,7 +6446,7 @@ dialog.modal::backdrop {
    and are not fine at 380px. */
 @media (max-width: 600px) {
   /*
-   * A phone gets the space-efficient pill only while it is idle. Focus,
+   * A phone gets the space-efficient bar only while it is idle. Focus,
    * text, an attachment, or a targeted thread opens it into a two-row bar so
    * the textarea and touch controls each have room. `max-height` supplies the
    * visible expansion while the layout changes underneath it; the global
@@ -6221,23 +6487,49 @@ dialog.modal::backdrop {
     --composer-pad-top: 8px;
     --composer-pad-bottom: 8px;
     --composer-pad-x: 6px;
-    --composer-shape: 999px;
+    --composer-shape: var(--radius-lg);
     --composer-layout: flex;
-    /* Lift the two edge controls into the pill until it is opened. */
+    /* Lift the two edge controls into the bar until it is opened. */
     --composer-bar-layout: contents;
     --composer-inset: 0 6px;
-    --composer-send-shape: 999px;
+    --composer-send-shape: 9px;
     --composer-spacer-layout: none;
 
     max-height: 52px;
   }
 
   /* The fuller toolbar is already in the markup. Keep it out of the idle
-     pill, then reveal it as part of the focus expansion without a render.
+     bar, then reveal it as part of the focus expansion without a render.
      What survives the fold is what the bar is for: the "+" and send. */
   .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown)
     :is(.mini-select, .ctx, .composer-note, .composer-bar .spacer) {
     display: none;
+  }
+
+  /* The channel composer has only the two edge controls, so it can keep one
+     flex layout in both states instead of jumping from flex to block as focus
+     lands. The textarea's minimum height is the animated dimension: the bar
+     grows around the caret while + and send stay under the same fingers. */
+  .chan-composer-wrap .composer {
+    --composer-layout: flex;
+    --composer-bar-layout: contents;
+    --composer-inset: 0 6px;
+    --composer-send-shape: 9px;
+    --composer-spacer-layout: none;
+
+    align-items: flex-end;
+  }
+
+  .chan-composer-wrap .composer-field textarea {
+    min-height: 64px;
+    transition: min-height 0.22s ease, padding 0.2s ease;
+  }
+
+  .chan-composer-wrap
+    .composer:not(.is-expanded):not(:focus-within):has(textarea:placeholder-shown)
+    .composer-field
+    textarea {
+    min-height: 36px;
   }
 
   /* `.chan-sidebar` (channel list + roster) goes off-canvas below this
@@ -6408,6 +6700,11 @@ dialog.modal::backdrop {
   .composer-bar .icon-btn {
     width: 34px;
     height: 34px;
+  }
+
+  .chan-foot-action,
+  .chan-account {
+    min-height: 44px;
   }
 
   .send-btn {
@@ -6944,6 +7241,64 @@ dialog.modal::backdrop {
   .thread-item-active .ti-live {
     animation: none;
   }
+}
+
+/* The held counterpart of `.thread-item-active`. Same shape — a wash and a
+   leading edge — in amber rather than the accent, because the difference
+   between "moving" and "stopped until you answer" is the one thing this list
+   is being asked to show, and two states drawn in one colour would be no
+   answer at all. Words rather than a dot here: a stopped thread has to say
+   what it is stopped on, and unlike the live marker it never flickers on and
+   off as a run progresses. */
+.thread-item-held {
+  background: var(--orange-wash);
+  box-shadow: inset 2px 0 0 var(--orange);
+}
+
+.thread-item-held:hover {
+  background: var(--orange-wash);
+}
+
+.ti-held {
+  flex: none;
+  color: var(--orange);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* The same fact on the channel row the thread hangs off, where a reader who
+   never opens the thread still meets it. A button, because the answer is one
+   click away — it opens the thread the go-ahead has to be typed into. */
+.thread-held {
+  /* Block-level, so it takes the line under the thread link rather than
+     sitting beside it — the two are different questions and reading them as
+     one row makes the second look like part of the first. */
+  display: flex;
+  width: fit-content;
+  max-width: 100%;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+  padding: 5px 10px;
+  border: 1px solid var(--orange);
+  border-radius: var(--radius);
+  background: var(--orange-wash);
+  color: var(--orange);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  text-align: left;
+}
+
+.thread-held:hover {
+  background: var(--orange-wash);
+  border-color: var(--orange);
+}
+
+.thread-held svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
 }
 
 /* ------------------------------------------------------ avatar and theme ---- */

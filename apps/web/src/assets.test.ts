@@ -402,6 +402,83 @@ test("navigation is the four product routes and nothing invented", async () => {
   );
 });
 
+test("the sidebar collapses to an icon rail with account controls at its foot", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const sidebar = chats.slice(
+    chats.indexOf("function chanSidebar"),
+    chats.indexOf("/* ---------------------------------------------------------- chan main"),
+  );
+  const header = chats.slice(
+    chats.indexOf("function chanHeader"),
+    chats.indexOf("function chanSearchRow"),
+  );
+
+  // The control stays with the surface it changes; the conversation header
+  // keeps only the phone button that opens the off-canvas drawer.
+  assert.match(sidebar, /class="chan-sidebar-top"/u);
+  assert.match(sidebar, /data-act="chan-collapse-toggle"/u);
+  assert.doesNotMatch(header, /data-act="chan-collapse-toggle"/u);
+  assert.match(header, /data-act="chan-sidebar-toggle"/u);
+
+  // Settings and profile/account are stable footer rows and reuse the same
+  // delegated actions as the rest of the app.
+  assert.match(sidebar, /class="chan-sidebar-foot"/u);
+  assert.match(
+    sidebar,
+    /class="chan-foot-action" data-act="nav"\s*data-value="settings"/u,
+  );
+  assert.match(sidebar, /class="chan-account" data-act="user-menu"/u);
+  assert.match(sidebar, /section\("People", "invite-repo"/u);
+  assert.doesNotMatch(
+    sidebar,
+    />Profile<\/span>/u,
+    "the account action should not repeat its destination as a subtitle",
+  );
+
+  // Compact means narrow, never absent. The labels fold away while the links,
+  // channel icons, Settings and account avatar remain real controls.
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed > \.chan-sidebar \{\s*width: 64px;/u,
+  );
+  assert.doesNotMatch(
+    css,
+    /\.chats-shell\.chan-collapsed > \.chan-sidebar \{[^}]*display: none;/u,
+  );
+  assert.match(css, /\.chats-shell\.chan-collapsed \.chan-row \{/u);
+  assert.match(css, /\.chan-row\.active::before \{/u);
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed :is\(\.chan-foot-action, \.chan-account\)/u,
+  );
+});
+
+test("a reply carries a quiet visual path back to its root", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const rendererStart = chats.indexOf("function threadReplies");
+  const rendererEnd = chats.indexOf("\n/**\n * How much summary", rendererStart);
+  const renderer = chats.slice(rendererStart, rendererEnd);
+
+  assert.match(
+    chats,
+    /replies\.length > 0 && !isReply \? " cmsg-threaded" : ""/u,
+    "only channel roots with replies should grow a branch",
+  );
+  assert.match(
+    chats,
+    /replies\.length === 0 \|\| isReply/u,
+    "the open thread root should not repeat the channel's reply link",
+  );
+  assert.match(renderer, /class="thread-replies"/u);
+  assert.match(renderer, /class="thread-replies-head"/u);
+  assert.match(renderer, /class="thread-replies-flow"/u);
+  assert.match(css, /\.cmsg-row\.cmsg-threaded::before \{/u);
+  assert.match(css, /\.thread-root\.has-replies::after \{/u);
+  assert.match(css, /\.thread-replies-head::after \{/u);
+});
+
 test("the summary opens over the editor instead of navigating away", async () => {
   const source = await browserSource();
   assert.match(source, /case "code-summary":[\s\S]{0,120}showPopover\(/u);
@@ -472,7 +549,7 @@ test("an empty, unfocused composer collapses to one lean row", async () => {
     css,
     /\.composer-field textarea,\s*\.composer-mirror \{\s*padding: var\(--composer-pad-top\) var\(--composer-pad-x\) var\(--composer-pad-bottom\);/u,
   );
-  assert.match(css, /--composer-shape: 999px;/u);
+  assert.match(css, /--composer-shape: var\(--radius-lg\);/u);
   assert.match(css, /--composer-bar-layout: contents;/u);
   // Nothing on the folded row is dropped from the markup: it is unpainted, so
   // focusing the composer brings it back without waiting for a render.
@@ -514,8 +591,8 @@ test("the composer is one lean floating bar with a + and a send", async () => {
   const shape = /\n\.composer \{([\s\S]*?)\n\}/u.exec(css)?.[1];
   assert.notEqual(shape, undefined, "the composer has a shape rule");
   assert.match(shape ?? "", /box-shadow: var\(--shadow-pop\);/u);
-  assert.match(shape ?? "", /--composer-shape: 999px;/u);
-  // The elastic gap is off while every control is on the pill, or it takes
+  assert.match(shape ?? "", /--composer-shape: var\(--radius-lg\);/u);
+  // The elastic gap is off while every control is on the compact bar, or it takes
   // half the width of the box away from the sentence being written in it.
   assert.match(shape ?? "", /--composer-spacer-layout: none;/u);
   assert.match(css, /\.composer-bar \.spacer \{\s*display: var\(--composer-spacer-layout/u);
@@ -917,6 +994,126 @@ test("slash and mention filtering does not rebuild the app while typing", async 
   );
 });
 
+test("a composer refresh keeps rapid edits, whitespace, and the caret's value", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await browserSource();
+  const start = chats.indexOf("const ATTACHMENT_PATTERN");
+  const end = chats.indexOf("\nfunction draftAttachmentPreviews", start);
+  assert.notEqual(start, -1, "the attachment suffix pattern should exist");
+  assert.notEqual(end, -1, "draftText should have a testable boundary");
+
+  const state: { chatDraft?: string } = {};
+  const createDraftText = new Function(
+    "state",
+    `${chats.slice(start, end)}\nreturn draftText;`,
+  );
+  const draftText = createDraftText(state) as () => string;
+
+  // Background channel, typing, and task frames rebuild the textarea from
+  // this value. The last input event must therefore survive exactly; trimming
+  // here used to make a just-typed Space disappear and move the restored
+  // caret backward, which felt intermittent because it needed a frame to land.
+  for (const value of [
+    "rapid  letters backspace ",
+    "two trailing spaces  ",
+    "Shift+Enter keeps this line\n",
+    "日本語の変換 ",
+  ]) {
+    state.chatDraft = value;
+    assert.equal(draftText(), value, JSON.stringify(value));
+  }
+
+  // Attachment references remain outside the textarea. Only their structural
+  // separator is removed; whitespace immediately before it is user input.
+  const reference = "![diagram](attachment:0123456789abcdef0123456789abcdef.png)";
+  state.chatDraft = `keep both spaces  \n${reference}\n`;
+  assert.equal(draftText(), "keep both spaces  ");
+  state.chatDraft = `keep the entered newline\n\n${reference}\n`;
+  assert.equal(draftText(), "keep the entered newline\n");
+
+  // The render path already captures and restores focus. Keeping the stored
+  // value exact is what makes those saved offsets meaningful after a refresh.
+  assert.match(app, /const focusedField = captureFocus\(\);/u);
+  assert.match(app, /restoreFocus\(focusedField\);/u);
+  const restoreStart = app.indexOf("function restoreFocus");
+  const restoreEnd = app.indexOf("\nfunction confirmDiscardEdit", restoreStart);
+  assert.match(
+    app.slice(restoreStart, restoreEnd),
+    /next\.setSelectionRange\(saved\.start, saved\.end\)/u,
+  );
+});
+
+test("the composer keyboard leaves Space, Shift+Enter, and IME to native input", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("export function handleComposerKeydown");
+  assert.notEqual(start, -1, "the channel composer key handler should exist");
+  const source = chats.slice(start).replace("export function", "function");
+  const state = { slashActive: false, mentionActive: false };
+  let submitted = 0;
+  const createHandler = new Function(
+    "state",
+    "imeComposing",
+    "channelSlashCandidates",
+    "activeChannelId",
+    "pickSlashCommand",
+    "channelMentionCandidates",
+    "pickMention",
+    "submitComposerMessage",
+    `${source}\nreturn handleComposerKeydown;`,
+  );
+  const handler = createHandler(
+    state,
+    (event: { isComposing?: boolean; keyCode?: number }) =>
+      event.isComposing === true || event.keyCode === 229,
+    () => [],
+    () => "repository",
+    () => undefined,
+    () => [],
+    () => undefined,
+    () => {
+      submitted += 1;
+    },
+  ) as (
+    event: {
+      key: string;
+      shiftKey?: boolean;
+      isComposing?: boolean;
+      keyCode?: number;
+      preventDefault: () => void;
+    },
+    rerender: () => void,
+  ) => void;
+
+  const press = (
+    key: string,
+    options: { shiftKey?: boolean; isComposing?: boolean } = {},
+  ) => {
+    let prevented = 0;
+    handler(
+      {
+        key,
+        ...options,
+        preventDefault: () => {
+          prevented += 1;
+        },
+      },
+      () => undefined,
+    );
+    return prevented;
+  };
+
+  assert.equal(press(" "), 0, "Space stays a native textarea edit");
+  assert.equal(press("Enter", { shiftKey: true }), 0, "Shift+Enter inserts a newline");
+  assert.equal(
+    press("Enter", { isComposing: true }),
+    0,
+    "composition Enter accepts the candidate",
+  );
+  assert.equal(submitted, 0);
+  assert.equal(press("Enter"), 1, "plain Enter is the only send gesture here");
+  assert.equal(submitted, 1);
+});
+
 test("channel @mentions include repository guests and surface directed unread pings", async () => {
   const data = await publicFile("data.js");
   const chats = await publicFile("screen-chats.js");
@@ -1025,21 +1222,23 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
   );
 
   // One readable accent on its light wash, shared with the live composer and
-  // with no changing gradient.
-  const sharedSelector =
-    ".cmsg-text .mention-ping,\n.composer-mirror .mention-ping {";
-  const rule = css.slice(
-    css.indexOf(sharedSelector),
-    css.indexOf("}", css.indexOf(sharedSelector)) + 1,
-  );
-  assert.notEqual(css.indexOf(sharedSelector), -1);
-  assert.match(rule, /color: var\(--accent-bright\);/u);
-  assert.match(rule, /background: var\(--accent-wash\);/u);
-  assert.match(rule, /border-radius:/u);
-  assert.doesNotMatch(rule, /gradient|animation|background-clip|text-fill/iu);
+  // with no changing gradient. The rules are separate because posted tokens
+  // may be bold while mirror tokens must keep the textarea's glyph widths.
+  for (const selector of [
+    ".cmsg-text .mention-ping {",
+    ".composer-mirror .mention-ping {",
+  ]) {
+    const start = css.indexOf(selector);
+    const rule = css.slice(start, css.indexOf("}", start) + 1);
+    assert.notEqual(start, -1);
+    assert.match(rule, /color: var\(--accent-bright\);/u);
+    assert.match(rule, /background: var\(--accent-wash\);/u);
+    assert.match(rule, /border-radius:/u);
+    assert.doesNotMatch(rule, /gradient|animation|background-clip|text-fill/iu);
+  }
   assert.match(
     css,
-    /\.cmsg-text \.mention-ping \{\n  padding: 1px 4px;\n\}/u,
+    /\.cmsg-text \.mention-ping \{[\s\S]{0,180}padding: 1px 4px;/u,
   );
   assert.doesNotMatch(css, /mention-wave/u);
 
@@ -1048,7 +1247,10 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
   // token gets the same inline padding a posted ping does.
   assert.match(chats, /function slashMarkup/u);
   assert.match(chats, /const inline = \(value\) =>\s*\n\s*slashMarkup\(/u);
-  assert.match(css, /\.cmsg-text \.slash-ping \{\n  padding: 1px 4px;\n\}/u);
+  assert.match(
+    css,
+    /\.cmsg-text \.slash-ping \{[\s\S]{0,180}padding: 1px 4px;/u,
+  );
 });
 
 test("the invite screen names the product, not only the team", async () => {
@@ -1155,7 +1357,7 @@ test("an agent's reply to a person is shown, not folded into the thinking block"
   );
 });
 
-test("each task turn puts its own thinking below its prompt", async () => {
+test("each task turn puts its own thinking below its prompt and starts closed", async () => {
   const source = await publicFile("screen-chats.js");
   const groupingStart = source.indexOf("function threadReplyTurns");
   const thinkingStart = source.indexOf("function threadThinkingBlock");
@@ -1198,7 +1400,16 @@ test("each task turn puts its own thinking below its prompt", async () => {
 
   const thinking = source.slice(thinkingStart, rendererStart);
   assert.match(thinking, /const key = `\$\{rootId\}:thinking:\$\{index\}`/u);
-  assert.match(thinking, /state\.thinkingOpen\[key\] \?\? !done/u);
+  assert.match(
+    thinking,
+    /state\.thinkingOpen\[key\] === true/u,
+    "only an explicit reader choice should open a Thinking block",
+  );
+  assert.equal(
+    thinking.includes("?? !done"),
+    false,
+    "an active turn should start closed just like a finished turn",
+  );
 });
 
 test("the working dots come back for the next turn in a finished thread", async () => {
@@ -1215,14 +1426,14 @@ test("the working dots come back for the next turn in a finished thread", async 
   );
   assert.match(body, /replies\[replies\.length - 1\]/u);
 
-  // A new turn gets its own disclosure key. It therefore opens from its live
-  // default without reopening the completed turn above it or needing a
-  // thread-global reset before submit.
+  // A new turn gets its own disclosure key. It therefore stays closed without
+  // changing the completed turn above it or needing a thread-global reset
+  // before submit.
   const thinkingStart = source.indexOf("function threadThinkingBlock");
   const thinkingEnd = source.indexOf("\nfunction threadReplies", thinkingStart);
   const thinking = source.slice(thinkingStart, thinkingEnd);
   assert.match(thinking, /const key = `\$\{rootId\}:thinking:\$\{index\}`/u);
-  assert.match(thinking, /state\.thinkingOpen\[key\] \?\? !done/u);
+  assert.match(thinking, /state\.thinkingOpen\[key\] === true/u);
 
   const app = await browserSource();
   assert.equal(
@@ -1337,6 +1548,10 @@ test("the composer paints its mentions on a layer that matches the textarea", as
     "&lt;code&gt;@agent&lt;/code&gt;\n",
   );
   assert.equal(wrap("@agents review", []), "[agents] review\n");
+  assert.equal(
+    wrap("keep  repeated and trailing spaces  ", []),
+    "keep  repeated and trailing spaces  \n",
+  );
 
   // The point of the mirror is that it colours what is being typed *now*. A
   // ping only lit up once its last character landed, and a name that never
@@ -1388,19 +1603,18 @@ test("the composer paints its mentions on a layer that matches the textarea", as
   assert.ok(composerPing !== null, "the composer mention rule exists");
   assert.doesNotMatch(
     composerPing[1] ?? "",
-    /\b(?:margin|padding):/u,
-    "painting a mention must not move the textarea's following characters",
+    /\b(?:font-weight|letter-spacing|margin|padding):/u,
+    "painting a mention must not change glyph advances or spacing",
   );
   // The command token is painted under the same constraint, in the second
   // accent so a command and a ping are not the same colour.
-  assert.match(css, /\.cmsg-text \.slash-ping,\n\.composer-mirror \.slash-ping \{/u);
   assert.match(css, /\.composer-mirror \.slash-ping \{[\s\S]{0,120}accent-2-wash/u);
   const composerSlash = /\.composer-mirror \.slash-ping \{([\s\S]*?)\n\}/u.exec(css);
   assert.ok(composerSlash !== null, "the composer command rule exists");
   assert.doesNotMatch(
     composerSlash[1] ?? "",
-    /\b(?:margin|padding):/u,
-    "painting a command must not move the textarea's following characters",
+    /\b(?:font-weight|letter-spacing|margin|padding):/u,
+    "painting a command must not change glyph advances or spacing",
   );
 });
 
@@ -1422,6 +1636,26 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
   assert.match(
     css.slice(css.lastIndexOf("@media", zoomAt), zoomAt),
     /max-width: 600px/u,
+  );
+
+  // The channel box grows without swapping layout modes underneath the
+  // caret. Its textarea supplies the animated height while the two edge
+  // controls stay in one flex row; reduced-motion still short-circuits it.
+  assert.match(
+    css,
+    /\.chan-composer-wrap \.composer \{[\s\S]{0,360}--composer-layout: flex;[\s\S]{0,220}--composer-bar-layout: contents;/u,
+  );
+  assert.match(
+    css,
+    /\.chan-composer-wrap \.composer-field textarea \{\s*min-height: 64px;\s*transition: min-height 0\.22s ease, padding 0\.2s ease;/u,
+  );
+  assert.match(
+    css,
+    /:has\(textarea:placeholder-shown\)[\s\S]{0,100}\.composer-field\s*textarea \{\s*min-height: 36px;/u,
+  );
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{[\s\S]{0,180}transition-duration: 0\.01ms !important;/u,
   );
 
   // The header counted the whole organization — and, before that had loaded,
@@ -1576,4 +1810,43 @@ test("a slash command is offered wherever it is typed, not only at the start", a
     chats.indexOf("export function pickMention"),
   );
   assert.match(pick, /`\$1\/\$\{name\} `/u);
+});
+
+test("a run waiting on a person is marked as waiting, not as finished", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // The two holds this product has, read off the task the same way the typing
+  // dots read the working ones — so a task is in exactly one of the two sets
+  // and the two marks can never both be on.
+  assert.match(data, /const HELD_STATUS = new Set\(\["planned", "awaiting_approval"\]\)/u);
+  assert.match(data, /export function threadAwaitsGoAhead\(/u);
+  assert.match(data, /export function channelAwaitsGoAhead\(/u);
+
+  // The sidebar answers from the tasks rather than the messages: only the open
+  // channel has its messages loaded, so a badge read from those would be right
+  // for the room already on screen and absent for every other.
+  const channelHeld = data.slice(
+    data.indexOf("export function channelAwaitsGoAhead"),
+    data.indexOf("/** Records a `channel-typing` frame from somebody else. */"),
+  );
+  assert.match(channelHeld, /state\.tasks\.some/u);
+  assert.equal(/channelMessagesFor/u.test(channelHeld), false);
+
+  // Three surfaces, because a reader meets a held run at whichever of them
+  // they happen to be looking at: the room list, the message in the channel,
+  // and the thread list.
+  assert.match(chats, /class="cr-held"/u);
+  assert.match(chats, /class="thread-held" data-act="channel-thread-open"/u);
+  assert.match(chats, /class="ti-held"/u);
+  // The channel line is the one that has to say what to do about it.
+  assert.match(chats, /Waiting for your go-ahead/u);
+
+  // Amber, not the accent: "moving" and "stopped until you answer" are the two
+  // states this list exists to tell apart, and one colour for both is no answer.
+  const held = /\n\.thread-item-held \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(held, undefined, "a held thread has a shape rule");
+  assert.match(held ?? "", /var\(--orange\)/u);
+  assert.equal(/var\(--accent\)/u.test(held ?? ""), false);
 });

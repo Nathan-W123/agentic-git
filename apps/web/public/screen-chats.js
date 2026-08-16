@@ -26,6 +26,7 @@ api,
   canManageRepository,
   channelAgentsFor,
   channelAuthor,
+  channelAwaitsGoAhead,
   channelMessagesFor,
   channelParticipants,
   channelUnreadCount,
@@ -47,6 +48,7 @@ api,
   providerOptionsNote,
   sendChannelMessage,
   state,
+  threadAwaitsGoAhead,
   threadIsWorking,
   threadTitle,
   threadTitleReply,
@@ -133,11 +135,23 @@ function chanRow(repo, activeRepositoryId) {
   const unread = channelUnreadCount(repo.id);
   const mentions = channelUnreadCount(repo.id, { mentionsOnly: true });
   const active = repo.id === activeRepositoryId;
+  // A room where something has stopped for a person. Unread says "there are
+  // words you have not read"; this says "nothing here moves until you answer",
+  // which is the one thing a reader cannot discover by not opening the room.
+  const held = channelAwaitsGoAhead(repo.id);
   return `<div class="chan-row${active ? " active" : ""}${
     unread > 0 ? " unread" : ""
-  }" role="button" tabindex="0" data-act="channel-open" data-value="${esc(repo.id)}">
+  }" role="button" tabindex="0" data-act="channel-open" data-value="${esc(repo.id)}"
+    title="#${esc(repo.id)}" aria-label="Open channel ${esc(repo.id)}"${
+      active ? ' aria-current="page"' : ""
+    }>
     <span class="cr-hash">${icon("chatBubble")}</span>
     <span class="cr-name">${esc(repo.id)}</span>
+    ${
+      held
+        ? `<span class="cr-held" title="An agent here is waiting for your go-ahead"><span class="sr-only">Waiting for you</span></span>`
+        : ""
+    }
     ${
       unread > 0
         ? `<span class="cr-badge" title="${
@@ -345,26 +359,53 @@ function statusDot(status, title) {
 const ATTACHMENT_PATTERN =
   /!\[([^\]]*)\]\(attachment:([0-9a-f]{32}\.(?:png|jpg|gif|webp))\)/gu;
 
-function draftAttachments(repositoryId) {
+/**
+ * The three helpers below take the draft rather than reading one.
+ *
+ * Two composers stage images now — the channel bar and the thread panel's
+ * reply box — and they hold their text in two different places
+ * (`state.chatDraft` and `state.threadDraft`). The rules for where the
+ * references live inside a draft, and for what the textarea may show of it,
+ * are the same in both, so they are written once and passed the draft. The
+ * channel's is the default, because it is the caller that came first and
+ * every one of its call sites reads the same string it always did.
+ */
+function draftAttachments(repositoryId, draft = state.chatDraft) {
   const base =
     `/api/v1/projects/${encodeURIComponent(state.projectId)}` +
     `/repositories/${encodeURIComponent(repositoryId ?? "")}/attachments/`;
-  return [...String(state.chatDraft ?? "").matchAll(ATTACHMENT_PATTERN)].map(
-    (match) => ({
-      reference: match[0],
-      alt: match[1] || "Attached image",
-      id: match[2],
-      src: base + match[2],
-    }),
-  );
+  return [...String(draft ?? "").matchAll(ATTACHMENT_PATTERN)].map((match) => ({
+    reference: match[0],
+    alt: match[1] || "Attached image",
+    id: match[2],
+    src: base + match[2],
+  }));
 }
 
-function draftText() {
-  return String(state.chatDraft ?? "").replace(ATTACHMENT_PATTERN, "").trimEnd();
+function draftText(source = state.chatDraft) {
+  const draft = String(source ?? "");
+  const attachmentAt = draft.search(ATTACHMENT_PATTERN);
+  if (attachmentAt === -1) {
+    // This value is written back into the textarea after any background
+    // render. It must be byte-for-byte what the person typed: `trimEnd()`
+    // made a render arriving after Space or Shift+Enter silently erase that
+    // input and clamp the restored caret to the shortened value.
+    return draft;
+  }
+
+  // Attachments are stored after the visible draft as reference lines. Drop
+  // the single newline that separates that hidden suffix from the textarea,
+  // but never trim the visible text itself — in particular, keep spaces and
+  // an additional newline the person entered before the separator.
+  const visible = draft.slice(0, attachmentAt);
+  return visible.endsWith("\n") ? visible.slice(0, -1) : visible;
 }
 
-function draftAttachmentPreviews(repositoryId) {
-  const attachments = draftAttachments(repositoryId);
+function draftAttachmentPreviews(
+  repositoryId,
+  { draft = state.chatDraft, removeAct = "channel-attachment-remove" } = {},
+) {
+  const attachments = draftAttachments(repositoryId, draft);
   if (attachments.length === 0) {
     return "";
   }
@@ -374,7 +415,7 @@ function draftAttachmentPreviews(repositoryId) {
         <img src="${esc(attachment.src)}" alt="${esc(attachment.alt)}">
         <span title="${esc(attachment.alt)}">${esc(attachment.alt)}</span>
         <button type="button" class="composer-attachment-remove"
-          data-act="channel-attachment-remove" data-value="${esc(attachment.id)}"
+          data-act="${esc(removeAct)}" data-value="${esc(attachment.id)}"
           aria-label="Remove ${esc(attachment.alt)}">&times;</button>
       </div>`,
     )
@@ -856,31 +897,35 @@ function chanSidebar(activeRepositoryId) {
   // grantees the org member list has never heard of; the org list is only
   // the floor before the roster resolves.
   const people = channelPeopleFor(activeRepositoryId);
+  const user = currentUserName();
 
   const channel = esc(activeRepositoryId ?? "");
-  return `<aside class="chan-sidebar">
-    <button type="button" class="chan-brand" data-act="nav" data-value="settings"
-      title="Settings">
-      ${brandMark(26)}
-      <span class="brand-text"><b>Lattice</b></span>
-      <!-- The row goes to Settings and only its tooltip said so, which is a
-           tooltip doing the work of a glyph. The stylesheet had been carrying
-           the rule for this gear since the brand moved here. -->
-      ${icon("gear", 'class="chan-brand-gear"')}
-    </button>
-    <div class="chan-sidebar-head">
-      ${searchBox("Search channels...", state.chatQuery, "channel-search")}
-      <!-- Phone only, where this column is an off-canvas drawer over the
-           conversation. It could already be dismissed by tapping the scrim,
-           by swiping it back, or by picking a channel — three gestures and
-           no button, which left somebody who opened it just to read the
-           roster with nothing to press. Desktop hides it: there the column
-           covers nothing, and folding it away is the header's own control. -->
+  return `<aside class="chan-sidebar" aria-label="Channels and account">
+    <!-- The collapse control belongs to the surface it changes. It stays in
+         this crown when the sidebar becomes an icon rail, so expanding it
+         never requires hunting in the conversation header. -->
+    <div class="chan-sidebar-top">
+      <button type="button" class="chan-brand" data-act="nav" data-value="chats"
+        title="Lattice chats" aria-label="Lattice chats">
+        ${brandMark(26)}
+        <span class="brand-text"><b>Lattice</b></span>
+      </button>
+      <button type="button" class="icon-btn desk-only chan-collapse-btn${
+        state.chanCollapsed ? " on" : ""
+      }" data-act="chan-collapse-toggle"
+        title="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}"
+        aria-pressed="${state.chanCollapsed === true}"
+        aria-label="${state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar"}">${icon(
+          "columns",
+        )}</button>
       ${iconButton("close", {
         act: "chan-sidebar-close",
         title: "Close",
         cls: "drawer-close",
       })}
+    </div>
+    <div class="chan-sidebar-head">
+      ${searchBox("Search channels...", state.chatQuery, "channel-search")}
     </div>
     <!-- One scroller, not three.
          The column used to be a four-row grid in which the channel list had
@@ -892,7 +937,13 @@ function chanSidebar(activeRepositoryId) {
          each heading sticks to the top of the panel while its own section is
          passing so the reader always knows which list they are in. -->
     <div class="chan-scroll">
-      ${section("Channels", "channel-new", channel, "New channel")}
+      <div class="chan-sec chan-sec-channels">
+        <span class="chan-sec-label">Channels</span>
+        <button type="button" class="chan-sec-add" data-act="channel-new"
+          data-value="${channel}" title="New channel" aria-label="New channel">
+          ${icon("plus")}
+        </button>
+      </div>
       <div class="chan-list">
         ${
           channels.length === 0
@@ -900,7 +951,7 @@ function chanSidebar(activeRepositoryId) {
             : channels.map((repo) => chanRow(repo, activeRepositoryId)).join("")
         }
       </div>
-      ${section("Users", "invite-repo", channel, "Invite someone")}
+      ${section("People", "invite-repo", channel, "Invite someone")}
       <div class="chan-roster">
         ${
           // People first, then agents. The channel header already names the
@@ -922,11 +973,27 @@ function chanSidebar(activeRepositoryId) {
         }
       </div>
     </div>
-    ${
-      state.health === undefined
-        ? `<div class="sys-line"><span class="dot grey"></span>Control plane unreachable</div>`
-        : ""
-    }
+    <!-- Account controls live at the foot like the products this shell is
+         modelled on. Both keep an icon in compact mode; the labels return on
+         expansion without changing actions or routes. -->
+    <div class="chan-sidebar-foot">
+      ${
+        state.health === undefined
+          ? `<div class="sys-line" title="Control plane unreachable"><span class="dot grey"></span>Control plane unreachable</div>`
+          : ""
+      }
+      <button type="button" class="chan-foot-action" data-act="nav"
+        data-value="settings" title="Settings" aria-label="Settings">
+        ${icon("gear")}
+        <span class="chan-foot-copy">Settings</span>
+      </button>
+      <button type="button" class="chan-account" data-act="user-menu"
+        title="Open profile menu" aria-label="Open profile menu for ${esc(user)}">
+        ${avatar(user, 32, user, myAvatar())}
+        <span class="chan-account-copy"><b>${esc(user)}</b></span>
+        ${icon("chevronRight", 'class="chan-account-more"')}
+      </button>
+    </div>
   </aside>`;
 }
 
@@ -1045,23 +1112,6 @@ function chanHeader(repository, repositoryId) {
          throws only when this header renders. -->
     <button type="button" class="icon-btn chan-sidebar-btn" data-act="chan-sidebar-toggle"
       title="Channels &amp; people" aria-label="Channels &amp; people">${icon("list")}</button>
-    <!-- The desktop counterpart of the button above: on a wide screen the
-         channel list is a column rather than a drawer, so folding it away is
-         a different act from opening it and gets its own control. Hidden
-         below the breakpoint where the drawer takes over.
-
-         Lit while the column is folded away. The aria-pressed below said so
-         to a screen reader and nothing said so to an eye: one grey glyph
-         meant both "hide this" and "the list you are missing is behind here",
-         which is the whole of "where did the channels go". The "on" modifier
-         is icon-btn's existing treatment for a toggle showing its state. -->
-    <button type="button" class="icon-btn desk-only${state.chanCollapsed ? " on" : ""}"
-      data-act="chan-collapse-toggle"
-      title="${state.chanCollapsed ? "Show channels &amp; people" : "Hide channels &amp; people"}"
-      aria-pressed="${state.chanCollapsed === true}"
-      aria-label="${state.chanCollapsed ? "Show channels and people" : "Hide channels and people"}">${icon(
-        "columns",
-      )}</button>
     ${icon("chatBubble", 'class="ch-hash"')}
     <div class="ch-title">
       <div class="ch-name">${esc(repositoryId ?? "")}</div>
@@ -1400,7 +1450,9 @@ function messageRow(
   // row could still *do* goes with the words. React, pin, revert and delete
   // all act on a line that is no longer there.
   const deleted = entry.deletedAt !== undefined;
-  return `<div class="cmsg-row${deleted ? " cmsg-deleted" : ""}${
+  return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
+    replies.length > 0 && !isReply ? " cmsg-threaded" : ""
+  }${deleted ? " cmsg-deleted" : ""}${
     // The auditor reads every merge without being asked, so its lines arrive
     // among work nobody is looking at yet. Drawn in the accent so they are
     // recognisable as the unprompted ones — and in *the reader's* accent
@@ -1448,13 +1500,27 @@ function messageRow(
         // thread's own link — the work is the thread's story, and a summary of
         // it sitting directly under the opening message read as a property of
         // that one message, beside a second copy wherever else the task was
-        // mentioned. Only a message with no thread keeps the block on itself,
-        // because there is nothing else for it to hang from.
-        replies.length === 0
+        // mentioned. A message with no thread keeps the block on itself
+        // because there is nothing else for it to hang from; the root inside
+        // the open thread keeps it because that is the thread. Crucially, the
+        // root does not repeat the channel's "N replies" link inside the panel
+        // those replies are already open in.
+        replies.length === 0 || isReply
           ? hideChanges
             ? ""
             : changedFilesBlock(entry, repositoryId)
           : threadSummaryLink(entry, replies, repositoryId) +
+            // The thread said "reply go ahead" — inside itself, where a
+            // collapsed thread keeps it. Said again here, on the row that is
+            // always visible, because a held run is otherwise indistinguishable
+            // in the channel from one still going: same request, same
+            // acknowledgement, and then nothing either way.
+            (threadAwaitsGoAhead(entry)
+              ? `<button type="button" class="thread-held" data-act="channel-thread-open"
+                   data-value="${esc(entry.id)}">${icon(
+                     "clock",
+                   )} Waiting for your go-ahead — open the thread and reply "go ahead"</button>`
+              : "") +
             (() => {
               // A few pixels of accent under the thread: how far its run has
               // got, present only while there is a run to speak of. Quiet by
@@ -1824,7 +1890,7 @@ function composer(repositoryId) {
   // pressed, and the bar stays the width of a sentence.
   //
   // Empty and unfocused, the composer shrinks further and its toolbar folds
-  // into the pill — the rest is in styles.css, off the textarea's own
+  // into the compact bar — the rest is in styles.css, off the textarea's own
   // `:placeholder-shown`, so typing opens it without waiting for a render.
   // Three things it cannot see from there, because all three live outside the
   // form: an image staged for the next message, a thread that message is
@@ -2106,6 +2172,11 @@ function threadListPanel(repositoryId) {
                 // up in the channel, so the two never disagree about who is
                 // working.
                 const working = threadIsWorking(entry);
+                // The other half of the same question. A held thread is not
+                // working and not finished, and without this it read as the
+                // latter — a row somebody had already dealt with — which is
+                // precisely the thread that needs them.
+                const held = threadAwaitsGoAhead(entry);
                 // The subject leads: somebody scanning this log is looking
                 // for a piece of work, and the agent's name told them which
                 // colleague — the wrong first question. Who and how much
@@ -2126,11 +2197,13 @@ function threadListPanel(repositoryId) {
                 // which thread is running — is already carried by the accent
                 // wash and leading edge of `.thread-item-active`.
                 return `<div class="thread-item-row">
-                  <button type="button" class="thread-item${working ? " thread-item-active" : ""}"
+                  <button type="button" class="thread-item${working ? " thread-item-active" : ""}${held ? " thread-item-held" : ""}"
                     title="${esc(
                       working
                         ? `Working now — started ${clockTime(entry.at)}`
-                        : clockTime(entry.at),
+                        : held
+                          ? `Waiting for your go-ahead — started ${clockTime(entry.at)}`
+                          : clockTime(entry.at),
                     )}"
                     data-act="channel-thread-open" data-value="${esc(entry.id)}">
                     <span class="ti-main">
@@ -2141,7 +2214,9 @@ function threadListPanel(repositoryId) {
                         ${
                           working
                             ? `<span class="ti-live"><span class="sr-only">Working</span></span>`
-                            : ""
+                            : held
+                              ? `<span class="ti-held">Waiting for you</span>`
+                              : ""
                         }
                       </span>
                     </span>
@@ -2553,10 +2628,18 @@ function threadPanel(repositoryId) {
   if (root === undefined) {
     return "";
   }
+  const hasReplies = (root.replies?.length ?? 0) > 0;
   // The subject in the header, where a reader looks first. "Thread" only
   // when nothing names it — and the title being here is what the fold
   // comment inside threadReplies has assumed all along.
   const title = threadTitle(root) || "Thread";
+  // The same pending state the channel bar keeps itself open over, for the
+  // same reason: an image staged for the next reply, or one still uploading,
+  // is something to send with no text at all — and on a phone the idle bar
+  // folds its note away unless it is told the box is not idle.
+  const threadPending =
+    state.threadAttaching > 0 ||
+    draftAttachments(repositoryId, state.threadDraft).length > 0;
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
@@ -2576,20 +2659,43 @@ function threadPanel(repositoryId) {
       ${panelClose("channel-thread-close", "Close thread (Esc)")}
     </header>
     <div class="thread-body">
-      <div class="thread-root">${messageRow(root, repositoryId, { isReply: true })}</div>
+      <div class="thread-root${hasReplies ? " has-replies" : ""}">${messageRow(root, repositoryId, { isReply: true })}</div>
       ${threadReplies(root, repositoryId)}
       ${threadTyping(root)}
       ${typingIndicator(repositoryId, root.id)}
     </div>
-    <form class="composer" data-act="channel-thread-submit" style="margin:0 12px 12px">
-      <textarea data-act="channel-thread-input" rows="1"
-        enterkeyhint="send"
-        placeholder="Reply in thread...">${esc(state.threadDraft)}</textarea>
-      <div class="composer-bar">
-        <span class="spacer"></span>
-        <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
-      </div>
-    </form>
+    <div class="thread-composer-wrap">
+      ${draftAttachmentPreviews(repositoryId, {
+        draft: state.threadDraft,
+        removeAct: "thread-attachment-remove",
+      })}
+      <form class="composer${threadPending ? " is-expanded" : ""}" data-act="channel-thread-submit">
+        <textarea data-act="channel-thread-input" rows="1"
+          enterkeyhint="send"
+          placeholder="Reply in thread...">${esc(draftText(state.threadDraft))}</textarea>
+        <div class="composer-bar">
+          <!-- Same arrangement as the channel bar: the input is the control
+               and the button only clicks it, because a bare file input cannot
+               be styled into the bar and a label would swallow the click
+               before the delegated handler saw it. One paperclip rather than
+               the channel's "+" menu — attaching is the only thing this
+               composer adds to a message, and a menu holding one item is a
+               click asking to be skipped. -->
+          <input type="file" data-act="channel-thread-attach-input" accept="image/png,
+            image/jpeg,image/gif,image/webp" multiple hidden>
+          ${iconButton("paperclip", {
+            act: "thread-attach",
+            title: "Attach images",
+            small: true,
+          })}
+          ${state.threadAttaching > 0
+            ? `<span class="composer-note">attaching ${esc(String(state.threadAttaching))} image(s)…</span>`
+            : ""}
+          <span class="spacer"></span>
+          <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
+        </div>
+      </form>
+    </div>
   </aside>`;
 }
 
@@ -2649,7 +2755,6 @@ function threadThinkingBlock(rootId, turn, index) {
     return { html: "", visible: body };
   }
 
-  const done = turn.replies.some((reply) => isThreadEnding(reply));
   const key = `${rootId}:thinking:${index}`;
   // Silent at zero. A task that has been stated and not yet worked on has a
   // block holding the request alone, and "0 steps" reads as a failure rather
@@ -2659,10 +2764,9 @@ function threadThinkingBlock(rootId, turn, index) {
       ? ""
       : `${steps.length} step${steps.length === 1 ? "" : "s"}`;
   const html = `<details class="thread-thinking"${
-    // A new turn receives a new key, so it opens while active without opening
-    // any finished turn above it. The reader's choice remains stable as more
-    // progress arrives for this turn alone.
-    (state.thinkingOpen[key] ?? !done) ? " open" : ""
+    // Every turn starts folded. Its independent key still keeps an explicit
+    // reader choice stable as more progress arrives for this turn alone.
+    state.thinkingOpen[key] === true ? " open" : ""
   }>
     <summary data-act="thinking-toggle" data-value="${esc(key)}">
       <span class="tt-label">Thinking</span>
@@ -2702,7 +2806,11 @@ function threadReplies(root, repositoryId) {
   if (replies.length === 0) {
     return `<div class="thread-count">No replies yet</div>`;
   }
-  return threadReplyTurns(replies)
+  const titled = threadTitleReply(root);
+  const said = replies.filter(
+    (reply) => reply !== titled && !isThreadThinking(reply),
+  );
+  const flow = threadReplyTurns(replies)
     .map((turn, index) => {
       const thinking = threadThinkingBlock(root.id, turn, index);
       return `${
@@ -2714,6 +2822,14 @@ function threadReplies(root, repositoryId) {
         .join("")}`;
     })
     .join("");
+  return `<section class="thread-replies" aria-label="${esc(
+    threadSaidCount(said.length),
+  )}">
+    <div class="thread-replies-head" aria-hidden="true">
+      <span>${esc(threadSaidCount(said.length))}</span>
+    </div>
+    <div class="thread-replies-flow">${flow}</div>
+  </section>`;
 }
 
 /**
@@ -3464,9 +3580,29 @@ export function submitThreadReply(rerender) {
   if (state.activeChannelThread === undefined) {
     return;
   }
+  // The whole draft, references included: the reply carries its images the
+  // same way a channel message does, and `messageBody` reads them back out.
   postChannelReply(activeChannelId(), state.activeChannelThread, state.threadDraft);
   state.threadDraft = "";
   rerender();
+}
+
+/**
+ * A keystroke in the thread reply box, without losing a staged image.
+ *
+ * The textarea only ever shows the visible half of the draft, so writing its
+ * value straight into `state.threadDraft` — which is what this used to do,
+ * back when a thread had nothing to stage — would drop the reference lines an
+ * upload appended and post the words without the picture. Same split, and the
+ * same reasoning, as `updateComposerInput` beside it; no render, because the
+ * textarea is already showing the character that was just typed and rebuilding
+ * the screen for it is what made typing lag.
+ */
+export function updateThreadComposerInput(node) {
+  const references = draftAttachments(activeChannelId(), state.threadDraft)
+    .map((attachment) => attachment.reference)
+    .join("\n");
+  state.threadDraft = `${node.value}${references === "" ? "" : `\n${references}\n`}`;
 }
 
 function updateMentionState(node) {
@@ -3540,7 +3676,7 @@ export function updateComposerInput(node) {
   // Emptied, it is cleared rather than measured: an empty box collapses to
   // the lean bar, whose padding is not the padding this measurement was taken
   // against, and a pixel height left behind from the open composer would hold
-  // the pill several rows tall with nothing in it.
+  // the bar several rows tall with nothing in it.
   node.style.height = "auto";
   if (node.value !== "") {
     node.style.height = `${Math.min(node.scrollHeight, 148)}px`;

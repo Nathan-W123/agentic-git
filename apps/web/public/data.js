@@ -193,11 +193,10 @@ export const state = {
    */
   agentPanelTab: "history",
   /*
-   * Whether a thread's thinking block is unfolded, keyed by thread id.
+   * Whether a turn's thinking block is unfolded, keyed by thread and turn.
    *
-   * Only holds threads the reader has actually clicked. An absent entry means
-   * "no opinion", which is what lets the default (open while running, folded
-   * once finished) still apply to every thread they have not touched.
+   * Only holds blocks the reader has actually clicked. An absent entry means
+   * closed, so every new turn starts folded until the reader opens it.
    */
   thinkingOpen: {},
   /**
@@ -244,6 +243,8 @@ export const state = {
   previews: {},
   /** Images being uploaded from the composer right now, for the note beside it. */
   attaching: 0,
+  /** The same, counted separately for the thread panel's own reply composer. */
+  threadAttaching: 0,
   /** The project whose inbox has been fetched, so it is fetched once. */
   dmLoadedProject: undefined,
   /** When the inbox was last fetched, for the refresh floor. */
@@ -1101,6 +1102,54 @@ export function threadIsWorking(entry) {
   }
   const busy = state.agentBusy[taskId];
   return busy !== undefined && busy.expiresAt > Date.now();
+}
+
+/**
+ * Statuses that mean the run stopped and is waiting for a person.
+ *
+ * The mirror image of {@link WORKING_STATUS}, and the reason that set
+ * excludes both of these: `planned` is a `/plan` task holding for a go-ahead,
+ * `awaiting_approval` is a run holding for a review. Retiring the dots was
+ * only half the fix — a thread with no dots and no ending is indistinguishable
+ * from one nobody has looked at, which is exactly how a held run came to read
+ * as a stuck one.
+ */
+const HELD_STATUS = new Set(["planned", "awaiting_approval"]);
+
+/**
+ * Is this thread's task waiting on the reader rather than on itself?
+ *
+ * Read from the task list, like {@link threadIsWorking}, so the mark survives
+ * a reload and cannot disagree with the dots: a task is in exactly one of the
+ * two sets. No busy-frame fallback here — a hold is durable by definition, and
+ * a transient frame never announces one.
+ */
+export function threadAwaitsGoAhead(entry) {
+  const taskId = entry?.taskId;
+  if (taskId === undefined || taskId === null || taskId === "") {
+    return false;
+  }
+  const task = state.tasks.find((candidate) => candidate.id === taskId);
+  return task !== undefined && HELD_STATUS.has(task.status);
+}
+
+/**
+ * Does anything in this channel need an answer before it can move?
+ *
+ * Answered from the tasks alone rather than from the channel's messages,
+ * because the sidebar draws every repository and only the open one has its
+ * messages loaded — a badge read from messages would be right for the room
+ * already on screen and silently absent for every other, which is the case it
+ * exists for.
+ */
+export function channelAwaitsGoAhead(repositoryId) {
+  if (!repositoryId) {
+    return false;
+  }
+  return state.tasks.some(
+    (task) =>
+      task.repositoryId === repositoryId && HELD_STATUS.has(task.status),
+  );
 }
 
 /** Records a `channel-typing` frame from somebody else. */
