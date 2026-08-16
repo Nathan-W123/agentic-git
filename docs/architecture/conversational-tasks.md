@@ -3,9 +3,13 @@
 A design for replying to a task and having the same agent continue, instead of
 starting a new one that remembers nothing.
 
-Not built. Written after a session in which the difference between commissioning
-work and having a conversation turned out to be the largest remaining gap
-between what an agent can do and what a person working alongside one can.
+Built, in the four stages below. Written after a session in which the
+difference between commissioning work and having a conversation turned out to
+be the largest remaining gap between what an agent can do and what a person
+working alongside one can. The document is kept as written — a design, in the
+present tense, describing the thing that now exists — because what it argues
+about *why* each half was chosen is still the reason the code is shaped this
+way. Where it says "has to change", the change has been made.
 
 ## What is actually missing
 
@@ -121,16 +125,37 @@ is `open` continues that task, whoever it mentions.
 
 ## Staging
 
+All four are built; each landed in the order below, for the reasons below.
+
 1. **Workspace and session survive a turn.** No user-visible change: a task
    completes, its workspace is kept, and a second turn is driven by a test
    rather than by a person. Everything else depends on this and nothing else
-   can be tested without it.
+   can be tested without it. `ConversationRegistry` (`coordinator.ts`) is what
+   holds them between turns, and its lifetime is why it is injectable: a
+   coordinator is built per run, a conversation outlives one.
 2. **Rebase at turn start**, with the three outcomes above, tested against a
    second agent landing between turns. The hard part, done second because stage
-   one is what lets it be tested at all.
-3. **The `open` status and lease handover**, still without a UI.
+   one is what lets it be tested at all. See
+   `services/coordinator/src/conversation.test.ts`, which drives a second agent
+   into canonical between two turns for each of the three.
+3. **The `open` status and lease handover**, still without a UI. The status is
+   `SubmittedTaskStatus`'s one non-terminal ending; `expireOpenTasks` is how
+   silence settles one.
 4. **The replies route dispatches**, which is the point at which this becomes
-   visible and, deliberately, the last thing built.
+   visible and, deliberately, the last thing built. The thread root is the
+   conversation id, so every turn typed into one thread continues one task.
+
+### What an operator sets
+
+The two process bounds and the silence deadline are deployment knobs rather
+than constants, because what they cost is machine-shaped and no default fits
+every machine: `COORD_MAX_CONVERSATION_SESSIONS` (default 8),
+`COORD_CONVERSATION_SESSION_IDLE_MS` (default fifteen minutes), and
+`COORD_OPEN_CONVERSATION_MAX_AGE_MS` (default six hours). The first two shed
+sessions only — the conversation stays open and continues cold — while the
+third ends the waiting itself. A value that is not a whole number is refused
+rather than ignored: a cap silently not the one you configured is worse than no
+cap you chose. See [deployment](../deployment.md).
 
 ## What this is not
 

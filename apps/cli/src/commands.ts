@@ -73,8 +73,35 @@ const LOCAL_LEASE_HEARTBEAT_MS = WORK_LEASE_TTL_MS / 5;
  * continues the conversation, a reply after it starts an ordinary task in
  * the same thread — the two clocks describing "is this still going on"
  * should not disagree with each other.
+ *
+ * A deployment whose people work to a different rhythm sets
+ * COORD_OPEN_CONVERSATION_MAX_AGE_MS.
  */
 const OPEN_CONVERSATION_MAX_AGE_MS = 6 * 60 * 60 * 1000;
+
+/**
+ * The configured span, or the default above.
+ *
+ * Read per sweep rather than once at module load so a control plane that is
+ * reconfigured and restarted picks the new value up wherever it is set, and
+ * so a test can state the deadline it means. A value that is not a
+ * whole number of milliseconds is refused rather than ignored: silently
+ * sweeping on the default would end conversations an operator believed they
+ * had kept open.
+ */
+function openConversationMaxAgeMs(): number {
+  const raw = process.env["COORD_OPEN_CONVERSATION_MAX_AGE_MS"]?.trim() ?? "";
+  if (raw.length === 0) {
+    return OPEN_CONVERSATION_MAX_AGE_MS;
+  }
+  const value = Number.parseInt(raw, 10);
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(
+      "COORD_OPEN_CONVERSATION_MAX_AGE_MS must be a non-negative integer",
+    );
+  }
+  return value;
+}
 
 /**
  * The worker record this process leases work under, if one can be had.
@@ -1128,7 +1155,7 @@ export async function runPendingTasks(
   // store settles the rows; the registry, when there is one, releases the
   // directories and sessions those conversations were keeping.
   const expiredConversations = await store.expireOpenTasks(
-    new Date(Date.now() - OPEN_CONVERSATION_MAX_AGE_MS).toISOString(),
+    new Date(Date.now() - openConversationMaxAgeMs()).toISOString(),
     { repositoryId: repository.id },
   );
   for (const expired of expiredConversations) {

@@ -126,6 +126,37 @@ Dynamic replanning is implemented end to end:
 Plan revisions, scope requests, decisions, approvals, and canonical-change
 evidence survive process and browser restarts in the coordination store.
 
+## Conversational Tasks
+
+Replying to a task continues it, with the same agent, rather than
+commissioning a stranger that remembers nothing. All four stages of
+docs/architecture/conversational-tasks.md are implemented:
+
+1. A landed turn keeps its workspace directory and its agent session, so the
+   next turn starts warm and in the same checkout.
+2. The next turn begins by catching that directory up to canonical: an advance
+   disjoint from the conversation's work is fast-forwarded silently, a clean
+   overlap is merged and named to the agent, and a conflicting one opens the
+   turn as a replan.
+3. A settled turn waits as `open` — the one non-terminal ending — with its
+   lease released, so the next turn is arbitrated afresh against the world as
+   it is rather than as it was.
+4. A reply in a thread whose task is `open` continues that task, whoever it
+   mentions.
+
+Each turn lands: it is validated, approved, and promoted like any other task,
+so a conversation is a series of ordinary tasks that share a workspace and a
+memory rather than a long-lived branch of unprotected work. What is bounded is
+the held process, not the conversation: a session cap
+(`COORD_MAX_CONVERSATION_SESSIONS`) and an idle timeout
+(`COORD_CONVERSATION_SESSION_IDLE_MS`) close sessions while leaving their
+conversations open and continuable cold, and
+`COORD_OPEN_CONVERSATION_MAX_AGE_MS` decides how long a thread waits for its
+next message before the waiting is over.
+
+Turn-by-turn conversation is not a long-lived agent. Between turns nothing is
+running; what survives is context.
+
 ## Repository Lifecycle
 
 - Greenfield start: `coord repo create` and the web repository form create an

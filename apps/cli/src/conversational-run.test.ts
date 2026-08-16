@@ -226,3 +226,59 @@ test("a conversation spans dispatches: open in the store, warm on disk", async (
     await rm(harness.root, { recursive: true, force: true });
   }
 });
+
+test("how long a conversation may wait is the deployment's to set", async () => {
+  const harness = await createHarness();
+  const store = harness.project.openStore();
+  const previous = process.env["COORD_OPEN_CONVERSATION_MAX_AGE_MS"];
+  try {
+    const repository = await repoAdd(harness.project, store, {
+      sourcePath: harness.sourcePath,
+      id: "conv",
+    });
+    const conversations = new ConversationRegistry();
+
+    const first = await taskSubmit(harness.project, store, {
+      objective: "write src/one.txt",
+      conversationId: "thread_root",
+    });
+    const runOne = await runPendingTasks(harness.project, store, {
+      repositoryId: repository.id,
+      conversations,
+    });
+    assert.equal(runOne.integrated, 1);
+    assert.equal(
+      (await store.listSubmittedTasks({})).find((task) => task.id === first.id)
+        ?.status,
+      "open",
+    );
+    const workspace = await readFile(
+      path.join(harness.signalsPath, `workspace-${first.id}`),
+      "utf8",
+    );
+
+    // Six hours of patience is a default, not a law. A deployment that says
+    // a conversation is over the moment its turn lands gets exactly that,
+    // on the next sweep — the work stays landed, only the waiting ends.
+    process.env["COORD_OPEN_CONVERSATION_MAX_AGE_MS"] = "0";
+    await runPendingTasks(harness.project, store, {
+      repositoryId: repository.id,
+      conversations,
+    });
+    assert.equal(
+      (await store.listSubmittedTasks({})).find((task) => task.id === first.id)
+        ?.status,
+      "integrated",
+    );
+    // The sweep reaches the directory too, not just the row.
+    await assert.rejects(lstat(workspace), { code: "ENOENT" });
+  } finally {
+    if (previous === undefined) {
+      delete process.env["COORD_OPEN_CONVERSATION_MAX_AGE_MS"];
+    } else {
+      process.env["COORD_OPEN_CONVERSATION_MAX_AGE_MS"] = previous;
+    }
+    await store.close();
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});

@@ -41,6 +41,11 @@ exact implemented and later-phase boundary.
   failure propagation, and atomic compare-and-swap integration.
 - Canonical-change indexing, durable plan revisions, live scope negotiation,
   and agent replanning against fresh canonical worktrees.
+- Conversational tasks: replying in a thread continues the same task with the
+  same agent, keeping its workspace and session between turns and catching
+  that workspace up to whatever else landed meanwhile. Every turn still plans,
+  validates, and promotes like an ordinary task, and the held sessions are
+  bounded by a configurable cap and idle timeout.
 - SQLite and PostgreSQL task queues, tenant/project isolation, approvals, full
   changesets, integration history, audit compaction, and hash-chain
   verification across archived and live events.
