@@ -3429,6 +3429,32 @@ test("a human channel participant can be @mentioned without an agent refusal", a
   ]);
 });
 
+
+/**
+ * Posts an unaddressed request and says yes to the offer it draws.
+ *
+ * An unnamed request is offered rather than started — picking the agent is a
+ * guess, and a wrong guess spends somebody's account — so the two-step is the
+ * behaviour, not scaffolding. These tests are about *which* agent a request
+ * reaches, which is the same question either way.
+ */
+async function autoClaim(
+  client: TestClient,
+  base: string,
+  content: string,
+): Promise<void> {
+  const posted = await client.request(`${base}/messages`, {
+    method: "POST",
+    body: { content },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const agreed = await client.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "yes" },
+  });
+  assert.equal(agreed.status, 201, JSON.stringify(agreed.data));
+}
+
 test("a human mention suppresses auto-claim but not an explicit agent mention", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -3549,11 +3575,7 @@ test("a clearly-scoped task message auto-claims to the one obviously-best agent"
     200,
   );
 
-  const posted = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "please update the settings page layout" },
-  });
-  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await autoClaim(owner, base, "please update the settings page layout");
 
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
   const [task] = runtime.submittedTasks;
@@ -3612,11 +3634,7 @@ test("an ambiguous task message is dispatched anyway, deterministically", async 
     200,
   );
 
-  const posted = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "can we clean up the error handling for the api" },
-  });
-  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await autoClaim(owner, base, "can we clean up the error handling for the api");
 
   // A near-tie used to mean silence, on the reasoning that a coin flip
   // spends somebody's account. With two agents connected — the ordinary
@@ -3626,11 +3644,7 @@ test("an ambiguous task message is dispatched anyway, deterministically", async 
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
   // Stable, not arbitrary: the same message must not land on a different
   // agent each time it is sent.
-  const repeat = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "can we clean up the error handling for the api" },
-  });
-  assert.equal(repeat.status, 201);
+  await autoClaim(owner, base, "can we clean up the error handling for the api");
   assert.equal(runtime.submittedTasks.length, 2);
   assert.equal(
     runtime.submittedTasks[0]?.actorId,
@@ -3934,13 +3948,11 @@ test("an unaddressed task is taken even when it matches no agent's role", async 
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
 
-  const posted = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: {
-      content: "can someone start building general infrastructure for a chess engine",
-    },
-  });
-  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await autoClaim(
+    owner,
+    base,
+    "can someone start building general infrastructure for a chess engine",
+  );
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
   assert.equal(runtime.submittedTasks[0]?.actorId, bootstrapped.user.id);
 
@@ -4010,11 +4022,7 @@ test("recent activity is one agent's, not its owner's whole roster", async (t) =
     });
   }
 
-  const posted = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "please deploy the postgres migration" },
-  });
-  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await autoClaim(owner, base, "please deploy the postgres migration");
 
   assert.equal(
     runtime.submittedTasks.length,
@@ -4057,11 +4065,7 @@ test("with no configured agents to join on, activity falls back to its owner", a
     submittedBy: ownerId,
   });
 
-  const posted = await owner.request(`${base}/messages`, {
-    method: "POST",
-    body: { content: "please deploy the postgres migration" },
-  });
-  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  await autoClaim(owner, base, "please deploy the postgres migration");
   assert.equal(
     runtime.submittedTasks.length,
     1,
@@ -8959,4 +8963,131 @@ test("/stop names one agent even with words after the name", async (t) => {
     .map((message: any) => String(message.content))
     .join("\n");
   assert.doesNotMatch(said, /Nobody here answers/u);
+});
+
+test("an unnamed request is offered before it is started, and yes starts it", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "offer-first");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "please update the settings page layout" },
+  });
+  assert.equal(posted.status, 201);
+  // Nothing has run. Choosing the agent is a guess, and a wrong guess costs a
+  // checkout, a run and somebody's usage; a slow one costs a word.
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const offered = await owner.request(`${base}/messages`);
+  const offer = (offered.data.messages as any[]).find(
+    (message) => message.kind === "system",
+  );
+  assert.ok(offer !== undefined, JSON.stringify(offered.data.messages));
+  assert.match(offer.content, /Nobody was named here\./u);
+  // The offer names who would take it and how to redirect it.
+  assert.match(offer.content, /reply "yes"/u);
+  assert.match(offer.content, /@mention whoever should/u);
+
+  const agreed = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "yes" },
+  });
+  assert.equal(agreed.status, 201);
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  // The sender's own words are the objective, not "yes".
+  assert.match(
+    String(runtime.submittedTasks[0]?.objective),
+    /settings page layout/u,
+  );
+});
+
+test("only the person who asked can accept the offer", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "offer-mine");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  const teammate = await runtime.store.createUser({
+    email: "offer-mine-colleague@example.com",
+    displayName: "Colleague Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: teammate.id,
+    role: "developer",
+  });
+  const colleague = new TestClient(runtime.origin);
+  await colleague.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: teammate.email, password: PASSWORD },
+  });
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "please update the settings page layout" },
+  });
+  assert.equal(runtime.submittedTasks.length, 0);
+
+  // "yes" is a common word in a busy channel, and the pick was made on the
+  // question of whose account pays. Somebody else agreeing is not that person
+  // agreeing.
+  const theirs = await colleague.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "yes" },
+  });
+  assert.equal(theirs.status, 201);
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+
+  const mine = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "yes" },
+  });
+  assert.equal(mine.status, 201);
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+});
+
+test("a remark about work is not a request, and is offered nothing", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "not-a-request");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Every one of these is about work and asks for none. The verb list alone
+  // could not tell them from an instruction, which is why the unnamed path
+  // wants an imperative or a phrase handing the work over.
+  for (const remark of [
+    "the retry loop was rewritten last week",
+    "I updated the readme this morning",
+    "we should probably refactor this at some point",
+    "that migration broke the build yesterday",
+  ]) {
+    const posted = await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: remark },
+    });
+    assert.equal(posted.status, 201, remark);
+  }
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const after = await owner.request(`${base}/messages`);
+  const offers = (after.data.messages as any[]).filter(
+    (message) =>
+      message.kind === "system" && /Nobody was named here\./u.test(message.content),
+  );
+  assert.deepEqual(offers, [], JSON.stringify(offers));
 });

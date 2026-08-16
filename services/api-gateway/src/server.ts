@@ -1404,6 +1404,53 @@ const THREAD_MERGE_MIN_OVERLAP = 0.42;
 /** Threads older than this are finished business, however well they match. */
 const THREAD_MERGE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 
+/**
+ * Phrasings that address a request to somebody, rather than merely mentioning
+ * work. Broad on the "someone" forms on purpose: "can someone start building
+ * the chess engine" is a request to the room, and the room is who is reading.
+ */
+const REQUEST_OPENER_RE =
+  /\b(please|can you|could you|would you|will you|can we|could we|shall we|can (?:someone|somebody|anyone|anybody)|could (?:someone|somebody|anyone|anybody)|(?:someone|somebody|anyone|anybody) (?:should|able to|want to)|we need to|i need (?:you|someone|somebody)|let'?s|go ahead and)\b/iu;
+
+/** A sentence that opens with the work verb itself — an instruction. */
+const IMPERATIVE_OPENER_RE = new RegExp(`^(?:${TASK_VERB_RE.source})`, "iu");
+
+/**
+ * Whether this is a request *addressed to somebody*, not just a sentence with
+ * work vocabulary in it.
+ *
+ * {@link looksLikeTaskRequest} asks whether a message is about work at all,
+ * which is the right question when an agent has been named — the sender chose
+ * it, so the only doubt is what they want. It is too loose for the unnamed
+ * path, where the same evidence has to answer a different question: is this
+ * addressed to anyone? "The retry loop was rewritten last week" is about work
+ * and asks for none, and an agent that opens a run on it has spent somebody's
+ * account on a remark.
+ *
+ * So the unnamed path additionally wants either an instruction — a sentence
+ * that opens with the verb — or a phrase that hands the work to somebody.
+ * Both are things a person does deliberately; neither happens by accident in
+ * conversation about a repository.
+ */
+export function readsAsDirectRequest(content: string): boolean {
+  const text = withoutMentions(content).trim();
+  if (text.length === 0) {
+    return false;
+  }
+  return REQUEST_OPENER_RE.test(text) || IMPERATIVE_OPENER_RE.test(text);
+}
+
+/**
+ * How an unnamed request is offered, and how the acceptance below finds it
+ * again. A prefix rather than a stored flag: a channel message carries no
+ * metadata of its own, and the offer has to be recognisable in the transcript
+ * by the same reading a person gives it.
+ */
+const AUTO_CLAIM_OFFER_OPENING = "Nobody was named here.";
+
+/** How far back an acceptance will look for the offer it is answering. */
+const AUTO_CLAIM_OFFER_LOOKBACK = 6;
+
 export function looksLikeTaskRequest(content: string): boolean {
   const text = content.trim();
   if (text.length < 6) {
@@ -8488,6 +8535,20 @@ export class ApiGateway {
       }
       return;
     }
+    // "Yes" answers the offer below before it is read as anything else — an
+    // approval is a short sentence with no work verb in it, so nothing would
+    // claim it, and the offer would sit there agreed to and unstarted.
+    if (
+      await this.maybeAcceptAutoClaim({
+        projectId,
+        repositoryId,
+        content,
+        senderId,
+        candidates,
+      })
+    ) {
+      return;
+    }
     await this.maybeAutoClaimTask({
       projectId,
       repositoryId,
@@ -12679,15 +12740,127 @@ export class ApiGateway {
     candidates: ChannelMentionCandidate[];
   }): Promise<void> {
     const { projectId, repositoryId, content, senderId, candidates } = input;
-    if (!looksLikeTaskRequest(content)) {
+    // Two gates now, not one. `looksLikeTaskRequest` asks whether this is
+    // about work; on the unnamed path the question is whether it is addressed
+    // to anybody, and a remark about work is not.
+    if (!looksLikeTaskRequest(content) || !readsAsDirectRequest(content)) {
       return;
     }
+    const chosen = await this.chooseAutoClaimCandidate({
+      repositoryId,
+      content,
+      senderId,
+      candidates,
+    });
+    if (chosen === undefined) {
+      return;
+    }
+    // Offered, not started. Picking the agent is a guess — the scoring below
+    // breaks ties rather than refusing them, deliberately — and a guess that
+    // is wrong costs a checkout, a run and somebody's usage. A guess that is
+    // merely slow costs one line and a "yes". The sender can also ignore it
+    // and @mention whoever should have it, which was always the escape and is
+    // now the faster path when the pick is wrong.
+    await this.postChannelSystemMessage(
+      projectId,
+      repositoryId,
+      `${AUTO_CLAIM_OFFER_OPENING} @${chosen.name} looks like the closest ` +
+        `fit — reply "yes" and it will start. Or @mention whoever should ` +
+        `take it.`,
+    );
+  }
+
+  /**
+   * Dispatches an offer the sender has just agreed to. True when it did.
+   *
+   * The offer carries no stored state, so acceptance re-reads the transcript:
+   * the most recent offer, and the message before it, which is the request in
+   * the sender's own words — which is what the dispatch wants as its
+   * objective anyway. The agent is chosen again rather than parsed back out
+   * of the offer's prose; the scoring is deterministic, so it lands on the
+   * same one it named.
+   *
+   * Only the person who asked may accept. Anyone could type "yes" in a busy
+   * channel and mean something else entirely, and the pick was made on the
+   * question of whose account pays.
+   */
+  private async maybeAcceptAutoClaim(input: {
+    projectId: string;
+    repositoryId: string;
+    content: string;
+    senderId: string;
+    candidates: ChannelMentionCandidate[];
+  }): Promise<boolean> {
+    const { projectId, repositoryId, senderId, candidates } = input;
+    if (!readsAsApproval(input.content)) {
+      return false;
+    }
+    const recent = await this.options.store.listChannelMessages(
+      repositoryId,
+      senderId,
+      { limit: AUTO_CLAIM_OFFER_LOOKBACK + 1 },
+    );
+    // Oldest first, so the offer is the last one of ours in the window, and
+    // the request is the last thing a person said before it.
+    let offerAt = -1;
+    for (let index = recent.length - 1; index >= 0; index -= 1) {
+      const message = recent[index];
+      if (
+        message?.kind === "system" &&
+        message.content.startsWith(AUTO_CLAIM_OFFER_OPENING)
+      ) {
+        offerAt = index;
+        break;
+      }
+    }
+    if (offerAt < 0) {
+      return false;
+    }
+    let request: ChannelMessage | undefined;
+    for (let index = offerAt - 1; index >= 0; index -= 1) {
+      const message = recent[index];
+      if (message?.kind === "user") {
+        request = message;
+        break;
+      }
+    }
+    if (request === undefined || request.authorId !== senderId) {
+      return false;
+    }
+    const chosen = await this.chooseAutoClaimCandidate({
+      repositoryId,
+      content: request.content,
+      senderId,
+      candidates,
+    });
+    if (chosen === undefined) {
+      return false;
+    }
+    await this.dispatchOneMention({
+      projectId,
+      repositoryId,
+      content: request.content,
+      senderId,
+      candidate: chosen,
+      trigger: "auto_claim",
+    });
+    return true;
+  }
+
+  /** Which agent an unnamed request would go to, or none. */
+  private async chooseAutoClaimCandidate(input: {
+    repositoryId: string;
+    content: string;
+    senderId: string;
+    candidates: ChannelMentionCandidate[];
+  }): Promise<ChannelMentionCandidate | undefined> {
+    const { repositoryId, content, senderId, candidates } = input;
     const dispatchable = candidates.filter(
       (candidate) =>
         candidate.visibility === "org" || candidate.userId === senderId,
     );
     if (dispatchable.length === 0) {
-      return;
+      return undefined;
     }
     const messageTokens = relevanceTokens(content);
     // The only reasonably cheap "recent activity" signal that already
@@ -12711,7 +12884,7 @@ export class ApiGateway {
     // less apt agent, and the sender can always name someone to override it.
     const [best] = scored;
     if (best === undefined) {
-      return;
+      return undefined;
     }
     // A tie no longer means silence. The margin rules were written so that
     // "two similarly relevant agents" failed closed, on the reasoning that
@@ -12734,21 +12907,7 @@ export class ApiGateway {
     const chosen = clearWinner
       ? best
       : (tied.find((entry) => entry.candidate.userId === senderId) ?? tied[0]);
-    if (chosen === undefined) {
-      return;
-    }
-    await this.dispatchOneMention({
-      projectId,
-      repositoryId,
-      content,
-      senderId,
-      candidate: chosen.candidate,
-      trigger: "auto_claim",
-      // No parenthetical explaining the auto-claim. The acknowledgement
-      // already names the agent that took it, which is the whole of what a
-      // reader needs; a sentence of process justification on every unpinged
-      // request read as the system apologising for working.
-    });
+    return chosen?.candidate;
   }
 
   /** A coordinator-authored line in the channel, broadcast the same way a real post is. */
