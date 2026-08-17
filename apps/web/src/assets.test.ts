@@ -849,6 +849,106 @@ test("agent news is one compact banner, not a stack of cards", async () => {
   );
 });
 
+/**
+ * The bug: two people each with a Codex connected opened two agent panels and
+ * saw one identical history, down to the timestamp — and the news banner named
+ * whichever of them the roster happened to list first.
+ *
+ * The cause is that `task.agentId` is the *vendor* CLI. Every Codex in the
+ * deployment submits under the same configured agent id, so a filter written
+ * as `agentId.includes("codex")` selects every Codex task there has ever been.
+ * The owner is the half that separates them, and the task already carries it
+ * as `submittedBy`.
+ */
+test("one agent's work is not every agent of that vendor's work", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+
+  // Both halves in one place, so the panel, the banner and the dot cannot
+  // drift into three different answers about who did what.
+  assert.match(data, /export function taskBelongsToAgent\(task, agent\)/u);
+  assert.match(data, /String\(task\.agentId \?\? ""\)\.toLowerCase\(\)\.includes\(vendor\)/u);
+  assert.match(
+    data,
+    /task\.submittedBy === undefined \|\| task\.submittedBy === agentOwnerId\(agent\)/u,
+  );
+  // A bare provider id is `myAgents`'s shape and means this account — the
+  // same rule `normalizeChannelAgentId` applies server-side.
+  assert.match(
+    data,
+    /id\.includes\(":"\) \? id\.slice\(0, id\.indexOf\(":"\)\) : currentUserId\(\)/u,
+  );
+
+  // Every caller goes through it. A surviving bare vendor comparison is the
+  // bug coming back on whichever surface kept it.
+  assert.match(chats, /taskBelongsToAgent\(task, agent\)/u);
+  assert.equal(
+    /includes\(vendor\)/u.test(chats),
+    false,
+    "the agent history should not match on the vendor alone",
+  );
+  assert.equal(
+    /VENDOR_FOR_PROVIDER/u.test(chats),
+    false,
+    "the vendor map is an implementation detail of the matcher now",
+  );
+
+  // The banner picks out of a list holding every agent in the room, so an
+  // unqualified `find` there is what named the wrong person's agent.
+  const banner = data.slice(data.indexOf("export function bannerLineForAudit"));
+  assert.match(
+    banner.slice(0, banner.indexOf("\n}")),
+    /channelAgentsFor\(repositoryId\)\.find\(\(agent\) =>\s*taskBelongsToAgent\(task, agent\),?\s*\)/u,
+  );
+});
+
+test("a notification says which agent, not which vendor", async () => {
+  const data = await publicFile("data.js");
+  const screen = await publicFile("screen-notifications.js");
+  // `agentId` is "codex" for everybody's Codex, so the chip labelled three
+  // people's work identically. The roster resolves the (owner, vendor) pair
+  // to the name the room has been using.
+  assert.match(data, /function agentNameForTask\(task, rosters\)/u);
+  assert.match(data, /agentName: agentNameForTask\(task, rosters\),/u);
+  assert.match(screen, /String\(row\.agentName \?\? row\.agentId \?\? "task"\)/u);
+  // `unreadCount` asks for this list on every render and `channelAgentsFor`
+  // rebuilds a roster each call, so the lookup is memoised across the pass
+  // rather than run once per notification.
+  assert.match(data, /const rosters = new Map\(\);/u);
+});
+
+test("the working dot reads the task list for teammates too", async () => {
+  const data = await publicFile("data.js");
+  const start = data.indexOf("function agentIsWorking(agent, repositoryId)");
+  assert.notEqual(start, -1, "the working check should still exist");
+  const body = data.slice(start, data.indexOf("\n}\n", start));
+  // The durable half used to be gated on `agent.mine` because the vendor
+  // alone could not say whose Codex was running, so reading it for everybody
+  // lit both agents on one person's task. With the owner checked, the gate is
+  // what was costing a teammate's dot minutes of a long run.
+  assert.match(body, /taskBelongsToAgent\(task, agent\)/u);
+  assert.equal(
+    /if \(agent\.mine === true\) \{/u.test(body),
+    false,
+    "the durable half no longer needs to exclude teammates",
+  );
+});
+
+test("an account's own agent is seen running at all", async () => {
+  const data = await publicFile("data.js");
+  const start = data.indexOf("export function myAgents()");
+  const body = data.slice(start, data.indexOf("\n  return {", start));
+  // `provider.adapter` is not a field the providers payload has, so this
+  // compared a task's vendor id ("codex") against an account provider id
+  // ("openai") — never equal, for any provider, so nothing was ever running.
+  assert.equal(
+    /provider\.adapter/u.test(body),
+    false,
+    "a provider id is not a vendor id; the matcher maps between them",
+  );
+  assert.match(body, /taskBelongsToAgent\(\s*task,/u);
+});
+
 test("every agent kind resolves to its own character", async () => {
   const source = await publicFile("ui.js");
   // The agent keys and the doodle names are deliberately different words

@@ -44,12 +44,12 @@ api,
   postChannelReply,
   sendChannelMessage,
   state,
+  taskBelongsToAgent,
   threadAwaitsGoAhead,
   threadIsWorking,
   threadTitle,
   threadTitleReply,
   typingOn,
-  VENDOR_FOR_PROVIDER,
 } from "./data.js";
 import { chatComposer, chatProgress, chatThread } from "./chat.js";
 import {
@@ -2406,23 +2406,24 @@ function threadListPanel(repositoryId) {
 /**
  * What this agent has been asked to do in this repository, newest first.
  *
- * Matched by vendor rather than by owner, because a task records which vendor
- * ran it and not whose account paid for it. With two people's Codex in one
- * room their histories are therefore indistinguishable here — the same
- * boundary the working dot has, and the same fix: stamp the owner on the task,
- * server-side. Until then this is honest about being per-vendor.
+ * Matched by owner *and* vendor (`taskBelongsToAgent`). This used to be the
+ * vendor alone, on the reasoning that a task records which vendor ran it and
+ * not whose account paid for it — but it does record the owner, as
+ * `submittedBy`, because a channel dispatch submits under the mentioned
+ * agent's account rather than the sender's. Without that half, two people's
+ * Codex in one room opened two panels showing one identical history.
  */
 function agentHistoryRows(agent, repositoryId) {
-  const vendor = VENDOR_FOR_PROVIDER[agent.provider ?? agent.id];
-  if (vendor === undefined) {
-    return [];
-  }
   const messages = channelMessagesFor(repositoryId);
   return state.tasks
     .filter(
       (task) =>
         task.repositoryId === repositoryId &&
-        String(task.agentId ?? "").toLowerCase().includes(vendor),
+        // This agent's work, not this vendor's. The filter used to be the
+        // vendor alone, which every Codex in the room answers to — so two
+        // people each with a Codex connected opened two panels showing one
+        // identical history, and neither could tell which rows were its own.
+        taskBelongsToAgent(task, agent),
     )
     .sort(
       (left, right) =>

@@ -1763,10 +1763,16 @@ export function myAgents() {
     (task) => task.submittedBy === undefined || task.submittedBy === mine,
   );
   return state.providers.map((provider) => {
+    // Vendor-mapped, not compared raw. A task's `agentId` is the vendor CLI
+    // ("codex"), and a provider id is the account vendor ("openai") — the two
+    // are never the same string, so the substring test this used to do
+    // answered false for every provider and no agent of this account's was
+    // ever seen running. `taskBelongsToAgent` maps between them, and carries
+    // the owner check the surrounding filter is already doing.
     const running = tasks.find(
       (task) =>
         ACTIVE_TASK_STATUS.has(task.status) &&
-        String(task.agentId ?? "").includes(provider.adapter ?? provider.id),
+        taskBelongsToAgent(task, { id: provider.id, provider: provider.id, userId: mine }),
     );
     // A credential the server has seen fail to authenticate. Stored is not
     // the same as working, and only the first was ever visible here.
@@ -1929,6 +1935,31 @@ export function notificationSeen(event) {
 }
 
 /**
+ * The agent a task belongs to, named as this channel names it.
+ *
+ * Undefined where the room cannot say — a task whose repository has no roster
+ * loaded yet, or one submitted outside any channel. The caller falls back to
+ * the raw id rather than inventing a name.
+ *
+ * `rosters` memoises `channelAgentsFor` across one pass. It rebuilds a
+ * repository's roster from the overrides and membership sets every call, and
+ * this runs once per notification — including from `unreadCount`, which the
+ * bell badge asks for on every render.
+ */
+function agentNameForTask(task, rosters) {
+  const repositoryId = task?.repositoryId;
+  if (repositoryId === undefined) {
+    return undefined;
+  }
+  let roster = rosters.get(repositoryId);
+  if (roster === undefined) {
+    roster = channelAgentsFor(repositoryId);
+    rosters.set(repositoryId, roster);
+  }
+  return roster.find((agent) => taskBelongsToAgent(task, agent))?.name;
+}
+
+/**
  * The audit stream reduced to the events a person actually needs to see.
  *
  * Everything the coordinator records is available on the run detail; this is
@@ -1936,6 +1967,7 @@ export function notificationSeen(event) {
  */
 export function notifications() {
   const rows = [];
+  const rosters = new Map();
   for (const entry of state.audit) {
     const event = entry.event ?? entry;
     const meta = NOTIFY[event.type];
@@ -1953,6 +1985,11 @@ export function notifications() {
       body: notificationBody(event, task),
       taskId: event.taskId,
       agentId: task?.agentId,
+      // Which agent, where the room can say. `agentId` is the vendor CLI, so
+      // the chip read "codex" on every Codex notification in the list no
+      // matter whose it was — three people's work labelled identically. The
+      // roster resolves the pair to a name the reader has actually met.
+      agentName: agentNameForTask(task, rosters),
     });
   }
   rows.sort((left, right) => String(right.at).localeCompare(String(left.at)));
@@ -2465,11 +2502,13 @@ export function bannerLineForAudit(event) {
     return undefined;
   }
   const task = state.tasks.find((candidate) => candidate.id === event.taskId);
-  const agentId = String(task?.agentId ?? "").toLowerCase();
-  const named = channelAgentsFor(repositoryId).find((agent) => {
-    const vendor = VENDOR_FOR_PROVIDER[agent.provider ?? agent.id];
-    return vendor !== undefined && agentId.includes(vendor);
-  });
+  // Owner-qualified, because this list holds every agent in the room and not
+  // only this account's. Matched on the vendor alone, `find` returned whoever
+  // happened to be first: with two people's Codex connected, both banners
+  // named the same agent, and half of them named the wrong one.
+  const named = channelAgentsFor(repositoryId).find((agent) =>
+    taskBelongsToAgent(task, agent),
+  );
   const name = named?.name?.split(" (")[0] ?? "An agent";
   switch (type) {
     case "canonical_promoted":
@@ -2687,27 +2726,20 @@ function agentIsWorking(agent, repositoryId) {
   // after the dispatch never received one, so an agent mid-run showed idle
   // until its next frame, which for a long plan is minutes of a green dot
   // that should be on and is not. The task list is durable and re-read on
-  // every audit frame, so it answers for the whole run: a claimed task naming
-  // this agent's vendor is this agent working, no frame required.
+  // every audit frame, so it answers for the whole run.
   //
-  // Own agents only. A task's `agentId` names a vendor, not an owner, so with
-  // two people's Codex in one room the task alone cannot say whose is
-  // working — the frames still carry that, and a teammate's dot keeps
-  // depending on them rather than lighting both.
-  if (agent.mine === true) {
-    const vendor =
-      VENDOR_FOR_PROVIDER[agent.provider ?? agent.id] ??
-      String(agent.provider ?? agent.id);
-    return state.tasks.some(
-      (task) =>
-        task.repositoryId === repositoryId &&
-        WORKING_STATUS.has(task.status) &&
-        String(task.agentId ?? "")
-          .toLowerCase()
-          .includes(vendor),
-    );
-  }
-  return false;
+  // This used to be own agents only, because a task's `agentId` names a
+  // vendor and the vendor alone could not say *whose* Codex was working — so
+  // reading it for everybody lit both agents on one person's task. The task
+  // also carries `submittedBy`, which is the owner, and `taskBelongsToAgent`
+  // reads the pair: a teammate's dot no longer has to wait for a frame, and
+  // still never lights on somebody else's run.
+  return state.tasks.some(
+    (task) =>
+      task.repositoryId === repositoryId &&
+      WORKING_STATUS.has(task.status) &&
+      taskBelongsToAgent(task, agent),
+  );
 }
 
 /** The vendor CLI each chat provider drives, as task `agentId`s name it. */
@@ -2716,6 +2748,66 @@ export const VENDOR_FOR_PROVIDER = {
   openai: "codex",
   google: "gemini",
 };
+
+/** The vendor CLI one agent drives, however that agent was resolved. */
+function agentVendor(agent) {
+  const provider =
+    agent?.provider ?? String(agent?.id ?? "").split(":").at(-1) ?? "";
+  if (provider === "") {
+    return undefined;
+  }
+  return VENDOR_FOR_PROVIDER[provider] ?? String(provider).toLowerCase();
+}
+
+/**
+ * The account an agent belongs to, as `submittedBy` records it.
+ *
+ * Roster entries carry `userId` outright. A bare provider id is the one shape
+ * `myAgents` mints and it is only ever this account's own agent — the same
+ * rule `normalizeChannelAgentId` resolves by on the server, kept identical so
+ * the two cannot disagree about whose agent an unqualified id names.
+ */
+function agentOwnerId(agent) {
+  if (typeof agent?.userId === "string") {
+    return agent.userId;
+  }
+  const id = String(agent?.id ?? "");
+  return id.includes(":") ? id.slice(0, id.indexOf(":")) : currentUserId();
+}
+
+/**
+ * Whether one task is *this* agent's work rather than some other agent's.
+ *
+ * Two halves, and neither is enough alone. `task.agentId` names a **vendor**,
+ * not an agent: every Codex in the deployment submits under the same
+ * configured agent id, because `resolveAgentIdForVendor` returns the first
+ * agent whose adapter matches the vendor. So the vendor says "some Codex did
+ * this" and can never say which one. The owner is the missing half —
+ * `dispatchOneMention` submits every channel task under the *mentioned
+ * agent's* own account rather than the sender's, precisely so that work one
+ * person's agent takes never spends somebody else's, which makes
+ * `submittedBy` the agent's owner.
+ *
+ * Together they are the `(submittedBy, agentId)` pair the server already
+ * groups per-agent history by (`recentObjectivesFor` in api-gateway). Matching
+ * the vendor alone is what put every Codex task into every Codex agent's
+ * panel: two people each with a Codex connected read as one agent with one
+ * history, and their panels showed the same rows down to the timestamp.
+ */
+export function taskBelongsToAgent(task, agent) {
+  const vendor = agentVendor(agent);
+  if (task === undefined || vendor === undefined) {
+    return false;
+  }
+  if (!String(task.agentId ?? "").toLowerCase().includes(vendor)) {
+    return false;
+  }
+  // A task from before `submittedBy` existed has no owner to check, and the
+  // vendor is all there is to go on. Left with the vendor rather than dropped:
+  // hiding an agent's whole history is a worse answer than the ambiguity this
+  // was written to fix, and it only ever applies to records that predate it.
+  return task.submittedBy === undefined || task.submittedBy === agentOwnerId(agent);
+}
 
 /**
  * Reads one channel back from the server, replacing whatever local or seeded

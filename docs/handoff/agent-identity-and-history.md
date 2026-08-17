@@ -100,13 +100,38 @@ Concrete wiring, all verified points:
   widen to `channelAgentsFor(activeChannelId())` so teammates' agents open
   too; render the tab strip with `tabs()` from `ui.js` (~764) when
   `agent.mine`; `state.agentPanelTab`.
-- **History content**: `state.tasks` filtered by this repo + vendor match on
-  `task.agentId` (`VENDOR_FOR_PROVIDER` in `data.js`), newest first: status
-  glyph, first line of objective, relative time; where a channel message has
-  `taskId === task.id`, the row is a button firing `channel-thread-open` on
-  that message. Note the vendor-match caveat: with two people's Codex in one
-  room, tasks cannot be attributed per-owner client-side (same boundary the
-  working-dot has; fix is stamping owner on the task, server-side).
+- **History content**: `state.tasks` filtered by this repo + `taskBelongsToAgent`
+  (`data.js`), newest first: status glyph, first line of objective, relative
+  time; where a channel message has `taskId === task.id`, the row is a button
+  firing `channel-thread-open` on that message.
+
+**The vendor-match caveat, half closed (2026-08-17).** This section used to
+warn that with two people's Codex in one room, tasks could not be attributed
+per-owner client-side, and that the fix was stamping the owner on the task
+server-side. The stamp was already there: `dispatchOneMention` submits every
+channel task under the *mentioned agent's* account rather than the sender's —
+deliberately, so one person's agent never spends another's — which makes
+`SubmittedTask.submittedBy` the agent's owner, and `GET /tasks` already hands
+whole task rows to the browser. What was missing was any client reading it.
+
+`taskBelongsToAgent(task, agent)` in `data.js` now reads the pair —
+`(submittedBy, vendor-of agentId)`, the same key `recentObjectivesFor` groups
+by server-side — and the panel history, the news banner's naming, the working
+dot's durable half and `myAgents`'s running-task lookup all go through it.
+Before that, every Codex task landed in every Codex agent's panel: two people
+opened two panels onto one identical history. Two consequences worth knowing:
+the working dot no longer excludes teammates (the `agent.mine` gate existed
+only because the vendor could not say whose run it was), and `myAgents` had
+been comparing a vendor id against a provider id — `provider.adapter` is not a
+field the providers payload carries — so *no* agent of your own had ever been
+seen running.
+
+Still open, and genuinely needing a schema change: **two Codex CLIs on one
+account**. The credential store is `users[userId]["codex"]` and
+`provider-connections.json` is `file[userId]["openai"]`, both single-valued, so
+the second connection overwrites the first and there is one roster row, one
+call sign, one `${userId}:openai`. Separating those needs a per-connection
+identity carried onto `SubmittedTask`, not a client-side matcher.
 - **NAV**: remove the notifications entry the same way "My Agents" went
   (route stays reachable; the bell in the topbar stays as the record and the
   unread badge). Banners (already live) cover the interrupt case.

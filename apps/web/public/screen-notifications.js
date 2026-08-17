@@ -59,7 +59,10 @@ function notificationRow(row) {
         row.taskId === undefined
           ? ""
           : `<div class="nr-meta"><span class="chip">${esc(
-              String(row.agentId ?? "task"),
+              // The agent this channel knows, not the vendor its CLI runs.
+              // `agentId` is "codex" for everybody's Codex, so the chip
+              // labelled every one of them the same and said nothing.
+              String(row.agentName ?? row.agentId ?? "task"),
             )}</span></div>`
       }
     </span>
