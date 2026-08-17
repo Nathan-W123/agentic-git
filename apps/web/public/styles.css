@@ -6620,9 +6620,11 @@ dialog.modal::backdrop {
   }
 
   /* `.chan-sidebar` (channel list + roster) goes off-canvas below this
-     width — toggled by `.chan-sidebar-btn` in `chanHeader`
-     (screen-chats.js), closed by the scrim, by picking a channel, or by its
-     own `.drawer-close`. */
+     width — dragged out by a rightward swipe across the conversation and back
+     by a leftward one, and equally toggled by `.chan-sidebar-btn` in
+     `chanHeader` (screen-chats.js), closed by the scrim, by picking a
+     channel, or by its own `.drawer-close`. The button stays because a
+     gesture nobody can see is a poor sole route to a surface. */
   .chan-sidebar-btn {
     display: inline-grid !important;
   }
@@ -6633,6 +6635,16 @@ dialog.modal::backdrop {
     display: inline-grid;
   }
 
+  /* Off-canvas, and draggable.
+     `translateX(-100%)` is the closed rest state and `none` the open one, with
+     the transition between them carrying every tap on the button, the scrim
+     and Escape. A finger on the glass takes a third route: `.chan-dragging`
+     turns the transition off and reads `--chan-drawer-x` — how many pixels of
+     drawer the drag has pulled out so far — so the panel is wherever the hand
+     is rather than easing toward a destination the hand has already left.
+     Letting go drops the modifier, which restores both the transition and the
+     class's own transform in one step, and the drawer finishes the trip from
+     exactly where it was. See the phone drawer drag in app.js. */
   .chan-sidebar {
     position: fixed;
     top: 0;
@@ -6642,20 +6654,56 @@ dialog.modal::backdrop {
     max-width: 320px;
     z-index: 76;
     transform: translateX(-100%);
-    transition: transform 0.2s ease;
+    /* Most of the distance covered early, then a long quiet tail — the curve
+       a drawer thrown by a hand would follow. A symmetric `ease` over the
+       same 0.28s reads as slower, because it saves half the travel for the
+       second half of the time and the panel appears to hesitate. */
+    transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
     box-shadow: var(--shadow-pop);
+    /* Declared here rather than added with `.chan-dragging`, even though it is
+       only earning its keep while the panel moves: promoting a layer at the
+       instant the finger starts dragging costs a frame at the one moment the
+       gesture is being judged for smoothness. One drawer-sized layer standing
+       by is the cheaper of the two. */
+    will-change: transform;
   }
 
   .chats-shell.roster-open .chan-sidebar {
     transform: none;
   }
 
+  .chats-shell.chan-dragging .chan-sidebar {
+    transform: translateX(calc(-100% + var(--chan-drawer-x, 0px)));
+    transition: none;
+  }
+
+  /* Always in the markup, unlike `.tree-scrim`. A drawer a third of the way
+     out wants a scrim a third of the way dark, and an element that exists
+     only once the drawer is fully open has no such state to be in — so this
+     one is present and simply transparent and untouchable until there is
+     something behind it to dim. */
   .chan-sidebar-scrim {
     display: block;
     position: fixed;
     inset: 0;
     z-index: 75;
     background: rgba(4, 5, 9, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+  }
+
+  .chats-shell.roster-open .chan-sidebar-scrim {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  /* Darkening in step with the drawer. `pointer-events` stays off for the
+     length of the drag so that the touch which ends it cannot also land on
+     the scrim and close what the finger just finished pulling open. */
+  .chats-shell.chan-dragging .chan-sidebar-scrim {
+    opacity: var(--chan-drawer-p, 0);
+    transition: none;
   }
 
   /* The header carries a lot on desktop — title, counts, an avatar stack,

@@ -1050,8 +1050,16 @@ function chanHeader(repositoryId) {
          literal: a bare one closes the string, and the selector after it
          then parses as real code — ".chan-sidebar" becomes a property read
          minus an identifier named "sidebar", which is valid JavaScript and
-         throws only when this header renders. -->
+         throws only when this header renders.
+
+         Not the only way in any more — a rightward swipe across the
+         conversation drags the same drawer out, and a leftward one puts it
+         back (see the phone drawer drag in app.js). The button stays because
+         a gesture leaves no trace on the screen, so it cannot be the sole
+         route to a surface; \`aria-expanded\` is what tells a reader which of
+         the two states the invisible drawer is currently in. -->
     <button type="button" class="icon-btn chan-sidebar-btn" data-act="chan-sidebar-toggle"
+      aria-expanded="${state.chanSidebarOpen === true}"
       title="Channels &amp; people" aria-label="Channels &amp; people">${icon("list")}</button>
     ${icon("chatBubble", 'class="ch-hash"')}
     <div class="ch-title">
@@ -3455,12 +3463,17 @@ export function renderChats() {
   return `<div class="chats-shell${state.chanSidebarOpen === true ? " roster-open" : ""}${state.chanCollapsed ? " chan-collapsed" : ""}">
     ${chanSidebar(repositoryId)}
     ${
-      // Phone-only off-canvas drawer for `.chan-sidebar` — see the toggle
+      // Phone-only scrim over the off-canvas `.chan-sidebar` — see the toggle
       // button in `chanHeader`. Tapping outside the drawer is how it closes,
       // the same as `.tree-scrim` over the file tree.
-      state.chanSidebarOpen === true
-        ? `<div class="chan-sidebar-scrim" data-act="chan-sidebar-close"></div>`
-        : ""
+      //
+      // Rendered unconditionally, unlike `.tree-scrim`: a drawer being dragged
+      // out under a finger is a third of the way open at some point, and it
+      // wants a scrim a third of the way dark, which an element that only
+      // exists once the drawer is fully open cannot be. It is transparent and
+      // untouchable until then, and hidden outright above the phone
+      // breakpoint — see `.chan-sidebar-scrim` in styles.css.
+      `<div class="chan-sidebar-scrim" data-act="chan-sidebar-close"></div>`
     }
     <div class="chan-main">
       ${chanHeader(repositoryId)}

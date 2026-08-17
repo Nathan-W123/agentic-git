@@ -2565,9 +2565,9 @@ document.addEventListener("focusin", requestUsageForHoverTarget);
 
 /* -------------------------------------------------- phone swipe ---- */
 /*
- * Each edge swipes in what lives on that side: from the right, the side
- * panel (threads, files); from the left, the channel drawer with the
- * channels, the users and the agents. Swiping back the way it came puts
+ * Each side swipes in what lives there: from the right, the side panel
+ * (threads, files); rightward across the conversation, the channel drawer with
+ * the channels, the users and the agents. Swiping back the way it came puts
  * either away.
  *
  * Phone only, and only on the chats screen. On a wide window both are
@@ -2575,10 +2575,14 @@ document.addEventListener("focusin", requestUsageForHoverTarget);
  * buttons keep working at every width and this is an addition to them, not a
  * replacement — a gesture nobody can see is a poor sole route to a feature.
  *
- * The open gestures have to start near their edge, because a drag from the
- * middle of a transcript is how someone scrolls a wide code block or swipes
- * between browser tabs. The close gestures have no edge requirement: an open
- * surface is full width (or nearly), so anywhere on it is the surface.
+ * Two mechanisms, and the difference matters. The channel drawer is *dragged*:
+ * it follows the finger pixel for pixel and settles when the finger lifts, so
+ * the gesture announces itself the moment it starts and can be changed halfway
+ * through. That is the block beginning at `drawerDragCandidate`. The side
+ * panel is still a *threshold* swipe measured once, at the end — it opens from
+ * the right edge only, because a drag from the middle of a transcript is how
+ * someone scrolls a wide code block, and it has no equivalent scrim or partial
+ * state to animate against. The `SWIPE_*` constants below belong to it.
  */
 const SWIPE_EDGE_PX = 28;
 const SWIPE_MIN_PX = 60;
@@ -2588,6 +2592,54 @@ const SWIPE_MIN_PX = 60;
 const SWIPE_MAX_SLOPE = 0.6;
 
 let swipeStart;
+
+/* How far a finger travels before this decides whether the gesture is the
+   drawer's or the transcript's. Small, because the drawer has to start moving
+   almost immediately to read as attached to the hand; large enough that a tap
+   with a shaky finger is still a tap. */
+const DRAWER_SLOP_PX = 8;
+/* Speed, in pixels per millisecond, at which the direction of travel decides
+   the outcome regardless of distance — a flick. Below it, distance decides.  */
+const DRAWER_FLICK_PX_PER_MS = 0.35;
+/* A finger that has been still this long before lifting was not flicking,
+   whatever it was doing a moment earlier. Without this, a fast drag that comes
+   to rest halfway still carries its old velocity to the release and the
+   drawer leaves under a hand that had quite clearly stopped. */
+const DRAWER_REST_MS = 100;
+
+/* The gesture in progress, or undefined. `active` separates a touch that might
+   become a drag from one that has committed: everything before the slop is
+   still potentially a tap or a scroll and must change nothing on screen. */
+let drawerDrag;
+
+/**
+ * The channel drawer's one way to change state, and deliberately not a render.
+ *
+ * `render()` replaces `.chats-shell` outright, and an element inserted with
+ * `roster-open` already on it has no before-state for CSS to transition from —
+ * the drawer did not slide, it simply appeared, which is what the button used
+ * to do. The same reasoning as `chan-collapse-toggle`: change the class on the
+ * node already standing and let the stylesheet move it.
+ *
+ * Safe because the class is now the whole of the difference. The scrim used to
+ * be rendered only while open, which made this a redraw whether it wanted to be
+ * or not; it is always in the markup now (see `renderChats`), so nothing else
+ * in the chats screen reads `chanSidebarOpen`.
+ */
+function setChanDrawer(open) {
+  const next = open === true;
+  state.chanSidebarOpen = next;
+  const shell = $(".chats-shell");
+  if (shell === null) {
+    // Not on the chats screen, or not drawn yet. Nothing to animate, and the
+    // state above is what the next render will read.
+    return;
+  }
+  shell.classList.toggle("roster-open", next);
+  shell
+    .querySelector(".chan-sidebar-btn")
+    ?.setAttribute("aria-expanded", String(next));
+}
 
 /**
  * Whichever side panel is showing, closed the way its own button closes it.
@@ -2683,8 +2735,7 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   if (state.chanSidebarOpen === true) {
-    state.chanSidebarOpen = false;
-    render();
+    setChanDrawer(false);
     return;
   }
   if (sidePanelOpen() && closeSidePanel()) {
@@ -2692,14 +2743,204 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+/**
+ * Whether a sideways drag starting here is something else's already.
+ *
+ * A wide code block, a diff or a table is dragged to read the rest of it, so a
+ * gesture that begins inside one belongs to that element for its whole length.
+ */
+function horizontalScrollerAt(target) {
+  if (!(target instanceof Element)) {
+    return false;
+  }
+  const scroller = target.closest(".msg-code, pre, .diff, table");
+  return scroller !== null && scroller.scrollWidth > scroller.clientWidth;
+}
+
+/**
+ * Whether this touch is allowed to become a drawer drag.
+ *
+ * Opening used to require starting inside a 28-pixel strip at the left edge,
+ * which on a phone is mostly inside the system's own back-swipe: what was left
+ * had to be found by accident, and so nobody found it and the header button
+ * stayed the only route. The conversation never scrolls sideways, so the whole
+ * of it can be the handle instead — the exclusions here are the places where a
+ * sideways drag already means something.
+ */
+function drawerDragCandidate(target) {
+  if (!phoneLayout() || state.route !== "chats") {
+    return false;
+  }
+  if (horizontalScrollerAt(target)) {
+    return false;
+  }
+  // A drag inside a field is how a caret is moved and a selection made.
+  if (
+    target instanceof Element &&
+    target.closest("input, textarea, select") !== null
+  ) {
+    return false;
+  }
+  // Closing: the drawer is out and covers most of the screen, so anywhere is
+  // the surface — the same reasoning the old close swipe used.
+  if (state.chanSidebarOpen === true) {
+    return true;
+  }
+  // Opening: only with nothing stacked over the conversation. A rightward
+  // swipe with the thread panel out is that panel's dismissal, and the
+  // threshold gesture in `touchend` below still owns it.
+  return !sidePanelOpen();
+}
+
+/**
+ * Hand whatever distance is left back to the stylesheet.
+ *
+ * Removing `.chan-dragging` restores both the transition and the class's own
+ * transform in the same style recalculation, so the drawer eases from exactly
+ * where the finger left it to whichever end it is going to — a release at 70%
+ * animates the last 30% instead of starting the trip over. Doing it in one
+ * step is the entire trick, which is why the modifier and `roster-open` change
+ * together, with nothing between them that could force a layout in between.
+ *
+ * Returns whether a drag was actually under way, so the threshold gestures
+ * below know to stand down rather than act on the same touch twice.
+ */
+function endDrawerDrag(event) {
+  const drag = drawerDrag;
+  drawerDrag = undefined;
+  if (drag === undefined || drag.active !== true) {
+    return false;
+  }
+  const progress = drag.width > 0 ? drag.offset / drag.width : 0;
+  const resting =
+    event === undefined || event.timeStamp - drag.lastTime > DRAWER_REST_MS;
+  const open =
+    !resting && Math.abs(drag.velocity) >= DRAWER_FLICK_PX_PER_MS
+      ? drag.velocity > 0
+      : progress >= 0.5;
+  if (drag.shell.isConnected) {
+    drag.shell.classList.remove("chan-dragging");
+    drag.shell.style.removeProperty("--chan-drawer-x");
+    drag.shell.style.removeProperty("--chan-drawer-p");
+  }
+  setChanDrawer(open);
+  return true;
+}
+
 document.addEventListener(
   "touchstart",
   (event) => {
     // A second finger means a pinch or a scroll gesture, never this.
+    const touch = event.touches.length === 1 ? event.touches[0] : undefined;
     swipeStart =
-      event.touches.length === 1 && event.touches[0] !== undefined
-        ? { x: event.touches[0].clientX, y: event.touches[0].clientY }
-        : undefined;
+      touch === undefined ? undefined : { x: touch.clientX, y: touch.clientY };
+    drawerDrag = undefined;
+    if (touch === undefined || !drawerDragCandidate(event.target)) {
+      return;
+    }
+    drawerDrag = {
+      startX: touch.clientX,
+      startY: touch.clientY,
+      // Where the drawer sits when the finger lands: fully out, or not out at
+      // all. Every later position is this plus how far the hand has moved.
+      from: state.chanSidebarOpen === true,
+      lastX: touch.clientX,
+      lastTime: event.timeStamp,
+      velocity: 0,
+      active: false,
+      offset: 0,
+      width: 0,
+      shell: undefined,
+    };
+  },
+  { passive: true },
+);
+
+/*
+ * Not passive: once this owns the gesture it has to stop the browser scrolling
+ * the transcript underneath a drawer that is moving with the finger, and stop
+ * the edge from being read as a back-swipe. It cancels nothing before the slop
+ * below, so an ordinary vertical scroll is never touched.
+ */
+document.addEventListener(
+  "touchmove",
+  (event) => {
+    const drag = drawerDrag;
+    if (drag === undefined) {
+      return;
+    }
+    const touch = event.touches[0];
+    if (event.touches.length !== 1 || touch === undefined) {
+      // A second finger arrived mid-drag. Settle where it stands rather than
+      // leaving the drawer stranded between its two states.
+      endDrawerDrag(undefined);
+      return;
+    }
+    const dx = touch.clientX - drag.startX;
+    const dy = touch.clientY - drag.startY;
+    if (drag.active !== true) {
+      if (Math.abs(dx) < DRAWER_SLOP_PX && Math.abs(dy) < DRAWER_SLOP_PX) {
+        return;
+      }
+      // The direction is decided once, at the slop, and stands for the rest of
+      // the touch. Re-deciding every frame is how a drag ends up fighting a
+      // scroll it half-owns.
+      if (Math.abs(dx) <= Math.abs(dy)) {
+        drawerDrag = undefined;
+        return;
+      }
+      // An open drawer cannot be pulled further open, and a closed one cannot
+      // be pushed further closed; either way there is nothing here to drag.
+      const opening = dx > 0;
+      if (drag.from === opening) {
+        drawerDrag = undefined;
+        return;
+      }
+      const shell = $(".chats-shell");
+      const width = shell?.querySelector(".chan-sidebar")?.offsetWidth ?? 0;
+      if (shell === null || width <= 0) {
+        drawerDrag = undefined;
+        return;
+      }
+      drag.shell = shell;
+      drag.width = width;
+      drag.active = true;
+      shell.classList.add("chan-dragging");
+    }
+    // A background render replaced the shell out from under the gesture —
+    // polling redraws the screen on its own schedule. The node holding the
+    // drag's inline offsets is gone, so there is nothing left to move.
+    if (!drag.shell.isConnected) {
+      drawerDrag = undefined;
+      return;
+    }
+    if (event.cancelable) {
+      event.preventDefault();
+    }
+    drag.offset = Math.min(
+      drag.width,
+      Math.max(0, (drag.from ? drag.width : 0) + dx),
+    );
+    const elapsed = event.timeStamp - drag.lastTime;
+    if (elapsed > 0) {
+      drag.velocity = (touch.clientX - drag.lastX) / elapsed;
+      drag.lastX = touch.clientX;
+      drag.lastTime = event.timeStamp;
+    }
+    drag.shell.style.setProperty("--chan-drawer-x", `${drag.offset}px`);
+    drag.shell.style.setProperty(
+      "--chan-drawer-p",
+      String(drag.offset / drag.width),
+    );
+  },
+  { passive: false },
+);
+
+document.addEventListener(
+  "touchcancel",
+  () => {
+    swipeStart = undefined;
+    endDrawerDrag(undefined);
   },
   { passive: true },
 );
@@ -2709,6 +2950,11 @@ document.addEventListener(
   (event) => {
     const start = swipeStart;
     swipeStart = undefined;
+    // A drag that ran has already decided where the drawer goes, and its
+    // release is not also a swipe at whatever is behind it.
+    if (endDrawerDrag(event)) {
+      return;
+    }
     const touch = event.changedTouches[0];
     if (
       start === undefined ||
@@ -2720,11 +2966,8 @@ document.addEventListener(
     }
     // Never steal a swipe that began inside something horizontally
     // scrollable — a wide code block or a diff is dragged, not swiped past.
-    if (event.target instanceof Element) {
-      const scroller = event.target.closest(".msg-code, pre, .diff, table");
-      if (scroller !== null && scroller.scrollWidth > scroller.clientWidth) {
-        return;
-      }
+    if (horizontalScrollerAt(event.target)) {
+      return;
     }
     const dx = touch.clientX - start.x;
     const dy = touch.clientY - start.y;
@@ -2734,9 +2977,10 @@ document.addEventListener(
     if (dx < 0) {
       // Leftward: an open channel drawer goes back first — it came from
       // this edge, so this is its dismissal whatever the finger started on.
+      // Reached only when the drag above declined the gesture, a field or a
+      // mid-swipe redraw being the usual reasons.
       if (state.chanSidebarOpen === true) {
-        state.chanSidebarOpen = false;
-        render();
+        setChanDrawer(false);
         return;
       }
       // From the right edge: bring the panel in. The thread list is
@@ -2756,8 +3000,7 @@ document.addEventListener(
       return;
     }
     if (start.x <= SWIPE_EDGE_PX && state.chanSidebarOpen !== true) {
-      state.chanSidebarOpen = true;
-      render();
+      setChanDrawer(true);
     }
   },
   { passive: true },
@@ -3404,9 +3647,11 @@ document.addEventListener("click", (event) => {
       state.chanTree = false;
       render();
       return;
+    // Both of these change a class rather than redrawing the screen, so the
+    // button and the scrim slide the drawer exactly as a finger does — see
+    // `setChanDrawer`, which explains why a render would not.
     case "chan-sidebar-toggle":
-      state.chanSidebarOpen = state.chanSidebarOpen !== true;
-      render();
+      setChanDrawer(state.chanSidebarOpen !== true);
       return;
     // Records which way the reader just flipped it, and lets the browser do
     // the flipping. No re-render: `<details>` has already toggled itself by
@@ -3437,8 +3682,7 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "chan-sidebar-close":
-      state.chanSidebarOpen = false;
-      render();
+      setChanDrawer(false);
       return;
     case "chan-tree-dir": {
       const open = state.chanTreeOpen ?? [];
