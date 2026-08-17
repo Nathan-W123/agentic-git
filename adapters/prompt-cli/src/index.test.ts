@@ -940,3 +940,61 @@ test("execution streams and planning does not", () => {
     false,
   );
 });
+
+test("the execution prompt asks for an ending a person can read", async () => {
+  // The channel shows one line when a task lands, and it is whatever the
+  // agent wrote here. Left unsaid, models wrote it for the next engineer to
+  // read the diff — paths, function names, the reasoning between them — and
+  // the reader got a paragraph of implementation detail clipped at the
+  // channel's bound.
+  const fixture = await createFixture();
+  const executionInputs: string[] = [];
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    if (args.includes("--permission-mode")) {
+      return output(claudeEnvelope(JSON.stringify(PLAN)));
+    }
+    executionInputs.push(String(options.input));
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(claudeEnvelope(JSON.stringify(COMPLETION)));
+  };
+
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+  await adapter.sendContext(session.id, contextFor(workspace));
+  await adapter.collectChanges(session.id);
+
+  const prompt = executionInputs[0] ?? "";
+  assert.match(prompt, /one or two plain sentences, under 200 characters/u);
+  assert.match(prompt, /No file paths, function or symbol names/u);
+  assert.match(prompt, /Finish the sentence/u);
+});

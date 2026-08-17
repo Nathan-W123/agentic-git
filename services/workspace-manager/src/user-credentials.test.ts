@@ -590,6 +590,107 @@ test("withCredentialHome hands a rotated token to the caller that can store it",
   assert.equal((await vault.get("user-1", "codex"))?.secret, refreshed);
 });
 
+test("exclusive credential homes wait for a task rotation and then load it", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  const original = JSON.stringify({ tokens: { access_token: "before" } });
+  const refreshed = JSON.stringify({ tokens: { access_token: "after" } });
+  await vault.put("user-1", "codex", {
+    kind: "session_file",
+    secret: original,
+  });
+
+  const taskHome = await vault.openCredentialHome({
+    userId: "user-1",
+    vendor: "codex",
+    mode: "shared",
+  });
+  assert.ok(taskHome !== undefined);
+  let replyOpened = false;
+  const replyHomePromise = vault
+    .openCredentialHome({ userId: "user-1", vendor: "codex" })
+    .then((home) => {
+      replyOpened = true;
+      return home;
+    });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(replyOpened, false, "the reply must wait for the task home");
+  const secondTaskHome = await vault.openCredentialHome({
+    userId: "user-1",
+    vendor: "codex",
+    mode: "shared",
+  });
+  assert.ok(
+    secondTaskHome !== undefined,
+    "a coordinator can keep staging tasks while the reply waits",
+  );
+
+  await writeFile(
+    path.join(taskHome.env["CODEX_HOME"] as string, "auth.json"),
+    `${refreshed}\n`,
+    "utf8",
+  );
+  await taskHome.close();
+  assert.equal(replyOpened, false, "the reply waits for every staged task");
+  await secondTaskHome.close();
+
+  const replyHome = await replyHomePromise;
+  assert.ok(replyHome !== undefined);
+  assert.deepEqual(
+    JSON.parse(
+      await readFile(
+        path.join(replyHome.env["CODEX_HOME"] as string, "auth.json"),
+        "utf8",
+      ),
+    ),
+    JSON.parse(refreshed),
+  );
+  await replyHome.close();
+});
+
+test("credential reservations are released when staging fails", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  await vault.put("user-1", "codex", {
+    kind: "oauth_token",
+    secret: "unsupported",
+  });
+
+  await assert.rejects(
+    vault.openCredentialHome({ userId: "user-1", vendor: "codex" }),
+    (error: unknown) =>
+      error instanceof UserCredentialError && error.code === "unsupported_kind",
+  );
+  await assert.rejects(
+    vault.openCredentialHome({ userId: "user-1", vendor: "codex" }),
+    (error: unknown) =>
+      error instanceof UserCredentialError && error.code === "unsupported_kind",
+  );
+});
+
+test("different users do not block one another's credential homes", async (t) => {
+  const directory = await scratch(t);
+  const vault = store(directory);
+  for (const userId of ["user-1", "user-2"]) {
+    await vault.put(userId, "claude", {
+      kind: "oauth_token",
+      secret: `sk-ant-oat01-${userId}`,
+    });
+  }
+
+  const first = await vault.openCredentialHome({
+    userId: "user-1",
+    vendor: "claude",
+  });
+  assert.ok(first !== undefined);
+  const second = await vault.openCredentialHome({
+    userId: "user-2",
+    vendor: "claude",
+  });
+  assert.ok(second !== undefined);
+  await Promise.all([first.close(), second.close()]);
+});
+
 test("a run that fails still keeps the token it refreshed on the way down", async (t) => {
   const directory = await scratch(t);
   const vault = store(directory);

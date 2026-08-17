@@ -39,6 +39,28 @@ const DEFAULT_EXECUTION_TIMEOUT_MS = 60 * 60 * 1000;
 const MAX_REPLAY_EVENTS = 10_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 2 * 1024 * 1024;
 
+/**
+ * How the explanation is expected to read.
+ *
+ * It is the line the channel shows when the task lands, and it was being
+ * written as a changelog for whoever would read the diff next: file paths,
+ * function names, the reasoning between them. Most people reading it never
+ * open the diff, and the ending they got was a paragraph of implementation
+ * detail cut off at the channel's bound. Asking for the short plain version
+ * fixes the account itself rather than trimming one downstream.
+ */
+const EXPLANATION_STYLE_INSTRUCTIONS = [
+  "The explanation is shown to the person who asked, in a chat, as the one " +
+    "line that says how this task ended. Most of them will never read the " +
+    "diff.",
+  "Write it for them: one or two plain sentences, under 200 characters, " +
+    "saying what is different now. No file paths, function or symbol names, " +
+    "code, or an account of how you went about it — somebody who cannot read " +
+    "the code should still understand it.",
+  "Finish the sentence. A summary that stops halfway is worse than a shorter " +
+    "one.",
+].join("\n");
+
 const PLAN_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -1490,6 +1512,7 @@ export class CodexAdapter implements AgentAdapter {
           "touch anything outside the listed files.",
         "Return only the JSON object required by the output schema, with " +
           "outcome=completed.",
+        EXPLANATION_STYLE_INSTRUCTIONS,
         `Task, for context only: ${record.input.task.objective}`,
         `Approved plan: ${JSON.stringify(approvedPlan)}`,
         `Canonical revision: ${context.canonicalVersion.revision}`,
@@ -1506,6 +1529,7 @@ export class CodexAdapter implements AgentAdapter {
       "Do not modify files outside expectedFiles without first returning a scope_change_requested outcome.",
       "Do not change Git metadata.",
       "Return only the JSON object required by the output schema.",
+      EXPLANATION_STYLE_INSTRUCTIONS,
       "For completed, set outcome=completed and use empty scope-change fields.",
       "When more scope is necessary, stop, set outcome=scope_change_requested, populate every scope field, and wait for the next invocation.",
       // The platform's own verbs. Without this paragraph the actions

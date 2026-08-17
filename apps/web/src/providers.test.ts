@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -941,6 +941,96 @@ test("streaming relays real CLI events and ends with the parsed reply", async ()
     `expected the summary override, got ${JSON.stringify(seenArgs[0])}`,
   );
   assert.ok(seenArgs[0]?.includes("read-only"));
+});
+
+test("a streaming thread reply waits for the agent task's rotated session", async () => {
+  const harness = await createHarness();
+  const credentials = await UserCredentialStore.open(
+    path.join(harness.project.directory, "secrets"),
+  );
+  const original = JSON.stringify({
+    auth_mode: "chatgpt",
+    tokens: { access_token: "before", refresh_token: "refresh-before" },
+  });
+  const refreshed = JSON.stringify({
+    auth_mode: "chatgpt",
+    tokens: { access_token: "after", refresh_token: "refresh-after" },
+  });
+  await credentials.put("u", "codex", {
+    kind: "session_file",
+    secret: original,
+    origin: "device_auth",
+  });
+  const taskHome = await credentials.openCredentialHome({
+    userId: "u",
+    vendor: "codex",
+    mode: "shared",
+  });
+  assert.ok(taskHome !== undefined);
+  await writeFile(
+    path.join(taskHome.env["CODEX_HOME"] as string, "auth.json"),
+    `${refreshed}\n`,
+    "utf8",
+  );
+  const openCredentialHome = credentials.openCredentialHome.bind(credentials);
+  let signalHomeRequested: (() => void) | undefined;
+  const completionHomeRequested = new Promise<void>((resolve) => {
+    signalHomeRequested = resolve;
+  });
+  credentials.openCredentialHome = async (input) => {
+    signalHomeRequested?.();
+    signalHomeRequested = undefined;
+    return await openCredentialHome(input);
+  };
+
+  let streamStarted = false;
+  const service = new ProviderChatService(harness.project, {
+    credentials,
+    homeDirectory: harness.home,
+    streamRunner: async (_command, _args, options, onLine) => {
+      streamStarted = true;
+      const staged = JSON.parse(
+        await readFile(
+          path.join(options.env?.["CODEX_HOME"] as string, "auth.json"),
+          "utf8",
+        ),
+      ) as Record<string, unknown>;
+      assert.deepEqual(staged, JSON.parse(refreshed));
+      const lines = [
+        JSON.stringify({ type: "thread.started", thread_id: "th-reply" }),
+        JSON.stringify({ type: "turn.started" }),
+        JSON.stringify({
+          type: "item.completed",
+          item: { id: "item-1", type: "agent_message", text: "still here" },
+        }),
+        JSON.stringify({
+          type: "turn.completed",
+          usage: { input_tokens: 2, output_tokens: 2 },
+        }),
+      ];
+      for (const line of lines) onLine(line);
+      return output(lines.join("\n"));
+    },
+  });
+  const replyPromise = service.completeStream(
+    {
+      userId: "u",
+      systemAdmin: false,
+      provider: "openai",
+      messages: [{ role: "user", content: "are you there?" }],
+    },
+    () => {},
+  );
+  await completionHomeRequested;
+  assert.equal(streamStarted, false, "the reply must not copy a live task token");
+
+  await taskHome.close();
+  assert.equal((await replyPromise).text, "still here");
+  assert.equal(streamStarted, true);
+  assert.equal(
+    (await credentials.summary("u", "codex"))?.unusableReason,
+    undefined,
+  );
 });
 
 test("streaming refuses the same cases the non-streaming path refuses", async () => {

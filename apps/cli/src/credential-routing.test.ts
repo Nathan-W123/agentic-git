@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomBytes } from "node:crypto";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -184,4 +184,50 @@ test("each vendor gets its credential the way that vendor reads it", async (t) =
   t.after(gemini.close);
   assert.equal(gemini.env["GEMINI_API_KEY"], "google-key");
   assert.equal(gemini.env["OPENAI_API_KEY"], undefined);
+});
+
+test("task credential homes share a lease and persist rotation on close", async (t) => {
+  const credentials = await vault(t);
+  const original = JSON.stringify({ tokens: { access_token: "before" } });
+  const refreshed = JSON.stringify({ tokens: { access_token: "after" } });
+  await credentials.put("alice", "codex", {
+    kind: "session_file",
+    secret: original,
+  });
+  const task = submittedTask({ submittedBy: "alice" });
+  const first = await openSubmitterCredentialHome(
+    { adapter: "codex" },
+    task,
+    { credentials },
+  );
+  assert.ok(first !== undefined);
+
+  let secondOpened = false;
+  const secondPromise = openSubmitterCredentialHome(
+    { adapter: "codex" },
+    submittedTask({ id: "task-2" as TaskId, submittedBy: "alice" }),
+    { credentials },
+  ).then((home) => {
+    secondOpened = true;
+    return home;
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const openedBeforeRelease = secondOpened;
+
+  await writeFile(
+    path.join(first.env["CODEX_HOME"] as string, "auth.json"),
+    `${refreshed}\n`,
+    "utf8",
+  );
+  await first.close();
+  const second = await secondPromise;
+  assert.ok(second !== undefined);
+  await second.close();
+
+  assert.equal(
+    openedBeforeRelease,
+    true,
+    "one coordinator must be able to stage multiple task homes",
+  );
+  assert.equal((await credentials.get("alice", "codex"))?.secret, refreshed);
 });

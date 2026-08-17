@@ -39,7 +39,6 @@ import type { TaskDefinition } from "@coord/shared-types";
 import {
   DockerWorkspaceManager,
   GitWorktreeWorkspaceManager,
-  openCredentialHome,
   type CredentialHome,
   type UserCredentialStore,
   type VendorCliKind,
@@ -1082,52 +1081,24 @@ export async function openSubmitterCredentialHome(
       : undefined;
   }
 
-  const credential = await options.credentials.get(task.submittedBy, vendor);
-  if (credential === undefined) {
+  const home = await options.credentials.openCredentialHome({
+    userId: task.submittedBy,
+    vendor,
+    baseEnv: sanitizeChildEnv(process.env),
+    // A coordinator stages every task home before starting any of them. Task
+    // homes therefore share the reservation; provider chat takes the
+    // exclusive side and waits until the run has filed any rotated session.
+    mode: "shared",
+  });
+  if (home === undefined) {
     return options.credentialPolicy === "refuse"
       ? refuse(`its submitter has connected no ${vendor} account`)
       : undefined;
   }
-  const home = await openCredentialHome({
-    vendor,
-    credential,
-    baseEnv: sanitizeChildEnv(process.env),
-  });
-  // The CLI refreshes its own OAuth token during a run and writes the new one
-  // into this home, which is then deleted. Keeping it is what stops a
-  // connected account from dying an hour after it was connected — see
-  // `CredentialHome.close`.
-  return {
-    ...home,
-    close: async () => {
-      const result = await home.close();
-      // The task run is where Codex actually works, so its rollout is the
-      // freshest rate-limit record there will ever be — and the directory it
-      // lives in is already gone by this line. Persist the tail the close
-      // handed back, or the usage hover keeps reporting a machine that has
-      // never run a session.
-      if (result.usageSnapshot !== undefined && options.credentials !== undefined) {
-        await options.credentials
-          .putUsageSnapshot(task.submittedBy ?? "", "codex", result.usageSnapshot)
-          .catch(() => undefined);
-      }
-      const store = options.credentials;
-      if (result.rotatedSecret !== undefined && store !== undefined) {
-        await store
-          .put(task.submittedBy ?? "", vendor, {
-            kind: credential.kind,
-            secret: result.rotatedSecret,
-            ...(credential.visibility === undefined
-              ? {}
-              : { visibility: credential.visibility }),
-          })
-          // A run that produced good work must not fail because its token
-          // could not be filed. The cost of losing it is one reconnect.
-          .catch(() => undefined);
-      }
-      return result;
-    },
-  };
+  // The store-backed home files usage and token rotation before releasing its
+  // reservation. A reply waiting on the exclusive side therefore cannot read
+  // between deleting the task home and storing the refreshed session.
+  return home;
 }
 
 export interface RunSummary {
