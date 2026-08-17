@@ -344,6 +344,39 @@ const CHANNEL_PROGRESS_INTERVAL_MS = 2000;
 const CHANNEL_HOLD_PREFIX = "⏸ Waiting on you";
 const CHANNEL_RELEASE_PREFIX = "▶ Go-ahead received";
 /**
+ * How the coordinator's arbitration lines open, and how they are found again.
+ *
+ * Every one of them describes a condition rather than an event — "starts once
+ * that one is done", "can run together" — so each is only true while the
+ * collision it describes is live. They are withdrawn rather than left as
+ * history, and the withdrawal has to survive the process that posted them:
+ * a deploy in the middle of a hold used to strand its notice in the room
+ * forever, because the only record of which message to delete was a Map in
+ * the memory that just died. The prefix plus the notice's `taskId` is what
+ * lets a fresh process recognise its predecessor's lines.
+ *
+ * The replan account (`announceReplay`) deliberately does not carry it: that
+ * one is written in the past tense about something that already happened, and
+ * stays as the room's record of why an agent started over.
+ */
+const CHANNEL_ARBITRATION_PREFIX = "⚖️";
+/**
+ * How the advisory line ends, and so how one is told from a hold.
+ *
+ * The two say opposite things — nothing is waiting, versus one agent is
+ * waiting on another — and they retire on opposite conditions, but a message
+ * carries only its text and its task. So the sentence itself is the
+ * classifier, which is safe precisely because this file is the only thing
+ * that writes it: the line is built from this constant, so the test for it
+ * cannot drift from the words being tested.
+ */
+const CHANNEL_ADVISORY_ENDING = "can run together.";
+
+/** Which of the coordinator's two conflict lines this is, read off the words. */
+function arbitrationNoticeKind(content: string): "hold" | "advisory" {
+  return content.endsWith(CHANNEL_ADVISORY_ENDING) ? "advisory" : "hold";
+}
+/**
  * How many of an agent's tasks, and how many recent channel lines, travel
  * with a question it is asked in the channel. Enough to answer "what are you
  * working on" and "what did you make of that", short enough that the context
@@ -2529,6 +2562,28 @@ function isOwnChannelEntry(authorId: string, viewerId: string): boolean {
   return authorId === viewerId || authorId.startsWith(`${viewerId}:`);
 }
 
+/**
+ * Whether this line is one of the coordinator's own temporary notices.
+ *
+ * Three things ask, and each needs the same answer: the sweep that withdraws
+ * a notice whose collision is over, the replacement path that must find its
+ * predecessor's line after a restart, and the delete route — which cancels the
+ * task behind a message it removes, and must not do that here. A notice
+ * carries the task it is *about*, not a run it narrates, so a reader tidying
+ * one out of their room would otherwise stop the work it names.
+ */
+function isCoordinatorNotice(message: {
+  kind: string;
+  authorId: string;
+  content: string;
+}): boolean {
+  return (
+    message.kind === "system" &&
+    message.authorId === "coordinator" &&
+    message.content.startsWith(CHANNEL_ARBITRATION_PREFIX)
+  );
+}
+
 function matchPath(pathname: string, pattern: RegExp): string[] | undefined {
   const match = pattern.exec(pathname);
   if (match === null) {
@@ -2704,14 +2759,32 @@ export class ApiGateway {
   private threadReconcileTimer: NodeJS.Timeout | undefined;
   /** Last `conflict_detected` sequence narrated to a channel. */
   private conflictSequence: number | undefined;
-  /** The one temporary sequencing notice currently shown for each held task. */
+  /**
+   * The coordinator's temporary conflict lines currently standing in a room,
+   * by message id.
+   *
+   * Each is true only while its collision is live, so each records what would
+   * end it. A `hold` — "starts once that one is done" — ends as soon as either
+   * end of it does: the held task stops, or the work it names finishes. An
+   * `advisory` — "conflicting files but can run together" — is about two runs
+   * being in flight, so it ends when both of them have stopped.
+   *
+   * Memory only, and deliberately not the sole record: a hold routinely
+   * outlives the process that announced it, which is why the notice also
+   * carries its task on the message and `reconcileArbitrationNotices` can
+   * finish the job without this map.
+   */
   private readonly arbitrationNotices = new Map<
     string,
     {
       projectId: string;
       repositoryId: string;
-      messageId: string;
+      /** The task the line is about — the held one, for a hold. */
+      taskId: string;
       content: string;
+      kind: "hold" | "advisory";
+      /** The other tasks the line names. */
+      alsoNamed: readonly string[];
     }
   >();
   /**
@@ -2880,11 +2953,16 @@ export class ApiGateway {
       return;
     }
     void this.reconcileFinishedThreads().catch(() => undefined);
+    // The same restart, from the other end: a hold announced by the process
+    // that just died has nobody left to withdraw it, and a notice is a claim
+    // about work in flight. Once immediately for exactly that reason.
+    void this.reconcileArbitrationNotices().catch(() => undefined);
     this.threadReconcileTimer = setInterval(() => {
       void this.reconcileFinishedThreads().catch(() => undefined);
       // Backstop for a conflict recorded moments before a restart killed the
       // fast pump: slow, but nothing stays unsaid.
       void this.narrateConflicts().catch(() => undefined);
+      void this.reconcileArbitrationNotices().catch(() => undefined);
     }, THREAD_RECONCILE_INTERVAL_MS);
     this.threadReconcileTimer.unref?.();
   }
@@ -2930,6 +3008,10 @@ export class ApiGateway {
     }
     this.watchedChannelTasks.clear();
     this.announcedChannelHolds.clear();
+    // The lines themselves stay in the store; what is forgotten is which
+    // process posted them. `reconcileArbitrationNotices` is what picks them up
+    // again, on this deployment or the next one.
+    this.arbitrationNotices.clear();
     this.webSockets.close();
     this.collaboration.close();
     if (!this.server.listening) {
@@ -6939,7 +7021,11 @@ export class ApiGateway {
       const cancelledTask = await this.stopTaskBehindMessage({
         projectId,
         repositoryId,
-        taskId: message.taskId,
+        // A coordinator notice names a task without being that task's thread:
+        // it is the room being told who is waiting on whom. Tidying one out of
+        // the channel is housekeeping, and must not stop the run it mentions —
+        // which is not even the run the reader is looking at.
+        taskId: isCoordinatorNotice(message) ? undefined : message.taskId,
         actorId: principal.user.id,
       });
       // Replies decide the shape: blank in place when there is a thread to
@@ -9761,6 +9847,14 @@ export class ApiGateway {
         // Dropping the watch as well, so the hour of silence does not happen
         // after the explanation either.
         this.watchedChannelTasks.delete(task.id);
+        // A run that never started cannot be waiting its turn either. Rare,
+        // but the arbitration can already have been announced: the plan is
+        // admitted before the execution that fails here.
+        await this.withdrawArbitrationNotice({
+          projectId,
+          repositoryId,
+          taskId: task.id,
+        });
         await this.appendChannelThreadReply({
           projectId,
           repositoryId,
@@ -11528,12 +11622,25 @@ export class ApiGateway {
           await this.options.store.cancelSubmittedTask(task.id);
           await say("Cancelled.");
           this.watchedChannelTasks.delete(task.id);
+          await this.withdrawArbitrationNotice({
+            projectId: input.projectId,
+            repositoryId: input.repositoryId,
+            taskId: task.id,
+          });
           return;
         }
         // The watcher goes first: this reply is the thread's ending, and the
         // progress pump narrating the operation's own task_cancelled event
         // on top of it would close the same thread twice.
         this.watchedChannelTasks.delete(task.id);
+        // With the watcher gone, nothing else will take back the room's
+        // standing "starts once the other one is done" — the pump that
+        // normally does it is no longer following this task.
+        await this.withdrawArbitrationNotice({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          taskId: task.id,
+        });
         const { cancelled } = await operation({
           projectId: input.projectId,
           repositoryId: input.repositoryId,
@@ -12945,6 +13052,9 @@ export class ApiGateway {
       watched.repositoryId,
     );
     const held = describe(watched.taskId);
+    const blockedBy = (
+      Array.isArray(data["blockedBy"]) ? data["blockedBy"] : []
+    ).filter((entry): entry is string => typeof entry === "string");
     const blockers = (Array.isArray(data["blockedBy"]) ? data["blockedBy"] : [])
       .slice(0, 2)
       .map(describe);
@@ -12997,7 +13107,7 @@ export class ApiGateway {
         `⚖️ ${held} and ${blocker} have conflicting files — ${held} starts ` +
         `once ${blocker} is done.`;
     }
-    await this.replaceArbitrationNotice(watched, line);
+    await this.replaceArbitrationNotice(watched, line, blockedBy);
   }
 
   /**
@@ -13070,29 +13180,38 @@ export class ApiGateway {
     return true;
   }
 
-  /** Keeps at most one temporary sequencing notice for a held task. */
+  /**
+   * Keeps at most one temporary sequencing notice for a held task.
+   *
+   * The prior notice is looked for in the room as well as in memory. A hold
+   * routinely outlives the process that announced it — this deployment
+   * restarts on every deploy, and being held is precisely a state that waits —
+   * so trusting the Map alone meant a restart both stranded the old line and
+   * posted a second one beside it the next time the same task was arbitrated.
+   */
   private async replaceArbitrationNotice(
     watched: { projectId: string; repositoryId: string; taskId: string },
     content?: string,
+    blockedBy: readonly string[] = [],
   ): Promise<void> {
-    const prior = this.arbitrationNotices.get(watched.taskId);
+    const remembered = [...this.arbitrationNotices.entries()].find(
+      ([, notice]) =>
+        notice.kind === "hold" && notice.taskId === watched.taskId,
+    );
+    const prior =
+      remembered === undefined
+        ? await this.findArbitrationNotice(watched)
+        : { messageId: remembered[0], ...remembered[1] };
     if (content !== undefined && prior?.content === content) {
       return;
     }
     if (prior !== undefined) {
-      await this.options.store.deleteChannelMessage(
-        prior.repositoryId,
-        prior.messageId,
-      );
-      await this.options.store.appendAudit(undefined, {
-        type: "channel_message_deleted",
-        data: {
-          projectId: prior.projectId,
-          repositoryId: prior.repositoryId,
-          messageId: prior.messageId,
-        },
+      await this.dropArbitrationNotice({
+        projectId: prior.projectId,
+        repositoryId: prior.repositoryId,
+        messageId: prior.messageId,
       });
-      this.arbitrationNotices.delete(watched.taskId);
+      this.arbitrationNotices.delete(prior.messageId);
     }
     if (content === undefined) {
       return;
@@ -13103,13 +13222,178 @@ export class ApiGateway {
       kind: "system",
       authorId: "coordinator",
       content,
+      // Recorded on the message, not just remembered: this is what a fresh
+      // process matches on to find a notice its predecessor left standing.
+      taskId: watched.taskId,
     });
-    this.arbitrationNotices.set(watched.taskId, {
+    this.arbitrationNotices.set(message.id, {
       projectId: watched.projectId,
       repositoryId: watched.repositoryId,
-      messageId: message.id,
+      taskId: watched.taskId,
       content,
+      kind: "hold",
+      alsoNamed: blockedBy,
     });
+  }
+
+  /**
+   * Takes back a notice because the condition it describes is over.
+   *
+   * Called from every path a held task can leave by — it finished, it failed,
+   * it was cancelled from its thread, it never started, the watchdog gave up
+   * on it. Each of those used to drop the watcher and leave "starts once the
+   * other one is done" standing in the room as a promise about a run that no
+   * longer exists.
+   *
+   * Silent and best-effort: an ending has already been said, and a sequencing
+   * notice ceasing to be true is not itself news.
+   */
+  private async withdrawArbitrationNotice(watched: {
+    projectId: string;
+    repositoryId: string;
+    taskId: string;
+  }): Promise<void> {
+    await this.replaceArbitrationNotice(watched).catch(() => undefined);
+  }
+
+  /**
+   * The room's own copy of a hold this process may not remember posting.
+   *
+   * Newest first: what is being replaced is whatever the room was last told
+   * about this task's collision, and an older line about the same one is
+   * exactly what a second announcement would otherwise sit beside.
+   */
+  private async findArbitrationNotice(watched: {
+    projectId: string;
+    repositoryId: string;
+    taskId: string;
+  }): Promise<
+    | {
+        projectId: string;
+        repositoryId: string;
+        messageId: string;
+        content: string;
+      }
+    | undefined
+  > {
+    const messages =
+      (await this.options.store
+        .listChannelMessages(watched.repositoryId, "", { limit: 50 })
+        .catch(() => undefined)) ?? [];
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (
+        message !== undefined &&
+        message.taskId === watched.taskId &&
+        isCoordinatorNotice(message) &&
+        // Only a hold is replaced by a hold. An advisory line about the same
+        // task is a different statement with a different end condition, and
+        // silently swapping one for the other would lose the room's record
+        // that two agents were allowed to overlap.
+        arbitrationNoticeKind(message.content) === "hold"
+      ) {
+        return {
+          projectId: watched.projectId,
+          repositoryId: watched.repositoryId,
+          messageId: message.id,
+          content: message.content,
+        };
+      }
+    }
+    return undefined;
+  }
+
+  /** One notice removed from the room, and the removal broadcast. */
+  private async dropArbitrationNotice(notice: {
+    projectId: string;
+    repositoryId: string;
+    messageId: string;
+  }): Promise<void> {
+    await this.options.store.deleteChannelMessage(
+      notice.repositoryId,
+      notice.messageId,
+    );
+    await this.options.store.appendAudit(undefined, {
+      type: "channel_message_deleted",
+      data: {
+        projectId: notice.projectId,
+        repositoryId: notice.repositoryId,
+        messageId: notice.messageId,
+      },
+    });
+  }
+
+  /**
+   * Sweeps up arbitration notices whose collision is over.
+   *
+   * The live paths withdraw their own — this is for the ones no live path can
+   * reach. Three shapes, all of which left a permanent line in the room:
+   *
+   *   - a restart between the hold and its release, after which nothing in
+   *     memory knew the message existed;
+   *   - the blocker finishing while the held task carries on without ever
+   *     being re-admitted, so the sentence "starts once that one is done"
+   *     describes something that already happened;
+   *   - the advisory "can run together" line, which is about two runs that
+   *     are running, long after both of them stopped.
+   *
+   * A notice whose tasks the store cannot find at all counts as over too: the
+   * work is gone, and the line about it is the only thing left claiming it is
+   * in flight.
+   */
+  private async reconcileArbitrationNotices(): Promise<void> {
+    const repositories = await this.options.store.listRepositories();
+    for (const repository of repositories) {
+      const [messages, tasks] = await Promise.all([
+        this.options.store.listChannelMessages(repository.id, "", {
+          limit: 40,
+        }),
+        this.options.store.listSubmittedTasks({ repositoryId: repository.id }),
+      ]);
+      const byId = new Map(tasks.map((task) => [task.id, task]));
+      const settled = (taskId: string | undefined): boolean => {
+        if (taskId === undefined) {
+          return false;
+        }
+        const status = byId.get(taskId)?.status;
+        return status === undefined || TASK_STATUSES_PAST_STOPPING.has(status);
+      };
+      for (const message of messages) {
+        if (!isCoordinatorNotice(message)) {
+          continue;
+        }
+        const subject = message.taskId;
+        if (subject === undefined) {
+          // Written before notices carried their task. Nothing to decide it
+          // against, and guessing from the words is how the room ends up
+          // losing a line that is still true.
+          continue;
+        }
+        const tracked = this.arbitrationNotices.get(message.id);
+        const others = tracked?.alsoNamed ?? [];
+        const kind = tracked?.kind ?? arbitrationNoticeKind(message.content);
+        // A hold is over as soon as either end of it is: the held task has
+        // stopped needing to be told when it starts, or the work it was
+        // waiting on has finished. An advisory line describes two runs being
+        // in flight together, so it waits for both of them to stop. A notice
+        // this process did not post — the restart case — knows only its own
+        // subject, which is what the message itself records.
+        const over =
+          kind === "advisory"
+            ? [subject, ...others].every((id) => settled(id))
+            : settled(subject) ||
+              (others.length > 0 && others.every((id) => settled(id)));
+        if (!over) {
+          continue;
+        }
+        await this.dropArbitrationNotice({
+          projectId: message.projectId,
+          repositoryId: repository.id,
+          messageId: message.id,
+        }).catch(() => undefined);
+        this.arbitrationNotices.delete(message.id);
+      }
+    }
   }
 
   /**
@@ -13274,15 +13558,32 @@ export class ApiGateway {
       // "who is waiting on whom". It is written to the audit record, which is
       // where an argument that long belongs; the room gets the order.
       const line =
-        `⚖️ ${named[0]} and ${named[1]} have conflicting files but can ` +
-        `run together.`;
-      await this.appendChannelEntry({
+        `⚖️ ${named[0]} and ${named[1]} have conflicting files but ` +
+        CHANNEL_ADVISORY_ENDING;
+      // Said in the present tense about two runs that are running, so it is
+      // withdrawn once neither of them is — a room that has been quiet for a
+      // day should not still be reporting who was allowed to overlap in it.
+      // The subject goes on the message so a fresh process can still find the
+      // line; the pair is remembered so this one can wait for both halves.
+      const [first = "", second = ""] = taskIds.map((entry) => String(entry));
+      const message = await this.appendChannelEntry({
         projectId,
         repositoryId,
         kind: "system",
         authorId: "coordinator",
         content: line,
+        taskId: first,
       }).catch(() => undefined);
+      if (message !== undefined) {
+        this.arbitrationNotices.set(message.id, {
+          projectId,
+          repositoryId,
+          taskId: first,
+          content: line,
+          kind: "advisory",
+          alsoNamed: [second],
+        });
+      }
     }
   }
 
@@ -13537,6 +13838,9 @@ export class ApiGateway {
                 .catch(() => undefined);
               this.watchedChannelTasks.delete(watched.taskId);
               this.announcedChannelHolds.delete(watched.taskId);
+              // A run that has stopped is not waiting its turn, whatever the
+              // room was last told about the collision it was in.
+              await this.withdrawArbitrationNotice(watched);
               break;
             }
             // Something worth following. Everything held so far goes in
@@ -13590,6 +13894,11 @@ export class ApiGateway {
             // Its ending is the news; the hold is merely no longer true, so
             // the marker goes without a line of its own.
             this.announcedChannelHolds.delete(watched.taskId);
+            // And neither is it waiting behind another agent. The same rule,
+            // applied to the sequencing notice: the ending says what happened,
+            // so the standing promise about when this would start is simply
+            // taken back rather than answered with a second line.
+            await this.withdrawArbitrationNotice(watched);
             break;
           }
         }
@@ -13599,6 +13908,7 @@ export class ApiGateway {
           // so giving up is said out loud rather than done quietly.
           this.watchedChannelTasks.delete(watched.taskId);
           this.announcedChannelHolds.delete(watched.taskId);
+          await this.withdrawArbitrationNotice(watched);
           const abandoned =
             "I could not finish this — I stopped hearing back from the run.";
           // Same rule as a terminal event: a run that never said anything
@@ -13643,6 +13953,15 @@ export class ApiGateway {
     content: string;
     /** Earlier channel root this flat entry answers. */
     referencedMessageId?: string;
+    /**
+     * The task this entry is about, when knowing that outlives this process.
+     *
+     * Written for the arbitration notices, which have to be findable again by
+     * a fresh process in order to be withdrawn. Not a thread root: nothing
+     * narrates into these, and the delete route knows to leave the task alone
+     * (see `isCoordinatorNotice`).
+     */
+    taskId?: string;
   }): Promise<{ id: string }> {
     const message = await this.options.store.appendChannelMessage({
       repositoryId: input.repositoryId,
@@ -13653,6 +13972,7 @@ export class ApiGateway {
       ...(input.referencedMessageId === undefined
         ? {}
         : { referencedMessageId: input.referencedMessageId }),
+      ...(input.taskId === undefined ? {} : { taskId: input.taskId }),
     });
     await this.options.store.appendAudit(undefined, {
       type: "channel_message_posted",
