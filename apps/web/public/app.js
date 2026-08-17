@@ -4799,6 +4799,20 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+/* Enter sends a direct message the same way it sends a thread reply. The DM
+   composer has no @mention picker steering its Enter, so the plain rule is the
+   whole rule here. */
+document.addEventListener("keydown", (event) => {
+  const node = event.target;
+  if (node?.dataset?.act !== "dm-input") {
+    return;
+  }
+  if (event.key === "Enter" && !event.shiftKey && !imeComposing(event)) {
+    event.preventDefault();
+    node.closest("form")?.requestSubmit();
+  }
+});
+
 /** Enter or Escape finishes the inline agent-name edit. */
 document.addEventListener("keydown", (event) => {
   const node = event.target;
