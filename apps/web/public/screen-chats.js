@@ -688,23 +688,7 @@ function rosterRow(agent) {
       data-act="agent-panel-open" data-value="${esc(agent.id)}">
       <span class="rr-avatar" data-hover="agent-usage"
         data-hover-value="${esc(agent.id)}" tabindex="0"
-        ${
-          // Your own agent is talked to one to one, not by mentioning it in
-          // the room — the group channel is for work everyone should see. The
-          // act sits on the avatar rather than the row so it wins over the
-          // row's settings toggle without taking the rest of the row with it.
-          // Personal agents only. An org agent's whole point is that its
-          // work happens where the team can see it; a private side-channel
-          // to one would put shared spend behind a curtain.
-          agent.mine && agent.visibility !== "org"
-            ? `data-act="agent-chat-open" data-value="${esc(agent.id)}"`
-            : ""
-        }
-        aria-label="${
-          agent.mine
-            ? `Message ${esc(agent.name)}`
-            : `Usage for ${esc(agent.name)}`
-        }">
+        aria-label="Open details for ${esc(agent.name)}">
         ${usageTip(agent)}
         ${agentFace(agent, 30)}
         ${statusDot(status, AGENT_STATUS_TITLE[status])}
@@ -763,9 +747,10 @@ export function rosterMenuItems(agentId) {
   const canModerate = canManageRepository(repositoryId);
   const paused = state.auditorPaused[repositoryId] === true;
   const items = [];
-  // Only for personal agents of this account, the same rule the avatar's
-  // one-to-one act follows: an org agent's whole point is that its work
-  // happens where the team can see it.
+  // Only for personal agents of this account. This is the explicit route to a
+  // one-to-one conversation; clicking the agent itself opens its details.
+  // An org agent's whole point is that its work happens where the team can see
+  // it, so no private-chat action is offered for one.
   if (agent.mine === true && agent.visibility !== "org") {
     items.push({
       act: "agent-chat-open",

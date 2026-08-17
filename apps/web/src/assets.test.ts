@@ -2337,6 +2337,46 @@ test("people and agents render directly without a main branch node", async () =>
   assert.match(header, /class="ch-count" title="\$\{roster\.length\}/u);
 });
 
+test("clicking an agent opens its details while chat and history stay explicit", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const row = chats.slice(
+    chats.indexOf("function rosterRow(agent)"),
+    chats.indexOf("/**\n * What the \"...\" on a roster row offers"),
+  );
+  const menu = chats.slice(
+    chats.indexOf("export function rosterMenuItems"),
+    chats.indexOf("function chanSidebar"),
+  );
+  const panel = chats.slice(
+    chats.indexOf("function agentPanel()"),
+    chats.indexOf("function dmPanel()"),
+  );
+  const open = app.slice(
+    app.indexOf('case "agent-panel-open"'),
+    app.indexOf('case "agent-panel-tab"'),
+  );
+
+  // The avatar is part of the primary row target. It must not shadow the row
+  // with the private-chat action and bypass the profile-like landing surface.
+  assert.match(row, /data-act="agent-panel-open"/u);
+  assert.match(row, /aria-label="Open details for \$\{esc\(agent\.name\)\}"/u);
+  assert.doesNotMatch(row, /data-act="agent-chat-open"/u);
+
+  assert.match(open, /state\.activeAgentPanel = value;/u);
+  assert.match(open, /state\.agentPanelTab = "spec";/u);
+  assert.doesNotMatch(open, /notifications/u);
+  assert.match(panel, /const requestedTab = state\.agentPanelTab \?\? "spec";/u);
+  assert.match(panel, /: agentSpec\(agent, repositoryId\)/u);
+
+  // The alternate destinations still exist, but only behind controls that
+  // name what they do instead of changing the result of clicking the agent.
+  assert.match(menu, /act: "agent-chat-open"/u);
+  assert.match(menu, /label: `Message \$\{agent\.name\}`/u);
+  assert.match(panel, /value: tab === "history" \? "spec" : "history"/u);
+  assert.match(panel, /\{ value: "chat", label: "Private chat" \}/u);
+});
+
 test("a roster row carries one ellipsis and a compact rename delete menu", async () => {
   const chats = await publicFile("screen-chats.js");
   const ui = await publicFile("ui.js");
