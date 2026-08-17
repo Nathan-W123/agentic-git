@@ -18,6 +18,7 @@
 
 import {
   activeChannelId,
+  activeTasks,
   agentStatus,
   agentsThinkingIn,
 api,
@@ -50,6 +51,7 @@ api,
   threadTitle,
   threadTitleReply,
   typingOn,
+  waitingTasks,
 } from "./data.js";
 import { chatComposer, chatProgress, chatThread } from "./chat.js";
 import {
@@ -2669,6 +2671,184 @@ function agentHistory(agent, repositoryId) {
     .join("")}</div>`;
 }
 
+/** Every loaded room this exact agent belongs to, with that room's overrides. */
+function agentChannelAssignments(agent, repositoryId) {
+  return state.repositories.flatMap((repository) => {
+    // The active room is necessarily known well enough to have opened this
+    // panel. Other rooms only become facts once their authoritative roster
+    // has arrived; `agent-panel-open` starts those reads in the background.
+    if (
+      repository.id !== repositoryId &&
+      !state.channelRosterLoaded.has(repository.id)
+    ) {
+      return [];
+    }
+    const member = channelAgentsFor(repository.id).find(
+      (candidate) => candidate.id === agent.id,
+    );
+    return member === undefined ? [] : [{ repository, member }];
+  });
+}
+
+function agentUsage(agent) {
+  if (agent.mine !== true) {
+    return `<div style="color:var(--text-3);font-size:12px;line-height:1.5">
+      Usage is private to the agent's owner.
+    </div>`;
+  }
+  const report = state.providerUsage[agent.provider ?? agent.id];
+  if (report === undefined || report.loading === true) {
+    return `<div style="color:var(--text-3);font-size:12px">Checking usage…</div>`;
+  }
+  if (report.unavailableReason !== undefined) {
+    return `<div style="color:var(--text-3);font-size:12px;line-height:1.5">${esc(
+      report.unavailableReason,
+    )}</div>`;
+  }
+  if ((report.windows ?? []).length === 0) {
+    return `<div style="color:var(--text-3);font-size:12px">No usage reported.</div>`;
+  }
+  return `<div style="display:grid;gap:10px">
+    ${report.windows
+      .map((window) => {
+        const percent = Math.max(0, Math.min(100, Number(window.percentUsed) || 0));
+        return `<div>
+          <div style="display:flex;justify-content:space-between;gap:12px;font-size:12px;margin-bottom:6px">
+            <span style="color:var(--text-2)">${esc(window.label)}</span>
+            <strong style="font-variant-numeric:tabular-nums">${Math.round(percent)}%</strong>
+          </div>
+          <div style="height:7px;border-radius:999px;background:var(--bg-inset);overflow:hidden">
+            <i style="display:block;width:${percent}%;height:100%;background:var(--accent);border-radius:inherit"></i>
+          </div>
+          ${
+            window.resetsAt === undefined
+              ? ""
+              : `<div style="margin-top:4px;color:var(--text-3);font-size:10.5px">Resets ${esc(
+                  window.resetsAt,
+                )}</div>`
+          }
+        </div>`;
+      })
+      .join("")}
+    ${
+      report.source === undefined
+        ? ""
+        : `<div style="color:var(--text-3);font-size:10.5px">${esc(report.source)}</div>`
+    }
+  </div>`;
+}
+
+/** The profile-like landing surface for an agent panel. */
+function agentSpec(agent, repositoryId) {
+  const assignments = agentChannelAssignments(agent, repositoryId);
+  const agentTasks = [...activeTasks(), ...waitingTasks()].filter((candidate) =>
+    taskBelongsToAgent(candidate, agent),
+  );
+  // Prefer work in the room the panel was opened from, but do not call an
+  // agent idle while it is visibly working in another channel.
+  const task =
+    agentTasks.find((candidate) => candidate.repositoryId === repositoryId) ??
+    agentTasks[0];
+  const taskRepositoryId = task?.repositoryId ?? repositoryId;
+  const taskMessage =
+    task === undefined
+      ? undefined
+      : channelMessagesFor(taskRepositoryId).find((entry) => entry.taskId === task.id);
+  const currentAssignment =
+    assignments.find(({ repository }) => repository.id === repositoryId)?.member ?? agent;
+  const status = agentStatus(agent, repositoryId);
+  const allChannelsLoaded = state.repositories.every((repository) =>
+    state.channelRosterLoaded.has(repository.id),
+  );
+  const detailCard = (label, value) => `<div style="min-width:0;padding:11px 12px;border:1px solid var(--border-soft);border-radius:10px;background:var(--bg-inset)">
+    <div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px">${esc(
+      label,
+    )}</div>
+    <div style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(
+      value,
+    )}">${esc(value)}</div>
+  </div>`;
+  return `<div class="agent-spec" style="min-height:0;overflow-y:auto;padding:20px 18px 24px">
+    <section style="display:flex;align-items:center;gap:13px;margin-bottom:22px">
+      <span style="position:relative;display:inline-flex;flex:none">
+        ${agentFace(agent, 46)}
+        ${statusDot(status, AGENT_STATUS_TITLE[status])}
+      </span>
+      <div style="min-width:0">
+        <h2 style="margin:0;font-size:20px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(
+          agent.name,
+        )}</h2>
+        <div style="margin-top:3px;color:var(--text-3);font-size:12px">${esc(
+          AGENT_STATUS_TITLE[status],
+        )}${agent.mine ? " · Your agent" : ""}</div>
+      </div>
+    </section>
+
+    <section style="margin-bottom:22px">
+      <div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:.09em;margin-bottom:8px">Configuration in #${esc(
+        repositoryId,
+      )}</div>
+      <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px">
+        ${detailCard("Model", currentAssignment.model || "Default")}
+        ${detailCard("Reasoning", currentAssignment.effort || "Default")}
+      </div>
+    </section>
+
+    <section style="margin-bottom:22px">
+      <div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:.09em;margin-bottom:8px">Current task</div>
+      <div style="padding:12px;border:1px solid var(--border-soft);border-radius:10px;background:var(--bg-inset)">
+        ${
+          task === undefined
+            ? `<div style="color:var(--text-3);font-size:12px">No active task.</div>`
+            : `<div style="font-size:13px;line-height:1.45">${esc(
+                taskSummaryLine(task, taskMessage),
+              )}</div>
+               <div style="margin-top:6px;color:var(--text-3);font-size:10.5px;text-transform:capitalize">${esc(
+                 String(task.status ?? "working").replaceAll("_", " "),
+               )} · #${esc(taskRepositoryId)} · ${esc(relativeTime(task.submittedAt))}</div>`
+        }
+      </div>
+    </section>
+
+    <section style="margin-bottom:22px">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px">
+        <span style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:.09em">Channels</span>
+        <span style="color:var(--text-3);font-size:10.5px">${assignments.length}</span>
+      </div>
+      <div style="display:grid;gap:7px">
+        ${
+          assignments.length === 0
+            ? `<div style="color:var(--text-3);font-size:12px">No channel memberships.</div>`
+            : assignments
+                .map(
+                  ({ repository, member }) => `<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:10px 11px;border:1px solid var(--border-soft);border-radius:9px">
+                    <strong style="font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">#${esc(
+                      repository.id,
+                    )}</strong>
+                    <span style="color:${member.role ? "var(--text-2)" : "var(--text-3)"};font-size:11px;text-align:right">${esc(
+                      member.role || "No role assigned",
+                    )}</span>
+                  </div>`,
+                )
+                .join("")
+        }
+        ${
+          allChannelsLoaded
+            ? ""
+            : `<div style="color:var(--text-3);font-size:10.5px">Checking remaining channels…</div>`
+        }
+      </div>
+    </section>
+
+    <section>
+      <div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:.09em;margin-bottom:8px">Usage</div>
+      <div style="padding:12px;border:1px solid var(--border-soft);border-radius:10px;background:var(--bg-inset)">
+        ${agentUsage(agent)}
+      </div>
+    </section>
+  </div>`;
+}
+
 function agentPanel() {
   const agentId = state.activeAgentPanel;
   if (agentId === undefined) {
@@ -2691,7 +2871,13 @@ function agentPanel() {
   // rather than a convenience. The avatar shortcut already refuses for the
   // same reason; this is the same rule where the tabs are drawn.
   const canChatPrivately = agent.mine === true && agent.visibility !== "org";
-  const tab = canChatPrivately ? (state.agentPanelTab ?? "history") : "history";
+  const requestedTab = state.agentPanelTab ?? "spec";
+  const tab =
+    requestedTab === "history" || requestedTab === "spec"
+      ? requestedTab
+      : canChatPrivately
+        ? "chat"
+        : "spec";
   const status = agentStatus(agent, activeChannelId());
   // Header and tabs share the grid's first row. `.thread-panel` is three rows
   // — header, a stretching body, composer — and an extra top-level child does
@@ -2703,19 +2889,25 @@ function agentPanel() {
     ${panelGrip()}
     <div class="agent-panel-head">
       <header class="thread-head">
-        ${panelKind("Agent")}
+        ${panelKind(tab === "history" ? "Agent history" : "Agent")}
         <span class="dm-head-name">
           ${agentFace(agent, 20)}
           ${esc(agent.name)}
           ${statusDot(status, AGENT_STATUS_TITLE[status])}
         </span>
         <span class="spacer"></span>
-        ${panelClose("agent-panel-close", "Close this conversation (Esc)")}
+        ${iconButton(tab === "history" ? "robot" : "history", {
+          act: "agent-panel-tab",
+          value: tab === "history" ? "spec" : "history",
+          title: tab === "history" ? "Back to agent details" : "View agent history",
+          small: true,
+        })}
+        ${panelClose("agent-panel-close", "Close agent panel (Esc)")}
       </header>
       ${
-        canChatPrivately
+        canChatPrivately && tab !== "history"
           ? tabs("agent-panel-tab", [
-              { value: "history", label: "History" },
+              { value: "spec", label: "Details" },
               { value: "chat", label: "Private chat" },
             ], tab)
           : ""
@@ -2732,7 +2924,9 @@ function agentPanel() {
             ${chatProgress(agent)}
             ${chatThread(agent)}
           </div>`
-        : agentHistory(agent, repositoryId)
+        : tab === "history"
+          ? agentHistory(agent, repositoryId)
+          : agentSpec(agent, repositoryId)
     }
     ${
       // The composer belongs to the private chat and nothing else. Under a

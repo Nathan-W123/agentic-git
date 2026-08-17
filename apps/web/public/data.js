@@ -185,13 +185,12 @@ export const state = {
   /** Any agent in the room, open in that same panel. */
   activeAgentPanel: undefined,
   /**
-   * Which half of an agent's panel is showing: "history" or "chat".
-   *
-   * History is the default because it is the half that exists for every
-   * agent — a private chat is only ever with your own, so opening straight
-   * into one would show most of the roster an empty room they cannot use.
+   * Which agent surface is showing: its specification, history, or private
+   * chat. The specification is the common landing surface for every agent;
+   * history remains one icon away, while chat only exists for a personal
+   * agent owned by this account.
    */
-  agentPanelTab: "history",
+  agentPanelTab: "spec",
   /*
    * Whether a turn's thinking block is unfolded, keyed by thread and turn.
    *

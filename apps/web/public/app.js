@@ -3890,14 +3890,32 @@ document.addEventListener("click", (event) => {
       void stopPreviewAction(value);
       return;
     case "agent-panel-open":
-      // Any agent in the room, not only your own, and history first. The
+      // Any agent in the room, not only your own, and its specification first. The
       // private-chat entry above stays as it was: that one is a deliberate
       // "talk to my agent" and lands on the chat tab.
       state.activeAgentPanel = value;
-      state.agentPanelTab = "history";
+      state.agentPanelTab = "spec";
       state.activeDm = undefined;
       state.activeChannelThread = undefined;
       render();
+      // Usage belongs to the signed-in account, so it is only requested for
+      // one of this person's own agents. Channel membership is repository
+      // scoped; load every roster once so the specification can honestly
+      // list every channel rather than only rooms visited this session.
+      {
+        const opened = channelAgentsFor(activeChannelId()).find(
+          (agent) => agent.id === value,
+        );
+        if (opened?.mine === true) {
+          void ensureProviderUsage(opened.provider ?? opened.id, render);
+        }
+        void (async () => {
+          for (const repository of state.repositories) {
+            await ensureChannelRoster(repository.id);
+          }
+          render();
+        })();
+      }
       return;
     case "agent-panel-tab":
       state.agentPanelTab = value;
