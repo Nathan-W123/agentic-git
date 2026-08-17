@@ -66,6 +66,7 @@ import {
 } from "./code-view.js";
 import {
   agentFace,
+  agentLabelOf,
   brandMark,
   avatar,
   chime,
@@ -78,7 +79,6 @@ import {
   miniSelect,
   relativeTime,
   searchBox,
-  tabs,
   toast,
 } from "./ui.js";
 
@@ -2741,10 +2741,32 @@ function agentSpec(agent, repositoryId) {
   const allChannelsLoaded = state.repositories.every((repository) =>
     state.channelRosterLoaded.has(repository.id),
   );
-  const detailCard = (label, value) => `<div class="aspec-card">
-    <div class="aspec-card-label">${esc(label)}</div>
-    <div class="aspec-card-value" title="${esc(value)}">${esc(value)}</div>
-  </div>`;
+  // One row, written the way the conversation beside it writes a line: the
+  // thing on the left, the one value that answers it on the right. A card per
+  // setting was two borders and a heading to say "opus", and the page had six
+  // of them stacked — the boxes were most of what there was to read.
+  const settingRow = (label, control, title = "") =>
+    `<div class="aspec-row"${title === "" ? "" : ` title="${esc(title)}"`}>
+      <span class="aspec-row-label">${esc(label)}</span>
+      <span class="aspec-row-value">${control}</span>
+    </div>`;
+  const readOnly = (value) =>
+    `<span class="aspec-row-text">${esc(value)}</span>`;
+  // The same row shape, with the value half editable. In this channel it reads
+  // "Role", because the heading above it already says which channel; in the
+  // list of the agent's other rooms the channel is the label.
+  const roleField = (repository, member, here = false) => `<form
+    class="aspec-row aspec-channel" data-act="agent-role-form"
+    data-value="${esc(agent.id)}" data-repo="${esc(repository.id)}">
+    <span class="aspec-row-label" title="#${esc(repository.id)}">${
+      here ? "Role" : `#${esc(repository.id)}`
+    }</span>
+    <input class="aspec-role" data-act="agent-role-input"
+      data-value="${esc(agent.id)}" data-repo="${esc(repository.id)}"
+      value="${esc(member.role ?? "")}" maxlength="120" autocomplete="off"
+      enterkeyhint="done" placeholder="Not set"
+      aria-label="Role for ${esc(agent.name)} in #${esc(repository.id)}">
+  </form>`;
   // Model and reasoning are the agent's own credential spending its owner's
   // account, so only that owner picks them; a teammate reads what was chosen.
   // A role is the opposite — it is this channel's declaration of what the
@@ -2757,107 +2779,116 @@ function agentSpec(agent, repositoryId) {
       ? providerEffortOptions(providerId, currentAssignment.model ?? "")
       : [];
   const optionsNote = agent.mine === true ? providerOptionsNote(providerId) : "";
-  const configuration =
-    agent.mine === true && (models.length > 0 || efforts.length > 0)
-      ? `<div class="aspec-fields" data-agent="${esc(agent.id)}">
-           ${
-             models.length === 0
-               ? detailCard("Model", currentAssignment.model || "Default")
-               : `<label class="aspec-field"><span class="aspec-field-label">Model</span>
-                   ${miniSelect(
-                     "channel-agent-model",
-                     models,
-                     currentAssignment.model ?? "",
-                     "Model in this channel",
-                   )}</label>`
-           }
-           ${
-             efforts.length === 0
-               ? detailCard("Reasoning", currentAssignment.effort || "Default")
-               : `<label class="aspec-field"><span class="aspec-field-label">Reasoning</span>
-                   ${miniSelect(
-                     "channel-agent-effort",
-                     efforts,
-                     currentAssignment.effort ?? "",
-                     "Reasoning effort in this channel",
-                   )}</label>`
-           }
-         </div>`
-      : `<div class="aspec-fields">
-           ${detailCard("Model", currentAssignment.model || "Default")}
-           ${detailCard("Reasoning", currentAssignment.effort || "Default")}
-         </div>`;
-  const roleField = (repository, member) => `<form class="aspec-channel"
-    data-act="agent-role-form" data-value="${esc(agent.id)}"
-    data-repo="${esc(repository.id)}">
-    <span class="aspec-channel-name" title="#${esc(repository.id)}">#${esc(
-      repository.id,
-    )}${repository.id === repositoryId ? '<span class="aspec-here">here</span>' : ""}</span>
-    <input class="aspec-role" data-act="agent-role-input"
-      data-value="${esc(agent.id)}" data-repo="${esc(repository.id)}"
-      value="${esc(member.role ?? "")}" maxlength="120" autocomplete="off"
-      enterkeyhint="done" placeholder="No role assigned"
-      aria-label="Role for ${esc(agent.name)} in #${esc(repository.id)}">
-  </form>`;
+  const configuration = `<div class="aspec-rows" data-agent="${esc(agent.id)}">
+      ${settingRow("Connection", readOnly(agentLabelOf(providerId)), providerId)}
+      ${settingRow(
+        "Model",
+        models.length === 0
+          ? readOnly(currentAssignment.model || "Default")
+          : miniSelect(
+              "channel-agent-model",
+              models,
+              currentAssignment.model ?? "",
+              "Model in this channel",
+            ),
+      )}
+      ${settingRow(
+        "Reasoning",
+        efforts.length === 0
+          ? readOnly(currentAssignment.effort || "Default")
+          : miniSelect(
+              "channel-agent-effort",
+              efforts,
+              currentAssignment.effort ?? "",
+              "Reasoning effort in this channel",
+            ),
+      )}
+      ${roleField(
+        state.repositories.find((repository) => repository.id === repositoryId) ?? {
+          id: repositoryId,
+        },
+        currentAssignment,
+        true,
+      )}
+    </div>`;
+  // The room the panel was opened from is already the whole first section, so
+  // it is not repeated in the list underneath it; that list is only "and here
+  // is everywhere else this agent works".
+  const elsewhere = assignments.filter(
+    ({ repository }) => repository.id !== repositoryId,
+  );
   return `<div class="agent-spec">
     <section class="aspec-head">
       <span class="aspec-face">
-        ${agentFace(agent, 46)}
+        ${agentFace(agent, 44)}
         ${statusDot(status, AGENT_STATUS_TITLE[status])}
       </span>
-      <div style="min-width:0">
+      <div class="aspec-identity">
         <h2>${esc(agent.name)}</h2>
-        <div class="aspec-sub">${esc(AGENT_STATUS_TITLE[status])}${
-          agent.mine ? " · Your agent" : ""
-        }</div>
+        <div class="aspec-sub">${esc(AGENT_STATUS_TITLE[status])} · #${esc(
+          repositoryId,
+        )}${agent.mine ? " · Your agent" : ""}</div>
       </div>
     </section>
 
     <section class="aspec-section">
-      <div class="aspec-label">Configuration in #${esc(repositoryId)}</div>
+      <div class="aspec-label">Orchestration in #${esc(repositoryId)}</div>
       ${configuration}
       ${optionsNote === "" ? "" : `<div class="aspec-note">${esc(optionsNote)}</div>`}
-    </section>
-
-    <section class="aspec-section">
-      <div class="aspec-label">Current task</div>
-      <div class="aspec-box">
-        ${
-          task === undefined
-            ? `<div class="aspec-note">No active task.</div>`
-            : `<div class="aspec-task">${esc(taskSummaryLine(task, taskMessage))}</div>
-               <div class="aspec-task-meta">${esc(
-                 String(task.status ?? "working").replaceAll("_", " "),
-               )} · #${esc(taskRepositoryId)} · ${esc(relativeTime(task.submittedAt))}</div>`
-        }
-      </div>
-      <button type="button" class="aspec-nav" data-act="agent-panel-tab"
-        data-value="history">${icon("history")}
-        <span>Task history</span>${icon("arrowRight")}</button>
+      <div class="aspec-note">A role is what this agent is for here; it rides
+        on every task submitted in this channel.</div>
     </section>
 
     <section class="aspec-section">
       <div class="aspec-label-row">
-        <span class="aspec-label">Roles by channel</span>
-        <span class="aspec-count">${assignments.length}</span>
+        <span class="aspec-label">Current task</span>
+        <button type="button" class="aspec-nav" data-act="agent-panel-tab"
+          data-value="history" title="Task history">
+          <span>History</span>${icon("arrowRight")}</button>
       </div>
-      <div class="aspec-channels">
-        ${
-          assignments.length === 0
-            ? `<div class="aspec-note">No channel memberships.</div>`
-            : assignments
-                .map(({ repository, member }) => roleField(repository, member))
-                .join("")
-        }
-        ${
-          allChannelsLoaded
-            ? ""
-            : `<div class="aspec-note">Checking remaining channels…</div>`
-        }
-      </div>
-      <div class="aspec-note">A role is what this agent is for in that
-        channel; it rides on every task submitted there.</div>
+      ${
+        // A box is spent on the one thing that is happening rather than on the
+        // sentence saying nothing is: an idle agent should read as a quiet
+        // line, not as an empty container with a border around the emptiness.
+        task === undefined
+          ? `<div class="aspec-note">Nothing running.</div>`
+          : `<div class="aspec-box aspec-live">
+               <div class="aspec-task">${esc(taskSummaryLine(task, taskMessage))}</div>
+               <div class="aspec-task-meta">${esc(
+                 String(task.status ?? "working").replaceAll("_", " "),
+               )} · #${esc(taskRepositoryId)} · ${esc(relativeTime(task.submittedAt))}</div>
+             </div>`
+      }
     </section>
+
+    ${
+      elsewhere.length === 0 && allChannelsLoaded
+        ? ""
+        : `<section class="aspec-section">
+            <div class="aspec-label-row">
+              <span class="aspec-label">Also in</span>
+              <span class="aspec-count">${elsewhere.length}</span>
+            </div>
+            ${
+              // No empty rule where the list would be: an `.aspec-rows` with
+              // nothing in it is still a hairline across the panel, which
+              // reads as a row that failed to render rather than as a list
+              // that has not arrived.
+              elsewhere.length === 0
+                ? ""
+                : `<div class="aspec-rows aspec-channels">
+                    ${elsewhere
+                      .map(({ repository, member }) => roleField(repository, member))
+                      .join("")}
+                  </div>`
+            }
+            ${
+              allChannelsLoaded
+                ? ""
+                : `<div class="aspec-note">Checking remaining channels…</div>`
+            }
+          </section>`
+    }
 
     <section class="aspec-section">
       <div class="aspec-label-row">
@@ -2873,9 +2904,7 @@ function agentSpec(agent, repositoryId) {
             : ""
         }
       </div>
-      <div class="aspec-box">
-        ${agentUsage(agent)}
-      </div>
+      ${agentUsage(agent)}
     </section>
   </div>`;
 }
@@ -2910,40 +2939,41 @@ function agentPanel() {
         ? "chat"
         : "spec";
   const status = agentStatus(agent, activeChannelId());
-  // Header and tabs share the grid's first row. `.thread-panel` is three rows
-  // — header, a stretching body, composer — and an extra top-level child does
-  // not add a row to it: it takes the body's. The tab strip became the
-  // stretching element and sat in the vertical middle of the panel with the
-  // history pushed below it, which is what a fourth child gets in a grid that
-  // was drawn for three.
+  // Every way out of the details page is one header control on the right, and
+  // each one is a toggle back to the details when it is the view you are in.
+  // The tab strip that used to say Details / Private chat is gone: it was a
+  // second navigation band under a header that already had room for it, and it
+  // could only ever offer two of the three places this panel goes.
+  const headerAction = (view, iconName, title) =>
+    iconButton(tab === view ? "robot" : iconName, {
+      act: "agent-panel-tab",
+      value: tab === view ? "spec" : view,
+      title: tab === view ? "Back to agent details" : title,
+      small: true,
+      cls: tab === view ? "on" : "",
+    });
+  // The header is the panel's first grid row directly. It used to be wrapped
+  // in `.agent-panel-head` so it could share that row with a tab strip — but
+  // that class is also the settings screen's agent header, and the two
+  // definitions merged into a column flex box that centred its child: the
+  // header shrank to its own content and floated in the middle of the panel,
+  // hairline and all, while the page under it stayed full width.
   return `<aside class="thread-panel">
     ${panelGrip()}
-    <div class="agent-panel-head">
-      <header class="thread-head">
-        ${panelKind(tab === "history" ? "Agent history" : "Agent")}
-        <span class="dm-head-name">
-          ${agentFace(agent, 20)}
-          ${esc(agent.name)}
-          ${statusDot(status, AGENT_STATUS_TITLE[status])}
-        </span>
-        <span class="spacer"></span>
-        ${iconButton(tab === "history" ? "robot" : "history", {
-          act: "agent-panel-tab",
-          value: tab === "history" ? "spec" : "history",
-          title: tab === "history" ? "Back to agent details" : "View agent history",
-          small: true,
-        })}
-        ${panelClose("agent-panel-close", "Close agent panel (Esc)")}
-      </header>
-      ${
-        canChatPrivately && tab !== "history"
-          ? tabs("agent-panel-tab", [
-              { value: "spec", label: "Details" },
-              { value: "chat", label: "Private chat" },
-            ], tab)
-          : ""
-      }
-    </div>
+    <header class="thread-head">
+      ${panelKind(
+        tab === "history" ? "Agent history" : tab === "chat" ? "Agent chat" : "Agent",
+      )}
+      <span class="dm-head-name">
+        ${agentFace(agent, 20)}
+        ${esc(agent.name)}
+        ${statusDot(status, AGENT_STATUS_TITLE[status])}
+      </span>
+      <span class="spacer"></span>
+      ${canChatPrivately ? headerAction("chat", "chatBubble", "Private chat") : ""}
+      ${headerAction("history", "history", "Task history")}
+      ${panelClose("agent-panel-close", "Close agent panel (Esc)")}
+    </header>
     ${
       tab === "chat"
         ? // Progress and transcript share one row, as they do in `chatPanel`.
