@@ -661,6 +661,24 @@ export async function ensureProviderUsage(providerId, rerender) {
   return state.providerUsage[providerId];
 }
 
+/**
+ * Asks again, ignoring the kept answer.
+ *
+ * The cache above exists so a hover cannot spawn a CLI call per pointer move,
+ * but it also means a figure that was unavailable once stays unavailable on
+ * the screen forever — including after the very thing that would fix it (a
+ * task running, a credential reconnected) has happened. This is the way to
+ * say "look again", and it is deliberately only reachable from a button
+ * somebody pressed.
+ */
+export async function refreshProviderUsage(providerId, rerender) {
+  if (!providerId) {
+    return undefined;
+  }
+  delete state.providerUsage[providerId];
+  return await ensureProviderUsage(providerId, rerender);
+}
+
 export async function applyProviderSetting(providerId, field, value) {
   const response = await api(
     `/chat/providers/${encodeURIComponent(providerId)}/settings`,
@@ -3370,20 +3388,43 @@ export function renameChannelAgent(repositoryId, agentId, name) {
   }
 }
 
-export function setChannelAgentSetting(repositoryId, agentId, field, value) {
+/**
+ * One agent's model, reasoning effort or role, in one repository.
+ *
+ * Applied locally first so the control answers the press, then written. A
+ * refusal puts the old value back rather than leaving the screen showing a
+ * setting the server never accepted: the two roles that mean something —
+ * auditor and investigator — are refused for real reasons (somebody already
+ * holds it, or the agent is personal and an audit would spend its owner's
+ * account unasked), and those refusals arrive at exactly the moment somebody
+ * has typed the word into the field. `rerender` is what makes the rollback
+ * visible; without one the corrected value waits for the next draw.
+ */
+export function setChannelAgentSetting(
+  repositoryId,
+  agentId,
+  field,
+  value,
+  rerender,
+) {
   if (!repositoryId || !agentId) {
     return;
   }
   state.channelAgentOverrides[repositoryId] ??= {};
+  const previous = state.channelAgentOverrides[repositoryId][agentId];
   state.channelAgentOverrides[repositoryId][agentId] = {
-    ...state.channelAgentOverrides[repositoryId][agentId],
+    ...previous,
     [field]: value,
   };
   if (state.projectId && (field === "model" || field === "effort" || field === "role")) {
     void api(channelPath(repositoryId, `/agents/${encodeURIComponent(agentId)}`), {
       method: "POST",
       body: { [field]: value },
-    }).catch((error) => toast(`Setting did not save: ${error.message}`, "error"));
+    }).catch((error) => {
+      state.channelAgentOverrides[repositoryId][agentId] = { ...previous };
+      toast(`Setting did not save: ${error.message}`, "error");
+      rerender?.();
+    });
   }
 }
 

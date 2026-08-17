@@ -434,6 +434,110 @@ export function parseCodexRateLimits(
     : { source: "Codex CLI", windows };
 }
 
+/** How long the account-quota handshake may take before it is abandoned. */
+export const CODEX_QUOTA_TIMEOUT_MS = 8_000;
+
+function codexNumber(
+  value: Record<string, unknown>,
+  camelCase: string,
+  snakeCase: string,
+): number | undefined {
+  const found = value[camelCase] ?? value[snakeCase];
+  return typeof found === "number" && Number.isFinite(found)
+    ? found
+    : undefined;
+}
+
+function codexAppServerWindow(
+  value: unknown,
+  fallbackLabel: string,
+): ProviderUsageWindow | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+  const window = value as Record<string, unknown>;
+  const used = codexNumber(window, "usedPercent", "used_percent");
+  if (used === undefined) {
+    return undefined;
+  }
+  // Two spellings of the same field across CLI releases, and neither is worth
+  // preferring: the app-server answers `window_minutes` on some builds and
+  // `window_duration_mins` on others.
+  const minutes =
+    codexNumber(window, "windowMinutes", "window_minutes") ??
+    codexNumber(window, "windowDurationMins", "window_duration_mins");
+  const resetsAt = codexNumber(window, "resetsAt", "resets_at");
+  return {
+    label: minutes === undefined ? fallbackLabel : codexWindowLabel(minutes),
+    percentUsed: Math.max(0, Math.min(100, used)),
+    ...(resetsAt === undefined
+      ? {}
+      : {
+          resetsAt: new Date(resetsAt * 1000).toLocaleString(undefined, {
+            month: "short",
+            day: "numeric",
+            hour: "numeric",
+            minute: "2-digit",
+          }),
+        }),
+  };
+}
+
+/**
+ * Reads the quota answer out of `codex app-server`'s JSON-RPC stdout.
+ *
+ * This is the figure the Codex CLI itself shows for `/status`, asked of the
+ * account directly rather than inferred from whatever a past session happened
+ * to write down — which is why it is worth a handshake: a deployment where
+ * every run gets its own temporary credential home has no past session
+ * records to read, and the usage card had nothing to show as a result.
+ *
+ * Exported for tests.
+ */
+export function parseCodexAppServerRateLimits(
+  stdout: string,
+): ProviderUsageReport | undefined {
+  for (const line of stdout.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed === "" || !trimmed.startsWith("{")) {
+      continue;
+    }
+    let message: Record<string, unknown>;
+    try {
+      message = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      continue;
+    }
+    const result = message["result"];
+    if (typeof result !== "object" || result === null) {
+      continue;
+    }
+    const envelope = result as Record<string, unknown>;
+    const limitsValue =
+      envelope["rateLimits"] ?? envelope["rate_limits"] ?? envelope;
+    if (typeof limitsValue !== "object" || limitsValue === null) {
+      continue;
+    }
+    const limits = limitsValue as Record<string, unknown>;
+    const windows = [
+      codexAppServerWindow(limits["primary"], "primary"),
+      codexAppServerWindow(limits["secondary"], "secondary"),
+    ].filter((window): window is ProviderUsageWindow => window !== undefined);
+    if (windows.length === 0) {
+      continue;
+    }
+    const plan = limits["planType"] ?? limits["plan_type"];
+    return {
+      source:
+        typeof plan === "string" && plan.trim() !== ""
+          ? `Codex account rate limits (${plan})`
+          : "Codex account rate limits",
+      windows,
+    };
+  }
+  return undefined;
+}
+
 /** Finds the `rate_limits` object wherever the CLI nested it. */
 function findRateLimits(value: unknown): unknown {
   if (typeof value !== "object" || value === null) {
@@ -1677,38 +1781,63 @@ export class ProviderChatService {
   }
 
   /**
-   * The Codex CLI does not print rate limits on stdout, but it records them
-   * in the rollout it writes for every session: a `rate_limits` object with
-   * the percentage used, the window length, and the reset time. The newest
-   * rollout is read and those figures are reported as-is.
+   * What the Codex account has consumed, asked of the account itself.
+   *
+   * The reading used to be second-hand: the CLI does not print rate limits on
+   * stdout, but it records them in the rollout it writes per session, so the
+   * newest rollout was parsed. On a deployment where every run gets its own
+   * temporary credential home that record does not survive the run — the home
+   * is removed at close — so the commonest answer this could give was "no
+   * Codex session has recorded rate limits on this machine yet", which is a
+   * fact about where we looked rather than about the account.
+   *
+   * So the account is asked directly, through the app-server's
+   * `account/rateLimits/read`, *inside* the credential home rather than after
+   * it: that is the only moment the caller's own `CODEX_HOME` exists, and
+   * asking outside it would ask on behalf of whatever login the host happens
+   * to carry. The old readers remain, in order, for a CLI too old to answer
+   * and for a host-login deployment.
    */
   private async codexUsage(userId?: string): Promise<ProviderUsageReport> {
     const source = "Codex CLI session records (~/.codex/sessions)";
     try {
-      // Sessions write their rollouts under whatever CODEX_HOME the run was
-      // given, and on this deployment every run gets a per-user credential
-      // home — while this reader searched the ambient one, where no session
-      // has ever run. The reader now resolves the home the same way the runs
-      // do, so it looks where the records actually are; the ambient home
-      // stays as the fallback for a host-login deployment.
       const credential =
         userId === undefined
           ? undefined
           : await this.ownCredential(userId, "openai").catch(() => undefined);
-      const env = await this.withCompletionEnv(
+      const inHome = await this.withCompletionEnv(
         userId,
         "openai",
         credential,
-        async (resolved) => resolved,
+        async (env) => {
+          const live = await this.codexAccountRateLimits(env);
+          if (live !== undefined) {
+            return live;
+          }
+          // Sessions write their rollouts under whatever CODEX_HOME the run
+          // was given, so the search follows the same home the runs use; the
+          // ambient one stays as the fallback for a host-login deployment.
+          const codexHome =
+            typeof env?.["CODEX_HOME"] === "string" && env["CODEX_HOME"] !== ""
+              ? env["CODEX_HOME"]
+              : undefined;
+          const newest = await this.newestCodexRollout(
+            codexHome === undefined
+              ? undefined
+              : path.join(codexHome, "sessions"),
+          );
+          if (newest === undefined) {
+            return undefined;
+          }
+          const parsed = parseCodexRateLimits(await readFile(newest, "utf8"));
+          return parsed === undefined ? undefined : { ...parsed, source };
+        },
       ).catch(() => undefined);
-      const codexHome =
-        typeof env?.["CODEX_HOME"] === "string" && env["CODEX_HOME"] !== ""
-          ? env["CODEX_HOME"]
-          : undefined;
-      // The persisted snapshot first: credential homes are temporary and
-      // removed at close, so live directories are empty by design — the
-      // close hook copies the newest rollout's tail out, and that copy is
-      // the only durable record.
+      if (inHome !== undefined) {
+        return inHome;
+      }
+      // The durable copy: credential homes are temporary, and the close hook
+      // carries the newest rollout's tail out of one before it is removed.
       if (userId !== undefined) {
         const store = await this.credentialStore();
         const snapshot = await store.readUsageSnapshot(userId, "codex");
@@ -1719,29 +1848,13 @@ export class ProviderChatService {
           }
         }
       }
-      const newest = await this.newestCodexRollout(
-        codexHome === undefined
-          ? undefined
-          : path.join(codexHome, "sessions"),
-      );
-      if (newest === undefined) {
-        return {
-          source,
-          windows: [],
-          unavailableReason:
-            "No Codex session has recorded rate limits on this machine yet.",
-        };
-      }
-      const contents = await readFile(newest, "utf8");
-      const report = parseCodexRateLimits(contents);
-      return report === undefined
-        ? {
-            source,
-            windows: [],
-            unavailableReason:
-              "The latest Codex session recorded no rate-limit figures.",
-          }
-        : { ...report, source };
+      return {
+        source,
+        windows: [],
+        unavailableReason:
+          "Codex reported no quota for this account, and no Codex session " +
+          "has recorded rate limits on this machine yet.",
+      };
     } catch (error) {
       return {
         source,
@@ -1749,6 +1862,58 @@ export class ProviderChatService {
         unavailableReason:
           error instanceof Error ? error.message : String(error),
       };
+    }
+  }
+
+  /**
+   * One `account/rateLimits/read` against the app-server, batched.
+   *
+   * The whole conversation — initialize, initialized, the read — is written
+   * to stdin at once and the answers are picked out of stdout, because that
+   * keeps this on the same one-shot process seam every other CLI call here
+   * uses (and therefore the same seam the tests stub). Every failure is
+   * `undefined`: a quota figure is supplementary, and a CLI too old to have
+   * the method, or missing entirely, must not turn the usage card into an
+   * error.
+   */
+  private async codexAccountRateLimits(
+    env: NodeJS.ProcessEnv | undefined,
+  ): Promise<ProviderUsageReport | undefined> {
+    const conversation = [
+      {
+        jsonrpc: "2.0",
+        id: 0,
+        method: "initialize",
+        params: {
+          clientInfo: {
+            name: "coord-web",
+            title: "Lattice",
+            version: "0.0.0",
+          },
+        },
+      },
+      { jsonrpc: "2.0", method: "initialized", params: {} },
+      { jsonrpc: "2.0", id: 1, method: "account/rateLimits/read", params: {} },
+    ]
+      .map((message) => `${JSON.stringify(message)}\n`)
+      .join("");
+    try {
+      const result = await this.runner(
+        resolveCodexCommand(this.homeDirectory),
+        ["app-server", "--stdio"],
+        {
+          input: conversation,
+          timeoutMs: CODEX_QUOTA_TIMEOUT_MS,
+          maxOutputBytes: 262_144,
+          ...(env === undefined ? {} : { env }),
+        },
+      );
+      // Parsed whatever the exit code: the app-server is killed at the
+      // deadline and exits non-zero on EOF, both after it has already
+      // answered.
+      return parseCodexAppServerRateLimits(result.stdout);
+    } catch {
+      return undefined;
     }
   }
 

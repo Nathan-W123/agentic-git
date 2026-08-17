@@ -5392,6 +5392,303 @@ svg {
   font-size: 11px;
 }
 
+/* ---------------------------------------------------- agent spec (details) --
+ * The agent's own page: who it is, what it is configured as here, what it is
+ * doing, what it is *for* in each channel, and what it has spent. Everything
+ * on it that can be changed is changed in place — a settings dialog opened
+ * from a details tab would be a second description of the same agent, and the
+ * two would disagree the moment one of them was edited.
+ */
+.agent-spec {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 20px 18px 24px;
+}
+
+.agent-spec .aspec-head {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  margin-bottom: 22px;
+}
+
+.agent-spec .aspec-face {
+  position: relative;
+  display: inline-flex;
+  flex: none;
+}
+
+.agent-spec .aspec-head h2 {
+  margin: 0;
+  font-size: 20px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-spec .aspec-sub {
+  margin-top: 3px;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.agent-spec .aspec-section {
+  margin-bottom: 22px;
+}
+
+.agent-spec .aspec-section:last-child {
+  margin-bottom: 0;
+}
+
+.agent-spec .aspec-label {
+  color: var(--text-3);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.09em;
+}
+
+.agent-spec .aspec-section > .aspec-label {
+  display: block;
+  margin-bottom: 8px;
+}
+
+.agent-spec .aspec-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+  min-height: 22px;
+}
+
+.agent-spec .aspec-count {
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
+.agent-spec .aspec-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.agent-spec .aspec-card,
+.agent-spec .aspec-field,
+.agent-spec .aspec-box {
+  min-width: 0;
+  padding: 11px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: var(--bg-inset);
+}
+
+.agent-spec .aspec-card-label,
+.agent-spec .aspec-field-label {
+  display: block;
+  color: var(--text-3);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 5px;
+}
+
+.agent-spec .aspec-card-value {
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The pickers are the same `mini-select` the composer uses, widened so a model
+   id is readable rather than clipped to a chevron. */
+.agent-spec .aspec-field .mini-select {
+  display: flex;
+  width: 100%;
+  max-width: none;
+  padding: 0;
+  background: none;
+}
+
+.agent-spec .aspec-field .mini-select:hover {
+  background: none;
+}
+
+.agent-spec .aspec-field .mini-select select {
+  flex: 1;
+  width: 100%;
+  min-width: 0;
+  max-width: none;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.agent-spec .aspec-task {
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.agent-spec .aspec-task-meta {
+  margin-top: 6px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  text-transform: capitalize;
+}
+
+/* The way through to everything this agent has been asked for here. The panel
+   header carries the same move as an icon; this is the one a reader finds
+   while actually looking at the current task. */
+.agent-spec .aspec-nav {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  margin-top: 8px;
+  padding: 9px 12px;
+  border: 1px solid var(--border-soft);
+  border-radius: 10px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.agent-spec .aspec-nav:hover {
+  background: var(--bg-inset);
+  color: var(--text);
+}
+
+.agent-spec .aspec-nav span {
+  flex: 1;
+  text-align: left;
+}
+
+.agent-spec .aspec-nav svg {
+  width: 14px;
+  height: 14px;
+  flex: none;
+}
+
+.agent-spec .aspec-channels {
+  display: grid;
+  gap: 7px;
+}
+
+/* One row per repository, and the role in it is the editable half: this is
+   where "what is this agent for here" is answered, per repository, without
+   leaving the panel. */
+.agent-spec .aspec-channel {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 11px;
+  border: 1px solid var(--border-soft);
+  border-radius: 9px;
+}
+
+.agent-spec .aspec-channel-name {
+  flex: none;
+  max-width: 40%;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-spec .aspec-here {
+  margin-left: 6px;
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: var(--bg-inset);
+  color: var(--text-3);
+  font-size: 9.5px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.agent-spec .aspec-role {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 7px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-2);
+  font: inherit;
+  font-size: 11.5px;
+  text-align: right;
+}
+
+.agent-spec .aspec-role::placeholder {
+  color: var(--text-3);
+}
+
+.agent-spec .aspec-role:hover {
+  border-color: var(--border-soft);
+}
+
+.agent-spec .aspec-role:focus {
+  outline: none;
+  border-color: var(--accent-line);
+  background: var(--bg-inset);
+  color: var(--text);
+  text-align: left;
+}
+
+.agent-spec .aspec-note {
+  margin-top: 8px;
+  color: var(--text-3);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.agent-spec .aspec-box .aspec-note {
+  margin-top: 0;
+  font-size: 12px;
+}
+
+.agent-spec .aspec-usage {
+  display: grid;
+  gap: 10px;
+}
+
+.agent-spec .aspec-usage-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 6px;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.agent-spec .aspec-usage-head strong {
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-spec .aspec-meter {
+  height: 7px;
+  border-radius: 999px;
+  background: var(--bg-card);
+  overflow: hidden;
+}
+
+.agent-spec .aspec-meter i {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  border-radius: inherit;
+}
+
+.agent-spec .aspec-usage-reset,
+.agent-spec .aspec-usage-source {
+  margin-top: 4px;
+  color: var(--text-3);
+  font-size: 10.5px;
+}
+
 /* -------------------------------------------------------------- thread ---- */
 
 /*

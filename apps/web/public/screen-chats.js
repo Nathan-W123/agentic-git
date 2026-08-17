@@ -43,6 +43,9 @@ api,
   personOnline,
   phoneLayout,
   postChannelReply,
+  providerEffortOptions,
+  providerModelOptions,
+  providerOptionsNote,
   sendChannelMessage,
   state,
   taskBelongsToAgent,
@@ -72,6 +75,7 @@ import {
   iconButton,
   imeComposing,
   emptyState,
+  miniSelect,
   relativeTime,
   searchBox,
   tabs,
@@ -2677,40 +2681,32 @@ function agentChannelAssignments(agent, repositoryId) {
 
 function agentUsage(agent) {
   if (agent.mine !== true) {
-    return `<div style="color:var(--text-3);font-size:12px;line-height:1.5">
-      Usage is private to the agent's owner.
-    </div>`;
+    return `<div class="aspec-note">Usage is private to the agent's owner.</div>`;
   }
   const report = state.providerUsage[agent.provider ?? agent.id];
   if (report === undefined || report.loading === true) {
-    return `<div style="color:var(--text-3);font-size:12px">Checking usage…</div>`;
+    return `<div class="aspec-note">Checking usage…</div>`;
   }
   if (report.unavailableReason !== undefined) {
-    return `<div style="color:var(--text-3);font-size:12px;line-height:1.5">${esc(
-      report.unavailableReason,
-    )}</div>`;
+    return `<div class="aspec-note">${esc(report.unavailableReason)}</div>`;
   }
   if ((report.windows ?? []).length === 0) {
-    return `<div style="color:var(--text-3);font-size:12px">No usage reported.</div>`;
+    return `<div class="aspec-note">No usage reported.</div>`;
   }
-  return `<div style="display:grid;gap:10px">
+  return `<div class="aspec-usage">
     ${report.windows
       .map((window) => {
         const percent = Math.max(0, Math.min(100, Number(window.percentUsed) || 0));
         return `<div>
-          <div style="display:flex;justify-content:space-between;gap:12px;font-size:12px;margin-bottom:6px">
-            <span style="color:var(--text-2)">${esc(window.label)}</span>
-            <strong style="font-variant-numeric:tabular-nums">${Math.round(percent)}%</strong>
+          <div class="aspec-usage-head">
+            <span>${esc(window.label)}</span>
+            <strong>${Math.round(percent)}%</strong>
           </div>
-          <div style="height:7px;border-radius:999px;background:var(--bg-inset);overflow:hidden">
-            <i style="display:block;width:${percent}%;height:100%;background:var(--accent);border-radius:inherit"></i>
-          </div>
+          <div class="aspec-meter"><i style="width:${percent}%"></i></div>
           ${
             window.resetsAt === undefined
               ? ""
-              : `<div style="margin-top:4px;color:var(--text-3);font-size:10.5px">Resets ${esc(
-                  window.resetsAt,
-                )}</div>`
+              : `<div class="aspec-usage-reset">Resets ${esc(window.resetsAt)}</div>`
           }
         </div>`;
       })
@@ -2718,7 +2714,7 @@ function agentUsage(agent) {
     ${
       report.source === undefined
         ? ""
-        : `<div style="color:var(--text-3);font-size:10.5px">${esc(report.source)}</div>`
+        : `<div class="aspec-usage-source">${esc(report.source)}</div>`
     }
   </div>`;
 }
@@ -2745,89 +2741,139 @@ function agentSpec(agent, repositoryId) {
   const allChannelsLoaded = state.repositories.every((repository) =>
     state.channelRosterLoaded.has(repository.id),
   );
-  const detailCard = (label, value) => `<div style="min-width:0;padding:11px 12px;border:1px solid var(--border-soft);border-radius:10px;background:var(--bg-inset)">
-    <div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:.08em;margin-bottom:5px">${esc(
-      label,
-    )}</div>
-    <div style="font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${esc(
-      value,
-    )}">${esc(value)}</div>
+  const detailCard = (label, value) => `<div class="aspec-card">
+    <div class="aspec-card-label">${esc(label)}</div>
+    <div class="aspec-card-value" title="${esc(value)}">${esc(value)}</div>
   </div>`;
-  return `<div class="agent-spec" style="min-height:0;overflow-y:auto;padding:20px 18px 24px">
-    <section style="display:flex;align-items:center;gap:13px;margin-bottom:22px">
-      <span style="position:relative;display:inline-flex;flex:none">
+  // Model and reasoning are the agent's own credential spending its owner's
+  // account, so only that owner picks them; a teammate reads what was chosen.
+  // A role is the opposite — it is this channel's declaration of what the
+  // agent is *for*, so anybody in the room may write one, and the server has
+  // the last word on the two roles that mean something (auditor, investigator).
+  const providerId = agent.provider ?? agent.id;
+  const models = agent.mine === true ? providerModelOptions(providerId) : [];
+  const efforts =
+    agent.mine === true
+      ? providerEffortOptions(providerId, currentAssignment.model ?? "")
+      : [];
+  const optionsNote = agent.mine === true ? providerOptionsNote(providerId) : "";
+  const configuration =
+    agent.mine === true && (models.length > 0 || efforts.length > 0)
+      ? `<div class="aspec-fields" data-agent="${esc(agent.id)}">
+           ${
+             models.length === 0
+               ? detailCard("Model", currentAssignment.model || "Default")
+               : `<label class="aspec-field"><span class="aspec-field-label">Model</span>
+                   ${miniSelect(
+                     "channel-agent-model",
+                     models,
+                     currentAssignment.model ?? "",
+                     "Model in this channel",
+                   )}</label>`
+           }
+           ${
+             efforts.length === 0
+               ? detailCard("Reasoning", currentAssignment.effort || "Default")
+               : `<label class="aspec-field"><span class="aspec-field-label">Reasoning</span>
+                   ${miniSelect(
+                     "channel-agent-effort",
+                     efforts,
+                     currentAssignment.effort ?? "",
+                     "Reasoning effort in this channel",
+                   )}</label>`
+           }
+         </div>`
+      : `<div class="aspec-fields">
+           ${detailCard("Model", currentAssignment.model || "Default")}
+           ${detailCard("Reasoning", currentAssignment.effort || "Default")}
+         </div>`;
+  const roleField = (repository, member) => `<form class="aspec-channel"
+    data-act="agent-role-form" data-value="${esc(agent.id)}"
+    data-repo="${esc(repository.id)}">
+    <span class="aspec-channel-name" title="#${esc(repository.id)}">#${esc(
+      repository.id,
+    )}${repository.id === repositoryId ? '<span class="aspec-here">here</span>' : ""}</span>
+    <input class="aspec-role" data-act="agent-role-input"
+      data-value="${esc(agent.id)}" data-repo="${esc(repository.id)}"
+      value="${esc(member.role ?? "")}" maxlength="120" autocomplete="off"
+      enterkeyhint="done" placeholder="No role assigned"
+      aria-label="Role for ${esc(agent.name)} in #${esc(repository.id)}">
+  </form>`;
+  return `<div class="agent-spec">
+    <section class="aspec-head">
+      <span class="aspec-face">
         ${agentFace(agent, 46)}
         ${statusDot(status, AGENT_STATUS_TITLE[status])}
       </span>
       <div style="min-width:0">
-        <h2 style="margin:0;font-size:20px;line-height:1.25;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(
-          agent.name,
-        )}</h2>
-        <div style="margin-top:3px;color:var(--text-3);font-size:12px">${esc(
-          AGENT_STATUS_TITLE[status],
-        )}${agent.mine ? " · Your agent" : ""}</div>
+        <h2>${esc(agent.name)}</h2>
+        <div class="aspec-sub">${esc(AGENT_STATUS_TITLE[status])}${
+          agent.mine ? " · Your agent" : ""
+        }</div>
       </div>
     </section>
 
-    <section style="margin-bottom:22px">
-      <div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:.09em;margin-bottom:8px">Configuration in #${esc(
-        repositoryId,
-      )}</div>
-      <div style="display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:8px">
-        ${detailCard("Model", currentAssignment.model || "Default")}
-        ${detailCard("Reasoning", currentAssignment.effort || "Default")}
-      </div>
+    <section class="aspec-section">
+      <div class="aspec-label">Configuration in #${esc(repositoryId)}</div>
+      ${configuration}
+      ${optionsNote === "" ? "" : `<div class="aspec-note">${esc(optionsNote)}</div>`}
     </section>
 
-    <section style="margin-bottom:22px">
-      <div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:.09em;margin-bottom:8px">Current task</div>
-      <div style="padding:12px;border:1px solid var(--border-soft);border-radius:10px;background:var(--bg-inset)">
+    <section class="aspec-section">
+      <div class="aspec-label">Current task</div>
+      <div class="aspec-box">
         ${
           task === undefined
-            ? `<div style="color:var(--text-3);font-size:12px">No active task.</div>`
-            : `<div style="font-size:13px;line-height:1.45">${esc(
-                taskSummaryLine(task, taskMessage),
-              )}</div>
-               <div style="margin-top:6px;color:var(--text-3);font-size:10.5px;text-transform:capitalize">${esc(
+            ? `<div class="aspec-note">No active task.</div>`
+            : `<div class="aspec-task">${esc(taskSummaryLine(task, taskMessage))}</div>
+               <div class="aspec-task-meta">${esc(
                  String(task.status ?? "working").replaceAll("_", " "),
                )} · #${esc(taskRepositoryId)} · ${esc(relativeTime(task.submittedAt))}</div>`
         }
       </div>
+      <button type="button" class="aspec-nav" data-act="agent-panel-tab"
+        data-value="history">${icon("history")}
+        <span>Task history</span>${icon("arrowRight")}</button>
     </section>
 
-    <section style="margin-bottom:22px">
-      <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px">
-        <span style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:.09em">Channels</span>
-        <span style="color:var(--text-3);font-size:10.5px">${assignments.length}</span>
+    <section class="aspec-section">
+      <div class="aspec-label-row">
+        <span class="aspec-label">Roles by channel</span>
+        <span class="aspec-count">${assignments.length}</span>
       </div>
-      <div style="display:grid;gap:7px">
+      <div class="aspec-channels">
         ${
           assignments.length === 0
-            ? `<div style="color:var(--text-3);font-size:12px">No channel memberships.</div>`
+            ? `<div class="aspec-note">No channel memberships.</div>`
             : assignments
-                .map(
-                  ({ repository, member }) => `<div style="display:flex;align-items:flex-start;justify-content:space-between;gap:12px;padding:10px 11px;border:1px solid var(--border-soft);border-radius:9px">
-                    <strong style="font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">#${esc(
-                      repository.id,
-                    )}</strong>
-                    <span style="color:${member.role ? "var(--text-2)" : "var(--text-3)"};font-size:11px;text-align:right">${esc(
-                      member.role || "No role assigned",
-                    )}</span>
-                  </div>`,
-                )
+                .map(({ repository, member }) => roleField(repository, member))
                 .join("")
         }
         ${
           allChannelsLoaded
             ? ""
-            : `<div style="color:var(--text-3);font-size:10.5px">Checking remaining channels…</div>`
+            : `<div class="aspec-note">Checking remaining channels…</div>`
         }
       </div>
+      <div class="aspec-note">A role is what this agent is for in that
+        channel; it rides on every task submitted there.</div>
     </section>
 
-    <section>
-      <div style="color:var(--text-3);font-size:10px;text-transform:uppercase;letter-spacing:.09em;margin-bottom:8px">Usage</div>
-      <div style="padding:12px;border:1px solid var(--border-soft);border-radius:10px;background:var(--bg-inset)">
+    <section class="aspec-section">
+      <div class="aspec-label-row">
+        <span class="aspec-label">Usage</span>
+        ${
+          agent.mine === true
+            ? iconButton("refresh", {
+                act: "agent-usage-refresh",
+                value: providerId,
+                title: "Check usage again",
+                small: true,
+              })
+            : ""
+        }
+      </div>
+      <div class="aspec-box">
         ${agentUsage(agent)}
       </div>
     </section>
