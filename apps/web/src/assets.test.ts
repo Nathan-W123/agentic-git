@@ -521,11 +521,11 @@ test("a reply carries a quiet visual path back to its root", async () => {
   );
   assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
   for (const branch of [channelBranch, panelBranch]) {
-    assert.match(branch ?? "", /border-left: 2px solid var\(--accent-line\);/u);
-    assert.match(branch ?? "", /border-bottom: 2px solid var\(--accent-line\);/u);
+    assert.match(branch ?? "", /border-left: 3px solid var\(--border-strong\);/u);
+    assert.match(branch ?? "", /border-bottom: 3px solid var\(--border-strong\);/u);
     assert.match(branch ?? "", /border-top-left-radius: 2px;/u);
     assert.match(branch ?? "", /border-bottom-right-radius: 2px;/u);
-    assert.match(branch ?? "", /border-bottom-left-radius: 10px;/u);
+    assert.match(branch ?? "", /border-bottom-left-radius: 11px;/u);
     assert.match(branch ?? "", /top: 44px;/u);
   }
   assert.match(channelBranch ?? "", /width: 16px;/u);
