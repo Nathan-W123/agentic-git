@@ -23,6 +23,7 @@ import {
   type ApiOperations,
 } from "./server.js";
 import { hashPassword } from "./auth.js";
+import type { CodexUsageReader } from "./codex-subscription-usage.js";
 
 const BOOTSTRAP_TOKEN = "bootstrap-token-with-at-least-24-characters";
 const PASSWORD = "RelayPassword123!";
@@ -87,6 +88,10 @@ interface TestRuntime {
     thinkingHidden?: boolean;
     thinkingTokens?: number;
   };
+  /** Provider usage returned before the Codex live-snapshot fallback. */
+  providerUsage: Map<string, unknown>;
+  /** Usage calls, so a live lookup can be shown to leave recorded data first. */
+  usageCalls: string[];
   /** Every canonical diff the auditor asked for, in order. */
   canonicalDiffs: Array<{
     projectId: string;
@@ -253,6 +258,7 @@ async function startRuntime(
     webSocketPollIntervalMs?: number;
     webSocketReauthorizeIntervalMs?: number;
     auditorPollIntervalMs?: number;
+    codexUsageReader?: CodexUsageReader;
     /**
      * Drops the optional `listAgents` operation, as a deployment that does
      * not implement it does — the fallback path for anything that joins
@@ -272,6 +278,8 @@ async function startRuntime(
   const submittedTasks: TestRuntime["submittedTasks"] = [];
   const chatPrompts: TestRuntime["chatPrompts"] = [];
   const chatAnswer: TestRuntime["chatAnswer"] = {};
+  const providerUsage: TestRuntime["providerUsage"] = new Map();
+  const usageCalls: TestRuntime["usageCalls"] = [];
   /** How the agent answers "is this work?" — "yes" unless a test says else. */
   let taskClassification = "yes";
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
@@ -355,8 +363,9 @@ async function startRuntime(
       async options() {
         return {};
       },
-      async usage() {
-        return {};
+      async usage(input) {
+        usageCalls.push(input.provider);
+        return providerUsage.get(input.provider) ?? {};
       },
       async setSettings(input) {
         // Only the call sign, which is the one setting the gateway does more
@@ -708,6 +717,9 @@ async function startRuntime(
     ...(options.auditorPollIntervalMs === undefined
       ? {}
       : { auditorPollIntervalMs: options.auditorPollIntervalMs }),
+    ...(options.codexUsageReader === undefined
+      ? {}
+      : { codexUsageReader: options.codexUsageReader }),
     staticAssets: new Map([
       [
         "/index.html",
@@ -736,6 +748,8 @@ async function startRuntime(
     submittedTasks,
     chatPrompts,
     chatAnswer,
+    providerUsage,
+    usageCalls,
     canonicalDiffs,
     rollbacks,
     setRollbackOutcome: (outcome) => {
@@ -10776,4 +10790,119 @@ test("a direct message can be unsent by its sender and nobody else", async (t) =
     ),
     [],
   );
+});
+
+test("Codex usage falls back to the live account quota snapshot", async (t) => {
+  let liveReads = 0;
+  const runtime = await startRuntime(t, {
+    codexUsageReader: async () => {
+      liveReads += 1;
+      return {
+        limitId: "codex",
+        primary: {
+          usedPercent: 11,
+          windowDurationMins: 300,
+          resetsAt: 1_787_000_000,
+        },
+        secondary: {
+          usedPercent: 37,
+          windowDurationMins: 10_080,
+          resetsAt: 1_787_400_000,
+        },
+        planType: "plus",
+      };
+    },
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const response = await client.request(
+    "/api/v1/chat/providers/openai/usage",
+  );
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  assert.equal(liveReads, 1);
+  assert.deepEqual(runtime.usageCalls, ["openai"]);
+  assert.equal(response.data.usage.source, "Codex account rate limits (plus)");
+  const resetText = (at: number): string =>
+    new Date(at * 1_000).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  assert.deepEqual(
+    response.data.usage.windows,
+    [
+      {
+        label: "5 hours",
+        percentUsed: 11,
+        resetsAt: resetText(1_787_000_000),
+      },
+      {
+        label: "7 days",
+        percentUsed: 37,
+        resetsAt: resetText(1_787_400_000),
+      },
+    ],
+  );
+});
+
+test("recorded Codex usage wins without an unnecessary live lookup", async (t) => {
+  let liveReads = 0;
+  const runtime = await startRuntime(t, {
+    codexUsageReader: async () => {
+      liveReads += 1;
+      return undefined;
+    },
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const recorded = {
+    source: "Codex CLI session records (~/.codex/sessions)",
+    windows: [{ label: "5 hours", percentUsed: 23 }],
+  };
+  runtime.providerUsage.set("openai", recorded);
+
+  const response = await client.request(
+    "/api/v1/chat/providers/openai/usage",
+  );
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  assert.deepEqual(response.data.usage, recorded);
+  assert.equal(liveReads, 0);
+});
+
+test("unavailable live Codex usage and Claude usage retain their existing shape", async (t) => {
+  let liveReads = 0;
+  const runtime = await startRuntime(t, {
+    codexUsageReader: async () => {
+      liveReads += 1;
+      return undefined;
+    },
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const unavailable = {
+    source: "Codex CLI session records (~/.codex/sessions)",
+    windows: [],
+    unavailableReason:
+      "No Codex session has recorded rate limits on this machine yet.",
+  };
+  const claude = {
+    source: "claude /usage, as reported by the signed-in account",
+    windows: [{ label: "session", percentUsed: 8 }],
+  };
+  runtime.providerUsage.set("openai", unavailable);
+  runtime.providerUsage.set("anthropic", claude);
+
+  const codexResponse = await client.request(
+    "/api/v1/chat/providers/openai/usage",
+  );
+  const claudeResponse = await client.request(
+    "/api/v1/chat/providers/anthropic/usage",
+  );
+  assert.equal(codexResponse.status, 200, JSON.stringify(codexResponse.data));
+  assert.equal(claudeResponse.status, 200, JSON.stringify(claudeResponse.data));
+  assert.deepEqual(codexResponse.data.usage, unavailable);
+  assert.deepEqual(claudeResponse.data.usage, claude);
+  assert.equal(liveReads, 1);
 });

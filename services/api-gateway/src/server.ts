@@ -89,6 +89,21 @@ import {
 import { RateLimiter } from "./rate-limiter.js";
 import { CollabWebSocketHub } from "./collab-websocket.js";
 import { AuditWebSocketHub, type WebSocketAuthorization } from "./websocket.js";
+import {
+  normalizeCodexRateLimits,
+  readCodexSubscriptionUsage,
+  type CodexRateLimitSnapshot,
+  type CodexRateLimitWindow,
+  type CodexUsageReader,
+} from "./codex-subscription-usage.js";
+export {
+  CODEX_USAGE_TIMEOUT_MS,
+  normalizeCodexRateLimits,
+  readCodexSubscriptionUsage,
+  type CodexRateLimitSnapshot,
+  type CodexRateLimitWindow,
+  type CodexUsageReader,
+} from "./codex-subscription-usage.js";
 
 const API_PREFIX = "/api/v1";
 
@@ -114,6 +129,81 @@ const AGENT_LABEL: Record<string, string> = {
   openai: "Codex",
   google: "Gemini",
 };
+
+interface ProviderUsageWindow {
+  label: string;
+  percentUsed: number;
+  resetsAt?: string;
+}
+
+interface ProviderUsageReport {
+  source: string;
+  windows: ProviderUsageWindow[];
+  unavailableReason?: string;
+}
+
+function hasUsageWindows(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  return (
+    Array.isArray((value as { windows?: unknown }).windows) &&
+    ((value as { windows: unknown[] }).windows.length > 0)
+  );
+}
+
+function codexWindowLabel(minutes: number | undefined, fallback: string): string {
+  if (minutes === undefined) {
+    return fallback;
+  }
+  if (minutes % (60 * 24) === 0) {
+    const days = minutes / (60 * 24);
+    return days === 1 ? "day" : `${days} days`;
+  }
+  if (minutes % 60 === 0) {
+    const hours = minutes / 60;
+    return hours === 1 ? "hour" : `${hours} hours`;
+  }
+  return `${minutes} minutes`;
+}
+
+function codexUsageWindow(
+  window: CodexRateLimitWindow,
+  fallback: string,
+): ProviderUsageWindow {
+  let resetsAt: string | undefined;
+  if (window.resetsAt !== undefined) {
+    const reset = new Date(window.resetsAt * 1_000);
+    if (Number.isFinite(reset.getTime())) {
+      resetsAt = reset.toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+    }
+  }
+  return {
+    label: codexWindowLabel(window.windowDurationMins, fallback),
+    percentUsed: window.usedPercent,
+    ...(resetsAt === undefined ? {} : { resetsAt }),
+  };
+}
+
+function codexUsageReport(
+  snapshot: CodexRateLimitSnapshot,
+): ProviderUsageReport {
+  return {
+    source:
+      snapshot.planType === undefined || snapshot.planType.trim() === ""
+        ? "Codex account rate limits"
+        : `Codex account rate limits (${snapshot.planType})`,
+    windows: [
+      codexUsageWindow(snapshot.primary, "primary"),
+      codexUsageWindow(snapshot.secondary, "secondary"),
+    ],
+  };
+}
 
 /** Mirrors `firstWord` in `apps/web/public/data.js`. */
 function firstWord(name: string): string {
@@ -2408,6 +2498,11 @@ export interface ApiGatewayOptions {
   authRateLimitPerMinute?: number;
   /** Event poll cadence; exposed for deterministic embedded runtimes/tests. */
   webSocketPollIntervalMs?: number;
+  /**
+   * Reads current Codex account quotas when no session has recorded them.
+   * Injectable so tests and embedded runtimes do not launch a real CLI.
+   */
+  codexUsageReader?: CodexUsageReader;
   /** How often open event channels re-check account and membership state. */
   webSocketReauthorizeIntervalMs?: number;
   /**
@@ -7637,10 +7732,21 @@ export class ApiGateway {
           return;
         }
         if (action === "usage" && method === "GET") {
+          const recordedUsage = await performChat(() =>
+            chatOperations.usage({ provider, userId: identity.userId }),
+          );
+          let usage = recordedUsage;
+          if (provider === "openai" && !hasUsageWindows(recordedUsage)) {
+            const liveSnapshot = await (
+              this.options.codexUsageReader ?? readCodexSubscriptionUsage
+            )().catch(() => undefined);
+            const snapshot = normalizeCodexRateLimits(liveSnapshot);
+            if (snapshot !== undefined) {
+              usage = codexUsageReport(snapshot);
+            }
+          }
           this.sendJson(response, 200, {
-            usage: await performChat(() =>
-              chatOperations.usage({ provider, userId: identity.userId }),
-            ),
+            usage,
           });
           return;
         }
