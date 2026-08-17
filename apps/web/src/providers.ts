@@ -3504,13 +3504,13 @@ export class ProviderChatService {
     onEvent: (event: ChatStreamEvent) => void,
   ): Promise<ChatReply> {
     const prompt = await this.prepareCompletion(input);
-    try {
-      return await this.withCompletionEnv(
-        input.userId,
-        input.provider,
-        prompt.credential,
-        async (env) =>
-          input.provider === "anthropic"
+    return await this.withCompletionEnv(
+      input.userId,
+      input.provider,
+      prompt.credential,
+      async (env) => {
+        try {
+          return input.provider === "anthropic"
             ? await this.streamViaClaudeCli(
                 prompt.text,
                 prompt.settings,
@@ -3524,16 +3524,18 @@ export class ProviderChatService {
                 input.cliSessionId,
                 onEvent,
                 env,
-              ),
-      );
-    } catch (error) {
-      // Thread continuations use this path now, so an expired credential must
-      // be retired exactly as it is for a non-streaming completion. Otherwise
-      // the failed turn is visible but the same dead agent remains available
-      // for the next message.
-      await this.noteCredentialFailure(input.userId, input.provider, error);
-      throw error;
-    }
+              );
+        } catch (error) {
+          // Record a real auth failure while the completion still owns the
+          // credential reservation. No task can rotate the session between
+          // observing the failure and retiring the credential; if this CLI
+          // itself rotated before failing, close writes it back and restores
+          // the connection before releasing the reservation.
+          await this.noteCredentialFailure(input.userId, input.provider, error);
+          throw error;
+        }
+      },
+    );
   }
 
   /**
@@ -3625,39 +3627,27 @@ export class ProviderChatService {
     if (credential === undefined) {
       return await use(undefined);
     }
-    return await withCredentialHome(
-      {
-        vendor: PROVIDER_VENDORS[provider],
-        credential,
-        baseEnv: sanitizeChildEnv(process.env),
-        // Chat runs the CLI the same way a task does, so it rotates the token
-        // the same way. Storing it here means a channel conversation keeps
-        // the account alive rather than quietly ageing it out.
-        ...(userId === undefined || provider !== "openai"
-          ? {}
-          : {
-              onUsageSnapshot: async (snapshot: string) => {
-                const store = await this.credentialStore();
-                await store.putUsageSnapshot(userId, "codex", snapshot);
-              },
-            }),
-        ...(userId === undefined
-          ? {}
-          : {
-              onRotate: async (secret: string) => {
-                const store = await this.credentialStore();
-                await store.put(userId, PROVIDER_VENDORS[provider], {
-                  kind: credential.kind,
-                  secret,
-                  ...(credential.visibility === undefined
-                    ? {}
-                    : { visibility: credential.visibility }),
-                });
-              },
-            }),
-      },
-      async (home) => await use(home.env),
-    );
+    if (userId === undefined) {
+      return await use(undefined);
+    }
+    const store = await this.credentialStore();
+    const home = await store.openCredentialHome({
+      userId,
+      vendor: PROVIDER_VENDORS[provider],
+      baseEnv: sanitizeChildEnv(process.env),
+    });
+    if (home === undefined) {
+      throw new ProviderChatError(
+        409,
+        "not_connected",
+        `Connect ${PROVIDER_NAMES[provider]} before chatting`,
+      );
+    }
+    try {
+      return await use(home.env);
+    } finally {
+      await home.close();
+    }
   }
 
   public async complete(input: {
@@ -3670,13 +3660,13 @@ export class ProviderChatService {
     ceremonial?: boolean;
   }): Promise<ChatReply> {
     const prompt = await this.prepareCompletion(input);
-    try {
-      return await this.withCompletionEnv(
-        input.userId,
-        input.provider,
-        prompt.credential,
-        async (env) =>
-          input.provider === "anthropic"
+    return await this.withCompletionEnv(
+      input.userId,
+      input.provider,
+      prompt.credential,
+      async (env) => {
+        try {
+          return input.provider === "anthropic"
             ? await this.completeViaClaudeCli(
                 prompt.text,
                 prompt.settings,
@@ -3688,18 +3678,15 @@ export class ProviderChatService {
                 prompt.settings,
                 input.cliSessionId,
                 env,
-              ),
-      );
-    } catch (error) {
-      // A stored credential that no longer authenticates is recorded as such
-      // here, where the failure is actually observed. Nothing else can see
-      // it: the vault knows a secret exists, and `claude auth status` reports
-      // a *stored* session rather than a working one, so without this the
-      // dashboard went on showing an agent as connected while every task and
-      // every message it was given failed to authenticate.
-      await this.noteCredentialFailure(input.userId, input.provider, error);
-      throw error;
-    }
+              );
+        } catch (error) {
+          // Keep the failure update inside the same reservation as the CLI;
+          // see the streaming path above for the ordering guarantee.
+          await this.noteCredentialFailure(input.userId, input.provider, error);
+          throw error;
+        }
+      },
+    );
   }
 
   /** Whether a failure means the credential itself has stopped working. */

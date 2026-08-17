@@ -286,6 +286,24 @@ export async function resolveCredentialKey(input: {
  * holds the project lock, so there is no concurrent writer to lose.
  */
 export class UserCredentialStore {
+  /**
+   * Live CLI homes keyed by the account they spend.
+   *
+   * Task homes are readers because one coordinator stages all of them before
+   * it starts any work. Dashboard completions are writers: they must wait for
+   * those task homes to close before copying a rotating session file, or a
+   * reply can launch from the task's now-stale refresh token and retire a
+   * perfectly healthy agent as soon as the vendor rejects that copy.
+   */
+  private readonly credentialUses = new Map<
+    string,
+    {
+      readers: number;
+      writer: boolean;
+      waiting: Array<{ mode: "shared" | "exclusive"; resolve: () => void }>;
+    }
+  >();
+
   public constructor(
     private readonly filePath: string,
     private readonly key: Buffer,
@@ -376,6 +394,159 @@ export class UserCredentialStore {
           "reconnect the provider to replace it",
         "undecryptable",
       );
+    }
+  }
+
+  /**
+   * Reserves one user's vendor session until its temporary home is closed.
+   *
+   * New task readers may join existing readers even when a writer is queued.
+   * `runPendingTasks` opens every task home before running the coordinator, so
+   * making that writer-preferring would deadlock: the first staged task could
+   * only close after the later task had got past the queued writer.
+   */
+  private async acquireCredentialUse(
+    userId: string,
+    vendor: VendorCliKind,
+    mode: "shared" | "exclusive",
+  ): Promise<() => void> {
+    const key = `${userId}\0${vendor}`;
+    const state = this.credentialUses.get(key) ?? {
+      readers: 0,
+      writer: false,
+      waiting: [],
+    };
+    this.credentialUses.set(key, state);
+
+    const available =
+      mode === "shared"
+        ? !state.writer
+        : !state.writer && state.readers === 0 && state.waiting.length === 0;
+    if (!available) {
+      await new Promise<void>((resolve) => {
+        state.waiting.push({ mode, resolve });
+      });
+    } else if (mode === "shared") {
+      state.readers += 1;
+    } else {
+      state.writer = true;
+    }
+
+    let released = false;
+    return () => {
+      if (released) {
+        return;
+      }
+      released = true;
+      if (mode === "shared") {
+        state.readers -= 1;
+      } else {
+        state.writer = false;
+      }
+      this.drainCredentialUses(key, state);
+    };
+  }
+
+  private drainCredentialUses(
+    key: string,
+    state: {
+      readers: number;
+      writer: boolean;
+      waiting: Array<{ mode: "shared" | "exclusive"; resolve: () => void }>;
+    },
+  ): void {
+    if (state.writer || state.readers > 0) {
+      return;
+    }
+    const first = state.waiting.shift();
+    if (first === undefined) {
+      this.credentialUses.delete(key);
+      return;
+    }
+    if (first.mode === "exclusive") {
+      state.writer = true;
+      first.resolve();
+      return;
+    }
+    state.readers += 1;
+    first.resolve();
+    while (state.waiting[0]?.mode === "shared") {
+      const reader = state.waiting.shift();
+      if (reader !== undefined) {
+        state.readers += 1;
+        reader.resolve();
+      }
+    }
+  }
+
+  /**
+   * Opens a stored credential only after reserving its rotating session.
+   *
+   * The credential is read after the wait, so a completion queued behind a
+   * task receives the token that task wrote back, not the snapshot that was
+   * current when the person pressed Reply. Closing persists any new rotation
+   * before releasing the reservation to the next CLI.
+   */
+  public async openCredentialHome(input: {
+    userId: string;
+    vendor: VendorCliKind;
+    baseEnv?: NodeJS.ProcessEnv;
+    mode?: "shared" | "exclusive";
+  }): Promise<CredentialHome | undefined> {
+    const release = await this.acquireCredentialUse(
+      input.userId,
+      input.vendor,
+      input.mode ?? "exclusive",
+    );
+    try {
+      const credential = await this.get(input.userId, input.vendor);
+      if (credential === undefined) {
+        release();
+        return undefined;
+      }
+      const home = await openCredentialHome({
+        vendor: input.vendor,
+        credential,
+        ...(input.baseEnv === undefined ? {} : { baseEnv: input.baseEnv }),
+      });
+      let closing:
+        | Promise<{ rotatedSecret?: string; usageSnapshot?: string }>
+        | undefined;
+      return {
+        ...home,
+        close: async () => {
+          closing ??= (async () => {
+            try {
+              const result = await home.close();
+              if (result.usageSnapshot !== undefined) {
+                await this.putUsageSnapshot(
+                  input.userId,
+                  input.vendor,
+                  result.usageSnapshot,
+                ).catch(() => undefined);
+              }
+              if (result.rotatedSecret !== undefined) {
+                await this.put(input.userId, input.vendor, {
+                  kind: credential.kind,
+                  secret: result.rotatedSecret,
+                  ...(credential.label === undefined
+                    ? {}
+                    : { label: credential.label }),
+                  origin: credential.origin,
+                  visibility: credential.visibility,
+                }).catch(() => undefined);
+              }
+              return result;
+            } finally {
+              release();
+            }
+          })();
+          return await closing;
+        },
+      };
+    } catch (error) {
+      release();
+      throw error;
     }
   }
 
