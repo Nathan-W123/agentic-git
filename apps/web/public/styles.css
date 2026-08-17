@@ -5324,15 +5324,13 @@ svg {
   white-space: nowrap;
 }
 
-/* Header and tabs as one grid row, so the body still gets the stretching one.
-   The panel's three rows are header / body / composer, and a fourth top-level
-   child does not extend that — it takes the body's row and pushes everything
-   after it into an implicit one. */
-.agent-panel-head {
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-}
+/* `.agent-panel-head` used to be defined here as well as on the settings
+   screen's agent header, for a wrapper that let a tab strip share the panel's
+   first grid row with `.thread-head`. Two rules for one class is one rule: the
+   pair merged into a column flex box with `align-items: center`, which sized
+   the header to its own content and floated it in the middle of the panel.
+   Details, private chat and history are header controls now — see
+   `agentPanel` — so the wrapper is gone and the header is the row. */
 
 /* One agent's work in this repository. Sits in the middle row of
    `.thread-panel`'s grid, which is the row that stretches, so the list
@@ -5418,6 +5416,10 @@ svg {
   flex: none;
 }
 
+.agent-spec .aspec-identity {
+  min-width: 0;
+}
+
 .agent-spec .aspec-head h2 {
   margin: 0;
   font-size: 20px;
@@ -5467,14 +5469,79 @@ svg {
   font-size: 10.5px;
 }
 
-.agent-spec .aspec-fields {
+/* The orchestration list: what is spending, how hard it thinks, and what it is
+   for here. Each setting is a line — label left, the value that answers it
+   right — separated by the same hairline the transcript uses between messages
+   rather than boxed one card per fact. Six bordered cards to carry six short
+   words was mostly border, and the borders were the loudest thing on a page
+   whose content is four words and a percentage. */
+.agent-spec .aspec-rows {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-  gap: 8px;
+  border-top: 1px solid var(--border-soft);
 }
 
-.agent-spec .aspec-card,
-.agent-spec .aspec-field,
+.agent-spec .aspec-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 40px;
+  padding: 6px 2px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.agent-spec .aspec-row-label {
+  flex: none;
+  max-width: 45%;
+  color: var(--text-3);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-spec .aspec-row-value {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+  flex: 1;
+}
+
+.agent-spec .aspec-row-text {
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The same `mini-select` the composer uses, sitting at the end of its row.
+   Chromeless until it is pointed at, so a settable value looks like the value
+   it is rather than like a form control queued up beside three others. */
+.agent-spec .aspec-row .mini-select {
+  max-width: 100%;
+  padding: 4px 6px;
+  background: none;
+  font-size: 13px;
+  color: var(--text);
+}
+
+.agent-spec .aspec-row .mini-select:hover {
+  background: var(--bg-hover);
+}
+
+.agent-spec .aspec-row .mini-select select {
+  max-width: 168px;
+  font-size: 13px;
+  color: var(--text);
+  text-align: right;
+}
+
+/* The one container left on the page, and it holds the one thing that is
+   actually happening. */
 .agent-spec .aspec-box {
   min-width: 0;
   padding: 11px 12px;
@@ -5483,44 +5550,9 @@ svg {
   background: var(--bg-inset);
 }
 
-.agent-spec .aspec-card-label,
-.agent-spec .aspec-field-label {
-  display: block;
-  color: var(--text-3);
-  font-size: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-  margin-bottom: 5px;
-}
-
-.agent-spec .aspec-card-value {
-  font-size: 13px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* The pickers are the same `mini-select` the composer uses, widened so a model
-   id is readable rather than clipped to a chevron. */
-.agent-spec .aspec-field .mini-select {
-  display: flex;
-  width: 100%;
-  max-width: none;
-  padding: 0;
-  background: none;
-}
-
-.agent-spec .aspec-field .mini-select:hover {
-  background: none;
-}
-
-.agent-spec .aspec-field .mini-select select {
-  flex: 1;
-  width: 100%;
-  min-width: 0;
-  max-width: none;
-  font-size: 13px;
-  color: var(--text);
+.agent-spec .aspec-live {
+  border-color: var(--accent-line);
+  background: var(--accent-wash);
 }
 
 .agent-spec .aspec-task {
@@ -5535,78 +5567,41 @@ svg {
   text-transform: capitalize;
 }
 
-/* The way through to everything this agent has been asked for here. The panel
-   header carries the same move as an icon; this is the one a reader finds
-   while actually looking at the current task. */
+/* The way through to everything this agent has been asked for here. A text
+   control on the heading's own line rather than a full-width bordered button
+   under the task: the panel header carries the same move as an icon, and two
+   boxes saying "History" on one screen is one too many. */
 .agent-spec .aspec-nav {
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  gap: 8px;
-  width: 100%;
-  margin-top: 8px;
-  padding: 9px 12px;
-  border: 1px solid var(--border-soft);
-  border-radius: 10px;
+  gap: 5px;
+  flex: none;
+  padding: 3px 4px;
+  border-radius: 7px;
   background: transparent;
-  color: var(--text-2);
+  color: var(--text-3);
   font: inherit;
-  font-size: 12px;
+  font-size: 11.5px;
   cursor: pointer;
+  transition: color 0.13s ease, background 0.13s ease;
 }
 
 .agent-spec .aspec-nav:hover {
-  background: var(--bg-inset);
+  background: var(--bg-hover);
   color: var(--text);
 }
 
-.agent-spec .aspec-nav span {
-  flex: 1;
-  text-align: left;
-}
-
 .agent-spec .aspec-nav svg {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   flex: none;
 }
 
-.agent-spec .aspec-channels {
-  display: grid;
-  gap: 7px;
-}
-
-/* One row per repository, and the role in it is the editable half: this is
-   where "what is this agent for here" is answered, per repository, without
-   leaving the panel. */
-.agent-spec .aspec-channel {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 11px;
-  border: 1px solid var(--border-soft);
-  border-radius: 9px;
-}
-
-.agent-spec .aspec-channel-name {
-  flex: none;
-  max-width: 40%;
-  font-size: 12px;
+/* Everywhere else this agent works, on the same hairline rows: the channel is
+   the label and the role in it is the editable value. */
+.agent-spec .aspec-channels .aspec-row-label {
   font-weight: 600;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-spec .aspec-here {
-  margin-left: 6px;
-  padding: 1px 5px;
-  border-radius: 999px;
-  background: var(--bg-inset);
-  color: var(--text-3);
-  font-size: 9.5px;
-  font-weight: 500;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
+  color: var(--text-2);
 }
 
 .agent-spec .aspec-role {
@@ -5616,9 +5611,9 @@ svg {
   border: 1px solid transparent;
   border-radius: 7px;
   background: transparent;
-  color: var(--text-2);
+  color: var(--text);
   font: inherit;
-  font-size: 11.5px;
+  font-size: 13px;
   text-align: right;
 }
 
@@ -5641,8 +5636,17 @@ svg {
 .agent-spec .aspec-note {
   margin-top: 8px;
   color: var(--text-3);
-  font-size: 11px;
+  font-size: 11.5px;
   line-height: 1.5;
+}
+
+/* A section whose whole body is one quiet line — an idle agent, usage that is
+   somebody else's to see — starts level with the heading above it rather than
+   indented from it by a margin meant to separate a note from content. */
+.agent-spec .aspec-label + .aspec-note,
+.agent-spec .aspec-label-row + .aspec-note {
+  margin-top: 0;
+  font-size: 12.5px;
 }
 
 .agent-spec .aspec-box .aspec-note {
@@ -6564,9 +6568,11 @@ dialog.modal::backdrop {
 
 /* The desktop collapse leaves a real navigation rail behind. Channel links
    and the profile menu keep their icons; search, roster detail and labels fold
-   away. The brand fades out while the collapse control rides the shrinking
-   rail's right edge into the top-left crown position. Phones use the full-width
-   drawer below, so none of these compact-rail rules apply there. */
+   away. The brand fades out and the collapse control takes the crown on the
+   rail's own centre line — the same line the "+", every channel mark and the
+   account avatar stand on, so the rail reads as one column of controls rather
+   than as four things that happen to be near each other. Phones use the
+   full-width drawer below, so none of these compact-rail rules apply there. */
 @media (min-width: 601px) {
   .chats-shell.chan-collapsed > .chan-sidebar {
     width: 64px;
@@ -6574,10 +6580,17 @@ dialog.modal::backdrop {
 
   .chats-shell.chan-collapsed .chan-sidebar-top {
     gap: 0;
-    padding: 10px 16px 6px;
+    justify-content: center;
+    padding: 10px 0 6px;
   }
 
+  /* Folded to nothing rather than merely hidden: left at `flex: 1` it still
+     took the crown's whole width, and `margin-left: auto` then pinned the
+     collapse control to the right edge instead of the centre. */
   .chats-shell.chan-collapsed .chan-brand {
+    flex: none;
+    width: 0;
+    padding: 0;
     opacity: 0;
     visibility: hidden;
     pointer-events: none;
@@ -6586,6 +6599,13 @@ dialog.modal::backdrop {
       opacity 0.1s ease,
       transform 0.18s ease,
       visibility 0s linear 0.18s;
+  }
+
+  .chats-shell.chan-collapsed .chan-collapse-btn {
+    margin-left: 0;
+    width: 40px;
+    height: 40px;
+    border-radius: 9px;
   }
 
   .chats-shell.chan-collapsed :is(
@@ -6600,8 +6620,19 @@ dialog.modal::backdrop {
     display: none;
   }
 
+  /* No scrollbar gutter in the rail. A 40px control centred inside a scroller
+     that has reserved a track on its right is not centred on the rail — it
+     sits half a scrollbar to the left of the account button under it and the
+     collapse control above it, which is exactly as visible as it sounds when
+     the three of them are the only things on a 64px column. */
   .chats-shell.chan-collapsed .chan-scroll {
     padding: 4px 0 8px;
+    scrollbar-width: none;
+  }
+
+  .chats-shell.chan-collapsed .chan-scroll::-webkit-scrollbar {
+    width: 0;
+    height: 0;
   }
 
   .chats-shell.chan-collapsed .chan-sec-channels {
@@ -6614,6 +6645,14 @@ dialog.modal::backdrop {
     width: 40px;
     height: 40px;
     border-radius: 9px;
+  }
+
+  /* One glyph size down the rail. Collapsed, these four controls are read as a
+     single column of marks, and a 14px "+" between an 18px chat bubble and a
+     16px collapse icon reads as three sizes of the same thing. */
+  .chats-shell.chan-collapsed :is(.chan-sec-add, .chan-collapse-btn) svg {
+    width: 18px;
+    height: 18px;
   }
 
   .chats-shell.chan-collapsed .chan-list {

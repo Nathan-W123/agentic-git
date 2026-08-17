@@ -675,43 +675,64 @@ test("codex usage comes from the rate limits its own session records", async () 
 test("codex usage asks the account for its quota before reading session records", async () => {
   const harness = await createHarness();
   const seen: string[][] = [];
+  const calls: Captured[] = [];
+  const store = await UserCredentialStore.open(
+    path.join(harness.project.directory, "secrets"),
+  );
+  await store.put("usage-user", "codex", {
+    kind: "api_key",
+    secret: "sk-openai-usage-user",
+  });
   const service = new ProviderChatService(harness.project, {
     homeDirectory: harness.home,
-    runner: scriptedRunner({
-      codex: (args) => {
-        seen.push([...args]);
-        if (args[0] !== "app-server") {
-          return output("", 127, "not scripted");
-        }
-        // The app-server answers the handshake and then the quota read, on
-        // its own JSON-RPC lines. Exit code is deliberately non-zero: it is
-        // killed once the answer is in, and the figures still count.
-        return output(
-          `${[
-            JSON.stringify({ jsonrpc: "2.0", id: 0, result: {} }),
-            JSON.stringify({
-              jsonrpc: "2.0",
-              id: 1,
-              result: {
-                rate_limits: {
-                  primary: {
-                    used_percent: 12.5,
-                    window_minutes: 300,
-                    resets_at: 1_785_902_966,
+    credentials: store,
+    runner: capturingRunner(
+      {
+        codex: (args) => {
+          seen.push([...args]);
+          if (args[0] !== "app-server") {
+            return output("", 127, "not scripted");
+          }
+          // The app-server answers the handshake and then the quota read, on
+          // its own JSON-RPC lines. Exit code is deliberately non-zero: it is
+          // killed once the answer is in, and the figures still count.
+          return output(
+            `${[
+              JSON.stringify({ jsonrpc: "2.0", id: 0, result: {} }),
+              JSON.stringify({
+                jsonrpc: "2.0",
+                id: 1,
+                result: {
+                  rate_limits: {
+                    primary: {
+                      used_percent: 12.5,
+                      window_minutes: 300,
+                      resets_at: 1_785_902_966,
+                    },
+                    secondary: { used_percent: 40, window_minutes: 10_080 },
+                    plan_type: "plus",
                   },
-                  secondary: { used_percent: 40, window_minutes: 10_080 },
-                  plan_type: "plus",
                 },
-              },
-            }),
-          ].join("\n")}\n`,
-          143,
-        );
+              }),
+            ].join("\n")}\n`,
+            143,
+          );
+        },
       },
-    }),
+      calls,
+    ),
   });
-  const report = await service.usage({ provider: "openai" });
+  const report = await service.usage({
+    provider: "openai",
+    userId: "usage-user",
+  });
   assert.deepEqual(seen[0], ["app-server", "--stdio"]);
+  const quotaCall = calls.find((call) => call.args[0] === "app-server");
+  assert.ok((quotaCall?.env?.["CODEX_HOME"] ?? "").length > 0);
+  assert.notEqual(quotaCall?.env?.["CODEX_HOME"], harness.home);
+  // Codex reads its API key from auth.json inside that isolated home, never
+  // from an inherited environment variable that could identify another user.
+  assert.equal(quotaCall?.env?.["OPENAI_API_KEY"], undefined);
   assert.equal(report.unavailableReason, undefined);
   assert.equal(report.source, "Codex account rate limits (plus)");
   assert.equal(report.windows.length, 2);
@@ -751,6 +772,108 @@ test("the codex quota answer is read in either spelling, and nothing is invented
   assert.equal(
     parseCodexAppServerRateLimits(
       `${JSON.stringify({ id: 1, error: { message: "unknown method" } })}\n`,
+    ),
+    undefined,
+  );
+});
+
+test("codex quota reads every modern named limit without duplicating its legacy alias", () => {
+  const report = parseCodexAppServerRateLimits(
+    `${JSON.stringify({
+      id: 1,
+      result: {
+        rateLimits: {
+          limitId: "codex",
+          primary: {
+            usedPercent: 17.25,
+            windowDurationMins: 300,
+            resetsAt: 1_785_902_966,
+          },
+          secondary: null,
+          planType: "pro",
+        },
+        rateLimitsByLimitId: {
+          codex: {
+            limitId: "codex",
+            primary: {
+              usedPercent: 17.25,
+              windowDurationMins: 300,
+              resetsAt: 1_785_902_966,
+            },
+            secondary: null,
+            planType: "pro",
+          },
+          codex_review: {
+            limitId: "codex_review",
+            limitName: "Code review",
+            primary: { usedPercent: 43.5, windowDurationMins: 10_080 },
+            secondary: null,
+            planType: "pro",
+          },
+          future_limit: null,
+        },
+      },
+    })}\n`,
+  );
+  assert.equal(report?.source, "Codex account rate limits (pro)");
+  assert.deepEqual(
+    report?.windows.map((window) => [window.label, window.percentUsed]),
+    [
+      ["codex · 5 hours", 17.25],
+      ["Code review · week", 43.5],
+    ],
+  );
+  assert.ok((report?.windows[0]?.resetsAt ?? "").length > 0);
+});
+
+test("codex quota ignores empty mapped windows and retains legacy fallback", () => {
+  const mappedOnly = parseCodexAppServerRateLimits(
+    `${JSON.stringify({
+      id: 1,
+      result: {
+        rateLimits: null,
+        rateLimitsByLimitId: {
+          codex: {
+            limitId: "codex",
+            primary: { usedPercent: 8, windowDurationMins: 300 },
+            secondary: null,
+            planType: "plus",
+          },
+          empty: { primary: null, secondary: null },
+        },
+      },
+    })}\n`,
+  );
+  assert.deepEqual(
+    mappedOnly?.windows.map((window) => [window.label, window.percentUsed]),
+    [["5 hours", 8]],
+  );
+
+  const legacy = parseCodexAppServerRateLimits(
+    `${JSON.stringify({
+      id: 1,
+      result: {
+        rate_limits: {
+          primary: { used_percent: 6, window_minutes: 60 },
+          secondary: null,
+        },
+        rate_limits_by_limit_id: { codex: null },
+      },
+    })}\n`,
+  );
+  assert.deepEqual(
+    legacy?.windows.map((window) => [window.label, window.percentUsed]),
+    [["hour", 6]],
+  );
+  assert.equal(
+    parseCodexAppServerRateLimits(
+      `${JSON.stringify({
+        id: 1,
+        result: {
+          rateLimits: { primary: null, secondary: null },
+          rateLimitsByLimitId: { codex: null },
+        },
+      })}\n`,
     ),
     undefined,
   );
