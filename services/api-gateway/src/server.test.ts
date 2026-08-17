@@ -4315,13 +4315,32 @@ test("a finished task says what it did, not that the pipeline worked", () => {
     );
   }
 
-  // Bounded: a model that ignores "one sentence" must not paste an essay into
-  // a channel everybody is reading.
+  // Bounded: a model that ignores "one or two plain sentences" must not paste
+  // an essay into a channel everybody is reading.
   const essay = narrateTaskEvent("canonical_promoted", {
     agentExplanation: `${"word ".repeat(400)}end`,
   });
-  assert.ok((essay ?? "").length < 450, String(essay?.length));
-  assert.match(essay ?? "", /…$/u);
+  assert.ok((essay ?? "").length < 250, String(essay?.length));
+  // Nothing to cut back to in an unpunctuated wall of text, so it ends on a
+  // whole word and says it was shortened — never halfway through one.
+  assert.match(essay ?? "", /word…$/u);
+
+  // An over-long account is cut back to the sentences that fit, not sliced at
+  // the bound: "…adds a cmsg-mine cl…" told a reader the ending was truncated
+  // and nothing else, with nowhere in the channel to read the rest.
+  const long = narrateTaskEvent("canonical_promoted", {
+    agentExplanation:
+      "Your own messages now sit on the right on a phone. " +
+      "Everybody else's stay on the left, and the desktop layout is " +
+      "unchanged. The reader's own id decides which side a message takes, " +
+      "so a signed-out reader sees every message on the left as before.",
+  });
+  assert.equal(
+    long,
+    "Your own messages now sit on the right on a phone. Everybody else's " +
+      "stay on the left, and the desktop layout is unchanged.",
+  );
+  assert.doesNotMatch(long ?? "", /…/u);
 
   // Newlines collapse: the ending is one line in a channel, and a multi-line
   // explanation would otherwise read as several messages.

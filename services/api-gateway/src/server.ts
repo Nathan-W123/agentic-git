@@ -787,11 +787,13 @@ const CHANNEL_CEREMONIAL_EVENTS = new Set([
 /**
  * How much of an agent's own account of its work the ending may carry.
  *
- * Long enough for the two or three sentences the prompt asks for, short
- * enough that a model which writes an essay does not paste it into a channel
- * everybody is reading.
+ * Room for a sentence or two in plain words, which is all an ending in a
+ * channel is for. It used to be 400, and 400 characters of an agent writing
+ * for an engineer is a paragraph naming files, functions and the reasoning
+ * between them — then cut mid-word at the bound, so the one line most people
+ * read of a task both said too much and stopped halfway through saying it.
  */
-const TERMINAL_SUMMARY_MAX = 400;
+const TERMINAL_SUMMARY_MAX = 200;
 
 const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
   // The fallback, for a run whose agent explained nothing — see the
@@ -1026,6 +1028,35 @@ function clipToBoundary(text: string, max: number): string {
   return `${kept.trimEnd()}…`;
 }
 
+/**
+ * An ending short enough to read at a glance and finished enough to trust.
+ *
+ * A cut sentence is worse than a short one: "…adds a cmsg-mine cl…" tells the
+ * reader the account was truncated but not what it said, and there is nowhere
+ * in the channel to go for the rest. So the whole sentences that fit are kept
+ * and the remainder is dropped — the first sentence of an account is the one
+ * that says what happened, and the ones after it are the detail. Only text
+ * with no sentence end at all inside the bound falls back to a clipped word,
+ * because something has to give and a runaway paragraph is not an ending.
+ */
+function shortenEnding(written: string): string {
+  if (written.length <= TERMINAL_SUMMARY_MAX) {
+    return written;
+  }
+  const head = written.slice(0, TERMINAL_SUMMARY_MAX);
+  const stop = Math.max(
+    head.lastIndexOf(". "),
+    head.lastIndexOf("! "),
+    head.lastIndexOf("? "),
+  );
+  // Only when a whole sentence is most of what the bound allows; one short
+  // opener followed by a long second sentence would otherwise leave a line
+  // saying almost nothing.
+  return stop > TERMINAL_SUMMARY_MAX * 0.4
+    ? head.slice(0, stop + 1)
+    : clipToBoundary(written, TERMINAL_SUMMARY_MAX);
+}
+
 /** How much of the machinery's own error text a failure line may quote. */
 const FAILURE_DETAIL_MAX = 240;
 
@@ -1243,11 +1274,9 @@ export function narrateTaskEvent(
         return CHANNEL_TERMINAL_EVENTS[type];
       }
       // Bounded, like every other line this writes: a model that ignores
-      // "one sentence" must not turn the ending into an essay.
-      const summary =
-        written.length > TERMINAL_SUMMARY_MAX
-          ? `${written.slice(0, TERMINAL_SUMMARY_MAX).trimEnd()}…`
-          : written;
+      // "one or two plain sentences" must not turn the ending into an essay,
+      // and must not end mid-word when it does.
+      const summary = shortenEnding(written);
       // The count, not the names — the reader who wants those is one click
       // Named while there are few enough to name. "(1 file changed)" is the
       // one fact about an ending that a reader cannot check and cannot use:
