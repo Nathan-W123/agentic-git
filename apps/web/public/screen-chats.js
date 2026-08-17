@@ -2938,7 +2938,6 @@ function agentPanel() {
       : canChatPrivately
         ? "chat"
         : "spec";
-  const status = agentStatus(agent, activeChannelId());
   // Every way out of the details page is one header control on the right, and
   // each one is a toggle back to the details when it is the view you are in.
   // The tab strip that used to say Details / Private chat is gone: it was a
@@ -2967,7 +2966,6 @@ function agentPanel() {
       <span class="dm-head-name">
         ${agentFace(agent, 20)}
         ${esc(agent.name)}
-        ${statusDot(status, AGENT_STATUS_TITLE[status])}
       </span>
       <span class="spacer"></span>
       ${canChatPrivately ? headerAction("chat", "chatBubble", "Private chat") : ""}

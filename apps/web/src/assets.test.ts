@@ -2368,13 +2368,19 @@ test("clicking an agent opens its details while chat and history stay explicit",
   assert.doesNotMatch(open, /notifications/u);
   assert.match(panel, /const requestedTab = state\.agentPanelTab \?\? "spec";/u);
   assert.match(panel, /: agentSpec\(agent, repositoryId\)/u);
+  assert.match(panel, /\$\{agentFace\(agent, 20\)\}/u);
+  assert.doesNotMatch(panel, /statusDot\(/u);
 
   // The alternate destinations still exist, but only behind controls that
   // name what they do instead of changing the result of clicking the agent.
   assert.match(menu, /act: "agent-chat-open"/u);
   assert.match(menu, /label: `Message \$\{agent\.name\}`/u);
-  assert.match(panel, /value: tab === "history" \? "spec" : "history"/u);
-  assert.match(panel, /\{ value: "chat", label: "Private chat" \}/u);
+  assert.match(panel, /const headerAction = \(view, iconName, title\)/u);
+  assert.match(
+    panel,
+    /canChatPrivately \? headerAction\("chat", "chatBubble", "Private chat"\) : ""/u,
+  );
+  assert.match(panel, /headerAction\("history", "history", "Task history"\)/u);
 });
 
 test("a roster row carries one ellipsis and a compact rename delete menu", async () => {
