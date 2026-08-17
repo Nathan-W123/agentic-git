@@ -21,14 +21,12 @@ import {
   type CanonicalRepository,
 } from "@coord/repository-service";
 import {
-  AGENT_ACCOUNT_PREFIX,
   assertAgentPlan,
   createId,
   describeError,
   mergePlanScope,
   normalizeRepositoryPath,
   planGroundingConfidence,
-  readsAsReportRequest,
   summariseChangedFiles,
   uniqueStrings,
   type AgentPlan,
@@ -702,16 +700,6 @@ export class Coordinator {
   private readonly taskWorkspacePaths = new Map<string, string>();
   /** Actions each task has spent, for the cap. */
   private readonly actionsUsed = new Map<string, number>();
-  /**
-   * Tasks the platform actually did something for. Read where an empty
-   * changeset is judged: "changed no files" is failure for "fix the retry
-   * loop" and the expected shape of "push to GitHub" — the push happened
-   * out here, not in the workspace, and there is nothing for the diff to
-   * show. Only performed actions count; a refused one changes nothing and
-   * must not launder an empty run into a success.
-   */
-  private readonly actionsDone = new Set<string>();
-
   public constructor(dependencies: CoordinatorDependencies = {}) {
     this.repositories = dependencies.repositories ?? new RepositoryService();
     this.workspaces =
@@ -2365,9 +2353,6 @@ export class Coordinator {
                 explanation: `The action failed: ${errorMessage(error)}`,
               }));
 
-    if (answer.outcome === "done") {
-      this.actionsDone.add(entry.task.id);
-    }
     await this.trace(recorder, runAudit, "action_performed", entry.task.id, {
       requestId,
       action,
@@ -3287,34 +3272,14 @@ export class Coordinator {
         }
       }
       await recorder?.integration(integration);
-      // Asked to look, not to change — and it looked. Decided here rather
-      // than at the status line below because the narration in between reads
-      // differently for a report: see the two uses.
-      //
-      // "Changed no files" is failure for "fix the retry loop" and success
-      // for "audit the codebase". Only the remote-worker path could express
-      // the second, and every task the control plane runs in process comes
-      // through here — so an audit, a review or a summary asked for in a
-      // channel was done, carried all the way to this method, and then
-      // recorded as failed with the integration service's "produced no
-      // repository changes" in place of the findings the agent had written.
-      //
-      // Judged against the request rather than by relaxing `empty` generally,
-      // because an empty changeset from a task that *was* meant to write is
-      // the exact symptom a sandbox silently refusing every edit produces.
-      // Reading the objective keeps that alarm intact and lets the report
-      // through. Same reading the adapters and the worker path use, so no two
-      // layers can disagree about what one empty changeset meant.
-      const reported =
-        integration.status === "empty" &&
-        (readsAsReportRequest(result.task.objective) ||
-          // The task's deliverable was a platform action that happened —
-          // a push, a preview — and an action leaves no diff by design.
-          // "The agent produced no repository changes" was exactly how a
-          // successfully pushed "push to GitHub" used to end: failed, with
-          // the push done and the branch name discarded. The agent's own
-          // explanation carries the action's result instead.
-          this.actionsDone.has(result.task.id));
+      // Reaching integration means the agent completed its run. A diff is one
+      // possible deliverable, not proof that work happened: answers, audits,
+      // reviews and platform actions all legitimately leave the repository
+      // untouched. Inferring otherwise from the wording of the objective made
+      // successful tasks fail whenever the intent heuristic missed a phrase.
+      // Real execution failures arrive through the exception path below;
+      // `empty` therefore completes by reporting the agent's own account.
+      const reported = integration.status === "empty";
       // Nothing was validated because nothing was changed, and there is no
       // gate here to have passed or failed. Saying "validation came back
       // empty" in front of a finished report is the same false alarm this
@@ -3347,19 +3312,6 @@ export class Coordinator {
         );
       }
       const agentAccount = result.changeSet.agentExplanation.trim();
-      // An empty ending that is not a report still carries the agent's own
-      // account, appended to the alarm rather than replacing it. That
-      // account is the only substantive evidence an empty run leaves —
-      // "the push was refused: GitHub is not connected" was written right
-      // there and then discarded, so the thread said "produced no
-      // repository changes" twice in a row while the reason sat unread in
-      // the changeset. The alarm still leads: an account can also be an
-      // excuse, and an empty run from a task meant to write stays a
-      // failure whatever it says for itself.
-      const failureExplanation =
-        integration.status === "empty" && agentAccount.length > 0
-          ? `${integration.explanation}. ${AGENT_ACCOUNT_PREFIX} ${agentAccount}`
-          : integration.explanation;
       const explanation = reported
         ? // The agent's own words are the deliverable here — there is no diff
           // to read instead, and the generic line says nothing a reader can
@@ -3367,7 +3319,7 @@ export class Coordinator {
           agentAccount.length > 0
           ? agentAccount
           : "Reported without changing any files."
-        : failureExplanation;
+        : integration.explanation;
       if (integration.status === "integrated") {
         await this.trace(
           recorder,
@@ -3440,10 +3392,7 @@ export class Coordinator {
           result.task.id,
           {
             status: integration.status,
-            // The enriched form, because this field is what the channel
-            // narrates: the generic sentence alone is exactly the ending
-            // that told a person nothing twice.
-            explanation: failureExplanation,
+            explanation: integration.explanation,
           },
         );
       }

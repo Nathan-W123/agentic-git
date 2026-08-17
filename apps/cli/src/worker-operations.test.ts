@@ -473,6 +473,48 @@ test("a valid remote result is recorded, validated, and promoted", async () => {
   }
 });
 
+test("a completed remote result is not failed solely because it changed nothing", async () => {
+  const harness = await createHarness();
+  try {
+    // The objective asks for an edit on purpose. Completion, rather than an
+    // intent heuristic, decides whether this no-op result is a failure.
+    const taskId = await submit(harness);
+    const assignment = await leaseAndAdmit(harness);
+    const explanation = "The requested behavior is already present.";
+    const accepted = await acceptWorkResult(
+      harness.store,
+      {
+        leaseId: assignment.lease.id,
+        status: "completed",
+        actorId: "user",
+        plan: plan(taskId),
+        changeSet: resultStub(taskId, assignment.canonicalVersion.revision, {
+          symbolsChanged: [],
+          agentExplanation: explanation,
+        }),
+      },
+      { repositories: harness.repositories },
+    );
+
+    assert.equal(accepted.accepted, true, accepted.reason);
+    assert.equal(accepted.integrationStatus, "empty");
+    assert.ok(accepted.runId);
+    assert.equal(
+      (await harness.store.listSubmittedTasks())[0]?.status,
+      "integrated",
+    );
+    const detail = await harness.store.getRun(accepted.runId);
+    assert.equal(detail?.run.status, "completed");
+    assert.equal(detail?.tasks[0]?.status, "integrated");
+    assert.equal(detail?.tasks[0]?.explanation, explanation);
+    const types = detail?.audit.map((event) => event.type) ?? [];
+    assert.ok(types.includes("task_reported"), types.join(", "));
+    assert.ok(!types.includes("task_failed"), types.join(", "));
+  } finally {
+    await rm(harness.root, { recursive: true, force: true });
+  }
+});
+
 test("a protected remote result waits for durable human approval", async () => {
   const harness = await createHarness();
   try {
@@ -4131,9 +4173,9 @@ test("the strict rebase switch restores the unconditional requeue", async () => 
   }
 });
 
-test("only a request to look excuses a changeset that changed nothing", () => {
-  // The distinction the pipeline could not previously draw. An empty result
-  // is the answer to one of these and the absence of an answer to the other.
+test("the report-intent helper distinguishes looking from editing", () => {
+  // This remains useful to task-routing callers even though completed empty
+  // results no longer depend on the heuristic.
   for (const objective of [
     "audit the codebase",
     "give me a summary of the connected repo",
@@ -4145,9 +4187,7 @@ test("only a request to look excuses a changeset that changed nothing", () => {
     assert.equal(readsAsReportRequest(objective), true, objective);
   }
 
-  // These must keep failing when they change nothing — an empty changeset
-  // here is the symptom of a sandbox silently refusing every edit, which is
-  // exactly what `CodexWriteDeniedError` exists to catch.
+  // These are change requests rather than reports.
   for (const objective of [
     "edit the readme, add a hello at the bottom",
     "fix the retry loop in worker.ts",
@@ -4161,7 +4201,7 @@ test("only a request to look excuses a changeset that changed nothing", () => {
   }
 });
 
-test("a question about the repository is answered by reporting, unless it asks for an edit", () => {
+test("the report-intent helper distinguishes questions from edit requests", () => {
   // These reach a task because the chat path has no checkout — see
   // `needsTheRepository`. Having got there, changing nothing is the answer.
   for (const objective of [
@@ -4173,8 +4213,7 @@ test("a question about the repository is answered by reporting, unless it asks f
     assert.equal(readsAsReportRequest(objective), true, objective);
   }
 
-  // A question mark does not turn a change request into a report. An empty
-  // result here is still the symptom of a sandbox refusing every write.
+  // A question mark does not turn a change request into a report.
   for (const objective of [
     "can you fix the retry loop?",
     "could you add a hello to the readme?",
