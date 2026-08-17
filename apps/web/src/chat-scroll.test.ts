@@ -55,6 +55,38 @@ test("a render nobody asked for does not move the reader", async () => {
   assert.match(chats, /document\.getElementById\(entry\.id\)/u);
 });
 
+test("settings interactions keep their place without carrying it to another screen", async () => {
+  const app = await publicFile("app.js");
+  // A Settings click re-renders the whole app, so its ordinary `.scroll`
+  // element needs an identity that exists on both sides of a same-screen
+  // render and on only one side of navigation to or from Settings.
+  assert.match(app, /class="scroll" data-scroll-key="settings"/u);
+
+  const capture = app.indexOf(
+    "const savedSettingsScroll = captureSettingsScroll();",
+  );
+  const swap = app.indexOf('root.innerHTML = `<div class="app"', capture);
+  const restore = app.indexOf(
+    "restoreSettingsScroll(savedSettingsScroll);",
+    swap,
+  );
+  assert.notEqual(capture, -1, "Settings scroll should be captured");
+  assert.notEqual(swap, -1, "the screen-wide innerHTML swap should still exist");
+  assert.notEqual(restore, -1, "Settings scroll should be restored");
+  assert.equal(capture < swap, true, "capture must precede DOM replacement");
+  assert.equal(restore > swap, true, "restore needs the replacement DOM");
+
+  const helpers = app.slice(
+    app.indexOf("function captureSettingsScroll"),
+    app.indexOf("\n/**\n * Where focus", app.indexOf("function captureSettingsScroll")),
+  );
+  assert.equal(
+    [...helpers.matchAll(/\[data-scroll-key="settings"\]/gu)].length,
+    2,
+    "capture and restore must require the same Settings-only surface",
+  );
+});
+
 test("the open thread is restored too, not only the channel", async () => {
   const chats = await publicFile("screen-chats.js");
   // The thread panel is fullscreen on a phone and had no restore of any kind,
