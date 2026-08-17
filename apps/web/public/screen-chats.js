@@ -1513,20 +1513,7 @@ function messageRow(
   // row could still *do* goes with the words. React, pin, revert and delete
   // all act on a line that is no longer there.
   const deleted = entry.deletedAt !== undefined;
-  // Who said it, from the reader's side. Only a person's own typing counts:
-  // an agent the reader happens to own is still answering the room, not
-  // speaking for them. The class is emitted at every width and the phone tier
-  // in styles.css is what acts on it, so the side a message sits on follows
-  // the viewport without a re-render — `phoneLayout()` would have to re-run
-  // the whole transcript on every rotation to say the same thing.
-  const mine =
-    entry.kind === "user" &&
-    ((currentUserId() !== "" &&
-      String(entry.authorId ?? "") === currentUserId()) ||
-      entry.authorId === "you");
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
-    mine ? " cmsg-mine" : ""
-  }${
     inlineReply ? " cmsg-inline-reply" : ""
   }${compact ? " cmsg-compact" : ""
   }${hasTaskThread && !isReply ? " cmsg-threaded" : ""
