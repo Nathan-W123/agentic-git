@@ -689,7 +689,7 @@ function settingsScreen() {
   const approvals = policy.approvals ?? {};
   const budgets = policy.budgets ?? {};
   const repository = currentRepository();
-  return `<div class="scroll"><div class="page">
+  return `<div class="scroll" data-scroll-key="settings"><div class="page">
     <div class="page-head">
       <span class="ph-icon">${icon("gear")}</span>
       <div><h1>Settings</h1><p>Project policy, repository, and your account.</p></div>
@@ -2773,6 +2773,29 @@ document.addEventListener(
 const FOCUSABLE_FIELDS = new Set(["INPUT", "TEXTAREA"]);
 
 /**
+ * The Settings page's position across the whole-app render below.
+ *
+ * Settings controls redraw the screen to show their new value. That replaces
+ * the `.scroll` node and gives its replacement a fresh `scrollTop` of zero,
+ * sending somebody back to the first card after every click. Keying this one
+ * surface makes navigation safe too: when entering or leaving Settings only
+ * one side of the render has the key, so no position crosses between screens.
+ */
+function captureSettingsScroll() {
+  return document.querySelector('[data-scroll-key="settings"]')?.scrollTop;
+}
+
+function restoreSettingsScroll(saved) {
+  if (saved === undefined) {
+    return;
+  }
+  const scroller = document.querySelector('[data-scroll-key="settings"]');
+  if (scroller !== null) {
+    scroller.scrollTop = saved;
+  }
+}
+
+/**
  * Where focus and the caret were, across a render nobody asked for.
  *
  * Every render is one `innerHTML` assignment over the whole app, so the field
@@ -2953,6 +2976,7 @@ function renderNow() {
   }
 
   const focusedField = captureFocus();
+  const savedSettingsScroll = captureSettingsScroll();
   // Where the reader had the conversation, for the same reason focus is taken
   // here: the swap below throws both away, and neither is in `state`.
   const savedScroll = captureChannelScroll();
@@ -2968,6 +2992,8 @@ function renderNow() {
       ${screen()}
     </div>
   </div>`;
+
+  restoreSettingsScroll(savedSettingsScroll);
 
   // Chats owns this now: the inline file and diff blocks in the transcript are
   // the only place code is read, so the channel has to load its own changeset
@@ -4765,6 +4791,20 @@ document.addEventListener("keydown", (event) => {
 document.addEventListener("keydown", (event) => {
   const node = event.target;
   if (node?.dataset?.act !== "channel-thread-input") {
+    return;
+  }
+  if (event.key === "Enter" && !event.shiftKey && !imeComposing(event)) {
+    event.preventDefault();
+    node.closest("form")?.requestSubmit();
+  }
+});
+
+/* Enter sends a direct message the same way it sends a thread reply. The DM
+   composer has no @mention picker steering its Enter, so the plain rule is the
+   whole rule here. */
+document.addEventListener("keydown", (event) => {
+  const node = event.target;
+  if (node?.dataset?.act !== "dm-input") {
     return;
   }
   if (event.key === "Enter" && !event.shiftKey && !imeComposing(event)) {

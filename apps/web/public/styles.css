@@ -4406,9 +4406,12 @@ svg {
 }
 
 /* A thread branches from the root avatar into its compact reply summary.
-   Two pixels gives the branch enough presence to read as a path rather than a
-   divider. It starts four pixels below the avatar and stops short of the reply
-   link, so the rounded stroke floats between the two components. */
+   Three pixels of a neutral border grey gives the branch enough presence to
+   read as a path rather than a divider, without the accent's colour pulling
+   the eye away from the message. It starts four pixels below the avatar and
+   stops short of the reply link, so the rounded stroke floats between the two
+   components. The elbow radius carries the extra pixel so the inner curve
+   keeps the shape it had at two. */
 .cmsg-row.cmsg-threaded::before {
   content: "";
   position: absolute;
@@ -4416,11 +4419,11 @@ svg {
   top: 44px;
   bottom: 18px;
   width: 16px;
-  border-left: 2px solid var(--accent-line);
-  border-bottom: 2px solid var(--accent-line);
+  border-left: 3px solid var(--border-strong);
+  border-bottom: 3px solid var(--border-strong);
   border-top-left-radius: 2px;
   border-bottom-right-radius: 2px;
-  border-bottom-left-radius: 10px;
+  border-bottom-left-radius: 11px;
   pointer-events: none;
 }
 
@@ -5537,8 +5540,8 @@ body.resizing-panel {
 }
 
 /* Continue the root avatar's stem toward the reply label without touching
-   either component. This uses the channel branch's two-pixel stroke, rounded
-   caps and ten-pixel elbow at a scale suited to the thread panel. */
+   either component. This uses the channel branch's three-pixel grey stroke,
+   rounded caps and eleven-pixel elbow at a scale suited to the thread panel. */
 .thread-root.has-replies::after {
   content: "";
   position: absolute;
@@ -5546,11 +5549,11 @@ body.resizing-panel {
   top: 44px;
   bottom: -15px;
   width: 11px;
-  border-left: 2px solid var(--accent-line);
-  border-bottom: 2px solid var(--accent-line);
+  border-left: 3px solid var(--border-strong);
+  border-bottom: 3px solid var(--border-strong);
   border-top-left-radius: 2px;
   border-bottom-right-radius: 2px;
-  border-bottom-left-radius: 10px;
+  border-bottom-left-radius: 11px;
   pointer-events: none;
 }
 

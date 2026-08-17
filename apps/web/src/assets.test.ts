@@ -521,11 +521,11 @@ test("a reply carries a quiet visual path back to its root", async () => {
   );
   assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
   for (const branch of [channelBranch, panelBranch]) {
-    assert.match(branch ?? "", /border-left: 2px solid var\(--accent-line\);/u);
-    assert.match(branch ?? "", /border-bottom: 2px solid var\(--accent-line\);/u);
+    assert.match(branch ?? "", /border-left: 3px solid var\(--border-strong\);/u);
+    assert.match(branch ?? "", /border-bottom: 3px solid var\(--border-strong\);/u);
     assert.match(branch ?? "", /border-top-left-radius: 2px;/u);
     assert.match(branch ?? "", /border-bottom-right-radius: 2px;/u);
-    assert.match(branch ?? "", /border-bottom-left-radius: 10px;/u);
+    assert.match(branch ?? "", /border-bottom-left-radius: 11px;/u);
     assert.match(branch ?? "", /top: 44px;/u);
   }
   assert.match(channelBranch ?? "", /width: 16px;/u);
@@ -1394,6 +1394,48 @@ test("the composer keyboard leaves Space, Shift+Enter, and IME to native input",
   assert.equal(submitted, 0);
   assert.equal(press("Enter"), 1, "plain Enter is the only send gesture here");
   assert.equal(submitted, 1);
+});
+
+test("every message composer sends on Enter and opens a line on Shift+Enter", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+
+  // One block per composer, each reached by the act its textarea carries. The
+  // DM composer was the one without a block: its Enter fell through to the
+  // textarea and only ever opened a new line.
+  for (const act of ["chat-input", "channel-thread-input", "dm-input"]) {
+    const start = app.indexOf(`if (node?.dataset?.act !== "${act}")`);
+    assert.notEqual(start, -1, `${act} has an Enter handler`);
+    const block = app.slice(start, app.indexOf("});", start));
+    assert.match(
+      block,
+      /event\.key === "Enter" && !event\.shiftKey && !imeComposing\(event\)/u,
+      `${act} sends on plain Enter only`,
+    );
+    assert.match(
+      block,
+      /event\.preventDefault\(\);\s*\n\s*node\.closest\("form"\)\?\.requestSubmit\(\)/u,
+      `${act} submits its own form`,
+    );
+  }
+
+  // The channel composer's Enter is steered by the @mention picker, so it
+  // routes through the shared handler rather than repeating the block above.
+  assert.match(
+    app,
+    /event\.target\?\.dataset\?\.act === "channel-input"\s*\)?\s*\{?\s*\n?\s*handleComposerKeydown\(event, render\)/u,
+  );
+  assert.match(chats, /if \(event\.key === "Enter" && !event\.shiftKey\) \{/u);
+
+  // Mobile keyboards need the hint to label the return key "send"; without it
+  // the same Enter is offered as a newline before it is pressed.
+  for (const act of ["channel-input", "dm-input", "channel-thread-input"]) {
+    const textarea = chats.slice(
+      chats.indexOf(`<textarea data-act="${act}"`),
+      chats.indexOf("</textarea>", chats.indexOf(`<textarea data-act="${act}"`)),
+    );
+    assert.match(textarea, /enterkeyhint="send"/u, `${act} labels its return key`);
+  }
 });
 
 test("channel @mentions include repository guests and surface directed unread pings", async () => {
