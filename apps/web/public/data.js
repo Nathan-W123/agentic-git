@@ -1331,14 +1331,14 @@ export async function signInForInvitation(email, password) {
 
 /* --------------------------------------------------------- appearance ---- */
 
-export const DEFAULT_ACCENT = "#e05f9e";
+export const DEFAULT_ACCENT = "#ff91a4";
 /**
  * The second colour, when nobody has chosen one.
  *
  * A lighter pink keeps the untouched-user theme cohesive while remaining
  * distinct from the primary pink wherever both accents appear together.
  */
-export const DEFAULT_ACCENT_SECONDARY = "#f3a6c8";
+export const DEFAULT_ACCENT_SECONDARY = "#ffa9b8";
 
 /**
  * The palette offered in settings.
@@ -1353,7 +1353,7 @@ export const PALETTE = [
   { value: "#4f8ef7", label: "Blue" },
   { value: "#2fae7f", label: "Green" },
   { value: "#e0663d", label: "Orange" },
-  { value: "#e05f9e", label: "Pink" },
+  { value: "#ff91a4", label: "Pink" },
   { value: "#3fa8b5", label: "Teal" },
   { value: "#d7a13b", label: "Amber" },
   { value: "#a06ee0", label: "Lilac" },
