@@ -2171,6 +2171,13 @@ svg {
   word-break: break-word;
 }
 
+/* Consecutive bubbles from one side are one visual run. The first keeps the
+   time; continuations spend only a narrow gutter on the fact that they are
+   still separate messages, preserving each message's own rewind action. */
+.msg.msg-compact {
+  margin-top: -8px;
+}
+
 /* Rewind, hidden until the bubble is under the pointer — the same bargain
    `.cmsg-actions` makes in the channel. It sits outside the bubble rather
    than in it so it never reflows what somebody is reading, on the side the

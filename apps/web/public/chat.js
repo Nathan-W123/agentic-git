@@ -109,6 +109,21 @@ export function chatProgress(agent) {
   </div>`;
 }
 
+/**
+ * Whether one private-chat message continues the same speaker's uninterrupted
+ * run. System notices and date boundaries are transcript structure rather
+ * than speech, so neither can be folded into the messages around it.
+ */
+function continuesPrivateChatMessageGroup(previous, current, startsNewDay) {
+  if (previous === undefined || startsNewDay) {
+    return false;
+  }
+  const role = current?.role;
+  return (
+    (role === "user" || role === "assistant") && previous.role === role
+  );
+}
+
 export function chatThread(agent) {
   if (agent === undefined) {
     return `<div class="chat-thread"></div>`;
@@ -127,7 +142,8 @@ export function chatThread(agent) {
   const rows = entries.map((entry, index) => {
     const day = new Date(entry.at ?? Date.now()).toDateString();
     let separator = "";
-    if (day !== lastDay) {
+    const startsNewDay = day !== lastDay;
+    if (startsNewDay) {
       lastDay = day;
       const isToday = day === new Date().toDateString();
       separator = `<div class="thread-day">${isToday ? "Today" : esc(day)}</div>`;
@@ -136,17 +152,26 @@ export function chatThread(agent) {
       return `${separator}<p class="msg system">${esc(entry.content)}</p>`;
     }
     const mine = entry.role === "user";
+    const compact = continuesPrivateChatMessageGroup(
+      entries[index - 1],
+      entry,
+      startsNewDay,
+    );
     // Rewind, not erase. This whole transcript is replayed to the provider on
     // every turn, so lifting one message out of the middle would leave the
     // model answering a question that is no longer there — and the reply it
     // had already given to it still sitting underneath. Deleting a message
     // therefore takes everything after it too, which is also what somebody
     // deleting a message here actually wants: to go back and ask differently.
-    return `${separator}<div class="msg ${mine ? "user" : "agent"}">${esc(
-      entry.content,
-    )}<span class="msg-time">${esc(clockTime(entry.at))}${
-      mine ? '<span class="tick">✓✓</span>' : ""
-    }</span>${iconButton("trash", {
+    return `${separator}<div class="msg ${mine ? "user" : "agent"}${
+      compact ? " msg-compact" : ""
+    }">${esc(entry.content)}${
+      compact
+        ? ""
+        : `<span class="msg-time">${esc(clockTime(entry.at))}${
+            mine ? '<span class="tick">✓✓</span>' : ""
+          }</span>`
+    }${iconButton("trash", {
       act: "chat-msg-delete",
       value: String(index),
       title:

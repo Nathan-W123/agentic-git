@@ -1719,6 +1719,51 @@ test("channel messages compact only an uninterrupted run from one person", async
   );
 });
 
+test("private-chat messages compact only an uninterrupted run from one speaker", async () => {
+  const chat = await publicFile("chat.js");
+  const css = await publicFile("styles.css");
+
+  const start = chat.indexOf("function continuesPrivateChatMessageGroup");
+  const end = chat.indexOf("\nexport function chatThread", start);
+  assert.notEqual(start, -1, "chat.js declares the private grouping rule");
+  assert.notEqual(end, -1, "the private grouping rule has a testable boundary");
+  const createGroupingRule = new Function(
+    `${chat.slice(start, end)}\nreturn continuesPrivateChatMessageGroup;`,
+  );
+  const continues = createGroupingRule() as (
+    previous: { role: string } | undefined,
+    current: { role: string },
+    startsNewDay: boolean,
+  ) => boolean;
+
+  assert.equal(continues({ role: "user" }, { role: "user" }, false), true);
+  assert.equal(
+    continues({ role: "assistant" }, { role: "assistant" }, false),
+    true,
+  );
+  assert.equal(continues({ role: "user" }, { role: "assistant" }, false), false);
+  assert.equal(continues({ role: "assistant" }, { role: "user" }, false), false);
+  assert.equal(continues({ role: "system" }, { role: "user" }, false), false);
+  assert.equal(continues({ role: "user" }, { role: "system" }, false), false);
+  assert.equal(continues({ role: "user" }, { role: "user" }, true), false);
+  assert.equal(continues(undefined, { role: "user" }, false), false);
+
+  // Continuations lose only repeated time chrome. They remain individual
+  // bubbles with their original indices, so rewinding from either one keeps
+  // the conversation semantics unchanged.
+  assert.match(chat, /compact \? " msg-compact" : ""/u);
+  assert.match(
+    chat,
+    /compact\s*\?\s*""\s*:\s*`<span class="msg-time">/u,
+  );
+  assert.match(chat, /act: "chat-msg-delete"/u);
+  assert.match(chat, /value: String\(index\)/u);
+  assert.match(
+    css,
+    /\.msg\.msg-compact \{\s*margin-top: -8px;\s*\}/u,
+  );
+});
+
 test("the invite screen names the product, not only the team", async () => {
   const app = await browserSource();
   const start = app.indexOf("function renderInvite");
