@@ -1665,11 +1665,11 @@ async function simplifySummaryAction(repositoryId, replyId) {
 /**
  * Which draft an upload lands in, and what the reader looks at while it does.
  *
- * Two composers stage images: the channel bar and the thread panel's reply
- * box. Everything about the upload is identical, so the only difference worth
- * naming is where the reference goes, which counter the "attaching…" note
- * reads, and which textarea gets the caret back — three strings, rather than a
- * second copy of the loop below drifting away from the first.
+ * Three composers stage images: the channel bar, the thread panel's reply
+ * box, and a direct message. Everything about the upload is identical, so the
+ * only difference worth naming is where the reference goes, which counter the
+ * "attaching…" note reads, and which textarea gets the caret back — three
+ * strings, rather than another copy of the loop below drifting away.
  */
 const ATTACH_TARGETS = {
   channel: {
@@ -1681,6 +1681,11 @@ const ATTACH_TARGETS = {
     draft: "threadDraft",
     counter: "threadAttaching",
     input: "channel-thread-input",
+  },
+  dm: {
+    draft: "dmDraft",
+    counter: "dmAttaching",
+    input: "dm-input",
   },
 };
 
@@ -1696,18 +1701,29 @@ const ATTACH_TARGETS = {
 async function attachChannelImages(files, target = "channel") {
   const where = ATTACH_TARGETS[target] ?? ATTACH_TARGETS.channel;
   const repositoryId = activeChannelId();
+  const dmUserId = target === "dm" ? state.activeDm : undefined;
   const images = files.filter((file) => file.type.startsWith("image/"));
-  if (repositoryId === undefined || images.length === 0) {
+  if (
+    repositoryId === undefined ||
+    images.length === 0 ||
+    (target === "dm" && dmUserId === undefined)
+  ) {
     if (files.length > 0) {
       toast("Only images can be attached.", "error");
     }
     return;
   }
-  state[where.counter] += images.length;
+  state[where.counter] = (state[where.counter] ?? 0) + images.length;
   render();
   for (const file of images) {
     try {
       const id = await uploadAttachment(repositoryId, file);
+      // A DM upload belongs to the person whose panel started it. If the
+      // reader opens a different conversation before the bytes arrive, do
+      // not append the old reference to the new person's draft.
+      if (target === "dm" && state.activeDm !== dmUserId) {
+        continue;
+      }
       const alt = file.name.replace(/\.[^.]+$/u, "").slice(0, 60);
       const draft = state[where.draft] ?? "";
       state[where.draft] = `${draft}${
@@ -1716,7 +1732,7 @@ async function attachChannelImages(files, target = "channel") {
     } catch (error) {
       toast(error.message ?? "That image could not be attached.", "error");
     } finally {
-      state[where.counter] -= 1;
+      state[where.counter] = Math.max(0, (state[where.counter] ?? 1) - 1);
       render();
     }
   }
@@ -3257,11 +3273,14 @@ document.addEventListener("click", (event) => {
       return;
     }
     case "channel-attachment-remove":
+    case "dm-attachment-remove":
     case "thread-attachment-remove": {
       const where =
         act === "channel-attachment-remove"
           ? ATTACH_TARGETS.channel
-          : ATTACH_TARGETS.thread;
+          : act === "thread-attachment-remove"
+            ? ATTACH_TARGETS.thread
+            : ATTACH_TARGETS.dm;
       const escaped = value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
       state[where.draft] = String(state[where.draft] ?? "")
         .replace(
@@ -3278,6 +3297,11 @@ document.addEventListener("click", (event) => {
       // clicks the hidden picker sitting beside it in the same bar.
       closePopover();
       $("[data-act='channel-thread-attach-input']")?.click();
+      return;
+    }
+    case "dm-attach": {
+      closePopover();
+      $("[data-act='dm-attach-input']")?.click();
       return;
     }
     case "channel-mention-key": {
@@ -4436,11 +4460,18 @@ document.addEventListener("change", (event) => {
   }
   if (
     picker?.dataset?.act === "channel-attach-input" ||
-    picker?.dataset?.act === "channel-thread-attach-input"
+    picker?.dataset?.act === "channel-thread-attach-input" ||
+    picker?.dataset?.act === "dm-attach-input"
   ) {
+    const target =
+      picker.dataset.act === "channel-thread-attach-input"
+        ? "thread"
+        : picker.dataset.act === "dm-attach-input"
+          ? "dm"
+          : "channel";
     void attachChannelImages(
       [...(picker.files ?? [])],
-      picker.dataset.act === "channel-thread-attach-input" ? "thread" : "channel",
+      target,
     );
     // Cleared, or picking the same file twice in a row fires no change event
     // and the second attempt looks like a dead button.
@@ -4532,9 +4563,13 @@ document.addEventListener("change", (event) => {
    Text-only clipboard data is left to the textarea's native paste behavior. */
 document.addEventListener("paste", (event) => {
   const act = event.target?.dataset?.act;
-  // Both composers, because pasting a screenshot is how most of these arrive
-  // and a thread is exactly where the screenshot being discussed belongs.
-  if (act !== "channel-input" && act !== "channel-thread-input") {
+  // Every message composer, because pasting a screenshot is how most of these
+  // arrive and it should land in the conversation where it was pasted.
+  if (
+    act !== "channel-input" &&
+    act !== "channel-thread-input" &&
+    act !== "dm-input"
+  ) {
     return;
   }
   const files = [...(event.clipboardData?.items ?? [])]
@@ -4545,7 +4580,14 @@ document.addEventListener("paste", (event) => {
     return;
   }
   event.preventDefault();
-  void attachChannelImages(files, act === "channel-thread-input" ? "thread" : "channel");
+  void attachChannelImages(
+    files,
+    act === "channel-thread-input"
+      ? "thread"
+      : act === "dm-input"
+        ? "dm"
+        : "channel",
+  );
 });
 
 document.addEventListener("input", (event) => {
@@ -4650,7 +4692,12 @@ document.addEventListener("input", (event) => {
     // Held without re-rendering. The draft is only read when the form is
     // submitted, and re-rendering the panel on every keystroke is what made
     // typing lag in the channel composer.
-    state.dmDraft = node.value;
+    const attachments = String(state.dmDraft ?? "").match(
+      /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
+    );
+    state.dmDraft = `${node.value}${
+      attachments === null ? "" : `\n${attachments.join("\n")}\n`
+    }`;
     return;
   }
   if (act === "channel-thread-input") {

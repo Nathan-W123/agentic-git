@@ -503,8 +503,35 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(renderer, /class="thread-replies"/u);
   assert.match(renderer, /class="thread-replies-head"/u);
   assert.match(renderer, /class="thread-replies-flow"/u);
-  assert.match(css, /\.cmsg-row\.cmsg-threaded::before \{/u);
-  assert.match(css, /\.thread-root\.has-replies::after \{/u);
+  const channelBranch = /\n\.cmsg-row\.cmsg-threaded::before \{([\s\S]*?)\n\}/u.exec(
+    css,
+  )?.[1];
+  const referencedChannelBranch =
+    /\n\.cmsg-row\.cmsg-threaded:has\(> \.cmsg-ref\)::before \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
+  const panelBranch = /\n\.thread-root\.has-replies::after \{([\s\S]*?)\n\}/u.exec(
+    css,
+  )?.[1];
+  assert.notEqual(channelBranch, undefined, "the channel thread branch should exist");
+  assert.notEqual(
+    referencedChannelBranch,
+    undefined,
+    "a referenced thread root should retain its adjusted branch",
+  );
+  assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
+  for (const branch of [channelBranch, panelBranch]) {
+    assert.match(branch ?? "", /border-left: 2px solid var\(--accent-line\);/u);
+    assert.match(branch ?? "", /border-bottom: 2px solid var\(--accent-line\);/u);
+    assert.match(branch ?? "", /border-top-left-radius: 2px;/u);
+    assert.match(branch ?? "", /border-bottom-right-radius: 2px;/u);
+    assert.match(branch ?? "", /border-bottom-left-radius: 10px;/u);
+    assert.match(branch ?? "", /top: 44px;/u);
+  }
+  assert.match(channelBranch ?? "", /width: 16px;/u);
+  assert.match(referencedChannelBranch ?? "", /top: 62px;/u);
+  assert.match(panelBranch ?? "", /left: 15px;/u);
+  assert.match(panelBranch ?? "", /width: 11px;/u);
   assert.match(css, /\.thread-replies-head::after \{/u);
 });
 
@@ -820,6 +847,106 @@ test("agent news is one compact banner, not a stack of cards", async () => {
     css,
     /@media \(prefers-reduced-motion: reduce\) \{\s*\.toast\.banner \{\s*transition: none;/u,
   );
+});
+
+/**
+ * The bug: two people each with a Codex connected opened two agent panels and
+ * saw one identical history, down to the timestamp — and the news banner named
+ * whichever of them the roster happened to list first.
+ *
+ * The cause is that `task.agentId` is the *vendor* CLI. Every Codex in the
+ * deployment submits under the same configured agent id, so a filter written
+ * as `agentId.includes("codex")` selects every Codex task there has ever been.
+ * The owner is the half that separates them, and the task already carries it
+ * as `submittedBy`.
+ */
+test("one agent's work is not every agent of that vendor's work", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+
+  // Both halves in one place, so the panel, the banner and the dot cannot
+  // drift into three different answers about who did what.
+  assert.match(data, /export function taskBelongsToAgent\(task, agent\)/u);
+  assert.match(data, /String\(task\.agentId \?\? ""\)\.toLowerCase\(\)\.includes\(vendor\)/u);
+  assert.match(
+    data,
+    /task\.submittedBy === undefined \|\| task\.submittedBy === agentOwnerId\(agent\)/u,
+  );
+  // A bare provider id is `myAgents`'s shape and means this account — the
+  // same rule `normalizeChannelAgentId` applies server-side.
+  assert.match(
+    data,
+    /id\.includes\(":"\) \? id\.slice\(0, id\.indexOf\(":"\)\) : currentUserId\(\)/u,
+  );
+
+  // Every caller goes through it. A surviving bare vendor comparison is the
+  // bug coming back on whichever surface kept it.
+  assert.match(chats, /taskBelongsToAgent\(task, agent\)/u);
+  assert.equal(
+    /includes\(vendor\)/u.test(chats),
+    false,
+    "the agent history should not match on the vendor alone",
+  );
+  assert.equal(
+    /VENDOR_FOR_PROVIDER/u.test(chats),
+    false,
+    "the vendor map is an implementation detail of the matcher now",
+  );
+
+  // The banner picks out of a list holding every agent in the room, so an
+  // unqualified `find` there is what named the wrong person's agent.
+  const banner = data.slice(data.indexOf("export function bannerLineForAudit"));
+  assert.match(
+    banner.slice(0, banner.indexOf("\n}")),
+    /channelAgentsFor\(repositoryId\)\.find\(\(agent\) =>\s*taskBelongsToAgent\(task, agent\),?\s*\)/u,
+  );
+});
+
+test("a notification says which agent, not which vendor", async () => {
+  const data = await publicFile("data.js");
+  const screen = await publicFile("screen-notifications.js");
+  // `agentId` is "codex" for everybody's Codex, so the chip labelled three
+  // people's work identically. The roster resolves the (owner, vendor) pair
+  // to the name the room has been using.
+  assert.match(data, /function agentNameForTask\(task, rosters\)/u);
+  assert.match(data, /agentName: agentNameForTask\(task, rosters\),/u);
+  assert.match(screen, /String\(row\.agentName \?\? row\.agentId \?\? "task"\)/u);
+  // `unreadCount` asks for this list on every render and `channelAgentsFor`
+  // rebuilds a roster each call, so the lookup is memoised across the pass
+  // rather than run once per notification.
+  assert.match(data, /const rosters = new Map\(\);/u);
+});
+
+test("the working dot reads the task list for teammates too", async () => {
+  const data = await publicFile("data.js");
+  const start = data.indexOf("function agentIsWorking(agent, repositoryId)");
+  assert.notEqual(start, -1, "the working check should still exist");
+  const body = data.slice(start, data.indexOf("\n}\n", start));
+  // The durable half used to be gated on `agent.mine` because the vendor
+  // alone could not say whose Codex was running, so reading it for everybody
+  // lit both agents on one person's task. With the owner checked, the gate is
+  // what was costing a teammate's dot minutes of a long run.
+  assert.match(body, /taskBelongsToAgent\(task, agent\)/u);
+  assert.equal(
+    /if \(agent\.mine === true\) \{/u.test(body),
+    false,
+    "the durable half no longer needs to exclude teammates",
+  );
+});
+
+test("an account's own agent is seen running at all", async () => {
+  const data = await publicFile("data.js");
+  const start = data.indexOf("export function myAgents()");
+  const body = data.slice(start, data.indexOf("\n  return {", start));
+  // `provider.adapter` is not a field the providers payload has, so this
+  // compared a task's vendor id ("codex") against an account provider id
+  // ("openai") — never equal, for any provider, so nothing was ever running.
+  assert.equal(
+    /provider\.adapter/u.test(body),
+    false,
+    "a provider id is not a vendor id; the matcher maps between them",
+  );
+  assert.match(body, /taskBelongsToAgent\(\s*task,/u);
 });
 
 test("every agent kind resolves to its own character", async () => {
@@ -1308,6 +1435,92 @@ test("the channel composer highlights mentions and previews pasted images", asyn
   assert.match(css, /\.composer-attachment img/u);
 });
 
+test("the direct-message composer previews pasted images like the channel composer", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const dmStart = chats.indexOf("function dmPanel()");
+  const dmEnd = chats.indexOf("\nfunction threadPanel", dmStart);
+  const dmPanel = chats.slice(dmStart, dmEnd);
+  const pasteStart = app.indexOf('document.addEventListener("paste"');
+  const pasteEnd = app.indexOf('document.addEventListener("input"', pasteStart);
+  const paste = app.slice(pasteStart, pasteEnd);
+  const changeStart = app.indexOf('document.addEventListener("change"');
+  const changeEnd = app.indexOf('document.addEventListener("paste"', changeStart);
+  const change = app.slice(changeStart, changeEnd);
+
+  assert.notEqual(dmStart, -1, "screen-chats.js declares the DM panel");
+  assert.notEqual(dmEnd, -1, "the DM panel has a testable boundary");
+  assert.match(dmPanel, /draftAttachmentPreviews\(repositoryId, \{/u);
+  assert.match(dmPanel, /draft: state\.dmDraft/u);
+  assert.match(dmPanel, /removeAct: "dm-attachment-remove"/u);
+  assert.match(dmPanel, /data-act="dm-attach-input"/u);
+  assert.match(dmPanel, /act: "dm-attach"/u);
+  assert.match(change, /picker\?\.dataset\?\.act === "dm-attach-input"/u);
+  assert.match(change, /picker\.dataset\.act === "dm-attach-input"/u);
+  assert.match(paste, /act !== "dm-input"/u);
+  assert.match(paste, /act === "dm-input"\s*\?\s*"dm"/u);
+});
+
+test("a direct message can send image-only and mixed text/image content", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const targetsStart = app.indexOf("const ATTACH_TARGETS");
+  const targetsEnd = app.indexOf("\n};", targetsStart) + 3;
+  const targets = app.slice(targetsStart, targetsEnd);
+  const submitStart = app.indexOf('case "dm-submit"');
+  const submitEnd = app.indexOf("\n    // Expanding a file", submitStart);
+  const submit = app.slice(submitStart, submitEnd);
+  const inputStart = app.indexOf('if (act === "dm-input")');
+  const inputEnd = app.indexOf('if (act === "channel-thread-input")', inputStart);
+  const input = app.slice(inputStart, inputEnd);
+  const dmStart = chats.indexOf("function dmPanel()");
+  const dmEnd = chats.indexOf("\nfunction threadPanel", dmStart);
+  const dmPanel = chats.slice(dmStart, dmEnd);
+
+  assert.match(
+    targets,
+    /dm: \{[\s\S]*draft: "dmDraft",[\s\S]*counter: "dmAttaching",[\s\S]*input: "dm-input"/u,
+  );
+  assert.match(dmPanel, /draftText\(state\.dmDraft\)/u);
+  assert.match(dmPanel, /messageBody\([\s\S]{0,100}message\.content/u);
+  assert.match(submit, /const draft = state\.dmDraft\.trim\(\)/u);
+  assert.match(submit, /draft\.length === 0/u);
+  assert.match(submit, /sendDirectMessage\(other, draft\)/u);
+  assert.match(input, /const attachments = String\(state\.dmDraft/u);
+  assert.match(input, /attachments\.join\("\\n"\)/u);
+  assert.match(input, /state\.dmDraft = `\$\{node\.value\}/u);
+});
+
+test(
+  "direct-message attachment removal and successful sends clear previews without leaking drafts between conversations",
+  async () => {
+    const app = await browserSource();
+    const attachStart = app.indexOf("async function attachChannelImages");
+    const attachEnd = app.indexOf(
+      "\nasync function startPreviewAction",
+      attachStart,
+    );
+    const attach = app.slice(attachStart, attachEnd);
+    const removeStart = app.indexOf('case "channel-attachment-remove"');
+    const removeEnd = app.indexOf('case "thread-attach"', removeStart);
+    const remove = app.slice(removeStart, removeEnd);
+    const submitStart = app.indexOf('case "dm-submit"');
+    const submitEnd = app.indexOf("\n    // Expanding a file", submitStart);
+    const submit = app.slice(submitStart, submitEnd);
+
+    assert.match(remove, /case "dm-attachment-remove"/u);
+    assert.match(remove, /ATTACH_TARGETS\.dm/u);
+    assert.match(remove, /state\[where\.draft\]/u);
+    assert.match(attach, /const dmUserId = target === "dm" \? state\.activeDm/u);
+    assert.match(attach, /target === "dm" && state\.activeDm !== dmUserId/u);
+    assert.match(submit, /state\.dmDraft = "";[\s\S]{0,80}render\(\)/u);
+    assert.match(
+      app,
+      /case "dm-open":[\s\S]{0,120}state\.activeDm = value;[\s\S]{0,120}state\.dmDraft = "";/u,
+    );
+  },
+);
+
 test("thread composer characters stay visible without a painted text layer", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
@@ -1405,6 +1618,62 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
   assert.match(
     css,
     /\.cmsg-text \.slash-ping \{[\s\S]{0,180}padding: 1px 4px;/u,
+  );
+});
+
+test("channel messages compact only an uninterrupted run from one person", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  const start = chats.indexOf("function continuesUserMessageGroup");
+  const end = chats.indexOf("\n/**\n * The three dots", start);
+  assert.notEqual(start, -1, "screen-chats.js declares the grouping rule");
+  assert.notEqual(end, -1, "the grouping rule has a testable boundary");
+  const createGroupingRule = new Function(
+    `${chats.slice(start, end)}\nreturn continuesUserMessageGroup;`,
+  );
+  const continues = createGroupingRule() as (
+    previous: unknown,
+    current: unknown,
+    startsNewDay: boolean,
+  ) => boolean;
+  const item = (
+    authorId: string,
+    options: { kind?: string; reply?: boolean } = {},
+  ) => ({
+    entry: { kind: options.kind ?? "user", authorId },
+    inlineReplyTo: options.reply === true ? { id: "root" } : undefined,
+  });
+
+  assert.equal(continues(item("alice"), item("alice"), false), true);
+  assert.equal(continues(item("alice"), item("bob"), false), false);
+  assert.equal(continues(item("alice"), item("alice"), true), false);
+  assert.equal(
+    continues(item("alice", { reply: true }), item("alice"), false),
+    false,
+  );
+  assert.equal(
+    continues(item("alice"), item("alice", { reply: true }), false),
+    false,
+  );
+  assert.equal(
+    continues(item("alice", { kind: "system" }), item("alice"), false),
+    false,
+  );
+
+  // Compaction changes only the repeated identity chrome. The body and the
+  // action rail stay outside those conditionals, so every message remains
+  // independently interactive.
+  assert.match(
+    chats,
+    /compact\s*\?\s*""\s*:\s*`<span class="cmsg-avatar">/u,
+  );
+  assert.match(chats, /compact\s*\?\s*""\s*:\s*`<div class="cmsg-top">/u);
+  assert.match(chats, /<span class="cmsg-actions">/u);
+  assert.match(css, /\.cmsg-row\.cmsg-compact \{/u);
+  assert.match(
+    css,
+    /\.cmsg-row\.cmsg-compact \.cmsg-body \{[\s\S]{0,80}margin-left: 44px;/u,
   );
 });
 

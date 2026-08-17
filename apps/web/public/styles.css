@@ -632,13 +632,6 @@ svg {
   white-space: nowrap;
 }
 
-.chan-account-more {
-  width: 14px;
-  height: 14px;
-  flex: none;
-  color: var(--text-4);
-}
-
 /* ------------------------------------------------------------- brand ---- */
 
 /* The mark takes its size from the `width`/`height` the caller passes to
@@ -4395,26 +4388,46 @@ svg {
   background: var(--bg-hover);
 }
 
+/* Consecutive lines from one person read as a single message group. Keep the
+   text aligned with the first line's body, but spend no vertical room on a
+   repeated face, name, or clock. Each line remains its own row so reactions,
+   thread details, and hover actions continue to belong to the right message. */
+.cmsg-row.cmsg-compact {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+.cmsg-row.cmsg-compact .cmsg-body {
+  margin-left: 44px;
+}
+
+.cmsg-row.cmsg-compact .cmsg-text {
+  margin-top: 0;
+}
+
 /* A thread branches from the root avatar into its compact reply summary.
-   The single hairline is deliberately quieter than the link text: it should
-   explain the relationship after a glance, not compete with the message. */
+   Two pixels gives the branch enough presence to read as a path rather than a
+   divider. It starts four pixels below the avatar and stops short of the reply
+   link, so the rounded stroke floats between the two components. */
 .cmsg-row.cmsg-threaded::before {
   content: "";
   position: absolute;
   left: 23px;
-  top: 40px;
+  top: 44px;
   bottom: 18px;
-  width: 20px;
-  border-left: 1px solid var(--accent-line);
-  border-bottom: 1px solid var(--accent-line);
-  border-bottom-left-radius: 9px;
+  width: 16px;
+  border-left: 2px solid var(--accent-line);
+  border-bottom: 2px solid var(--accent-line);
+  border-top-left-radius: 2px;
+  border-bottom-right-radius: 2px;
+  border-bottom-left-radius: 10px;
   pointer-events: none;
 }
 
 /* A thread whose root also answers something starts its avatar one reference
    line lower, so the branch drawn under that avatar starts there too. */
 .cmsg-row.cmsg-threaded:has(> .cmsg-ref)::before {
-  top: 58px;
+  top: 62px;
 }
 
 /* A person's reply is an ordinary line of the transcript, sitting in time
@@ -5523,19 +5536,21 @@ body.resizing-panel {
   margin-bottom: 0;
 }
 
-/* Continue the root avatar's stem into the reply label, then turn toward the
-   words. This is the same branch used in the channel transcript at a scale
-   suited to the thread panel. */
+/* Continue the root avatar's stem toward the reply label without touching
+   either component. This uses the channel branch's two-pixel stroke, rounded
+   caps and ten-pixel elbow at a scale suited to the thread panel. */
 .thread-root.has-replies::after {
   content: "";
   position: absolute;
-  left: 16px;
-  top: 40px;
+  left: 15px;
+  top: 44px;
   bottom: -15px;
-  width: 13px;
-  border-left: 1px solid var(--accent-line);
-  border-bottom: 1px solid var(--accent-line);
-  border-bottom-left-radius: 8px;
+  width: 11px;
+  border-left: 2px solid var(--accent-line);
+  border-bottom: 2px solid var(--accent-line);
+  border-top-left-radius: 2px;
+  border-bottom-right-radius: 2px;
+  border-bottom-left-radius: 10px;
   pointer-events: none;
 }
 
@@ -6273,8 +6288,7 @@ dialog.modal::backdrop {
       .chan-sec-label,
       .cr-name,
       .cr-more,
-      .chan-account-copy,
-      .chan-account-more
+      .chan-account-copy
     ) {
     display: none;
   }

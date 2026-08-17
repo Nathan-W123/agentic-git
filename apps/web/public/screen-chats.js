@@ -44,12 +44,12 @@ api,
   postChannelReply,
   sendChannelMessage,
   state,
+  taskBelongsToAgent,
   threadAwaitsGoAhead,
   threadIsWorking,
   threadTitle,
   threadTitleReply,
   typingOn,
-  VENDOR_FOR_PROVIDER,
 } from "./data.js";
 import { chatComposer, chatProgress, chatThread } from "./chat.js";
 import {
@@ -311,13 +311,13 @@ function attachmentImage(base, image) {
 /**
  * The three helpers below take the draft rather than reading one.
  *
- * Two composers stage images now — the channel bar and the thread panel's
- * reply box — and they hold their text in two different places
- * (`state.chatDraft` and `state.threadDraft`). The rules for where the
- * references live inside a draft, and for what the textarea may show of it,
- * are the same in both, so they are written once and passed the draft. The
- * channel's is the default, because it is the caller that came first and
- * every one of its call sites reads the same string it always did.
+ * Three composers stage images now — the channel bar, the thread panel's reply
+ * box, and direct messages — and they hold their text in separate drafts. The
+ * rules for where the references live inside a draft, and for what the
+ * textarea may show of it, are the same in all three, so they are written once
+ * and passed the draft. The channel's is the default, because it is the caller
+ * that came first and every one of its call sites reads the same string it
+ * always did.
  */
 function draftAttachments(repositoryId, draft = state.chatDraft) {
   const base =
@@ -933,7 +933,6 @@ function chanSidebar(activeRepositoryId) {
         title="Open profile menu" aria-label="Open profile menu for ${esc(user)}">
         ${avatar(user, 32, user, myAvatar())}
         <span class="chan-account-copy"><b>${esc(user)}</b></span>
-        ${icon("chevronRight", 'class="chan-account-more"')}
       </button>
     </div>
   </aside>`;
@@ -1477,6 +1476,7 @@ function messageRow(
     inlineReplyTo = undefined,
     hideChanges = false,
     actions = "",
+    compact = false,
   } = {},
 ) {
   const author = channelAuthor(repositoryId, entry);
@@ -1516,6 +1516,7 @@ function messageRow(
   const deleted = entry.deletedAt !== undefined;
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
     inlineReply ? " cmsg-inline-reply" : ""
+  }${compact ? " cmsg-compact" : ""
   }${hasTaskThread && !isReply ? " cmsg-threaded" : ""
   }${deleted ? " cmsg-deleted" : ""}${
     // The auditor reads every merge without being asked, so its lines arrive
@@ -1553,16 +1554,31 @@ function messageRow(
               ? messageReference(referencedRoot, repositoryId)
               : holdNoticeRef(entry, repositoryId)
     }
-    <span class="cmsg-avatar">${
-      author.agent !== undefined ? agentFace(author.agent, 32) : avatar(author.name, 32, author.name, author.name === currentUserName() ? myAvatar() : undefined)
-    }</span>
+    ${
+      compact
+        ? ""
+        : `<span class="cmsg-avatar">${
+            author.agent !== undefined
+              ? agentFace(author.agent, 32)
+              : avatar(
+                  author.name,
+                  32,
+                  author.name,
+                  author.name === currentUserName() ? myAvatar() : undefined,
+                )
+          }</span>`
+    }
     <div class="cmsg-body">
-      <div class="cmsg-top">
-        <span class="cmsg-name${author.agent !== undefined ? " agent-name" : ""}">${esc(
-          author.name,
-        )}</span>
-        <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
-      </div>
+      ${
+        compact
+          ? ""
+          : `<div class="cmsg-top">
+              <span class="cmsg-name${author.agent !== undefined ? " agent-name" : ""}">${esc(
+                author.name,
+              )}</span>
+              <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
+            </div>`
+      }
       <div class="cmsg-text">${
         deleted
           ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
@@ -1717,6 +1733,32 @@ function messageRow(
 }
 
 /**
+ * Whether one timeline item continues the uninterrupted run of human messages
+ * immediately before it. Replies keep their reference and full header, and a
+ * date boundary starts a fresh group even when the same person was speaking
+ * on both sides of midnight.
+ */
+function continuesUserMessageGroup(previous, current, startsNewDay) {
+  if (
+    previous === undefined ||
+    startsNewDay ||
+    previous.inlineReplyTo !== undefined ||
+    current.inlineReplyTo !== undefined
+  ) {
+    return false;
+  }
+  const before = previous.entry;
+  const after = current.entry;
+  const authorId = String(after.authorId ?? "");
+  return (
+    before.kind === "user" &&
+    after.kind === "user" &&
+    authorId !== "" &&
+    String(before.authorId ?? "") === authorId
+  );
+}
+
+/**
  * The three dots, for one surface.
  *
  * People and agents are shown by the same row because they mean the same
@@ -1835,11 +1877,12 @@ function messageList(repositoryId) {
   }
   timeline.push(...pending.slice(next));
   let lastDay = "";
-  const rows = timeline.map((item) => {
+  const rows = timeline.map((item, index) => {
     const entry = item.entry;
     const day = new Date(item.at ?? Date.now()).toDateString();
     let separator = "";
-    if (day !== lastDay) {
+    const startsNewDay = day !== lastDay;
+    if (startsNewDay) {
       lastDay = day;
       const isToday = day === new Date().toDateString();
       separator = `<div class="chan-day">${isToday ? "Today" : esc(day)}</div>`;
@@ -1854,7 +1897,15 @@ function messageList(repositoryId) {
       (entry.replies ?? []).length === 0 &&
       entry.taskId !== undefined &&
       threadedTasks.has(entry.taskId);
-    return separator + messageRow(entry, repositoryId, { hideChanges });
+    // Search results are independent hits rather than a faithful transcript;
+    // always name them so filtering an intervening author cannot create a
+    // group that did not exist in the channel.
+    const compact =
+      query === "" &&
+      continuesUserMessageGroup(timeline[index - 1], item, startsNewDay);
+    return (
+      separator + messageRow(entry, repositoryId, { hideChanges, compact })
+    );
   });
   return `<div class="chan-messages" id="chan-messages"
     data-scroll-key="channel:${esc(repositoryId)}">${rows.join(
@@ -2406,23 +2457,24 @@ function threadListPanel(repositoryId) {
 /**
  * What this agent has been asked to do in this repository, newest first.
  *
- * Matched by vendor rather than by owner, because a task records which vendor
- * ran it and not whose account paid for it. With two people's Codex in one
- * room their histories are therefore indistinguishable here — the same
- * boundary the working dot has, and the same fix: stamp the owner on the task,
- * server-side. Until then this is honest about being per-vendor.
+ * Matched by owner *and* vendor (`taskBelongsToAgent`). This used to be the
+ * vendor alone, on the reasoning that a task records which vendor ran it and
+ * not whose account paid for it — but it does record the owner, as
+ * `submittedBy`, because a channel dispatch submits under the mentioned
+ * agent's account rather than the sender's. Without that half, two people's
+ * Codex in one room opened two panels showing one identical history.
  */
 function agentHistoryRows(agent, repositoryId) {
-  const vendor = VENDOR_FOR_PROVIDER[agent.provider ?? agent.id];
-  if (vendor === undefined) {
-    return [];
-  }
   const messages = channelMessagesFor(repositoryId);
   return state.tasks
     .filter(
       (task) =>
         task.repositoryId === repositoryId &&
-        String(task.agentId ?? "").toLowerCase().includes(vendor),
+        // This agent's work, not this vendor's. The filter used to be the
+        // vendor alone, which every Codex in the room answers to — so two
+        // people each with a Codex connected opened two panels showing one
+        // identical history, and neither could tell which rows were its own.
+        taskBelongsToAgent(task, agent),
     )
     .sort(
       (left, right) =>
@@ -2706,6 +2758,10 @@ function dmPanel() {
   const name = person?.name ?? memberName(userId) ?? "Someone";
   const messages = state.dmThreads[userId] ?? [];
   const online = personOnline(userId);
+  const repositoryId = activeChannelId();
+  const dmPending =
+    (state.dmAttaching ?? 0) > 0 ||
+    draftAttachments(repositoryId, state.dmDraft).length > 0;
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
@@ -2727,7 +2783,11 @@ function dmPanel() {
               .map((message) => {
                 const mine = message.authorId === currentUserId();
                 return `<div class="dm-msg${mine ? " dm-mine" : ""}">
-                  <div class="dm-bubble">${esc(message.content)}</div>
+                  <div class="dm-bubble cmsg-text">${messageBody(
+                    message.content,
+                    repositoryId,
+                    [],
+                  )}</div>
                   <span class="dm-msg-actions">${iconButton("reply", {
                     act: "dm-reply-quote",
                     value: message.id,
@@ -2752,14 +2812,31 @@ function dmPanel() {
               .join("")
       }
     </div>
-    <form class="composer" data-act="dm-submit" style="margin:0 12px 12px">
-      <textarea data-act="dm-input" rows="1"
-        placeholder="Message ${esc(name)}...">${esc(state.dmDraft)}</textarea>
-      <div class="composer-bar">
-        <span class="spacer"></span>
-        <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
-      </div>
-    </form>
+    <div class="thread-composer-wrap">
+      ${draftAttachmentPreviews(repositoryId, {
+        draft: state.dmDraft,
+        removeAct: "dm-attachment-remove",
+      })}
+      <form class="composer${dmPending ? " is-expanded" : ""}" data-act="dm-submit"
+        style="margin:0 12px 12px">
+        <textarea data-act="dm-input" rows="1" enterkeyhint="send"
+          placeholder="Message ${esc(name)}...">${esc(draftText(state.dmDraft))}</textarea>
+        <div class="composer-bar">
+          <input type="file" data-act="dm-attach-input" accept="image/png,
+            image/jpeg,image/gif,image/webp" multiple hidden>
+          ${iconButton("paperclip", {
+            act: "dm-attach",
+            title: "Attach images",
+            small: true,
+          })}
+          ${(state.dmAttaching ?? 0) > 0
+            ? `<span class="composer-note">attaching ${esc(String(state.dmAttaching))} image(s)…</span>`
+            : ""}
+          <span class="spacer"></span>
+          <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
+        </div>
+      </form>
+    </div>
   </aside>`;
 }
 
