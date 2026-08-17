@@ -622,6 +622,31 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(css, /\.thread-replies-head::after \{/u);
 });
 
+test("a long thread name cannot push the panel's close out of reach", async () => {
+  const css = await publicFile("styles.css");
+  const chats = await publicFile("screen-chats.js");
+  const head = /\n\.thread-head \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.notEqual(head, undefined, "the shared panel header should exist");
+  // The header is a row of `.thread-panel`'s grid and its title never wraps,
+  // so without this the row's automatic minimum is the whole title and the
+  // controls after it — including the close — leave the panel entirely.
+  assert.match(head ?? "", /min-width: 0;/u);
+  // And once the row is the panel's width, the tools hold their box rather
+  // than shrinking under the name.
+  assert.match(css, /\.thread-head \.icon-btn \{\s*flex: none;\s*\}/u);
+  // The title is the one thing in the row that gives way, by ellipsis.
+  const title = /\n\.thread-head \.thread-title \{([\s\S]*?)\n\}/u.exec(css)?.[1];
+  assert.match(title ?? "", /min-width: 0;/u);
+  assert.match(title ?? "", /overflow: hidden;/u);
+  assert.match(title ?? "", /text-overflow: ellipsis;/u);
+  // Every panel that names something shares the one header, so the fix is the
+  // same fix for all of them.
+  assert.ok(
+    (chats.match(/<header class="thread-head">/gu) ?? []).length >= 5,
+    "the panels should share one header",
+  );
+});
+
 test("the summary opens over the editor instead of navigating away", async () => {
   const source = await browserSource();
   assert.match(source, /case "code-summary":[\s\S]{0,120}showPopover\(/u);

@@ -5773,6 +5773,25 @@ body.resizing-panel {
   border-bottom: 1px solid var(--border-soft);
   font-size: 13.5px;
   font-weight: 600;
+  /* The header is a row of `.thread-panel`'s grid, and a grid item's automatic
+     minimum size is its min-content width. Its title is `white-space: nowrap`,
+     so that min-content is the *whole* title however long it runs: a thread
+     named in a sentence made the header wider than the panel, and everything
+     after the name — pin, reply, and the close — slid out past the panel's
+     right edge, off the screen entirely on a phone where the panel is the
+     screen. Nothing could close the thread but Esc. Zeroing the minimum lets
+     the row be the panel's width, which is what makes the title's own ellipsis
+     engage rather than sit there unused. */
+  min-width: 0;
+}
+
+/* Every tool in the header keeps its 30px box. They are flex items with the
+   default shrink factor, so once a long title has taken the row they were
+   squeezing narrower than their own glyph — a close you can see and not hit is
+   the same bug in a smaller font. The title is the only thing here that gives
+   way. */
+.thread-head .icon-btn {
+  flex: none;
 }
 
 /* One quiet word saying which of the six surfaces this is — see `panelKind`.
