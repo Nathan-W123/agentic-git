@@ -933,7 +933,6 @@ function chanSidebar(activeRepositoryId) {
         title="Open profile menu" aria-label="Open profile menu for ${esc(user)}">
         ${avatar(user, 32, user, myAvatar())}
         <span class="chan-account-copy"><b>${esc(user)}</b></span>
-        ${icon("chevronRight", 'class="chan-account-more"')}
       </button>
     </div>
   </aside>`;

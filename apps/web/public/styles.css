@@ -632,13 +632,6 @@ svg {
   white-space: nowrap;
 }
 
-.chan-account-more {
-  width: 14px;
-  height: 14px;
-  flex: none;
-  color: var(--text-4);
-}
-
 /* ------------------------------------------------------------- brand ---- */
 
 /* The mark takes its size from the `width`/`height` the caller passes to
@@ -6295,8 +6288,7 @@ dialog.modal::backdrop {
       .chan-sec-label,
       .cr-name,
       .cr-more,
-      .chan-account-copy,
-      .chan-account-more
+      .chan-account-copy
     ) {
     display: none;
   }
