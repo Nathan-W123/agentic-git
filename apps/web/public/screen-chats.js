@@ -2779,8 +2779,31 @@ function agentSpec(agent, repositoryId) {
       ? providerEffortOptions(providerId, currentAssignment.model ?? "")
       : [];
   const optionsNote = agent.mine === true ? providerOptionsNote(providerId) : "";
+  // Personal or org-wide. Unlike the two rows under it this is not a channel
+  // override at all — it is the stored credential's own field, so the answer
+  // is the same in every room and only its owner may change it. It sits with
+  // Connection above the per-channel settings for that reason, and says so in
+  // the row's tooltip rather than in another line of prose.
+  const visibility = agent.visibility === "org" ? "org" : "personal";
   const configuration = `<div class="aspec-rows" data-agent="${esc(agent.id)}">
       ${settingRow("Connection", readOnly(agentLabelOf(providerId)), providerId)}
+      ${settingRow(
+        "Who can task it",
+        agent.mine === true
+          ? miniSelect(
+              "channel-agent-visibility",
+              [
+                { value: "personal", label: "Only me" },
+                { value: "org", label: "Anyone in the org" },
+              ],
+              visibility,
+              "Who may @mention this agent to submit work",
+            )
+          : readOnly(
+              visibility === "org" ? "Anyone in the org" : "Only its owner",
+            ),
+        `Set on the connection, so it applies wherever this agent works — not just #${repositoryId}`,
+      )}
       ${settingRow(
         "Model",
         models.length === 0
@@ -2836,7 +2859,15 @@ function agentSpec(agent, repositoryId) {
       ${configuration}
       ${optionsNote === "" ? "" : `<div class="aspec-note">${esc(optionsNote)}</div>`}
       <div class="aspec-note">A role is what this agent is for here; it rides
-        on every task submitted in this channel.</div>
+        on every task submitted in this channel.${
+          // Said where the switch is, because "anyone in the org" reads like
+          // handing over the key otherwise: it decides who may @mention the
+          // agent, and the credential behind it is still never shared.
+          agent.mine === true
+            ? ` Sharing it with the org lets teammates @mention it —
+        the credential itself is never shared.`
+            : ""
+        }</div>
     </section>
 
     <section class="aspec-section">

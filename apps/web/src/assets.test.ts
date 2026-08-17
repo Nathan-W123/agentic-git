@@ -2383,6 +2383,39 @@ test("clicking an agent opens its details while chat and history stay explicit",
   assert.match(panel, /headerAction\("history", "history", "Task history"\)/u);
 });
 
+test("the spec tab is where an agent is made org-wide or kept personal", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const spec = chats.slice(
+    chats.indexOf("function agentSpec(agent, repositoryId)"),
+    chats.indexOf("function agentPanel()"),
+  );
+  const handlerStart = app.indexOf('case "channel-agent-visibility"');
+  const handler = app.slice(handlerStart, app.indexOf("default:", handlerStart));
+
+  // The one control that decides whether teammates may task this agent. It
+  // was only offered while pasting a credential, which left an agent
+  // connected as personal personal forever.
+  assert.notEqual(handlerStart, -1);
+  assert.match(spec, /miniSelect\(\s*"channel-agent-visibility"/u);
+  assert.match(spec, /\{ value: "personal", label: "Only me" \}/u);
+  assert.match(spec, /\{ value: "org", label: "Anyone in the org" \}/u);
+
+  // Only the owner of the credential picks who may spend it; a teammate
+  // reads the answer, the same way model and reasoning already degrade.
+  assert.match(spec, /agent\.mine === true\s*\?\s*miniSelect\(\s*"channel-agent-visibility"/u);
+  assert.match(spec, /: readOnly\(\s*visibility === "org" \? "Anyone in the org" : "Only its owner",/u);
+
+  // The select lives inside the row block the handler resolves the agent
+  // from, so the control and its handler cannot drift apart again.
+  assert.match(spec, /<div class="aspec-rows" data-agent="\$\{esc\(agent\.id\)\}">/u);
+  assert.match(handler, /node\.closest\("\[data-agent\]"\)\?\.dataset\.agent/u);
+  assert.match(
+    handler,
+    /applyProviderSetting\(agentId, "visibility", node\.value\)/u,
+  );
+});
+
 test("a roster row carries one ellipsis and a compact rename delete menu", async () => {
   const chats = await publicFile("screen-chats.js");
   const ui = await publicFile("ui.js");
