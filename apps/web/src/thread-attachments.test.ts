@@ -72,13 +72,17 @@ test("the two composers upload by one path, into two drafts", async () => {
   // Both pickers reach it, and so does a paste into either box — which is how
   // most screenshots actually arrive.
   assert.match(app, /picker\?\.dataset\?\.act === "channel-thread-attach-input"/u);
+  // The guard and the target choice have since grown a direct-message arm, so
+  // both are matched across the lines they now span. What is being pinned is
+  // unchanged: a paste into either channel composer reaches the one uploader,
+  // and the thread box is the arm that stages into the thread draft.
   assert.match(
     app,
-    /act !== "channel-input" && act !== "channel-thread-input"/u,
+    /act !== "channel-input" &&\s*act !== "channel-thread-input"/u,
   );
   assert.match(
     app,
-    /attachChannelImages\(files, act === "channel-thread-input" \? "thread" : "channel"\)/u,
+    /attachChannelImages\(\s*files,\s*act === "channel-thread-input"\s*\? "thread"/u,
   );
 });
 

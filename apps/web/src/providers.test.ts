@@ -14,6 +14,7 @@ import {
   parseClaudeStreamJson,
   parseCodexAppServerRateLimits,
   parseCodexJsonl,
+  streamProcess,
   type ProcessRunner,
 } from "./providers.js";
 
@@ -1031,6 +1032,37 @@ test("a streaming thread reply waits for the agent task's rotated session", asyn
     (await credentials.summary("u", "codex"))?.unusableReason,
     undefined,
   );
+});
+
+test("the streaming runner spawns the child in the environment it was handed", async () => {
+  // Staging a credential home is worth nothing if the runner then spawns the
+  // CLI under the host's ambient login instead. The type used to omit `env`
+  // altogether, so both call sites passed one that was silently discarded and
+  // every stubbed-runner test still passed.
+  const seen: string[] = [];
+  const staged = await streamProcess(
+    process.execPath,
+    ["-e", "console.log(process.env['LATTICE_STAGED_HOME'] ?? '<unset>')"],
+    {
+      env: { ...process.env, LATTICE_STAGED_HOME: "/staged/codex-home" },
+      timeoutMs: 30_000,
+    },
+    (line) => seen.push(line),
+  );
+  assert.equal(staged.exitCode, 0);
+  assert.equal(seen.join("").trim(), "/staged/codex-home");
+
+  // With nothing supplied the child still inherits the harness environment,
+  // which is what the single-operator deployment relies on.
+  const inherited: string[] = [];
+  const ambient = await streamProcess(
+    process.execPath,
+    ["-e", "console.log(process.env['PATH'] === undefined ? 'bare' : 'inherited')"],
+    { timeoutMs: 30_000 },
+    (line) => inherited.push(line),
+  );
+  assert.equal(ambient.exitCode, 0);
+  assert.equal(inherited.join("").trim(), "inherited");
 });
 
 test("streaming refuses the same cases the non-streaming path refuses", async () => {
