@@ -2040,7 +2040,25 @@ async function savePolicy(form) {
 function applyTheme() {
   const accent = myAccent();
   const light = myTheme() === "light";
-  const root = document.documentElement.style;
+  const element = document.documentElement;
+  const root = element.style;
+
+  // Let the stylesheet choose the neutral ground for this theme, then nudge
+  // only that outermost surface toward the chosen accent. Two percent is just
+  // enough for the room to belong to the colour without turning the neutral
+  // surface ramp into a second accent palette. Remove the previous inline
+  // value first so switching themes always starts from that theme's own base.
+  element.dataset.theme = light ? "light" : "dark";
+  root.removeProperty("--bg");
+  const neutralGround = getComputedStyle(element)
+    .getPropertyValue("--bg")
+    .trim();
+  const ground = mix(
+    neutralGround || (light ? "#ddd7cb" : "#141414"),
+    accent,
+    0.02,
+  );
+  root.setProperty("--bg", ground);
   root.setProperty("--accent", accent);
   // "Bright" means "stands out from the ground", not "closer to white".
   //
@@ -2069,7 +2087,7 @@ function applyTheme() {
   // to make this function symmetrical, which is not a reason.
   root.setProperty(
     "--accent-bright",
-    light ? readableOn(accent, "#e8e2d4", 4.5) : mix(accent, "#ffffff", 0.32),
+    light ? readableOn(accent, ground, 4.5) : mix(accent, "#ffffff", 0.32),
   );
   // The quieter of the pair, so it steps toward the ground rather than away
   // from it — which is toward white on light and toward black on dark.
@@ -2101,24 +2119,9 @@ function applyTheme() {
   );
   root.setProperty("--accent-2-wash", withAlpha(second, light ? 0.17 : 0.12));
   root.setProperty("--accent-2-line", withAlpha(second, light ? 0.5 : 0.38));
-  // Surfaces are the stylesheet's business, and only the stylesheet's.
-  //
-  // This used to overwrite every background, border and text colour from here,
-  // mixing a few percent of the accent into each so the whole interface read
-  // as being *in* the chosen colour. Two things were wrong with it. The dark
-  // bases written here were blue-black (#0a0b0f, #111320) while the stylesheet
-  // had already been moved to true grey, so the JS quietly undid the CSS on
-  // every render and the greys nobody could find in the file were the ones
-  // actually on screen. And the accent mix is a hue by definition: a grey with
-  // 5% purple in it is a purple-grey, which is exactly what a neutral surface
-  // is not.
-  //
-  // Setting only the theme attribute now, and letting `:root` and
-  // `:root[data-theme="light"]` supply the ramps. Both are complete — surfaces,
-  // borders, text and shadows — so nothing here needs restating, and changing
-  // a colour means editing the colour rather than hunting for the assignment
-  // that overrides it.
-  document.documentElement.dataset.theme = light ? "light" : "dark";
+  // Every panel, card, border and text colour remains the stylesheet's
+  // business. Keeping the tint to `--bg` preserves the contrast and hierarchy
+  // of the complete neutral ramps in `:root` and the light-theme override.
   // The browser chrome around the page — a phone's status bar, the installed
   // app's title bar — sits flush against the header, so it follows the page
   // ground, not the accent. Painting it with the accent put a saturated band
@@ -2126,9 +2129,6 @@ function applyTheme() {
   // seam this meta exists to hide. Read back from the stylesheet after the
   // theme attribute lands, so the chrome can never disagree with the ramp
   // the CSS actually resolved.
-  const ground = getComputedStyle(document.documentElement)
-    .getPropertyValue("--bg")
-    .trim();
   if (ground !== "") {
     document
       .querySelector('meta[name="theme-color"]')

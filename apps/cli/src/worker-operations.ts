@@ -58,7 +58,6 @@ import {
   type CanonicalVersion,
   type ChangeSet,
   type FilePatch,
-  readsAsReportRequest,
   type CoordinatorDecision,
   type DeferredResource,
   type IntegrationResult,
@@ -228,24 +227,9 @@ async function canonicalAdvance(
  * repository for as long as the lease lived — longer, if the process died
  * before deleting one.
  */
-/**
- * Whether a task was asked to look at the repository rather than change it.
- *
- * Read-only work is real work here — the auditor exists to do it — but the
- * pipeline measures success in patches, so an audit that finds nothing to
- * change is indistinguishable from an edit that silently failed. This is what
- * tells them apart, and it deliberately reads the *request* rather than the
- * result: what was asked for is the only thing that says whether an empty
- * changeset is the answer or the absence of one.
- *
- * Kept to verbs that cannot be confused with editing. "review" is left out on
- * purpose — "review the retry loop and fix it" is a change request, and a
- * word that appears in both kinds of sentence would quietly excuse the very
- * failure `CodexWriteDeniedError` was written to catch.
- */
-// Re-exported for callers and tests that have always imported it from here;
-// it lives in shared-types now so the adapters can apply the same reading.
-export { readsAsReportRequest };
+// Compatibility re-export for task-routing callers. Completion no longer
+// depends on this heuristic: a completed run with no diff is still complete.
+export { readsAsReportRequest } from "@coord/shared-types";
 
 export function bundleRefFor(leaseId: string): string {
   return `${LEASE_REF_PREFIX}${leaseId.replaceAll(/[^A-Za-z0-9_-]/gu, "")}`;
@@ -2788,6 +2772,13 @@ export async function acceptWorkResult(
         );
       }
     }
+    // A completed worker run does not need a diff to have a deliverable.
+    // Answers, audits, reviews and platform actions may all leave canonical
+    // untouched, and guessing intent from the objective made successful work
+    // fail whenever the wording fell outside the heuristic. Execution errors
+    // are reported by the worker as failures before this integration result.
+    const reported = integration.status === "empty";
+    const successful = integration.status === "integrated" || reported;
     if (integration.status === "integrated") {
       await store.saveTaskStatus(
         run.id,
@@ -2862,23 +2853,7 @@ export async function acceptWorkResult(
         assessedAgainst,
         run.id,
       );
-    } else if (
-      integration.status === "empty" &&
-      readsAsReportRequest(task.objective)
-    ) {
-      // Asked to look, not to change — and it looked.
-      //
-      // "Changed no files" is failure for "fix the retry loop" and success
-      // for "audit the codebase". The pipeline could only express the first,
-      // so an audit, a summary or a review came back as "complete but changed
-      // no files" and was recorded as a failed task. The work had been done;
-      // only the definition of done was wrong.
-      //
-      // Judged against the request rather than by relaxing `empty` generally,
-      // because an empty changeset from a task that *was* meant to write is
-      // the exact symptom `CodexWriteDeniedError` exists to catch — a sandbox
-      // silently refusing every edit while the agent reports success. Reading
-      // the objective keeps that alarm intact and lets the report through.
+    } else if (reported) {
       const explanation =
         changeSet.agentExplanation.trim().length > 0
           ? changeSet.agentExplanation.trim()
@@ -2924,13 +2899,14 @@ export async function acceptWorkResult(
         followUpTaskIds: followUp === undefined ? [] : [followUp],
         withheldFiles: split.deferred.map((patch) => patch.path).sort(),
         reason:
-          integration.status !== "integrated"
+          !successful
             ? "failed"
-            : planAdmissionPartial(admitted.admission) ||
-                split.deferred.length > 0
+            : integration.status === "integrated" &&
+                (planAdmissionPartial(admitted.admission) ||
+                  split.deferred.length > 0)
               ? "partially_completed"
               : "completed",
-        ...(integration.status === "integrated"
+        ...(successful
           ? {}
           : { failure: integration.explanation }),
       }),
@@ -2938,13 +2914,13 @@ export async function acceptWorkResult(
     ).catch(() => undefined);
     await store.finishRun(
       run.id,
-      integration.status === "integrated" ? "completed" : "failed",
+      successful ? "completed" : "failed",
       integration.canonicalVersion,
     );
     runFinished = true;
     return {
-      accepted: integration.status === "integrated",
-      ...(integration.status === "integrated"
+      accepted: successful,
+      ...(successful
         ? {}
         : { reason: integration.explanation }),
       runId: run.id,

@@ -2342,67 +2342,27 @@ test("a phone's caret sits on its own letters, and a backlog arrives as one line
   assert.match(app, /\$\{lines\.length\} updates/u);
 });
 
-test("on a phone the reader's own messages run down the right side", async () => {
+test("a channel transcript reads down one side at every width", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
 
-  // The row says whose it is. Only a person's own typing counts — an agent
-  // the reader happens to own is answering the room, not speaking for them —
-  // and a signed-out reader with an empty id must not match every message
-  // that arrived without an author.
+  // The room is a log, not a two-sided conversation: the reader's own lines
+  // are placed exactly like everybody else's, so the avatar gutter and the
+  // name are the only things that say who is speaking. Nothing marks a row
+  // as the reader's, and nothing mirrors one on a phone.
   const rendererStart = chats.indexOf("function messageRow");
+  assert.notEqual(rendererStart, -1, "messageRow is still the channel row");
   const renderer = chats.slice(
     rendererStart,
     chats.indexOf("\nfunction continuesUserMessageGroup", rendererStart),
   );
-  assert.notEqual(rendererStart, -1, "messageRow is still the channel row");
-  assert.match(renderer, /const mine =\s*entry\.kind === "user" &&/u);
-  assert.match(renderer, /currentUserId\(\) !== ""/u);
-  assert.match(renderer, /entry\.authorId === "you"/u);
-  assert.match(renderer, /mine \? " cmsg-mine" : ""/u);
-
-  // The class is emitted at every width and only the phone tier acts on it,
-  // so turning the phone changes sides without re-rendering the transcript.
-  const mineAt = css.indexOf(".cmsg-row.cmsg-mine {");
-  assert.notEqual(mineAt, -1, "the mirrored row rule is still there");
-  assert.match(
-    css.slice(css.lastIndexOf("@media", mineAt), mineAt),
-    /max-width: 600px/u,
-    "mirroring belongs to the phone tier, not the desktop transcript",
+  assert.ok(
+    !renderer.includes("cmsg-mine"),
+    "the channel row no longer marks the reader's own messages",
   );
-  assert.match(
-    css.slice(mineAt, css.indexOf("}", mineAt)),
-    /flex-direction: row-reverse;/u,
-  );
-
-  // Shrink-to-fit, so the body ends at the right edge rather than stretching
-  // back to the left margin, with everything hanging off it following.
-  assert.match(
-    css,
-    /\.cmsg-row\.cmsg-mine \.cmsg-body \{\s*flex: 0 1 auto;/u,
-  );
-  assert.match(
-    css,
-    /\.cmsg-row\.cmsg-mine \.cmsg-top,\s*\.cmsg-row\.cmsg-mine \.cmsg-reactions \{\s*justify-content: flex-end;/u,
-  );
-  assert.match(
-    css,
-    /\.cmsg-row\.cmsg-mine\.cmsg-compact \.cmsg-body \{\s*margin-left: 0;\s*margin-right: 44px;/u,
-  );
-  // React and reply keep hanging off the side the message is not anchored to,
-  // in both the floating and the touch-screen in-flow arrangement.
-  assert.match(
-    css,
-    /\.cmsg-row\.cmsg-mine \.cmsg-actions \{\s*right: auto;\s*left: 8px;\s*margin-left: 0;\s*margin-right: 6px;/u,
-  );
-  // And a reply's address turns up out of the avatar column it now sits under.
-  assert.match(
-    css,
-    /\.cmsg-row\.cmsg-mine \.cmsg-ref \{\s*flex-direction: row-reverse;/u,
-  );
-  assert.match(
-    css,
-    /\.cmsg-row\.cmsg-mine \.cmsg-ref-elbow \{[\s\S]{0,140}border-right: 2px solid var\(--border-soft\);/u,
+  assert.ok(
+    !css.includes("cmsg-mine"),
+    "no width mirrors a channel row onto the right",
   );
 });
 

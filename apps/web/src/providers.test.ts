@@ -661,6 +661,10 @@ test("codex usage comes from the rate limits its own session records", async () 
   assert.equal(report.windows[0]?.label, "week");
   assert.equal(report.windows[0]?.percentUsed, 2);
   assert.ok((report.windows[0]?.resetsAt ?? "").length > 0);
+  // The session record carries the same richer figures the app-server does.
+  assert.equal(report.planType, "pro");
+  assert.equal(report.windows[0]?.windowDurationMins, 10_080);
+  assert.equal(report.windows[0]?.resetsAtEpoch, 1_785_902_966);
 
   // With no rollouts at all, that is stated rather than guessed.
   const empty = await createHarness();
@@ -878,6 +882,74 @@ test("codex quota ignores empty mapped windows and retains legacy fallback", () 
     ),
     undefined,
   );
+});
+
+test("codex quota keeps the plan, the credit balance, and the raw window figures", () => {
+  const report = parseCodexAppServerRateLimits(
+    `${JSON.stringify({
+      id: 1,
+      result: {
+        rateLimits: {
+          primary: {
+            usedPercent: 17.25,
+            windowDurationMins: 300,
+            resetsAt: 1_785_902_966,
+          },
+          secondary: {
+            usedPercent: 43.5,
+            windowDurationMins: 10_080,
+            resetsAt: 1_786_402_966,
+          },
+          planType: "pro",
+          credits: { hasCredits: true, unlimited: false, balance: 12.5 },
+        },
+      },
+    })}\n`,
+  );
+  // The plan stops being only a phrase inside `source`.
+  assert.equal(report?.planType, "pro");
+  assert.equal(report?.source, "Codex account rate limits (pro)");
+  assert.equal(report?.creditBalance, 12.5);
+  assert.equal(report?.windows[0]?.windowDurationMins, 300);
+  assert.equal(report?.windows[0]?.resetsAtEpoch, 1_785_902_966);
+  assert.equal(report?.windows[1]?.windowDurationMins, 10_080);
+  assert.equal(report?.windows[1]?.resetsAtEpoch, 1_786_402_966);
+  // The formatted string stays beside the number rather than being replaced.
+  assert.ok((report?.windows[0]?.resetsAt ?? "").length > 0);
+
+  // Credits reported at the envelope rather than inside the limits object
+  // answer the same question, and a credits object with no number in it is
+  // absent rather than a balance of zero.
+  const atEnvelope = parseCodexAppServerRateLimits(
+    `${JSON.stringify({
+      id: 1,
+      result: {
+        credits: { balance: 3 },
+        rate_limits: {
+          primary: { used_percent: 6, window_minutes: 60 },
+          secondary: null,
+        },
+      },
+    })}\n`,
+  );
+  assert.equal(atEnvelope?.creditBalance, 3);
+  assert.equal(atEnvelope?.windows[0]?.windowDurationMins, 60);
+  assert.equal(atEnvelope?.windows[0]?.resetsAtEpoch, undefined);
+
+  const noBalance = parseCodexAppServerRateLimits(
+    `${JSON.stringify({
+      id: 1,
+      result: {
+        rateLimits: {
+          primary: { usedPercent: 6, windowDurationMins: 60 },
+          secondary: null,
+          credits: { hasCredits: false, unlimited: true },
+        },
+      },
+    })}\n`,
+  );
+  assert.equal(noBalance?.creditBalance, undefined);
+  assert.equal(noBalance?.planType, undefined);
 });
 
 test("streaming relays real CLI events and ends with the parsed reply", async () => {

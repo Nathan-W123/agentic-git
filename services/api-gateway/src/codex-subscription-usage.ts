@@ -21,10 +21,11 @@ export interface CodexRateLimitWindow {
 /**
  * The useful, stable portion of Codex's account quota response.
  *
- * Credits are intentionally opaque here. They have changed shape between CLI
- * releases and are not part of the browser's provider-neutral usage contract;
- * preserving the value is enough for callers which need to distinguish a
- * subscription snapshot from an API-key account.
+ * The credits object stays opaque: it has changed shape between CLI releases,
+ * so preserving it verbatim is what lets a caller distinguish a subscription
+ * snapshot from an API-key account without this file promising a shape it
+ * cannot keep. `creditBalance` is the one field inside it that has been
+ * constant, lifted out because it is the part a person reads.
  */
 export interface CodexRateLimitSnapshot {
   limitId?: string;
@@ -32,6 +33,8 @@ export interface CodexRateLimitSnapshot {
   secondary: CodexRateLimitWindow;
   planType?: string;
   credits?: unknown;
+  /** Credits remaining, when the account holds a credit balance at all. */
+  creditBalance?: number;
   rateLimitReachedType?: string;
 }
 
@@ -89,6 +92,23 @@ function normalizeWindow(value: unknown): CodexRateLimitWindow | undefined {
 }
 
 /**
+ * Reads the balance out of the credits object, when there is one.
+ *
+ * A credits object that is present but carries no number is absent, not a
+ * zero balance: telling somebody they have no credits left when the CLI never
+ * said so is worse than showing nothing.
+ */
+function normalizeCreditBalance(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  const credits = record(value);
+  return credits === undefined
+    ? undefined
+    : finiteNumber(property(credits, "balance", "balance"));
+}
+
+/**
  * Validates the app-server response and extracts a complete subscription
  * snapshot. API-key accounts return no `rateLimits`, and partial responses
  * are treated the same way: unavailable rather than a guessed quota.
@@ -123,12 +143,18 @@ export function normalizeCodexRateLimits(
     "rate_limit_reached_type",
   );
   const hasCredits = Object.hasOwn(limits, "credits");
+  // The already-lifted number is accepted too: the gateway re-normalizes a
+  // snapshot it was handed, and a round trip must not lose the balance.
+  const creditBalance =
+    normalizeCreditBalance(limits["credits"]) ??
+    finiteNumber(property(limits, "creditBalance", "credit_balance"));
   return {
     primary,
     secondary,
     ...(typeof limitId === "string" ? { limitId } : {}),
     ...(typeof planType === "string" ? { planType } : {}),
     ...(hasCredits ? { credits: limits["credits"] } : {}),
+    ...(creditBalance === undefined ? {} : { creditBalance }),
     ...(typeof reachedType === "string"
       ? { rateLimitReachedType: reachedType }
       : {}),

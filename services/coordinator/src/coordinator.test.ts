@@ -1047,9 +1047,9 @@ test("a task whose deliverable was a performed action ends done, not empty", asy
   }
 });
 
-test("a refused action does not launder an empty run into a success", async () => {
-  // The refusal costs the agent a round trip and nothing else changed, so an
-  // empty changeset still means what it always meant: nothing was done.
+test("a refused action completes with the agent's explanation", async () => {
+  // The platform result is the deliverable. Relaying a refusal changes no
+  // files, but the agent still completed the task it was able to perform.
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
 
   try {
@@ -1088,21 +1088,14 @@ test("a refused action does not launder an empty run into a success", async () =
       tasks: [{ task: task("task_a"), adapter: agent }],
     });
 
-    assert.equal(result.tasks[0]?.status, "failed");
-    // Both halves: the alarm leads, the agent's reason follows.
-    assert.match(
-      result.tasks[0]?.explanation ?? "",
-      /produced no repository changes/u,
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(
+      result.tasks[0]?.explanation,
+      "The push was refused: you haven't connected GitHub.",
     );
-    assert.match(
-      result.tasks[0]?.explanation ?? "",
-      /you haven't connected GitHub/u,
-    );
-    const failure = result.audit.find((event) => event.type === "task_failed");
-    assert.match(
-      String((failure?.data as Record<string, unknown>)["explanation"] ?? ""),
-      /you haven't connected GitHub/u,
-    );
+    const types = result.audit.map((event) => event.type);
+    assert.ok(types.includes("task_reported"), types.join(", "));
+    assert.ok(!types.includes("task_failed"), types.join(", "));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1482,10 +1475,9 @@ test("a task asked to look finishes by reporting, not by failing", async () => {
   }
 });
 
-test("a task asked to change still fails when it changes nothing", async () => {
-  // The alarm this must not blunt: an empty changeset from a task that was
-  // meant to write is exactly what a sandbox silently refusing every edit
-  // produces, and it has to stay a failure.
+test("a completed task is not failed solely because it changed nothing", async () => {
+  // Completion is the agent's explicit outcome. Inferring failure from the
+  // objective made legitimate no-op answers depend on a wording heuristic.
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
 
   try {
@@ -1497,6 +1489,9 @@ test("a task asked to change still fails when it changes nothing", async () => {
       fixture.repository,
       fixture.workspaces,
       "",
+      false,
+      undefined,
+      "The retry loop already has the requested behavior.",
     );
     const result = await new Coordinator({
       repositories: fixture.repositories,
@@ -1514,22 +1509,22 @@ test("a task asked to change still fails when it changes nothing", async () => {
       ],
     });
 
-    assert.equal(result.tasks[0]?.status, "failed");
-    assert.match(
-      result.tasks[0]?.explanation ?? "",
-      /produced no repository changes/u,
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(
+      result.tasks[0]?.explanation,
+      "The retry loop already has the requested behavior.",
     );
+    const types = result.audit.map((event) => event.type);
+    assert.ok(types.includes("task_reported"), types.join(", "));
+    assert.ok(!types.includes("task_failed"), types.join(", "));
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("an empty run carrying an agent account keeps that account whole", async () => {
-  // An empty run that was meant to write stays a failure, but the account the
-  // agent wrote is the only substantive evidence it leaves — and for a
-  // question misread as a change request, that account *is* the answer. It
-  // travels beside the alarm, entire, so the narration downstream has
-  // something to show rather than a clipped sentence.
+test("an empty run carries the agent's account as its successful result", async () => {
+  // With no diff to read, the agent's account is the deliverable and must be
+  // preserved without a no-changes failure wrapped around it.
   const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
 
   try {
@@ -1565,10 +1560,12 @@ test("an empty run carrying an agent account keeps that account whole", async ()
       ],
     });
 
-    assert.equal(result.tasks[0]?.status, "failed");
+    assert.equal(result.tasks[0]?.status, "integrated");
     const explanation = result.tasks[0]?.explanation ?? "";
-    assert.match(explanation, /produced no repository changes/u);
-    assert.ok(explanation.includes(account), explanation);
+    assert.equal(explanation, account);
+    const types = result.audit.map((event) => event.type);
+    assert.ok(types.includes("task_reported"), types.join(", "));
+    assert.ok(!types.includes("task_failed"), types.join(", "));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -110,6 +110,20 @@ export interface ProviderUsageWindow {
   percentUsed: number;
   /** Reset moment exactly as the CLI worded it; it carries its own zone. */
   resetsAt?: string;
+  /**
+   * The same reset moment as the CLI's own seconds-since-epoch, kept beside
+   * the formatted string rather than instead of it. `resetsAt` is formatted
+   * on the server, in the server's locale and zone; the browser cannot undo
+   * that to say "in 42 minutes", which is the form a person actually reads a
+   * quota in. Absent when the CLI published no reset time.
+   */
+  resetsAtEpoch?: number;
+  /**
+   * How long this window is, in minutes, as the CLI reported it. The label is
+   * derived from it ("5 hours", "7 days"), but the number itself distinguishes
+   * a five-hour window from a weekly one without parsing English back.
+   */
+  windowDurationMins?: number;
 }
 
 export interface ProviderUsageReport {
@@ -118,6 +132,16 @@ export interface ProviderUsageReport {
   windows: ProviderUsageWindow[];
   /** Set when the CLI publishes no consumption figure at all. */
   unavailableReason?: string;
+  /** The subscription tier the account is on ("plus", "pro", ...). */
+  planType?: string;
+  /**
+   * Credits left on the account, when it holds a credit balance at all.
+   *
+   * Kept as a plain number because that is the only part of the credits
+   * object whose shape has been stable across CLI releases; anything else it
+   * carries is deliberately not promised here.
+   */
+  creditBalance?: number;
 }
 
 export interface ChatReply {
@@ -419,19 +443,29 @@ export function parseCodexRateLimits(
           ? codexWindowLabel(window.window_minutes)
           : name,
       percentUsed: Math.max(0, Math.min(100, window.used_percent)),
+      ...(typeof window.window_minutes === "number" && window.window_minutes > 0
+        ? { windowDurationMins: window.window_minutes }
+        : {}),
       ...(typeof window.resets_at === "number"
         ? {
             resetsAt: new Date(window.resets_at * 1000).toLocaleString(
               undefined,
               { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" },
             ),
+            resetsAtEpoch: window.resets_at,
           }
         : {}),
     });
   }
   return windows.length === 0
     ? undefined
-    : { source: "Codex CLI", windows };
+    : {
+        source: "Codex CLI",
+        windows,
+        ...(typeof limits.plan_type === "string" && limits.plan_type.trim() !== ""
+          ? { planType: limits.plan_type.trim() }
+          : {}),
+      };
 }
 
 /** How long the account-quota handshake may take before it is abandoned. */
@@ -470,7 +504,10 @@ function codexAppServerWindow(
   return {
     label: minutes === undefined ? fallbackLabel : codexWindowLabel(minutes),
     percentUsed: Math.max(0, Math.min(100, used)),
-    ...(resetsAt === undefined
+    ...(minutes === undefined || minutes <= 0
+      ? {}
+      : { windowDurationMins: minutes }),
+    ...(resetsAt === undefined || resetsAt < 0
       ? {}
       : {
           resetsAt: new Date(resetsAt * 1000).toLocaleString(undefined, {
@@ -479,14 +516,35 @@ function codexAppServerWindow(
             hour: "numeric",
             minute: "2-digit",
           }),
+          resetsAtEpoch: resetsAt,
         }),
   };
+}
+
+/**
+ * The balance out of the app-server's `credits` object, if it has one.
+ *
+ * Only the number is taken. The credits object has changed shape between CLI
+ * releases and an account on a plain subscription has none at all, so this
+ * reads the one field that has been constant and treats everything else --
+ * including a credits object that is present but says nothing -- as absent
+ * rather than as a zero balance.
+ */
+function codexCreditBalance(value: unknown): number | undefined {
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : undefined;
+  }
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  return codexNumber(value as Record<string, unknown>, "balance", "balance");
 }
 
 interface CodexAppServerLimitSnapshot {
   id: string;
   name: string;
   plan?: string;
+  creditBalance?: number;
   windows: ProviderUsageWindow[];
 }
 
@@ -512,6 +570,7 @@ function codexAppServerLimitSnapshot(
       : fallbackName;
   const nameValue = limits["limitName"] ?? limits["limit_name"];
   const planValue = limits["planType"] ?? limits["plan_type"];
+  const creditBalance = codexCreditBalance(limits["credits"]);
   return {
     id,
     name:
@@ -521,6 +580,7 @@ function codexAppServerLimitSnapshot(
     ...(typeof planValue === "string" && planValue.trim() !== ""
       ? { plan: planValue.trim() }
       : {}),
+    ...(creditBalance === undefined ? {} : { creditBalance }),
     windows,
   };
 }
@@ -613,6 +673,14 @@ export function parseCodexAppServerRateLimits(
     }
     const plan =
       legacy?.plan ?? snapshots.find((snapshot) => snapshot.plan)?.plan;
+    // Credits are an account-level fact, so the app-server has put them at
+    // the envelope on some builds and inside the limits object on others.
+    // Either spelling answers the same question; neither is invented.
+    const creditBalance =
+      codexCreditBalance(envelope["credits"]) ??
+      legacy?.creditBalance ??
+      snapshots.find((snapshot) => snapshot.creditBalance !== undefined)
+        ?.creditBalance;
     const showBucketNames = snapshots.length > 1;
     const windows = snapshots.flatMap((snapshot) =>
       snapshot.windows.map((window) => ({
@@ -628,6 +696,8 @@ export function parseCodexAppServerRateLimits(
           ? `Codex account rate limits (${plan})`
           : "Codex account rate limits",
       windows,
+      ...(plan === undefined ? {} : { planType: plan }),
+      ...(creditBalance === undefined ? {} : { creditBalance }),
     };
   }
   return undefined;

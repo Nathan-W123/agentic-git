@@ -10856,14 +10856,50 @@ test("Codex usage falls back to the live account quota snapshot", async (t) => {
         label: "5 hours",
         percentUsed: 11,
         resetsAt: resetText(1_787_000_000),
+        // The raw figures travel beside the formatted ones: the string is in
+        // the server's zone and locale, which the browser cannot undo.
+        resetsAtEpoch: 1_787_000_000,
+        windowDurationMins: 300,
       },
       {
         label: "7 days",
         percentUsed: 37,
         resetsAt: resetText(1_787_400_000),
+        resetsAtEpoch: 1_787_400_000,
+        windowDurationMins: 10_080,
       },
     ],
   );
+  // The plan is a field of its own now, not only a phrase inside `source`.
+  assert.equal(response.data.usage.planType, "plus");
+  assert.equal(response.data.usage.creditBalance, undefined);
+});
+
+test("a Codex credit balance reaches the usage route", async (t) => {
+  const runtime = await startRuntime(t, {
+    codexUsageReader: async () => ({
+      primary: { usedPercent: 4, windowDurationMins: 300 },
+      secondary: { usedPercent: 19, windowDurationMins: 10_080 },
+      planType: "pro",
+      credits: { hasCredits: true, balance: 12.5 },
+    }),
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const response = await client.request(
+    "/api/v1/chat/providers/openai/usage",
+  );
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  assert.equal(response.data.usage.planType, "pro");
+  assert.equal(response.data.usage.creditBalance, 12.5);
+  // A window with no reset time still reports its length, and invents no
+  // reset moment for itself.
+  assert.deepEqual(response.data.usage.windows[0], {
+    label: "5 hours",
+    percentUsed: 4,
+    windowDurationMins: 300,
+  });
 });
 
 test("recorded Codex usage wins without an unnecessary live lookup", async (t) => {
