@@ -150,3 +150,50 @@ test("startup failures, malformed output, and timeouts stay unavailable", async 
   assert.equal(timedOut, undefined);
   assert.ok(Date.now() - startedAt < 1_000);
 });
+
+test("a numeric credit balance is lifted out of the opaque credits object", () => {
+  const snapshot = normalizeCodexRateLimits({
+    result: {
+      rate_limits: {
+        primary: { used_percent: 8, window_duration_mins: 300 },
+        secondary: { used_percent: 61, window_duration_mins: 10_080 },
+        plan_type: "pro",
+        credits: { has_credits: true, unlimited: false, balance: 42.5 },
+      },
+    },
+  });
+
+  assert.equal(snapshot?.creditBalance, 42.5);
+  assert.equal(snapshot?.planType, "pro");
+  // The whole object survives beside the lifted number, so a caller that
+  // needs a field this file does not promise can still find it.
+  assert.deepEqual(snapshot?.credits, {
+    has_credits: true,
+    unlimited: false,
+    balance: 42.5,
+  });
+});
+
+test("credits that carry no number are absent rather than a zero balance", () => {
+  const noNumber = normalizeCodexRateLimits({
+    result: {
+      rateLimits: {
+        primary: { usedPercent: 8, windowDurationMins: 300 },
+        secondary: { usedPercent: 61, windowDurationMins: 10_080 },
+        credits: { hasCredits: false, unlimited: true },
+      },
+    },
+  });
+  assert.equal(noNumber?.creditBalance, undefined);
+  assert.ok(Object.hasOwn(noNumber ?? {}, "credits"));
+
+  const noCredits = normalizeCodexRateLimits({
+    result: {
+      rateLimits: {
+        primary: { usedPercent: 8, windowDurationMins: 300 },
+        secondary: { usedPercent: 61, windowDurationMins: 10_080 },
+      },
+    },
+  });
+  assert.equal(noCredits?.creditBalance, undefined);
+});

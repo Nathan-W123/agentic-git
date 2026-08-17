@@ -130,6 +130,70 @@ function chanRow(repo, activeRepositoryId) {
 }
 
 /**
+ * "in 3 hours", from the reset time the CLI reported.
+ *
+ * The formatted `resetsAt` string is made server-side, in the server's zone,
+ * so a reader in another zone gets a clock time that is not theirs. The raw
+ * seconds-since-epoch beside it is zone-free, and how long until the quota
+ * comes back is the question a person actually has. Empty when the CLI gave
+ * no reset time, or when the moment has already passed and the number would
+ * only be stale.
+ */
+function usageResetsIn(window) {
+  const at = Number(window?.resetsAtEpoch);
+  if (!Number.isFinite(at) || at <= 0) {
+    return "";
+  }
+  const seconds = (at * 1000 - Date.now()) / 1000;
+  if (seconds <= 0) {
+    return "";
+  }
+  if (seconds < 3600) {
+    const minutes = Math.max(1, Math.round(seconds / 60));
+    return `in ${minutes} min`;
+  }
+  if (seconds < 86_400) {
+    const hours = Math.round(seconds / 3600);
+    return `in ${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+  const days = Math.round(seconds / 86_400);
+  return `in ${days} day${days === 1 ? "" : "s"}`;
+}
+
+/** "Resets Jul 29, 10:59am · in 3 hours", with either half allowed to be missing. */
+function usageResetText(window) {
+  const when = window?.resetsAt;
+  const soon = usageResetsIn(window);
+  if (when === undefined || when === null || when === "") {
+    return soon === "" ? "" : `Resets ${soon}`;
+  }
+  return soon === "" ? `Resets ${when}` : `Resets ${when} · ${soon}`;
+}
+
+/**
+ * The plan and any credit balance, which are facts about the account rather
+ * than about one window. Codex reports both; the other CLIs report neither,
+ * and this renders nothing at all for them rather than an empty row.
+ */
+function usageAccountLine(report) {
+  const parts = [];
+  if (typeof report?.planType === "string" && report.planType.trim() !== "") {
+    parts.push(`${report.planType.trim()} plan`);
+  }
+  // `typeof`, not `Number()`: a null balance coerces to 0, and "0 credits" is
+  // a claim the CLI never made.
+  const credits = report?.creditBalance;
+  if (typeof credits === "number" && Number.isFinite(credits)) {
+    parts.push(
+      `${credits.toLocaleString(undefined, {
+        maximumFractionDigits: 2,
+      })} credits`,
+    );
+  }
+  return parts.join(" · ");
+}
+
+/**
  * The hover card for one roster entry.
  *
  * Only for this account's own agents: the usage route reports the *caller's*
@@ -158,12 +222,17 @@ function usageTip(agent) {
           <span class="rr-usage-bar"><i style="width:${percent}%"></i></span>
           <span class="rr-usage-pct">${Math.round(percent)}%</span>
         </div>${
-          window.resetsAt === undefined
+          usageResetText(window) === ""
             ? ""
-            : `<div class="rr-usage-reset">Resets ${esc(window.resetsAt)}</div>`
+            : `<div class="rr-usage-reset">${esc(usageResetText(window))}</div>`
         }`;
       })
       .join("")}
+      ${
+        usageAccountLine(report) === ""
+          ? ""
+          : `<div class="rr-usage-plan">${esc(usageAccountLine(report))}</div>`
+      }
       ${report.source === undefined ? "" : `<div class="rr-usage-src">${esc(report.source)}</div>`}`;
   }
   return `<div class="rr-usage" role="tooltip">${body}</div>`;
@@ -2704,13 +2773,18 @@ function agentUsage(agent) {
           </div>
           <div class="aspec-meter"><i style="width:${percent}%"></i></div>
           ${
-            window.resetsAt === undefined
+            usageResetText(window) === ""
               ? ""
-              : `<div class="aspec-usage-reset">Resets ${esc(window.resetsAt)}</div>`
+              : `<div class="aspec-usage-reset">${esc(usageResetText(window))}</div>`
           }
         </div>`;
       })
       .join("")}
+    ${
+      usageAccountLine(report) === ""
+        ? ""
+        : `<div class="aspec-usage-plan">${esc(usageAccountLine(report))}</div>`
+    }
     ${
       report.source === undefined
         ? ""

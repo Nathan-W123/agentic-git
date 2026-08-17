@@ -4106,12 +4106,20 @@ svg {
 }
 
 .rr-usage-reset,
+.rr-usage-plan,
 .rr-usage-src,
 .rr-usage-empty {
   margin-top: 4px;
   font-size: 10.5px;
   line-height: 1.45;
   color: var(--text-3);
+}
+
+/* The plan and credit balance are the account's own facts, not a footnote
+   about where the numbers came from, so they read a shade louder than the
+   source line they sit above. */
+.rr-usage-plan {
+  color: var(--text-2);
 }
 
 .roster-row:hover {
@@ -5687,10 +5695,15 @@ svg {
 }
 
 .agent-spec .aspec-usage-reset,
+.agent-spec .aspec-usage-plan,
 .agent-spec .aspec-usage-source {
   margin-top: 4px;
   color: var(--text-3);
   font-size: 10.5px;
+}
+
+.agent-spec .aspec-usage-plan {
+  color: var(--text-2);
 }
 
 /* -------------------------------------------------------------- thread ---- */

@@ -134,12 +134,20 @@ interface ProviderUsageWindow {
   label: string;
   percentUsed: number;
   resetsAt?: string;
+  /** The CLI's own reset time, so the browser can say "in 42 minutes". */
+  resetsAtEpoch?: number;
+  /** Window length in minutes, the number the label is derived from. */
+  windowDurationMins?: number;
 }
 
 interface ProviderUsageReport {
   source: string;
   windows: ProviderUsageWindow[];
   unavailableReason?: string;
+  /** The subscription tier, when the account reports one. */
+  planType?: string;
+  /** Credits remaining, when the account holds a credit balance. */
+  creditBalance?: number;
 }
 
 function hasUsageWindows(value: unknown): boolean {
@@ -172,6 +180,7 @@ function codexUsageWindow(
   fallback: string,
 ): ProviderUsageWindow {
   let resetsAt: string | undefined;
+  let resetsAtEpoch: number | undefined;
   if (window.resetsAt !== undefined) {
     const reset = new Date(window.resetsAt * 1_000);
     if (Number.isFinite(reset.getTime())) {
@@ -181,12 +190,18 @@ function codexUsageWindow(
         hour: "numeric",
         minute: "2-digit",
       });
+      resetsAtEpoch = window.resetsAt;
     }
   }
   return {
     label: codexWindowLabel(window.windowDurationMins, fallback),
     percentUsed: window.usedPercent,
-    ...(resetsAt === undefined ? {} : { resetsAt }),
+    ...(resetsAt === undefined || resetsAtEpoch === undefined
+      ? {}
+      : { resetsAt, resetsAtEpoch }),
+    ...(window.windowDurationMins === undefined
+      ? {}
+      : { windowDurationMins: window.windowDurationMins }),
   };
 }
 
@@ -202,6 +217,12 @@ function codexUsageReport(
       codexUsageWindow(snapshot.primary, "primary"),
       codexUsageWindow(snapshot.secondary, "secondary"),
     ],
+    ...(snapshot.planType === undefined || snapshot.planType.trim() === ""
+      ? {}
+      : { planType: snapshot.planType.trim() }),
+    ...(snapshot.creditBalance === undefined
+      ? {}
+      : { creditBalance: snapshot.creditBalance }),
   };
 }
 
