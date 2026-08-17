@@ -1217,15 +1217,23 @@ const DEVICE_AUTH_DEFAULT_EXPIRY_MS = 15 * 60_000;
  * same parsers the non-streaming path uses, so live events and the final
  * reply can never disagree about what the CLI said.
  */
+export type StreamRunnerOptions = {
+  cwd?: string;
+  input?: string;
+  /**
+   * Environment for the child, before harness variables are stripped. Carries
+   * the per-user credential home, so dropping it silently falls the CLI back
+   * to whatever login the host happens to hold.
+   */
+  env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
+  maxOutputBytes?: number;
+};
+
 export type StreamRunner = (
   command: string,
   args: readonly string[],
-  options: {
-    cwd?: string;
-    input?: string;
-    timeoutMs?: number;
-    maxOutputBytes?: number;
-  },
+  options: StreamRunnerOptions,
   onLine: (line: string) => void,
 ) => Promise<ProcessOutput>;
 
@@ -1244,22 +1252,25 @@ export type ChatStreamEvent =
   | { type: "done"; reply: ChatReply }
   | { type: "error"; message: string; code: string };
 
-async function streamProcess(
+/**
+ * The runner every chat uses unless a test supplies its own. Exported so the
+ * environment it hands the child can be pinned directly: a stubbed runner can
+ * only show that the caller passed an environment, which is exactly the half
+ * that was already true while this one dropped it.
+ */
+export async function streamProcess(
   command: string,
   args: readonly string[],
-  options: {
-    cwd?: string;
-    input?: string;
-    timeoutMs?: number;
-    maxOutputBytes?: number;
-  },
+  options: StreamRunnerOptions,
   onLine: (line: string) => void,
 ): Promise<ProcessOutput> {
   const startedAt = Date.now();
   return await new Promise<ProcessOutput>((resolve, reject) => {
     const child = spawn(command, [...args], {
       cwd: options.cwd,
-      env: sanitizeChildEnv(process.env),
+      // Same precedence as `runProcess`: the caller's environment when it
+      // supplies one, the harness environment otherwise, sanitised either way.
+      env: sanitizeChildEnv(options.env ?? process.env),
       shell: false,
       windowsHide: true,
       stdio: ["pipe", "pipe", "pipe"],

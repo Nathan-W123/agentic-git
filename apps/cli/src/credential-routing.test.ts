@@ -202,17 +202,29 @@ test("task credential homes share a lease and persist rotation on close", async 
   );
   assert.ok(first !== undefined);
 
-  let secondOpened = false;
+  // The second home has to finish staging while the first is still holding
+  // its reservation. Waiting a fixed number of event-loop turns would measure
+  // how long staging takes rather than whether it was blocked — staging is
+  // several file writes, so it never lands within one turn — so the wait is
+  // bounded by a timer the lease itself would outlast.
+  const stalled = Symbol("stalled");
   const secondPromise = openSubmitterCredentialHome(
     { adapter: "codex" },
     submittedTask({ id: "task-2" as TaskId, submittedBy: "alice" }),
     { credentials },
-  ).then((home) => {
-    secondOpened = true;
-    return home;
-  });
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  const openedBeforeRelease = secondOpened;
+  );
+  const raced = await Promise.race([
+    secondPromise,
+    new Promise<typeof stalled>((resolve) => {
+      const timer = setTimeout(() => resolve(stalled), 5_000);
+      timer.unref();
+    }),
+  ]);
+  assert.notEqual(
+    raced,
+    stalled,
+    "one coordinator must be able to stage multiple task homes",
+  );
 
   await writeFile(
     path.join(first.env["CODEX_HOME"] as string, "auth.json"),
@@ -224,10 +236,5 @@ test("task credential homes share a lease and persist rotation on close", async 
   assert.ok(second !== undefined);
   await second.close();
 
-  assert.equal(
-    openedBeforeRelease,
-    true,
-    "one coordinator must be able to stage multiple task homes",
-  );
   assert.equal((await credentials.get("alice", "codex"))?.secret, refreshed);
 });

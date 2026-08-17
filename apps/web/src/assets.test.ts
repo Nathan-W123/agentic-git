@@ -579,12 +579,12 @@ test("a reply carries a quiet visual path back to its root", async () => {
 
   assert.match(
     chats,
-    /replies\.length > 0 && !isReply \? " cmsg-threaded" : ""/u,
+    /hasTaskThread && !isReply \? " cmsg-threaded" : ""/u,
     "only channel roots with replies should grow a branch",
   );
   assert.match(
     chats,
-    /replies\.length === 0 \|\| isReply/u,
+    /!hasTaskThread \|\| isReply/u,
     "the open thread root should not repeat the channel's reply link",
   );
   assert.match(renderer, /class="thread-replies"/u);
@@ -1200,10 +1200,13 @@ test("a colour that reaches a style attribute is validated first", async () => {
 });
 
 test("the product is named Lattice throughout the browser surface", async () => {
-  assert.match(await browserSource(), /<b>Lattice<\/b>/u);
+  // The wordmark sits in the chat sidebar's crown, which is rendered by the
+  // chats screen rather than the shell.
+  assert.match(await publicFile("screen-chats.js"), /<b>Lattice<\/b>/u);
   assert.match(await publicFile("index.html"), /<title>Lattice<\/title>/u);
   for (const file of [
     "app.js",
+    "screen-chats.js",
     "ui.js",
     "styles.css",
     "index.html",
@@ -1684,7 +1687,7 @@ test("thread composer characters stay visible without a painted text layer", asy
   // text and WebKit's separate text fill rather than relying on inheritance.
   assert.match(
     chats,
-    /<form class="composer" data-act="channel-thread-submit"[\s\S]{0,240}<textarea data-act="channel-thread-input"/u,
+    /<form class="composer[\s\S]{0,80}data-act="channel-thread-submit"[\s\S]{0,240}<textarea data-act="channel-thread-input"/u,
   );
   const rule = /\.composer textarea \{([\s\S]*?)\n\}/u.exec(css);
   assert.ok(rule !== null, "the shared composer textarea rule exists");
