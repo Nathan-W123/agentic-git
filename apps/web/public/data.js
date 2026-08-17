@@ -185,13 +185,12 @@ export const state = {
   /** Any agent in the room, open in that same panel. */
   activeAgentPanel: undefined,
   /**
-   * Which half of an agent's panel is showing: "history" or "chat".
-   *
-   * History is the default because it is the half that exists for every
-   * agent — a private chat is only ever with your own, so opening straight
-   * into one would show most of the roster an empty room they cannot use.
+   * Which agent surface is showing: its specification, history, or private
+   * chat. The specification is the common landing surface for every agent;
+   * history remains one icon away, while chat only exists for a personal
+   * agent owned by this account.
    */
-  agentPanelTab: "history",
+  agentPanelTab: "spec",
   /*
    * Whether a turn's thinking block is unfolded, keyed by thread and turn.
    *
@@ -1314,15 +1313,14 @@ export async function signInForInvitation(email, password) {
 
 /* --------------------------------------------------------- appearance ---- */
 
-export const DEFAULT_ACCENT = "#8b5cf6";
+export const DEFAULT_ACCENT = "#e05f9e";
 /**
  * The second colour, when nobody has chosen one.
  *
- * A teal rather than a near-violet: the pair only earns its keep if the two
- * are told apart at a glance, and a secondary that reads as "the primary,
- * slightly off" is worse than having none.
+ * A lighter pink keeps the untouched-user theme cohesive while remaining
+ * distinct from the primary pink wherever both accents appear together.
  */
-export const DEFAULT_ACCENT_SECONDARY = "#3fa8b5";
+export const DEFAULT_ACCENT_SECONDARY = "#f3a6c8";
 
 /**
  * The palette offered in settings.
@@ -1364,13 +1362,13 @@ export function agentColorFor(userId) {
   }
   // Their accent before a hash of their id. Both are "a colour for this
   // person", and one of them they actually picked — falling to the hash first
-  // meant somebody whose interface was purple had an orange agent, and the two
+  // meant somebody whose interface was pink had an orange agent, and the two
   // colours sat next to each other in the same list looking like a mistake.
   //
   // And the shared default when they have chosen neither, rather than a hash
   // of their id. The hash gave everybody a different colour for free, which
   // sounds useful and reads as decoration: nothing in the interface means
-  // "orange", so an orange agent beside a purple highlight is just two colours
+  // "orange", so an orange agent beside a pink highlight is just two colours
   // disagreeing. Distinct colours are still available — they are one click in
   // Appearance — but they are now something somebody chose rather than
   // something their user id happened to hash to.
@@ -1395,7 +1393,7 @@ export function myAgentColor() {
  * The accent this browser last saw somebody signed in with.
  *
  * Kept for the signed-out screens, which have no principal to read a colour
- * off and so painted themselves the default purple for everybody — including
+ * off and so painted themselves the default accent for everybody — including
  * the person who had just spent time choosing something else, and who sees
  * that screen every time their session lapses. The theme has been remembered
  * here for the same reason since light mode existed; this is the other half
@@ -1403,9 +1401,9 @@ export function myAgentColor() {
  *
  * Deliberately not cleared on sign-out: "the colour this machine is" is the
  * whole point, and a machine with one user — which is most of them — should
- * not flash purple on the way back in. On a shared machine it does reveal
- * that the last person preferred green, which is the same thing the theme
- * already reveals and about as consequential.
+ * not flash the default accent on the way back in. On a shared machine it
+ * does reveal that the last person preferred green, which is the same thing
+ * the theme already reveals and about as consequential.
  */
 function rememberAccent(accent) {
   try {

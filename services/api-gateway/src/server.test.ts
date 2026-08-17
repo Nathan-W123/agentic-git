@@ -23,6 +23,7 @@ import {
   type ApiOperations,
 } from "./server.js";
 import { hashPassword } from "./auth.js";
+import type { CodexUsageReader } from "./codex-subscription-usage.js";
 
 const BOOTSTRAP_TOKEN = "bootstrap-token-with-at-least-24-characters";
 const PASSWORD = "RelayPassword123!";
@@ -87,6 +88,10 @@ interface TestRuntime {
     thinkingHidden?: boolean;
     thinkingTokens?: number;
   };
+  /** Provider usage returned before the Codex live-snapshot fallback. */
+  providerUsage: Map<string, unknown>;
+  /** Usage calls, so a live lookup can be shown to leave recorded data first. */
+  usageCalls: string[];
   /** Every canonical diff the auditor asked for, in order. */
   canonicalDiffs: Array<{
     projectId: string;
@@ -253,6 +258,7 @@ async function startRuntime(
     webSocketPollIntervalMs?: number;
     webSocketReauthorizeIntervalMs?: number;
     auditorPollIntervalMs?: number;
+    codexUsageReader?: CodexUsageReader;
     /**
      * Drops the optional `listAgents` operation, as a deployment that does
      * not implement it does — the fallback path for anything that joins
@@ -272,6 +278,8 @@ async function startRuntime(
   const submittedTasks: TestRuntime["submittedTasks"] = [];
   const chatPrompts: TestRuntime["chatPrompts"] = [];
   const chatAnswer: TestRuntime["chatAnswer"] = {};
+  const providerUsage: TestRuntime["providerUsage"] = new Map();
+  const usageCalls: TestRuntime["usageCalls"] = [];
   /** How the agent answers "is this work?" — "yes" unless a test says else. */
   let taskClassification = "yes";
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
@@ -355,8 +363,9 @@ async function startRuntime(
       async options() {
         return {};
       },
-      async usage() {
-        return {};
+      async usage(input) {
+        usageCalls.push(input.provider);
+        return providerUsage.get(input.provider) ?? {};
       },
       async setSettings(input) {
         // Only the call sign, which is the one setting the gateway does more
@@ -708,6 +717,9 @@ async function startRuntime(
     ...(options.auditorPollIntervalMs === undefined
       ? {}
       : { auditorPollIntervalMs: options.auditorPollIntervalMs }),
+    ...(options.codexUsageReader === undefined
+      ? {}
+      : { codexUsageReader: options.codexUsageReader }),
     staticAssets: new Map([
       [
         "/index.html",
@@ -736,6 +748,8 @@ async function startRuntime(
     submittedTasks,
     chatPrompts,
     chatAnswer,
+    providerUsage,
+    usageCalls,
     canonicalDiffs,
     rollbacks,
     setRollbackOutcome: (outcome) => {
@@ -7745,6 +7759,302 @@ test("a sequenced admission is removed silently when the held task can start", a
   );
 });
 
+test("a hold is taken back when the held task stops instead of starting", async (t) => {
+  // An approved re-admission was the only thing that ever withdrew one of
+  // these. Every other way out of a hold — the run failed, somebody cancelled
+  // it, it never started — dropped the watcher and left "starts once the other
+  // one is done" standing in the room as a promise about a run that no longer
+  // exists. It is the commonest ending of the two: a held task is one that was
+  // already in trouble.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "failedholdroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation: "Sequenced behind executing work on the same resources",
+    },
+  });
+  await waitFor(
+    async () =>
+      (await runtime.store.listChannelMessages(repo, ownerId)).some(
+        (message) => message.authorId === "coordinator",
+      ),
+    "the hold was never announced in the room",
+    8_000,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "task_failed",
+    taskId: tasks.claude,
+    data: { error: "npm test exited 1" },
+  });
+  await waitFor(
+    async () =>
+      (await runtime.store.listChannelMessages(repo, ownerId)).every(
+        (message) => message.authorId !== "coordinator",
+      ),
+    "the hold outlived the run it was about",
+    8_000,
+  );
+
+  // The ending itself is untouched: what goes is the standing claim about when
+  // this was going to start, not the account of what happened to it.
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  assert.equal(
+    messages.some(
+      (message) =>
+        message.kind === "outcome" ||
+        (message.replies ?? []).some((reply) => reply.kind === "outcome"),
+    ),
+    true,
+    `withdrawing the hold took the ending with it: ${JSON.stringify(
+      messages.map((message) => message.content),
+    )}`,
+  );
+});
+
+test("notices left standing by a restart are swept once their collision is over", async (t) => {
+  // The map that remembers which message to delete dies with the process, and
+  // a hold is precisely the state that waits — across a deploy, routinely. So
+  // the sweep decides from the store instead: the notice carries its task, and
+  // a task that has stopped cannot still be waiting its turn.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "sweptroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation: "Sequenced behind executing work on the same resources",
+    },
+  });
+  await waitFor(
+    async () =>
+      (await runtime.store.listChannelMessages(repo, ownerId)).some(
+        (message) => message.authorId === "coordinator",
+      ),
+    "the hold was never announced in the room",
+    8_000,
+  );
+
+  const sweep = async (): Promise<void> => {
+    await (
+      runtime.gateway as unknown as {
+        reconcileArbitrationNotices(): Promise<void>;
+      }
+    ).reconcileArbitrationNotices();
+  };
+  const coordinatorLines = async (): Promise<string[]> =>
+    (await runtime.store.listChannelMessages(repo, ownerId))
+      .filter((message) => message.authorId === "coordinator")
+      .map((message) => String(message.content));
+
+  // Both ends still running: the line is current, and a sweep that took it now
+  // would be deleting the room's only account of why one agent is idle.
+  await sweep();
+  assert.equal(
+    (await coordinatorLines()).length,
+    1,
+    "the sweep took a hold that was still true",
+  );
+
+  // The blocker lands. Nothing re-admits the held task — the case no live path
+  // reaches — and the sentence "starts once that one is done" is now about
+  // something that already happened.
+  await runtime.store.cancelSubmittedTask(tasks.codex);
+  await sweep();
+  assert.deepEqual(
+    await coordinatorLines(),
+    [],
+    "the hold survived the work it was waiting on",
+  );
+});
+
+test("the can-run-together line goes once neither run is in flight", async (t) => {
+  // Present tense about two runs that are running. Left alone it became the
+  // room's permanent last word on a collision that stopped mattering when both
+  // agents finished, hours earlier.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "advisorysweep");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "conflict_detected",
+    taskId: tasks.claude,
+    data: {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId: repo,
+      taskIds: [tasks.claude, tasks.codex],
+      disposition: "concurrent_with_notification",
+      evidence: [{ kind: "file_overlap", resources: ["apps/web/public/app.js"] }],
+    },
+  });
+  await waitFor(
+    async () =>
+      (await runtime.store.listChannelMessages(repo, ownerId)).some(
+        (message) => message.authorId === "coordinator",
+      ),
+    "the advisory collision was never announced",
+    8_000,
+  );
+
+  const sweep = async (): Promise<void> => {
+    await (
+      runtime.gateway as unknown as {
+        reconcileArbitrationNotices(): Promise<void>;
+      }
+    ).reconcileArbitrationNotices();
+  };
+  const coordinatorLines = async (): Promise<string[]> =>
+    (await runtime.store.listChannelMessages(repo, ownerId))
+      .filter((message) => message.authorId === "coordinator")
+      .map((message) => String(message.content));
+
+  // One side finishing is not enough: the other is still overlapping it, which
+  // is the whole content of the line.
+  await runtime.store.cancelSubmittedTask(tasks.codex);
+  await sweep();
+  assert.equal(
+    (await coordinatorLines()).length,
+    1,
+    "the advisory line went while one of the two runs was still going",
+  );
+
+  await runtime.store.cancelSubmittedTask(tasks.claude);
+  await sweep();
+  assert.deepEqual(
+    await coordinatorLines(),
+    [],
+    "the advisory line outlived both runs it described",
+  );
+});
+
+test("deleting a coordinator notice does not stop the task it names", async (t) => {
+  // The notice carries a task id so a fresh process can find it again — and
+  // the delete route stops the task behind any message it removes. A reader
+  // tidying a stale hold out of their channel would otherwise have cancelled
+  // somebody else's running agent, from a line that is not even that run's
+  // thread.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const firstName = String(session.user.displayName).split(" ")[0] ?? "Owner";
+  const repo = await invitableRepository(owner, "deleteroom");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  const tasks = await roomWithTwoAgents(
+    runtime,
+    owner,
+    repo,
+    ownerId,
+    firstName,
+  );
+
+  await runtime.store.appendAudit(undefined, {
+    type: "plan_admitted",
+    taskId: tasks.claude,
+    data: {
+      status: "sequenced",
+      blockedBy: [tasks.codex],
+      explanation: "Sequenced behind executing work on the same resources",
+    },
+  });
+  await waitFor(
+    async () =>
+      (await runtime.store.listChannelMessages(repo, ownerId)).some(
+        (message) => message.authorId === "coordinator",
+      ),
+    "the hold was never announced in the room",
+    8_000,
+  );
+
+  const notice = (await runtime.store.listChannelMessages(repo, ownerId)).find(
+    (message) => message.authorId === "coordinator",
+  );
+  assert.ok(notice !== undefined, "the hold notice was not found");
+  assert.equal(
+    notice.taskId,
+    tasks.claude,
+    "the notice did not record the task it is about",
+  );
+
+  const removed = await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages/${notice.id}`,
+    { method: "DELETE" },
+  );
+  assert.equal(removed.status, 200, JSON.stringify(removed.data));
+  assert.equal(
+    (removed.data as { cancelledTask?: boolean }).cancelledTask,
+    false,
+    "deleting the notice cancelled the run it named",
+  );
+  assert.deepEqual(runtime.cancelCalls, [], "the notice stopped a live run");
+  const held = (await runtime.store.listSubmittedTasks({ repositoryId: repo }))
+    .find((task) => task.id === tasks.claude);
+  assert.notEqual(
+    held?.status,
+    "cancelled",
+    "the task behind the notice was cancelled by a channel tidy-up",
+  );
+});
+
 test("an agent with no connection this channel knows still falls back to its objective", async (t) => {
   // The fallback is the whole reason the resolver can be trusted: it names an
   // agent or it says nothing confident. A task submitted by somebody with no
@@ -10480,4 +10790,119 @@ test("a direct message can be unsent by its sender and nobody else", async (t) =
     ),
     [],
   );
+});
+
+test("Codex usage falls back to the live account quota snapshot", async (t) => {
+  let liveReads = 0;
+  const runtime = await startRuntime(t, {
+    codexUsageReader: async () => {
+      liveReads += 1;
+      return {
+        limitId: "codex",
+        primary: {
+          usedPercent: 11,
+          windowDurationMins: 300,
+          resetsAt: 1_787_000_000,
+        },
+        secondary: {
+          usedPercent: 37,
+          windowDurationMins: 10_080,
+          resetsAt: 1_787_400_000,
+        },
+        planType: "plus",
+      };
+    },
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+
+  const response = await client.request(
+    "/api/v1/chat/providers/openai/usage",
+  );
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  assert.equal(liveReads, 1);
+  assert.deepEqual(runtime.usageCalls, ["openai"]);
+  assert.equal(response.data.usage.source, "Codex account rate limits (plus)");
+  const resetText = (at: number): string =>
+    new Date(at * 1_000).toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  assert.deepEqual(
+    response.data.usage.windows,
+    [
+      {
+        label: "5 hours",
+        percentUsed: 11,
+        resetsAt: resetText(1_787_000_000),
+      },
+      {
+        label: "7 days",
+        percentUsed: 37,
+        resetsAt: resetText(1_787_400_000),
+      },
+    ],
+  );
+});
+
+test("recorded Codex usage wins without an unnecessary live lookup", async (t) => {
+  let liveReads = 0;
+  const runtime = await startRuntime(t, {
+    codexUsageReader: async () => {
+      liveReads += 1;
+      return undefined;
+    },
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const recorded = {
+    source: "Codex CLI session records (~/.codex/sessions)",
+    windows: [{ label: "5 hours", percentUsed: 23 }],
+  };
+  runtime.providerUsage.set("openai", recorded);
+
+  const response = await client.request(
+    "/api/v1/chat/providers/openai/usage",
+  );
+  assert.equal(response.status, 200, JSON.stringify(response.data));
+  assert.deepEqual(response.data.usage, recorded);
+  assert.equal(liveReads, 0);
+});
+
+test("unavailable live Codex usage and Claude usage retain their existing shape", async (t) => {
+  let liveReads = 0;
+  const runtime = await startRuntime(t, {
+    codexUsageReader: async () => {
+      liveReads += 1;
+      return undefined;
+    },
+  });
+  const client = new TestClient(runtime.origin);
+  await bootstrap(client);
+  const unavailable = {
+    source: "Codex CLI session records (~/.codex/sessions)",
+    windows: [],
+    unavailableReason:
+      "No Codex session has recorded rate limits on this machine yet.",
+  };
+  const claude = {
+    source: "claude /usage, as reported by the signed-in account",
+    windows: [{ label: "session", percentUsed: 8 }],
+  };
+  runtime.providerUsage.set("openai", unavailable);
+  runtime.providerUsage.set("anthropic", claude);
+
+  const codexResponse = await client.request(
+    "/api/v1/chat/providers/openai/usage",
+  );
+  const claudeResponse = await client.request(
+    "/api/v1/chat/providers/anthropic/usage",
+  );
+  assert.equal(codexResponse.status, 200, JSON.stringify(codexResponse.data));
+  assert.equal(claudeResponse.status, 200, JSON.stringify(claudeResponse.data));
+  assert.deepEqual(codexResponse.data.usage, unavailable);
+  assert.deepEqual(claudeResponse.data.usage, claude);
+  assert.equal(liveReads, 1);
 });

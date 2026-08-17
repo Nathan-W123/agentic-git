@@ -483,6 +483,93 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
   );
 });
 
+test("the phone drawer is dragged out under the finger, not toggled", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // The drag tracks: a move sets how far out the drawer is, the stylesheet
+  // reads that number, and the transition is off while the finger is down so
+  // the panel is where the hand is rather than easing toward it.
+  const move = app.slice(
+    app.indexOf('"touchmove",', app.indexOf("function endDrawerDrag")),
+    app.indexOf('"touchcancel",'),
+  );
+  assert.notEqual(move, "", "the drawer has a touchmove handler");
+  assert.match(move, /setProperty\("--chan-drawer-x", `\$\{drag\.offset\}px`\)/u);
+  assert.match(move, /setProperty\(\s*"--chan-drawer-p",/u);
+  assert.match(move, /classList\.add\("chan-dragging"\)/u);
+  assert.match(
+    css,
+    /\.chats-shell\.chan-dragging \.chan-sidebar \{\s*transform: translateX\(calc\(-100% \+ var\(--chan-drawer-x, 0px\)\)\);\s*transition: none;/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.chan-dragging \.chan-sidebar-scrim \{\s*opacity: var\(--chan-drawer-p, 0\);/u,
+  );
+
+  // Non-passive, because a drawer moving with the finger cannot have the
+  // transcript scrolling underneath it — but only once the gesture is the
+  // drawer's, which is what the slop decides.
+  assert.match(move, /\{ passive: false \}/u);
+  assert.match(move, /event\.preventDefault\(\)/u);
+  assert.match(move, /Math\.abs\(dx\) <= Math\.abs\(dy\)/u);
+
+  // Letting go hands the rest of the distance back to CSS: the modifier comes
+  // off, which restores both the transition and the class's own transform, and
+  // the drawer finishes from wherever it was. A render here would replace the
+  // shell and leave the new element nothing to animate from.
+  const settle = app.slice(
+    app.indexOf("function endDrawerDrag"),
+    app.indexOf('"touchstart",'),
+  );
+  assert.match(settle, /classList\.remove\("chan-dragging"\)/u);
+  assert.match(settle, /removeProperty\("--chan-drawer-x"\)/u);
+  assert.match(settle, /setChanDrawer\(open\)/u);
+  assert.doesNotMatch(settle, /\brender\(\)/u);
+  const setter = app.slice(
+    app.indexOf("function setChanDrawer"),
+    app.indexOf("function closeSidePanel"),
+  );
+  assert.match(setter, /classList\.toggle\("roster-open", next\)/u);
+  assert.doesNotMatch(setter, /\brender\(\)/u);
+  assert.match(
+    css,
+    /\.chan-sidebar \{[^}]*transition: transform 0\.28s cubic-bezier\(0\.32, 0\.72, 0, 1\);/u,
+  );
+
+  // The button is not the only route any more, and equally is not gone: a
+  // gesture leaves nothing on screen, so it cannot be the sole way to a
+  // surface. Both now go through the same non-rendering setter.
+  assert.match(chats, /class="icon-btn chan-sidebar-btn" data-act="chan-sidebar-toggle"/u);
+  assert.match(chats, /aria-expanded="\$\{state\.chanSidebarOpen === true\}"/u);
+  assert.match(
+    app,
+    /case "chan-sidebar-toggle":\s*setChanDrawer\(state\.chanSidebarOpen !== true\);/u,
+  );
+  assert.match(app, /case "chan-sidebar-close":\s*setChanDrawer\(false\);/u);
+
+  // The scrim is always in the markup — a drawer a third of the way out wants
+  // a scrim a third of the way dark, which an element that only exists once it
+  // is fully open cannot be. Transparent and untouchable until then.
+  assert.match(
+    chats,
+    /`<div class="chan-sidebar-scrim" data-act="chan-sidebar-close"><\/div>`\s*\}/u,
+  );
+  assert.doesNotMatch(
+    chats,
+    /state\.chanSidebarOpen === true\s*\?\s*`<div class="chan-sidebar-scrim"/u,
+  );
+  assert.match(
+    css,
+    /\.chan-sidebar-scrim \{[^}]*opacity: 0;[^}]*pointer-events: none;/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.roster-open \.chan-sidebar-scrim \{\s*opacity: 1;\s*pointer-events: auto;/u,
+  );
+});
+
 test("a reply carries a quiet visual path back to its root", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
@@ -1716,6 +1803,51 @@ test("channel messages compact only an uninterrupted run from one person", async
   assert.match(
     css,
     /\.cmsg-row\.cmsg-compact \.cmsg-body \{[\s\S]{0,80}margin-left: 44px;/u,
+  );
+});
+
+test("private-chat messages compact only an uninterrupted run from one speaker", async () => {
+  const chat = await publicFile("chat.js");
+  const css = await publicFile("styles.css");
+
+  const start = chat.indexOf("function continuesPrivateChatMessageGroup");
+  const end = chat.indexOf("\nexport function chatThread", start);
+  assert.notEqual(start, -1, "chat.js declares the private grouping rule");
+  assert.notEqual(end, -1, "the private grouping rule has a testable boundary");
+  const createGroupingRule = new Function(
+    `${chat.slice(start, end)}\nreturn continuesPrivateChatMessageGroup;`,
+  );
+  const continues = createGroupingRule() as (
+    previous: { role: string } | undefined,
+    current: { role: string },
+    startsNewDay: boolean,
+  ) => boolean;
+
+  assert.equal(continues({ role: "user" }, { role: "user" }, false), true);
+  assert.equal(
+    continues({ role: "assistant" }, { role: "assistant" }, false),
+    true,
+  );
+  assert.equal(continues({ role: "user" }, { role: "assistant" }, false), false);
+  assert.equal(continues({ role: "assistant" }, { role: "user" }, false), false);
+  assert.equal(continues({ role: "system" }, { role: "user" }, false), false);
+  assert.equal(continues({ role: "user" }, { role: "system" }, false), false);
+  assert.equal(continues({ role: "user" }, { role: "user" }, true), false);
+  assert.equal(continues(undefined, { role: "user" }, false), false);
+
+  // Continuations lose only repeated time chrome. They remain individual
+  // bubbles with their original indices, so rewinding from either one keeps
+  // the conversation semantics unchanged.
+  assert.match(chat, /compact \? " msg-compact" : ""/u);
+  assert.match(
+    chat,
+    /compact\s*\?\s*""\s*:\s*`<span class="msg-time">/u,
+  );
+  assert.match(chat, /act: "chat-msg-delete"/u);
+  assert.match(chat, /value: String\(index\)/u);
+  assert.match(
+    css,
+    /\.msg\.msg-compact \{\s*margin-top: -8px;\s*\}/u,
   );
 });
 
