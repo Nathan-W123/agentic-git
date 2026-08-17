@@ -12,6 +12,7 @@ import {
   ProviderChatError,
   ProviderChatService,
   parseClaudeStreamJson,
+  parseCodexAppServerRateLimits,
   parseCodexJsonl,
   type ProcessRunner,
 } from "./providers.js";
@@ -669,6 +670,90 @@ test("codex usage comes from the rate limits its own session records", async () 
   const none = await bare.usage({ provider: "openai" });
   assert.deepEqual(none.windows, []);
   assert.match(none.unavailableReason ?? "", /no Codex session/iu);
+});
+
+test("codex usage asks the account for its quota before reading session records", async () => {
+  const harness = await createHarness();
+  const seen: string[][] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    runner: scriptedRunner({
+      codex: (args) => {
+        seen.push([...args]);
+        if (args[0] !== "app-server") {
+          return output("", 127, "not scripted");
+        }
+        // The app-server answers the handshake and then the quota read, on
+        // its own JSON-RPC lines. Exit code is deliberately non-zero: it is
+        // killed once the answer is in, and the figures still count.
+        return output(
+          `${[
+            JSON.stringify({ jsonrpc: "2.0", id: 0, result: {} }),
+            JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              result: {
+                rate_limits: {
+                  primary: {
+                    used_percent: 12.5,
+                    window_minutes: 300,
+                    resets_at: 1_785_902_966,
+                  },
+                  secondary: { used_percent: 40, window_minutes: 10_080 },
+                  plan_type: "plus",
+                },
+              },
+            }),
+          ].join("\n")}\n`,
+          143,
+        );
+      },
+    }),
+  });
+  const report = await service.usage({ provider: "openai" });
+  assert.deepEqual(seen[0], ["app-server", "--stdio"]);
+  assert.equal(report.unavailableReason, undefined);
+  assert.equal(report.source, "Codex account rate limits (plus)");
+  assert.equal(report.windows.length, 2);
+  assert.equal(report.windows[0]?.percentUsed, 12.5);
+  assert.equal(report.windows[0]?.label, "5 hours");
+  assert.ok((report.windows[0]?.resetsAt ?? "").length > 0);
+  assert.equal(report.windows[1]?.label, "week");
+});
+
+test("the codex quota answer is read in either spelling, and nothing is invented", () => {
+  const camel = parseCodexAppServerRateLimits(
+    `${JSON.stringify({
+      id: 1,
+      result: {
+        rateLimits: {
+          primary: { usedPercent: 7, windowDurationMins: 60 },
+          secondary: { usedPercent: 130, windowDurationMins: 43_200 },
+        },
+      },
+    })}\n`,
+  );
+  assert.equal(camel?.source, "Codex account rate limits");
+  assert.equal(camel?.windows[0]?.label, "hour");
+  assert.equal(camel?.windows[0]?.percentUsed, 7);
+  // A percentage past the end of the bar is clamped, not drawn off the edge.
+  assert.equal(camel?.windows[1]?.percentUsed, 100);
+
+  // A handshake with no quota in it, an error reply, and noise are all "no
+  // answer" rather than an empty report that reads as a real zero.
+  assert.equal(parseCodexAppServerRateLimits(""), undefined);
+  assert.equal(
+    parseCodexAppServerRateLimits(
+      `${JSON.stringify({ id: 0, result: {} })}\nnot json\n`,
+    ),
+    undefined,
+  );
+  assert.equal(
+    parseCodexAppServerRateLimits(
+      `${JSON.stringify({ id: 1, error: { message: "unknown method" } })}\n`,
+    ),
+    undefined,
+  );
 });
 
 test("streaming relays real CLI events and ends with the parsed reply", async () => {

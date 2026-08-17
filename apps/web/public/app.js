@@ -63,6 +63,7 @@ import {
   ensureProviderUsage,
   ensureRepositoryGrants,
   refreshChannelMessages,
+  refreshProviderUsage,
   addChannelAgent,
   removeChannelAgent,
   removeChannelAgentForUser,
@@ -1050,6 +1051,31 @@ function commitAgentRename(providerId, name) {
   state.settingsRenamingId = undefined;
   render();
   void renameAgent(providerId, name).then(() => render());
+}
+
+/**
+ * Writes one channel's role for one agent, from the details tab's inline
+ * field.
+ *
+ * The repository is read off the field rather than taken from the open
+ * channel: the tab lists every room the agent belongs to, and the whole point
+ * of the list is that a role is per repository — the same agent can be the
+ * reviewer here and the migration hand next door.
+ *
+ * `defaultValue` is moved to the committed text because Enter and the blur it
+ * causes both arrive, and a second write would be a second request saying the
+ * same thing.
+ */
+function commitChannelRole(input) {
+  const agentId = input.dataset.value;
+  const repositoryId = input.dataset.repo;
+  if (!agentId || !repositoryId || input.value === input.defaultValue) {
+    return;
+  }
+  const role = input.value.trim();
+  input.defaultValue = role;
+  setChannelAgentSetting(repositoryId, agentId, "role", role, render);
+  render();
 }
 
 function appearanceCard() {
@@ -3908,6 +3934,11 @@ document.addEventListener("click", (event) => {
         );
         if (opened?.mine === true) {
           void ensureProviderUsage(opened.provider ?? opened.id, render);
+          // The model and reasoning pickers on the details tab are drawn from
+          // the account's own reported lists, so they have to be asked for the
+          // same way the composer's pickers are — otherwise the tab shows two
+          // empty dropdowns and no way to tell that anything is missing.
+          void ensureAgentOptions(opened.provider ?? opened.id, render);
         }
         void (async () => {
           for (const repository of state.repositories) {
@@ -4350,6 +4381,13 @@ document.addEventListener("click", (event) => {
     case "agent-all":
       navigate("agents");
       return;
+    // Asks the vendor again rather than reading the kept answer. A usage card
+    // that said "no session has recorded rate limits yet" would otherwise go
+    // on saying it for the rest of the session, including after the run that
+    // produced some.
+    case "agent-usage-refresh":
+      void refreshProviderUsage(value, render);
+      return;
     case "task-cancel":
       void cancelTask(value, render);
       return;
@@ -4687,6 +4725,14 @@ document.addEventListener("submit", (event) => {
       }
       return;
     }
+    /** The details tab's role field: Enter commits, blur commits the same. */
+    case "agent-role-form": {
+      const input = $("[data-act='agent-role-input']", form);
+      if (input !== null) {
+        commitChannelRole(input);
+      }
+      return;
+    }
     /** The inline name edit commits on Enter; blur uses the same operation. */
     case "channel-rename-form": {
       const input = $("[data-act='channel-rename-input']", form);
@@ -4818,7 +4864,7 @@ document.addEventListener("change", (event) => {
         return;
       }
       const field = act === "channel-agent-model" ? "model" : "effort";
-      setChannelAgentSetting(activeChannelId(), agentId, field, node.value);
+      setChannelAgentSetting(activeChannelId(), agentId, field, node.value, render);
       render();
       return;
     }
@@ -5085,9 +5131,19 @@ document.addEventListener("keydown", (event) => {
     render();
     return;
   }
+  // Escape abandons a half-typed role and puts the saved one back, which a
+  // plain revert of the field's value is: `defaultValue` is what was last
+  // committed.
+  if (act === "agent-role-input" && event.key === "Escape") {
+    event.preventDefault();
+    node.value = node.defaultValue;
+    node.blur();
+    return;
+  }
   if (
     (act === "channel-rename-input" ||
-      act === "settings-rename-input") &&
+      act === "settings-rename-input" ||
+      act === "agent-role-input") &&
     event.key === "Enter" &&
     !imeComposing(event)
   ) {
@@ -5107,6 +5163,15 @@ document.addEventListener("focusout", (event) => {
     const providerId = node.dataset.value;
     if (providerId && state.settingsRenamingId === providerId) {
       commitAgentRename(providerId, node.value);
+    }
+    return;
+  }
+  // The role field on the details tab makes the same bargain: clicking away
+  // is how most edits to it end, and losing one because it was never
+  // "submitted" would be the field quietly discarding work.
+  if (act === "agent-role-input") {
+    if (node.isConnected) {
+      commitChannelRole(node);
     }
     return;
   }
