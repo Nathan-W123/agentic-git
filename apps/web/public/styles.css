@@ -19,8 +19,10 @@
 
   /* Neutral grey, not blue-black. The surfaces were tinted toward navy, which
      read as a colour choice competing with the accent rather than as a
-     background behind it. Every value below is a true grey — equal parts, no
-     hue at all — so nothing competes with the accent or the status dots.
+     background behind it. The ramp below starts from true grey — equal parts,
+     no hue at all — so nothing competes with the accent or the status dots.
+     `applyTheme` gives only `--bg` a two-percent nudge toward the chosen accent;
+     every raised surface stays on this neutral ramp.
 
      The conversation is the lightest surface and everything else steps down
      away from it. This is the inverse of what the ramp used to do: the panels
