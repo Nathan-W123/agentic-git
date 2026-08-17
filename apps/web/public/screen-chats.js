@@ -311,13 +311,13 @@ function attachmentImage(base, image) {
 /**
  * The three helpers below take the draft rather than reading one.
  *
- * Two composers stage images now — the channel bar and the thread panel's
- * reply box — and they hold their text in two different places
- * (`state.chatDraft` and `state.threadDraft`). The rules for where the
- * references live inside a draft, and for what the textarea may show of it,
- * are the same in both, so they are written once and passed the draft. The
- * channel's is the default, because it is the caller that came first and
- * every one of its call sites reads the same string it always did.
+ * Three composers stage images now — the channel bar, the thread panel's reply
+ * box, and direct messages — and they hold their text in separate drafts. The
+ * rules for where the references live inside a draft, and for what the
+ * textarea may show of it, are the same in all three, so they are written once
+ * and passed the draft. The channel's is the default, because it is the caller
+ * that came first and every one of its call sites reads the same string it
+ * always did.
  */
 function draftAttachments(repositoryId, draft = state.chatDraft) {
   const base =
@@ -2759,6 +2759,10 @@ function dmPanel() {
   const name = person?.name ?? memberName(userId) ?? "Someone";
   const messages = state.dmThreads[userId] ?? [];
   const online = personOnline(userId);
+  const repositoryId = activeChannelId();
+  const dmPending =
+    (state.dmAttaching ?? 0) > 0 ||
+    draftAttachments(repositoryId, state.dmDraft).length > 0;
   return `<aside class="thread-panel">
     ${panelGrip()}
     <header class="thread-head">
@@ -2780,7 +2784,11 @@ function dmPanel() {
               .map((message) => {
                 const mine = message.authorId === currentUserId();
                 return `<div class="dm-msg${mine ? " dm-mine" : ""}">
-                  <div class="dm-bubble">${esc(message.content)}</div>
+                  <div class="dm-bubble cmsg-text">${messageBody(
+                    message.content,
+                    repositoryId,
+                    [],
+                  )}</div>
                   <span class="dm-msg-actions">${iconButton("reply", {
                     act: "dm-reply-quote",
                     value: message.id,
@@ -2805,14 +2813,31 @@ function dmPanel() {
               .join("")
       }
     </div>
-    <form class="composer" data-act="dm-submit" style="margin:0 12px 12px">
-      <textarea data-act="dm-input" rows="1"
-        placeholder="Message ${esc(name)}...">${esc(state.dmDraft)}</textarea>
-      <div class="composer-bar">
-        <span class="spacer"></span>
-        <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
-      </div>
-    </form>
+    <div class="thread-composer-wrap">
+      ${draftAttachmentPreviews(repositoryId, {
+        draft: state.dmDraft,
+        removeAct: "dm-attachment-remove",
+      })}
+      <form class="composer${dmPending ? " is-expanded" : ""}" data-act="dm-submit"
+        style="margin:0 12px 12px">
+        <textarea data-act="dm-input" rows="1" enterkeyhint="send"
+          placeholder="Message ${esc(name)}...">${esc(draftText(state.dmDraft))}</textarea>
+        <div class="composer-bar">
+          <input type="file" data-act="dm-attach-input" accept="image/png,
+            image/jpeg,image/gif,image/webp" multiple hidden>
+          ${iconButton("paperclip", {
+            act: "dm-attach",
+            title: "Attach images",
+            small: true,
+          })}
+          ${(state.dmAttaching ?? 0) > 0
+            ? `<span class="composer-note">attaching ${esc(String(state.dmAttaching))} image(s)…</span>`
+            : ""}
+          <span class="spacer"></span>
+          <button class="send-btn" type="submit" title="Send">${icon("send")}</button>
+        </div>
+      </form>
+    </div>
   </aside>`;
 }
 

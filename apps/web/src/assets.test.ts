@@ -1435,6 +1435,92 @@ test("the channel composer highlights mentions and previews pasted images", asyn
   assert.match(css, /\.composer-attachment img/u);
 });
 
+test("the direct-message composer previews pasted images like the channel composer", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const dmStart = chats.indexOf("function dmPanel()");
+  const dmEnd = chats.indexOf("\nfunction threadPanel", dmStart);
+  const dmPanel = chats.slice(dmStart, dmEnd);
+  const pasteStart = app.indexOf('document.addEventListener("paste"');
+  const pasteEnd = app.indexOf('document.addEventListener("input"', pasteStart);
+  const paste = app.slice(pasteStart, pasteEnd);
+  const changeStart = app.indexOf('document.addEventListener("change"');
+  const changeEnd = app.indexOf('document.addEventListener("paste"', changeStart);
+  const change = app.slice(changeStart, changeEnd);
+
+  assert.notEqual(dmStart, -1, "screen-chats.js declares the DM panel");
+  assert.notEqual(dmEnd, -1, "the DM panel has a testable boundary");
+  assert.match(dmPanel, /draftAttachmentPreviews\(repositoryId, \{/u);
+  assert.match(dmPanel, /draft: state\.dmDraft/u);
+  assert.match(dmPanel, /removeAct: "dm-attachment-remove"/u);
+  assert.match(dmPanel, /data-act="dm-attach-input"/u);
+  assert.match(dmPanel, /act: "dm-attach"/u);
+  assert.match(change, /picker\?\.dataset\?\.act === "dm-attach-input"/u);
+  assert.match(change, /picker\.dataset\.act === "dm-attach-input"/u);
+  assert.match(paste, /act !== "dm-input"/u);
+  assert.match(paste, /act === "dm-input"\s*\?\s*"dm"/u);
+});
+
+test("a direct message can send image-only and mixed text/image content", async () => {
+  const app = await browserSource();
+  const chats = await publicFile("screen-chats.js");
+  const targetsStart = app.indexOf("const ATTACH_TARGETS");
+  const targetsEnd = app.indexOf("\n};", targetsStart) + 3;
+  const targets = app.slice(targetsStart, targetsEnd);
+  const submitStart = app.indexOf('case "dm-submit"');
+  const submitEnd = app.indexOf("\n    // Expanding a file", submitStart);
+  const submit = app.slice(submitStart, submitEnd);
+  const inputStart = app.indexOf('if (act === "dm-input")');
+  const inputEnd = app.indexOf('if (act === "channel-thread-input")', inputStart);
+  const input = app.slice(inputStart, inputEnd);
+  const dmStart = chats.indexOf("function dmPanel()");
+  const dmEnd = chats.indexOf("\nfunction threadPanel", dmStart);
+  const dmPanel = chats.slice(dmStart, dmEnd);
+
+  assert.match(
+    targets,
+    /dm: \{[\s\S]*draft: "dmDraft",[\s\S]*counter: "dmAttaching",[\s\S]*input: "dm-input"/u,
+  );
+  assert.match(dmPanel, /draftText\(state\.dmDraft\)/u);
+  assert.match(dmPanel, /messageBody\([\s\S]{0,100}message\.content/u);
+  assert.match(submit, /const draft = state\.dmDraft\.trim\(\)/u);
+  assert.match(submit, /draft\.length === 0/u);
+  assert.match(submit, /sendDirectMessage\(other, draft\)/u);
+  assert.match(input, /const attachments = String\(state\.dmDraft/u);
+  assert.match(input, /attachments\.join\("\\n"\)/u);
+  assert.match(input, /state\.dmDraft = `\$\{node\.value\}/u);
+});
+
+test(
+  "direct-message attachment removal and successful sends clear previews without leaking drafts between conversations",
+  async () => {
+    const app = await browserSource();
+    const attachStart = app.indexOf("async function attachChannelImages");
+    const attachEnd = app.indexOf(
+      "\nasync function startPreviewAction",
+      attachStart,
+    );
+    const attach = app.slice(attachStart, attachEnd);
+    const removeStart = app.indexOf('case "channel-attachment-remove"');
+    const removeEnd = app.indexOf('case "thread-attach"', removeStart);
+    const remove = app.slice(removeStart, removeEnd);
+    const submitStart = app.indexOf('case "dm-submit"');
+    const submitEnd = app.indexOf("\n    // Expanding a file", submitStart);
+    const submit = app.slice(submitStart, submitEnd);
+
+    assert.match(remove, /case "dm-attachment-remove"/u);
+    assert.match(remove, /ATTACH_TARGETS\.dm/u);
+    assert.match(remove, /state\[where\.draft\]/u);
+    assert.match(attach, /const dmUserId = target === "dm" \? state\.activeDm/u);
+    assert.match(attach, /target === "dm" && state\.activeDm !== dmUserId/u);
+    assert.match(submit, /state\.dmDraft = "";[\s\S]{0,80}render\(\)/u);
+    assert.match(
+      app,
+      /case "dm-open":[\s\S]{0,120}state\.activeDm = value;[\s\S]{0,120}state\.dmDraft = "";/u,
+    );
+  },
+);
+
 test("thread composer characters stay visible without a painted text layer", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
