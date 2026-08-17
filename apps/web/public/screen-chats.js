@@ -1477,6 +1477,7 @@ function messageRow(
     inlineReplyTo = undefined,
     hideChanges = false,
     actions = "",
+    compact = false,
   } = {},
 ) {
   const author = channelAuthor(repositoryId, entry);
@@ -1516,6 +1517,7 @@ function messageRow(
   const deleted = entry.deletedAt !== undefined;
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
     inlineReply ? " cmsg-inline-reply" : ""
+  }${compact ? " cmsg-compact" : ""
   }${hasTaskThread && !isReply ? " cmsg-threaded" : ""
   }${deleted ? " cmsg-deleted" : ""}${
     // The auditor reads every merge without being asked, so its lines arrive
@@ -1553,16 +1555,31 @@ function messageRow(
               ? messageReference(referencedRoot, repositoryId)
               : holdNoticeRef(entry, repositoryId)
     }
-    <span class="cmsg-avatar">${
-      author.agent !== undefined ? agentFace(author.agent, 32) : avatar(author.name, 32, author.name, author.name === currentUserName() ? myAvatar() : undefined)
-    }</span>
+    ${
+      compact
+        ? ""
+        : `<span class="cmsg-avatar">${
+            author.agent !== undefined
+              ? agentFace(author.agent, 32)
+              : avatar(
+                  author.name,
+                  32,
+                  author.name,
+                  author.name === currentUserName() ? myAvatar() : undefined,
+                )
+          }</span>`
+    }
     <div class="cmsg-body">
-      <div class="cmsg-top">
-        <span class="cmsg-name${author.agent !== undefined ? " agent-name" : ""}">${esc(
-          author.name,
-        )}</span>
-        <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
-      </div>
+      ${
+        compact
+          ? ""
+          : `<div class="cmsg-top">
+              <span class="cmsg-name${author.agent !== undefined ? " agent-name" : ""}">${esc(
+                author.name,
+              )}</span>
+              <span class="cmsg-time">${esc(clockTime(entry.at))}</span>
+            </div>`
+      }
       <div class="cmsg-text">${
         deleted
           ? `<span class="cmsg-tombstone">${icon("trash")} This message was deleted</span>`
@@ -1717,6 +1734,32 @@ function messageRow(
 }
 
 /**
+ * Whether one timeline item continues the uninterrupted run of human messages
+ * immediately before it. Replies keep their reference and full header, and a
+ * date boundary starts a fresh group even when the same person was speaking
+ * on both sides of midnight.
+ */
+function continuesUserMessageGroup(previous, current, startsNewDay) {
+  if (
+    previous === undefined ||
+    startsNewDay ||
+    previous.inlineReplyTo !== undefined ||
+    current.inlineReplyTo !== undefined
+  ) {
+    return false;
+  }
+  const before = previous.entry;
+  const after = current.entry;
+  const authorId = String(after.authorId ?? "");
+  return (
+    before.kind === "user" &&
+    after.kind === "user" &&
+    authorId !== "" &&
+    String(before.authorId ?? "") === authorId
+  );
+}
+
+/**
  * The three dots, for one surface.
  *
  * People and agents are shown by the same row because they mean the same
@@ -1835,11 +1878,12 @@ function messageList(repositoryId) {
   }
   timeline.push(...pending.slice(next));
   let lastDay = "";
-  const rows = timeline.map((item) => {
+  const rows = timeline.map((item, index) => {
     const entry = item.entry;
     const day = new Date(item.at ?? Date.now()).toDateString();
     let separator = "";
-    if (day !== lastDay) {
+    const startsNewDay = day !== lastDay;
+    if (startsNewDay) {
       lastDay = day;
       const isToday = day === new Date().toDateString();
       separator = `<div class="chan-day">${isToday ? "Today" : esc(day)}</div>`;
@@ -1854,7 +1898,15 @@ function messageList(repositoryId) {
       (entry.replies ?? []).length === 0 &&
       entry.taskId !== undefined &&
       threadedTasks.has(entry.taskId);
-    return separator + messageRow(entry, repositoryId, { hideChanges });
+    // Search results are independent hits rather than a faithful transcript;
+    // always name them so filtering an intervening author cannot create a
+    // group that did not exist in the channel.
+    const compact =
+      query === "" &&
+      continuesUserMessageGroup(timeline[index - 1], item, startsNewDay);
+    return (
+      separator + messageRow(entry, repositoryId, { hideChanges, compact })
+    );
   });
   return `<div class="chan-messages" id="chan-messages"
     data-scroll-key="channel:${esc(repositoryId)}">${rows.join(

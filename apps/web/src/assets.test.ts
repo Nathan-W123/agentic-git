@@ -1535,6 +1535,62 @@ test("a posted ping highlights its full name with a quiet static treatment", asy
   );
 });
 
+test("channel messages compact only an uninterrupted run from one person", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  const start = chats.indexOf("function continuesUserMessageGroup");
+  const end = chats.indexOf("\n/**\n * The three dots", start);
+  assert.notEqual(start, -1, "screen-chats.js declares the grouping rule");
+  assert.notEqual(end, -1, "the grouping rule has a testable boundary");
+  const createGroupingRule = new Function(
+    `${chats.slice(start, end)}\nreturn continuesUserMessageGroup;`,
+  );
+  const continues = createGroupingRule() as (
+    previous: unknown,
+    current: unknown,
+    startsNewDay: boolean,
+  ) => boolean;
+  const item = (
+    authorId: string,
+    options: { kind?: string; reply?: boolean } = {},
+  ) => ({
+    entry: { kind: options.kind ?? "user", authorId },
+    inlineReplyTo: options.reply === true ? { id: "root" } : undefined,
+  });
+
+  assert.equal(continues(item("alice"), item("alice"), false), true);
+  assert.equal(continues(item("alice"), item("bob"), false), false);
+  assert.equal(continues(item("alice"), item("alice"), true), false);
+  assert.equal(
+    continues(item("alice", { reply: true }), item("alice"), false),
+    false,
+  );
+  assert.equal(
+    continues(item("alice"), item("alice", { reply: true }), false),
+    false,
+  );
+  assert.equal(
+    continues(item("alice", { kind: "system" }), item("alice"), false),
+    false,
+  );
+
+  // Compaction changes only the repeated identity chrome. The body and the
+  // action rail stay outside those conditionals, so every message remains
+  // independently interactive.
+  assert.match(
+    chats,
+    /compact\s*\?\s*""\s*:\s*`<span class="cmsg-avatar">/u,
+  );
+  assert.match(chats, /compact\s*\?\s*""\s*:\s*`<div class="cmsg-top">/u);
+  assert.match(chats, /<span class="cmsg-actions">/u);
+  assert.match(css, /\.cmsg-row\.cmsg-compact \{/u);
+  assert.match(
+    css,
+    /\.cmsg-row\.cmsg-compact \.cmsg-body \{[\s\S]{0,80}margin-left: 44px;/u,
+  );
+});
+
 test("the invite screen names the product, not only the team", async () => {
   const app = await browserSource();
   const start = app.indexOf("function renderInvite");

@@ -4395,6 +4395,23 @@ svg {
   background: var(--bg-hover);
 }
 
+/* Consecutive lines from one person read as a single message group. Keep the
+   text aligned with the first line's body, but spend no vertical room on a
+   repeated face, name, or clock. Each line remains its own row so reactions,
+   thread details, and hover actions continue to belong to the right message. */
+.cmsg-row.cmsg-compact {
+  padding-top: 1px;
+  padding-bottom: 1px;
+}
+
+.cmsg-row.cmsg-compact .cmsg-body {
+  margin-left: 44px;
+}
+
+.cmsg-row.cmsg-compact .cmsg-text {
+  margin-top: 0;
+}
+
 /* A thread branches from the root avatar into its compact reply summary.
    Two pixels gives the branch enough presence to read as a path rather than a
    divider. It starts four pixels below the avatar and stops short of the reply
