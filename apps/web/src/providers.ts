@@ -483,6 +483,60 @@ function codexAppServerWindow(
   };
 }
 
+interface CodexAppServerLimitSnapshot {
+  id: string;
+  name: string;
+  plan?: string;
+  windows: ProviderUsageWindow[];
+}
+
+function codexAppServerLimitSnapshot(
+  value: unknown,
+  fallbackName: string,
+): CodexAppServerLimitSnapshot | undefined {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const limits = value as Record<string, unknown>;
+  const windows = [
+    codexAppServerWindow(limits["primary"], "primary"),
+    codexAppServerWindow(limits["secondary"], "secondary"),
+  ].filter((window): window is ProviderUsageWindow => window !== undefined);
+  if (windows.length === 0) {
+    return undefined;
+  }
+  const idValue = limits["limitId"] ?? limits["limit_id"];
+  const id =
+    typeof idValue === "string" && idValue.trim() !== ""
+      ? idValue.trim()
+      : fallbackName;
+  const nameValue = limits["limitName"] ?? limits["limit_name"];
+  const planValue = limits["planType"] ?? limits["plan_type"];
+  return {
+    id,
+    name:
+      typeof nameValue === "string" && nameValue.trim() !== ""
+        ? nameValue.trim()
+        : id,
+    ...(typeof planValue === "string" && planValue.trim() !== ""
+      ? { plan: planValue.trim() }
+      : {}),
+    windows,
+  };
+}
+
+function codexAppServerSnapshotSignature(
+  snapshot: CodexAppServerLimitSnapshot,
+): string {
+  return JSON.stringify(
+    snapshot.windows.map((window) => [
+      window.label,
+      window.percentUsed,
+      window.resetsAt ?? null,
+    ]),
+  );
+}
+
 /**
  * Reads the quota answer out of `codex app-server`'s JSON-RPC stdout.
  *
@@ -513,23 +567,64 @@ export function parseCodexAppServerRateLimits(
       continue;
     }
     const envelope = result as Record<string, unknown>;
-    const limitsValue =
-      envelope["rateLimits"] ?? envelope["rate_limits"] ?? envelope;
-    if (typeof limitsValue !== "object" || limitsValue === null) {
+    const byLimitValue =
+      envelope["rateLimitsByLimitId"] ??
+      envelope["rate_limits_by_limit_id"];
+    const snapshots: CodexAppServerLimitSnapshot[] = [];
+    if (
+      typeof byLimitValue === "object" &&
+      byLimitValue !== null &&
+      !Array.isArray(byLimitValue)
+    ) {
+      for (const [limitId, value] of Object.entries(
+        byLimitValue as Record<string, unknown>,
+      )) {
+        const snapshot = codexAppServerLimitSnapshot(value, limitId);
+        if (snapshot !== undefined) {
+          snapshots.push(snapshot);
+        }
+      }
+    }
+
+    // Older app-servers returned just `rateLimits`; newer ones retain it as a
+    // compatibility alias while putting the complete set in the keyed map.
+    // Keep a genuinely distinct top-level bucket, but do not show the aliased
+    // default twice.
+    const legacyValue =
+      envelope["rateLimits"] ??
+      envelope["rate_limits"] ??
+      (envelope["primary"] !== undefined || envelope["secondary"] !== undefined
+        ? envelope
+        : undefined);
+    const legacy = codexAppServerLimitSnapshot(legacyValue, "default");
+    if (
+      legacy !== undefined &&
+      !snapshots.some(
+        (snapshot) =>
+          (legacy.id !== "default" && snapshot.id === legacy.id) ||
+          codexAppServerSnapshotSignature(snapshot) ===
+            codexAppServerSnapshotSignature(legacy),
+      )
+    ) {
+      snapshots.push(legacy);
+    }
+    if (snapshots.length === 0) {
       continue;
     }
-    const limits = limitsValue as Record<string, unknown>;
-    const windows = [
-      codexAppServerWindow(limits["primary"], "primary"),
-      codexAppServerWindow(limits["secondary"], "secondary"),
-    ].filter((window): window is ProviderUsageWindow => window !== undefined);
-    if (windows.length === 0) {
-      continue;
-    }
-    const plan = limits["planType"] ?? limits["plan_type"];
+    const plan =
+      legacy?.plan ?? snapshots.find((snapshot) => snapshot.plan)?.plan;
+    const showBucketNames = snapshots.length > 1;
+    const windows = snapshots.flatMap((snapshot) =>
+      snapshot.windows.map((window) => ({
+        ...window,
+        label: showBucketNames
+          ? `${snapshot.name} · ${window.label}`
+          : window.label,
+      })),
+    );
     return {
       source:
-        typeof plan === "string" && plan.trim() !== ""
+        plan !== undefined
           ? `Codex account rate limits (${plan})`
           : "Codex account rate limits",
       windows,
