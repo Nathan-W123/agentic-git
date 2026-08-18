@@ -13,9 +13,12 @@ import type { CoordinatorProject } from "@coord/cli/project";
 import {
   runProcess,
   sanitizeChildEnv,
+  type CanonicalRepository,
   type ProcessOutput,
 } from "@coord/repository-service";
+import type { CanonicalVersion } from "@coord/shared-types";
 import {
+  GitWorktreeWorkspaceManager,
   supportedCredentialKinds,
   UserCredentialError,
   UserCredentialStore,
@@ -26,10 +29,12 @@ import {
   withCredentialHome,
   type CredentialHome,
   type CredentialVisibility,
+  type TaskWorkspace,
   type UserCredential,
   type UserCredentialKind,
   type UserCredentialSummary,
   type VendorCliKind,
+  type WorkspaceManager,
 } from "@coord/workspace-manager";
 
 /**
@@ -1447,6 +1452,15 @@ export interface ProviderChatServiceOptions {
    * exactly as it did before, file-only.
    */
   callSigns?: AgentCallSignStore;
+  /** Creates the short-lived, read-only checkout used by repository chat. */
+  workspaceManager?: Pick<WorkspaceManager, "create" | "destroy">;
+}
+
+/** Canonical state a chat answer may inspect without gaining write access. */
+export interface RepositoryChatContext {
+  repository: CanonicalRepository;
+  baseVersion: CanonicalVersion;
+  rootPath: string;
 }
 
 /**
@@ -1567,12 +1581,15 @@ export class ProviderChatService {
   private credentialStorePromise: Promise<UserCredentialStore> | undefined;
   /** Durable home for call signs; absent means file-only, as before. */
   private readonly callSignStore: AgentCallSignStore | undefined;
+  private readonly workspaceManager: Pick<WorkspaceManager, "create" | "destroy">;
 
   public constructor(
     private readonly project: CoordinatorProject,
     options: ProviderChatServiceOptions = {},
   ) {
     this.callSignStore = options.callSigns;
+    this.workspaceManager =
+      options.workspaceManager ?? new GitWorktreeWorkspaceManager();
     this.runner = options.runner ?? runProcess;
     this.streamRunner = options.streamRunner ?? streamProcess;
     this.longRunningSpawner = options.longRunningSpawner ?? spawnLongRunning;
@@ -3581,42 +3598,91 @@ export class ProviderChatService {
       cliSessionId?: string;
       /** A throwaway line — run it on {@link CEREMONIAL_MODELS}. */
       ceremonial?: boolean;
+      /** Optional canonical checkout for a repository-grounded answer. */
+      repository?: RepositoryChatContext;
     },
     onEvent: (event: ChatStreamEvent) => void,
   ): Promise<ChatReply> {
     const prompt = await this.prepareCompletion(input);
-    return await this.withCompletionEnv(
-      input.userId,
-      input.provider,
-      prompt.credential,
-      async (env) => {
-        try {
-          return input.provider === "anthropic"
-            ? await this.streamViaClaudeCli(
-                prompt.text,
-                prompt.settings,
-                input.cliSessionId,
-                onEvent,
-                env,
-              )
-            : await this.streamViaCodexCli(
-                prompt.text,
-                prompt.settings,
-                input.cliSessionId,
-                onEvent,
-                env,
-              );
-        } catch (error) {
-          // Record a real auth failure while the completion still owns the
-          // credential reservation. No task can rotate the session between
-          // observing the failure and retiring the credential; if this CLI
-          // itself rotated before failing, close writes it back and restores
-          // the connection before releasing the reservation.
-          await this.noteCredentialFailure(input.userId, input.provider, error);
-          throw error;
-        }
-      },
+    return await this.withCompletionDirectory(
+      input.repository,
+      async (workingDirectory) =>
+        await this.withCompletionEnv(
+          input.userId,
+          input.provider,
+          prompt.credential,
+          async (env) => {
+            try {
+              return input.provider === "anthropic"
+                ? await this.streamViaClaudeCli(
+                    prompt.text,
+                    prompt.settings,
+                    input.cliSessionId,
+                    onEvent,
+                    env,
+                    workingDirectory,
+                  )
+                : await this.streamViaCodexCli(
+                    prompt.text,
+                    prompt.settings,
+                    input.cliSessionId,
+                    onEvent,
+                    env,
+                    workingDirectory,
+                  );
+            } catch (error) {
+              // Record a real auth failure while the completion still owns the
+              // credential reservation. No task can rotate the session between
+              // observing the failure and retiring the credential; if this CLI
+              // itself rotated before failing, close writes it back and restores
+              // the connection before releasing the reservation.
+              await this.noteCredentialFailure(input.userId, input.provider, error);
+              throw error;
+            }
+          },
+        ),
     );
+  }
+
+  /**
+   * Gives one answer a detached checkout of the exact canonical revision.
+   *
+   * Provider chat remains read-only: Codex still runs in its read-only
+   * sandbox, Claude keeps its non-interactive permission boundary, and the
+   * checkout is destroyed after the turn even when the CLI fails. Chat that
+   * is not attached to a repository keeps using the empty scratch directory.
+   */
+  private async withCompletionDirectory<T>(
+    context: RepositoryChatContext | undefined,
+    use: (workingDirectory: string) => Promise<T>,
+  ): Promise<T> {
+    if (context === undefined) {
+      return await use(await this.scratchDirectory());
+    }
+
+    let workspace: TaskWorkspace;
+    try {
+      workspace = await this.workspaceManager.create({
+        taskId: `chat_${randomUUID()}`,
+        rootPath: context.rootPath,
+        repository: context.repository,
+        baseVersion: context.baseVersion,
+      });
+    } catch (error) {
+      throw new ProviderChatError(
+        503,
+        "repository_unavailable",
+        `The repository could not be opened for this answer: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+
+    try {
+      return await use(workspace.path);
+    } finally {
+      await this.workspaceManager.destroy(workspace);
+    }
   }
 
   /**
@@ -3739,34 +3805,42 @@ export class ProviderChatService {
     cliSessionId?: string;
     /** A throwaway line — run it on {@link CEREMONIAL_MODELS}. */
     ceremonial?: boolean;
+    /** Optional canonical checkout for a repository-grounded answer. */
+    repository?: RepositoryChatContext;
   }): Promise<ChatReply> {
     const prompt = await this.prepareCompletion(input);
-    return await this.withCompletionEnv(
-      input.userId,
-      input.provider,
-      prompt.credential,
-      async (env) => {
-        try {
-          return input.provider === "anthropic"
-            ? await this.completeViaClaudeCli(
-                prompt.text,
-                prompt.settings,
-                input.cliSessionId,
-                env,
-              )
-            : await this.completeViaCodexCli(
-                prompt.text,
-                prompt.settings,
-                input.cliSessionId,
-                env,
-              );
-        } catch (error) {
-          // Keep the failure update inside the same reservation as the CLI;
-          // see the streaming path above for the ordering guarantee.
-          await this.noteCredentialFailure(input.userId, input.provider, error);
-          throw error;
-        }
-      },
+    return await this.withCompletionDirectory(
+      input.repository,
+      async (workingDirectory) =>
+        await this.withCompletionEnv(
+          input.userId,
+          input.provider,
+          prompt.credential,
+          async (env) => {
+            try {
+              return input.provider === "anthropic"
+                ? await this.completeViaClaudeCli(
+                    prompt.text,
+                    prompt.settings,
+                    input.cliSessionId,
+                    env,
+                    workingDirectory,
+                  )
+                : await this.completeViaCodexCli(
+                    prompt.text,
+                    prompt.settings,
+                    input.cliSessionId,
+                    env,
+                    workingDirectory,
+                  );
+            } catch (error) {
+              // Keep the failure update inside the same reservation as the CLI;
+              // see the streaming path above for the ordering guarantee.
+              await this.noteCredentialFailure(input.userId, input.provider, error);
+              throw error;
+            }
+          },
+        ),
     );
   }
 
@@ -3854,8 +3928,8 @@ export class ProviderChatService {
     cliSessionId: string | undefined,
     onEvent: (event: ChatStreamEvent) => void,
     env: NodeJS.ProcessEnv | undefined,
+    workingDirectory: string,
   ): Promise<ChatReply> {
-    const scratch = await this.scratchDirectory();
     const model = settings.model ?? DEFAULT_CLAUDE_MODEL;
     const effort = settings.effort ?? DEFAULT_CLAUDE_EFFORT;
     const usePositional = prompt.length <= 8_000;
@@ -3939,7 +4013,7 @@ export class ProviderChatService {
         resolveClaudeCommand("claude"),
         argsFor(resume),
         {
-          cwd: scratch,
+          cwd: workingDirectory,
           ...(usePositional ? {} : { input: prompt }),
           ...(env === undefined ? {} : { env }),
           timeoutMs: CLI_TIMEOUT_MS,
@@ -3974,8 +4048,8 @@ export class ProviderChatService {
     cliSessionId: string | undefined,
     onEvent: (event: ChatStreamEvent) => void,
     env: NodeJS.ProcessEnv | undefined,
+    workingDirectory: string,
   ): Promise<ChatReply> {
-    const scratch = await this.scratchDirectory();
     const command = resolveCodexCommand(this.homeDirectory);
     const resumable =
       cliSessionId !== undefined &&
@@ -4007,7 +4081,7 @@ export class ProviderChatService {
             "--sandbox",
             "read-only",
             "-C",
-            scratch,
+            workingDirectory,
             ...(settings.model === undefined ||
             // Already stored before the suggestion list was fixed: bare gpt
             // ids fail every ChatGPT-account run with the vendor's 400, and
@@ -4055,7 +4129,7 @@ export class ProviderChatService {
         command,
         argsFor(resume),
         {
-          cwd: scratch,
+          cwd: workingDirectory,
           ...(env === undefined ? {} : { env }),
           timeoutMs: CLI_TIMEOUT_MS,
           maxOutputBytes: MAX_OUTPUT_BYTES,
@@ -4090,16 +4164,16 @@ export class ProviderChatService {
   /**
    * Headless Claude Code completion. The prompt is a positional argument —
    * verified live that a piped stdin prompt makes the CLI skip thinking —
-   * and the process runs in an empty scratch directory under default
-   * deny-by-request permissions, so it can answer but not act on the host.
+   * and the process runs in either an empty scratch directory or a temporary
+   * canonical checkout under default deny-by-request permissions.
    */
   private async completeViaClaudeCli(
     prompt: string,
     settings: ProviderSettings,
     cliSessionId: string | undefined,
     env: NodeJS.ProcessEnv | undefined,
+    workingDirectory: string,
   ): Promise<ChatReply> {
-    const scratch = await this.scratchDirectory();
     const model = settings.model ?? DEFAULT_CLAUDE_MODEL;
     const effort = settings.effort ?? DEFAULT_CLAUDE_EFFORT;
     const usePositional = prompt.length <= 8_000;
@@ -4119,7 +4193,7 @@ export class ProviderChatService {
     ];
     const runOnce = async (resume: boolean): Promise<ProcessOutput> =>
       await this.runner(resolveClaudeCommand("claude"), argsFor(resume), {
-        cwd: scratch,
+        cwd: workingDirectory,
         ...(usePositional ? {} : { input: prompt }),
         ...(env === undefined ? {} : { env }),
         timeoutMs: CLI_TIMEOUT_MS,
@@ -4144,9 +4218,9 @@ export class ProviderChatService {
   /**
    * Codex CLI completion over the signed-in ChatGPT account.
    *
-   * Runs `codex exec --json` in the read-only sandbox inside an empty
-   * scratch directory: the model can reason and answer but the CLI's own
-   * sandbox denies writes and command execution. Continuity uses
+   * Runs `codex exec --json` in the read-only sandbox inside either an empty
+   * scratch directory or a temporary canonical checkout: the model can
+   * reason and answer but the CLI's own sandbox denies writes. Continuity uses
    * `codex exec resume <thread_id>`.
    */
   private async completeViaCodexCli(
@@ -4154,8 +4228,8 @@ export class ProviderChatService {
     settings: ProviderSettings,
     cliSessionId: string | undefined,
     env: NodeJS.ProcessEnv | undefined,
+    workingDirectory: string,
   ): Promise<ChatReply> {
-    const scratch = await this.scratchDirectory();
     const command = resolveCodexCommand(this.homeDirectory);
     const resumable =
       cliSessionId !== undefined &&
@@ -4186,14 +4260,14 @@ export class ProviderChatService {
             "--sandbox",
             "read-only",
             "-C",
-            scratch,
+            workingDirectory,
             ...(settings.model === undefined ? [] : ["-m", settings.model]),
             ...effortOverride,
             prompt,
           ];
     const runOnce = async (resume: boolean): Promise<ProcessOutput> =>
       await this.runner(command, argsFor(resume), {
-        cwd: scratch,
+        cwd: workingDirectory,
         ...(env === undefined ? {} : { env }),
         timeoutMs: CLI_TIMEOUT_MS,
         maxOutputBytes: MAX_OUTPUT_BYTES,

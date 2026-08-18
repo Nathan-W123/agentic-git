@@ -1660,10 +1660,9 @@ const TASK_VERB_RE_GLOBAL = new RegExp(TASK_VERB_RE.source, "giu");
  *    it is past tense. The second clause is what keeps a mixed sentence
  *    ("which key changed, and can you revert it?") on the work path.
  *
- * A question that needs the repository to answer is unaffected and still
- * becomes a task — that is {@link needsTheRepository}'s job, and reading code
- * to report on it is work this product does deliberately. What this removes
- * is the case where nothing needed opening at all.
+ * Questions are answered by provider chat, which receives a temporary
+ * read-only checkout when it needs to inspect the repository. What this
+ * removes is the case where a question about completed work starts new work.
  */
 function asksAboutWork(text: string): boolean {
   if (!text.endsWith("?")) {
@@ -1730,46 +1729,6 @@ function readsAsQuestion(content: string): boolean {
     return false;
   }
   return text.endsWith("?") || INTERROGATIVE_RE.test(text);
-}
-
-/**
- * Whether a channel message reads as a request for work, conservatively.
- *
- * This is not NLP — a small, documented word list, biased hard toward false
- * negatives on purpose. A message that should have triggered but didn't
- * costs nothing: the sender can still @mention the right agent by hand,
- * which always works. A message that shouldn't have triggered but did
- * spends someone's real API/subscription usage on unwanted work. Those two
- * failure modes are not symmetric, so the rule requires *positive* evidence
- * — a concrete task verb — rather than merely the *absence* of a chatter
- * marker, and a status question about existing work is excluded even when
- * it contains a verb.
- */
-/**
- * Whether answering this honestly means opening the repository.
- *
- * The chat path has no checkout, so a message that needs one can only be met
- * with an apology. Routing it to a task instead gets it answered by an agent
- * with the files in front of it.
- *
- * Deliberately generous about what counts — a false positive costs a task
- * that reads a repository and reports, which is the behaviour being asked
- * for; a false negative is the apology this exists to remove. It stays
- * anchored on concrete nouns rather than any mention of work, so "how are you
- * getting on?" is still conversation.
- */
-export function needsTheRepository(content: string): boolean {
-  return (
-    /\b(repo|repos|repository|repositories|codebase|code ?base|source code|the code|this code|file|files|folder|directory|readme|test|tests|function|functions|class|classes|module|modules|endpoint|schema|migration|dependency|dependencies|commit|commits|branch|diff|changeset)\b/iu.test(
-      content,
-    ) ||
-    // A path or a filename, which is a reference to the repository whether or
-    // not the sentence around it says so.
-    /[\w-]+\.(?:ts|tsx|js|jsx|mjs|cjs|json|md|css|html|yml|yaml|toml|sql|py|go|rs|java|rb|sh)\b/iu.test(
-      content,
-    ) ||
-    /(^|\s)(?:\.\/|src\/|apps\/|packages\/|services\/)/u.test(content)
-  );
 }
 
 /**
@@ -1898,6 +1857,19 @@ const CLASSIFY_TIMEOUT_MS = 20_000;
  */
 const AUTO_CLAIM_CONTEXT_LOOKBACK = 8;
 
+/**
+ * Whether a channel message reads as a request for work, conservatively.
+ *
+ * This is not NLP — a small, documented word list, biased hard toward false
+ * negatives on purpose. A message that should have triggered but didn't
+ * costs nothing: the sender can still @mention the right agent by hand,
+ * which always works. A message that shouldn't have triggered but did
+ * spends someone's real API/subscription usage on unwanted work. Those two
+ * failure modes are not symmetric, so the rule requires *positive* evidence
+ * — a concrete task verb — rather than merely the *absence* of a chatter
+ * marker, and a status question about existing work is excluded even when
+ * it contains a verb.
+ */
 export function looksLikeTaskRequest(content: string): boolean {
   const text = content.trim();
   if (text.length < 6) {
@@ -2584,6 +2556,8 @@ export interface ChatProviderOperations {
     provider: string;
     messages: unknown;
     cliSessionId?: string;
+    /** Canonical repository this answer may inspect, when asked in a channel. */
+    repositoryId?: string;
     /**
      * A throwaway line — a title, an acknowledgement — rather than work.
      * The provider service runs these on a cheap model; see
@@ -2602,6 +2576,8 @@ export interface ChatProviderOperations {
       provider: string;
       messages: unknown;
       cliSessionId?: string;
+      /** Canonical repository this answer may inspect, when asked in a channel. */
+      repositoryId?: string;
     },
     onEvent: (event: ChatStreamEvent) => void,
   ): Promise<unknown>;
@@ -9959,23 +9935,11 @@ export class ApiGateway {
     // appeared to type forever because there was nothing to finish. Anything
     // that does not read as a request for work is simply answered, in the
     // channel, like a message from a colleague.
-    // …unless answering it means looking at the repository, which the chat
-    // path cannot do: provider chat runs the CLI in an empty scratch
-    // directory, so a question about a file could only ever be answered with
-    // "I can't see the repository from here". That sentence was true and
-    // useless, and it was the commonest thing an agent said.
-    //
-    // A task is the path that has a checkout. Sending these there is now
-    // cheap in the two ways it previously was not: a task asked to look can
-    // finish by reporting rather than failing for changing nothing, and a
-    // task that says nothing substantive no longer opens a thread. So the
-    // question is answered by an agent that actually read the file, and it
-    // still arrives as one line in the channel.
-    if (
-      input.queueAfterCurrent !== true &&
-      readsAsQuestion(content) &&
-      !needsTheRepository(content)
-    ) {
+    // Provider chat receives a temporary read-only checkout of this channel's
+    // canonical repository. Questions can therefore be answered from the
+    // files without becoming coordinated edit tasks; requests for code still
+    // continue through the task path below.
+    if (input.queueAfterCurrent !== true && readsAsQuestion(content)) {
       await this.answerInChannel(
         candidate,
         content,
@@ -10622,19 +10586,18 @@ export class ApiGateway {
         "Answer this message directly and briefly — two or three sentences " +
         "at most, no markdown headings, no preamble.\n\n" +
         (directive === undefined ? "" : `${directive}\n\n`) +
-        "This chat has no checkout, so answer from what is below rather than " +
-        "from the code; if the answer is not there, say so plainly rather " +
-        "than guessing, and never claim to have started or requested " +
-        "anything. Your tasks are a different matter: each one runs with the " +
-        "repository checked out. So describe what your work is doing from " +
-        "the list below, and never say the work cannot continue, is blocked, " +
-        "or cannot be completed merely because this conversation cannot see " +
-        "the files — that is true of the chat and false of the task. Each " +
+        "You have a read-only checkout of this channel's canonical repository. " +
+        "Inspect it whenever the answer depends on the code, and say plainly " +
+        "when a file is absent or unreadable rather than guessing. Do not " +
+        "claim to have changed or started anything: coding requests use the " +
+        "separate task path. Describe existing work from the list below. Each " +
         "task below is labelled with what has actually happened to it; a task " +
         "labelled done is finished, whatever else you remember about it.\n\n" +
         (await this.agentWorkContext(repositoryId, candidate)) +
         `\n\nThe message: ${question}`,
       QUESTION_TIMEOUT_MS,
+      false,
+      repositoryId,
     );
     // The sender's own words handed back are not an answer, however
     // confidently they are worded — see {@link readsAsEchoOfRequest}. Caught
@@ -11280,10 +11243,9 @@ export class ApiGateway {
     const prompt =
       `${agentIdentity(candidate)}\n\n` +
       "You are answering a follow-up question inside the thread for a task " +
-      "you worked on. This chat has no checkout, but the task itself ran " +
-      "with the repository — so answer from the thread below, and never say " +
-      "the work is blocked or cannot continue merely because this " +
-      "conversation cannot see the files. Below is that " +
+      "you worked on. You have a read-only checkout of the channel's current " +
+      "canonical repository, so inspect it when the answer depends on code. " +
+      "The thread below records what the task itself did. Below is that " +
       "thread so far, oldest first. Answer the question directly and " +
       "briefly — three sentences at most, no markdown headings, no " +
       "preamble. If the thread shows the work did not finish, say plainly " +
@@ -11387,6 +11349,8 @@ export class ApiGateway {
             break;
         }
       },
+      false,
+      input.repositoryId,
     );
     acceptingEvents = false;
     await deliveries;
@@ -11464,6 +11428,7 @@ export class ApiGateway {
     timeoutMs: number,
     onEvent?: (event: ChatStreamEvent) => void,
     ceremonial = false,
+    repositoryId?: string,
   ): Promise<{ reply?: unknown; error?: string }> {
     const providers = this.options.operations.chatProviders;
     if (providers === undefined) {
@@ -11475,6 +11440,7 @@ export class ApiGateway {
       provider: candidate.provider,
       messages: [{ role: "user", content: prompt }],
       ...(ceremonial ? { ceremonial: true } : {}),
+      ...(repositoryId === undefined ? {} : { repositoryId }),
     };
     const timedOut = Symbol("timeout");
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -11520,6 +11486,7 @@ export class ApiGateway {
     prompt: string,
     timeoutMs: number,
     ceremonial = false,
+    repositoryId?: string,
   ): Promise<{ text?: string; error?: string }> {
     const answer = await this.performChat(
       candidate,
@@ -11527,6 +11494,7 @@ export class ApiGateway {
       timeoutMs,
       undefined,
       ceremonial,
+      repositoryId,
     );
     // `ChatReply.text` is the field the provider service actually fills.
     // Reading `content` — the shape of the *request* — found nothing every

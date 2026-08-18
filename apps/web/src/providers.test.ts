@@ -5,7 +5,12 @@ import path from "node:path";
 import test from "node:test";
 
 import { CoordinatorProject } from "@coord/cli/project";
-import { UserCredentialStore } from "@coord/workspace-manager";
+import {
+  UserCredentialStore,
+  type CreateWorkspaceInput,
+  type TaskWorkspace,
+  type WorkspaceManager,
+} from "@coord/workspace-manager";
 
 import {
   AGENT_CALL_SIGNS,
@@ -1443,6 +1448,7 @@ interface Captured {
   command: string;
   args: readonly string[];
   env: NodeJS.ProcessEnv | undefined;
+  cwd: string | undefined;
 }
 
 /**
@@ -1486,12 +1492,207 @@ function capturingRunner(
   return (async (
     command: string,
     args: readonly string[],
-    options?: { env?: NodeJS.ProcessEnv },
+    options?: { env?: NodeJS.ProcessEnv; cwd?: string },
   ) => {
-    calls.push({ command, args, env: options?.env });
+    calls.push({ command, args, env: options?.env, cwd: options?.cwd });
     return await inner(command, args, options);
   }) as ProcessRunner;
 }
+
+test("codex and claude inspect a temporary canonical checkout", async () => {
+  const harness = await createHarness();
+  await seedCodexCache(harness.home);
+  const checkout = path.join(path.dirname(harness.home), "canonical-checkout");
+  await mkdir(checkout, { recursive: true });
+  const created: CreateWorkspaceInput[] = [];
+  const destroyed: TaskWorkspace[] = [];
+  const workspaceManager: Pick<WorkspaceManager, "create" | "destroy"> = {
+    create: async (input) => {
+      created.push(input);
+      return {
+        id: `workspace_${created.length}`,
+        taskId: input.taskId,
+        path: checkout,
+        rootPath: input.rootPath,
+        repository: input.repository,
+        baseVersion: input.baseVersion,
+        isolation: "git-worktree",
+        createdAt: "2026-08-18T00:00:00.000Z",
+      };
+    },
+    destroy: async (workspace) => {
+      destroyed.push(workspace);
+    },
+  };
+  const calls: Captured[] = [];
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    workspaceManager,
+    runner: capturingRunner(
+      {
+        claude: (args) =>
+          args[0] === "auth"
+            ? output(JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }))
+            : output(
+                [
+                  JSON.stringify({
+                    type: "assistant",
+                    message: { content: [{ type: "text", text: "from files" }] },
+                  }),
+                  JSON.stringify({
+                    type: "result",
+                    is_error: false,
+                    result: "from files",
+                    session_id: "sess-repository",
+                    usage: { input_tokens: 1, output_tokens: 2 },
+                  }),
+                ].join("\n"),
+              ),
+        codex: (args) =>
+          args[0] === "--version"
+            ? output("codex-cli 0.146.0")
+            : args[0] === "login"
+              ? output("Logged in using ChatGPT")
+              : output(
+                  [
+                    JSON.stringify({
+                      type: "thread.started",
+                      thread_id: "thread-repository",
+                    }),
+                    JSON.stringify({
+                      type: "item.completed",
+                      item: { type: "agent_message", text: "from files" },
+                    }),
+                    JSON.stringify({ type: "turn.completed", usage: {} }),
+                  ].join("\n"),
+                ),
+      },
+      calls,
+    ),
+  });
+  await service.connect({ userId: "u", systemAdmin: true, provider: "openai" });
+  await service.connect({ userId: "u", systemAdmin: true, provider: "anthropic" });
+  const repository = {
+    repository: { id: "repo", path: "/canonical/repo.git", branch: "main" },
+    baseVersion: {
+      sequence: 7,
+      revision: "a".repeat(40),
+      branch: "main",
+      createdAt: "2026-08-18T00:00:00.000Z",
+    },
+    rootPath: harness.project.planningRoot,
+  };
+
+  for (const provider of ["openai", "anthropic"] as const) {
+    const reply = await service.complete({
+      userId: "u",
+      systemAdmin: true,
+      provider,
+      messages: [{ role: "user", content: "Which file handles chat?" }],
+      repository,
+    });
+    assert.equal(reply.text, "from files");
+  }
+
+  assert.equal(created.length, 2);
+  assert.deepEqual(
+    created.map((entry) => entry.baseVersion.revision),
+    [repository.baseVersion.revision, repository.baseVersion.revision],
+  );
+  assert.equal(destroyed.length, 2);
+  const codex = calls.find((call) => call.args[0] === "exec");
+  assert.ok(codex);
+  assert.equal(codex.cwd, checkout);
+  assert.ok(
+    codex.args.includes("--sandbox") && codex.args.includes("read-only"),
+  );
+  assert.equal(codex.args[codex.args.indexOf("-C") + 1], checkout);
+  const claude = calls.find(
+    (call) =>
+      path.basename(call.command).startsWith("claude") && call.args[0] !== "auth",
+  );
+  assert.ok(claude);
+  assert.equal(claude.cwd, checkout);
+});
+
+test("repository chat failures clean up and report unavailable checkouts", async () => {
+  const harness = await createHarness();
+  const checkout = path.join(path.dirname(harness.home), "failed-checkout");
+  const destroyed: TaskWorkspace[] = [];
+  let failCreate = false;
+  const workspaceManager: Pick<WorkspaceManager, "create" | "destroy"> = {
+    create: async (input) => {
+      if (failCreate) {
+        throw new Error("canonical revision is missing");
+      }
+      return {
+        id: "workspace_failure",
+        taskId: input.taskId,
+        path: checkout,
+        rootPath: input.rootPath,
+        repository: input.repository,
+        baseVersion: input.baseVersion,
+        isolation: "git-worktree",
+        createdAt: "2026-08-18T00:00:00.000Z",
+      };
+    },
+    destroy: async (workspace) => {
+      destroyed.push(workspace);
+    },
+  };
+  const service = new ProviderChatService(harness.project, {
+    homeDirectory: harness.home,
+    workspaceManager,
+    runner: scriptedRunner({
+      claude: (args) =>
+        args[0] === "auth"
+          ? output(JSON.stringify({ loggedIn: true, authMethod: "claude.ai" }))
+          : output("", 1, "file could not be read"),
+    }),
+  });
+  await service.connect({ userId: "u", systemAdmin: true, provider: "anthropic" });
+  const input = {
+    userId: "u",
+    systemAdmin: true,
+    provider: "anthropic" as const,
+    messages: [{ role: "user", content: "Read README.md" }],
+    repository: {
+      repository: { id: "repo", path: "/canonical/repo.git", branch: "main" },
+      baseVersion: {
+        sequence: 7,
+        revision: "a".repeat(40),
+        branch: "main",
+        createdAt: "2026-08-18T00:00:00.000Z",
+      },
+      rootPath: harness.project.planningRoot,
+    },
+  };
+
+  await assert.rejects(
+    service.complete(input),
+    (error: unknown) =>
+      error instanceof ProviderChatError && error.code === "cli_failed",
+  );
+  assert.equal(
+    destroyed.length,
+    1,
+    "the failed completion left no checkout behind",
+  );
+
+  failCreate = true;
+  await assert.rejects(
+    service.complete(input),
+    (error: unknown) =>
+      error instanceof ProviderChatError &&
+      error.code === "repository_unavailable" &&
+      /canonical revision is missing/u.test(error.message),
+  );
+  assert.equal(
+    destroyed.length,
+    1,
+    "a checkout that was never created is not destroyed",
+  );
+});
 
 test("a credential the CLI rejects is reported, not stored", async () => {
   const harness = await createHarness();
