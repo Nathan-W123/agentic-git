@@ -11959,3 +11959,47 @@ test("without a trusted proxy the forwarded headers are ignored entirely", async
   });
   assert.equal(claimed.headers.get("strict-transport-security"), null);
 });
+
+test("/ask asks first and then works — the command says both halves", async (t) => {
+  // The reported case: "I want to add an orchestrate command, use /ask for
+  // clarifications" got an answer describing what such a command would do,
+  // with nothing asked and nothing built. `/ask` is not `/dnc`: it opens the
+  // question round and the same task carries on into the work afterwards.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "ask-then-builds");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "@Claude (Owner) add an orchestrate command /ask",
+    },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // Coordinated work, not the read-only answer path.
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.match(
+    runtime.submittedTasks[0]?.objective ?? "",
+    /add an orchestrate command/u,
+  );
+  assert.match(
+    runtime.submittedTasks[0]?.objective ?? "",
+    /force a question round before implementation/u,
+  );
+
+  // And the picker promises the second half too, so nobody reads `/ask` as a
+  // command that only ever talks.
+  const listed = await owner.request(`${base}/messages`);
+  const ask = (listed.data.slashCommands as any[]).find(
+    (entry) => entry.name === "ask",
+  );
+  assert.match(String(ask?.summary), /questions first/iu);
+  assert.match(String(ask?.summary), /do the work/iu);
+});

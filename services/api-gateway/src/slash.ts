@@ -58,7 +58,10 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: "ask",
-    summary: "Ask 1–6 questions before starting work",
+    // Questions first, then the work — both halves matter. `/ask` is not
+    // `/dnc`: the agent asks what it would otherwise have guessed at, and
+    // then builds what the answers describe in the same task.
+    summary: "Ask 1–6 questions first, then do the work",
     usage: "/ask @agent what you want done",
     takesObjective: true,
   },

@@ -882,9 +882,14 @@ const FORCED_QUESTION_SHAPE_INSTRUCTIONS = [
   `Ask between one and ${String(MAX_AGENT_QUESTIONS)} focused questions. ` +
     "Every question must have at least two concrete options and recommended " +
     "must be the zero-based index of the option you recommend.",
+  "Ask about what you would otherwise have to guess: what the person " +
+    "actually wants built, and the choices that would be expensive to get " +
+    "wrong. Read enough of the repository first that the options are real.",
   "Use empty arrays for every scope field and symbolsChanged, and empty " +
     "strings for action and reason. The response will be rejected unless it " +
     "is a valid question_asked outcome.",
+  "The answers arrive with the next round, which is where you implement the " +
+    "task. /ask delays the work; it does not replace it.",
 ].join("\n");
 
 const STRING_ARRAY_JSON_SCHEMA = {
@@ -2127,7 +2132,18 @@ export class PromptCliAdapter implements AgentAdapter {
       "Keep planning focused: inspect only enough files to establish an accurate scope.",
       `Planning deadline: ${this.planningTimeoutMs} ms.`,
       `Task id: ${input.task.id}`,
-      `Objective: ${input.task.objective}`,
+      `Objective: ${input.task.objective.replace(FORCE_QUESTION_MARKER, "").trim()}`,
+      // An explicit `/ask` still ends in code, so the plan has to be a plan
+      // for that code — otherwise the round after the answers arrive has an
+      // empty scope to implement inside.
+      ...(input.task.objective.includes(FORCE_QUESTION_MARKER)
+        ? [
+            "This task opens a short clarification round with the person " +
+              "before implementation. Plan the implementation you expect to " +
+              "carry out once they answer, listing every file it is likely " +
+              "to touch.",
+          ]
+        : []),
       // See the codex adapter's equivalent: notes from earlier tasks, offered
       // as background rather than as fact.
       ...(input.priorContext === undefined || input.priorContext.trim() === ""

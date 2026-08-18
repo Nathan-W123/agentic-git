@@ -1384,3 +1384,219 @@ test("the execution prompt asks for an ending a person can read", async () => {
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+test("an explicit /ask asks its questions first, then implements the answers", async () => {
+  // The reported case: "add an orchestrate command, use /ask for
+  // clarifications" reached a Codex-backed agent, which had no way to ask —
+  // so it inferred what the command should do and described it in prose. The
+  // forced round makes the questions the only thing the first round can
+  // produce, and the round after it is an ordinary implementation round.
+  const fixture = await createFixture();
+  const planningInputs: string[] = [];
+  const executionInputs: string[] = [];
+  const executionSchemas: Array<{ outcome?: unknown }> = [];
+  const emptyScope = {
+    additionalFiles: [],
+    additionalSymbols: [],
+    additionalApis: [],
+    additionalSchemas: [],
+    additionalConfigKeys: [],
+    additionalTests: [],
+    additionalServices: [],
+    reason: "",
+  };
+  const runner: CodexProcessRunner = async (_executable, args, options = {}) => {
+    const sandbox = args[args.indexOf("--sandbox") + 1];
+    if (sandbox === "read-only") {
+      planningInputs.push(options.input ?? "");
+      return output(JSON.stringify(PLAN));
+    }
+    executionInputs.push(options.input ?? "");
+    const schemaPath = args[args.indexOf("--output-schema") + 1] ?? "";
+    const schema = JSON.parse(await readFile(schemaPath, "utf8")) as {
+      properties: { outcome?: unknown };
+    };
+    executionSchemas.push(schema.properties);
+    if (executionInputs.length === 1) {
+      return output(
+        JSON.stringify({
+          outcome: "question_asked",
+          requestId: "ask_1",
+          questions: [
+            {
+              question: "What should the orchestrate command do?",
+              options: ["Fan out subtasks", "Queue them in order"],
+              recommended: 0,
+            },
+            {
+              question: "Where should it live?",
+              options: ["The channel commands", "A separate service"],
+              recommended: 0,
+            },
+          ],
+          symbolsChanged: [],
+          explanation: "Asking before building",
+          action: "",
+          ...emptyScope,
+        }),
+      );
+    }
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(
+      JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: ["value"],
+        explanation: "Built the orchestrate command the answers described",
+        requestId: "",
+        action: "",
+        questions: [],
+        ...emptyScope,
+      }),
+    );
+  };
+
+  try {
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      runner,
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const session = await adapter.startTask({
+      task: {
+        ...TASK,
+        objective:
+          "Add an orchestrate command\n\n" +
+          "[Coordinator: force a question round before implementation.]",
+      },
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+    });
+    const events: AgentEvent[] = [];
+    await adapter.streamEvents(session.id, (event) => {
+      events.push(event);
+      // Standing in for the channel, which puts the questions to whoever
+      // asked and hands back what they chose.
+      if (event.event === "question_asked") {
+        void adapter.resolveQuestion(session.id, {
+          requestId: event.requestId,
+          status: "answered",
+          chosen: 0,
+          answers: [{ chosen: 0 }, { text: "In the channel commands" }],
+        });
+      }
+    });
+    await adapter.requestPlan(session.id);
+    const workspace = await fixture.workspaces.create({
+      taskId: TASK.id,
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    await adapter.sendContext(session.id, contextFor(workspace));
+    const changeSet = await adapter.collectChanges(session.id);
+
+    // The routing marker is never shown to the agent as part of the request,
+    // and planning is told the work still follows the questions.
+    assert.doesNotMatch(planningInputs[0] ?? "", /Coordinator: force a question/u);
+    assert.match(planningInputs[0] ?? "", /clarification round/u);
+
+    // The first round could only ask; the second was the implementation one.
+    assert.equal(executionInputs.length, 2);
+    assert.match(executionInputs[0] ?? "", /explicit \/ask command/u);
+    assert.deepEqual(executionSchemas[0]?.outcome, {
+      type: "string",
+      enum: ["question_asked"],
+    });
+    assert.match(executionInputs[1] ?? "", /Implement the approved task/u);
+    assert.match(executionInputs[1] ?? "", /Fan out subtasks/u);
+    assert.match(executionInputs[1] ?? "", /In the channel commands/u);
+    assert.doesNotMatch(executionInputs[1] ?? "", /Coordinator: force a question/u);
+
+    const asked = events.find((event) => event.event === "question_asked");
+    assert.equal(asked?.event === "question_asked" && asked.questions?.length, 2);
+    assert.equal(events.at(-1)?.event, "completed");
+    // And it really did the work: /ask delays the code, it does not cancel it.
+    assert.equal(changeSet.patches[0]?.path, "src/value.js");
+
+    await fixture.workspaces.destroy(workspace);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("an explicit /ask round that answers with work instead of questions fails", async () => {
+  const fixture = await createFixture();
+  const runner: CodexProcessRunner = async (_executable, args) => {
+    const sandbox = args[args.indexOf("--sandbox") + 1];
+    if (sandbox === "read-only") {
+      return output(JSON.stringify(PLAN));
+    }
+    return output(
+      JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: [],
+        explanation: "Guessed at it instead of asking",
+        requestId: "",
+        action: "",
+        questions: [],
+        additionalFiles: [],
+        additionalSymbols: [],
+        additionalApis: [],
+        additionalSchemas: [],
+        additionalConfigKeys: [],
+        additionalTests: [],
+        additionalServices: [],
+        reason: "",
+      }),
+    );
+  };
+
+  try {
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      runner,
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const session = await adapter.startTask({
+      task: {
+        ...TASK,
+        objective:
+          "Add an orchestrate command " +
+          "[Coordinator: force a question round before implementation.]",
+      },
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+    });
+    await adapter.requestPlan(session.id);
+    const workspace = await fixture.workspaces.create({
+      taskId: TASK.id,
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    await assert.rejects(
+      adapter.sendContext(session.id, contextFor(workspace)),
+      /must ask its questions before execution/u,
+    );
+
+    await fixture.workspaces.destroy(workspace);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});

@@ -1158,3 +1158,42 @@ test("the execution prompt asks for an ending a person can read", async () => {
   // account, and a number here only taught the model to stop near it.
   assert.doesNotMatch(prompt, /under \d+ characters/u);
 });
+
+test("claude: an explicit ask is planned as the work that follows its questions", async () => {
+  // The plan is what the implementation round is allowed to touch, so a plan
+  // made from an objective still carrying the routing marker used to read as
+  // "plan to ask a question" — leaving nothing to build once the answers
+  // arrived. `/ask` delays the work; the plan is still a plan for the work.
+  const fixture = await createFixture();
+  const planningInputs: string[] = [];
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    assert.ok(args.includes("--permission-mode"));
+    planningInputs.push(String(options.input));
+    return output(claudeEnvelope(JSON.stringify(ASK_PLAN)));
+  };
+
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: ASK_TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+
+  assert.match(planningInputs[0] ?? "", /Objective: Update the fixture value/u);
+  assert.doesNotMatch(planningInputs[0] ?? "", /Coordinator: force a question/u);
+  assert.match(planningInputs[0] ?? "", /clarification round/u);
+});

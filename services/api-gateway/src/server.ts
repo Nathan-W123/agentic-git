@@ -9788,7 +9788,8 @@ export class ApiGateway {
         projectId,
         repositoryId,
         parsed.command.name === "ask"
-          ? `\`/ask\` needs one agent and a task to clarify: \`${parsed.command.usage}\`.`
+          ? `\`/ask\` needs one agent and a task: it asks you about the parts ` +
+              `it would have to guess at, then does the work. \`${parsed.command.usage}\`.`
           : `\`/dnc\` answers without starting work — mention the agent you are asking: \`${parsed.command.usage}\`.`,
       );
       return;
