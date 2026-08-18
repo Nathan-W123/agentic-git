@@ -58,8 +58,8 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: "ask",
-    summary: "Ask without starting work — an answer, not a task",
-    usage: "/ask @agent your question",
+    summary: "Ask 1–6 questions before starting work",
+    usage: "/ask @agent what you want done",
     takesObjective: true,
   },
   {

@@ -50,6 +50,19 @@ const PLAN: AgentPlan = {
   riskLevel: "low",
 };
 
+const FORCE_QUESTION_MARKER =
+  "[Coordinator: force a question round before implementation.]";
+
+const ASK_TASK: TaskDefinition = {
+  ...TASK,
+  objective: `${TASK.objective}\n\n${FORCE_QUESTION_MARKER}`,
+};
+
+const ASK_PLAN: AgentPlan = {
+  ...PLAN,
+  objective: ASK_TASK.objective,
+};
+
 const COMPLETION = {
   outcome: "completed",
   symbolsChanged: ["value"],
@@ -221,6 +234,149 @@ test("claude: plan-mode planning, skip-permissions execution, collected diff", a
   assert.equal(changeSet.patches.length, 1);
   assert.equal(changeSet.patches[0]?.path, "src/value.js");
   assert.deepEqual(changeSet.symbolsChanged, ["value"]);
+});
+
+test("claude: an explicit ask cannot complete before asking its questions", async () => {
+  const fixture = await createFixture();
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    if (args.includes("--permission-mode")) {
+      return output(claudeEnvelope(JSON.stringify(ASK_PLAN)));
+    }
+    const schemaArgument = args[args.indexOf("--json-schema") + 1];
+    const schema = JSON.parse(schemaArgument ?? "{}") as {
+      properties?: { outcome?: { enum?: unknown }; questions?: unknown };
+      required?: unknown[];
+    };
+    assert.deepEqual(schema.properties?.outcome?.enum, ["question_asked"]);
+    assert.ok(schema.required?.includes("questions"));
+    assert.match(String(options.input), /explicit \/ask command/u);
+    assert.match(String(options.input), /between one and 6 focused questions/u);
+    return output(claudeEnvelope(JSON.stringify(COMPLETION)));
+  };
+
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: ASK_TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const workspace = await fixture.workspaces.create({
+    taskId: ASK_TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+
+  await assert.rejects(
+    adapter.sendContext(session.id, contextFor(workspace)),
+    /must produce a question_asked outcome/u,
+  );
+});
+
+test("claude: every explicit ask opens the question round, then continues with its answer", async () => {
+  const fixture = await createFixture();
+  const executionInputs: string[] = [];
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    if (args.includes("--permission-mode")) {
+      return output(claudeEnvelope(JSON.stringify(ASK_PLAN)));
+    }
+    executionInputs.push(String(options.input));
+    if (executionInputs.length === 1) {
+      return output(
+        claudeEnvelope(
+          JSON.stringify({
+            ...COMPLETION,
+            outcome: "question_asked",
+            requestId: "ask_first_round",
+            symbolsChanged: [],
+            explanation: "",
+            questions: [
+              {
+                question: "Which value should the fixture use?",
+                options: ["Two", "Three"],
+                recommended: 0,
+              },
+            ],
+          }),
+        ),
+      );
+    }
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(claudeEnvelope(JSON.stringify(COMPLETION)));
+  };
+
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: ASK_TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const seen: string[] = [];
+  await adapter.streamEvents(session.id, (event) => {
+    seen.push(event.event);
+    if (event.event === "question_asked") {
+      assert.equal(event.questions?.[0]?.recommended, 0);
+      void adapter.resolveQuestion(session.id, {
+        requestId: event.requestId ?? "",
+        status: "answered",
+        answers: [{ chosen: 0 }],
+      });
+    }
+  });
+  const workspace = await fixture.workspaces.create({
+    taskId: ASK_TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+
+  await adapter.sendContext(session.id, contextFor(workspace));
+
+  assert.equal(executionInputs.length, 2);
+  assert.match(executionInputs[0] ?? "", /explicit \/ask command/u);
+  assert.doesNotMatch(executionInputs[0] ?? "", /Required validation commands/u);
+  assert.match(executionInputs[1] ?? "", /Answers you already have/u);
+  assert.match(executionInputs[1] ?? "", /Which value should the fixture use\?/u);
+  assert.match(executionInputs[1] ?? "", /already been satisfied/u);
+  assert.ok(seen.includes("question_asked"), seen.join(", "));
+  const changeSet = await adapter.collectChanges(session.id);
+  assert.equal(changeSet.patches.length, 1);
 });
 
 test("claude: a transcript past the cap still finishes — the tail holds the result", async () => {

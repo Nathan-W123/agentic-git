@@ -107,11 +107,14 @@ test("/stop is a channel command that names agents rather than an objective", ()
 
 test("a command written last is still the command, and the mentions survive", () => {
   // How it is typed when somebody says the thing first and then decides they
-  // only want an answer about it. The command word is lifted out from the end
-  // the same way it is from the front, and the mention stays where it was.
+  // want the agent's question round before implementation. The command word
+  // is lifted out from the end the same way it is from the front, and the
+  // mention stays where it was.
   const parsed = parseSlashCommand("@Zeus change the background color /ask");
   assert.equal(parsed?.command.name, "ask");
   assert.equal(parsed?.rest, "@Zeus change the background color");
+  assert.match(parsed?.command.summary ?? "", /questions before starting/u);
+  assert.equal(parsed?.command.usage, "/ask @agent what you want done");
 });
 
 test("/dnc and /simple carry an objective, like /ask and /plan", () => {
