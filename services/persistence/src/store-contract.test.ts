@@ -2796,6 +2796,97 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: a password reset is single use and cannot be raced`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "forgetful@example.com",
+        displayName: "Forgetful",
+        passwordDigest: "digest",
+      });
+      await store.createPasswordReset({
+        id: "pwr_1",
+        userId: user.id,
+        email: "forgetful@example.com",
+        secretHash: "hash",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2026-01-01T01:00:00.000Z",
+        consumedAt: undefined,
+      });
+
+      const stored = await store.getPasswordReset("pwr_1");
+      assert.equal(stored?.userId, user.id);
+      assert.equal(stored?.secretHash, "hash");
+      assert.equal(stored?.consumedAt, undefined);
+
+      const first = await store.consumePasswordReset(
+        "pwr_1",
+        "2026-01-01T00:10:00.000Z",
+      );
+      // Two requests racing one link must not both come away believing they
+      // set the password.
+      const second = await store.consumePasswordReset(
+        "pwr_1",
+        "2026-01-01T00:10:01.000Z",
+      );
+      assert.equal(first, true);
+      assert.equal(second, false);
+      assert.equal(
+        (await store.getPasswordReset("pwr_1"))?.consumedAt,
+        "2026-01-01T00:10:00.000Z",
+      );
+      assert.equal(await store.getPasswordReset("pwr_missing"), undefined);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
+  test(`${backend.name}: a new reset link drops the ones before it`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const user = await store.createUser({
+        email: "again@example.com",
+        displayName: "Again",
+        passwordDigest: "digest",
+      });
+      const other = await store.createUser({
+        email: "untouched@example.com",
+        displayName: "Untouched",
+        passwordDigest: "digest",
+      });
+      for (const id of ["pwr_a", "pwr_b"]) {
+        await store.createPasswordReset({
+          id,
+          userId: user.id,
+          email: "again@example.com",
+          secretHash: `hash-${id}`,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          expiresAt: "2026-01-01T01:00:00.000Z",
+          consumedAt: undefined,
+        });
+      }
+      await store.createPasswordReset({
+        id: "pwr_c",
+        userId: other.id,
+        email: "untouched@example.com",
+        secretHash: "hash-c",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        expiresAt: "2026-01-01T01:00:00.000Z",
+        consumedAt: undefined,
+      });
+
+      await store.deletePasswordResetsForUser(user.id);
+      assert.equal(await store.getPasswordReset("pwr_a"), undefined);
+      assert.equal(await store.getPasswordReset("pwr_b"), undefined);
+      // One account's reset is not another's: clearing mine leaves yours.
+      assert.notEqual(await store.getPasswordReset("pwr_c"), undefined);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a revoked invitation stops working`, async () => {
     const { store, cleanup } = await backend.open();
     try {

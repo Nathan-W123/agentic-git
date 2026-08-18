@@ -854,4 +854,24 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON submitted_tasks(after_task_id)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version. Postgres has no
+    // COLLATE NOCASE, so the address is stored lowercased by the store.
+    version: 36,
+    name: "password-resets",
+    statements: [
+      `CREATE TABLE password_resets (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        email TEXT NOT NULL,
+        token_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT
+      )`,
+      `CREATE INDEX password_resets_by_user
+         ON password_resets(user_id, created_at DESC)`,
+      `CREATE INDEX password_resets_by_token ON password_resets(token_hash)`,
+    ],
+  },
 ];

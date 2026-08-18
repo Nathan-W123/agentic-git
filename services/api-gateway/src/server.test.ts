@@ -24,6 +24,7 @@ import {
   type ApiOperations,
 } from "./server.js";
 import { hashPassword } from "./auth.js";
+import type { MailMessage, Mailer } from "./mailer.js";
 import type { CodexUsageReader } from "./codex-subscription-usage.js";
 
 const BOOTSTRAP_TOKEN = "bootstrap-token-with-at-least-24-characters";
@@ -7654,7 +7655,7 @@ test("a gateway configured with a padded token still starts and accepts it", asy
 /** A gateway with whatever bootstrap configuration a test wants. */
 async function startBareGateway(
   t: TestContext,
-  options: { bootstrapToken?: string },
+  options: { bootstrapToken?: string; mailer?: Mailer },
 ): Promise<{ client: TestClient; store: CoordinationStore }> {
   const store = new InMemoryCoordinationStore();
   const gateway = new ApiGateway({
@@ -7663,6 +7664,9 @@ async function startBareGateway(
     ...(options.bootstrapToken === undefined
       ? {}
       : { bootstrapToken: options.bootstrapToken }),
+    // Never the real one: a test that opens a socket to a mail relay is a test
+    // that fails on somebody else's network.
+    ...(options.mailer === undefined ? {} : { mailer: options.mailer }),
   });
   t.after(async () => {
     await gateway.close();
@@ -12023,4 +12027,243 @@ test("/ask asks first and then works — the command says both halves", async (t
   );
   assert.match(String(ask?.summary), /questions first/iu);
   assert.match(String(ask?.summary), /do the work/iu);
+});
+
+/* ------------------------------------------------- account confirmations ---- */
+
+/** A mailer that keeps what it was asked to send, and a link reader for it. */
+function recordingMailer(): { sent: MailMessage[]; mailer: Mailer } {
+  const sent: MailMessage[] = [];
+  return {
+    sent,
+    mailer: async (message) => {
+      sent.push(message);
+    },
+  };
+}
+
+function resetLink(message: MailMessage | undefined): string {
+  const match = /#reset\/(\S+)/u.exec(message?.text ?? "");
+  return match?.[1] ?? "";
+}
+
+test("creating an account refuses a retyped address that does not match", async (t) => {
+  const { client } = await startBareGateway(t, {});
+
+  const mismatched = await client.request("/api/v1/auth/bootstrap", {
+    method: "POST",
+    body: {
+      email: "owner@example.com",
+      confirmEmail: "owner@exampel.com",
+      displayName: "Owner",
+      password: PASSWORD,
+      confirmPassword: PASSWORD,
+    },
+  });
+  assert.equal(mismatched.status, 400);
+  assert.equal(mismatched.data.error.code, "confirmation_mismatch");
+
+  // And nothing was created: the deployment still has no owner.
+  const health = await client.request("/api/v1/health");
+  assert.equal(health.data.setupRequired, true);
+
+  const matched = await client.request("/api/v1/auth/bootstrap", {
+    method: "POST",
+    body: {
+      email: "Owner@Example.com",
+      // Case is not a mismatch — the account stores the address lowercased.
+      confirmEmail: "owner@example.com",
+      displayName: "Owner",
+      password: PASSWORD,
+      confirmPassword: PASSWORD,
+    },
+  });
+  assert.equal(matched.status, 201, JSON.stringify(matched.data));
+});
+
+test("registering refuses a retyped password that does not match", async (t) => {
+  const { client } = await startBareGateway(t, {});
+  await bootstrap(client);
+
+  const stranger = new TestClient(client.origin);
+  const refused = await stranger.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "newcomer@example.com",
+      confirmEmail: "newcomer@example.com",
+      displayName: "Newcomer",
+      password: PASSWORD,
+      confirmPassword: `${PASSWORD}x`,
+    },
+  });
+  assert.equal(refused.status, 400);
+  assert.equal(refused.data.error.code, "confirmation_mismatch");
+
+  // A client that sends no confirmation at all is still served: the retype is
+  // a guard against a typo, not a credential.
+  const accepted = await stranger.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "newcomer@example.com",
+      displayName: "Newcomer",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(accepted.status, 201, JSON.stringify(accepted.data));
+});
+
+/* ------------------------------------------------------ password resets ---- */
+
+test("a forgotten password is recovered through a mailed link", async (t) => {
+  const { sent, mailer } = recordingMailer();
+  const { client } = await startBareGateway(t, { mailer });
+  await bootstrap(client);
+
+  const asked = new TestClient(client.origin);
+  const requested = await asked.request("/api/v1/auth/password-reset", {
+    method: "POST",
+    body: { email: "owner@example.com" },
+  });
+  assert.equal(requested.status, 202);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]?.to, "owner@example.com");
+
+  const token = resetLink(sent[0]);
+  assert.notEqual(token, "", sent[0]?.text);
+
+  // The form checks the link before asking for a password, and is told whose
+  // account it belongs to.
+  const preview = await asked.request(
+    `/api/v1/auth/password-reset/${encodeURIComponent(token)}`,
+  );
+  assert.equal(preview.status, 200);
+  assert.equal(preview.data.reset.email, "owner@example.com");
+
+  const changed = await asked.request("/api/v1/auth/password-reset/confirm", {
+    method: "POST",
+    body: {
+      token,
+      password: "BrandNewRelay123!",
+      confirmPassword: "BrandNewRelay123!",
+    },
+  });
+  assert.equal(changed.status, 200, JSON.stringify(changed.data));
+  assert.equal(changed.data.user.email, "owner@example.com");
+
+  // The link is single use, and the old password no longer works.
+  const replayed = await asked.request("/api/v1/auth/password-reset/confirm", {
+    method: "POST",
+    body: {
+      token,
+      password: "BrandNewRelay123!",
+      confirmPassword: "BrandNewRelay123!",
+    },
+  });
+  assert.equal(replayed.status, 400);
+  assert.equal(replayed.data.error.code, "reset_invalid");
+
+  const stale = new TestClient(client.origin);
+  const oldPassword = await stale.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "owner@example.com", password: PASSWORD },
+  });
+  assert.equal(oldPassword.status, 401);
+
+  const newPassword = await stale.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "owner@example.com", password: "BrandNewRelay123!" },
+  });
+  assert.equal(newPassword.status, 200, JSON.stringify(newPassword.data));
+});
+
+test("asking to reset an unknown address says nothing about it", async (t) => {
+  const { sent, mailer } = recordingMailer();
+  const { client } = await startBareGateway(t, { mailer });
+  await bootstrap(client);
+
+  const stranger = new TestClient(client.origin);
+  const answer = await stranger.request("/api/v1/auth/password-reset", {
+    method: "POST",
+    body: { email: "nobody@example.com" },
+  });
+  // Same status and same wording as for an address that does exist, or this
+  // endpoint would answer "does this person have an account here".
+  assert.equal(answer.status, 202);
+  assert.equal(sent.length, 0);
+
+  const known = await stranger.request("/api/v1/auth/password-reset", {
+    method: "POST",
+    body: { email: "owner@example.com" },
+  });
+  assert.equal(known.status, 202);
+  assert.equal(known.data.message, answer.data.message);
+});
+
+test("a reset link that was superseded or mistyped is refused", async (t) => {
+  const { sent, mailer } = recordingMailer();
+  const { client } = await startBareGateway(t, { mailer });
+  await bootstrap(client);
+
+  const asked = new TestClient(client.origin);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const answer = await asked.request("/api/v1/auth/password-reset", {
+      method: "POST",
+      body: { email: "owner@example.com" },
+    });
+    assert.equal(answer.status, 202);
+  }
+  assert.equal(sent.length, 2);
+
+  // Asking twice invalidates the first link rather than leaving two working
+  // keys in the mailbox.
+  const first = await asked.request(
+    `/api/v1/auth/password-reset/${encodeURIComponent(resetLink(sent[0]))}`,
+  );
+  assert.equal(first.status, 404);
+  assert.equal(first.data.error.code, "reset_invalid");
+
+  const mistyped = await asked.request(
+    `/api/v1/auth/password-reset/${encodeURIComponent(`${resetLink(sent[1])}x`)}`,
+  );
+  assert.equal(mistyped.status, 404);
+
+  const latest = await asked.request(
+    `/api/v1/auth/password-reset/${encodeURIComponent(resetLink(sent[1]))}`,
+  );
+  assert.equal(latest.status, 200);
+});
+
+test("a reset refuses a new password that was retyped differently", async (t) => {
+  const { sent, mailer } = recordingMailer();
+  const { client } = await startBareGateway(t, { mailer });
+  await bootstrap(client);
+
+  const asked = new TestClient(client.origin);
+  await asked.request("/api/v1/auth/password-reset", {
+    method: "POST",
+    body: { email: "owner@example.com" },
+  });
+  const token = resetLink(sent[0]);
+  const refused = await asked.request("/api/v1/auth/password-reset/confirm", {
+    method: "POST",
+    body: {
+      token,
+      password: "BrandNewRelay123!",
+      confirmPassword: "BrandNewRelay124!",
+    },
+  });
+  assert.equal(refused.status, 400);
+  assert.equal(refused.data.error.code, "confirmation_mismatch");
+
+  // The link survives a typo: burning it would leave the person with no way
+  // back in but to ask for another.
+  const retried = await asked.request("/api/v1/auth/password-reset/confirm", {
+    method: "POST",
+    body: {
+      token,
+      password: "BrandNewRelay123!",
+      confirmPassword: "BrandNewRelay123!",
+    },
+  });
+  assert.equal(retried.status, 200, JSON.stringify(retried.data));
 });

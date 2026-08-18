@@ -318,3 +318,92 @@ test("a session cookie is Secure exactly when the request was", async () => {
     [true, true],
   );
 });
+
+/* ------------------------------------------------------ password resets ---- */
+
+test("a reset link sets the password once and only within its lifetime", async () => {
+  let now = new Date("2026-01-01T00:00:00.000Z");
+  const { auth, store, user } = await serviceWithUser(() => now);
+
+  const issued = await auth.requestPasswordReset("worker@example.com");
+  assert.notEqual(issued, undefined);
+  const token = issued?.token ?? "";
+
+  // Stored hashed, exactly like an invitation: the database never holds
+  // anything that could be presented back as a credential.
+  const stored = await store.getPasswordReset(token.split(".")[0] ?? "");
+  assert.notEqual(stored, undefined);
+  assert.equal(stored?.secretHash.includes(token.split(".")[1] ?? "x"), false);
+
+  const session = await auth.completePasswordReset({
+    token,
+    password: "BrandNewRelay123!",
+    ipAddress: "10.0.0.1",
+    userAgent: "test",
+  });
+  assert.equal(session.principal.user.id, user.id);
+  const updated = await store.getUser(user.id);
+  assert.equal(
+    await verifyPassword("BrandNewRelay123!", updated?.passwordDigest ?? ""),
+    true,
+  );
+
+  // Single use.
+  await assert.rejects(
+    auth.completePasswordReset({
+      token,
+      password: "AnotherRelay1234!",
+      ipAddress: "10.0.0.1",
+      userAgent: "test",
+    }),
+    (error: unknown) =>
+      error instanceof AuthenticationError && error.code === "reset_invalid",
+  );
+
+  // And a fresh link stops working once its hour is up.
+  const second = await auth.requestPasswordReset("worker@example.com");
+  now = new Date("2026-01-01T02:00:00.000Z");
+  assert.equal(await auth.findPasswordReset(second?.token ?? ""), undefined);
+});
+
+test("a reset is refused for an unknown address, a disabled account, or a mistyped link", async () => {
+  const { auth, store, user } = await serviceWithUser();
+
+  // Nothing is minted for an address with no account — the caller is told the
+  // same thing either way, so there is nothing here to leak.
+  assert.equal(await auth.requestPasswordReset("nobody@example.com"), undefined);
+
+  const issued = await auth.requestPasswordReset("worker@example.com");
+  const token = issued?.token ?? "";
+  assert.equal(await auth.findPasswordReset(`${token}x`), undefined);
+  assert.equal(await auth.findPasswordReset("no-separator"), undefined);
+
+  // A link outlives its account being disabled, so it is checked again on use.
+  await store.updateUser(user.id, { disabled: true });
+  assert.equal(await auth.findPasswordReset(token), undefined);
+  assert.equal(await auth.requestPasswordReset("worker@example.com"), undefined);
+});
+
+test("resetting a password revokes the sessions somebody else may be holding", async () => {
+  const { auth, store, user } = await serviceWithUser();
+  const stolen = await auth.issueSession(user, "10.0.0.9", "thief");
+  assert.notEqual(
+    await store.getAuthSession(stolen.principal.sessionId ?? ""),
+    undefined,
+  );
+
+  const issued = await auth.requestPasswordReset("worker@example.com");
+  await auth.completePasswordReset({
+    token: issued?.token ?? "",
+    password: "BrandNewRelay123!",
+    ipAddress: "10.0.0.1",
+    userAgent: "test",
+  });
+
+  // A reset is the remedy for an account somebody else is in. Leaving their
+  // session alive would make it no remedy at all.
+  assert.equal(
+    await store.getAuthSession(stolen.principal.sessionId ?? ""),
+    undefined,
+  );
+});

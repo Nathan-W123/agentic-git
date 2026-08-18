@@ -159,6 +159,25 @@ export interface InvitationRecord {
   revokedAt: string | undefined;
 }
 
+/**
+ * A pending password reset.
+ *
+ * Modelled on `InvitationRecord`: the link's secret is stored only as a hash,
+ * so a readable table is a list of dead links rather than a list of working
+ * ones. `email` is a copy of the address the link was sent to, kept so a reset
+ * that arrives after the account changed address can be refused rather than
+ * quietly resetting a mailbox that is no longer proof of anything.
+ */
+export interface PasswordResetRecord {
+  id: string;
+  userId: UserId;
+  email: string;
+  secretHash: string;
+  createdAt: string;
+  expiresAt: string;
+  consumedAt: string | undefined;
+}
+
 export interface UserAppearance {
   accent?: string;
   /**
@@ -1316,6 +1335,19 @@ export interface CoordinationStore {
   /** Marks it used. Returns false when it was already used or revoked. */
   acceptInvitation(id: string, userId: UserId, at: string): Promise<boolean>;
   revokeInvitation(id: string, at: string): Promise<void>;
+
+  createPasswordReset(reset: PasswordResetRecord): Promise<void>;
+  getPasswordReset(id: string): Promise<PasswordResetRecord | undefined>;
+  /** Marks it used. Returns false when it was already used. */
+  consumePasswordReset(id: string, at: string): Promise<boolean>;
+  /**
+   * Drops every outstanding reset for one account.
+   *
+   * Called when a reset succeeds and when the password changes by any other
+   * route, so a link that was requested and then superseded cannot be used to
+   * take an account back after its owner has recovered it.
+   */
+  deletePasswordResetsForUser(userId: UserId): Promise<void>;
 
   createApiToken(token: ApiTokenRecord): Promise<void>;
   getApiToken(id: string): Promise<ApiTokenRecord | undefined>;

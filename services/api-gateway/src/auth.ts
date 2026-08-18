@@ -9,6 +9,7 @@ import type {
   CoordinationStore,
   OrganizationMembership,
   OrganizationRole,
+  PasswordResetRecord,
   UserAccount,
 } from "@coord/persistence";
 import { createId } from "@coord/shared-types";
@@ -116,6 +117,12 @@ export interface AuthServiceOptions {
   loginFailureLimit?: number;
   /** How long an account stays locked, and how long failures accumulate. */
   loginLockoutMs?: number;
+  /**
+   * How long a password reset link works for. One hour by default: long
+   * enough to survive a slow mail relay, short enough that a link sitting in
+   * an old mailbox is not a standing key to the account.
+   */
+  passwordResetTtlMs?: number;
   now?: () => Date;
 }
 
@@ -356,6 +363,7 @@ export class AuthService {
    * matches how the rate limiter already works.
    */
   private readonly loginFailures = new Map<string, LoginFailures>();
+  private readonly passwordResetTtlMs: number;
   private readonly now: () => Date;
 
   public constructor(
@@ -367,6 +375,7 @@ export class AuthService {
     this.secureCookies = options.secureCookies ?? false;
     this.loginFailureLimit = options.loginFailureLimit ?? 10;
     this.loginLockoutMs = options.loginLockoutMs ?? 15 * 60 * 1000;
+    this.passwordResetTtlMs = options.passwordResetTtlMs ?? 60 * 60 * 1000;
     this.now = options.now ?? (() => new Date());
     if (!Number.isSafeInteger(this.sessionTtlMs) || this.sessionTtlMs < 60_000) {
       throw new RangeError("Session lifetime must be at least one minute");
@@ -502,6 +511,142 @@ export class AuthService {
       throw new AuthenticationError("Email or password is incorrect");
     }
     this.loginFailures.delete(attempted);
+    return await this.issueSession(
+      user,
+      input.ipAddress,
+      input.userAgent,
+      input.secure,
+    );
+  }
+
+  /**
+   * Mints a reset link for an account, if that address has one.
+   *
+   * Returns nothing when the address is unknown, and the caller answers the
+   * same way either way: a form that says "no account for that address" is an
+   * address oracle, and this one can be posted to without any credential at
+   * all.
+   *
+   * Outstanding resets for the account are dropped first, so requesting a
+   * second link invalidates the first. Otherwise every request would leave
+   * another working key behind, and a person who requests three because the
+   * first was slow to arrive would be leaving two of them lying in a mailbox.
+   */
+  public async requestPasswordReset(email: string): Promise<
+    | {
+        user: UserAccount;
+        token: string;
+        expiresAt: string;
+      }
+    | undefined
+  > {
+    const user = await this.store.getUserByEmail(email);
+    if (user === undefined || user.disabled) {
+      return undefined;
+    }
+    await this.store.deletePasswordResetsForUser(user.id);
+    const id = `pwr_${randomBytes(9).toString("base64url")}`;
+    const secret = randomBytes(32).toString("base64url");
+    const now = this.now();
+    const expiresAt = new Date(
+      now.getTime() + this.passwordResetTtlMs,
+    ).toISOString();
+    await this.store.createPasswordReset({
+      id,
+      userId: user.id,
+      email: user.email,
+      secretHash: hashSecret(secret),
+      createdAt: now.toISOString(),
+      expiresAt,
+      consumedAt: undefined,
+    });
+    // The only time the secret exists. It is stored hashed, so a lost link is
+    // reissued rather than looked up.
+    return { user, token: `${id}.${secret}`, expiresAt };
+  }
+
+  /**
+   * The account a reset link belongs to, or nothing if it is not usable.
+   *
+   * Every way a link can be wrong — unknown, mistyped, already used, expired,
+   * or issued to an address the account no longer has — comes back the same,
+   * so the form behind it cannot be used to learn anything about who exists.
+   */
+  public async findPasswordReset(
+    token: string,
+  ): Promise<{ reset: PasswordResetRecord; user: UserAccount } | undefined> {
+    const separator = token.indexOf(".");
+    if (separator < 1) {
+      return undefined;
+    }
+    const reset = await this.store.getPasswordReset(token.slice(0, separator));
+    if (
+      reset === undefined ||
+      !secretMatches(token.slice(separator + 1), reset.secretHash) ||
+      reset.consumedAt !== undefined ||
+      Date.parse(reset.expiresAt) <= this.now().getTime()
+    ) {
+      return undefined;
+    }
+    const user = await this.store.getUser(reset.userId);
+    if (
+      user === undefined ||
+      user.disabled ||
+      // The address is re-checked because the link's authority comes from the
+      // mailbox it was sent to. If the account has since moved to another
+      // address, that mailbox is no longer proof of anything.
+      user.email.toLowerCase() !== reset.email.toLowerCase()
+    ) {
+      return undefined;
+    }
+    return { reset, user };
+  }
+
+  /**
+   * Sets a new password from a reset link and signs the person in.
+   *
+   * Consuming the link is a conditional update in the store, so two requests
+   * racing the same link cannot both succeed. Every other session the account
+   * has is revoked: a reset is the remedy for an account somebody else may be
+   * holding, and leaving their session alive would make it no remedy at all.
+   */
+  public async completePasswordReset(input: {
+    token: string;
+    password: string;
+    ipAddress: string;
+    userAgent: string;
+    secure?: boolean;
+  }): Promise<SessionIssueResult> {
+    const found = await this.findPasswordReset(input.token);
+    if (found === undefined) {
+      throw new AuthenticationError(
+        "This password reset link is no longer valid. Request a new one.",
+        400,
+        "reset_invalid",
+      );
+    }
+    // Hashed before the link is spent, so a password the policy refuses does
+    // not burn the one link the person has.
+    const passwordDigest = await hashPassword(input.password);
+    const consumed = await this.store.consumePasswordReset(
+      found.reset.id,
+      this.now().toISOString(),
+    );
+    if (!consumed) {
+      throw new AuthenticationError(
+        "This password reset link has already been used.",
+        400,
+        "reset_invalid",
+      );
+    }
+    const user = await this.store.updateUser(found.user.id, {
+      passwordDigest,
+    });
+    await this.store.revokeUserSessions(user.id);
+    await this.store.deletePasswordResetsForUser(user.id);
+    // A lockout from the guessing that may have prompted the reset would
+    // otherwise keep the owner out of the account they have just recovered.
+    this.loginFailures.delete(user.email.trim().toLowerCase());
     return await this.issueSession(
       user,
       input.ipAddress,

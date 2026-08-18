@@ -311,6 +311,8 @@ const AUTH_HASHES = new Map([
   ["signin", "login"],
   ["register", "register"],
   ["setup", "bootstrap"],
+  ["forgot", "forgot"],
+  ["reset", "reset"],
 ]);
 
 /** The same table read the other way, for writing the URL back. */
@@ -318,10 +320,32 @@ const AUTH_MODE_HASHES = new Map(
   [...AUTH_HASHES].map(([hash, mode]) => [mode, hash]),
 );
 
-/** The form the current URL asks for, if it asks for one at all. */
+/**
+ * The form the current URL asks for, if it asks for one at all.
+ *
+ * Only the first segment names the form: a reset link carries its secret in
+ * the same fragment, as `#reset/<token>`. The fragment is never sent to the
+ * server by the browser, which is the point — the secret stays out of access
+ * logs and out of `Referer` headers on the way to whatever the page loads.
+ */
 function authModeFromHash() {
-  return AUTH_HASHES.get(window.location.hash.replace(/^#/u, ""));
+  return AUTH_HASHES.get(
+    window.location.hash.replace(/^#/u, "").split("/")[0] ?? "",
+  );
 }
+
+/** The secret out of a `#reset/<token>` link, or "" when there is none. */
+function passwordResetTokenFromHash() {
+  const hash = window.location.hash.replace(/^#/u, "");
+  return hash.startsWith("reset/") ? hash.slice("reset/".length) : "";
+}
+
+/**
+ * What the server said about the reset link this browser arrived on:
+ * `{ email }` once it is confirmed usable, `{ error }` when it is not, and
+ * undefined until the answer comes back.
+ */
+let resetState;
 
 let authMode = "login";
 /**
@@ -417,6 +441,18 @@ function renderInvite() {
             autocomplete="${signIn ? "current-password" : "new-password"}"
             required placeholder="••••••••••••">
         </label>
+        ${
+          // Only when the password is being chosen. Retyping one you already
+          // know is friction with nothing to catch.
+          signIn
+            ? ""
+            : `<label class="field">
+          <span>Confirm password</span>
+          <input class="input" name="confirmPassword" type="password"
+            minlength="12" autocomplete="new-password" required
+            placeholder="••••••••••••">
+        </label>`
+        }
         <button class="btn btn-primary btn-wide" type="submit">
           ${signIn ? "Sign in and join" : "Accept and join"}
         </button>
@@ -432,6 +468,9 @@ function renderInvite() {
 }
 
 function renderAuth() {
+  if (authMode === "forgot" || authMode === "reset") {
+    return renderPasswordReset();
+  }
   const setupRequired = state.health?.setupRequired === true;
   const bootstrap = authMode === "bootstrap";
   const register = authMode === "register";
@@ -489,12 +528,36 @@ function renderAuth() {
           <input class="input" name="email" type="email" autocomplete="username"
             placeholder="you@company.com" required>
         </label>
+        ${
+          // Asked for only where the address is being chosen. A typo in it is
+          // not recoverable by the person who made it: every way back into the
+          // account — the reset link most of all — goes to the address as
+          // typed, so an account created against a mistyped one is lost at the
+          // moment it is created.
+          bootstrap || register
+            ? `<label class="field">
+          <span>Confirm email address</span>
+          <input class="input" name="confirmEmail" type="email"
+            autocomplete="off" placeholder="you@company.com" required>
+        </label>`
+            : ""
+        }
         <label class="field">
           <span>Password</span>
           <input class="input" name="password" type="password" minlength="12"
             autocomplete="${bootstrap || register ? "new-password" : "current-password"}"
             placeholder="••••••••••••" required>
         </label>
+        ${
+          bootstrap || register
+            ? `<label class="field">
+          <span>Confirm password</span>
+          <input class="input" name="confirmPassword" type="password"
+            minlength="12" autocomplete="new-password" required
+            placeholder="••••••••••••">
+        </label>`
+            : ""
+        }
 
         ${
           bootstrap || register
@@ -502,8 +565,9 @@ function renderAuth() {
             : // No "remember me": sessions run to a fixed server-side lifetime and
               // there is no per-login control over it, so the checkbox could
               // only ever have been decoration.
-              `<p class="auth-hint">Forgotten your password? Your organization
-                owner can reset it.</p>`
+              `<p class="auth-hint"><a class="link-muted" href="#forgot"
+                data-act="auth-mode" data-value="forgot">Forgotten your
+                password?</a></p>`
         }
 
         <button class="btn btn-primary btn-wide" type="submit">
@@ -532,6 +596,207 @@ function renderAuth() {
   </main>`;
 }
 
+/**
+ * The two halves of recovering a forgotten password.
+ *
+ * "forgot" asks for the address; "reset" is what the link in the mail opens,
+ * and chooses the new password. One function because they are one flow and
+ * share the shell — and because the reset half has to say something useful
+ * when the link has expired, which is the state people actually arrive in.
+ */
+function renderPasswordReset() {
+  const reset = authMode === "reset";
+  const token = passwordResetTokenFromHash();
+  const dead = reset && resetState?.error !== undefined;
+  return `<main class="auth-shell">
+    <div class="auth-box">
+      <div class="auth-mascot">
+        ${brandMark(54)}
+        <div>
+          <h1>${reset ? "Choose a new password" : "Reset your password"}</h1>
+          <p>${
+            reset
+              ? dead
+                ? esc(resetState.error)
+                : resetState?.email === undefined
+                  ? "Checking your link…"
+                  : `Setting a new password for ${esc(resetState.email)}.`
+              : "Tell us the address on your account and we will send a link to it."
+          }</p>
+        </div>
+      </div>
+      ${
+        reset
+          ? dead
+            ? ""
+            : `<form class="auth-card" data-act="password-reset">
+        <input type="hidden" name="token" value="${esc(token)}">
+        <label class="field">
+          <span>New password</span>
+          <input class="input" name="password" type="password" minlength="12"
+            autocomplete="new-password" placeholder="••••••••••••" required>
+        </label>
+        <label class="field">
+          <span>Confirm new password</span>
+          <input class="input" name="confirmPassword" type="password"
+            minlength="12" autocomplete="new-password" required
+            placeholder="••••••••••••">
+        </label>
+        <button class="btn btn-primary btn-wide" type="submit">
+          Set password and sign in
+        </button>
+        <p class="form-msg" id="auth-msg" role="alert"></p>
+      </form>`
+          : `<form class="auth-card" data-act="password-forgot">
+        <label class="field">
+          <span>Email address</span>
+          <input class="input" name="email" type="email" autocomplete="username"
+            placeholder="you@company.com" required>
+        </label>
+        <button class="btn btn-primary btn-wide" type="submit">
+          Email me a reset link
+        </button>
+        <p class="form-msg" id="auth-msg" role="alert"></p>
+      </form>`
+      }
+      <p class="auth-foot">${
+        dead
+          ? `<a class="link-muted" href="#forgot" data-act="auth-mode" data-value="forgot">Ask for a new link</a>.`
+          : `Remembered it? <a class="link-muted" href="#signin" data-act="auth-mode" data-value="login">Sign in</a>.`
+      }</p>
+    </div>
+  </main>`;
+}
+
+/**
+ * Checks the link before showing the form behind it.
+ *
+ * Without this, somebody arriving on a week-old link would type a password
+ * twice and only then be told the link was dead. The answer also names the
+ * address, so the form can say whose password is being set — which is the
+ * difference between trusting the page and guessing at it.
+ */
+async function loadPasswordReset() {
+  const token = passwordResetTokenFromHash();
+  if (token === "") {
+    resetState = { error: "That reset link is incomplete. Ask for a new one." };
+  } else {
+    try {
+      const answer = await api(
+        `/auth/password-reset/${encodeURIComponent(token)}`,
+      );
+      resetState = { email: answer?.reset?.email ?? "" };
+    } catch (error) {
+      resetState = { error: error.message };
+    }
+  }
+  const root = $("#auth-root");
+  if (root !== null && !root.hidden && authMode === "reset") {
+    root.innerHTML = renderAuth();
+  }
+}
+
+/** Asks for a reset link. The answer is the same whether or not it exists. */
+async function submitPasswordResetRequest(form) {
+  const data = new FormData(form);
+  const message = $("#auth-msg");
+  try {
+    const answer = await api("/auth/password-reset", {
+      method: "POST",
+      body: { email: String(data.get("email") ?? "") },
+    });
+    if (message !== null) {
+      // Deliberately not "we sent it": the server does not say whether the
+      // address has an account, and neither does this.
+      message.textContent =
+        answer?.message ??
+        "If that address has an account, a reset link is on its way to it.";
+    }
+    form.reset();
+  } catch (error) {
+    if (message !== null) {
+      message.textContent = error.message;
+    }
+  }
+}
+
+/**
+ * Sets the new password and lands inside.
+ *
+ * The response carries the session, exactly as registering does, because
+ * somebody who has just proved they hold the mailbox and chosen a password
+ * has no reason to be asked for that password again on the next screen.
+ */
+async function submitPasswordReset(form) {
+  const data = new FormData(form);
+  const message = $("#auth-msg");
+  const password = String(data.get("password") ?? "");
+  const confirmation = String(data.get("confirmPassword") ?? "");
+  if (password !== confirmation) {
+    if (message !== null) {
+      message.textContent = "Passwords do not match";
+    }
+    return;
+  }
+  try {
+    await api("/auth/password-reset/confirm", {
+      method: "POST",
+      body: {
+        token: String(data.get("token") ?? ""),
+        password,
+        confirmPassword: confirmation,
+      },
+    });
+    resetState = undefined;
+    authMode = "login";
+    window.location.hash = "#chats";
+    await boot();
+    toast("Password changed", "ok");
+  } catch (error) {
+    if (message !== null) {
+      message.textContent = error.message;
+    }
+  }
+}
+
+/**
+ * Whether the retyped address and password match what they confirm.
+ *
+ * Checked here as well as on the server so the answer is instant and the form
+ * keeps what was typed. The server checks too — a browser is not where a rule
+ * lives — but a round trip to be told about a typo is a poor way to learn of
+ * one. Absent fields pass: a form that does not ask twice has nothing to
+ * disagree with.
+ */
+function confirmationsMatch(data) {
+  const pairs = [
+    ["email", "confirmEmail", "Email addresses do not match"],
+    ["password", "confirmPassword", "Passwords do not match"],
+  ];
+  for (const [field, confirmation, complaint] of pairs) {
+    const typed = data.get(confirmation);
+    if (typed === null) {
+      continue;
+    }
+    const original = String(data.get(field) ?? "").trim();
+    const retyped = String(typed).trim();
+    // The address is compared case-insensitively because the account stores
+    // it that way; a capital letter in one box is not a mistake to report.
+    const same =
+      field === "email"
+        ? original.toLowerCase() === retyped.toLowerCase()
+        : original === retyped;
+    if (!same) {
+      const message = $("#auth-msg");
+      if (message !== null) {
+        message.textContent = complaint;
+      }
+      return false;
+    }
+  }
+  return true;
+}
+
 async function submitLogin(form) {
   const data = new FormData(form);
   try {
@@ -550,6 +815,9 @@ async function submitLogin(form) {
 
 async function submitBootstrap(form) {
   const data = new FormData(form);
+  if (!confirmationsMatch(data)) {
+    return;
+  }
   try {
     // The one-time token authenticates the request itself, so it travels as a
     // header rather than as part of the record being created.
@@ -567,7 +835,9 @@ async function submitBootstrap(form) {
         displayName: String(data.get("displayName") ?? ""),
         organizationName: String(data.get("organizationName") ?? ""),
         email: String(data.get("email") ?? ""),
+        confirmEmail: String(data.get("confirmEmail") ?? ""),
         password: String(data.get("password") ?? ""),
+        confirmPassword: String(data.get("confirmPassword") ?? ""),
       },
     });
     authMode = "login";
@@ -588,6 +858,9 @@ async function submitBootstrap(form) {
  */
 async function submitRegister(form) {
   const data = new FormData(form);
+  if (!confirmationsMatch(data)) {
+    return;
+  }
   const organizationName = String(data.get("organizationName") ?? "").trim();
   try {
     await api("/auth/register", {
@@ -595,7 +868,9 @@ async function submitRegister(form) {
       body: {
         displayName: String(data.get("displayName") ?? ""),
         email: String(data.get("email") ?? ""),
+        confirmEmail: String(data.get("confirmEmail") ?? ""),
         password: String(data.get("password") ?? ""),
+        confirmPassword: String(data.get("confirmPassword") ?? ""),
         // Omitted rather than sent empty, so the server picks its default
         // instead of naming a team the empty string.
         ...(organizationName === "" ? {} : { organizationName }),
@@ -629,6 +904,9 @@ function inviteError(error) {
 /** Creates the account the invitation names, then claims it. */
 async function submitInviteAccept(form) {
   const data = new FormData(form);
+  if (!confirmationsMatch(data)) {
+    return;
+  }
   try {
     await acceptInvitation(
       state.inviteToken,
@@ -3431,7 +3709,15 @@ function applyHash() {
     const mode = authModeFromHash();
     if (mode !== undefined && mode !== authMode) {
       authMode = mode;
+      // A different link means a different answer; the old one would otherwise
+      // still be on screen while the new one is checked.
+      if (mode === "reset") {
+        resetState = undefined;
+      }
       authRoot.innerHTML = renderAuth();
+      if (mode === "reset") {
+        void loadPasswordReset();
+      }
     }
     return;
   }
@@ -4878,6 +5164,12 @@ document.addEventListener("submit", (event) => {
     case "register":
       void submitRegister(form);
       return;
+    case "password-forgot":
+      void submitPasswordResetRequest(form);
+      return;
+    case "password-reset":
+      void submitPasswordReset(form);
+      return;
     case "policy-save":
       void savePolicy(form);
       return;
@@ -5450,12 +5742,18 @@ function showAuth() {
   // to draw. Naming the form instead means the sign-in page reloads as the
   // sign-in page.
   const hash = AUTH_MODE_HASHES.get(authMode);
-  if (hash !== undefined && window.location.hash !== `#${hash}`) {
+  // `startsWith` rather than equality, because a reset link's hash carries the
+  // secret after the form's name — rewriting it to the bare `#reset` would
+  // throw away the one thing the page needs.
+  if (hash !== undefined && !window.location.hash.startsWith(`#${hash}`)) {
     window.location.hash = `#${hash}`;
   }
   $("#app-root").hidden = true;
   $("#auth-root").hidden = false;
   $("#auth-root").innerHTML = renderAuth();
+  if (authMode === "reset" && resetState === undefined) {
+    void loadPasswordReset();
+  }
 }
 
 function showApp() {

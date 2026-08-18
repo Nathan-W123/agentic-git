@@ -95,6 +95,7 @@ import type {
   TokenUsageRecord,
   SubmittedTaskStatus,
   InvitationRecord,
+  PasswordResetRecord,
   RepositoryGrant,
   UserAccount,
   UserAppearance,
@@ -1367,6 +1368,59 @@ export class PostgresCoordinationStore implements CoordinationStore {
       acceptedAt: optionalText(row, "accepted_at"),
       acceptedBy: optionalText(row, "accepted_by"),
       revokedAt: optionalText(row, "revoked_at"),
+    };
+  }
+
+  public async createPasswordReset(reset: PasswordResetRecord): Promise<void> {
+    await this.query(
+      `INSERT INTO password_resets
+         (id, user_id, email, token_hash, created_at, expires_at, consumed_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NULL)`,
+      [
+        reset.id,
+        reset.userId,
+        // Lowercased for the same reason invitations are: this schema has no
+        // case-insensitive collation on the column.
+        reset.email.toLowerCase(),
+        reset.secretHash,
+        reset.createdAt,
+        reset.expiresAt,
+      ],
+    );
+  }
+
+  public async getPasswordReset(
+    id: string,
+  ): Promise<PasswordResetRecord | undefined> {
+    const row = await this.row("SELECT * FROM password_resets WHERE id = $1", [
+      id,
+    ]);
+    return row === undefined ? undefined : this.toPasswordReset(row);
+  }
+
+  public async consumePasswordReset(id: string, at: string): Promise<boolean> {
+    const rows = await this.rows(
+      `UPDATE password_resets SET consumed_at = $1
+       WHERE id = $2 AND consumed_at IS NULL
+       RETURNING id`,
+      [at, id],
+    );
+    return rows.length === 1;
+  }
+
+  public async deletePasswordResetsForUser(userId: string): Promise<void> {
+    await this.query("DELETE FROM password_resets WHERE user_id = $1", [userId]);
+  }
+
+  private toPasswordReset(row: Row): PasswordResetRecord {
+    return {
+      id: text(row, "id"),
+      userId: text(row, "user_id"),
+      email: text(row, "email"),
+      secretHash: text(row, "token_hash"),
+      createdAt: text(row, "created_at"),
+      expiresAt: text(row, "expires_at"),
+      consumedAt: optionalText(row, "consumed_at"),
     };
   }
 
