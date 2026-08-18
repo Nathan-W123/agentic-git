@@ -761,12 +761,14 @@ const EXPLANATION_STYLE_INSTRUCTIONS = [
   "The explanation is shown to the person who asked, in a chat, as the one " +
     "line that says how this task ended. Most of them will never read the " +
     "diff.",
-  "Write it for them: one or two plain sentences, under 200 characters, " +
-    "saying what is different now. No file paths, function or symbol names, " +
-    "code, or an account of how you went about it — somebody who cannot read " +
-    "the code should still understand it.",
-  "Finish the sentence. A summary that stops halfway is worse than a shorter " +
-    "one.",
+  "Write it for them: one or two plain sentences saying what is different " +
+    "now. No file paths, function or symbol names, code, or an account of how " +
+    "you went about it — somebody who cannot read the code should still " +
+    "understand it.",
+  // No character count: the reader is shown whatever this says, whole, so a
+  // number here only ever taught the model to stop mid-thought near it.
+  "Say the whole thing. A summary that stops halfway is worse than a shorter " +
+    "one, and there is nowhere else for the reader to find the rest.",
 ].join("\n");
 
 const COMPLETION_SHAPE_INSTRUCTIONS = [

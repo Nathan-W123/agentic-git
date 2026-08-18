@@ -1371,9 +1371,12 @@ test("the execution prompt asks for an ending a person can read", async () => {
     await adapter.collectChanges(session.id);
 
     const prompt = executionInputs[0] ?? "";
-    assert.match(prompt, /one or two plain sentences, under 200 characters/u);
+    assert.match(prompt, /one or two plain sentences saying what is different/u);
     assert.match(prompt, /No file paths, function or symbol names/u);
-    assert.match(prompt, /Finish the sentence/u);
+    assert.match(prompt, /Say the whole thing/u);
+    // No character count in the ask any more: the channel shows the whole
+    // account, and a number here only taught the model to stop near it.
+    assert.doesNotMatch(prompt, /under \d+ characters/u);
 
     await fixture.workspaces.destroy(workspace);
   } finally {

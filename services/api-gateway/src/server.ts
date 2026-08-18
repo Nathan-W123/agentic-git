@@ -806,15 +806,21 @@ const CHANNEL_CEREMONIAL_EVENTS = new Set([
 ]);
 
 /**
- * How much of an agent's own account of its work the ending may carry.
+ * The runaway guard on an agent's own account of its work, and nothing more.
  *
- * Room for a sentence or two in plain words, which is all an ending in a
- * channel is for. It used to be 400, and 400 characters of an agent writing
- * for an engineer is a paragraph naming files, functions and the reasoning
- * between them — then cut mid-word at the bound, so the one line most people
- * read of a task both said too much and stopped halfway through saying it.
+ * It was 200, and before that 400, on the theory that an ending belongs on one
+ * line — but a bound low enough to shape the writing is a bound the writing
+ * keeps hitting, and every account that hit it reached the reader with its
+ * last sentence missing or an ellipsis where the point was. There is nowhere
+ * in the channel to read the rest, so the shortening was pure loss.
+ *
+ * The account is now shown whole. This bound is set where {@link
+ * FAILURE_ACCOUNT_MAX} is, for the reason that one is: a model that ignores
+ * "one or two plain sentences" entirely must not be able to paste a novel into
+ * a room full of people. Ordinary summaries — a paragraph at the very worst —
+ * never come near it, so in practice nothing is cut.
  */
-const TERMINAL_SUMMARY_MAX = 200;
+const TERMINAL_SUMMARY_MAX = 4_000;
 
 const CHANNEL_TERMINAL_EVENTS: Record<string, string> = {
   // The fallback, for a run whose agent explained nothing — see the
@@ -1050,15 +1056,20 @@ function clipToBoundary(text: string, max: number): string {
 }
 
 /**
- * An ending short enough to read at a glance and finished enough to trust.
+ * An ending the reader gets all of.
  *
- * A cut sentence is worse than a short one: "…adds a cmsg-mine cl…" tells the
- * reader the account was truncated but not what it said, and there is nowhere
- * in the channel to go for the rest. So the whole sentences that fit are kept
- * and the remainder is dropped — the first sentence of an account is the one
- * that says what happened, and the ones after it are the detail. Only text
- * with no sentence end at all inside the bound falls back to a clipped word,
- * because something has to give and a runaway paragraph is not an ending.
+ * Nothing an agent writes about its own work is shortened here any more. A cut
+ * ending — "…adds a cmsg-mine cl…" — tells the reader the account was
+ * truncated and not what it said, and dropping the sentences past a bound is
+ * the same loss without the ellipsis to admit it: the detail after the first
+ * sentence is often the part somebody asked for. There is nowhere in the
+ * channel to go for the rest, so there is no shortening worth doing.
+ *
+ * What is left is the runaway guard at {@link TERMINAL_SUMMARY_MAX}, which an
+ * account of a page or two never reaches. Past it, whole sentences are kept in
+ * preference to a clipped word, and text with no sentence end at all inside
+ * the bound falls back to a clipped word — something has to give when a model
+ * writes four thousand characters instead of two.
  */
 function shortenEnding(written: string): string {
   if (written.length <= TERMINAL_SUMMARY_MAX) {
@@ -1294,9 +1305,9 @@ export function narrateTaskEvent(
       if (written.length === 0 || isAdapterFallback) {
         return CHANNEL_TERMINAL_EVENTS[type];
       }
-      // Bounded, like every other line this writes: a model that ignores
-      // "one or two plain sentences" must not turn the ending into an essay,
-      // and must not end mid-word when it does.
+      // Whole, save for the runaway guard: this is the one line most people
+      // read of a task, and a bound low enough to shape it was a bound it kept
+      // being cut at.
       const summary = shortenEnding(written);
       // The count, not the names — the reader who wants those is one click
       // Named while there are few enough to name. "(1 file changed)" is the
