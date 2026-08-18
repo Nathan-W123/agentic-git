@@ -4315,19 +4315,10 @@ test("a finished task says what it did, not that the pipeline worked", () => {
     );
   }
 
-  // Bounded: a model that ignores "one or two plain sentences" must not paste
-  // an essay into a channel everybody is reading.
-  const essay = narrateTaskEvent("canonical_promoted", {
-    agentExplanation: `${"word ".repeat(400)}end`,
-  });
-  assert.ok((essay ?? "").length < 250, String(essay?.length));
-  // Nothing to cut back to in an unpunctuated wall of text, so it ends on a
-  // whole word and says it was shortened — never halfway through one.
-  assert.match(essay ?? "", /word…$/u);
-
-  // An over-long account is cut back to the sentences that fit, not sliced at
-  // the bound: "…adds a cmsg-mine cl…" told a reader the ending was truncated
-  // and nothing else, with nowhere in the channel to read the rest.
+  // A long account reaches the reader whole. It used to be cut back to the
+  // sentences that fit inside 200 characters, which dropped the half of it
+  // somebody had asked for — a diagnosis, a caveat, what was left undone —
+  // with nowhere in the channel to read the rest.
   const long = narrateTaskEvent("canonical_promoted", {
     agentExplanation:
       "Your own messages now sit on the right on a phone. " +
@@ -4338,9 +4329,30 @@ test("a finished task says what it did, not that the pipeline worked", () => {
   assert.equal(
     long,
     "Your own messages now sit on the right on a phone. Everybody else's " +
-      "stay on the left, and the desktop layout is unchanged.",
+      "stay on the left, and the desktop layout is unchanged. The reader's " +
+      "own id decides which side a message takes, so a signed-out reader " +
+      "sees every message on the left as before.",
   );
   assert.doesNotMatch(long ?? "", /…/u);
+
+  // A paragraph — several hundred characters, far past every bound this used
+  // to keep — survives byte for byte.
+  const paragraph = `${"This sentence says something worth reading. ".repeat(14)}And this one ends it.`;
+  assert.ok(paragraph.length > 600, String(paragraph.length));
+  assert.equal(
+    narrateTaskEvent("canonical_promoted", { agentExplanation: paragraph }),
+    paragraph,
+  );
+
+  // The guard that is left is for a runaway model only: nobody wants a novel
+  // pasted into a channel everybody is reading.
+  const novel = narrateTaskEvent("canonical_promoted", {
+    agentExplanation: `${"word ".repeat(1200)}end`,
+  });
+  assert.ok((novel ?? "").length < 4_100, String(novel?.length));
+  // Nothing to cut back to in an unpunctuated wall of text, so it ends on a
+  // whole word and says it was shortened — never halfway through one.
+  assert.match(novel ?? "", /word…$/u);
 
   // Newlines collapse: the ending is one line in a channel, and a multi-line
   // explanation would otherwise read as several messages.
