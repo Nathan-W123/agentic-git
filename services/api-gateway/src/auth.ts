@@ -1,6 +1,7 @@
 import {
   createHash,
   randomBytes,
+  randomInt,
   scrypt as scryptCallback,
   timingSafeEqual,
 } from "node:crypto";
@@ -13,6 +14,8 @@ import type {
   UserAccount,
 } from "@coord/persistence";
 import { createId } from "@coord/shared-types";
+
+import type { Mailer } from "./mailer.js";
 
 const SESSION_COOKIE = "coord_session";
 const CSRF_COOKIE = "coord_csrf";
@@ -123,8 +126,34 @@ export interface AuthServiceOptions {
    * an old mailbox is not a standing key to the account.
    */
   passwordResetTtlMs?: number;
+  /** Delivers the one-time code required to finish self-service sign-up. */
+  mailer?: Mailer;
+  /** How long a registration code remains usable. Ten minutes by default. */
+  registrationTtlMs?: number;
+  /** Wrong codes allowed before a registration challenge is closed. */
+  registrationAttemptLimit?: number;
   now?: () => Date;
 }
+
+/** Account details held only until the mailbox has been proved. */
+export interface PendingRegistration {
+  id: string;
+  email: string;
+  displayName: string;
+  organizationName?: string;
+  passwordDigest: string;
+  codeHash: string;
+  expiresAt: string;
+  failedAttempts: number;
+}
+
+/** The opaque challenge returned after the confirmation mail is accepted. */
+export interface RegistrationStartResult {
+  registrationId: string;
+  expiresAt: string;
+}
+
+type ClosedRegistrationReason = "used" | "expired" | "exhausted";
 
 function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("base64url");
@@ -364,6 +393,14 @@ export class AuthService {
    */
   private readonly loginFailures = new Map<string, LoginFailures>();
   private readonly passwordResetTtlMs: number;
+  private readonly registrationMailer: Mailer | undefined;
+  private readonly registrationTtlMs: number;
+  private readonly registrationAttemptLimit: number;
+  private readonly pendingRegistrations = new Map<string, PendingRegistration>();
+  private readonly closedRegistrations = new Map<
+    string,
+    { reason: ClosedRegistrationReason; forgetAt: number }
+  >();
   private readonly now: () => Date;
 
   public constructor(
@@ -376,9 +413,24 @@ export class AuthService {
     this.loginFailureLimit = options.loginFailureLimit ?? 10;
     this.loginLockoutMs = options.loginLockoutMs ?? 15 * 60 * 1000;
     this.passwordResetTtlMs = options.passwordResetTtlMs ?? 60 * 60 * 1000;
+    this.registrationMailer = options.mailer;
+    this.registrationTtlMs = options.registrationTtlMs ?? 10 * 60 * 1000;
+    this.registrationAttemptLimit = options.registrationAttemptLimit ?? 5;
     this.now = options.now ?? (() => new Date());
     if (!Number.isSafeInteger(this.sessionTtlMs) || this.sessionTtlMs < 60_000) {
       throw new RangeError("Session lifetime must be at least one minute");
+    }
+    if (
+      !Number.isSafeInteger(this.registrationTtlMs) ||
+      this.registrationTtlMs < 60_000
+    ) {
+      throw new RangeError("Registration lifetime must be at least one minute");
+    }
+    if (
+      !Number.isSafeInteger(this.registrationAttemptLimit) ||
+      this.registrationAttemptLimit < 1
+    ) {
+      throw new RangeError("Registration attempt limit must be positive");
     }
   }
 
@@ -433,21 +485,19 @@ export class AuthService {
    * owner, who set the control plane up; a self-registered user administers
    * their own organization and nothing beyond it.
    *
-   * The email uniqueness check belongs to the store, which enforces it under
-   * whatever concurrency the deployment has. A duplicate surfaces as the
-   * store's own conflict rather than being pre-checked here, because a check
-   * followed by an insert is a race.
+   * The early email lookup gives an explicit registration error, while the
+   * store's unique constraint remains the final authority under concurrency.
    */
-  public async register(input: {
+  private async register(input: {
     email: string;
     displayName: string;
-    password: string;
+    passwordDigest: string;
     organizationName?: string;
   }): Promise<UserAccount> {
     const user = await this.store.createUser({
       email: input.email,
       displayName: input.displayName,
-      passwordDigest: await hashPassword(input.password),
+      passwordDigest: input.passwordDigest,
       systemAdmin: false,
     });
     // Slugs have to be unique across the deployment, and a display name is
@@ -475,6 +525,205 @@ export class AuthService {
       description: "Repositories you create live here.",
     });
     return user;
+  }
+
+  /**
+   * Starts self-service registration without creating any durable account.
+   *
+   * The password is digested before it is retained and the confirmation code
+   * is retained only as a hash. The pending record is installed only after
+   * mail delivery succeeds, so a relay failure leaves no credential-shaped
+   * state that can later be confirmed.
+   */
+  public async startRegistration(input: {
+    email: string;
+    displayName: string;
+    password: string;
+    organizationName?: string;
+  }): Promise<RegistrationStartResult> {
+    const email = input.email.trim().toLowerCase();
+    if ((await this.store.getUserByEmail(email)) !== undefined) {
+      throw new AuthenticationError(
+        "An account already uses that email address",
+        409,
+        "account_exists",
+      );
+    }
+    const passwordDigest = await hashPassword(input.password);
+    const now = this.now();
+    this.sweepRegistrationState(now.getTime());
+    // A newer code supersedes any older code for the same address. Removing
+    // it before delivery also means a failed replacement does not leave a
+    // different, still-usable challenge behind.
+    for (const [id, pending] of this.pendingRegistrations) {
+      if (pending.email === email) {
+        this.pendingRegistrations.delete(id);
+      }
+    }
+
+    const id = `reg_${randomBytes(18).toString("base64url")}`;
+    const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
+    const expiresAt = new Date(
+      now.getTime() + this.registrationTtlMs,
+    ).toISOString();
+    const pending: PendingRegistration = {
+      id,
+      email,
+      displayName: input.displayName.trim(),
+      ...(input.organizationName === undefined
+        ? {}
+        : { organizationName: input.organizationName.trim() }),
+      passwordDigest,
+      codeHash: digest(`${id}:${code}`),
+      expiresAt,
+      failedAttempts: 0,
+    };
+    if (this.registrationMailer === undefined) {
+      throw new AuthenticationError(
+        "The confirmation email could not be delivered",
+        503,
+        "registration_mail_delivery_failed",
+      );
+    }
+    try {
+      await this.registrationMailer({
+        to: email,
+        subject: "Confirm your Lattice account",
+        text: [
+          `Your Lattice confirmation code is ${code}.`,
+          "",
+          `It expires at ${expiresAt}.`,
+          "If you did not request this account, you can ignore this message.",
+        ].join("\n"),
+      });
+    } catch {
+      throw new AuthenticationError(
+        "The confirmation email could not be delivered",
+        503,
+        "registration_mail_delivery_failed",
+      );
+    }
+    this.pendingRegistrations.set(id, pending);
+    return { registrationId: id, expiresAt };
+  }
+
+  /** Creates the account only after the one-time mailbox code is accepted. */
+  public async confirmRegistration(input: {
+    registrationId: string;
+    code: string;
+  }): Promise<UserAccount> {
+    const now = this.now().getTime();
+    this.sweepRegistrationState(now);
+    const pending = this.pendingRegistrations.get(input.registrationId);
+    if (pending === undefined) {
+      this.throwClosedRegistration(input.registrationId);
+    }
+    if (Date.parse(pending.expiresAt) <= now) {
+      this.closeRegistration(pending.id, "expired", now);
+      throw new AuthenticationError(
+        "This confirmation code has expired",
+        400,
+        "registration_expired",
+      );
+    }
+    if (pending.failedAttempts >= this.registrationAttemptLimit) {
+      this.closeRegistration(pending.id, "exhausted", now);
+      throw new AuthenticationError(
+        "Too many incorrect confirmation codes were entered",
+        429,
+        "registration_attempts_exhausted",
+      );
+    }
+    if (!equalDigest(`${pending.id}:${input.code.trim()}`, pending.codeHash)) {
+      pending.failedAttempts += 1;
+      if (pending.failedAttempts >= this.registrationAttemptLimit) {
+        this.closeRegistration(pending.id, "exhausted", now);
+        throw new AuthenticationError(
+          "Too many incorrect confirmation codes were entered",
+          429,
+          "registration_attempts_exhausted",
+        );
+      }
+      throw new AuthenticationError(
+        "The confirmation code is incorrect",
+        400,
+        "registration_code_invalid",
+      );
+    }
+
+    // Consumed before the first await below. Two confirmations racing in one
+    // process therefore cannot both reach account creation.
+    this.closeRegistration(pending.id, "used", now);
+    if ((await this.store.getUserByEmail(pending.email)) !== undefined) {
+      throw new AuthenticationError(
+        "An account already uses that email address",
+        409,
+        "account_exists",
+      );
+    }
+    return await this.register({
+      email: pending.email,
+      displayName: pending.displayName,
+      passwordDigest: pending.passwordDigest,
+      ...(pending.organizationName === undefined
+        ? {}
+        : { organizationName: pending.organizationName }),
+    });
+  }
+
+  private closeRegistration(
+    id: string,
+    reason: ClosedRegistrationReason,
+    now: number,
+  ): void {
+    this.pendingRegistrations.delete(id);
+    this.closedRegistrations.set(id, {
+      reason,
+      forgetAt: now + this.registrationTtlMs,
+    });
+  }
+
+  private throwClosedRegistration(id: string): never {
+    const closed = this.closedRegistrations.get(id)?.reason;
+    if (closed === "used") {
+      throw new AuthenticationError(
+        "This registration challenge has already been used",
+        409,
+        "registration_already_used",
+      );
+    }
+    if (closed === "expired") {
+      throw new AuthenticationError(
+        "This confirmation code has expired",
+        400,
+        "registration_expired",
+      );
+    }
+    if (closed === "exhausted") {
+      throw new AuthenticationError(
+        "Too many incorrect confirmation codes were entered",
+        429,
+        "registration_attempts_exhausted",
+      );
+    }
+    throw new AuthenticationError(
+      "This registration challenge is not valid",
+      400,
+      "registration_invalid",
+    );
+  }
+
+  private sweepRegistrationState(now: number): void {
+    for (const [id, pending] of this.pendingRegistrations) {
+      if (Date.parse(pending.expiresAt) <= now) {
+        this.closeRegistration(id, "expired", now);
+      }
+    }
+    for (const [id, closed] of this.closedRegistrations) {
+      if (closed.forgetAt <= now) {
+        this.closedRegistrations.delete(id);
+      }
+    }
   }
 
   public async login(input: {

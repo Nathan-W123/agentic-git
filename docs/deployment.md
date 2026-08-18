@@ -60,9 +60,9 @@ the web UI.
 | `COORD_ALLOWED_ORIGINS` | Comma-separated browser origins allowed CORS access, for a UI hosted on a different origin. | none |
 | `COORD_CREDENTIAL_KEY` | Encrypts users' stored provider credentials. 32 bytes as base64 or hex; anything else is stretched with scrypt. Generated once beside the credential file if unset, which ties the credentials to that directory — set it explicitly in real deployments. Read once at boot and then removed from the process environment, so nothing the control plane spawns can see it. | generated |
 | `COORD_CREDENTIAL_POLICY` | What a task does when its submitter has connected no provider account: `refuse` fails the task, `host-login` falls back to the machine's own CLI login. `refuse` is the default because the fallback is silent — one person's task spends the host owner's subscription and nothing in the run says so. **A single-operator deployment where nobody has connected a provider account needs `host-login`, or its tasks stop running.** See [per-user provider accounts](architecture/per-user-credentials.md). | `refuse` |
-| `COORD_ALLOW_REGISTRATION` | `1` to accept self-service sign-up at `/api/v1/auth/register`. Closed by default: a new account owns its own organization and can run tasks, which on a deployment strangers can reach means they can run code on it. Invitations are unaffected and are the intended way to add people. `COORD_DISABLE_REGISTRATION=1` still closes it explicitly. | closed |
-| `COORD_SMTP_URL` | Relay used to send the "forgotten password" link: `smtp://user:password@host:587` (STARTTLS when the relay offers it) or `smtps://host:465` (TLS from the first byte). Percent-encode an `@` in the password. Unset means no mail is sent — the link is written to the control plane's log instead, which is a usable recovery path for a single-operator deployment and no answer at all for a shared one. | unset |
-| `COORD_MAIL_FROM` | `From` address on that mail, display name allowed (`Lattice <no-reply@example.com>`). Unset means `no-reply@<SMTP host>`, which most relays refuse to send as — set the address the relay has authorised. | `no-reply@<SMTP host>` |
+| `COORD_ALLOW_REGISTRATION` | Set to `0` to close self-service sign-up at `/api/v1/auth/register`. A new account owns its own organization and can run tasks, so close registration on a deployment strangers can reach unless that is intentional. Invitations are unaffected. `COORD_DISABLE_REGISTRATION=1` still closes it explicitly. | open |
+| `COORD_SMTP_URL` | Relay used to send registration confirmation codes and "forgotten password" links: `smtp://user:password@host:587` (STARTTLS when the relay offers it) or `smtps://host:465` (TLS from the first byte). Percent-encode an `@` in the password. Unset means messages are written to the control plane's log instead, which is a usable path for a single-operator deployment and no answer at all for a shared one. | unset |
+| `COORD_MAIL_FROM` | `From` address on those messages, display name allowed (`Lattice <no-reply@example.com>`). Unset means `no-reply@<SMTP host>`, which most relays refuse to send as — set the address the relay has authorised. | `no-reply@<SMTP host>` |
 | `COORD_PUBLIC_URL` | Absolute origin this deployment is reached at, used to build the reset link. Unset falls back to the `Host` header of the request that asked for the link — correct behind a router that sets it, wrong wherever a client can choose it. | inferred from `Host` |
 | `COORD_PASSWORD_RESET_TTL_MINUTES` | How long a reset link stays usable. Requesting a new link always invalidates the previous one, whatever this is. | `60` |
 | `COORD_TRUSTED_PROXY_HOPS` | How many proxies sit in front of this control plane. `0` ignores `X-Forwarded-For` and treats the socket peer as the client. Behind a platform router that means every request shares one rate-limit bucket, so one client can exhaust the ten-per-minute sign-in budget for everybody — set this to the real number of hops. Setting it higher than the truth lets a client choose its own bucket, so it is never inferred. Also what makes `X-Forwarded-Proto` trusted for the Secure-cookie and HSTS decisions. | `0` |
@@ -85,6 +85,21 @@ not forwarded there yet, so a Compose deployment that wants one adds the line
 (`COORD_MAX_CONVERSATION_SESSIONS: ${COORD_MAX_CONVERSATION_SESSIONS:-}`, and
 the same shape for the other two) beside the ones already there. Empty is each
 one's own default, so an unset variable changes nothing.
+
+## Account email confirmation
+
+Self-service sign-up first validates the submitted fields, hashes the password,
+and mails a six-digit code to the address. No user, organization, membership,
+project, or session is created at that point. The account is created and the
+browser is signed in only after the code is submitted to
+`/api/v1/auth/register/confirm` before it expires. A code is single-use and is
+closed after repeated incorrect attempts. Pending challenges are process-local,
+so a restart invalidates them and multi-instance deployments must route both
+steps to the same control-plane instance.
+
+Configure `COORD_SMTP_URL` for every shared deployment. Without it, the code is
+written to the control plane log with the `[mail]` prefix and never reaches the
+person's inbox.
 
 ## Forgotten passwords
 

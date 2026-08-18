@@ -34,6 +34,174 @@ import {
   parseApiToken,
   parseBearer,
 } from "./auth.js";
+import type { MailMessage } from "./mailer.js";
+
+function confirmationCode(message: MailMessage | undefined): string {
+  return /\b([0-9]{6})\b/u.exec(message?.text ?? "")?.[1] ?? "";
+}
+
+test("registration retains digests and creates the account only after the mailed code", async () => {
+  const store = new InMemoryCoordinationStore();
+  const sent: MailMessage[] = [];
+  const auth = new AuthService(store, {
+    mailer: async (message) => {
+      sent.push(message);
+    },
+  });
+
+  const started = await auth.startRegistration({
+    email: "New.Person@Example.com",
+    displayName: "New Person",
+    password: "MailConfirm123!",
+    organizationName: "Confirmed team",
+  });
+  assert.match(started.registrationId, /^reg_/u);
+  assert.equal(await store.countUsers(), 0);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]?.to, "new.person@example.com");
+  const code = confirmationCode(sent[0]);
+  assert.match(code, /^[0-9]{6}$/u);
+
+  const pending = (
+    auth as unknown as {
+      pendingRegistrations: Map<
+        string,
+        { passwordDigest: string; codeHash: string }
+      >;
+    }
+  ).pendingRegistrations.get(started.registrationId);
+  assert.notEqual(pending, undefined);
+  assert.notEqual(pending?.passwordDigest, "MailConfirm123!");
+  assert.notEqual(pending?.codeHash, code);
+  assert.equal(JSON.stringify(pending).includes("MailConfirm123!"), false);
+  assert.equal(JSON.stringify(pending).includes(`\"${code}\"`), false);
+  assert.equal(
+    await verifyPassword("MailConfirm123!", pending?.passwordDigest ?? ""),
+    true,
+  );
+
+  const user = await auth.confirmRegistration({
+    registrationId: started.registrationId,
+    code,
+  });
+  assert.equal(await store.countUsers(), 1);
+  assert.equal(user.email, "new.person@example.com");
+  const organizations = await store.listOrganizations(user.id);
+  assert.equal(organizations.length, 1);
+  assert.equal(organizations[0]?.name, "Confirmed team");
+  assert.equal(
+    (await store.getMembership(organizations[0]?.id ?? "", user.id))?.role,
+    "owner",
+  );
+  assert.deepEqual(
+    (await store.listProjects(organizations[0]?.id ?? "")).map(
+      (project) => project.slug,
+    ),
+    ["default"],
+  );
+});
+
+test("registration rejects wrong, expired, exhausted, reused, and unknown challenges", async () => {
+  let clock = new Date("2026-01-01T00:00:00.000Z");
+  const store = new InMemoryCoordinationStore();
+  const sent: MailMessage[] = [];
+  const auth = new AuthService(store, {
+    now: () => clock,
+    registrationTtlMs: 60_000,
+    registrationAttemptLimit: 2,
+    mailer: async (message) => {
+      sent.push(message);
+    },
+  });
+  const begin = async (email: string) =>
+    await auth.startRegistration({
+      email,
+      displayName: "New Person",
+      password: "MailConfirm123!",
+    });
+  const errorCode = (code: string) => (error: unknown) =>
+    error instanceof AuthenticationError && error.code === code;
+
+  const exhausted = await begin("attempts@example.com");
+  await assert.rejects(
+    auth.confirmRegistration({
+      registrationId: exhausted.registrationId,
+      code: "not-code",
+    }),
+    errorCode("registration_code_invalid"),
+  );
+  await assert.rejects(
+    auth.confirmRegistration({
+      registrationId: exhausted.registrationId,
+      code: "still-wrong",
+    }),
+    errorCode("registration_attempts_exhausted"),
+  );
+  await assert.rejects(
+    auth.confirmRegistration({
+      registrationId: exhausted.registrationId,
+      code: confirmationCode(sent[0]),
+    }),
+    errorCode("registration_attempts_exhausted"),
+  );
+
+  const expired = await begin("expired@example.com");
+  clock = new Date("2026-01-01T00:01:00.000Z");
+  await assert.rejects(
+    auth.confirmRegistration({
+      registrationId: expired.registrationId,
+      code: confirmationCode(sent[1]),
+    }),
+    errorCode("registration_expired"),
+  );
+
+  const usable = await begin("used@example.com");
+  const usableCode = confirmationCode(sent[2]);
+  await auth.confirmRegistration({
+    registrationId: usable.registrationId,
+    code: usableCode,
+  });
+  await assert.rejects(
+    auth.confirmRegistration({
+      registrationId: usable.registrationId,
+      code: usableCode,
+    }),
+    errorCode("registration_already_used"),
+  );
+  await assert.rejects(
+    auth.confirmRegistration({ registrationId: "reg_unknown", code: "000000" }),
+    errorCode("registration_invalid"),
+  );
+  assert.equal(await store.countUsers(), 1);
+});
+
+test("mail delivery failure leaves no account or pending registration", async () => {
+  const store = new InMemoryCoordinationStore();
+  const auth = new AuthService(store, {
+    mailer: async () => {
+      throw new Error("relay unavailable");
+    },
+  });
+  await assert.rejects(
+    auth.startRegistration({
+      email: "undelivered@example.com",
+      displayName: "Undelivered",
+      password: "MailConfirm123!",
+    }),
+    (error: unknown) =>
+      error instanceof AuthenticationError &&
+      error.code === "registration_mail_delivery_failed",
+  );
+  assert.equal(await store.countUsers(), 0);
+  assert.equal(
+    (
+      auth as unknown as {
+        pendingRegistrations: Map<string, unknown>;
+      }
+    ).pendingRegistrations.size,
+    0,
+  );
+});
 
 async function serviceWithUser(now?: () => Date) {
   const store = new InMemoryCoordinationStore();

@@ -2704,9 +2704,10 @@ export interface ApiGatewayOptions {
    */
   codexUsageReader?: CodexUsageReader;
   /**
-   * Delivers the password reset link. Defaults to the mailer built from
-   * `COORD_SMTP_URL`, which logs the message when no relay is configured.
-   * Injected by tests, which must not open a socket to anywhere.
+   * Delivers password-reset links and registration confirmation codes.
+   * Defaults to the mailer built from `COORD_SMTP_URL`, which logs messages
+   * when no relay is configured. Injected by tests, which must not open a
+   * socket to anywhere.
    */
   mailer?: Mailer;
   /**
@@ -3270,7 +3271,7 @@ export class ApiGateway {
    * the system administrator.
    */
   private readonly bootstrapToken: string | undefined;
-  /** Delivers the password reset link. */
+  /** Delivers password-reset links and registration confirmation codes. */
   private readonly mailer: Mailer;
   /** Configured origin for links that leave the browser, or "" to infer one. */
   private readonly publicUrl: string;
@@ -3303,18 +3304,19 @@ export class ApiGateway {
         return parsed.origin;
       }),
     );
-    this.auth = new AuthService(options.store, {
-      secureCookies: options.secureCookies ?? false,
-      passwordResetTtlMs: passwordResetTtlMs(
-        process.env["COORD_PASSWORD_RESET_TTL_MINUTES"],
-      ),
-    });
     this.mailer =
       options.mailer ??
       createMailer({
         smtpUrl: process.env["COORD_SMTP_URL"],
         from: process.env["COORD_MAIL_FROM"],
       });
+    this.auth = new AuthService(options.store, {
+      secureCookies: options.secureCookies ?? false,
+      passwordResetTtlMs: passwordResetTtlMs(
+        process.env["COORD_PASSWORD_RESET_TTL_MINUTES"],
+      ),
+      mailer: this.mailer,
+    });
     this.publicUrl = (
       options.publicUrl ??
       process.env["COORD_PUBLIC_URL"] ??
@@ -3538,6 +3540,7 @@ export class ApiGateway {
           // Registration mints an account from an unauthenticated request, so
           // it belongs on the stricter limiter with the other two.
           `${API_PREFIX}/auth/register`,
+          `${API_PREFIX}/auth/register/confirm`,
         ].includes(url.pathname) ||
         // Password reset belongs here too, and more than any of them: it sends
         // mail to an address the caller chose, so an unthrottled one is a way
@@ -3599,6 +3602,7 @@ export class ApiGateway {
             `${API_PREFIX}/auth/bootstrap`,
             // Creating an account cannot require an account.
             `${API_PREFIX}/auth/register`,
+            `${API_PREFIX}/auth/register/confirm`,
           ].includes(url.pathname)) ||
         (request.method === "POST" &&
           url.pathname.endsWith("/accept") &&
@@ -3770,7 +3774,7 @@ export class ApiGateway {
       }
       const body = objectBody(await this.readJson(request));
       this.assertAccountConfirmations(body);
-      const user = await this.auth.register({
+      const registration = await this.auth.startRegistration({
         email: emailField(body["email"]) ?? "",
         displayName:
           stringField(body["displayName"], "displayName", { max: 120 }) ?? "",
@@ -3783,6 +3787,29 @@ export class ApiGateway {
                   max: 120,
                 }) ?? "",
             }),
+      });
+      this.sendJson(response, 202, registration);
+      return;
+    }
+
+    if (
+      method === "POST" &&
+      path === `${API_PREFIX}/auth/register/confirm`
+    ) {
+      if (!registrationOpen(process.env)) {
+        throw new HttpError(
+          403,
+          "registration_closed",
+          "This control plane does not accept new accounts",
+        );
+      }
+      const body = objectBody(await this.readJson(request));
+      const user = await this.auth.confirmRegistration({
+        registrationId:
+          stringField(body["registrationId"], "registrationId", {
+            max: 128,
+          }) ?? "",
+        code: stringField(body["code"], "code", { max: 32 }) ?? "",
       });
       const issued = await this.auth.issueSession(
         user,

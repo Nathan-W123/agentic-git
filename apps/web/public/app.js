@@ -346,6 +346,8 @@ function passwordResetTokenFromHash() {
  * undefined until the answer comes back.
  */
 let resetState;
+/** The mailed-code challenge returned before a self-service account exists. */
+let pendingRegistration;
 
 let authMode = "login";
 /**
@@ -467,9 +469,42 @@ function renderInvite() {
   </main>`;
 }
 
+function renderRegistrationConfirmation() {
+  return `<main class="auth-shell">
+    <div class="auth-box">
+      <div class="auth-mascot">
+        ${brandMark(54)}
+        <div>
+          <h1>Check your email</h1>
+          <p>Enter the six-digit code sent to ${esc(
+            pendingRegistration?.email ?? "your email address",
+          )}.</p>
+        </div>
+      </div>
+      <form class="auth-card" data-act="registration-confirmation">
+        <label class="field">
+          <span>Confirmation code</span>
+          <input class="input" name="code" type="text" inputmode="numeric"
+            autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6"
+            placeholder="000000" required autofocus>
+        </label>
+        <button class="btn btn-primary btn-wide" type="submit">
+          Confirm and create account
+        </button>
+        <p class="form-msg" id="auth-msg" role="alert"></p>
+      </form>
+      <p class="auth-foot">The code expires shortly. <a class="link-muted"
+        href="#signin" data-act="auth-mode" data-value="login">Return to sign in</a>.</p>
+    </div>
+  </main>`;
+}
+
 function renderAuth() {
   if (authMode === "forgot" || authMode === "reset") {
     return renderPasswordReset();
+  }
+  if (authMode === "register" && pendingRegistration !== undefined) {
+    return renderRegistrationConfirmation();
   }
   const setupRequired = state.health?.setupRequired === true;
   const bootstrap = authMode === "bootstrap";
@@ -848,13 +883,11 @@ async function submitBootstrap(form) {
 }
 
 /**
- * Signs somebody up and drops them straight inside.
+ * Starts sign-up, then waits for proof that the mailbox is reachable.
  *
- * The response sets the session cookie, so there is no second login step: the
- * point of registering is to arrive, and sending a person who has just chosen
- * a password back to a form asking for it is the kind of seam that makes an
- * app feel unfinished. `boot()` then lands them on their own — empty — project,
- * which is where creating a repository starts.
+ * The first response deliberately carries no session. It only identifies the
+ * short-lived challenge whose code was mailed to the address, and the account
+ * does not exist until the next form confirms it.
  */
 async function submitRegister(form) {
   const data = new FormData(form);
@@ -863,7 +896,7 @@ async function submitRegister(form) {
   }
   const organizationName = String(data.get("organizationName") ?? "").trim();
   try {
-    await api("/auth/register", {
+    const registration = await api("/auth/register", {
       method: "POST",
       body: {
         displayName: String(data.get("displayName") ?? ""),
@@ -876,11 +909,37 @@ async function submitRegister(form) {
         ...(organizationName === "" ? {} : { organizationName }),
       },
     });
+    pendingRegistration = {
+      registrationId: registration.registrationId,
+      expiresAt: registration.expiresAt,
+      email: String(data.get("email") ?? "").trim(),
+    };
+    $("#auth-root").innerHTML = renderAuth();
+  } catch (error) {
+    $("#auth-msg").textContent = error.message;
+  }
+}
+
+/** Finishes sign-up and enters the application only after the code is valid. */
+async function submitRegistrationConfirmation(form) {
+  const data = new FormData(form);
+  const message = $("#auth-msg");
+  try {
+    await api("/auth/register/confirm", {
+      method: "POST",
+      body: {
+        registrationId: pendingRegistration?.registrationId ?? "",
+        code: String(data.get("code") ?? "").trim(),
+      },
+    });
+    pendingRegistration = undefined;
     authMode = "login";
     window.location.hash = "#chats";
     await boot();
   } catch (error) {
-    $("#auth-msg").textContent = error.message;
+    if (message !== null) {
+      message.textContent = error.message;
+    }
   }
 }
 
@@ -3709,6 +3768,9 @@ function applyHash() {
     const mode = authModeFromHash();
     if (mode !== undefined && mode !== authMode) {
       authMode = mode;
+      if (mode !== "register") {
+        pendingRegistration = undefined;
+      }
       // A different link means a different answer; the old one would otherwise
       // still be on screen while the new one is checked.
       if (mode === "reset") {
@@ -3858,6 +3920,9 @@ document.addEventListener("click", (event) => {
     case "auth-mode": {
       event.preventDefault();
       authMode = value;
+      if (value !== "register") {
+        pendingRegistration = undefined;
+      }
       // Rendered here rather than left to the `hashchange` this triggers, so
       // the form swaps on the click even when the hash is already the one
       // being asked for.
@@ -5163,6 +5228,9 @@ document.addEventListener("submit", (event) => {
       return;
     case "register":
       void submitRegister(form);
+      return;
+    case "registration-confirmation":
+      void submitRegistrationConfirmation(form);
       return;
     case "password-forgot":
       void submitPasswordResetRequest(form);

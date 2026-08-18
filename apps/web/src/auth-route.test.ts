@@ -145,6 +145,44 @@ test("creating an account asks for the address and password twice", async () => 
   }
 });
 
+test("registration waits for the emailed one-time code before entering the app", async () => {
+  const app = await publicFile("app.js");
+  const confirmation = app.slice(
+    app.indexOf("function renderRegistrationConfirmation()"),
+    app.indexOf("function renderAuth()"),
+  );
+  assert.match(
+    confirmation,
+    /data-act="registration-confirmation"/u,
+    "the challenge should render its own form",
+  );
+  assert.match(
+    confirmation,
+    /autocomplete="one-time-code"/u,
+    "the code field should use the browser's one-time-code affordance",
+  );
+  assert.match(confirmation, /pattern="\[0-9\]\{6\}"/u);
+
+  const start = app.slice(
+    app.indexOf("async function submitRegister(form)"),
+    app.indexOf("async function submitRegistrationConfirmation(form)"),
+  );
+  assert.match(start, /registration\.registrationId/u);
+  assert.doesNotMatch(
+    start,
+    /await boot\(\)/u,
+    "starting registration must not enter the application",
+  );
+
+  const finish = app.slice(
+    app.indexOf("async function submitRegistrationConfirmation(form)"),
+    app.indexOf("function enterAfterInvitation()"),
+  );
+  assert.match(finish, /api\("\/auth\/register\/confirm"/u);
+  assert.match(finish, /await boot\(\)/u);
+  assert.match(finish, /message\.textContent = error\.message/u);
+});
+
 test("a forgotten password has a way out of the sign-in form", async () => {
   const app = await publicFile("app.js");
   // The old copy told people to ask their organization owner — which is no
