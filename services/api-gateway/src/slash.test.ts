@@ -129,3 +129,17 @@ test("/dnc and /simple carry an objective, like /ask and /plan", () => {
     slashCommandsMatching("/si").some((entry) => entry.name === "simple"),
   );
 });
+
+test("/push names an agent rather than carrying an objective", () => {
+  const parsed = parseSlashCommand("/push @Eos");
+  assert.equal(parsed?.command.name, "push");
+  assert.equal(parsed?.rest, "@Eos");
+  assert.equal(parsed?.command.takesObjective, false);
+  assert.ok(
+    slashCommandsMatching("/pu").some((entry) => entry.name === "push"),
+  );
+  assert.match(formatSlashHelp(), /\/push @agent/u);
+
+  // It is syntax only as its own slash word, like every other command.
+  assert.equal(parseSlashCommand("read docs/push.md first"), undefined);
+});

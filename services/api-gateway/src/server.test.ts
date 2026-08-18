@@ -5376,6 +5376,70 @@ test("/simple keeps it brief in both places a reply is written from", async (t) 
   assert.match(prompt ?? "", /short and simple/u);
 });
 
+test("/push tasks only the named agent with a safe GitHub publish workflow", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "push-command");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // A second available agent proves this is explicit targeting rather than
+  // an auto-claim or room-wide publish.
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/push @Claude (Owner)" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const task = runtime.submittedTasks[0];
+  assert.equal(task?.vendor, "claude");
+  const objective = task?.objective ?? "";
+  assert.match(objective, /First sync this repository with GitHub, then publish/u);
+  assert.match(objective, /no more than six words/u);
+  assert.match(objective, /slightly longer version.*commit and push summary/u);
+  assert.match(
+    objective,
+    /if it fails, pull from GitHub and integrate the remote changes, then retry/u,
+  );
+  assert.match(objective, /Do not force-push/u);
+  assert.doesNotMatch(objective, /@Claude|\/push/u);
+});
+
+test("/push without one reachable agent dispatches nothing and explains the target", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "push-needs-agent");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  for (const content of ["/push", "/push @Nobody"]) {
+    const posted = await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content },
+    });
+    assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  }
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const listed = await owner.request(`${base}/messages`);
+  const said = (listed.data.messages as any[])
+    .map((message) => String(message.content))
+    .join("\n");
+  assert.match(said, /`\/push` needs an agent/u);
+  assert.match(said, /`\/push` needs one agent from this channel/u);
+  assert.match(said, /@Claude \(Owner\)/u);
+});
+
 test("a held run says in the room that it is waiting, not only in its thread", async (t) => {
   // The hold announced itself with a sentence inside the thread and nothing
   // anywhere else, and a thread is collapsed until somebody opens it. From
@@ -5783,10 +5847,18 @@ test("a slash inside a sentence is left alone, and /help answers", async (t) => 
     (listed.data.messages as any[]).map((m) => m.content).join("\n"),
     /\/plan/u,
   );
+  assert.match(
+    (listed.data.messages as any[]).map((m) => m.content).join("\n"),
+    /\/push @agent/u,
+  );
   // The picker reads the same table the channel parses by, so they cannot
   // offer and accept different things.
   assert.ok(
     (listed.data.slashCommands as any[]).some((entry) => entry.name === "plan"),
+    JSON.stringify(listed.data.slashCommands),
+  );
+  assert.ok(
+    (listed.data.slashCommands as any[]).some((entry) => entry.name === "push"),
     JSON.stringify(listed.data.slashCommands),
   );
   // /help answers the channel; it does not become work for an agent.

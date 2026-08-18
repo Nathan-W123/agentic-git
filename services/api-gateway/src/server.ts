@@ -9110,7 +9110,8 @@ export class ApiGateway {
    * Returns true when the message is finished with — `/help` and the
    * thread-scoped ones are answered here and go no further. Returns false
    * for commands that only change how the rest of the message is treated
-   * (`/plan`, `/ask`), which still need the mention resolution below.
+   * (`/plan`, `/ask`, `/dnc`, `/simple`, `/push`), which still need the
+   * mention resolution below.
    */
   private async runSlashCommand(input: {
     projectId: string;
@@ -9150,6 +9151,25 @@ export class ApiGateway {
     if (input.command.name === "cancel") {
       await this.cancelFromChannel(input);
       return true;
+    }
+    if (input.command.name === "push") {
+      if (/@agents\b/iu.test(input.rest)) {
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          "`/push` works with one agent at a time — mention the agent whose " +
+            "changes should be published.",
+        );
+        return true;
+      }
+      if (!ADDRESSED_RE.test(input.rest)) {
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          "`/push` needs an agent to publish for — use `/push @agent`.",
+        );
+        return true;
+      }
     }
     return false;
   }
@@ -9386,6 +9406,22 @@ export class ApiGateway {
       const mentionedPeople = people.filter((person) =>
         textMentionsName(content, person.name),
       );
+      if (parsed?.command.name === "push" && mentioned.length !== 1) {
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          mentioned.length > 1
+            ? "`/push` works with one agent at a time — mention only the " +
+                "agent whose changes should be published."
+            : candidates.length === 0
+              ? "`/push` needs a reachable agent, and this channel has none."
+              : "`/push` needs one agent from this channel: " +
+                  `${candidates
+                    .map((candidate) => `@${candidate.name}`)
+                    .join(", ")}.`,
+        );
+        return;
+      }
       if (
         mentioned.length === 0 &&
         mentionedPeople.length === 0 &&
@@ -9445,6 +9481,22 @@ export class ApiGateway {
           projectId,
           repositoryId,
           content,
+          ...(parsed?.command.name === "push"
+            ? {
+                objective:
+                  "First sync this repository with GitHub, then publish the " +
+                  "current changes to GitHub on a fresh branch. Name the " +
+                  "branch with a lowercase, hyphen-separated slug of no more " +
+                  "than six words that summarizes the general changes. Use a " +
+                  "slightly longer version of that description for the " +
+                  "commit and push summary. " +
+                  "Try the push once; if it fails, pull from GitHub and " +
+                  "integrate the remote changes, then retry the same branch's " +
+                  "push once. Do not force-push. If syncing, pulling, " +
+                  "integrating, or the retry fails, report that failure " +
+                  "instead of claiming success.",
+              }
+            : {}),
           senderId,
           candidate,
           referencedMessageId,
@@ -9617,6 +9669,8 @@ export class ApiGateway {
     projectId: string;
     repositoryId: string;
     content: string;
+    /** Worker instructions when a command expands beyond its visible text. */
+    objective?: string;
     senderId: string;
     candidate: ChannelMentionCandidate;
     /** The channel root that asked for this answer or work. */
@@ -9982,7 +10036,9 @@ export class ApiGateway {
         objective: withRoleContext(
           candidate.role,
           [
-            await this.describeAttachments(withoutMentions(content) || content),
+            await this.describeAttachments(
+              (input.objective ?? withoutMentions(content)) || content,
+            ),
             ...(input.brief === true ? [KEEP_IT_SIMPLE_DIRECTIVE] : []),
           ].join("\n\n"),
         ),

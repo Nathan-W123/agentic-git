@@ -13,7 +13,16 @@
 
 /** What a command does, and what to draw in the picker. */
 export interface SlashCommand {
-  name: string;
+  name:
+    | "plan"
+    | "ask"
+    | "dnc"
+    | "simple"
+    | "push"
+    | "retry"
+    | "cancel"
+    | "stop"
+    | "help";
   /** One line, shown beside the name in the lookup. */
   summary: string;
   /** How it is typed, shown under the summary. */
@@ -61,6 +70,12 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     summary: "Answer as short and simple as it can be said",
     usage: "/simple @agent your message",
     takesObjective: true,
+  },
+  {
+    name: "push",
+    summary: "Sync and publish this agent's changes on a new GitHub branch",
+    usage: "/push @agent",
+    takesObjective: false,
   },
   {
     name: "retry",
