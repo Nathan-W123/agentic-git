@@ -5391,6 +5391,116 @@ test("a command and a mention work together, and /plan holds the run", async (t)
   }, "the approved plan never started");
 });
 
+test("only the person who asked can start a held plan", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "plan-hold-owner");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const bystander = await addColleague(runtime, "bystander@example.com");
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/plan @Claude (Owner) rework the retry loop" },
+  });
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.equal(task?.status, "planned");
+  const root = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.kind === "agent");
+  const thread = `${base}/messages/${encodeURIComponent(root?.id ?? "")}/replies`;
+
+  // Somebody else in the room says go. The plan is not theirs to spend: it
+  // runs on the account of whoever asked for it, and nothing about the
+  // thread tells them that, so the refusal has to.
+  const notTheirs = await bystander.client.request(thread, {
+    method: "POST",
+    body: { content: "go ahead" },
+  });
+  assert.equal(notTheirs.status, 201);
+  await waitFor(async () => {
+    const held = (
+      await runtime.store.listChannelMessages(repositoryId, ownerId)
+    ).find((message) => message.kind === "agent");
+    return (held?.replies ?? []).some((reply) => /Owner's to start/u.test(reply.content));
+  }, "the bystander was never told whose plan this is");
+
+  // And it really is still held — the refusal is the point, not the wording.
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId }))[0]?.status,
+    "planned",
+  );
+
+  // The person who asked says the same words, and it starts.
+  const theirs = await owner.request(thread, {
+    method: "POST",
+    body: { content: "go ahead" },
+  });
+  assert.equal(theirs.status, 201);
+  await waitFor(async () => {
+    const started = (
+      await runtime.store.listChannelMessages(repositoryId, ownerId)
+    ).find((message) => message.kind === "agent");
+    return (started?.replies ?? []).some((reply) =>
+      /Starting now/u.test(reply.content),
+    );
+  }, "the plan's own author could not start it");
+});
+
+test("a held plan nobody is recorded as asking for still starts", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "plan-hold-orphan");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Work filed outside a channel — over the API, or from the command line —
+  // records nobody as having asked. Held plans like that predate this rule
+  // and would otherwise be unstartable by anyone, which is worse than the
+  // thing the rule prevents.
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "rework the retry loop",
+    agentId: "hud-agent",
+    validationCommands: [],
+    planOnly: true,
+  });
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "That's the plan — nothing is running yet.",
+  });
+  await runtime.store.setChannelMessageTask(repositoryId, root.id, task.id);
+
+  const go = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "go ahead" } },
+  );
+  assert.equal(go.status, 201);
+  await waitFor(async () => {
+    const released = (
+      await runtime.store.listSubmittedTasks({ repositoryId })
+    ).find((entry) => entry.id === task.id);
+    return released?.status !== "planned";
+  }, "a plan with no recorded requester was stranded");
+});
+
 test("/queue chains one agent's follow-up work without claiming it early", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

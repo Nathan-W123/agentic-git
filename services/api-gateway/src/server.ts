@@ -12250,6 +12250,13 @@ export class ApiGateway {
    * tests and writes the status in one step and returns undefined if it was
    * not held, so two people saying "go ahead" at once start one run.
    *
+   * Only the person who asked may start it — the same rule auto-claim
+   * acceptance already keeps, for the same reason. A held plan is the one
+   * review in this system that happens before the work is paid for, and the
+   * account it would be paid from is the plan author's; anybody else in the
+   * thread saying "go ahead" is spending somebody else's credential on work
+   * they never approved.
+   *
    * Returns false when there is nothing held, so a "yes" in a thread that
    * has nothing to start still reads as conversation.
    */
@@ -12267,6 +12274,45 @@ export class ApiGateway {
     );
     if (root?.taskId === undefined || input.responder === undefined) {
       return false;
+    }
+    // Whose plan this is, read before anything is released. Checking after
+    // the release would mean refusing a run that had already started, which
+    // is the whole of what this is here to prevent.
+    //
+    // The hold is read first so the refusal is only ever said about work
+    // that is actually waiting: a "go ahead" in a thread whose task has
+    // already run belongs to the conversation, not to this.
+    const held = (
+      await this.options.store.listSubmittedTasks({
+        repositoryId: input.repositoryId,
+        status: "planned",
+      })
+    ).find((entry) => entry.id === root.taskId);
+    if (held === undefined) {
+      return false;
+    }
+    const requester = await this.triggeredByForTask({
+      taskId: held.id,
+      root,
+    });
+    if (requester !== undefined && requester !== input.viewerId) {
+      // Said, not swallowed. A reply that quietly did nothing reads as the
+      // agent ignoring them, and they would say it again.
+      const asker = await this.options.store
+        .getUser(requester)
+        .catch(() => undefined);
+      await this.appendChannelThreadReply({
+        projectId: input.projectId,
+        repositoryId: input.repositoryId,
+        messageId: input.messageId,
+        authorId: `${input.responder.userId}:${input.responder.provider}`,
+        content:
+          `This one is ${asker?.displayName ?? "somebody else"}'s to start — ` +
+          `it was their request and it runs on their account, so I'll wait ` +
+          `for their go-ahead.`,
+      }).catch(() => undefined);
+      // Handled: they were answered, and the plan is still held.
+      return true;
     }
     // The release is the test. Reading the status first and acting on it
     // afterwards would let two approvals both pass the read.
@@ -12315,6 +12361,44 @@ export class ApiGateway {
       }),
     ).catch(() => undefined);
     return true;
+  }
+
+  /**
+   * Who asked for this task, when a person in a channel did.
+   *
+   * There is no column for it and adding one would say nothing about the
+   * tasks already filed. `submittedBy` is not this: it is the owner of the
+   * agent that took the work, which on a mention is deliberately *not* the
+   * sender, because the run is paid for out of that owner's account. The
+   * person who typed the request survives in the `task_submitted` audit
+   * event as `mentionedBy`, which is read here.
+   *
+   * Falls back to the author of the thread the task hangs off, for work
+   * filed before that event carried a sender, and reads nothing from an
+   * agent-authored root — an agent cannot have asked.
+   *
+   * Undefined when neither knows. Work submitted over the API or from the
+   * command line has no channel request behind it at all, and callers treat
+   * that as "nobody in particular asked" rather than refusing everybody and
+   * stranding a plan nothing can ever start.
+   */
+  private async triggeredByForTask(input: {
+    taskId: string;
+    root: ChannelMessage;
+  }): Promise<string | undefined> {
+    const trail = await this.options.store
+      .listAuditEvents({ taskId: input.taskId, types: ["task_submitted"] })
+      .catch(() => [] as SequencedAuditEvent[]);
+    // Newest first: a task dispatched more than once is the latest ask.
+    for (let index = trail.length - 1; index >= 0; index -= 1) {
+      const mentionedBy = (
+        trail[index]?.event.data as Record<string, unknown> | undefined
+      )?.["mentionedBy"];
+      if (typeof mentionedBy === "string" && mentionedBy.length > 0) {
+        return mentionedBy;
+      }
+    }
+    return input.root.kind === "user" ? input.root.authorId : undefined;
   }
 
   /**
