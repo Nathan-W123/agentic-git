@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 
 import {
+  MAX_AGENT_QUESTIONS,
   type AgentActionResult,
   type AgentAdapter,
   type AgentCapabilities,
@@ -10,6 +11,7 @@ import {
   type AgentTokenUsage,
   type CoordinatorContext,
   type QuestionAnswer,
+  type QuestionChoice,
   type StartTaskInput,
 } from "@coord/agent-protocol";
 import {
@@ -486,10 +488,21 @@ interface Completion {
 interface QuestionAsked {
   outcome: "question_asked";
   requestId: string;
-  question: string;
-  options: string[];
+  /** The single-question shape, still accepted and still what most asks use. */
+  question?: string;
+  options?: string[];
+  recommended?: number;
+  /** One to six questions asked together; see `MAX_AGENT_QUESTIONS`. */
+  questions?: AskedQuestion[];
   symbolsChanged: string[];
   explanation: string;
+}
+
+interface AskedQuestion {
+  question: string;
+  options: string[];
+  /** Index into `options` the agent would pick itself. */
+  recommended?: number;
 }
 
 /**
@@ -690,18 +703,48 @@ function assertExecutionResult(
   if (completion.outcome === "question_asked") {
     // Two options at minimum: one "option" is a statement, and a question
     // with nothing to choose between is the free-text ask this shape exists
-    // to prevent.
-    if (
-      typeof completion.requestId !== "string" ||
-      typeof completion.question !== "string" ||
-      completion.question.trim().length === 0 ||
-      !stringArray(completion.options) ||
-      completion.options.length < 2
-    ) {
+    // to prevent. Six at most, because past that the agent is designing a
+    // form rather than asking what blocks it.
+    if (typeof completion.requestId !== "string") {
+      throw new TypeError("A question must carry a requestId");
+    }
+    // Read as unknown, because this is the boundary: the CLI wrote this JSON
+    // and the type above is what it is supposed to have written, not what it
+    // did.
+    const asked: unknown[] = Array.isArray(completion.questions)
+      ? completion.questions
+      : [
+          {
+            question: completion.question,
+            options: completion.options,
+            recommended: completion.recommended,
+          },
+        ];
+    if (asked.length === 0 || asked.length > MAX_AGENT_QUESTIONS) {
       throw new TypeError(
-        "A question must carry a requestId, the question itself, and at " +
-          "least two options to choose between",
+        `Ask between one and ${String(MAX_AGENT_QUESTIONS)} questions at once`,
       );
+    }
+    for (const value of asked) {
+      const entry = value as Partial<AskedQuestion>;
+      if (
+        typeof entry !== "object" ||
+        entry === null ||
+        typeof entry.question !== "string" ||
+        entry.question.trim().length === 0 ||
+        !stringArray(entry.options) ||
+        entry.options.length < 2 ||
+        (entry.recommended !== undefined &&
+          (!Number.isInteger(entry.recommended) ||
+            entry.recommended < 0 ||
+            entry.recommended >= entry.options.length))
+      ) {
+        throw new TypeError(
+          "Every question must carry the question itself and at least two " +
+            "options to choose between, and any recommendation must name " +
+            "one of them",
+        );
+      }
     }
     return;
   }
@@ -736,6 +779,34 @@ function assertExecutionResult(
       "The scope change request does not match the required output shape",
     );
   }
+}
+
+/**
+ * The questions one ask carries, whichever shape the CLI used to write them.
+ *
+ * Validated already by `assertExecutionResult`, so this only has to choose
+ * between the two shapes rather than defend against either.
+ */
+function questionsAsked(execution: QuestionAsked): AskedQuestion[] {
+  const asked: AskedQuestion[] =
+    execution.questions !== undefined && execution.questions.length > 0
+      ? execution.questions
+      : [
+          {
+            question: execution.question ?? "",
+            options: execution.options ?? [],
+            ...(execution.recommended === undefined
+              ? {}
+              : { recommended: execution.recommended }),
+          },
+        ];
+  return asked.slice(0, MAX_AGENT_QUESTIONS).map((entry) => ({
+    question: entry.question,
+    options: [...entry.options],
+    ...(entry.recommended === undefined
+      ? {}
+      : { recommended: entry.recommended }),
+  }));
 }
 
 const PLAN_SHAPE_INSTRUCTIONS = [
@@ -781,9 +852,11 @@ const COMPLETION_SHAPE_INSTRUCTIONS = [
   '  outcome ("completed", "scope_change_requested", "question_asked" or "action_requested"), symbolsChanged, explanation,',
   "  requestId, additionalFiles, additionalSymbols, additionalApis, additionalSchemas,",
   "  additionalConfigKeys, additionalTests, additionalServices, reason,",
-  "  question, options, action",
+  "  question, options, recommended, questions, action",
   "For completed, use empty scope fields. For scope_change_requested, fill every scope field.",
-  'For question_asked, set requestId, question, and options (at least two); leave the scope fields empty.',
+  'For question_asked, set requestId and either question plus options (at least two), or questions: a list of up to ' +
+    String(MAX_AGENT_QUESTIONS) +
+    ' objects, each with its own question, options (at least two) and recommended (the index of the one you would pick). Leave the scope fields empty.',
   "For action_requested, set requestId and action; leave the scope fields empty.",
   EXPLANATION_STYLE_INSTRUCTIONS,
 ].join("\n");
@@ -866,6 +939,23 @@ const COMPLETION_JSON_SCHEMA = JSON.stringify({
     // question to satisfy it.
     question: { type: "string" },
     options: STRING_ARRAY_JSON_SCHEMA,
+    recommended: { type: "integer" },
+    // The multi-question shape. One ask may carry up to six of them, each
+    // with its own options and its own recommendation.
+    questions: {
+      type: "array",
+      maxItems: MAX_AGENT_QUESTIONS,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          question: { type: "string" },
+          options: STRING_ARRAY_JSON_SCHEMA,
+          recommended: { type: "integer" },
+        },
+        required: ["question", "options"],
+      },
+    },
     // Present only for `action_requested`, optional for the same reason.
     action: { type: "string" },
     additionalFiles: STRING_ARRAY_JSON_SCHEMA,
@@ -1282,35 +1372,65 @@ export class PromptCliAdapter implements AgentAdapter {
 
       if (execution.outcome === "question_asked") {
         const askId = execution.requestId.trim() || createId("question");
+        const asked = questionsAsked(execution);
+        const first = asked[0];
+        if (first === undefined) {
+          throw new Error("A question was asked with nothing in it");
+        }
         const waiting = this.createQuestionWaiter(record, askId);
         this.emit(record, {
           event: "question_asked",
           requestId: askId,
-          question: execution.question,
-          options: [...execution.options],
+          question: first.question,
+          options: [...first.options],
+          ...(first.recommended === undefined
+            ? {}
+            : { recommended: first.recommended }),
+          questions: asked.map((entry) => ({
+            question: entry.question,
+            options: [...entry.options],
+            ...(entry.recommended === undefined
+              ? {}
+              : { recommended: entry.recommended }),
+          })),
           occurredAt: new Date().toISOString(),
         });
         const answer = await waiting;
         // Nobody answered. The agent asked because the decision was not its
         // to make, and silence does not hand it back — so the run ends here
-        // rather than guessing on somebody's behalf.
-        if (answer.status !== "answered" || answer.chosen === undefined) {
+        // rather than guessing on somebody's behalf. Skipping is not silence:
+        // it is somebody handing this one decision back deliberately, which
+        // the loop below records as such.
+        if (answer.status !== "answered") {
           throw new Error(
-            `No answer to "${execution.question}" — the task was cancelled ` +
+            `No answer to "${first.question}" — the task was cancelled ` +
               `rather than guessed at.`,
           );
         }
-        this.emit(record, {
-          event: "progress",
-          message: `Answered: ${
-            execution.options[answer.chosen] ?? String(answer.chosen)
-          }`,
-          occurredAt: new Date().toISOString(),
-        });
-        record.answers.push({
-          question: execution.question,
-          chose: execution.options[answer.chosen] ?? "",
-        });
+        const choices: QuestionChoice[] =
+          answer.answers ??
+          (answer.chosen === undefined ? [] : [{ chosen: answer.chosen }]);
+        if (choices.length === 0) {
+          throw new Error(
+            `No answer to "${first.question}" — the task was cancelled ` +
+              `rather than guessed at.`,
+          );
+        }
+        for (const [index, entry] of asked.entries()) {
+          const choice = choices[index];
+          const chose =
+            choice === undefined || choice.skipped === true
+              ? "(you decide)"
+              : (choice.text?.trim() ??
+                entry.options[choice.chosen ?? -1] ??
+                "(you decide)");
+          this.emit(record, {
+            event: "progress",
+            message: `Answered: ${chose}`,
+            occurredAt: new Date().toISOString(),
+          });
+          record.answers.push({ question: entry.question, chose });
+        }
         continue;
       }
 
@@ -2042,6 +2162,15 @@ export class PromptCliAdapter implements AgentAdapter {
         "and at least two concrete options. Somebody has a limited time to " +
         "answer; if nobody does, the task is cancelled, so ask once and ask " +
         "for the thing that actually blocks you.",
+      // One prompt, not one per decision. Each ask holds the workspace and
+      // the leases for as long as it waits, so a run blocked on three things
+      // that asks three times costs three of those waits and three chances
+      // for nobody to be around.
+      `Ask everything that blocks you in that one outcome — up to ${String(
+        MAX_AGENT_QUESTIONS,
+      )} questions in the questions list, each with its own options. Set ` +
+        "recommended on each to the option you would pick yourself: the " +
+        "person answering sees it marked, and agreeing with you is one tap.",
       // The incident behind this sentence: an agent blocked on credentials
       // offered "have the operator provision credentials to the runner",
       // waited, got an answer — and nothing anywhere could act on it. An

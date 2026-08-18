@@ -159,10 +159,13 @@ import {
 import {
   INVITE_ROLES,
   acceptInvitation,
+  answerAgentQuestion,
   applyProviderSetting,
   createInvitation,
   invitationLink,
   loadInvitations,
+  loadPendingQuestions,
+  pendingQuestionFor,
   readInvitation,
   revokeInvitation,
   saveAppearance,
@@ -3314,6 +3317,19 @@ function renderNow() {
         render();
       }
     });
+    // Once per channel, then only when the stream says the set changed. A
+    // question is put to one person and lives in the control plane's memory,
+    // so there is nothing in the transcript that would bring it back after a
+    // reload — this is the read that finds a run already waiting.
+    if (state.pendingQuestions[activeChannelId()] === undefined) {
+      const channel = activeChannelId();
+      state.pendingQuestions[channel] = [];
+      void loadPendingQuestions(channel).then(() => {
+        if (state.route === "chats") {
+          render();
+        }
+      });
+    }
     // Asked once per channel, not on every render: the preview outlives the
     // page, so a reload has to find the one already running rather than offer
     // to start a second. `undefined` is "not asked yet"; `null` is "asked,
@@ -3431,6 +3447,65 @@ function typeIntoComposer(character, opened) {
   const next = $("[data-act='channel-input']");
   next?.focus({ preventScroll: true });
   next?.setSelectionRange(at + 1, at + 1);
+}
+
+/* ------------------------------------------- the agent's question prompt ---
+ *
+ * The card above the composer. Everything here works on one set at a time —
+ * the one `pendingQuestionFor` is showing — and keeps its half-finished
+ * answers in `state` rather than in the DOM, because the whole screen is
+ * rebuilt on every render and the DOM forgets.
+ */
+
+/** The set on screen, its questions, and where in it the reader is. */
+function questionPromptState() {
+  const repositoryId = activeChannelId();
+  const pending = pendingQuestionFor(repositoryId);
+  const questions = pending?.questions ?? [];
+  if (pending === undefined || questions.length === 0) {
+    return undefined;
+  }
+  const step = Math.min(
+    Math.max(state.questionStep[pending.requestId] ?? 0, 0),
+    questions.length - 1,
+  );
+  return { repositoryId, pending, questions, step };
+}
+
+/**
+ * Records one answer and moves on — to the next question, or to the run.
+ *
+ * Answering the last one sends the set. A prompt with a Send button would ask
+ * for one more tap than it needs: there is nothing else the last answer could
+ * be for, and the run has been waiting the whole time.
+ */
+function answerQuestionStep(choice) {
+  const current = questionPromptState();
+  if (current === undefined) {
+    return;
+  }
+  const { repositoryId, pending, questions, step } = current;
+  if (state.questionSending[pending.requestId] === true) {
+    return;
+  }
+  const answers = [...(state.questionAnswers[pending.requestId] ?? [])];
+  answers[step] = choice;
+  state.questionAnswers[pending.requestId] = answers;
+  if (step < questions.length - 1) {
+    state.questionStep[pending.requestId] = step + 1;
+    render();
+    return;
+  }
+  // Anything never visited is a skip: the reader paged past it, which is the
+  // same "your call" the Skip button says outright.
+  const complete = questions.map(
+    (question, index) => answers[index] ?? { skipped: true },
+  );
+  // Started before the render, not after: sending is what dims the card, and
+  // it is set as the call begins rather than when it resolves.
+  const sent = answerAgentQuestion(repositoryId, pending.requestId, complete);
+  render();
+  void sent.then(() => render());
 }
 
 function actionOf(event) {
@@ -3731,6 +3806,42 @@ document.addEventListener("click", (event) => {
     case "chan-sidebar-close":
       setChanDrawer(false);
       return;
+    case "question-choose":
+      answerQuestionStep({ chosen: Number(value) });
+      return;
+    case "question-skip": {
+      // What the reader typed wins over the button they then pressed: the
+      // pencil row holds both, and skipping with words in the box would throw
+      // away the more specific answer of the two.
+      const typed = $("[data-act='question-text']")?.value?.trim() ?? "";
+      answerQuestionStep(typed === "" ? { skipped: true } : { text: typed });
+      return;
+    }
+    case "question-back":
+    case "question-next": {
+      const current = questionPromptState();
+      if (current === undefined) {
+        return;
+      }
+      state.questionStep[current.pending.requestId] =
+        act === "question-back"
+          ? Math.max(current.step - 1, 0)
+          : Math.min(current.step + 1, current.questions.length - 1);
+      render();
+      return;
+    }
+    case "question-dismiss": {
+      // Put aside, not answered. The run is still waiting and its deadline is
+      // still running; the prompt comes back on the next reload, which is the
+      // honest state of things. Cancelling somebody else's run from a close
+      // button would be a surprising amount of consequence for an X.
+      const current = questionPromptState();
+      if (current !== undefined) {
+        state.questionDismissed[current.pending.requestId] = true;
+        render();
+      }
+      return;
+    }
     case "chan-tree-dir": {
       const open = state.chanTreeOpen ?? [];
       state.chanTreeOpen = open.includes(value)
@@ -4958,6 +5069,23 @@ document.addEventListener("input", (event) => {
     return;
   }
   const { node, act } = found;
+  if (act === "question-text") {
+    // No render: this is the one control on the prompt whose value is being
+    // typed into, and rebuilding the screen under a caret loses it.
+    const current = questionPromptState();
+    if (current === undefined) {
+      return;
+    }
+    const answers = [...(state.questionAnswers[current.pending.requestId] ?? [])];
+    const typed = node.value.trim();
+    if (typed === "") {
+      delete answers[current.step];
+    } else {
+      answers[current.step] = { text: typed };
+    }
+    state.questionAnswers[current.pending.requestId] = answers;
+    return;
+  }
   if (act === "repo-search") {
     state.repoQuery = node.value;
     const focused = document.activeElement === node;
@@ -5121,6 +5249,52 @@ document.addEventListener("keydown", (event) => {
     event.target?.dataset?.act === "channel-thread-input"
   ) {
     handleComposerKeydown(event, render);
+  }
+});
+
+/**
+ * The prompt's own keys: a number picks that option, Enter takes what was
+ * typed, Escape puts the whole set aside.
+ *
+ * Digits only outside the text box — inside it "1" is somebody typing an
+ * answer that starts with a one, and stealing it would make the box unusable
+ * for exactly the answers it exists to accept.
+ */
+document.addEventListener("keydown", (event) => {
+  const node = event.target;
+  if (node?.dataset?.act === "question-text") {
+    if (event.key === "Enter" && !imeComposing(event)) {
+      event.preventDefault();
+      const typed = node.value.trim();
+      if (typed !== "") {
+        answerQuestionStep({ text: typed });
+      }
+    }
+    return;
+  }
+  if (
+    state.route !== "chats" ||
+    node?.tagName === "INPUT" ||
+    node?.tagName === "TEXTAREA" ||
+    node?.isContentEditable === true
+  ) {
+    return;
+  }
+  const current = questionPromptState();
+  if (current === undefined) {
+    return;
+  }
+  if (event.key === "Escape") {
+    event.preventDefault();
+    state.questionDismissed[current.pending.requestId] = true;
+    render();
+    return;
+  }
+  const picked = Number(event.key) - 1;
+  const options = current.questions[current.step]?.options ?? [];
+  if (Number.isInteger(picked) && picked >= 0 && picked < options.length) {
+    event.preventDefault();
+    answerQuestionStep({ chosen: picked });
   }
 });
 
@@ -5502,6 +5676,18 @@ async function boot() {
       }
       return;
     }
+    // An agent stopped on a question, or one stopped waiting. Both change
+    // what the prompt above the composer should be showing, and both are
+    // transient: the list is re-read rather than patched from the frame.
+    if (frame?.type === "agent-questions-changed") {
+      const channel = activeChannelId();
+      void loadPendingQuestions(channel).then(() => {
+        if (state.route === "chats" && !renameFieldFocused()) {
+          render();
+        }
+      });
+      return;
+    }
     if (frame?.type === "channel-typing") {
       noteTyping(frame);
       if (state.route === "chats" && !renameFieldFocused()) {
@@ -5556,6 +5742,23 @@ async function boot() {
       channelFrameTimer = window.setTimeout(() => {
         void refreshChannelMessages(channelRepositoryId).then(() => render());
       }, CHANNEL_FRAME_COALESCE_MS);
+    }
+    // The audit half of the same news. The transient frame above is what
+    // arrives while somebody is watching; this is what a browser coming back
+    // from a reconnect replays, and a question asked while it was away would
+    // otherwise wait for the next channel switch to appear.
+    if (
+      frame?.type === "audit" &&
+      ["question_asked", "question_answered", "question_cancelled"].includes(
+        String(frame.event?.type ?? ""),
+      )
+    ) {
+      const channel = activeChannelId();
+      void loadPendingQuestions(channel).then(() => {
+        if (state.route === "chats" && !renameFieldFocused()) {
+          render();
+        }
+      });
     }
     // News gets a banner before the store gets re-read: an ending or a
     // question is worth a sentence in the corner wherever the reader is,

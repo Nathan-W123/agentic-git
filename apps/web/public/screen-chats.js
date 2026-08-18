@@ -39,6 +39,7 @@ api,
   memberName,
   myAgents,
   myAvatar,
+  pendingQuestionFor,
   persist,
   personOnline,
   phoneLayout,
@@ -2175,6 +2176,103 @@ function paintComposerSuggestions(repositoryId) {
 }
 
 
+/**
+ * The prompt an agent's question opens above the composer.
+ *
+ * Above the chat rather than inside it, because a question is not a message:
+ * it is a wait. A message scrolls away while the run that needs it goes on
+ * holding its workspace, and a numbered list in the transcript could not say
+ * which of its options was already taken, page between six of them, or take
+ * an answer nobody offered. This can, and it sits where the reader's hands
+ * already are.
+ *
+ * One set at a time. Two prompts stacked over the composer is a form, and a
+ * person who owes two agents an answer is better served by finishing one.
+ */
+function agentQuestionPrompt(repositoryId) {
+  const pending = pendingQuestionFor(repositoryId);
+  const questions = pending?.questions ?? [];
+  if (pending === undefined || questions.length === 0) {
+    return "";
+  }
+  const requestId = pending.requestId;
+  const total = questions.length;
+  const step = Math.min(
+    Math.max(state.questionStep[requestId] ?? 0, 0),
+    total - 1,
+  );
+  const current = questions[step];
+  const answers = state.questionAnswers[requestId] ?? [];
+  const picked = answers[step] ?? {};
+  const sending = state.questionSending[requestId] === true;
+  const askerName = String(
+    channelAuthor(repositoryId, {
+      kind: "agent",
+      authorId: pending.agentId,
+    }).name ?? "An agent",
+  ).split(" (")[0];
+  const thread = channelMessagesFor(repositoryId).find(
+    (entry) => entry.id === pending.messageId,
+  );
+  const context = thread === undefined ? "" : threadTitle(thread);
+  return `<div class="ask-prompt" data-request="${esc(requestId)}"
+    role="dialog" aria-label="A question from ${esc(askerName)}">
+    ${
+      context === ""
+        ? ""
+        : `<div class="ask-context">${esc(askerName)} — ${esc(context)}</div>`
+    }
+    <div class="ask-card${sending ? " is-sending" : ""}">
+      <div class="ask-head">
+        <h4>${esc(current.question)}</h4>
+        <div class="ask-head-tools">
+          ${
+            total === 1
+              ? ""
+              : `<div class="ask-pager">
+                  <button type="button" class="ask-step" data-act="question-back"
+                    ${step === 0 ? "disabled" : ""}
+                    title="Previous question" aria-label="Previous question"
+                    >${icon("chevronRight")}</button>
+                  <span>${String(step + 1)} of ${String(total)}</span>
+                  <button type="button" class="ask-step" data-act="question-next"
+                    ${step === total - 1 ? "disabled" : ""}
+                    title="Next question" aria-label="Next question"
+                    >${icon("chevronRight")}</button>
+                </div>`
+          }
+          <button type="button" class="ask-step" data-act="question-dismiss"
+            title="Not now" aria-label="Not now">${icon("close")}</button>
+        </div>
+      </div>
+      <div class="ask-options">
+        ${current.options
+          .map(
+            (option, index) => `<button type="button"
+              class="ask-option${picked.chosen === index ? " is-picked" : ""}"
+              data-act="question-choose" data-value="${String(index)}">
+              <span class="ask-num">${String(index + 1)}</span>
+              <span class="ask-label">${esc(option)}</span>
+              ${
+                current.recommended === index
+                  ? `<span class="ask-recommended">Recommended</span>`
+                  : ""
+              }
+            </button>`,
+          )
+          .join("")}
+      </div>
+      <div class="ask-else${picked.text ? " is-picked" : ""}">
+        <span class="ask-num">${icon("pencil")}</span>
+        <input type="text" data-act="question-text" placeholder="Something else"
+          value="${esc(picked.text ?? "")}" ${sending ? "disabled" : ""}>
+        <button type="button" class="btn btn-ghost btn-sm ask-skip"
+          data-act="question-skip">Skip</button>
+      </div>
+    </div>
+  </div>`;
+}
+
 function composer(repositoryId) {
   // One lean bar: a "+" on the left, the text, and send on the right. Every
   // other affordance — attaching an image, running a command, addressing
@@ -3884,6 +3982,7 @@ export function renderChats() {
       ${chanSearchRow()}
       ${pinnedBanner(repositoryId)}
       ${messageList(repositoryId)}
+      ${agentQuestionPrompt(repositoryId)}
       ${composer(repositoryId)}
     </div>
     ${

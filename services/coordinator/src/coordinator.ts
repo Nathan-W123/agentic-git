@@ -1,12 +1,15 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import type {
-  AgentAdapter,
-  AgentEvent,
-  AgentSession,
-  QuestionAnswer,
-  StartTaskInput,
+import {
+  agentQuestionSet,
+  type AgentAdapter,
+  type AgentEvent,
+  type AgentQuestion,
+  type AgentSession,
+  type QuestionAnswer,
+  type QuestionChoice,
+  type StartTaskInput,
 } from "@coord/agent-protocol";
 import {
   CodeIntelligenceService,
@@ -641,10 +644,13 @@ export interface QuestionController {
     taskId: string;
     repositoryId: string;
     projectId?: string;
+    /** The first question, for a controller that only shows one. */
     question: string;
     options: string[];
+    /** Every question the agent asked, one to six of them. */
+    questions: AgentQuestion[];
     deadlineMs: number;
-  }): Promise<{ chosen?: number } | undefined>;
+  }): Promise<{ chosen?: number; answers?: QuestionChoice[] } | undefined>;
 }
 
 /**
@@ -2721,10 +2727,15 @@ export class Coordinator {
     runAudit: AuditEvent[],
   ): Promise<void> {
     const requestId = event.requestId ?? createId("question");
+    const questions = agentQuestionSet(event);
+    const first = questions[0];
     await this.trace(recorder, runAudit, "question_asked", entry.task.id, {
       requestId,
-      question: event.question,
-      options: event.options,
+      question: first?.question ?? event.question,
+      options: first?.options ?? event.options,
+      // The whole set, so a reader that can show more than one does not have
+      // to go back to the run to find the rest.
+      questions,
       // So a reader knows how long they have, rather than discovering the
       // deadline by missing it.
       deadlineMs: this.questionDeadlineMs,
@@ -2735,15 +2746,27 @@ export class Coordinator {
         taskId: entry.task.id,
         repositoryId: input.repository.id,
         ...(input.projectId === undefined ? {} : { projectId: input.projectId }),
-        question: event.question,
-        options: [...event.options],
+        question: first?.question ?? event.question,
+        options: [...(first?.options ?? event.options)],
+        questions,
         deadlineMs: this.questionDeadlineMs,
       })
       .catch(() => undefined);
-    const answer: QuestionAnswer =
-      answered === undefined || answered.chosen === undefined
-        ? { requestId, status: "cancelled" }
-        : { requestId, status: "answered", chosen: answered.chosen };
+    // Answered means somebody engaged with the prompt at all. Skipping every
+    // question is still an answer — it says "your call" — and only silence
+    // cancels, which is the distinction the deadline exists to draw.
+    const choices: QuestionChoice[] = answered?.answers ?? [];
+    const chosen = answered?.chosen ?? choices[0]?.chosen;
+    const engaged =
+      answered !== undefined && (chosen !== undefined || choices.length > 0);
+    const answer: QuestionAnswer = engaged
+      ? {
+          requestId,
+          status: "answered",
+          ...(chosen === undefined ? {} : { chosen }),
+          ...(choices.length === 0 ? {} : { answers: choices }),
+        }
+      : { requestId, status: "cancelled" };
     await this.trace(
       recorder,
       runAudit,
@@ -2753,7 +2776,18 @@ export class Coordinator {
         requestId,
         ...(answer.chosen === undefined
           ? {}
-          : { chose: event.options[answer.chosen] ?? "" }),
+          : { chose: questions[0]?.options[answer.chosen] ?? "" }),
+        ...(choices.length === 0
+          ? {}
+          : {
+              chose_all: choices.map((choice, index) =>
+                choice.skipped === true
+                  ? "(skipped)"
+                  : (choice.text ??
+                    questions[index]?.options[choice.chosen ?? -1] ??
+                    ""),
+              ),
+            }),
       },
     );
     // Handed back either way. The adapter is blocked on this call, and a

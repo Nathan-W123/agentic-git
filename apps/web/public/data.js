@@ -218,6 +218,23 @@ export const state = {
   /** Message/token totals per repository, for the info popover. */
   channelStats: {},
   /**
+   * Questions an agent has stopped on and is waiting for this person to
+   * answer, keyed by repository id.
+   *
+   * Only ever this account's own: the server puts a question to whoever
+   * submitted the task and nobody else, so an empty list here means nobody is
+   * waiting on *you*, not that nobody is waiting.
+   */
+  pendingQuestions: {},
+  /** Which question of a set is on screen, by request id. */
+  questionStep: {},
+  /** The answers gathered so far for a set, by request id. */
+  questionAnswers: {},
+  /** Sets this reader put aside for now. Cleared when the set is answered. */
+  questionDismissed: {},
+  /** Request ids currently being sent, so the prompt cannot be double-tapped. */
+  questionSending: {},
+  /**
    * Pinned messages per repository — the banner's own list, server-fed.
    *
    * Banner-only read data, kept beside the transcript rather than folded
@@ -2495,6 +2512,77 @@ export function threadTitle(entry, { fallbackToContent = true } = {}) {
 
 const channelPath = (repositoryId, suffix = "") =>
   `/projects/${encodeURIComponent(state.projectId)}/repositories/${encodeURIComponent(repositoryId)}/channel${suffix}`;
+
+/**
+ * The open questions this account is being asked in one repository.
+ *
+ * Read rather than pushed: the socket frame only says the set changed, the
+ * same way every other channel frame does, and the store stays the one
+ * account of what is actually still waiting. A question is a live wait — the
+ * run holding it can end at any moment — so a list patched from frames would
+ * go on offering choices that no longer settle anything.
+ */
+export async function loadPendingQuestions(repositoryId) {
+  if (!repositoryId || !state.projectId) {
+    return;
+  }
+  const answer = await apiOptional(
+    channelPath(repositoryId, "/questions"),
+    undefined,
+  );
+  if (answer === undefined) {
+    return;
+  }
+  const open = Array.isArray(answer.questions) ? answer.questions : [];
+  state.pendingQuestions[repositoryId] = open;
+  // Anything that is no longer waiting takes its half-finished answers with
+  // it: keeping them would mean the next question to arrive under a reused
+  // request id inherited somebody else's taps.
+  const live = new Set(open.map((entry) => entry.requestId));
+  for (const map of [
+    state.questionStep,
+    state.questionAnswers,
+    state.questionDismissed,
+    state.questionSending,
+  ]) {
+    for (const requestId of Object.keys(map)) {
+      if (!live.has(requestId)) {
+        delete map[requestId];
+      }
+    }
+  }
+}
+
+/** The question set this repository's prompt should show, if any. */
+export function pendingQuestionFor(repositoryId) {
+  return (state.pendingQuestions[repositoryId] ?? []).find(
+    (entry) => state.questionDismissed[entry.requestId] !== true,
+  );
+}
+
+/**
+ * Sends one set of answers back to the run that is holding for them.
+ *
+ * Every question gets an entry, in order, including the skipped ones: the
+ * agent is told "your call" for those rather than left to infer it from a
+ * gap. A 404 means the wait ended while this was being filled in — the
+ * deadline, or the task being cancelled — and the reload below is what takes
+ * the prompt down.
+ */
+export async function answerAgentQuestion(repositoryId, requestId, answers) {
+  state.questionSending[requestId] = true;
+  try {
+    await api(channelPath(repositoryId, `/questions/${encodeURIComponent(requestId)}/answer`), {
+      method: "POST",
+      body: { answers },
+    });
+  } catch (error) {
+    toast(error.message ?? "That question is no longer waiting", "warn");
+  } finally {
+    delete state.questionSending[requestId];
+    await loadPendingQuestions(repositoryId);
+  }
+}
 
 /** Channel stats for the info popover, keyed by repository id. */
 export async function loadChannelStats(repositoryId) {

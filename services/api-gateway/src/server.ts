@@ -37,7 +37,10 @@ import {
   buildInvestigationPrompt,
   formatAgentQuestion,
   formatFailureVerdict,
+  MAX_AGENT_QUESTIONS,
   optionChosenBy,
+  type AgentQuestion,
+  type QuestionChoice,
   type FailureClass,
   isAuditorRole as roleIsAuditor,
   isInvestigatorRole as roleIsInvestigator,
@@ -258,6 +261,25 @@ function defaultChannelAgentName(connection: {
   // deployment, and "Athena (Bob)" reads as a disambiguation of something that
   // was never ambiguous.
   return connection.callSign ?? `${label} (${firstWord(connection.userName)})`;
+}
+
+/**
+ * One open question, as the screen that answers it sees it.
+ *
+ * Everything the prompt needs to stand on its own: which run is waiting, how
+ * long is left, and the questions themselves. Never persisted — see
+ * `pendingAgentQuestions`, which holds the wait it belongs to.
+ */
+interface OpenAgentQuestion {
+  requestId: string;
+  taskId: string;
+  repositoryId: string;
+  /** The thread the run is being narrated in, so the prompt can link to it. */
+  messageId: string;
+  agentId: string;
+  askedAt: string;
+  deadlineAt: string;
+  questions: AgentQuestion[];
 }
 
 /**
@@ -3058,9 +3080,27 @@ export class ApiGateway {
   private readonly pendingAgentQuestions = new Map<
     string,
     {
+      taskId: string;
+      projectId: string;
+      repositoryId: string;
       messageId: string;
+      /** The agent that asked, as the channel knows it. */
+      authorId: string;
+      /**
+       * Whoever asked for the work, and the only person the prompt opens for.
+       *
+       * A question is a decision about somebody's own request; putting it in
+       * front of everyone in the room turns one person's choice into a race,
+       * and the first stranger to tap wins. Undefined only for work nobody
+       * asked for by hand, which nobody is waiting on either.
+       */
+      submitterId: string | undefined;
+      questions: AgentQuestion[];
+      askedAtMs: number;
+      deadlineAtMs: number;
+      /** The first question's option count, for a numbered reply in the thread. */
       optionCount: number;
-      settle: (chosen: number) => void;
+      settle: (answers: QuestionChoice[]) => void;
     }
   >();
   /**
@@ -6526,6 +6566,105 @@ export class ApiGateway {
         capped: messages.length >= 200,
         tokens,
       });
+      return;
+    }
+    // The questions an agent has stopped on, and the answers coming back.
+    //
+    // Their own route rather than a message shape, because a question is a
+    // live wait rather than a record: it exists only while a run is holding
+    // its workspace for it, and it is put to one person — whoever asked for
+    // the work — rather than posted to the room.
+    const channelQuestionsMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/questions$`,
+        "u",
+      ),
+    );
+    if (channelQuestionsMatch !== undefined && method === "GET") {
+      const [projectId = "", repositoryId = ""] = channelQuestionsMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
+      this.sendJson(response, 200, {
+        questions: this.openAgentQuestionsFor({
+          repositoryId,
+          viewerId: principal.user.id,
+        }),
+      });
+      return;
+    }
+    const channelQuestionAnswerMatch = matchPath(
+      path,
+      new RegExp(
+        `^${API_PREFIX}/projects/([^/]+)/repositories/([^/]+)/channel/questions/([^/]+)/answer$`,
+        "u",
+      ),
+    );
+    if (channelQuestionAnswerMatch !== undefined && method === "POST") {
+      const [projectId = "", repositoryId = "", requestId = ""] =
+        channelQuestionAnswerMatch;
+      await authorizeRepository(
+        this.options.store,
+        principal,
+        projectId,
+        repositoryId,
+        "view",
+      );
+      const pending = this.pendingAgentQuestions.get(requestId);
+      if (
+        pending === undefined ||
+        pending.repositoryId !== repositoryId ||
+        pending.submitterId !== principal.user.id
+      ) {
+        // The same 404 for "already answered", "deadline passed" and "not
+        // yours": from out here they are one situation — there is nothing
+        // left to answer — and the screen's move is the same, which is to
+        // re-read the list and take the prompt down.
+        throw new HttpError(
+          404,
+          "not_found",
+          "That question is no longer waiting for an answer",
+        );
+      }
+      const body = objectBody(await this.readJson(request));
+      const submitted = Array.isArray(body["answers"]) ? body["answers"] : [];
+      const answers: QuestionChoice[] = pending.questions.map(
+        (question, index) => {
+          const raw = submitted[index];
+          const entry =
+            typeof raw === "object" && raw !== null && !Array.isArray(raw)
+              ? (raw as Record<string, unknown>)
+              : {};
+          const chosen = entry["chosen"];
+          const written = entry["text"];
+          // Not `stringField`: an empty box is the ordinary case here — most
+          // answers are a tap — and a 400 for typing nothing would be the
+          // prompt refusing its own default.
+          const text =
+            typeof written === "string" ? written.slice(0, 2_000) : undefined;
+          if (
+            typeof chosen === "number" &&
+            Number.isInteger(chosen) &&
+            chosen >= 0 &&
+            chosen < question.options.length
+          ) {
+            return { chosen };
+          }
+          if (text !== undefined && text.trim().length > 0) {
+            return { text: text.trim() };
+          }
+          // Anything else is a pass. Skipping is a real answer — "your call"
+          // — which is what makes six questions cheap to put to somebody.
+          return { skipped: true };
+        },
+      );
+      pending.settle(answers);
+      this.sendJson(response, 200, { answered: answers.length });
       return;
     }
     const channelTypingMatch = matchPath(
@@ -12036,8 +12175,9 @@ export class ApiGateway {
     projectId?: string;
     question: string;
     options: string[];
+    questions?: AgentQuestion[];
     deadlineMs: number;
-  }): Promise<{ chosen?: number } | undefined> {
+  }): Promise<{ chosen?: number; answers?: QuestionChoice[] } | undefined> {
     const watched = this.watchedChannelTasks.get(input.taskId);
     if (watched === undefined) {
       // Nobody is following this task in a channel, so there is nowhere to
@@ -12045,35 +12185,62 @@ export class ApiGateway {
       // agent for fifteen minutes against a question no one will ever see.
       return undefined;
     }
+    const asked: AgentQuestion[] =
+      input.questions !== undefined && input.questions.length > 0
+        ? input.questions
+        : [{ question: input.question, options: input.options }];
+    const questions = asked.slice(0, MAX_AGENT_QUESTIONS);
+    const submitterId = await this.questionRecipient(watched, input.taskId);
+    const askedAtMs = Date.now();
+    // The record in the thread, without the choices: those are the prompt's,
+    // and offering them twice would let one be answered while the other still
+    // showed as open. See `formatAgentQuestion`.
     await this.appendChannelThreadReply({
       projectId: watched.projectId,
       repositoryId: watched.repositoryId,
       messageId: watched.messageId,
       authorId: watched.authorId,
       content: formatAgentQuestion({
-        question: input.question,
-        options: input.options,
+        questions,
         deadlineMinutes: Math.max(1, Math.round(input.deadlineMs / 60_000)),
       }),
     }).catch(() => undefined);
-    const answer = await new Promise<{ chosen?: number } | undefined>(
-      (resolve) => {
-        const timer = setTimeout(() => {
+    const answer = await new Promise<
+      { chosen?: number; answers?: QuestionChoice[] } | undefined
+    >((resolve) => {
+      const timer = setTimeout(() => {
+        this.pendingAgentQuestions.delete(input.requestId);
+        this.announceAgentQuestions(watched.projectId);
+        resolve(undefined);
+      }, input.deadlineMs);
+      timer.unref?.();
+      this.pendingAgentQuestions.set(input.requestId, {
+        taskId: input.taskId,
+        projectId: watched.projectId,
+        repositoryId: watched.repositoryId,
+        messageId: watched.messageId,
+        authorId: watched.authorId,
+        submitterId,
+        questions,
+        askedAtMs,
+        deadlineAtMs: askedAtMs + input.deadlineMs,
+        optionCount: questions[0]?.options.length ?? 0,
+        settle: (answers) => {
+          clearTimeout(timer);
           this.pendingAgentQuestions.delete(input.requestId);
-          resolve(undefined);
-        }, input.deadlineMs);
-        timer.unref?.();
-        this.pendingAgentQuestions.set(input.requestId, {
-          messageId: watched.messageId,
-          optionCount: input.options.length,
-          settle: (chosen) => {
-            clearTimeout(timer);
-            this.pendingAgentQuestions.delete(input.requestId);
-            resolve({ chosen });
-          },
-        });
-      },
-    );
+          this.announceAgentQuestions(watched.projectId);
+          const chosen = answers[0]?.chosen;
+          resolve({
+            ...(chosen === undefined ? {} : { chosen }),
+            answers,
+          });
+        },
+      });
+      // Pushed rather than waited for: the prompt is meant to appear while
+      // the person is still looking at the room, not the next time something
+      // else happens to make the screen re-read itself.
+      this.announceAgentQuestions(watched.projectId);
+    });
     if (answer === undefined) {
       // Remembered so a "1" typed after this moment gets an honest account
       // of what happened to it, rather than the chat model's best guess at
@@ -12169,15 +12336,103 @@ export class ApiGateway {
       if (pending.messageId !== messageId) {
         continue;
       }
+      // Only when one thing was asked. A number cannot say which of six
+      // questions it answers, and guessing that it means the first would
+      // settle the whole set — five decisions taken from somebody who typed
+      // one digit. Those are answered in the prompt, which knows.
+      if (pending.questions.length !== 1) {
+        return false;
+      }
       const chosen = optionChosenBy(reply, pending.optionCount);
       if (chosen === undefined) {
         return false;
       }
-      pending.settle(chosen);
+      pending.settle([{ chosen }]);
       void requestId;
       return true;
     }
     return false;
+  }
+
+  /**
+   * Who a question is put to: the person who asked for the work.
+   *
+   * Not `submittedBy`, which is the *owner of the agent* that took it — a
+   * mention runs on that owner's account deliberately, so on somebody else's
+   * agent the two are different people and the question would go to the one
+   * who is not waiting for it. {@link triggeredByForTask} already answers
+   * this question for approvals; a question is the same question.
+   *
+   * Falls back to the agent's owner, so work with no channel request behind
+   * it still reaches somebody rather than nobody.
+   */
+  private async questionRecipient(
+    watched: WatchedChannelTask,
+    taskId: string,
+  ): Promise<string | undefined> {
+    const root = await this.options.store
+      .getChannelMessage(watched.repositoryId, watched.messageId, watched.ownerId)
+      .catch(() => undefined);
+    const triggered =
+      root === undefined
+        ? undefined
+        : await this.triggeredByForTask({ taskId, root }).catch(() => undefined);
+    if (triggered !== undefined) {
+      return triggered;
+    }
+    const tasks = await this.options.store
+      .listSubmittedTasks({ repositoryId: watched.repositoryId })
+      .catch((): SubmittedTask[] => []);
+    return tasks.find((task) => task.id === taskId)?.submittedBy;
+  }
+
+  /**
+   * Tells a project that the set of open questions has changed.
+   *
+   * Transient, like typing and the busy dot: the questions themselves live in
+   * memory for exactly as long as the runs waiting on them, so there is
+   * nothing here for the audit replay to catch a reconnecting browser up on —
+   * it asks for the list instead. See `broadcastTransient`.
+   */
+  private announceAgentQuestions(projectId: string): void {
+    this.webSockets.broadcastTransient(projectId, {
+      type: "agent-questions-changed",
+      projectId,
+      occurredAt: new Date().toISOString(),
+    });
+  }
+
+  /**
+   * The questions this person is being asked in this repository.
+   *
+   * Their own tasks only. Somebody else's question is somebody else's
+   * decision, and a room where everyone sees everyone's prompts is a room
+   * where the first person to tap answers for the person who asked.
+   */
+  private openAgentQuestionsFor(input: {
+    repositoryId: string;
+    viewerId: string;
+  }): OpenAgentQuestion[] {
+    const open: OpenAgentQuestion[] = [];
+    for (const [requestId, pending] of this.pendingAgentQuestions) {
+      if (
+        pending.repositoryId !== input.repositoryId ||
+        pending.submitterId !== input.viewerId
+      ) {
+        continue;
+      }
+      open.push({
+        requestId,
+        taskId: pending.taskId,
+        repositoryId: pending.repositoryId,
+        messageId: pending.messageId,
+        agentId: pending.authorId,
+        askedAt: new Date(pending.askedAtMs).toISOString(),
+        deadlineAt: new Date(pending.deadlineAtMs).toISOString(),
+        questions: pending.questions,
+      });
+    }
+    return open;
   }
 
   /**
