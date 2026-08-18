@@ -1,7 +1,7 @@
 /*
  * Lattice — control room styling.
  *
- * One dark theme, deliberately restrained: deep navy ground, a single accent,
+ * One dark theme, deliberately restrained: neutral grey ground, a single accent,
  * and semantic colour used only where it carries meaning (green for healthy
  * and added, red for failed and deleted, orange for waiting, blue for
  * secondary task state). Thin borders and generous negative space do the
@@ -17,15 +17,20 @@
 :root {
   color-scheme: dark;
 
-  /* The outer ground uses the deep navy from the supplied reference palette.
-     `applyTheme` still gives only `--bg` a two-percent nudge toward the chosen
-     accent; every raised surface stays on the neutral ramp below, so changing
-     the room does not turn the rest of the interface into a second palette.
+  /* Neutral grey, not blue-black. The surfaces were tinted toward navy, which
+     read as a colour choice competing with the accent rather than as a
+     background behind it. The ramp below starts from true grey — equal parts,
+     no hue at all — so nothing competes with the accent or the status dots.
+     `applyTheme` gives only `--bg` a two-percent nudge toward the chosen accent;
+     every raised surface stays on this neutral ramp.
 
-     The conversation remains the lightest raised surface and every other
-     raised surface steps down away from it, keeping the existing hierarchy
-     inside the new outer ground. */
-  --bg: #1f375d;
+     The conversation is the lightest surface and everything else steps down
+     away from it. This is the inverse of what the ramp used to do: the panels
+     were lighter than the room they framed, which put the eye on the chrome
+     and left the thing being read sitting in the darkest part of the screen.
+     Lightness is the cheapest way to say "look here", and there is only one
+     place worth spending it. */
+  --bg: #141414;
   --bg-panel: #1a1a1a;
   --bg-card: #202020;
   --bg-card-2: #252525;

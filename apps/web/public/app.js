@@ -2043,18 +2043,18 @@ function applyTheme() {
   const element = document.documentElement;
   const root = element.style;
 
-  // Let the stylesheet choose the base ground for this theme, then nudge
+  // Let the stylesheet choose the neutral ground for this theme, then nudge
   // only that outermost surface toward the chosen accent. Two percent is just
   // enough for the room to belong to the colour without turning the neutral
   // surface ramp into a second accent palette. Remove the previous inline
   // value first so switching themes always starts from that theme's own base.
   element.dataset.theme = light ? "light" : "dark";
   root.removeProperty("--bg");
-  const baseGround = getComputedStyle(element)
+  const neutralGround = getComputedStyle(element)
     .getPropertyValue("--bg")
     .trim();
   const ground = mix(
-    baseGround || (light ? "#ddd7cb" : "#1f375d"),
+    neutralGround || (light ? "#ddd7cb" : "#141414"),
     accent,
     0.02,
   );
@@ -2122,7 +2122,7 @@ function applyTheme() {
   root.setProperty("--accent-2-line", withAlpha(second, light ? 0.5 : 0.38));
   // Every panel, card, border and text colour remains the stylesheet's
   // business. Keeping the tint to `--bg` preserves the contrast and hierarchy
-  // of the complete surface ramps in `:root` and the light-theme override.
+  // of the complete neutral ramps in `:root` and the light-theme override.
   // The browser chrome around the page — a phone's status bar, the installed
   // app's title bar — sits flush against the header, so it follows the page
   // ground, not the accent. Painting it with the accent put a saturated band
