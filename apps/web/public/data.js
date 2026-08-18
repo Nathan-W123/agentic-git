@@ -1093,17 +1093,15 @@ export function agentsThinkingIn(repositoryId) {
     if (entry.repositoryId !== repositoryId) {
       continue;
     }
-    // Roster ids are two shapes: one's own agents are the bare provider id,
-    // a teammate's are `${userId}:${provider}` (see `channelAgentsFor`). Both
-    // have to be matched, or a teammate's agent working would either go
-    // unnamed or be shown as your own.
+    // Roster ids are two shapes, but every entry has the explicit owner that
+    // arrived in the busy frame. Provider alone is not an identity: with two
+    // people's Codex agents in the room it picks the viewer's own agent first,
+    // regardless of which one is actually working.
     const agent = channelAgentsFor(repositoryId).find((candidate) => {
       if ((candidate.provider ?? candidate.id) !== entry.provider) {
         return false;
       }
-      return candidate.mine === true
-        ? true
-        : String(candidate.id) === `${entry.userId}:${entry.provider}`;
+      return candidate.userId === entry.userId;
     });
     names.push(agent?.name ?? "An agent");
   }
