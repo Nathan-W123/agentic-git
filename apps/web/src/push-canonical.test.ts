@@ -10,7 +10,10 @@ import type { RepositoryService } from "@coord/repository-service";
 import { UserCredentialStore } from "@coord/workspace-manager";
 
 import { GitHubConnectionService } from "./github-connection.js";
-import { pushCanonical } from "./push-canonical.js";
+import {
+  pushCanonical,
+  pushCanonicalForActor,
+} from "./push-canonical.js";
 
 /**
  * The push action's identity rules, tested at the seam where they live: who
@@ -101,6 +104,27 @@ test("a push runs as the task's submitter, with their stored token", async (t) =
   // The explanation names the identity the push carried, so the person
   // reading the thread knows which account to look for on GitHub.
   assert.match(result.explanation, /as octocat/u);
+});
+
+test("a direct push runs as the authenticated actor without creating a task", async (t) => {
+  const { project, store, github, submitter } = await harness(t);
+  await github.connect({ userId: submitter, token: "ghp_direct_user" });
+
+  const captured: Array<{ credentials?: { token: string } }> = [];
+  const result = await pushCanonicalForActor(
+    project,
+    store,
+    github,
+    { repositoryId: "origin", actorId: submitter },
+    recordingRepositories(captured),
+  );
+
+  assert.equal(result.outcome, "done");
+  assert.equal(captured[0]?.credentials?.token, "ghp_direct_user");
+  assert.deepEqual(
+    await store.listSubmittedTasks({ repositoryId: "origin" }),
+    [],
+  );
 });
 
 test("a submitter with no GitHub connection is refused by name, not covered for", async (t) => {

@@ -6,6 +6,102 @@ import { describeError } from "@coord/shared-types";
 
 import type { GitHubConnectionService } from "./github-connection.js";
 
+export interface PushCanonicalResult {
+  outcome: "done" | "refused";
+  detail?: { url?: string; output?: string[] };
+  explanation: string;
+}
+
+async function pushCanonicalAs(
+  project: CoordinatorProject,
+  store: CoordinationStore,
+  github: GitHubConnectionService,
+  input: { repositoryId: string; actorId: string },
+  repositories?: RepositoryService,
+): Promise<PushCanonicalResult> {
+  const connection = await github.tokenFor(input.actorId);
+  if (connection === undefined) {
+    return {
+      outcome: "refused",
+      explanation:
+        "You haven't connected GitHub, so there is no account to push as. " +
+        "Connect GitHub in Settings and ask again — the push will run as " +
+        "you and reach only what your token can. Nothing was pushed.",
+    };
+  }
+  try {
+    const pushed = await repoPush(
+      project,
+      store,
+      {
+        repositoryId: input.repositoryId,
+        credentials: { token: connection.token },
+      },
+      repositories,
+    );
+    return {
+      outcome: "done",
+      detail: { url: pushed.remoteUrl },
+      explanation:
+        `Pushed ${pushed.revision.slice(0, 8)} to ${pushed.targetBranch} on ` +
+        `${pushed.remoteUrl}` +
+        (connection.login === undefined ? "" : ` as ${connection.login}`) +
+        ". Open a pull request from that branch when you want it reviewed.",
+    };
+  } catch (error) {
+    const explanation = describeError(error);
+    if (/authentication failed|error: 40[13]\b|returned error: 40[13]\b/iu.test(explanation)) {
+      // Stored and usable are different things: a token GitHub has just
+      // refused should stop looking connected in Settings, and the refusal
+      // should say whose token failed rather than only that a push did.
+      await github
+        .noteAuthFailure(
+          input.actorId,
+          "GitHub refused this token during a push",
+        )
+        .catch(() => undefined);
+      return {
+        outcome: "refused",
+        explanation:
+          "GitHub refused your stored token, so nothing was pushed. It may " +
+          "have expired or lost access to this repository — reconnect " +
+          "GitHub in Settings.",
+      };
+    }
+    return {
+      outcome: "refused",
+      explanation: `The push did not go through: ${explanation}`,
+    };
+  }
+}
+
+/**
+ * Publishes canonical immediately for the authenticated person who asked.
+ *
+ * Unlike {@link pushCanonical}, this path has no task to resolve: the channel
+ * already authenticated the sender and passes that identity directly. It is
+ * the implementation behind `/push`, which is a repository operation rather
+ * than agent work and therefore never needs a plan or a workspace.
+ */
+export async function pushCanonicalForActor(
+  project: CoordinatorProject,
+  store: CoordinationStore,
+  github: GitHubConnectionService,
+  request: { repositoryId: string; actorId: string },
+  repositories?: RepositoryService,
+): Promise<PushCanonicalResult> {
+  const stored = await store.getRepository(request.repositoryId);
+  if ((stored?.remoteUrl ?? "").length === 0) {
+    return {
+      outcome: "refused",
+      explanation:
+        `${request.repositoryId} has no remote recorded, so there is ` +
+        "nowhere to push it. Connect it to a GitHub repository first.",
+    };
+  }
+  return await pushCanonicalAs(project, store, github, request, repositories);
+}
+
 /**
  * Publishes canonical to the repository's recorded remote, as an agent action.
  *
@@ -32,11 +128,7 @@ export async function pushCanonical(
     task: { id: string };
   },
   repositories?: RepositoryService,
-): Promise<{
-  outcome: "done" | "refused";
-  detail?: { url?: string; output?: string[] };
-  explanation: string;
-}> {
+): Promise<PushCanonicalResult> {
   const stored = await store.getRepository(request.repository.id);
   const remoteUrl = stored?.remoteUrl ?? "";
   if (remoteUrl.length === 0) {
@@ -61,55 +153,11 @@ export async function pushCanonical(
         "push as. Nothing was pushed.",
     };
   }
-  const connection = await github.tokenFor(submitter);
-  if (connection === undefined) {
-    return {
-      outcome: "refused",
-      explanation:
-        "You haven't connected GitHub, so there is no account to push as. " +
-        "Connect GitHub in Settings and ask again — the push will run as " +
-        "you and reach only what your token can. Nothing was pushed.",
-    };
-  }
-  try {
-    const pushed = await repoPush(
-      project,
-      store,
-      {
-        repositoryId: request.repository.id,
-        credentials: { token: connection.token },
-      },
-      repositories,
-    );
-    return {
-      outcome: "done",
-      detail: { url: pushed.remoteUrl },
-      explanation:
-        `Pushed ${pushed.revision.slice(0, 8)} to ${pushed.targetBranch} on ` +
-        `${pushed.remoteUrl}` +
-        (connection.login === undefined ? "" : ` as ${connection.login}`) +
-        ". Open a pull request from that branch when you want it reviewed.",
-    };
-  } catch (error) {
-    const explanation = describeError(error);
-    if (/authentication failed|error: 40[13]\b|returned error: 40[13]\b/iu.test(explanation)) {
-      // Stored and usable are different things: a token GitHub has just
-      // refused should stop looking connected in Settings, and the refusal
-      // should say whose token failed rather than only that a push did.
-      await github
-        .noteAuthFailure(submitter, "GitHub refused this token during a push")
-        .catch(() => undefined);
-      return {
-        outcome: "refused",
-        explanation:
-          "GitHub refused your stored token, so nothing was pushed. It may " +
-          "have expired or lost access to this repository — reconnect " +
-          "GitHub in Settings.",
-      };
-    }
-    return {
-      outcome: "refused",
-      explanation: `The push did not go through: ${explanation}`,
-    };
-  }
+  return await pushCanonicalAs(
+    project,
+    store,
+    github,
+    { repositoryId: request.repository.id, actorId: submitter },
+    repositories,
+  );
 }

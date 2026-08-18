@@ -80,8 +80,8 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
   },
   {
     name: "push",
-    summary: "Sync and publish this agent's changes on a new GitHub branch",
-    usage: "/push @agent",
+    summary: "Publish canonical on a new GitHub branch",
+    usage: "/push",
     takesObjective: false,
   },
   {

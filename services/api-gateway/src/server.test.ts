@@ -81,6 +81,12 @@ interface TestRuntime {
     model?: string;
     effort?: string;
   }>;
+  /** Every direct canonical push requested through the channel command. */
+  pushCalls: Array<{
+    projectId: string;
+    repositoryId: string;
+    actorId: string;
+  }>;
   /**
    * Every prompt the fake `complete` was asked, and what it should answer —
    * for asserting that a follow-up in a thread reaches the agent at all, and
@@ -273,6 +279,13 @@ async function startRuntime(
      * tasks to configured agents.
      */
     withoutListAgents?: boolean;
+    /** Drops direct push support, as an older or limited deployment may. */
+    withoutPushRepository?: boolean;
+    /** The direct push result returned to the channel. */
+    pushOutcome?: {
+      outcome: "done" | "refused";
+      explanation: string;
+    };
   } = {},
 ): Promise<TestRuntime> {
   const store = new InMemoryCoordinationStore();
@@ -284,6 +297,7 @@ async function startRuntime(
   // drift from itself.
   const chatConnections: TestRuntime["chatConnections"] = new Map();
   const submittedTasks: TestRuntime["submittedTasks"] = [];
+  const pushCalls: TestRuntime["pushCalls"] = [];
   const chatPrompts: TestRuntime["chatPrompts"] = [];
   const chatAnswer: TestRuntime["chatAnswer"] = {};
   const providerUsage: TestRuntime["providerUsage"] = new Map();
@@ -488,6 +502,15 @@ async function startRuntime(
       await store.linkRepository(input.projectId, repository.id);
       canonicalRepositoryNames.add(repository.id);
       return repository;
+    },
+    async pushRepository(input) {
+      pushCalls.push(input);
+      return (
+        options.pushOutcome ?? {
+          outcome: "done",
+          explanation: "Pushed canonical to coord/export-test on GitHub.",
+        }
+      );
     },
     async submitTask(input) {
       const agentId =
@@ -717,6 +740,9 @@ async function startRuntime(
   if (options.withoutListAgents === true) {
     delete operations.listAgents;
   }
+  if (options.withoutPushRepository === true) {
+    delete operations.pushRepository;
+  }
   const gateway = new ApiGateway({
     store,
     operations,
@@ -765,6 +791,7 @@ async function startRuntime(
     port: address.port,
     chatConnections,
     submittedTasks,
+    pushCalls,
     chatPrompts,
     chatAnswer,
     providerUsage,
@@ -3691,7 +3718,7 @@ test("@everyone pings every person in the channel and files no task", async (t) 
   );
 });
 
-test("@everyone still lets an agent named beside it take the work, but not /push", async (t) => {
+test("@everyone still lets a named agent take work while /push stays direct", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -3715,8 +3742,8 @@ test("@everyone still lets an agent named beside it take the work, but not /push
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
   assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
 
-  // `/push` publishes one agent's changes, so a broadcast is not a target it
-  // can have — the same answer `@agents` gets.
+  // `/push` is a repository operation. Text after the command cannot turn it
+  // into an agent task, even when that text is an agent-style broadcast.
   assert.equal(
     (await owner.request(`${base}/messages`, {
       method: "POST",
@@ -3725,10 +3752,11 @@ test("@everyone still lets an agent named beside it take the work, but not /push
     201,
   );
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.equal(runtime.pushCalls.length, 1);
   const listed = await owner.request(`${base}/messages`);
   assert.match(
     (listed.data.messages as any[]).map((message) => String(message.content)).join("\n"),
-    /`\/push` works with one agent at a time/u,
+    /Pushed canonical/u,
   );
 });
 
@@ -5829,68 +5857,83 @@ test("/simple keeps it brief in both places a reply is written from", async (t) 
   assert.match(prompt ?? "", /short and simple/u);
 });
 
-test("/push tasks only the named agent with a safe GitHub publish workflow", async (t) => {
+test("/push publishes directly as the sender without planning or running a task", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
-  const ownerId = bootstrapped.user.id;
   const repositoryId = await invitableRepository(owner, "push-command");
   const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
 
-  // A second available agent proves this is explicit targeting rather than
-  // an auto-claim or room-wide publish.
-  runtime.chatConnections.set(ownerId, [
-    { provider: "anthropic", visibility: "org" },
-    { provider: "openai", visibility: "org" },
-  ]);
-  await joinAllConnectedAgents(runtime, repositoryId);
-
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
-    body: { content: "/push @Claude (Owner)" },
+    body: { content: "/push" },
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
-  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
-  const task = runtime.submittedTasks[0];
-  assert.equal(task?.vendor, "claude");
-  const objective = task?.objective ?? "";
-  assert.match(objective, /First sync this repository with GitHub, then publish/u);
-  assert.match(objective, /no more than six words/u);
-  assert.match(objective, /slightly longer version.*commit and push summary/u);
+  assert.deepEqual(runtime.pushCalls, [
+    {
+      projectId: DEFAULT_PROJECT_ID,
+      repositoryId,
+      actorId: bootstrapped.user.id,
+    },
+  ]);
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  assert.equal(runtime.runCalls.length, 0);
+  const listed = await owner.request(`${base}/messages`);
   assert.match(
-    objective,
-    /if it fails, pull from GitHub and integrate the remote changes, then retry/u,
+    (listed.data.messages as any[]).map((message) => String(message.content)).join("\n"),
+    /Pushed canonical to coord\/export-test on GitHub/u,
   );
-  assert.match(objective, /Do not force-push/u);
-  assert.doesNotMatch(objective, /@Claude|\/push/u);
 });
 
-test("/push without one reachable agent dispatches nothing and explains the target", async (t) => {
-  const runtime = await startRuntime(t);
+test("/push reports refusals and unsupported deployments in the channel", async (t) => {
+  const runtime = await startRuntime(t, {
+    pushOutcome: {
+      outcome: "refused",
+      explanation: "You haven't connected GitHub, so nothing was pushed.",
+    },
+  });
   const owner = new TestClient(runtime.origin);
-  const bootstrapped = await bootstrap(owner);
-  const repositoryId = await invitableRepository(owner, "push-needs-agent");
+  await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "push-refused");
   const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
-  runtime.chatConnections.set(bootstrapped.user.id, [
-    { provider: "anthropic", visibility: "org" },
-  ]);
-  await joinAllConnectedAgents(runtime, repositoryId);
-
-  for (const content of ["/push", "/push @Nobody"]) {
-    const posted = await owner.request(`${base}/messages`, {
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
       method: "POST",
-      body: { content },
-    });
-    assert.equal(posted.status, 201, JSON.stringify(posted.data));
-  }
-  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+      body: { content: "/push" },
+    })).status,
+    201,
+  );
   const listed = await owner.request(`${base}/messages`);
-  const said = (listed.data.messages as any[])
-    .map((message) => String(message.content))
-    .join("\n");
-  assert.match(said, /`\/push` needs an agent/u);
-  assert.match(said, /`\/push` needs one agent from this channel/u);
-  assert.match(said, /@Claude \(Owner\)/u);
+  assert.match(
+    (listed.data.messages as any[]).map((message) => String(message.content)).join("\n"),
+    /haven't connected GitHub/u,
+  );
+  assert.equal(runtime.submittedTasks.length, 0);
+
+  const limitedRuntime = await startRuntime(t, { withoutPushRepository: true });
+  const limitedOwner = new TestClient(limitedRuntime.origin);
+  await bootstrap(limitedOwner);
+  const limitedRepository = await invitableRepository(
+    limitedOwner,
+    "push-unsupported",
+  );
+  const limitedBase =
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${limitedRepository}/channel`;
+  assert.equal(
+    (await limitedOwner.request(`${limitedBase}/messages`, {
+      method: "POST",
+      body: { content: "/push" },
+    })).status,
+    201,
+  );
+  const limitedListed = await limitedOwner.request(`${limitedBase}/messages`);
+  assert.match(
+    (limitedListed.data.messages as any[])
+      .map((message) => String(message.content))
+      .join("\n"),
+    /cannot push repositories from the channel/u,
+  );
+  assert.equal(limitedRuntime.submittedTasks.length, 0);
 });
 
 test("a held run says in the room that it is waiting, not only in its thread", async (t) => {
@@ -6302,7 +6345,7 @@ test("a slash inside a sentence is left alone, and /help answers", async (t) => 
   );
   assert.match(
     (listed.data.messages as any[]).map((m) => m.content).join("\n"),
-    /\/push @agent/u,
+    /\/push\b/u,
   );
   // The picker reads the same table the channel parses by, so they cannot
   // offer and accept different things.
