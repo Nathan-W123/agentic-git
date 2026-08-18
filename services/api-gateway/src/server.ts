@@ -1717,8 +1717,21 @@ const INTERROGATIVE_RE =
   /^(what|why|how|when|who|where|which|is|are|was|were|do|does|did|can|could|would|will|should|have|has|any)\b/iu;
 
 /**
- * Whether a message addressed to an agent by name is a question rather than
- * a request for work.
+ * Terse requests whose answer is the deliverable, even though they are not
+ * phrased as questions.
+ *
+ * `/simple @Hades summary of the codebase` used to miss both question tests
+ * and become an edit task. The task correctly found no diff, then reported
+ * that implementation detail in front of the answer. These openers describe
+ * an answer rather than repository work; the task-verb guard below still wins
+ * for requests that actually ask to build, fix, audit, or change something.
+ */
+const ANSWER_REQUEST_RE =
+  /^(?:(?:give|show|tell)\s+me\s+(?:an?\s+)?(?:summary|overview)\b|summari[sz]e\b|describe\b|explain\b|outline\b|(?:an?\s+)?(?:summary|overview)\b)/iu;
+
+/**
+ * Whether a message addressed to an agent by name asks for an answer rather
+ * than work.
  *
  * The bias here is the opposite of {@link looksLikeTaskRequest}'s, and
  * deliberately so. That one guards the no-mention path, where a false
@@ -1740,7 +1753,11 @@ function readsAsQuestion(content: string): boolean {
   if (TASK_VERB_RE.test(text)) {
     return false;
   }
-  return text.endsWith("?") || INTERROGATIVE_RE.test(text);
+  return (
+    text.endsWith("?") ||
+    INTERROGATIVE_RE.test(text) ||
+    ANSWER_REQUEST_RE.test(text)
+  );
 }
 
 /**

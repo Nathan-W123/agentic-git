@@ -5994,6 +5994,25 @@ test("/simple keeps it brief in both places a reply is written from", async (t) 
     .find((entry) => entry.includes("what are you working on?"));
   assert.ok(prompt, JSON.stringify(runtime.chatPrompts));
   assert.match(prompt ?? "", /short and simple/u);
+
+  // A terse answer request has no question mark or interrogative opener, but
+  // it is still asking for information. Keep it on the same read-only answer
+  // path instead of manufacturing an empty edit task whose result starts with
+  // "No files changed".
+  const summaryRepo = await invitableRepository(owner, "simple-brief-summary");
+  await joinAllConnectedAgents(runtime, summaryRepo);
+  const summaryBase = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${summaryRepo}/channel`;
+  const summarized = await owner.request(`${summaryBase}/messages`, {
+    method: "POST",
+    body: { content: "/simple @Claude (Owner) summary of the codebase" },
+  });
+  assert.equal(summarized.status, 201, JSON.stringify(summarized.data));
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const summaryPrompt = runtime.chatPrompts
+    .map((entry) => entry.prompt)
+    .find((entry) => entry.includes("summary of the codebase"));
+  assert.ok(summaryPrompt, JSON.stringify(runtime.chatPrompts));
+  assert.match(summaryPrompt ?? "", /short and simple/u);
 });
 
 test("/push publishes directly as the sender without planning or running a task", async (t) => {
