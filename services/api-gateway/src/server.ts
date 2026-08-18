@@ -626,6 +626,33 @@ const QUESTION_TIMEOUT_MS = 180000;
 const OPENING_TIMEOUT_MS = 120000;
 
 /**
+ * What `/dnc` — "do not code" — adds to the answer prompt.
+ *
+ * The guarantee is structural: a `/dnc` message goes down the answer path,
+ * which never submits a task, so nothing can be written. This says it to the
+ * agent in words as well, because the reply should *read* like an answer —
+ * an agent that closes with "I'll get started on that" has promised work the
+ * command exists to rule out.
+ */
+const DO_NOT_CODE_DIRECTIVE =
+  "This is a do-not-code request: you are being asked to read and answer, " +
+  "not to work. Do not write, change, or run anything, and do not start — " +
+  "or offer to start — any work. If the answer would need code changes, say " +
+  "what you would change, in words, and stop there.";
+
+/**
+ * What `/simple` adds: brevity above everything else.
+ *
+ * Worded for both places it travels — the answer prompt of a question, and
+ * the objective string of a task — so one sentence serves wherever the reply
+ * is written from.
+ */
+const KEEP_IT_SIMPLE_DIRECTIVE =
+  "Keep every reply as short and simple as it can possibly be: the fewest, " +
+  "plainest words that still say it, one short sentence when one is enough " +
+  "— no preamble, no restating the request, nothing extra.";
+
+/**
  * Politeness and preamble, which carry no information about the work.
  *
  * Stripped so an opening line reads as a summary rather than as the request
@@ -9399,13 +9426,18 @@ export class ApiGateway {
         // channel infers question-versus-work from the wording, and the
         // inference is occasionally wrong in the expensive direction — a
         // question read as a task opens a thread and spends a run.
-        if (parsed?.command.name === "ask") {
+        //
+        // `/dnc` is `/ask` said harder: the same no-task path, plus the
+        // prompt telling the agent in words that it is reading and answering,
+        // never coding.
+        if (parsed?.command.name === "ask" || parsed?.command.name === "dnc") {
           await this.answerInChannel(
             candidate,
             content,
             projectId,
             repositoryId,
             referencedMessageId,
+            parsed?.command.name === "dnc" ? DO_NOT_CODE_DIRECTIVE : undefined,
           );
           continue;
         }
@@ -9417,6 +9449,10 @@ export class ApiGateway {
           candidate,
           referencedMessageId,
           ...(parsed?.command.name === "plan" ? { planOnly: true } : {}),
+          // `/simple` travels as a flag rather than as words appended to
+          // `content`, so the question-versus-work reading below stays about
+          // what the sender actually typed.
+          ...(parsed?.command.name === "simple" ? { brief: true } : {}),
         });
       }
       return;
@@ -9628,6 +9664,13 @@ export class ApiGateway {
      * execution is already bought.
      */
     planOnly?: boolean;
+    /**
+     * `/simple`: whatever comes back should be as short and simple as it can
+     * be said. Carried as a flag so the question-versus-work reading of
+     * `content` is untouched, then written into whichever text the agent
+     * actually receives — the answer prompt or the task objective.
+     */
+    brief?: boolean;
   }): Promise<void> {
     const {
       projectId,
@@ -9702,6 +9745,7 @@ export class ApiGateway {
         projectId,
         repositoryId,
         input.referencedMessageId,
+        input.brief === true ? KEEP_IT_SIMPLE_DIRECTIVE : undefined,
       );
       return;
     }
@@ -9933,9 +9977,14 @@ export class ApiGateway {
         // its objective are both in hand at once, so it is the one place
         // that can honestly say what the agent's role here is; a task
         // submitted outside a channel has no such pair to resolve.
+        // `/simple` rides inside the objective string itself — no new field,
+        // no schema, just words the worker reads with the rest of the ask.
         objective: withRoleContext(
           candidate.role,
-          await this.describeAttachments(withoutMentions(content) || content),
+          [
+            await this.describeAttachments(withoutMentions(content) || content),
+            ...(input.brief === true ? [KEEP_IT_SIMPLE_DIRECTIVE] : []),
+          ].join("\n\n"),
         ),
         vendor: candidate.vendor,
         // The mentioned (or auto-claiming) agent's owner, never the sender —
@@ -10292,12 +10341,19 @@ export class ApiGateway {
     projectId: string,
     repositoryId: string,
     referencedMessageId?: string,
+    /**
+     * An instruction the command word added — `/dnc`'s "read and answer
+     * only", `/simple`'s "as short as it can be said" — placed with the
+     * other instructions rather than mixed into the sender's message.
+     */
+    directive?: string,
   ): Promise<void> {
     const answer = await this.askAgent(
       candidate,
       `${agentIdentity(candidate)}\n\n` +
         "Answer this message directly and briefly — two or three sentences " +
         "at most, no markdown headings, no preamble.\n\n" +
+        (directive === undefined ? "" : `${directive}\n\n`) +
         "This chat has no checkout, so answer from what is below rather than " +
         "from the code; if the answer is not there, say so plainly rather " +
         "than guessing, and never claim to have started or requested " +
