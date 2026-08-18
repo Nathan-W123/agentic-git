@@ -5331,6 +5331,129 @@ test("/dnc is answered in the channel, told in words not to code, and files no t
   assert.match(prompt, /The message: @Claude \(Owner\) rework the retry loop/u);
 });
 
+test("/dnc in a thread reply is answered with the do-not-code words, and no task is filed", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "dnc-thread-answers-only");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // An agent-authored thread: the place where a work-verbed reply used to be
+  // dispatched as a task even when the command promised it would not be.
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it — reworking the retry helper.",
+  });
+
+  runtime.chatAnswer.text = "It retries twice and then backs off for good.";
+  // Worded as work on purpose, like the channel test above: the command has
+  // to beat the verb reading in a thread too.
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "/dnc rework the retry loop" } },
+  );
+  assert.equal(replied.status, 201, JSON.stringify(replied.data));
+
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    const thread = (listed.data.messages as any[]).find(
+      (message) => message.id === root.id,
+    );
+    return thread?.replies?.some(
+      (reply: any) => reply.content === runtime.chatAnswer.text,
+    ) === true;
+  }, "the do-not-code reply was never answered in its thread");
+
+  // Answered, never dispatched — no task is the whole guarantee: nothing to
+  // plan, nothing for the coordinator to run.
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
+  assert.match(prompt, /do-not-code request/u);
+  // The command word is lifted out of the question slot, as in the channel.
+  assert.match(prompt, /The question: rework the retry loop/u);
+});
+
+test("/dnc with nobody mentioned never becomes an auto-claim offer, and says how to ask", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dnc-no-mention");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Task-worded and unaddressed — without the command this is exactly the
+  // message auto-claim exists to offer on, and a "yes" to that offer submits
+  // a task. The command's promise has to hold on this path too.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/dnc fix the retry loop" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const agreed = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "yes" },
+  });
+  assert.equal(agreed.status, 201, JSON.stringify(agreed.data));
+
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const after = await owner.request(`${base}/messages`);
+  const contents = (after.data.messages as any[]).map((message) =>
+    String(message.content),
+  );
+  assert.ok(
+    contents.every((line) => !/^Want me to take this/u.test(line)),
+    JSON.stringify(contents),
+  );
+  // Not silence either: the sender is told what a do-not-code ask needs.
+  const hint = (after.data.messages as any[]).find(
+    (message) => message.kind === "system",
+  );
+  assert.match(String(hint?.content), /`\/dnc` answers without starting work/u);
+  assert.match(String(hint?.content), /\/dnc @agent your question/u);
+});
+
+test("@agents /dnc answers the whole room, told not to code, and files no task", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dnc-broadcast");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text = "The retry loop caps at five attempts.";
+
+  // Task-worded and not a question: without the command the broadcast gate
+  // refuses this outright as a would-be broadcast task. The command says it
+  // is a question, so the verb reading must give way here as everywhere.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/dnc @agents rework the retry loop" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const listed = await owner.request(`${base}/messages`);
+  const answer = (listed.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(answer?.content, runtime.chatAnswer.text);
+  // The do-not-code words reach every answer of the fan-out, in the same
+  // directive slot the single-mention path fills.
+  const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
+  assert.match(prompt, /do-not-code request/u);
+});
+
 test("/simple keeps it brief in both places a reply is written from", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);

@@ -9372,7 +9372,18 @@ export class ApiGateway {
           /\b(status|report|update|progress|working on|stand-?up)\b/iu.test(
             content,
           );
-        if (looksLikeTaskRequest(content) && !readsAsQuestion(content) && !statusAsk) {
+        // `/ask` and `/dnc` say outright that this is a question, so the
+        // verb reading is moot — refusing "@agents /dnc rework?" as a
+        // would-be broadcast task would read the words and ignore the
+        // command that overrides them.
+        const answerCommand =
+          parsed?.command.name === "ask" || parsed?.command.name === "dnc";
+        if (
+          !answerCommand &&
+          looksLikeTaskRequest(content) &&
+          !readsAsQuestion(content) &&
+          !statusAsk
+        ) {
           await this.postChannelSystemMessage(
             projectId,
             repositoryId,
@@ -9389,6 +9400,14 @@ export class ApiGateway {
               projectId,
               repositoryId,
               referencedMessageId,
+              // The same directive slot the single-mention path fills: a
+              // broadcast `/dnc` is still a do-not-code request in every
+              // answer of the fan-out, and `/simple` still means brief.
+              parsed?.command.name === "dnc"
+                ? DO_NOT_CODE_DIRECTIVE
+                : parsed?.command.name === "simple"
+                  ? KEEP_IT_SIMPLE_DIRECTIVE
+                  : undefined,
             ).catch(() => undefined),
           ),
         );
@@ -9507,6 +9526,22 @@ export class ApiGateway {
           ...(parsed?.command.name === "simple" ? { brief: true } : {}),
         });
       }
+      return;
+    }
+    // `/ask` and `/dnc` promise an answer and nothing else, and everything
+    // below this line exists to start work — the auto-claim offer, and the
+    // "yes" that accepts one. A do-not-code request must never draw a "want
+    // me to take this?" whose acceptance submits a task through planning and
+    // coordination, so with nobody mentioned the channel says what is
+    // missing instead of doing either wrong thing: offering work breaks the
+    // command's promise, and silence reads as a broken channel.
+    if (parsed?.command.name === "ask" || parsed?.command.name === "dnc") {
+      await this.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        `\`/${parsed.command.name}\` answers without starting work — mention ` +
+          `the agent you are asking: \`${parsed.command.usage}\`.`,
+      );
       return;
     }
     // "Yes" answers the offer below before it is read as anything else — an
@@ -10519,7 +10554,7 @@ export class ApiGateway {
     viewerId: string;
     question: string;
   }): Promise<void> {
-    const question = input.question.trim();
+    let question = input.question.trim();
     if (question.length === 0) {
       return;
     }
@@ -10549,6 +10584,30 @@ export class ApiGateway {
         name: command.command.name,
       });
       return;
+    }
+    // `/ask`, `/dnc` and `/simple` mean here what they mean in the channel.
+    // Until now a thread reply carried them as plain text: the command word
+    // sat inside `question`, the work-versus-question split below read
+    // "/dnc rework the retry loop" by its verb, and the one command whose
+    // whole promise is "no task, no coordination" dispatched a task. So the
+    // word is lifted out the way the channel lifts it, `/ask` and `/dnc` pin
+    // the reply to the answer path — no wording can dispatch work from them —
+    // and `/dnc`'s do-not-code sentence and `/simple`'s brevity travel to
+    // whichever text the agent actually receives.
+    const answerOnly =
+      command?.command.name === "ask" || command?.command.name === "dnc";
+    const brief = command?.command.name === "simple";
+    const directive =
+      command?.command.name === "dnc"
+        ? DO_NOT_CODE_DIRECTIVE
+        : brief
+          ? KEEP_IT_SIMPLE_DIRECTIVE
+          : undefined;
+    if ((answerOnly || brief) && command !== undefined) {
+      // A bare command with nothing after it still needs something to hand
+      // the agent; the raw text beats an empty question slot.
+      const stripped = command.rest.trim();
+      question = stripped === "" ? question : stripped;
     }
     const root = await this.options.store.getChannelMessage(
       input.repositoryId,
@@ -10609,7 +10668,7 @@ export class ApiGateway {
       // An instruction goes to one agent even when several were named — two
       // agents editing one repository from one sentence is a collision, not
       // collaboration. Questions fan out; each named agent answers as itself.
-      if (looksLikeTaskRequest(question) && named[0] !== undefined) {
+      if (!answerOnly && looksLikeTaskRequest(question) && named[0] !== undefined) {
         await this.dispatchOneMention({
           projectId: input.projectId,
           repositoryId: input.repositoryId,
@@ -10617,6 +10676,7 @@ export class ApiGateway {
           senderId: input.viewerId,
           candidate: named[0],
           threadMessageId: input.messageId,
+          ...(brief ? { brief: true } : {}),
         });
         return;
       }
@@ -10626,6 +10686,7 @@ export class ApiGateway {
           root,
           candidate,
           question,
+          ...(directive === undefined ? {} : { directive }),
         });
       }
       return;
@@ -10746,7 +10807,7 @@ export class ApiGateway {
     // re-assignment. Same dispatch path as every other reply-triggered task;
     // the conversation id it derives from this thread's root is what makes
     // the coordinator resume the kept workspace instead of building one.
-    if (owner !== undefined && looksLikeTaskRequest(question)) {
+    if (!answerOnly && owner !== undefined && looksLikeTaskRequest(question)) {
       const rootTask =
         root.taskId === undefined
           ? undefined
@@ -10768,6 +10829,7 @@ export class ApiGateway {
           candidate: owner,
           threadMessageId: input.messageId,
           trigger: "conversation",
+          ...(brief ? { brief: true } : {}),
         });
         return;
       }
@@ -10778,7 +10840,7 @@ export class ApiGateway {
     // which no similarity score can claim to know. Only one agent is given
     // the work even if several were named — two agents editing the same
     // repository from one sentence is a collision, not collaboration.
-    if (looksLikeTaskRequest(question) && answering[0] !== undefined) {
+    if (!answerOnly && looksLikeTaskRequest(question) && answering[0] !== undefined) {
       const candidate = answering[0];
       if (candidate.visibility !== "personal" || candidate.userId === input.viewerId) {
         await this.dispatchOneMention({
@@ -10788,6 +10850,7 @@ export class ApiGateway {
           senderId: input.viewerId,
           candidate,
           threadMessageId: input.messageId,
+          ...(brief ? { brief: true } : {}),
         });
         return;
       }
@@ -10808,7 +10871,13 @@ export class ApiGateway {
         });
         continue;
       }
-      await this.answerAsAgent({ ...input, root, candidate, question });
+      await this.answerAsAgent({
+        ...input,
+        root,
+        candidate,
+        question,
+        ...(directive === undefined ? {} : { directive }),
+      });
     }
     if (answering.length === 0 && owner === undefined) {
       // The thread's agent could not be resolved. Reached last on purpose:
@@ -10971,6 +11040,12 @@ export class ApiGateway {
     };
     candidate: ChannelMentionCandidate;
     question: string;
+    /**
+     * An instruction the command word added — `/dnc`'s "read and answer
+     * only", `/simple`'s "as short as it can be said" — placed with the
+     * other instructions rather than mixed into the person's question.
+     */
+    directive?: string;
   }): Promise<void> {
     const { root, candidate, question } = input;
     // The reply route stores the person's question before starting this turn.
@@ -11007,7 +11082,9 @@ export class ApiGateway {
       "briefly — three sentences at most, no markdown headings, no " +
       "preamble. If the thread shows the work did not finish, say plainly " +
       "how far it got and what stopped it. Do not invent progress the " +
-      "thread does not show.\n\nThread so far:\n" +
+      "thread does not show.\n\n" +
+      (input.directive === undefined ? "" : `${input.directive}\n\n`) +
+      "Thread so far:\n" +
       history.map((line) => `- ${line}`).join("\n") +
       `\n\nThe question: ${question}`;
 
