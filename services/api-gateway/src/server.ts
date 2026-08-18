@@ -2096,6 +2096,20 @@ export interface ApiOperations {
     revision: string;
     resolved?: { side: "remote" | "local"; files: string[] };
   }>;
+  /**
+   * Publishes canonical directly for the authenticated caller. This is a
+   * repository operation, not agent work: `/push` invokes it without filing
+   * a task or entering plan admission.
+   */
+  pushRepository?(input: {
+    projectId: string;
+    repositoryId: string;
+    actorId: string;
+  }): Promise<{
+    outcome: "done" | "refused";
+    detail?: { url?: string; output?: string[] };
+    explanation: string;
+  }>;
   submitTask(input: {
     projectId: string;
     repositoryId: string;
@@ -9129,10 +9143,10 @@ export class ApiGateway {
   /**
    * Acts on a command that the channel itself answers.
    *
-   * Returns true when the message is finished with — `/help` and the
-   * thread-scoped ones are answered here and go no further. Returns false
-   * for commands that only change how the rest of the message is treated
-   * (`/plan`, `/queue`, `/ask`, `/dnc`, `/simple`, `/push`), which still need the
+   * Returns true when the message is finished with — `/help`, `/push` and the
+   * thread-scoped ones are answered here and go no further. Returns false for
+   * commands that only change how the rest of the message is treated
+   * (`/plan`, `/queue`, `/ask`, `/dnc`, `/simple`), which still need the
    * mention resolution below.
    */
   private async runSlashCommand(input: {
@@ -9175,23 +9189,26 @@ export class ApiGateway {
       return true;
     }
     if (input.command.name === "push") {
-      if (/@agents\b/iu.test(input.rest) || EVERYONE_RE.test(input.rest)) {
+      const operation = this.options.operations.pushRepository;
+      if (operation === undefined) {
         await this.postChannelSystemMessage(
           projectId,
           repositoryId,
-          "`/push` works with one agent at a time — mention the agent whose " +
-            "changes should be published.",
+          "This deployment cannot push repositories from the channel.",
         );
         return true;
       }
-      if (!ADDRESSED_RE.test(input.rest)) {
-        await this.postChannelSystemMessage(
-          projectId,
-          repositoryId,
-          "`/push` needs an agent to publish for — use `/push @agent`.",
-        );
-        return true;
-      }
+      const result = await operation({
+        projectId,
+        repositoryId,
+        actorId: input.senderId,
+      });
+      await this.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        result.explanation,
+      );
+      return true;
     }
     if (input.command.name === "queue") {
       if (/@agents\b/iu.test(input.rest) || EVERYONE_RE.test(input.rest)) {
@@ -9470,22 +9487,6 @@ export class ApiGateway {
       const mentionedPeople = people.filter(
         (person) => everyone || textMentionsName(content, person.name),
       );
-      if (parsed?.command.name === "push" && mentioned.length !== 1) {
-        await this.postChannelSystemMessage(
-          projectId,
-          repositoryId,
-          mentioned.length > 1
-            ? "`/push` works with one agent at a time — mention only the " +
-                "agent whose changes should be published."
-            : candidates.length === 0
-              ? "`/push` needs a reachable agent, and this channel has none."
-              : "`/push` needs one agent from this channel: " +
-                  `${candidates
-                    .map((candidate) => `@${candidate.name}`)
-                    .join(", ")}.`,
-        );
-        return;
-      }
       if (parsed?.command.name === "queue" && mentioned.length !== 1) {
         await this.postChannelSystemMessage(
           projectId,
@@ -9572,22 +9573,6 @@ export class ApiGateway {
           projectId,
           repositoryId,
           content,
-          ...(parsed?.command.name === "push"
-            ? {
-                objective:
-                  "First sync this repository with GitHub, then publish the " +
-                  "current changes to GitHub on a fresh branch. Name the " +
-                  "branch with a lowercase, hyphen-separated slug of no more " +
-                  "than six words that summarizes the general changes. Use a " +
-                  "slightly longer version of that description for the " +
-                  "commit and push summary. " +
-                  "Try the push once; if it fails, pull from GitHub and " +
-                  "integrate the remote changes, then retry the same branch's " +
-                  "push once. Do not force-push. If syncing, pulling, " +
-                  "integrating, or the retry fails, report that failure " +
-                  "instead of claiming success.",
-              }
-            : {}),
           senderId,
           candidate,
           referencedMessageId,
@@ -10695,6 +10680,21 @@ export class ApiGateway {
         viewerId: input.viewerId,
         name: command.command.name,
       });
+      return;
+    }
+    if (command?.command.name === "push") {
+      const operation = this.options.operations.pushRepository;
+      const explanation =
+        operation === undefined
+          ? "This deployment cannot push repositories from the channel."
+          : (
+              await operation({
+                projectId: input.projectId,
+                repositoryId: input.repositoryId,
+                actorId: input.viewerId,
+              })
+            ).explanation;
+      await this.sayThreadIsUnanswered(input, explanation);
       return;
     }
     // `/ask`, `/dnc` and `/simple` mean here what they mean in the channel.

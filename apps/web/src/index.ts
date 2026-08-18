@@ -36,7 +36,10 @@ import { OverlayWorkspaceService } from "./overlay.js";
 import { PreviewService } from "./preview.js";
 import { ProviderChatService, type ProviderId } from "./providers.js";
 import { pullCanonical } from "./pull-canonical.js";
-import { pushCanonical } from "./push-canonical.js";
+import {
+  pushCanonical,
+  pushCanonicalForActor,
+} from "./push-canonical.js";
 import {
   captureCredentialKey,
   UserCredentialStore,
@@ -343,6 +346,12 @@ async function serve(
         ...(connection === undefined
           ? {}
           : { credentials: { token: connection.token } }),
+      });
+    },
+    async pushRepository(input) {
+      return await pushCanonicalForActor(project, store, github, {
+        repositoryId: input.repositoryId,
+        actorId: input.actorId,
       });
     },
     async submitTask(input) {
