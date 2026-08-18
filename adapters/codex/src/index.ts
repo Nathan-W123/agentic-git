@@ -57,6 +57,11 @@ const EXPLANATION_STYLE_INSTRUCTIONS = [
     "now. No file paths, function or symbol names, code, or an account of how " +
     "you went about it — somebody who cannot read the code should still " +
     "understand it.",
+  // Brevity is asked for here rather than enforced downstream. Nothing trims
+  // this any more, so the only thing keeping the ending short is the ask.
+  "Keep it short. The shortest ending that still says what changed is the " +
+    "right one: no preamble, no restating the request back, no listing " +
+    "everything you touched along the way.",
   // No character count: the reader is shown whatever this says, whole, so a
   // number here only ever taught the model to stop mid-thought near it.
   "Say the whole thing. A summary that stops halfway is worse than a shorter " +

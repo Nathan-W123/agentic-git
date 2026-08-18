@@ -1373,6 +1373,7 @@ test("the execution prompt asks for an ending a person can read", async () => {
     const prompt = executionInputs[0] ?? "";
     assert.match(prompt, /one or two plain sentences saying what is different/u);
     assert.match(prompt, /No file paths, function or symbol names/u);
+    assert.match(prompt, /Keep it short/u);
     assert.match(prompt, /Say the whole thing/u);
     // No character count in the ask any more: the channel shows the whole
     // account, and a number here only taught the model to stop near it.
