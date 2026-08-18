@@ -544,6 +544,7 @@ function composerMirror(value, participants = []) {
   // itself was present.
   const names = [
     "agents",
+    "everyone",
     ...participants
       .map((participant) => participant?.name)
       .filter((name) => typeof name === "string" && name.length > 0),
@@ -589,6 +590,7 @@ function paintComposerMirror(node) {
 function richText(text, mentions) {
   const mentionNames = [
     "agents",
+    "everyone",
     ...mentions
       .map((mention) => mention?.name)
       .filter((name) => typeof name === "string")
@@ -2045,13 +2047,17 @@ function isThreadThinking(reply) {
  */
 function channelMentionCandidates(repositoryId) {
   const query = state.mentionQuery.trim().toLowerCase();
-  // The broadcast address, offered like any other name so it is
-  // discoverable from the same "@" that reveals everyone else. The server
-  // answers it with every reachable agent — questions only.
-  const broadcast =
-    query === "" || "agents".includes(query)
-      ? [{ name: "agents", kind: "broadcast" }]
-      : [];
+  // The two broadcast addresses, offered like any other name so they are
+  // discoverable from the same "@" that reveals everyone else. `@agents` the
+  // server answers with every reachable agent — questions only; `@everyone`
+  // it turns into a ping for every person in the channel and no work at all.
+  // Both first, and people after: a room's broadcast is the row somebody is
+  // looking for when they open the picker with nothing typed, and the five
+  // that fit are worth more to it than the fifth name down a list.
+  const broadcast = [
+    { name: "agents", kind: "broadcast", hint: "every agent" },
+    { name: "everyone", kind: "broadcast", hint: "everyone here" },
+  ].filter((entry) => query === "" || entry.name.includes(query));
   return [
     ...broadcast,
     ...channelParticipants(repositoryId)
@@ -2117,13 +2123,13 @@ function mentionPopover(candidates) {
               : avatar(entry.name, 18)
         }
         <span>${esc(entry.name)}</span>
-        <span class="mi-kind">${
+        <span class="mi-kind">${esc(
           entry.kind === "broadcast"
-            ? "every agent"
+            ? (entry.hint ?? "everyone")
             : entry.kind === "agent"
               ? "agent"
-              : "person"
-        }</span>
+              : "person",
+        )}</span>
       </button>`,
     )
     .join("")}</div>`;

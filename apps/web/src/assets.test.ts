@@ -1625,6 +1625,41 @@ test("channel @mentions include repository guests and surface directed unread pi
   assert.match(chats, /mentions > 0 \? "@"/u);
 });
 
+test("@everyone is offered, highlighted, and pinged to every person in the room", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+  const app = await browserSource();
+
+  // Offered from the same "@" that reveals every other name, beside the
+  // agent broadcast, and labelled so the two are told apart at a glance.
+  const candidates = chats.slice(
+    chats.indexOf("function channelMentionCandidates"),
+    chats.indexOf("\nfunction ", chats.indexOf("function channelMentionCandidates") + 1),
+  );
+  assert.match(candidates, /name: "agents", kind: "broadcast"/u);
+  assert.match(candidates, /name: "everyone", kind: "broadcast"/u);
+  assert.match(candidates, /hint: "everyone here"/u);
+  assert.match(chats, /entry\.hint \?\? "everyone"/u);
+
+  // Coloured in a posted message and in the composer's mirror alike, without
+  // waiting for a roster to carry a person called "everyone".
+  const highlighted = [...chats.matchAll(/\[\s*\n\s*"agents",\s*\n\s*"everyone",/gu)];
+  assert.equal(highlighted.length, 2, "both name lists carry the broadcasts");
+
+  // The optimistic copy of a sent message names the same people the server
+  // will, so the sender's own "@" badge does not flicker while it arrives.
+  const send = data.slice(
+    data.indexOf("export function sendChannelMessage"),
+    data.indexOf("\n}\n", data.indexOf("export function sendChannelMessage")),
+  );
+  assert.match(send, /const everyone = \/@everyone\\b\/iu\.test\(trimmed\)/u);
+  assert.match(send, /everyone && participant\.kind !== "agent"/u);
+
+  // And the shortcut that writes the address into the composer handles it the
+  // same way it handles "@agents".
+  assert.match(app, /case "mention-everyone-insert":/u);
+});
+
 test("the channel composer highlights mentions and previews pasted images", async () => {
   const app = await browserSource();
   const chats = await publicFile("screen-chats.js");

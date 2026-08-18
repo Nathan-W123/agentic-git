@@ -3846,9 +3846,13 @@ document.addEventListener("click", (event) => {
       render();
       void loadDmThread(value).then(() => render());
       return;
-    // Starts an "@agents …" message rather than sending one: the person still
-    // says what they want asked; this only saves them typing the address.
-    case "mention-agents-insert": {
+    // Starts an "@agents …" or "@everyone …" message rather than sending one:
+    // the person still says what they want asked or told; this only saves
+    // them typing the address. One body for both, because the only thing that
+    // differs between the room's two broadcasts is the word.
+    case "mention-agents-insert":
+    case "mention-everyone-insert": {
+      const address = act === "mention-agents-insert" ? "agents" : "everyone";
       const input = document.querySelector("[data-act='channel-input']");
       if (input !== null) {
         // Through the draft and a render, exactly like `typeIntoComposer`
@@ -3859,7 +3863,10 @@ document.addEventListener("click", (event) => {
         const attachments = state.chatDraft.match(
           /!\[[^\]]*\]\(attachment:[0-9a-f]{32}\.(?:png|jpg|gif|webp)\)/gu,
         );
-        const written = `@agents ${input.value.replace(/^@agents\s*/u, "")}`;
+        const written = `@${address} ${input.value.replace(
+          new RegExp(`^@${address}\\s*`, "u"),
+          "",
+        )}`;
         state.chatDraft = `${written}${
           attachments === null ? "" : `\n${attachments.join("\n")}\n`
         }`;

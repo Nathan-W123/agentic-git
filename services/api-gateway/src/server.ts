@@ -574,6 +574,21 @@ export function describeTaskState(status: string): string {
  */
 const ADDRESSED_RE = /(?:^|\s)@[A-Za-z][^\s/]*(?=\s|$)/u;
 /**
+ * The broadcast address for the room's people.
+ *
+ * `@agents` addresses every agent; this is the other half of the same idea,
+ * and the half a person reaches for first, because it is the word every
+ * other chat tool uses for it. It resolves to a ping for each human in the
+ * channel and to no work at all: mentioning a person has never submitted a
+ * task on their behalf (see `dispatchChannelMentions`), and addressing all
+ * of them at once cannot mean something different from addressing them one
+ * at a time.
+ *
+ * Written like `@agents` above it — no leading boundary, a trailing `\b` so
+ * `@everyoneelse` is somebody's unusual call sign rather than a broadcast.
+ */
+const EVERYONE_RE = /@everyone\b/iu;
+/**
  * How often the auditor looks for new canonical promotions.
  *
  * Far slower than the progress poller above, which is keeping a person
@@ -9039,6 +9054,11 @@ export class ApiGateway {
     agents: readonly ChannelMentionCandidate[],
     people: readonly ChannelPersonMention[],
   ): ChannelMessageMention[] {
+    // `@everyone` resolves here, where every other mention does, rather than
+    // at delivery: the unread "@" badge, the ping counts and the highlighted
+    // name all read this one list, so expanding the broadcast into the people
+    // it names is the whole of what makes it a ping.
+    const everyone = EVERYONE_RE.test(content);
     const mentions: ChannelMessageMention[] = [
       ...agents
         .filter((agent) => textMentionsName(content, agent.name))
@@ -9048,7 +9068,7 @@ export class ApiGateway {
           name: agent.name,
         })),
       ...people
-        .filter((person) => textMentionsName(content, person.name))
+        .filter((person) => everyone || textMentionsName(content, person.name))
         .map((person) => ({
           kind: "user" as const,
           id: person.userId,
@@ -9153,7 +9173,7 @@ export class ApiGateway {
       return true;
     }
     if (input.command.name === "push") {
-      if (/@agents\b/iu.test(input.rest)) {
+      if (/@agents\b/iu.test(input.rest) || EVERYONE_RE.test(input.rest)) {
         await this.postChannelSystemMessage(
           projectId,
           repositoryId,
@@ -9422,8 +9442,13 @@ export class ApiGateway {
       // and no task should be submitted on the person's behalf. Resolving the
       // people server-side is what stops a valid human ping from falling into
       // the "Nobody here answers" agent error below.
-      const mentionedPeople = people.filter((person) =>
-        textMentionsName(content, person.name),
+      // `@everyone` is that same ping addressed to the whole room, so it
+      // stands in for having named each of them: it dispatches nothing, and
+      // its only job here is to keep a valid broadcast out of the "Nobody
+      // here answers" error below.
+      const everyone = EVERYONE_RE.test(content);
+      const mentionedPeople = people.filter(
+        (person) => everyone || textMentionsName(content, person.name),
       );
       if (parsed?.command.name === "push" && mentioned.length !== 1) {
         await this.postChannelSystemMessage(
@@ -9444,6 +9469,7 @@ export class ApiGateway {
       if (
         mentioned.length === 0 &&
         mentionedPeople.length === 0 &&
+        !everyone &&
         ADDRESSED_RE.test(content)
       ) {
         // Somebody addressed a name and nothing happened.

@@ -3635,6 +3635,90 @@ test("a human mention suppresses auto-claim but not an explicit agent mention", 
   );
 });
 
+test("@everyone pings every person in the channel and files no task", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "mention-everyone-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const colleague = await addColleague(runtime, "everyone-ping@example.com");
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@everyone standup moved to ten" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // A ping is the whole of it. Mentioning one person has never submitted work
+  // on their behalf, and saying it to the room at once cannot mean more.
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+
+  const listed = await owner.request(`${base}/messages`);
+  const broadcast = (listed.data.messages as any[]).find((message) =>
+    String(message.content).includes("standup moved"),
+  );
+  const pinged = (broadcast.mentions as any[])
+    .filter((mention) => mention.kind === "user")
+    .map((mention) => mention.id)
+    .sort();
+  assert.deepEqual(pinged, [bootstrapped.user.id, colleague.id].sort());
+  // The room's agents are `@agents`. This word is for its people.
+  assert.equal(
+    (broadcast.mentions as any[]).some((mention) => mention.kind === "agent"),
+    false,
+  );
+  // And a valid broadcast is never the unresolved-name error.
+  assert.doesNotMatch(
+    (listed.data.messages as any[]).map((message) => String(message.content)).join("\n"),
+    /Nobody here answers/u,
+  );
+});
+
+test("@everyone still lets an agent named beside it take the work, but not /push", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "mention-everyone-agent-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  await addColleague(runtime, "everyone-and-agent@example.com");
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: {
+        content: "@everyone heads up — @Claude (Owner) please update the release checklist",
+      },
+    })).status,
+    201,
+  );
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
+
+  // `/push` publishes one agent's changes, so a broadcast is not a target it
+  // can have — the same answer `@agents` gets.
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "/push @everyone" },
+    })).status,
+    201,
+  );
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const listed = await owner.request(`${base}/messages`);
+  assert.match(
+    (listed.data.messages as any[]).map((message) => String(message.content)).join("\n"),
+    /`\/push` works with one agent at a time/u,
+  );
+});
+
 test("a user outside the repository cannot be resolved as a channel ping", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
