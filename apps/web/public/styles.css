@@ -21,8 +21,9 @@
      read as a colour choice competing with the accent rather than as a
      background behind it. The ramp below starts from true grey — equal parts,
      no hue at all — so nothing competes with the accent or the status dots.
-     `applyTheme` gives only `--bg` a two-percent nudge toward the chosen accent;
-     every raised surface stays on this neutral ramp.
+     `applyTheme` gives the page and conversation grounds a two-percent nudge
+     toward the chosen accent; every other raised surface stays on this neutral
+     ramp.
 
      The conversation is the lightest surface and everything else steps down
      away from it. This is the inverse of what the ramp used to do: the panels
@@ -39,8 +40,11 @@
   --bg-active: #343434;
   /* The conversation column itself. Named separately rather than reusing
      `--bg-card`, because a card is a thing drawn on a surface and this is the
-     surface — they move in opposite directions when either is adjusted. */
+     surface — they move in opposite directions when either is adjusted.
+     `--room-tint` is replaced at runtime with the same slight chosen-colour
+     tint as the page ground; this reference is the neutral pre-JS fallback. */
   --bg-chat: #262626;
+  --room-tint: var(--bg-chat);
 
   --border: #333333;
   --border-soft: #2a2a2a;
@@ -4223,7 +4227,7 @@ svg {
      `.chan-messages` so the header, search row and composer belong to the
      conversation too, instead of the transcript reading as a panel floating
      inside a darker frame. */
-  background: var(--bg-chat);
+  background: var(--room-tint);
   /* The terminal drawer anchors to the bottom of the conversation column,
      not the viewport -- the roster and file panels sit alongside and should
      stay reachable while it is open. */

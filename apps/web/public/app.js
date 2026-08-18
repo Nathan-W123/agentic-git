@@ -2043,22 +2043,32 @@ function applyTheme() {
   const element = document.documentElement;
   const root = element.style;
 
-  // Let the stylesheet choose the neutral ground for this theme, then nudge
-  // only that outermost surface toward the chosen accent. Two percent is just
+  // Let the stylesheet choose the neutral grounds for this theme, then nudge
+  // the page and conversation toward the chosen accent. Two percent is just
   // enough for the room to belong to the colour without turning the neutral
   // surface ramp into a second accent palette. Remove the previous inline
-  // value first so switching themes always starts from that theme's own base.
+  // values first so switching themes always starts from that theme's own base.
   element.dataset.theme = light ? "light" : "dark";
   root.removeProperty("--bg");
+  root.removeProperty("--room-tint");
   const neutralGround = getComputedStyle(element)
     .getPropertyValue("--bg")
+    .trim();
+  const neutralRoom = getComputedStyle(element)
+    .getPropertyValue("--bg-chat")
     .trim();
   const ground = mix(
     neutralGround || (light ? "#ddd7cb" : "#141414"),
     accent,
     0.02,
   );
+  const roomTint = mix(
+    neutralRoom || (light ? "#f1ede3" : "#262626"),
+    accent,
+    0.02,
+  );
   root.setProperty("--bg", ground);
+  root.setProperty("--room-tint", roomTint);
   root.setProperty("--accent", accent);
   // "Bright" means "stands out from the ground", not "closer to white".
   //
@@ -2121,8 +2131,9 @@ function applyTheme() {
   root.setProperty("--accent-2-wash", withAlpha(second, light ? 0.17 : 0.12));
   root.setProperty("--accent-2-line", withAlpha(second, light ? 0.5 : 0.38));
   // Every panel, card, border and text colour remains the stylesheet's
-  // business. Keeping the tint to `--bg` preserves the contrast and hierarchy
-  // of the complete neutral ramps in `:root` and the light-theme override.
+  // business. Keeping the tint to the page and conversation grounds preserves
+  // the contrast and hierarchy of the complete neutral ramps in `:root` and
+  // the light-theme override.
   // The browser chrome around the page — a phone's status bar, the installed
   // app's title bar — sits flush against the header, so it follows the page
   // ground, not the accent. Painting it with the accent put a saturated band
