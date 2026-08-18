@@ -276,6 +276,8 @@ export const state = {
   mentionActive: false,
   mentionQuery: "",
   mentionIndex: 0,
+  /** Which visible composer owns the shared mention/command picker state. */
+  composerAutocompleteTarget: undefined,
   // The command picker, mirroring the three above. Its candidates come from
   // the server with the messages, so it can never offer something the
   // channel would not recognise.
@@ -3058,6 +3060,11 @@ export function sendChannelMessage(repositoryId, text, kind = "user", authorId) 
   if (!repositoryId || trimmed === "") {
     return undefined;
   }
+  // `@everyone` names every person in the channel, exactly as the server
+  // expands it when it resolves the stored message. The optimistic copy has
+  // to agree with that or the sender's own "@" badge flickers on for the
+  // moment before the server's version of their message arrives.
+  const everyone = /@everyone\b/iu.test(trimmed);
   const message = {
     id: `${repositoryId}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     kind,
@@ -3069,11 +3076,13 @@ export function sendChannelMessage(repositoryId, text, kind = "user", authorId) 
         (participant) =>
           typeof participant.name === "string" && participant.name !== "",
       )
-      .filter((participant) =>
-        new RegExp(
-          `@${String(participant.name ?? "").replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}(?=$|[\\s,.:;!?()\\[\\]{}])`,
-          "iu",
-        ).test(trimmed),
+      .filter(
+        (participant) =>
+          (everyone && participant.kind !== "agent") ||
+          new RegExp(
+            `@${String(participant.name ?? "").replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")}(?=$|[\\s,.:;!?()\\[\\]{}])`,
+            "iu",
+          ).test(trimmed),
       )
       .map((participant) => ({
         kind: participant.kind === "agent" ? "agent" : "user",

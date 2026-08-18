@@ -75,6 +75,8 @@ interface TestRuntime {
     conversationId?: string;
     /** Whether the dispatch asked for the work to be held, not queued. */
     planOnly?: boolean;
+    /** Whether the dispatch asked to follow this agent's active work. */
+    queueAfterCurrent?: boolean;
     /** What the channel picked for this agent, if it picked anything. */
     model?: string;
     effort?: string;
@@ -488,6 +490,11 @@ async function startRuntime(
       return repository;
     },
     async submitTask(input) {
+      const agentId =
+        input.agentId ??
+        (input.vendor === undefined
+          ? "test-agent"
+          : `test-agent-${input.vendor}`);
       submittedTasks.push({
         projectId: input.projectId,
         repositoryId: input.repositoryId,
@@ -500,6 +507,9 @@ async function startRuntime(
           ? {}
           : { conversationId: input.conversationId }),
         ...(input.planOnly === undefined ? {} : { planOnly: input.planOnly }),
+        ...(input.queueAfterCurrent === undefined
+          ? {}
+          : { queueAfterCurrent: input.queueAfterCurrent }),
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.effort === undefined ? {} : { effort: input.effort }),
       });
@@ -520,9 +530,12 @@ async function startRuntime(
         // A real deployment resolves `vendor` to one of its own configured
         // agent ids (see `resolveAgentIdForVendor` in apps/web/src/index.ts);
         // the fixture only needs a stable, distinguishable id back.
-        agentId: input.agentId ?? (input.vendor === undefined ? "test-agent" : `test-agent-${input.vendor}`),
+        agentId,
         validationCommands: [],
         submittedBy: input.actorId,
+        ...(input.queueAfterCurrent === true
+          ? { queueAfterCurrent: true }
+          : {}),
       });
     },
     async runRepository() {
@@ -3635,6 +3648,90 @@ test("a human mention suppresses auto-claim but not an explicit agent mention", 
   );
 });
 
+test("@everyone pings every person in the channel and files no task", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "mention-everyone-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  const colleague = await addColleague(runtime, "everyone-ping@example.com");
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@everyone standup moved to ten" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // A ping is the whole of it. Mentioning one person has never submitted work
+  // on their behalf, and saying it to the room at once cannot mean more.
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+
+  const listed = await owner.request(`${base}/messages`);
+  const broadcast = (listed.data.messages as any[]).find((message) =>
+    String(message.content).includes("standup moved"),
+  );
+  const pinged = (broadcast.mentions as any[])
+    .filter((mention) => mention.kind === "user")
+    .map((mention) => mention.id)
+    .sort();
+  assert.deepEqual(pinged, [bootstrapped.user.id, colleague.id].sort());
+  // The room's agents are `@agents`. This word is for its people.
+  assert.equal(
+    (broadcast.mentions as any[]).some((mention) => mention.kind === "agent"),
+    false,
+  );
+  // And a valid broadcast is never the unresolved-name error.
+  assert.doesNotMatch(
+    (listed.data.messages as any[]).map((message) => String(message.content)).join("\n"),
+    /Nobody here answers/u,
+  );
+});
+
+test("@everyone still lets an agent named beside it take the work, but not /push", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "mention-everyone-agent-repo");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  await addColleague(runtime, "everyone-and-agent@example.com");
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: {
+        content: "@everyone heads up — @Claude (Owner) please update the release checklist",
+      },
+    })).status,
+    201,
+  );
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
+
+  // `/push` publishes one agent's changes, so a broadcast is not a target it
+  // can have — the same answer `@agents` gets.
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "/push @everyone" },
+    })).status,
+    201,
+  );
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const listed = await owner.request(`${base}/messages`);
+  assert.match(
+    (listed.data.messages as any[]).map((message) => String(message.content)).join("\n"),
+    /`\/push` works with one agent at a time/u,
+  );
+});
+
 test("a user outside the repository cannot be resolved as a channel ping", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
@@ -5292,6 +5389,239 @@ test("a command and a mention work together, and /plan holds the run", async (t)
       /Starting now/u.test(reply.content),
     );
   }, "the approved plan never started");
+});
+
+test("only the person who asked can start a held plan", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "plan-hold-owner");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const bystander = await addColleague(runtime, "bystander@example.com");
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/plan @Claude (Owner) rework the retry loop" },
+  });
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.equal(task?.status, "planned");
+  const root = (
+    await runtime.store.listChannelMessages(repositoryId, ownerId)
+  ).find((message) => message.kind === "agent");
+  const thread = `${base}/messages/${encodeURIComponent(root?.id ?? "")}/replies`;
+
+  // Somebody else in the room says go. The plan is not theirs to spend: it
+  // runs on the account of whoever asked for it, and nothing about the
+  // thread tells them that, so the refusal has to.
+  const notTheirs = await bystander.client.request(thread, {
+    method: "POST",
+    body: { content: "go ahead" },
+  });
+  assert.equal(notTheirs.status, 201);
+  await waitFor(async () => {
+    const held = (
+      await runtime.store.listChannelMessages(repositoryId, ownerId)
+    ).find((message) => message.kind === "agent");
+    return (held?.replies ?? []).some((reply) => /Owner's to start/u.test(reply.content));
+  }, "the bystander was never told whose plan this is");
+
+  // And it really is still held — the refusal is the point, not the wording.
+  assert.equal(
+    (await runtime.store.listSubmittedTasks({ repositoryId }))[0]?.status,
+    "planned",
+  );
+
+  // The person who asked says the same words, and it starts.
+  const theirs = await owner.request(thread, {
+    method: "POST",
+    body: { content: "go ahead" },
+  });
+  assert.equal(theirs.status, 201);
+  await waitFor(async () => {
+    const started = (
+      await runtime.store.listChannelMessages(repositoryId, ownerId)
+    ).find((message) => message.kind === "agent");
+    return (started?.replies ?? []).some((reply) =>
+      /Starting now/u.test(reply.content),
+    );
+  }, "the plan's own author could not start it");
+});
+
+test("a held plan nobody is recorded as asking for still starts", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "plan-hold-orphan");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Work filed outside a channel — over the API, or from the command line —
+  // records nobody as having asked. Held plans like that predate this rule
+  // and would otherwise be unstartable by anyone, which is worse than the
+  // thing the rule prevents.
+  const task = await runtime.store.submitTask({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    objective: "rework the retry loop",
+    agentId: "hud-agent",
+    validationCommands: [],
+    planOnly: true,
+  });
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "That's the plan — nothing is running yet.",
+  });
+  await runtime.store.setChannelMessageTask(repositoryId, root.id, task.id);
+
+  const go = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "go ahead" } },
+  );
+  assert.equal(go.status, 201);
+  await waitFor(async () => {
+    const released = (
+      await runtime.store.listSubmittedTasks({ repositoryId })
+    ).find((entry) => entry.id === task.id);
+    return released?.status !== "planned";
+  }, "a plan with no recorded requester was stranded");
+});
+
+test("/queue chains one agent's follow-up work without claiming it early", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "slash-queue");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Bad queue commands are explained and never create empty or unroutable
+  // work.
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/queue do this later" },
+  });
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/queue @Claude (Owner)" },
+  });
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "/queue @Claude (Owner) @Codex (Owner) duplicate work",
+    },
+  });
+  assert.equal(runtime.submittedTasks.length, 0);
+  const rejected = await owner.request(`${base}/messages`);
+  assert.match(
+    (rejected.data.messages as Array<{ content: string }>)
+      .map((message) => message.content)
+      .join("\n"),
+    /\/queue @agent what should run next/u,
+  );
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) handle current work" },
+  });
+  const current = (await runtime.store.listSubmittedTasks({ repositoryId }))[0];
+  assert.ok(current !== undefined);
+  await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+
+  for (const objective of ["first follow-up", "second follow-up"]) {
+    const posted = await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: `/queue @Claude (Owner) ${objective}` },
+    });
+    assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  }
+  assert.equal(runtime.submittedTasks.length, 3);
+  assert.ok(
+    runtime.submittedTasks
+      .slice(1)
+      .every((task) => task.queueAfterCurrent === true),
+  );
+  assert.equal(runtime.runCalls.length, 1);
+  const tasks = await runtime.store.listSubmittedTasks({ repositoryId });
+  const first = tasks.find((task) => task.objective.includes("first follow-up"));
+  const second = tasks.find((task) => task.objective.includes("second follow-up"));
+  assert.equal(first?.afterTaskId, current.id);
+  assert.equal(second?.afterTaskId, first?.id);
+  assert.deepEqual(
+    await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID),
+    [],
+  );
+
+  await runtime.store.completeSubmittedTask(current.id, "integrated");
+  await runtime.store.appendAudit(undefined, {
+    type: "task_reported",
+    taskId: current.id,
+    data: { explanation: "Current work finished." },
+  });
+  await waitFor(
+    async () => runtime.runCalls.length === 2,
+    "the first queued task was not started after its predecessor finished",
+  );
+  const [firstClaim] = await runtime.store.claimSubmittedTasks(
+    repositoryId,
+    DEFAULT_PROJECT_ID,
+  );
+  assert.equal(firstClaim?.id, first?.id);
+  assert.ok(first !== undefined);
+  await runtime.store.completeSubmittedTask(first.id, "integrated");
+  await runtime.store.appendAudit(undefined, {
+    type: "task_reported",
+    taskId: first.id,
+    data: { explanation: "First follow-up finished." },
+  });
+  await waitFor(
+    async () => runtime.runCalls.length === 3,
+    "the second queued task was not started after the first finished",
+  );
+  const [secondClaim] = await runtime.store.claimSubmittedTasks(
+    repositoryId,
+    DEFAULT_PROJECT_ID,
+  );
+  assert.equal(secondClaim?.id, second?.id);
+  assert.ok(second !== undefined);
+  await runtime.store.completeSubmittedTask(second.id, "integrated");
+
+  // With no unfinished task, the same command is submitted normally and is
+  // immediately claimable.
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/queue @Claude (Owner) idle follow-up" },
+  });
+  const idle = (await runtime.store.listSubmittedTasks({ repositoryId })).find(
+    (task) => task.objective.includes("idle follow-up"),
+  );
+  assert.equal(idle?.afterTaskId, undefined);
+  assert.equal(runtime.runCalls.length, 4);
+  const [idleClaim] = await runtime.store.claimSubmittedTasks(
+    repositoryId,
+    DEFAULT_PROJECT_ID,
+  );
+  assert.equal(idleClaim?.id, idle?.id);
 });
 
 test("/dnc is answered in the channel, told in words not to code, and files no task", async (t) => {

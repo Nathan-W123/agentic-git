@@ -143,3 +143,19 @@ test("/push names an agent rather than carrying an objective", () => {
   // It is syntax only as its own slash word, like every other command.
   assert.equal(parseSlashCommand("read docs/push.md first"), undefined);
 });
+
+test("/queue carries a follow-up objective and is discoverable", () => {
+  const parsed = parseSlashCommand(
+    "/queue @Eos rework the retry loop after the current task",
+  );
+  assert.equal(parsed?.command.name, "queue");
+  assert.equal(
+    parsed?.rest,
+    "@Eos rework the retry loop after the current task",
+  );
+  assert.equal(parsed?.command.takesObjective, true);
+  assert.ok(
+    slashCommandsMatching("/qu").some((entry) => entry.name === "queue"),
+  );
+  assert.match(formatSlashHelp(), /\/queue @agent/u);
+});

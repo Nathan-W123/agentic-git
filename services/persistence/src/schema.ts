@@ -1042,6 +1042,18 @@ export const MIGRATIONS: readonly Migration[] = [
          ON channel_messages(referenced_message_id)`,
     ],
   },
+  {
+    // An explicit follow-up remains submitted but cannot be leased while the
+    // task ahead of it is still queued, running, or waiting for approval.
+    version: 35,
+    name: "queued-task-dependencies",
+    statements: [
+      `ALTER TABLE submitted_tasks ADD COLUMN after_task_id TEXT
+         REFERENCES submitted_tasks(id) ON DELETE SET NULL`,
+      `CREATE INDEX submitted_tasks_after_task
+         ON submitted_tasks(after_task_id)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

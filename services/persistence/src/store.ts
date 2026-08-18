@@ -425,6 +425,17 @@ export interface SubmitTaskInput {
   validationCommands: ValidationCommand[];
   submittedBy?: UserId;
   /**
+   * A task which must stop being active before this one may be leased.
+   * Used by explicit follow-up queues; absent tasks and terminal tasks do
+   * not block the new work.
+   */
+  afterTaskId?: TaskId;
+  /**
+   * Atomically choose {@link afterTaskId} as this agent owner's latest
+   * submitted or claimed task. Explicit `afterTaskId` wins when both exist.
+   */
+  queueAfterCurrent?: boolean;
+  /**
    * What this request was asked inside, for the agent that will run it.
    *
    * Today that is the thread a channel dispatch came from: "now do the same
@@ -479,6 +490,8 @@ export interface SubmittedTask {
   agentId: string;
   validationCommands: ValidationCommand[];
   submittedBy: UserId | undefined;
+  /** See {@link SubmitTaskInput.afterTaskId}. */
+  afterTaskId: TaskId | undefined;
   /** See {@link SubmitTaskInput.context}. Absent on everything submitted outside a thread. */
   context: string | undefined;
   /** See {@link SubmitTaskInput.conversationId}. Absent on one-shot tasks. */

@@ -1339,13 +1339,14 @@ test("controls the deployment cannot honour are disabled, not chatty", async () 
 
 test("slash and mention filtering does not rebuild the app while typing", async () => {
   const chats = await publicFile("screen-chats.js");
-  const start = chats.indexOf("export function updateComposerInput");
-  const end = chats.indexOf("\nexport function pickSlashCommand", start);
-  assert.notEqual(start, -1, "the channel composer input handler should exist");
-  assert.notEqual(end, -1, "the composer input handler should have a boundary");
+  const start = chats.indexOf("function updateComposerPresentation");
+  const end = chats.indexOf("\n/**\n * A keystroke", start);
+  assert.notEqual(start, -1, "the shared composer painter should exist");
+  assert.notEqual(end, -1, "the shared composer painter should have a boundary");
   const handler = chats.slice(start, end);
 
-  assert.match(handler, /suggestions\.innerHTML = composerSuggestions/u);
+  assert.match(handler, /paintComposerSuggestions\(activeChannelId\(\)\)/u);
+  assert.match(handler, /paintComposerMirror\(node\)/u);
   assert.equal(
     /\brerender\s*\(/u.test(handler),
     false,
@@ -1562,14 +1563,127 @@ test("the composer keyboard leaves Space, Shift+Enter, and IME to native input",
   assert.equal(submitted, 1);
 });
 
+test("thread composer suggestions navigate, dismiss, and insert into the thread draft", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const pickStart = chats.indexOf("function composerTarget");
+  const pickEnd = chats.indexOf("\nexport function handleComposerKeydown", pickStart);
+  assert.notEqual(pickStart, -1, "the composer target resolver should exist");
+  assert.notEqual(pickEnd, -1, "the picker helpers should have a boundary");
+
+  const state: Record<string, unknown> = {
+    chatDraft: "channel stays put",
+    threadDraft: "ask @Mar",
+  };
+  const input = {
+    selectionStart: 8,
+    focus: () => undefined,
+    setSelectionRange: () => undefined,
+  };
+  const createPickers = new Function(
+    "state",
+    "document",
+    "draftText",
+    `${chats
+      .slice(pickStart, pickEnd)
+      .replaceAll("export function", "function")}\nreturn { pickMention, pickSlashCommand };`,
+  );
+  const pickers = createPickers(
+    state,
+    { querySelector: () => input },
+    (value: string) => value,
+  ) as {
+    pickMention: (name: string, rerender: () => void, target: string) => void;
+    pickSlashCommand: (name: string, rerender: () => void, target: string) => void;
+  };
+
+  pickers.pickMention("Mary Jane", () => undefined, "thread");
+  assert.equal(state.threadDraft, "ask @Mary Jane ");
+  assert.equal(state.chatDraft, "channel stays put");
+  state.threadDraft = "/pl";
+  input.selectionStart = 3;
+  pickers.pickSlashCommand("plan", () => undefined, "thread");
+  assert.equal(state.threadDraft, "/plan ");
+  assert.equal(state.chatDraft, "channel stays put");
+
+  const handlerSource = chats
+    .slice(chats.indexOf("export function handleComposerKeydown"))
+    .replace("export function", "function");
+  const picks: Array<[string, string]> = [];
+  const createHandler = new Function(
+    "state",
+    "imeComposing",
+    "channelSlashCandidates",
+    "activeChannelId",
+    "pickSlashCommand",
+    "channelMentionCandidates",
+    "pickMention",
+    "submitThreadReply",
+    "submitComposerMessage",
+    `${handlerSource}\nreturn handleComposerKeydown;`,
+  );
+  const handler = createHandler(
+    state,
+    () => false,
+    () => [{ name: "plan" }, { name: "review" }],
+    () => "repository",
+    (name: string, _rerender: () => void, target: string) => {
+      picks.push([name, target]);
+    },
+    () => [{ name: "Mary Jane" }, { name: "Claude" }],
+    (name: string, _rerender: () => void, target: string) => {
+      picks.push([name, target]);
+    },
+    () => undefined,
+    () => undefined,
+  ) as (
+    event: {
+      key: string;
+      target: { dataset: { act: string } };
+      preventDefault: () => void;
+    },
+    rerender: () => void,
+  ) => void;
+  const press = (key: string) =>
+    handler(
+      {
+        key,
+        target: { dataset: { act: "channel-thread-input" } },
+        preventDefault: () => undefined,
+      },
+      () => undefined,
+    );
+
+  Object.assign(state, {
+    composerAutocompleteTarget: "thread",
+    slashActive: true,
+    slashIndex: 0,
+    mentionActive: false,
+  });
+  press("ArrowDown");
+  assert.equal(state.slashIndex, 1);
+  press("Enter");
+  assert.deepEqual(picks.pop(), ["review", "thread"]);
+  press("Escape");
+  assert.equal(state.slashActive, false);
+
+  Object.assign(state, {
+    mentionActive: true,
+    mentionIndex: 0,
+  });
+  press("ArrowUp");
+  assert.equal(state.mentionIndex, 1);
+  press("Tab");
+  assert.deepEqual(picks.pop(), ["Claude", "thread"]);
+  press("Escape");
+  assert.equal(state.mentionActive, false);
+});
+
 test("every message composer sends on Enter and opens a line on Shift+Enter", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
 
-  // One block per composer, each reached by the act its textarea carries. The
-  // DM composer was the one without a block: its Enter fell through to the
-  // textarea and only ever opened a new line.
-  for (const act of ["chat-input", "channel-thread-input", "dm-input"]) {
+  // The composers without suggestions keep their small native-submit blocks.
+  for (const act of ["chat-input", "dm-input"]) {
     const start = app.indexOf(`if (node?.dataset?.act !== "${act}")`);
     assert.notEqual(start, -1, `${act} has an Enter handler`);
     const block = app.slice(start, app.indexOf("});", start));
@@ -1585,13 +1699,18 @@ test("every message composer sends on Enter and opens a line on Shift+Enter", as
     );
   }
 
-  // The channel composer's Enter is steered by the @mention picker, so it
-  // routes through the shared handler rather than repeating the block above.
+  // Channel and thread Enter are steered by their @mention and slash pickers,
+  // so both route through the shared handler rather than racing a second
+  // plain-submit listener.
   assert.match(
     app,
-    /event\.target\?\.dataset\?\.act === "channel-input"\s*\)?\s*\{?\s*\n?\s*handleComposerKeydown\(event, render\)/u,
+    /event\.target\?\.dataset\?\.act === "channel-input" \|\|\s*event\.target\?\.dataset\?\.act === "channel-thread-input"[\s\S]{0,80}handleComposerKeydown\(event, render\)/u,
   );
   assert.match(chats, /if \(event\.key === "Enter" && !event\.shiftKey\) \{/u);
+  assert.match(
+    chats,
+    /if \(target === "thread"\) \{\s*submitThreadReply\(rerender\);\s*\} else \{\s*submitComposerMessage\(rerender\);/u,
+  );
 
   // Mobile keyboards need the hint to label the return key "send"; without it
   // the same Enter is offered as a newline before it is pressed.
@@ -1625,6 +1744,41 @@ test("channel @mentions include repository guests and surface directed unread pi
   assert.match(chats, /mentions > 0 \? "@"/u);
 });
 
+test("@everyone is offered, highlighted, and pinged to every person in the room", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const data = await publicFile("data.js");
+  const app = await browserSource();
+
+  // Offered from the same "@" that reveals every other name, beside the
+  // agent broadcast, and labelled so the two are told apart at a glance.
+  const candidates = chats.slice(
+    chats.indexOf("function channelMentionCandidates"),
+    chats.indexOf("\nfunction ", chats.indexOf("function channelMentionCandidates") + 1),
+  );
+  assert.match(candidates, /name: "agents", kind: "broadcast"/u);
+  assert.match(candidates, /name: "everyone", kind: "broadcast"/u);
+  assert.match(candidates, /hint: "everyone here"/u);
+  assert.match(chats, /entry\.hint \?\? "everyone"/u);
+
+  // Coloured in a posted message and in the composer's mirror alike, without
+  // waiting for a roster to carry a person called "everyone".
+  const highlighted = [...chats.matchAll(/\[\s*\n\s*"agents",\s*\n\s*"everyone",/gu)];
+  assert.equal(highlighted.length, 2, "both name lists carry the broadcasts");
+
+  // The optimistic copy of a sent message names the same people the server
+  // will, so the sender's own "@" badge does not flicker while it arrives.
+  const send = data.slice(
+    data.indexOf("export function sendChannelMessage"),
+    data.indexOf("\n}\n", data.indexOf("export function sendChannelMessage")),
+  );
+  assert.match(send, /const everyone = \/@everyone\\b\/iu\.test\(trimmed\)/u);
+  assert.match(send, /everyone && participant\.kind !== "agent"/u);
+
+  // And the shortcut that writes the address into the composer handles it the
+  // same way it handles "@agents".
+  assert.match(app, /case "mention-everyone-insert":/u);
+});
+
 test("the channel composer highlights mentions and previews pasted images", async () => {
   const app = await browserSource();
   const chats = await publicFile("screen-chats.js");
@@ -1637,8 +1791,11 @@ test("the channel composer highlights mentions and previews pasted images", asyn
   assert.match(app, /case "channel-attachment-remove"/u);
   assert.match(chats, /function draftAttachmentPreviews/u);
   assert.match(chats, /class="composer-attachments"/u);
-  assert.match(chats, /state\.mentionActive \? " mention-active"/u);
-  assert.match(chats, /classList\.toggle\("mention-active", state\.mentionActive\)/u);
+  assert.match(chats, /mentionActiveFor\("channel"\) \? " mention-active"/u);
+  assert.match(
+    chats,
+    /classList\.toggle\("mention-active", mentionActiveFor\("channel"\)\)/u,
+  );
   assert.match(css, /\.chan-composer-wrap\.mention-active::before/u);
   assert.match(css, /\.composer-attachment img/u);
 });
@@ -1729,22 +1886,63 @@ test(
   },
 );
 
-test("thread composer characters stay visible without a painted text layer", async () => {
+test("thread composer paints pings and commands and opens their suggestion lists", async () => {
+  const app = await publicFile("app.js");
+  const data = await publicFile("data.js");
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");
+  const panelStart = chats.indexOf("function threadPanel");
+  const panelEnd = chats.indexOf("\n/**", panelStart);
+  const panel = chats.slice(panelStart, panelEnd);
 
-  // Thread replies are a plain textarea, not a transparent control laid over
-  // a mirror. The shared composer rule must therefore paint both ordinary CSS
-  // text and WebKit's separate text fill rather than relying on inheritance.
+  assert.notEqual(panelStart, -1, "the thread panel should exist");
+  assert.notEqual(panelEnd, -1, "the thread panel should have a boundary");
+  assert.match(panel, /data-thread-composer-suggestions/u);
+  assert.match(panel, /composerSuggestions\(repositoryId, "thread"\)/u);
+  assert.match(panel, /class="composer-field"/u);
+  assert.match(panel, /class="composer-mirror" data-composer-mirror/u);
   assert.match(
-    chats,
-    /<form class="composer[\s\S]{0,80}data-act="channel-thread-submit"[\s\S]{0,240}<textarea data-act="channel-thread-input"/u,
+    panel,
+    /composerMirror\(\s*draftText\(state\.threadDraft\),\s*channelParticipants\(repositoryId\)/u,
   );
-  const rule = /\.composer textarea \{([\s\S]*?)\n\}/u.exec(css);
-  assert.ok(rule !== null, "the shared composer textarea rule exists");
-  assert.match(rule[1] ?? "", /\n\s*color: var\(--text\);/u);
-  assert.match(rule[1] ?? "", /\n\s*-webkit-text-fill-color: var\(--text\);/u);
-  assert.doesNotMatch(rule[1] ?? "", /transparent/u);
+  assert.match(data, /composerAutocompleteTarget: undefined/u);
+
+  const threadInput = chats.slice(
+    chats.indexOf("export function updateThreadComposerInput"),
+    chats.indexOf("\nfunction updateMentionState", chats.indexOf("export function updateThreadComposerInput")),
+  );
+  assert.match(threadInput, /updateComposerPresentation\(node, "thread"\)/u);
+  const mentionState = chats.slice(
+    chats.indexOf("function updateMentionState"),
+    chats.indexOf("\nexport function updateComposerInput"),
+  );
+  assert.match(mentionState, /state\.composerAutocompleteTarget = target/u);
+  assert.match(mentionState, /state\.slashActive = slash !== null/u);
+  assert.match(mentionState, /const match = \/\(\^\|\\s\)@/u);
+  assert.match(mentionState, /state\.mentionActive = true/u);
+
+  const suggestions = chats.slice(
+    chats.indexOf("function composerSuggestions"),
+    chats.indexOf("\nfunction mentionActiveFor"),
+  );
+  assert.match(suggestions, /state\.composerAutocompleteTarget !== target/u);
+  assert.match(suggestions, /state\.slashActive[\s\S]*slashPopover/u);
+  assert.match(suggestions, /state\.mentionActive[\s\S]*mentionPopover/u);
+
+  assert.match(app, /case "thread-mention-pick"/u);
+  assert.match(app, /pickMention\(value, render, "thread"\)/u);
+  assert.match(app, /case "thread-slash-pick"/u);
+  assert.match(app, /pickSlashCommand\(value, render, "thread"\)/u);
+  assert.match(css, /\.thread-composer-wrap \{[\s\S]{0,80}position: relative/u);
+  assert.match(css, /\.thread-composer-wrap \.mention-pop/u);
+  assert.match(
+    css,
+    /\.composer-mirror \.mention-ping \{[\s\S]{0,160}color: var\(--accent-bright\);[\s\S]{0,160}background: var\(--accent-wash\)/u,
+  );
+  assert.match(
+    css,
+    /\.composer-mirror \.slash-ping \{[\s\S]{0,160}color: var\(--accent-2-bright\);[\s\S]{0,160}background: var\(--accent-2-wash\)/u,
+  );
 });
 
 test("a posted ping highlights its full name with a quiet static treatment", async () => {

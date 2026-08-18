@@ -558,6 +558,10 @@ export interface TaskSubmitOptions {
   projectId?: string;
   agentId?: string;
   submittedBy?: string;
+  /** Do not lease this task until the referenced task is no longer active. */
+  afterTaskId?: string;
+  /** Atomically queue after this agent owner's latest unfinished task. */
+  queueAfterCurrent?: boolean;
   /**
    * Background for the agent that will run this, kept out of the objective
    * (which is rendered wherever the request is shown). Set by the channel
@@ -608,6 +612,12 @@ export async function taskSubmit(
     ...(options.submittedBy === undefined
       ? {}
       : { submittedBy: options.submittedBy }),
+    ...(options.afterTaskId === undefined
+      ? {}
+      : { afterTaskId: options.afterTaskId }),
+    ...(options.queueAfterCurrent === true
+      ? { queueAfterCurrent: true }
+      : {}),
     ...(options.context === undefined || options.context.trim() === ""
       ? {}
       : { context: options.context.trim() }),

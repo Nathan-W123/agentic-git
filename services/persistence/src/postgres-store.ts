@@ -832,6 +832,13 @@ export class PostgresCoordinationStore implements CoordinationStore {
 
         const values: unknown[] = [];
         const clauses = ["status = 'submitted'"];
+        clauses.push(
+          `NOT EXISTS (
+            SELECT 1 FROM submitted_tasks predecessor
+            WHERE predecessor.id = submitted_tasks.after_task_id
+              AND predecessor.status IN ('submitted', 'claimed', 'planned')
+          )`,
+        );
         if (input.taskId !== undefined) {
           clauses.push(`id = ${bind(values, input.taskId)}`);
         }
@@ -1656,6 +1663,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
       agentId: input.agentId,
       validationCommands: input.validationCommands,
       submittedBy: input.submittedBy,
+      afterTaskId: input.afterTaskId,
       context: input.context,
       conversationId: input.conversationId,
       model: input.model,
@@ -1670,6 +1678,25 @@ export class PostgresCoordinationStore implements CoordinationStore {
 
     await this.transaction(
       async (client) => {
+        if (task.afterTaskId === undefined && input.queueAfterCurrent === true) {
+          const predecessor = (
+            await client.query(
+              `SELECT id FROM submitted_tasks
+               WHERE repository_id = $1 AND project_id = $2 AND agent_id = $3
+                 AND submitted_by IS NOT DISTINCT FROM $4
+                 AND status IN ('submitted', 'claimed')
+               ORDER BY submitted_at DESC, seq DESC LIMIT 1`,
+              [
+                task.repositoryId,
+                task.projectId ?? DEFAULT_PROJECT_ID,
+                task.agentId,
+                task.submittedBy ?? null,
+              ],
+            )
+          ).rows[0] as Row | undefined;
+          task.afterTaskId =
+            predecessor === undefined ? undefined : text(predecessor, "id");
+        }
         // A new turn settles the conversation's previous one: its work
         // already landed, and what it was waiting for has now arrived. One
         // transaction with the insert, so "at most one open turn per
@@ -1686,8 +1713,8 @@ export class PostgresCoordinationStore implements CoordinationStore {
           `INSERT INTO submitted_tasks
              (id, repository_id, project_id, objective, agent_id,
               validation_commands_json, submitted_by, status, submitted_at,
-              context, conversation_id, model, effort)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)`,
+              context, conversation_id, model, effort, after_task_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`,
           [
             task.id,
             task.repositoryId,
@@ -1702,6 +1729,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
             task.conversationId ?? null,
             task.model ?? null,
             task.effort ?? null,
+            task.afterTaskId ?? null,
           ],
         );
       },
@@ -1748,6 +1776,11 @@ export class PostgresCoordinationStore implements CoordinationStore {
           await client.query(
             `SELECT * FROM submitted_tasks
              WHERE repository_id = $1${projectClause} AND status = 'submitted'
+               AND NOT EXISTS (
+                 SELECT 1 FROM submitted_tasks predecessor
+                 WHERE predecessor.id = submitted_tasks.after_task_id
+                   AND predecessor.status IN ('submitted', 'claimed', 'planned')
+               )
              ORDER BY submitted_at, seq`,
             values,
           )
@@ -1942,6 +1975,7 @@ export class PostgresCoordinationStore implements CoordinationStore {
         "validation_commands_json",
       ),
       submittedBy: optionalText(row, "submitted_by"),
+      afterTaskId: optionalText(row, "after_task_id"),
       context: optionalText(row, "context"),
       conversationId: optionalText(row, "conversation_id"),
       model: optionalText(row, "model"),

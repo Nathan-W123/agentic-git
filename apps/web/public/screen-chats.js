@@ -544,6 +544,7 @@ function composerMirror(value, participants = []) {
   // itself was present.
   const names = [
     "agents",
+    "everyone",
     ...participants
       .map((participant) => participant?.name)
       .filter((name) => typeof name === "string" && name.length > 0),
@@ -589,6 +590,7 @@ function paintComposerMirror(node) {
 function richText(text, mentions) {
   const mentionNames = [
     "agents",
+    "everyone",
     ...mentions
       .map((mention) => mention?.name)
       .filter((name) => typeof name === "string")
@@ -2045,13 +2047,17 @@ function isThreadThinking(reply) {
  */
 function channelMentionCandidates(repositoryId) {
   const query = state.mentionQuery.trim().toLowerCase();
-  // The broadcast address, offered like any other name so it is
-  // discoverable from the same "@" that reveals everyone else. The server
-  // answers it with every reachable agent — questions only.
-  const broadcast =
-    query === "" || "agents".includes(query)
-      ? [{ name: "agents", kind: "broadcast" }]
-      : [];
+  // The two broadcast addresses, offered like any other name so they are
+  // discoverable from the same "@" that reveals everyone else. `@agents` the
+  // server answers with every reachable agent — questions only; `@everyone`
+  // it turns into a ping for every person in the channel and no work at all.
+  // Both first, and people after: a room's broadcast is the row somebody is
+  // looking for when they open the picker with nothing typed, and the five
+  // that fit are worth more to it than the fifth name down a list.
+  const broadcast = [
+    { name: "agents", kind: "broadcast", hint: "every agent" },
+    { name: "everyone", kind: "broadcast", hint: "everyone here" },
+  ].filter((entry) => query === "" || entry.name.includes(query));
   return [
     ...broadcast,
     ...channelParticipants(repositoryId)
@@ -2082,7 +2088,7 @@ function channelSlashCandidates(repositoryId) {
     .slice(0, 6);
 }
 
-function slashPopover(candidates) {
+function slashPopover(candidates, target) {
   if (candidates.length === 0) {
     return `<div class="mention-pop"><div class="mention-item" style="color:var(--text-4)">No commands</div></div>`;
   }
@@ -2091,7 +2097,8 @@ function slashPopover(candidates) {
     .map(
       (entry, position) => `<button type="button" class="mention-item slash-item${
         position === index ? " active" : ""
-      }" data-act="channel-slash-pick" data-value="${esc(entry.name)}">
+      }" data-act="${target === "thread" ? "thread" : "channel"}-slash-pick"
+        data-value="${esc(entry.name)}">
         <span class="slash-name">/${esc(entry.name)}</span>
         <span class="slash-summary">${esc(entry.summary ?? "")}</span>
       </button>`,
@@ -2099,7 +2106,7 @@ function slashPopover(candidates) {
     .join("")}</div>`;
 }
 
-function mentionPopover(candidates) {
+function mentionPopover(candidates, target) {
   if (candidates.length === 0) {
     return `<div class="mention-pop"><div class="mention-item" style="color:var(--text-4)">No matches</div></div>`;
   }
@@ -2108,7 +2115,8 @@ function mentionPopover(candidates) {
     .map(
       (entry, position) => `<button type="button" class="mention-item${
         position === index ? " active" : ""
-      }" data-act="channel-mention-pick" data-value="${esc(entry.name)}">
+      }" data-act="${target === "thread" ? "thread" : "channel"}-mention-pick"
+        data-value="${esc(entry.name)}">
         ${
           entry.kind === "broadcast"
             ? icon("users", 'width="20" height="20"')
@@ -2117,26 +2125,53 @@ function mentionPopover(candidates) {
               : avatar(entry.name, 18)
         }
         <span>${esc(entry.name)}</span>
-        <span class="mi-kind">${
+        <span class="mi-kind">${esc(
           entry.kind === "broadcast"
-            ? "every agent"
+            ? (entry.hint ?? "everyone")
             : entry.kind === "agent"
               ? "agent"
-              : "person"
-        }</span>
+              : "person",
+        )}</span>
       </button>`,
     )
     .join("")}</div>`;
 }
 
-function composerSuggestions(repositoryId) {
+function composerSuggestions(repositoryId, target = "channel") {
+  if (state.composerAutocompleteTarget !== target) {
+    return "";
+  }
   return `${
-    state.slashActive ? slashPopover(channelSlashCandidates(repositoryId)) : ""
+    state.slashActive
+      ? slashPopover(channelSlashCandidates(repositoryId), target)
+      : ""
   }${
     state.mentionActive
-      ? mentionPopover(channelMentionCandidates(repositoryId))
+      ? mentionPopover(channelMentionCandidates(repositoryId), target)
       : ""
   }`;
+}
+
+function mentionActiveFor(target) {
+  return state.composerAutocompleteTarget === target && state.mentionActive;
+}
+
+/** Repaints only the two small suggestion surfaces, never either transcript. */
+function paintComposerSuggestions(repositoryId) {
+  const channel = document.querySelector("[data-composer-suggestions]");
+  if (channel !== null) {
+    channel.innerHTML = composerSuggestions(repositoryId, "channel");
+  }
+  const thread = document.querySelector("[data-thread-composer-suggestions]");
+  if (thread !== null) {
+    thread.innerHTML = composerSuggestions(repositoryId, "thread");
+  }
+  document
+    .querySelector(".chan-composer-wrap")
+    ?.classList.toggle("mention-active", mentionActiveFor("channel"));
+  document
+    .querySelector(".thread-composer-wrap")
+    ?.classList.toggle("mention-active", mentionActiveFor("thread"));
 }
 
 
@@ -2166,8 +2201,8 @@ function composer(repositoryId) {
       : channelMessagesFor(repositoryId).find(
           (entry) => entry.id === state.composerThreadId,
         );
-  return `<div class="chan-composer-wrap${state.mentionActive ? " mention-active" : ""}">
-    <div data-composer-suggestions>${composerSuggestions(repositoryId)}</div>
+  return `<div class="chan-composer-wrap${mentionActiveFor("channel") ? " mention-active" : ""}">
+    <div data-composer-suggestions>${composerSuggestions(repositoryId, "channel")}</div>
     ${composerThreadChip(repositoryId)}
     ${draftAttachmentPreviews(repositoryId)}
     <form class="composer${pending ? " is-expanded" : ""}" data-act="channel-submit">
@@ -3258,15 +3293,23 @@ function threadPanel(repositoryId) {
       ${threadTyping(root)}
       ${typingIndicator(repositoryId, root.id)}
     </div>
-    <div class="thread-composer-wrap">
+    <div class="thread-composer-wrap${mentionActiveFor("thread") ? " mention-active" : ""}">
+      <div data-thread-composer-suggestions>${composerSuggestions(repositoryId, "thread")}</div>
       ${draftAttachmentPreviews(repositoryId, {
         draft: state.threadDraft,
         removeAct: "thread-attachment-remove",
       })}
       <form class="composer${threadPending ? " is-expanded" : ""}" data-act="channel-thread-submit">
-        <textarea data-act="channel-thread-input" rows="1"
-          enterkeyhint="send"
-          placeholder="Reply in thread...">${esc(draftText(state.threadDraft))}</textarea>
+        <div class="composer-field">
+          <div class="composer-mirror" data-composer-mirror aria-hidden="true"
+            >${composerMirror(
+              draftText(state.threadDraft),
+              channelParticipants(repositoryId),
+            )}</div>
+          <textarea data-act="channel-thread-input" rows="1" spellcheck="true"
+            enterkeyhint="send"
+            placeholder="Reply in thread...">${esc(draftText(state.threadDraft))}</textarea>
+        </div>
         <div class="composer-bar">
           <!-- Same arrangement as the channel bar: the input is the control
                and the button only clicks it, because a bare file input cannot
@@ -4328,7 +4371,37 @@ export function submitThreadReply(rerender) {
   // same way a channel message does, and `messageBody` reads them back out.
   postChannelReply(activeChannelId(), state.activeChannelThread, state.threadDraft);
   state.threadDraft = "";
+  if (state.composerAutocompleteTarget === "thread") {
+    state.mentionActive = false;
+    state.mentionQuery = "";
+    state.slashActive = false;
+    state.slashQuery = "";
+  }
   rerender();
+}
+
+function autocompleteSnapshot() {
+  return (
+    `${String(state.composerAutocompleteTarget)} ` +
+    `${String(state.mentionActive)} ${state.mentionQuery} ` +
+    `${String(state.slashActive)} ${state.slashQuery}`
+  );
+}
+
+/** Updates the live layers around a composer without rebuilding the screen. */
+function updateComposerPresentation(node, target) {
+  const before = autocompleteSnapshot();
+  updateMentionState(node, target);
+  paintComposerMirror(node);
+
+  node.style.height = "auto";
+  if (node.value !== "") {
+    node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
+  }
+
+  if (autocompleteSnapshot() !== before) {
+    paintComposerSuggestions(activeChannelId());
+  }
 }
 
 /**
@@ -4347,9 +4420,11 @@ export function updateThreadComposerInput(node) {
     .map((attachment) => attachment.reference)
     .join("\n");
   state.threadDraft = `${node.value}${references === "" ? "" : `\n${references}\n`}`;
+  updateComposerPresentation(node, "thread");
 }
 
-function updateMentionState(node) {
+function updateMentionState(node, target = "channel") {
+  state.composerAutocompleteTarget = target;
   const value = node.value;
   const cursor = node.selectionStart ?? value.length;
   const before = value.slice(0, cursor);
@@ -4403,37 +4478,7 @@ export function updateComposerInput(node) {
   // updated whenever either popup changes. Rebuilding the full app for that
   // used to reparse the transcript, sidebar and roster after every character
   // typed following "/" or "@".
-  const popupState = () =>
-    `${String(state.mentionActive)} ${state.mentionQuery} ` +
-    `${String(state.slashActive)} ${state.slashQuery}`;
-  const before = popupState();
-  updateMentionState(node);
-  node.closest(".chan-composer-wrap")?.classList.toggle("mention-active", state.mentionActive);
-  const changed = popupState() !== before;
-  // Same reasoning as the height below: a property of this element, repainted
-  // directly. Routing it through a render would put the whole-app rebuild
-  // this function exists to avoid back on the keystroke path.
-  paintComposerMirror(node);
-  // The height is a property of this element, not of the app, so it is set
-  // directly whether or not anything else is rebuilt.
-  //
-  // Emptied, it is cleared rather than measured: an empty box collapses to
-  // the lean bar, whose padding is not the padding this measurement was taken
-  // against, and a pixel height left behind from the open composer would hold
-  // the bar several rows tall with nothing in it.
-  node.style.height = "auto";
-  if (node.value !== "") {
-    node.style.height = `${Math.min(node.scrollHeight, 148)}px`;
-  }
-  if (!changed) {
-    return;
-  }
-  const suggestions = node
-    .closest(".chan-composer-wrap")
-    ?.querySelector("[data-composer-suggestions]");
-  if (suggestions !== null && suggestions !== undefined) {
-    suggestions.innerHTML = composerSuggestions(activeChannelId());
-  }
+  updateComposerPresentation(node, "channel");
 }
 
 /**
@@ -4443,20 +4488,29 @@ export function updateComposerInput(node) {
  * sentence that usually continues with an "@" and an objective, and the
  * mention picker is what should open next.
  */
-export function pickSlashCommand(name, rerender) {
-  const node = document.querySelector("[data-act='channel-input']");
-  const cursor = node?.selectionStart ?? state.chatDraft.length;
-  const before = state.chatDraft.slice(0, cursor);
-  const after = state.chatDraft.slice(cursor);
+function composerTarget(target) {
+  return target === "thread"
+    ? { selector: "[data-act='channel-thread-input']", draft: "threadDraft" }
+    : { selector: "[data-act='channel-input']", draft: "chatDraft" };
+}
+
+export function pickSlashCommand(name, rerender, target = "channel") {
+  const { selector, draft } = composerTarget(target);
+  const node = document.querySelector(selector);
+  const source = state[draft] ?? "";
+  const cursor = node?.selectionStart ?? draftText(source).length;
+  const before = source.slice(0, cursor);
+  const after = source.slice(cursor);
   // The same boundary `updateMentionState` opened the picker on, so what is
   // completed is the word the picker was offering — whatever came before it
   // in the message is kept.
   const replaced = before.replace(/(^|\s)\/([a-z0-9-]*)$/iu, `$1/${name} `);
-  state.chatDraft = replaced + after;
+  state[draft] = replaced + after;
+  state.composerAutocompleteTarget = target;
   state.slashActive = false;
   state.slashQuery = "";
   rerender();
-  const next = document.querySelector("[data-act='channel-input']");
+  const next = document.querySelector(selector);
   if (next !== null) {
     const pos = replaced.length;
     next.focus({ preventScroll: true });
@@ -4464,16 +4518,20 @@ export function pickSlashCommand(name, rerender) {
   }
 }
 
-export function pickMention(name, rerender) {
-  const node = document.querySelector("[data-act='channel-input']");
-  const cursor = node?.selectionStart ?? state.chatDraft.length;
-  const before = state.chatDraft.slice(0, cursor);
-  const after = state.chatDraft.slice(cursor);
+export function pickMention(name, rerender, target = "channel") {
+  const { selector, draft } = composerTarget(target);
+  const node = document.querySelector(selector);
+  const source = state[draft] ?? "";
+  const cursor = node?.selectionStart ?? draftText(source).length;
+  const before = source.slice(0, cursor);
+  const after = source.slice(cursor);
   const replaced = before.replace(/@([\w.-]*)$/u, `@${name} `);
-  state.chatDraft = replaced + after;
+  state[draft] = replaced + after;
+  state.composerAutocompleteTarget = target;
   state.mentionActive = false;
+  state.mentionQuery = "";
   rerender();
-  const next = document.querySelector("[data-act='channel-input']");
+  const next = document.querySelector(selector);
   if (next !== null) {
     const pos = replaced.length;
     next.focus({ preventScroll: true });
@@ -4506,12 +4564,15 @@ export function handleComposerKeydown(event, rerender) {
   if (imeComposing(event)) {
     return;
   }
+  const target =
+    event.target?.dataset?.act === "channel-thread-input" ? "thread" : "channel";
+  const ownsSuggestions = state.composerAutocompleteTarget === target;
   // The same four keys as the mention picker, because they are the same
   // gesture — a list under the cursor that Up/Down move through, Enter or Tab
   // accepts, and Escape dismisses. Handled first, and only one picker is ever
   // open at a time (see `updateMentionState`), so the two cannot both claim
   // an Enter.
-  if (state.slashActive) {
+  if (ownsSuggestions && state.slashActive) {
     const list = channelSlashCandidates(activeChannelId());
     if (event.key === "ArrowDown") {
       event.preventDefault();
@@ -4528,7 +4589,11 @@ export function handleComposerKeydown(event, rerender) {
     }
     if ((event.key === "Enter" || event.key === "Tab") && list.length > 0) {
       event.preventDefault();
-      pickSlashCommand(list[state.slashIndex % list.length].name, rerender);
+      pickSlashCommand(
+        list[state.slashIndex % list.length].name,
+        rerender,
+        target,
+      );
       return;
     }
     if (event.key === "Escape") {
@@ -4538,7 +4603,7 @@ export function handleComposerKeydown(event, rerender) {
       return;
     }
   }
-  if (state.mentionActive) {
+  if (ownsSuggestions && state.mentionActive) {
     const list = channelMentionCandidates(activeChannelId());
     if (event.key === "ArrowDown") {
       event.preventDefault();
@@ -4555,7 +4620,7 @@ export function handleComposerKeydown(event, rerender) {
     }
     if ((event.key === "Enter" || event.key === "Tab") && list.length > 0) {
       event.preventDefault();
-      pickMention(list[state.mentionIndex % list.length].name, rerender);
+      pickMention(list[state.mentionIndex % list.length].name, rerender, target);
       return;
     }
     if (event.key === "Escape") {
@@ -4567,6 +4632,10 @@ export function handleComposerKeydown(event, rerender) {
   }
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
-    submitComposerMessage(rerender);
+    if (target === "thread") {
+      submitThreadReply(rerender);
+    } else {
+      submitComposerMessage(rerender);
+    }
   }
 }
