@@ -174,6 +174,25 @@ async function serve(
     credentials,
     callSigns: store,
   });
+  const repositoryChatContext = async (repositoryId: string | undefined) => {
+    if (repositoryId === undefined) {
+      return undefined;
+    }
+    const stored = await store.getRepository(repositoryId);
+    if (stored === undefined) {
+      throw new Error(`Unknown repository: ${repositoryId}`);
+    }
+    const repository = {
+      id: stored.id,
+      path: stored.path,
+      branch: stored.branch,
+    };
+    return {
+      repository,
+      baseVersion: await repositories.getCanonicalVersion(repository),
+      rootPath: project.planningRoot,
+    };
+  };
   // Beside the agent connections and in the same store: a push runs as the
   // task's submitter, so their GitHub token is scoped, stored and shown
   // exactly the way their agent credentials are. With a GitHub OAuth App's
@@ -258,21 +277,43 @@ async function serve(
           ...input,
           provider: input.provider as ProviderId,
         }),
-      completeStream: (input, onEvent) =>
-        providerChat.completeStream(
-          { ...input, provider: input.provider as ProviderId },
+      completeStream: async (input, onEvent) => {
+        const repository = await repositoryChatContext(input.repositoryId);
+        return await providerChat.completeStream(
+          {
+            userId: input.userId,
+            systemAdmin: input.systemAdmin,
+            provider: input.provider as ProviderId,
+            messages: input.messages,
+            ...(input.cliSessionId === undefined
+              ? {}
+              : { cliSessionId: input.cliSessionId }),
+            ...(repository === undefined ? {} : { repository }),
+          },
           onEvent,
-        ),
+        );
+      },
       setSettings: (input) =>
         providerChat.setSettings({
           ...input,
           provider: input.provider as ProviderId,
         }),
-      complete: (input) =>
-        providerChat.complete({
-          ...input,
+      complete: async (input) => {
+        const repository = await repositoryChatContext(input.repositoryId);
+        return await providerChat.complete({
+          userId: input.userId,
+          systemAdmin: input.systemAdmin,
           provider: input.provider as ProviderId,
-        }),
+          messages: input.messages,
+          ...(input.cliSessionId === undefined
+            ? {}
+            : { cliSessionId: input.cliSessionId }),
+          ...(input.ceremonial === undefined
+            ? {}
+            : { ceremonial: input.ceremonial }),
+          ...(repository === undefined ? {} : { repository }),
+        });
+      },
       connectionsFor: (userIds) => providerChat.listConnectionsFor(userIds),
       noteAuthFailure: (input) =>
         providerChat.noteAuthFailure({

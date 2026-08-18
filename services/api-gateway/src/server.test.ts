@@ -93,7 +93,12 @@ interface TestRuntime {
    * for asserting that a follow-up in a thread reaches the agent at all, and
    * that the thread's own history goes with it.
    */
-  chatPrompts: Array<{ userId: string; provider: string; prompt: string }>;
+  chatPrompts: Array<{
+    userId: string;
+    provider: string;
+    prompt: string;
+    repositoryId?: string;
+  }>;
   chatAnswer: {
     text?: string;
     fail?: string;
@@ -338,6 +343,9 @@ async function startRuntime(
       userId: String(input?.userId ?? ""),
       provider: String(input?.provider ?? ""),
       prompt: asked,
+      ...(input?.repositoryId === undefined
+        ? {}
+        : { repositoryId: String(input.repositoryId) }),
     });
     // The unnamed path asks the agent whether a message is work before it
     // offers to take it. Answered here rather than through `chatAnswer` so a
@@ -4092,7 +4100,7 @@ test("registration can be closed off", async (t) => {
  * Naming an agent is evidence the sender wants *something*; the question
  * mark is what says it is an answer rather than work.
  */
-test("a question to an agent is answered in the channel, not turned into a task", async (t) => {
+test("a question about repository files is answered in the channel, not turned into a task", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -4102,10 +4110,13 @@ test("a question to an agent is answered in the channel, not turned into a task"
     { provider: "anthropic", visibility: "personal" },
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text = "The API gateway handles channel questions.";
 
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
-    body: { content: "@Claude (Owner) what are you working on" },
+    body: {
+      content: "@Claude (Owner) which file contains channel question routing?",
+    },
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
 
@@ -4117,6 +4128,7 @@ test("a question to an agent is answered in the channel, not turned into a task"
   );
   assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
   assert.deepEqual(agentMessages[0].replies ?? [], []);
+  assert.equal(runtime.chatPrompts.at(-1)?.repositoryId, repositoryId);
 });
 
 test("an agent's answer carries a reference to the message it answers", async (t) => {
@@ -5777,6 +5789,8 @@ test("/ask is answered wherever the command word sits, and files no task", async
     prompt,
     /The message: @Claude \(Owner\) change the background color/u,
   );
+  assert.match(prompt, /read-only checkout/u);
+  assert.equal(runtime.chatPrompts.at(-1)?.repositoryId, repositoryId);
 });
 
 test("an answer that is only the request repeated back is not posted as one", async (t) => {
@@ -5850,6 +5864,8 @@ test("/ask in a thread reply is answered, and an echo there is refused too", asy
   const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
   assert.match(prompt, /question to answer, not an instruction/u);
   assert.match(prompt, /The question: change the background color/u);
+  assert.match(prompt, /read-only checkout/u);
+  assert.equal(runtime.chatPrompts.at(-1)?.repositoryId, repositoryId);
 });
 
 test("only a reply that adds nothing counts as the request repeated back", () => {
@@ -7977,8 +7993,9 @@ test("a question in the channel carries the agent's own work with it", async (t)
   assert.match(prompt, new RegExp(`You are "${mention.replace(/[()]/gu, "\\$&")}"`, "u"));
   assert.match(prompt, /Fix the retry loop in worker\.ts/u);
   assert.match(prompt, /Your tasks in this repository/u);
-  // And it is told not to invent, since it cannot read the repository here.
-  assert.match(prompt, /never claim to have started or requested anything/u);
+  // Repository-backed questions can inspect files without claiming a change.
+  assert.match(prompt, /read-only checkout/u);
+  assert.match(prompt, /Inspect it whenever the answer depends on the code/u);
 });
 
 test("a run that cannot start says so, instead of an hour of silence", async (t) => {
