@@ -59,8 +59,22 @@ RUN apt-get update \
 # leaves nothing runnable behind — `claude auth status` then fails and the host
 # reports no usable CLI. Codex needs no such grant: its bin is plain JS, which
 # is why it worked while Claude did not.
+# Pinned, because this step is the only one in the image that can fail
+# without anything in this repository changing. Unpinned, every build
+# resolved whatever `latest` was at that moment and ran each package's
+# postinstall — which downloads a per-platform binary over the network —
+# then asserted both CLIs run. A release published an hour ago could
+# therefore break a deploy of a commit that built yesterday, after all the
+# code had already compiled, which reads as "failed to build image" with
+# nothing in the diff to explain it.
+#
+# Bump these deliberately: change the version, redeploy, and the failure (if
+# any) belongs to that bump rather than to whoever happened to deploy next.
+ARG CLAUDE_CODE_VERSION=2.1.235
+ARG CODEX_VERSION=0.147.0
 RUN npm install -g --allow-scripts=@anthropic-ai/claude-code \
-      @anthropic-ai/claude-code @openai/codex \
+      @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
+      @openai/codex@${CODEX_VERSION} \
   && npm cache clean --force \
   && claude --version \
   && codex --version
