@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import {
+  MAX_AGENT_QUESTIONS,
   type AgentActionResult,
   type AgentAdapter,
   type AgentCapabilities,
@@ -10,6 +11,8 @@ import {
   type AgentSession,
   type AgentTokenUsage,
   type CoordinatorContext,
+  type QuestionAnswer,
+  type QuestionChoice,
   type StartTaskInput,
 } from "@coord/agent-protocol";
 import {
@@ -66,6 +69,43 @@ const EXPLANATION_STYLE_INSTRUCTIONS = [
   // number here only ever taught the model to stop mid-thought near it.
   "Say the whole thing. A summary that stops halfway is worse than a shorter " +
     "one, and there is nowhere else for the reader to find the rest.",
+].join("\n");
+
+/**
+ * Internal objective marker written by the channel's explicit `/ask` command.
+ *
+ * The same string the prompt-CLI adapters read, because it is the channel that
+ * writes it and the vendor that happens to answer must not change what `/ask`
+ * means. Carrying it in the objective avoids a new persisted task field.
+ */
+const FORCE_QUESTION_MARKER =
+  "[Coordinator: force a question round before implementation.]";
+
+/**
+ * What the first round of an explicit `/ask` is allowed to do.
+ *
+ * A dedicated prompt rather than extra wording inside the implementation one:
+ * mixing "implement now" with "only ask" leaves the model a choice, and the
+ * whole point of `/ask` is that the questions come first. The rounds after
+ * this one are ordinary implementation rounds — `/ask` delays the work, it
+ * does not replace it.
+ */
+const FORCED_QUESTION_INSTRUCTIONS = [
+  "This run was started with an explicit /ask command. Its first round must " +
+    "open the question prompt before any implementation begins.",
+  "Do not edit files, run commands that change anything, complete the task, " +
+    "request scope, or request a platform action in this round.",
+  "Return only the JSON object required by the output schema, with " +
+    "outcome=question_asked and every question in questions.",
+  `Ask between one and ${String(MAX_AGENT_QUESTIONS)} focused questions. ` +
+    "Every question must have at least two concrete options, and recommended " +
+    "must be the zero-based index of the option you would pick yourself.",
+  "Ask about what you would otherwise have to guess: what the person " +
+    "actually wants built, and the choices that would be expensive to get " +
+    "wrong. Read enough of the repository first that the options are real.",
+  "Use empty arrays for every scope field and symbolsChanged, and empty " +
+    "strings for action and reason. The answers arrive with the next round, " +
+    "which is where you implement the task.",
 ].join("\n");
 
 const PLAN_SCHEMA = {
@@ -141,11 +181,17 @@ const COMPLETION_SCHEMA = {
     "additionalTests",
     "additionalServices",
     "reason",
+    "questions",
   ],
   properties: {
     outcome: {
       type: "string",
-      enum: ["completed", "scope_change_requested", "action_requested"],
+      enum: [
+        "completed",
+        "scope_change_requested",
+        "question_asked",
+        "action_requested",
+      ],
     },
     symbolsChanged: { type: "array", items: { type: "string" } },
     explanation: { type: "string" },
@@ -163,6 +209,38 @@ const COMPLETION_SCHEMA = {
     additionalTests: { type: "array", items: { type: "string" } },
     additionalServices: { type: "array", items: { type: "string" } },
     reason: { type: "string" },
+    // Present only for question_asked. Strict mode requires every key to be
+    // required at every level, so the other outcomes send an empty list —
+    // the same way `action` above sends an empty string.
+    questions: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["question", "options", "recommended"],
+        properties: {
+          question: { type: "string" },
+          options: { type: "array", items: { type: "string" } },
+          recommended: { type: "integer" },
+        },
+      },
+    },
+  },
+} as const;
+
+/**
+ * The first round of an explicit `/ask`, enforced at the process boundary.
+ *
+ * Only the outcome is narrowed: a count or a minimum-length here would be one
+ * more thing OpenAI's strict mode could reject before the model ever runs,
+ * and {@link assertExecutionResult} already holds the same invariants after
+ * parsing.
+ */
+const FORCED_QUESTION_SCHEMA = {
+  ...COMPLETION_SCHEMA,
+  properties: {
+    ...COMPLETION_SCHEMA.properties,
+    outcome: { type: "string", enum: ["question_asked"] },
   },
 } as const;
 
@@ -261,9 +339,35 @@ interface CodexActionRequest {
   explanation: string;
 }
 
+/**
+ * The agent asking a person, before it writes anything, what it should build.
+ *
+ * The round ends on the questions, the channel puts them to whoever asked,
+ * and their answers come back through {@link CodexAdapter.resolveQuestion} —
+ * after which the next round is an ordinary implementation round carrying the
+ * answers. Before this a Codex-backed agent had no way to ask at all, so an
+ * explicit `/ask` reached it as an instruction it could only guess at.
+ */
+interface CodexQuestionAsked {
+  outcome: "question_asked";
+  requestId: string;
+  questions: CodexAskedQuestion[];
+  symbolsChanged: string[];
+  explanation: string;
+}
+
+interface CodexAskedQuestion {
+  question: string;
+  /** At least two; one "option" is a statement, not a question. */
+  options: string[];
+  /** Index into `options` the agent would pick itself. */
+  recommended?: number;
+}
+
 type CodexExecutionResult =
   | CodexCompletion
   | CodexScopeChange
+  | CodexQuestionAsked
   | CodexActionRequest;
 
 interface CodexSession {
@@ -308,6 +412,23 @@ interface CodexSession {
       reject: (error: Error) => void;
     }
   >;
+  /**
+   * Questions put to a person and not yet answered.
+   *
+   * Its own map because the two waits are answered by different things:
+   * arbitration decides a scope request in milliseconds, a person decides
+   * this one when they get to it.
+   */
+  pendingQuestion: Map<
+    string,
+    {
+      promise: Promise<QuestionAnswer>;
+      resolve: (answer: QuestionAnswer) => void;
+      reject: (error: Error) => void;
+    }
+  >;
+  /** What a person chose, for the prompt of the round after. */
+  answers: Array<{ question: string; chose: string }>;
   /** What the platform did and said, for the prompt of the round after. */
   actionResults: AgentActionResult[];
   cancelled: boolean;
@@ -511,6 +632,45 @@ function assertExecutionResult(
   if (completion.outcome === "completed") {
     return;
   }
+  if (completion.outcome === "question_asked") {
+    const request = completion as Partial<CodexQuestionAsked>;
+    if (typeof request.requestId !== "string") {
+      throw new TypeError("A Codex question must carry a requestId");
+    }
+    const asked: unknown[] = Array.isArray(request.questions)
+      ? request.questions
+      : [];
+    // Six at most, because past that the agent is designing a form rather
+    // than asking what blocks it; one at least, because a question round
+    // with nothing in it is not a question round.
+    if (asked.length === 0 || asked.length > MAX_AGENT_QUESTIONS) {
+      throw new TypeError(
+        `Ask between one and ${String(MAX_AGENT_QUESTIONS)} questions at once`,
+      );
+    }
+    for (const value of asked) {
+      const entry = value as Partial<CodexAskedQuestion>;
+      if (
+        typeof entry !== "object" ||
+        entry === null ||
+        typeof entry.question !== "string" ||
+        entry.question.trim().length === 0 ||
+        !stringArray(entry.options) ||
+        entry.options.length < 2 ||
+        (entry.recommended !== undefined &&
+          (!Number.isInteger(entry.recommended) ||
+            entry.recommended < 0 ||
+            entry.recommended >= entry.options.length))
+      ) {
+        throw new TypeError(
+          "Every Codex question must carry the question itself and at least " +
+            "two options to choose between, and any recommendation must name " +
+            "one of them",
+        );
+      }
+    }
+    return;
+  }
   if (completion.outcome === "action_requested") {
     // The name is all the platform needs; whether it is an action the
     // platform honours is the coordinator's call, not a schema's.
@@ -540,6 +700,19 @@ function assertExecutionResult(
   ) {
     throw new TypeError("Codex scope change does not match the output schema");
   }
+}
+
+/**
+ * The objective as the person wrote it, with the `/ask` marker lifted out.
+ *
+ * The marker is routing, not part of the request: an agent shown it in an
+ * implementation prompt starts describing the question round instead of doing
+ * the work the round was for.
+ */
+function plannedObjective(objective: string): string {
+  return objective.includes(FORCE_QUESTION_MARKER)
+    ? objective.replace(FORCE_QUESTION_MARKER, "").trim()
+    : objective;
 }
 
 function errorMessage(error: unknown): string {
@@ -635,6 +808,8 @@ export class CodexAdapter implements AgentAdapter {
       scopeDecisions: [],
       tokenUsage: [],
       pendingScope: new Map(),
+      pendingQuestion: new Map(),
+      answers: [],
       pendingAction: new Map(),
       actionResults: [],
       resume: undefined,
@@ -701,6 +876,8 @@ export class CodexAdapter implements AgentAdapter {
       scopeDecisions: [],
       tokenUsage: existing?.tokenUsage ?? [],
       pendingScope: new Map(),
+      pendingQuestion: new Map(),
+      answers: [],
       pendingAction: new Map(),
       actionResults: [],
       resume,
@@ -872,21 +1049,41 @@ export class CodexAdapter implements AgentAdapter {
     });
 
     for (let attempt = 0; attempt < 8; attempt += 1) {
+      const forceQuestion = this.forcedQuestionPending(record);
       const output = await this.withSchema(
-        COMPLETION_SCHEMA,
+        forceQuestion ? FORCED_QUESTION_SCHEMA : COMPLETION_SCHEMA,
         async (schemaPath) =>
           await this.runCodex(
             record,
             context.workspacePath,
             this.executionSandbox,
             schemaPath,
-            this.executionPrompt(record, context),
+            forceQuestion
+              ? this.forcedQuestionPrompt(record, context)
+              : this.executionPrompt(record, context),
             this.executionTimeoutMs,
             "execution",
           ),
       );
       const execution = parseJsonObject(output, "executing the task");
       assertExecutionResult(execution);
+      // The schema already says this, and the check stays anyway: an explicit
+      // `/ask` must never quietly turn into a completion, a scope request or a
+      // platform action because a model read past the round it was given.
+      if (forceQuestion && execution.outcome !== "question_asked") {
+        throw new TypeError(
+          "An explicit /ask command must ask its questions before execution",
+        );
+      }
+      if (
+        forceQuestion &&
+        execution.outcome === "question_asked" &&
+        execution.questions.some((entry) => entry.recommended === undefined)
+      ) {
+        throw new TypeError(
+          "An explicit /ask command must recommend one option per question",
+        );
+      }
       if (execution.outcome === "completed") {
         record.completion = {
           outcome: "completed",
@@ -898,6 +1095,68 @@ export class CodexAdapter implements AgentAdapter {
           occurredAt: new Date().toISOString(),
         });
         return;
+      }
+
+      if (execution.outcome === "question_asked") {
+        const askId = execution.requestId.trim() || createId("question");
+        const asked = execution.questions;
+        const first = asked[0];
+        if (first === undefined) {
+          throw new Error("A question was asked with nothing in it");
+        }
+        const waiting = this.createQuestionWaiter(record, askId);
+        this.emit(record, {
+          event: "question_asked",
+          requestId: askId,
+          // `question` and `options` repeat the first entry for readers that
+          // only know the single-question shape.
+          question: first.question,
+          options: [...first.options],
+          ...(first.recommended === undefined
+            ? {}
+            : { recommended: first.recommended }),
+          questions: asked.map((entry) => ({
+            question: entry.question,
+            options: [...entry.options],
+            ...(entry.recommended === undefined
+              ? {}
+              : { recommended: entry.recommended }),
+          })),
+          occurredAt: new Date().toISOString(),
+        });
+        const answer = await waiting;
+        // Nobody answered. The agent asked because the decision was not its
+        // to make, and silence does not hand it back — so the run ends here
+        // rather than guessing on somebody's behalf. Skipping is not silence:
+        // it is one decision handed back deliberately, which the loop below
+        // records as such.
+        const choices: QuestionChoice[] =
+          answer.status !== "answered"
+            ? []
+            : (answer.answers ??
+              (answer.chosen === undefined ? [] : [{ chosen: answer.chosen }]));
+        if (choices.length === 0) {
+          throw new Error(
+            `No answer to "${first.question}" — the task was cancelled ` +
+              `rather than guessed at.`,
+          );
+        }
+        for (const [index, entry] of asked.entries()) {
+          const choice = choices[index];
+          const chose =
+            choice === undefined || choice.skipped === true
+              ? "(you decide)"
+              : (choice.text?.trim() ??
+                entry.options[choice.chosen ?? -1] ??
+                "(you decide)");
+          this.emit(record, {
+            event: "progress",
+            message: `Answered: ${chose}`,
+            occurredAt: new Date().toISOString(),
+          });
+          record.answers.push({ question: entry.question, chose });
+        }
+        continue;
       }
 
       if (execution.outcome === "action_requested") {
@@ -1031,6 +1290,49 @@ export class CodexAdapter implements AgentAdapter {
     pending.resolve(structuredClone(decision));
   }
 
+  public async resolveQuestion(
+    sessionId: string,
+    answer: QuestionAnswer,
+  ): Promise<void> {
+    const record = this.requireSession(sessionId);
+    const pending = record.pendingQuestion.get(answer.requestId);
+    if (pending === undefined) {
+      throw new Error(
+        `Codex session ${sessionId} has no pending question ${answer.requestId}`,
+      );
+    }
+    record.pendingQuestion.delete(answer.requestId);
+    pending.resolve(structuredClone(answer));
+  }
+
+  /**
+   * Hands the agent a promise for what a person will say.
+   *
+   * No timer of its own, unlike the scope waiter: a question is answered by
+   * somebody who may be at lunch, and the coordinator is what knows how long
+   * that is allowed to take.
+   */
+  private createQuestionWaiter(
+    record: CodexSession,
+    requestId: string,
+  ): Promise<QuestionAnswer> {
+    if (record.pendingQuestion.has(requestId)) {
+      throw new Error(`Codex repeated pending question ${requestId}`);
+    }
+    let resolvePromise: (answer: QuestionAnswer) => void = () => undefined;
+    let rejectPromise: (error: Error) => void = () => undefined;
+    const promise = new Promise<QuestionAnswer>((resolve, reject) => {
+      resolvePromise = resolve;
+      rejectPromise = reject;
+    });
+    record.pendingQuestion.set(requestId, {
+      promise,
+      resolve: resolvePromise,
+      reject: rejectPromise,
+    });
+    return promise;
+  }
+
   public async resolveAction(
     sessionId: string,
     result: AgentActionResult,
@@ -1075,6 +1377,10 @@ export class CodexAdapter implements AgentAdapter {
       pending.reject(new Error(`Session ${sessionId} was cancelled`));
     }
     record.pendingScope.clear();
+    for (const pending of record.pendingQuestion.values()) {
+      pending.reject(new Error(`Session ${sessionId} was cancelled`));
+    }
+    record.pendingQuestion.clear();
     for (const pending of record.pendingAction.values()) {
       pending.reject(new Error(`Session ${sessionId} was cancelled`));
     }
@@ -1379,7 +1685,19 @@ export class CodexAdapter implements AgentAdapter {
       `Planning deadline: ${this.planningTimeoutMs} ms.`,
       "Return only the JSON object required by the output schema.",
       `Task id: ${input.task.id}`,
-      `Objective: ${input.task.objective}`,
+      `Objective: ${plannedObjective(input.task.objective)}`,
+      // An explicit `/ask` still ends in code, so the plan has to be a plan
+      // for that code. Without this the objective's own marker read as "plan
+      // to ask a question", and the round after the answers arrived had an
+      // empty scope to implement inside.
+      ...(input.task.objective.includes(FORCE_QUESTION_MARKER)
+        ? [
+            "This task opens a short clarification round with the person " +
+              "before implementation. Plan the implementation you expect to " +
+              "carry out once they answer, listing every file it is likely " +
+              "to touch.",
+          ]
+        : []),
       // What earlier tasks in this repository already worked out. Advisory:
       // it was true at an earlier revision, and the workspace is what is true
       // now — so it is labelled as notes rather than as fact.
@@ -1498,8 +1816,11 @@ export class CodexAdapter implements AgentAdapter {
     record: CodexSession,
     context: CoordinatorContext,
   ): string {
+    const taskObjective = plannedObjective(record.input.task.objective);
     const approvedPlan =
-      record.plan === undefined ? undefined : { ...record.plan, commands: [] };
+      record.plan === undefined
+        ? undefined
+        : { ...record.plan, objective: taskObjective, commands: [] };
     const validationLabels = record.input.task.validationCommands.map(
       (command) => command.label,
     );
@@ -1520,7 +1841,7 @@ export class CodexAdapter implements AgentAdapter {
         "Return only the JSON object required by the output schema, with " +
           "outcome=completed.",
         EXPLANATION_STYLE_INSTRUCTIONS,
-        `Task, for context only: ${record.input.task.objective}`,
+        `Task, for context only: ${taskObjective}`,
         `Approved plan: ${JSON.stringify(approvedPlan)}`,
         `Canonical revision: ${context.canonicalVersion.revision}`,
         `Coordinator validation labels (do not execute): ${JSON.stringify(validationLabels)}`,
@@ -1572,15 +1893,58 @@ export class CodexAdapter implements AgentAdapter {
         "deployment, granting access. If the work is blocked on something " +
         "like that, finish with outcome=completed and an explanation " +
         "saying exactly what is missing.",
-      `Task: ${record.input.task.objective}`,
+      `Task: ${taskObjective}`,
       `Approved plan: ${JSON.stringify(approvedPlan)}`,
       `Coordinator decision: ${JSON.stringify(context.decision)}`,
       `Prior scope decisions: ${JSON.stringify(record.scopeDecisions)}`,
+      // Answers already given, so a later round does not ask the same thing
+      // again — the CLI is re-invoked per round and remembers nothing of the
+      // last one.
+      `Answers you already have: ${JSON.stringify(record.answers)}`,
+      ...(this.isForcedQuestionTask(record)
+        ? [
+            "The explicit /ask question round is already satisfied. Use the " +
+              "answers above and build what they describe; do not ask the " +
+              "same questions again.",
+          ]
+        : []),
       // Replay for actions: the round after a push has to know the push
       // happened — and where it landed — or it would ask again.
       `Platform actions already performed: ${JSON.stringify(record.actionResults)}`,
       `Canonical revision: ${context.canonicalVersion.revision}`,
       `Coordinator validation labels (do not execute): ${JSON.stringify(validationLabels)}`,
+    ].join("\n");
+  }
+
+  /** Whether this task came from the channel's explicit `/ask` command. */
+  private isForcedQuestionTask(record: CodexSession): boolean {
+    return record.input.task.objective.includes(FORCE_QUESTION_MARKER);
+  }
+
+  /** The forced round is complete as soon as at least one answer is recorded. */
+  private forcedQuestionPending(record: CodexSession): boolean {
+    return this.isForcedQuestionTask(record) && record.answers.length === 0;
+  }
+
+  /**
+   * The first round of an explicit `/ask`: questions only, and the round
+   * after this one implements what the answers describe.
+   */
+  private forcedQuestionPrompt(
+    record: CodexSession,
+    context: CoordinatorContext,
+  ): string {
+    const objective = plannedObjective(record.input.task.objective);
+    const approvedPlan =
+      record.plan === undefined
+        ? undefined
+        : { ...record.plan, objective, commands: [] };
+    return [
+      FORCED_QUESTION_INSTRUCTIONS,
+      `Task: ${objective}`,
+      `Thread/context that led to this task: ${record.input.task.context ?? ""}`,
+      `Approved plan: ${JSON.stringify(approvedPlan)}`,
+      `Canonical revision: ${context.canonicalVersion.revision}`,
     ].join("\n");
   }
 

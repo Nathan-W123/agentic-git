@@ -67,6 +67,17 @@ const MAX_REPLAY_EVENTS = 10_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8 * 1024 * 1024;
 const MAX_SCOPE_ROUNDS = 8;
 
+/**
+ * Internal objective marker written by the channel's explicit `/ask` command.
+ *
+ * The command has to survive task submission, planning and queueing before the
+ * execution adapter can act on it. Keeping the marker in the existing
+ * objective avoids a new persisted task field, while the exact, namespaced
+ * text keeps ordinary requests containing the word "ask" out of this path.
+ */
+const FORCE_QUESTION_MARKER =
+  "[Coordinator: force a question round before implementation.]";
+
 export type PromptCliProcessRunner = (
   executable: string,
   args: readonly string[],
@@ -861,6 +872,26 @@ const COMPLETION_SHAPE_INSTRUCTIONS = [
   EXPLANATION_STYLE_INSTRUCTIONS,
 ].join("\n");
 
+const FORCED_QUESTION_SHAPE_INSTRUCTIONS = [
+  "This run was started with an explicit /ask command. Its first execution " +
+    "round must open the question prompt before any implementation begins.",
+  "Do not edit files, run commands, complete the task, request scope, or " +
+    "request a platform action in this round.",
+  "Answer with exactly one JSON object and nothing else. Set outcome to " +
+    '"question_asked", set requestId, and put every question in questions.',
+  `Ask between one and ${String(MAX_AGENT_QUESTIONS)} focused questions. ` +
+    "Every question must have at least two concrete options and recommended " +
+    "must be the zero-based index of the option you recommend.",
+  "Ask about what you would otherwise have to guess: what the person " +
+    "actually wants built, and the choices that would be expensive to get " +
+    "wrong. Read enough of the repository first that the options are real.",
+  "Use empty arrays for every scope field and symbolsChanged, and empty " +
+    "strings for action and reason. The response will be rejected unless it " +
+    "is a valid question_asked outcome.",
+  "The answers arrive with the next round, which is where you implement the " +
+    "task. /ask delays the work; it does not replace it.",
+].join("\n");
+
 const STRING_ARRAY_JSON_SCHEMA = {
   type: "array",
   items: { type: "string" },
@@ -918,7 +949,7 @@ const PLAN_JSON_SCHEMA = JSON.stringify({
   ],
 });
 
-const COMPLETION_JSON_SCHEMA = JSON.stringify({
+const COMPLETION_JSON_SCHEMA_DEFINITION = {
   type: "object",
   additionalProperties: false,
   properties: {
@@ -944,6 +975,7 @@ const COMPLETION_JSON_SCHEMA = JSON.stringify({
     // with its own options and its own recommendation.
     questions: {
       type: "array",
+      minItems: 1,
       maxItems: MAX_AGENT_QUESTIONS,
       items: {
         type: "object",
@@ -980,6 +1012,40 @@ const COMPLETION_JSON_SCHEMA = JSON.stringify({
     "additionalTests",
     "additionalServices",
     "reason",
+  ],
+} as const;
+
+const COMPLETION_JSON_SCHEMA = JSON.stringify(
+  COMPLETION_JSON_SCHEMA_DEFINITION,
+);
+
+/**
+ * Claude enforces this schema at the process boundary for an explicit ask.
+ * Gemini has no schema flag, so the matching runtime check in `sendContext`
+ * enforces the same invariant after parsing its response.
+ */
+const FORCED_QUESTION_JSON_SCHEMA = JSON.stringify({
+  ...COMPLETION_JSON_SCHEMA_DEFINITION,
+  properties: {
+    ...COMPLETION_JSON_SCHEMA_DEFINITION.properties,
+    outcome: { type: "string", enum: ["question_asked"] },
+    questions: {
+      ...COMPLETION_JSON_SCHEMA_DEFINITION.properties.questions,
+      items: {
+        ...COMPLETION_JSON_SCHEMA_DEFINITION.properties.questions.items,
+        properties: {
+          ...COMPLETION_JSON_SCHEMA_DEFINITION.properties.questions.items
+            .properties,
+          question: { type: "string", minLength: 1 },
+          options: { ...STRING_ARRAY_JSON_SCHEMA, minItems: 2 },
+        },
+        required: ["question", "options", "recommended"],
+      },
+    },
+  },
+  required: [
+    ...COMPLETION_JSON_SCHEMA_DEFINITION.required,
+    "questions",
   ],
 });
 
@@ -1338,6 +1404,7 @@ export class PromptCliAdapter implements AgentAdapter {
     });
 
     for (let round = 0; round < MAX_SCOPE_ROUNDS; round += 1) {
+      const forceQuestion = this.forcedQuestionPending(record);
       const stdout = await this.run(
         record,
         context.workspacePath,
@@ -1345,10 +1412,14 @@ export class PromptCliAdapter implements AgentAdapter {
           this.model,
           this.effort,
           this.profile.name === "claude"
-            ? COMPLETION_JSON_SCHEMA
+            ? forceQuestion
+              ? FORCED_QUESTION_JSON_SCHEMA
+              : COMPLETION_JSON_SCHEMA
             : undefined,
         ),
-        this.executionPrompt(record, context),
+        forceQuestion
+          ? this.forcedQuestionPrompt(record, context)
+          : this.executionPrompt(record, context),
         this.executionTimeoutMs,
         "execution",
       );
@@ -1357,6 +1428,26 @@ export class PromptCliAdapter implements AgentAdapter {
         "the execution result",
       );
       assertExecutionResult(execution);
+      // Claude is constrained before it answers; Gemini and custom profiles
+      // are constrained here. An explicit `/ask` must never silently turn
+      // into a completion, scope request or platform action because a model
+      // ignored the prompt that distinguishes this round.
+      if (forceQuestion && execution.outcome !== "question_asked") {
+        throw new TypeError(
+          "An explicit /ask command must produce a question_asked outcome before execution",
+        );
+      }
+      if (
+        forceQuestion &&
+        execution.outcome === "question_asked" &&
+        (execution.questions === undefined ||
+          execution.questions.length === 0 ||
+          execution.questions.some((question) => question.recommended === undefined))
+      ) {
+        throw new TypeError(
+          "An explicit /ask command must produce one to six questions with recommendations",
+        );
+      }
       if (execution.outcome === "completed") {
         record.completion = {
           outcome: "completed",
@@ -2041,7 +2132,18 @@ export class PromptCliAdapter implements AgentAdapter {
       "Keep planning focused: inspect only enough files to establish an accurate scope.",
       `Planning deadline: ${this.planningTimeoutMs} ms.`,
       `Task id: ${input.task.id}`,
-      `Objective: ${input.task.objective}`,
+      `Objective: ${input.task.objective.replace(FORCE_QUESTION_MARKER, "").trim()}`,
+      // An explicit `/ask` still ends in code, so the plan has to be a plan
+      // for that code — otherwise the round after the answers arrive has an
+      // empty scope to implement inside.
+      ...(input.task.objective.includes(FORCE_QUESTION_MARKER)
+        ? [
+            "This task opens a short clarification round with the person " +
+              "before implementation. Plan the implementation you expect to " +
+              "carry out once they answer, listing every file it is likely " +
+              "to touch.",
+          ]
+        : []),
       // See the codex adapter's equivalent: notes from earlier tasks, offered
       // as background rather than as fact.
       ...(input.priorContext === undefined || input.priorContext.trim() === ""
@@ -2112,8 +2214,13 @@ export class PromptCliAdapter implements AgentAdapter {
     record: PromptCliSession,
     context: CoordinatorContext,
   ): string {
+    const taskObjective = this.isForcedQuestionTask(record)
+      ? record.input.task.objective.replace(FORCE_QUESTION_MARKER, "").trim()
+      : record.input.task.objective;
     const approvedPlan =
-      record.plan === undefined ? undefined : { ...record.plan, commands: [] };
+      record.plan === undefined
+        ? undefined
+        : { ...record.plan, objective: taskObjective, commands: [] };
     const validationLabels = record.input.task.validationCommands.map(
       (command) => command.label,
     );
@@ -2132,7 +2239,7 @@ export class PromptCliAdapter implements AgentAdapter {
           "of what is there.",
         "Every other file you edited has already been integrated. Do not " +
           "touch anything outside the listed files.",
-        `Task, for context only: ${record.input.task.objective}`,
+        `Task, for context only: ${taskObjective}`,
         `Approved plan: ${JSON.stringify(approvedPlan)}`,
         `Canonical revision: ${context.canonicalVersion.revision}`,
         `Coordinator validation labels (do not execute): ${JSON.stringify(validationLabels)}`,
@@ -2215,7 +2322,7 @@ export class PromptCliAdapter implements AgentAdapter {
         "task; the action was.",
       "Do not modify files outside expectedFiles without first answering with a scope_change_requested outcome.",
       "Do not change Git metadata.",
-      `Task: ${record.input.task.objective}`,
+      `Task: ${taskObjective}`,
       `Approved plan: ${JSON.stringify(approvedPlan)}`,
       `Coordinator decision: ${JSON.stringify(context.decision)}`,
       `Prior scope decisions: ${JSON.stringify(record.scopeDecisions)}`,
@@ -2223,12 +2330,54 @@ export class PromptCliAdapter implements AgentAdapter {
       // again — the CLI is re-invoked per round and remembers nothing of the
       // last one.
       `Answers you already have: ${JSON.stringify(record.answers)}`,
+      ...(this.isForcedQuestionTask(record)
+        ? [
+            "The explicit /ask question round has already been satisfied. " +
+              "Use the answers above and continue the task; do not ask the " +
+              "same questions again.",
+          ]
+        : []),
       // Same replay for actions: the round after a push has to know the push
       // happened — and where it landed — or it would ask again.
       `Platform actions already performed: ${JSON.stringify(record.actionResults)}`,
       `Canonical revision: ${context.canonicalVersion.revision}`,
       `Coordinator validation labels (do not execute): ${JSON.stringify(validationLabels)}`,
       COMPLETION_SHAPE_INSTRUCTIONS,
+    ].join("\n");
+  }
+
+  /** Whether this task came from the channel's explicit `/ask` command. */
+  private isForcedQuestionTask(record: PromptCliSession): boolean {
+    return record.input.task.objective.includes(FORCE_QUESTION_MARKER);
+  }
+
+  /** The forced round is complete as soon as at least one answer is recorded. */
+  private forcedQuestionPending(record: PromptCliSession): boolean {
+    return this.isForcedQuestionTask(record) && record.answers.length === 0;
+  }
+
+  /**
+   * A dedicated first-round prompt rather than stronger wording inside the
+   * normal implementation prompt. Mixing "implement now" and "only ask" in
+   * one instruction leaves the model a choice; this round has exactly one
+   * valid operation and a schema that says the same thing.
+   */
+  private forcedQuestionPrompt(
+    record: PromptCliSession,
+    context: CoordinatorContext,
+  ): string {
+    const markerAt = record.input.task.objective.indexOf(FORCE_QUESTION_MARKER);
+    const objective = record.input.task.objective.slice(0, markerAt).trim();
+    const approvedPlan =
+      record.plan === undefined
+        ? undefined
+        : { ...record.plan, objective, commands: [] };
+    return [
+      FORCED_QUESTION_SHAPE_INSTRUCTIONS,
+      `Task: ${objective}`,
+      `Thread/context that led to this task: ${record.input.task.context ?? ""}`,
+      `Approved plan: ${JSON.stringify(approvedPlan)}`,
+      `Canonical revision: ${context.canonicalVersion.revision}`,
     ].join("\n");
   }
 

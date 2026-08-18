@@ -3748,7 +3748,11 @@ test("@everyone still lets a named agent take work while /push stays direct", as
     })).status,
     201,
   );
-  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
   assert.equal(runtime.submittedTasks[0]?.vendor, "claude");
 
   // `/push` is a repository operation. Text after the command cannot turn it
@@ -3760,7 +3764,11 @@ test("@everyone still lets a named agent take work while /push stays direct", as
     })).status,
     201,
   );
-  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
   assert.equal(runtime.pushCalls.length, 1);
   const listed = await owner.request(`${base}/messages`);
   assert.match(
@@ -5750,85 +5758,74 @@ test("/dnc in a thread reply is answered with the do-not-code words, and no task
   assert.match(prompt, /The question: rework the retry loop/u);
 });
 
-test("/ask is answered wherever the command word sits, and files no task", async (t) => {
+test("/ask always submits a task marked for a forced question round", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
-  const repositoryId = await invitableRepository(owner, "ask-answers-only");
+  const repositoryId = await invitableRepository(owner, "ask-forces-questions");
   const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
   runtime.chatConnections.set(bootstrapped.user.id, [
     { provider: "anthropic", visibility: "personal" },
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
-  runtime.chatAnswer.text =
-    "The background is set in the dashboard stylesheet, so it is a one-line change there.";
 
-  // The command written last, which is how it is typed when somebody says the
-  // thing first and then decides they only want an answer about it. Worded as
-  // work on purpose: `/ask` has to beat the verb reading from either end of
-  // the sentence.
+  // The command written last must be lifted out and remembered structurally,
+  // not lost because it was not the first word in the message.
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
     body: { content: "@Claude (Owner) change the background color /ask" },
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
 
-  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
-  const listed = await owner.request(`${base}/messages`);
-  const answer = (listed.data.messages as any[]).find(
-    (message) => message.kind === "agent",
-  );
-  assert.equal(answer?.content, runtime.chatAnswer.text);
-
-  // The prompt says what the reply must not be. An instruction handed to a
-  // model told only to be brief comes back as the instruction, tidied up.
-  const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
-  assert.match(prompt, /question to answer, not an instruction/u);
-  assert.match(prompt, /never reply with the message repeated back/iu);
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
   assert.match(
-    prompt,
-    /The message: @Claude \(Owner\) change the background color/u,
+    runtime.submittedTasks[0]?.objective ?? "",
+    /change the background color/u,
   );
-  assert.match(prompt, /read-only checkout/u);
-  assert.equal(runtime.chatPrompts.at(-1)?.repositoryId, repositoryId);
+  assert.match(
+    runtime.submittedTasks[0]?.objective ?? "",
+    /force a question round before implementation/u,
+  );
+  assert.doesNotMatch(runtime.submittedTasks[0]?.objective ?? "", /\/ask/u);
 });
 
-test("an answer that is only the request repeated back is not posted as one", async (t) => {
+test("/ask bypasses the direct-answer path even when its objective is a question", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
-  const repositoryId = await invitableRepository(owner, "ask-echo-guard");
+  const repositoryId = await invitableRepository(owner, "ask-question-task");
   const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
   runtime.chatConnections.set(bootstrapped.user.id, [
     { provider: "anthropic", visibility: "personal" },
   ]);
   await joinAllConnectedAgents(runtime, repositoryId);
-  // Exactly what the channel posted when this was reported: the sender's own
-  // words, capitalised and clipped, with nothing added.
-  runtime.chatAnswer.text = "Change the background";
 
   const posted = await owner.request(`${base}/messages`, {
     method: "POST",
-    body: { content: "@Claude (Owner) change the background color /ask" },
+    body: {
+      content: "/ask @Claude (Owner) which background color should we use?",
+    },
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
 
-  const listed = await owner.request(`${base}/messages`);
-  const answer = (listed.data.messages as any[]).find(
-    (message) => message.kind === "agent",
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.match(
+    runtime.submittedTasks[0]?.objective ?? "",
+    /which background color should we use\?/u,
   );
-  assert.notEqual(answer?.content, runtime.chatAnswer.text);
-  assert.match(String(answer?.content), /repeated rather than an answer/u);
-  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  assert.match(
+    runtime.submittedTasks[0]?.objective ?? "",
+    /force a question round before implementation/u,
+  );
 });
 
-test("/ask in a thread reply is answered, and an echo there is refused too", async (t) => {
+test("/ask in a thread reply starts the same forced question task", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
   const ownerId = bootstrapped.user.id;
   runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
-  const repositoryId = await invitableRepository(owner, "ask-thread-answers-only");
+  const repositoryId = await invitableRepository(owner, "ask-thread-questions");
   await joinAllConnectedAgents(runtime, repositoryId);
   const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
 
@@ -5840,7 +5837,6 @@ test("/ask in a thread reply is answered, and an echo there is refused too", asy
     content: "On it — reworking the dashboard styles.",
   });
 
-  runtime.chatAnswer.text = "Change the background";
   const replied = await owner.request(
     `${base}/messages/${encodeURIComponent(root.id)}/replies`,
     { method: "POST", body: { content: "change the background color /ask" } },
@@ -5848,24 +5844,14 @@ test("/ask in a thread reply is answered, and an echo there is refused too", asy
   assert.equal(replied.status, 201, JSON.stringify(replied.data));
 
   await waitFor(async () => {
-    const listed = await owner.request(`${base}/messages`);
-    const thread = (listed.data.messages as any[]).find(
-      (message) => message.id === root.id,
-    );
-    return thread?.replies?.some(
-      (reply: any) =>
-        reply.kind === "outcome" &&
-        /repeated rather than an answer/u.test(String(reply.content)),
-    ) === true;
-  }, "the echoed thread answer was posted, or nothing was");
+    return runtime.submittedTasks.length === 1;
+  }, "the thread /ask was never dispatched");
 
-  // Answered, never dispatched: the command's whole promise.
-  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
-  const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
-  assert.match(prompt, /question to answer, not an instruction/u);
-  assert.match(prompt, /The question: change the background color/u);
-  assert.match(prompt, /read-only checkout/u);
-  assert.equal(runtime.chatPrompts.at(-1)?.repositoryId, repositoryId);
+  assert.equal(runtime.submittedTasks[0]?.conversationId, root.id);
+  assert.match(
+    runtime.submittedTasks[0]?.objective ?? "",
+    /force a question round before implementation/u,
+  );
 });
 
 test("only a reply that adds nothing counts as the request repeated back", () => {
@@ -11972,4 +11958,48 @@ test("without a trusted proxy the forwarded headers are ignored entirely", async
     headers: { "X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.7" },
   });
   assert.equal(claimed.headers.get("strict-transport-security"), null);
+});
+
+test("/ask asks first and then works — the command says both halves", async (t) => {
+  // The reported case: "I want to add an orchestrate command, use /ask for
+  // clarifications" got an answer describing what such a command would do,
+  // with nothing asked and nothing built. `/ask` is not `/dnc`: it opens the
+  // question round and the same task carries on into the work afterwards.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "ask-then-builds");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "@Claude (Owner) add an orchestrate command /ask",
+    },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // Coordinated work, not the read-only answer path.
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.match(
+    runtime.submittedTasks[0]?.objective ?? "",
+    /add an orchestrate command/u,
+  );
+  assert.match(
+    runtime.submittedTasks[0]?.objective ?? "",
+    /force a question round before implementation/u,
+  );
+
+  // And the picker promises the second half too, so nobody reads `/ask` as a
+  // command that only ever talks.
+  const listed = await owner.request(`${base}/messages`);
+  const ask = (listed.data.slashCommands as any[]).find(
+    (entry) => entry.name === "ask",
+  );
+  assert.match(String(ask?.summary), /questions first/iu);
+  assert.match(String(ask?.summary), /do the work/iu);
 });
