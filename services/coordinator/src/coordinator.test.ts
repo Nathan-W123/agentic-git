@@ -9,6 +9,7 @@ import {
   type AgentAdapter,
   type AgentCapabilities,
   type AgentEvent,
+  type AgentQuestion,
   type AgentSession,
   type CoordinatorContext,
   type QuestionAnswer,
@@ -1855,6 +1856,81 @@ test("an answered question is handed back and the run continues", async () => {
   }
 });
 
+test("a set of questions is put whole, and answered one for one", async () => {
+  // Asking three things at once costs one wait rather than three. The whole
+  // set reaches the controller, and every question gets its own answer back —
+  // including the one nobody chose an option for, which is a real answer
+  // ("your call") rather than silence.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const asked: AgentQuestion[][] = [];
+    const agent = new AskingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      {
+        question: "Change both modules?",
+        options: ["Both", "One and a shim"],
+        questions: [
+          {
+            question: "Change both modules?",
+            options: ["Both", "One and a shim"],
+            recommended: 0,
+          },
+          { question: "Keep the old name?", options: ["Keep", "Rename"] },
+          { question: "Add a test?", options: ["Yes", "No"], recommended: 0 },
+        ],
+      },
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      store: new InMemoryCoordinationStore(),
+      questions: {
+        awaitAnswer: async (ask) => {
+          asked.push(ask.questions.map((entry) => ({ ...entry })));
+          return {
+            answers: [{ chosen: 0 }, { text: "call it loader2" }, { skipped: true }],
+          };
+        },
+      },
+      questionDeadlineMs: 5_000,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(asked[0]?.length, 3);
+    assert.equal(asked[0]?.[0]?.recommended, 0);
+    assert.equal(asked[0]?.[1]?.question, "Keep the old name?");
+    assert.deepEqual(agent.answers, [
+      {
+        requestId: "q1",
+        status: "answered",
+        chosen: 0,
+        answers: [{ chosen: 0 }, { text: "call it loader2" }, { skipped: true }],
+      },
+    ]);
+    const answered = result.audit.find(
+      (event) => event.type === "question_answered",
+    );
+    assert.deepEqual(answered?.data["chose_all"], [
+      "Both",
+      "call it loader2",
+      "(skipped)",
+    ]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 /**
  * An agent whose edit phase runs until somebody stops it — the shape of the
  * task the owner could not stop: a session mid-work, returning nothing, with
@@ -2040,7 +2116,11 @@ class AskingAgent extends TestAgent {
     repository: CanonicalRepository,
     workspaces: WorkspaceManager,
     outputPath: string,
-    private readonly ask: { question: string; options: string[] },
+    private readonly ask: {
+      question: string;
+      options: string[];
+      questions?: AgentQuestion[];
+    },
   ) {
     super(agentId, plan, repository, workspaces, outputPath);
   }
@@ -2076,6 +2156,9 @@ class AskingAgent extends TestAgent {
       requestId: "q1",
       question: this.ask.question,
       options: [...this.ask.options],
+      ...(this.ask.questions === undefined
+        ? {}
+        : { questions: this.ask.questions }),
       occurredAt: new Date().toISOString(),
     });
   }

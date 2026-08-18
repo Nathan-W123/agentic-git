@@ -581,20 +581,54 @@ export function formatFailureVerdict(verdict: FailureVerdict): string {
  * device the auditor's findings already use, for the same reason.
  */
 
-/** How the question reads in the thread. */
-export function formatAgentQuestion(input: {
+/**
+ * One question and what it will accept, mirroring the agent protocol's own
+ * `AgentQuestion`. Restated here rather than imported because the gateway
+ * does not otherwise depend on the protocol package, and the shape is three
+ * fields wide.
+ */
+export interface AgentQuestion {
   question: string;
-  options: readonly string[];
+  options: string[];
+  /** Index into `options` the agent would pick itself. */
+  recommended?: number;
+}
+
+/** One person's answer to one question. Mirrors the protocol's `QuestionChoice`. */
+export interface QuestionChoice {
+  chosen?: number;
+  text?: string;
+  skipped?: boolean;
+}
+
+/** The most an agent may ask at once; mirrors the protocol's own cap. */
+export const MAX_AGENT_QUESTIONS = 6;
+
+/**
+ * How the question reads in the thread.
+ *
+ * Deliberately not the options. The choices belong in the prompt above the
+ * chat, where they can be paged through, recommended, overridden in words and
+ * skipped — a numbered list in a message could do none of that, and once the
+ * prompt existed the list was the same decision offered twice, in two places,
+ * with nothing keeping them in step. What stays in the thread is the record
+ * that the agent stopped and what it stopped on, which is what somebody
+ * scrolling back is looking for.
+ */
+export function formatAgentQuestion(input: {
+  questions: readonly { question: string }[];
   deadlineMinutes: number;
 }): string {
+  const asked = input.questions.map((entry) => entry.question.trim());
+  const opening =
+    asked.length === 1
+      ? `I need a decision before I go on: ${asked[0] ?? ""}`
+      : `I need ${String(asked.length)} decisions before I go on:\n` +
+        asked.map((question) => `• ${question}`).join("\n");
   return (
-    `${input.question.trim()}\n\n` +
-    input.options
-      .map((option, index) => `${String(index + 1)}. ${option.trim()}`)
-      .join("\n") +
-    `\n\nReply with a number. I've stopped until you do — if nobody answers ` +
-    `in ${String(input.deadlineMinutes)} minutes I'll cancel this rather ` +
-    `than guess.`
+    `${opening}\n\nThe choices are waiting above the chat. I've stopped ` +
+    `until you answer — if nobody does in ${String(input.deadlineMinutes)} ` +
+    `minutes I'll cancel this rather than guess.`
   );
 }
 

@@ -145,9 +145,24 @@ export type AgentEvent =
        */
       event: "question_asked";
       requestId?: string;
+      /** The first question, mirrored from `questions[0]` for older readers. */
       question: string;
       /** At least two; one "option" is a statement, not a question. */
       options: string[];
+      /** Index into `options` the agent would pick itself; advisory only. */
+      recommended?: number;
+      /**
+       * The whole set, one to {@link MAX_AGENT_QUESTIONS} of them.
+       *
+       * A run that is blocked is usually blocked on more than one decision,
+       * and asking them one at a time costs a round trip and fifteen minutes
+       * of held leases each. Asking together costs one prompt.
+       *
+       * Optional so an adapter that only ever asks one thing can keep filling
+       * `question` and `options` alone; read it through
+       * {@link agentQuestionSet}, which normalises both shapes.
+       */
+      questions?: AgentQuestion[];
       occurredAt: string;
     }
   | {
@@ -225,9 +240,90 @@ export interface AgentActionResult {
  */
 export interface QuestionAnswer {
   requestId: string;
-  /** Index into the options it offered, or undefined when nobody answered. */
+  /**
+   * What was chosen for the first question, or undefined when nobody
+   * answered. Mirrors `answers[0].chosen`, and is what an adapter that only
+   * ever asks one thing reads.
+   */
   chosen?: number;
+  /** One entry per question asked, in the order they were asked. */
+  answers?: QuestionChoice[];
   status: "answered" | "cancelled";
+}
+
+/**
+ * One person's answer to one question.
+ *
+ * Three shapes rather than one index, because the prompt offers three: pick
+ * an option, write something the agent did not think of, or say this one does
+ * not matter. A skipped question is deliberately not the same as an
+ * unanswered one — it is somebody saying "your call", which the agent may act
+ * on, and it is what makes asking six questions cheap enough to be worth
+ * doing.
+ */
+export interface QuestionChoice {
+  /** Index into that question's options, when one was picked. */
+  chosen?: number;
+  /** What they wrote instead, when they answered in their own words. */
+  text?: string;
+  /** They passed on this one and left the decision to the agent. */
+  skipped?: boolean;
+}
+
+/**
+ * One question and the answers it will accept.
+ *
+ * `recommended` is the agent's own pick. It is what makes a six-question
+ * prompt answerable in a second — the reader agrees or overrides rather than
+ * deciding each one from nothing — and it is advisory only: nothing is
+ * chosen for anybody, and silence still cancels.
+ */
+export interface AgentQuestion {
+  question: string;
+  /** At least two; one "option" is a statement, not a question. */
+  options: string[];
+  /** Index into `options`, when the agent has a preference. */
+  recommended?: number;
+}
+
+/**
+ * The most an agent may ask at once.
+ *
+ * Six is what the prompt can page through without becoming a form. Past that
+ * the agent is designing rather than asking, and the honest move is to decide
+ * and say what it assumed.
+ */
+export const MAX_AGENT_QUESTIONS = 6;
+
+/**
+ * The question set an event carries, whichever shape it used to carry it.
+ *
+ * Older adapters emit one `question` and its `options`; newer ones fill
+ * `questions`. Every reader wants the same list, so it is derived here once
+ * rather than in each of them.
+ */
+export function agentQuestionSet(
+  event: Extract<AgentEvent, { event: "question_asked" }>,
+): AgentQuestion[] {
+  const asked: AgentQuestion[] =
+    event.questions !== undefined && event.questions.length > 0
+      ? event.questions
+      : [
+          {
+            question: event.question,
+            options: event.options,
+            ...(event.recommended === undefined
+              ? {}
+              : { recommended: event.recommended }),
+          },
+        ];
+  return asked.slice(0, MAX_AGENT_QUESTIONS).map((entry) => ({
+    question: entry.question,
+    options: [...entry.options],
+    ...(entry.recommended === undefined
+      ? {}
+      : { recommended: entry.recommended }),
+  }));
 }
 
 /**

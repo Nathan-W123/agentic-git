@@ -10427,7 +10427,107 @@ test("a reply naming an option routes back to the waiting question", async (t) =
   );
   assert.equal(replied.status, 201, JSON.stringify(replied.data));
 
-  assert.deepEqual(await waiting, { chosen: 0 });
+  // The set comes back one answer per question, and `chosen` still mirrors the
+  // first of them for an adapter that only ever asks one thing.
+  assert.deepEqual(await waiting, { chosen: 0, answers: [{ chosen: 0 }] });
+});
+
+test("a set of questions is answered from the prompt, not from the thread", async (t) => {
+  // The prompt above the composer is where a question is answered now. It is
+  // put to the person who submitted the task and to nobody else, it carries
+  // every question at once, and the options never appear in the transcript —
+  // a numbered list in a message cannot page, cannot mark a recommendation,
+  // and cannot take an answer the agent did not think of.
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const session = await bootstrap(owner);
+  const ownerId = session.user.id;
+  const repo = await invitableRepository(owner, "asked-in-prompt");
+  runtime.chatConnections.set(ownerId, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repo);
+  runtime.chatAnswer.text = "On it.";
+  const mention = `Codex (${String(session.user.displayName).split(" ")[0]})`;
+
+  await owner.request(
+    `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/messages`,
+    { method: "POST", body: { content: `@${mention} please fix the retry loop` } },
+  );
+  await waitFor(
+    async () => runtime.submittedTasks.length > 0,
+    "the mention never became work",
+  );
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId: repo });
+  await waitFor(async () => {
+    const messages = await runtime.store.listChannelMessages(repo, ownerId);
+    return messages.some((message) => message.taskId === task?.id);
+  }, "the dispatch never acknowledged in the channel");
+
+  const waiting = runtime.gateway.awaitAgentAnswer({
+    requestId: "q-set",
+    taskId: task?.id ?? "",
+    repositoryId: repo,
+    projectId: DEFAULT_PROJECT_ID,
+    question: "Which approach?",
+    options: ["Both modules", "One and a shim"],
+    questions: [
+      {
+        question: "Which approach?",
+        options: ["Both modules", "One and a shim"],
+        recommended: 1,
+      },
+      { question: "Keep the old name?", options: ["Keep", "Rename"] },
+      { question: "Add a test?", options: ["Yes", "No"] },
+    ],
+    deadlineMs: 4_000,
+  });
+
+  const questionsPath = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repo}/channel/questions`;
+  await waitFor(async () => {
+    const answer = await owner.request(questionsPath);
+    return (answer.data?.questions ?? []).length > 0;
+  }, "the question never reached the person who asked for the work");
+  const listed = (await owner.request(questionsPath)).data;
+  assert.equal(listed.questions[0].requestId, "q-set");
+  assert.equal(listed.questions[0].questions.length, 3);
+  assert.equal(listed.questions[0].questions[0].recommended, 1);
+
+  // The thread records that a question was asked without repeating its
+  // choices: the same decision open in two places could be taken twice.
+  const messages = await runtime.store.listChannelMessages(repo, ownerId);
+  const posted = messages
+    .flatMap((message) => message.replies)
+    .map((reply) => reply.content)
+    .filter((content) => content.includes("Which approach?"));
+  assert.equal(posted.length, 1);
+  assert.equal(
+    posted.filter((content) => content.includes("1. Both modules")).length,
+    0,
+  );
+
+  const answered = await owner.request(
+    `${questionsPath}/q-set/answer`,
+    {
+      method: "POST",
+      body: {
+        answers: [{ chosen: 1 }, { text: "call it loader2" }, {}],
+      },
+    },
+  );
+  assert.equal(answered.status, 200, JSON.stringify(answered.data));
+
+  // One answer per question, in order, and an empty one is a deliberate pass
+  // rather than a gap the agent has to interpret.
+  assert.deepEqual(await waiting, {
+    chosen: 1,
+    answers: [{ chosen: 1 }, { text: "call it loader2" }, { skipped: true }],
+  });
+
+  // And once settled it is gone: a question is a live wait, so there is
+  // nothing left to answer twice.
+  const after = await owner.request(questionsPath);
+  assert.deepEqual(after.data.questions, []);
 });
 
 test("an answer after the deadline is told it was late, not chatted at", async (t) => {

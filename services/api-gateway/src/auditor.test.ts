@@ -356,17 +356,36 @@ test("investigator is a reserved role name, matched like auditor", () => {
   assert.equal(isInvestigatorRole("auditor"), false);
 });
 
-test("a question is numbered, and a reply is read only inside the range", () => {
+test("the thread records the question and not its options", () => {
   const posted = formatAgentQuestion({
-    question: "The config loader is used by two modules. How far should I go?",
-    options: ["Change both", "Change one and leave a shim", "Stop and report"],
+    questions: [
+      {
+        question:
+          "The config loader is used by two modules. How far should I go?",
+      },
+    ],
     deadlineMinutes: 15,
   });
-  assert.match(posted, /1\. Change both/u);
-  assert.match(posted, /3\. Stop and report/u);
+  assert.match(posted, /How far should I go\?/u);
+  // The choices belong to the prompt above the composer. Offering them here
+  // as well would be the same decision open in two places at once.
+  assert.doesNotMatch(posted, /1\. /u);
+  assert.match(posted, /above the chat/u);
   // The reader is told the cost of not answering, rather than discovering it.
   assert.match(posted, /15 minutes/u);
   assert.match(posted, /cancel this rather than guess/u);
+
+  // A set says how many decisions are waiting, and names each of them.
+  const several = formatAgentQuestion({
+    questions: [
+      { question: "Which loader?" },
+      { question: "Migrate the old callers?" },
+    ],
+    deadlineMinutes: 15,
+  });
+  assert.match(several, /2 decisions/u);
+  assert.match(several, /• Which loader\?/u);
+  assert.match(several, /• Migrate the old callers\?/u);
 
   // A bare number, or one inside a sentence — both mean the same thing.
   assert.equal(optionChosenBy("2", 3), 1);

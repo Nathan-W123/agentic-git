@@ -28,31 +28,55 @@ does not appear and the commands still work typed in full.
 
 ## The ask tool — built, plumbing proven, judgement unproven
 
-An agent can stop mid-execution and ask a person a question with enumerated
-options. Fifteen minutes, then the task is cancelled rather than defaulted.
+An agent can stop mid-execution and ask the person who asked for the work up
+to six questions, each with enumerated options and one of them marked as the
+agent's own recommendation. Fifteen minutes, then the task is cancelled rather
+than defaulted.
 
 The path, end to end:
 
-1. The CLI answers with `outcome: "question_asked"` carrying `question` and
-   `options` (`adapters/prompt-cli/src/index.ts`, `COMPLETION_JSON_SCHEMA`
-   and `assertExecutionResult` — at least two options, enforced).
+1. The CLI answers with `outcome: "question_asked"` carrying either `question`
+   plus `options`, or `questions` — one to six entries, each with its own
+   `options` and optional `recommended`
+   (`adapters/prompt-cli/src/index.ts`, `COMPLETION_JSON_SCHEMA` and
+   `assertExecutionResult` — at least two options each, at most
+   `MAX_AGENT_QUESTIONS` of them, enforced).
 2. The adapter emits `question_asked` and blocks on a waiter with no timer
    of its own. The coordinator owns the clock; two deadlines for one wait
    would disagree about when it ended.
-3. `Coordinator.answerAgentQuestion` traces `question_asked`, calls the
+3. `Coordinator.answerAgentQuestion` normalises both shapes through
+   `agentQuestionSet`, traces `question_asked`, calls the
    `QuestionController`, waits `questionDeadlineMs` (default 15 min), traces
    `question_answered` or `question_cancelled`, and **always** calls
    `resolveQuestion`. An adapter left blocked would die on the 60-minute
    execution timeout and report the wrong cause.
-4. `ApiGateway.awaitAgentAnswer` posts the numbered question into the thread
-   the task is already followed in, and waits. It finds the thread through
-   `ChannelMessage.taskId`, so it does not need the run in memory.
-5. A reply is read by `optionChosenBy`, which takes a number from anywhere in
-   the sentence but refuses anything outside the range offered — "5" against
-   three options is somebody talking about something else.
+4. `ApiGateway.awaitAgentAnswer` registers the wait, posts a line into the
+   thread saying what was asked — the question text, never its options — and
+   pushes an `agent-questions-changed` frame at the project. It finds the
+   thread through `ChannelMessage.taskId`, so it does not need the run in
+   memory.
+5. The web app reads `GET …/channel/questions` and opens a prompt above the
+   composer: one question at a time, paged, the recommended option marked, a
+   free-text box for an answer nobody offered, and Skip. It answers with
+   `POST …/channel/questions/:requestId/answer`, one entry per question.
+
+**The prompt is put to one person: whoever asked for the work.** Read through
+`questionRecipient`, which is `triggeredByForTask` — the mention's sender —
+and not `submittedBy`, which is the owner of the agent that took the job and
+on somebody else's agent is a different person entirely. The GET lists nothing
+for anybody else, and the POST refuses them.
+
+**The options are not in the transcript.** They were, as a numbered list, and
+a numbered reply still settles a single-question ask (`optionChosenBy`, which
+takes a number from anywhere in the sentence and refuses anything outside the
+range). A set of two or more is answered in the prompt only: a bare number
+cannot say which question it belongs to, and treating it as the first would
+take five decisions from somebody who typed one digit.
 
 **Silence cancels, it does not default.** The agent asked because the choice
-was not its to make; nobody answering does not hand it back.
+was not its to make; nobody answering does not hand it back. Skipping is not
+silence — it is somebody deliberately handing that one decision back, and the
+agent is told so in words ("you decide") rather than left to infer it.
 
 ### What is genuinely unknown
 
