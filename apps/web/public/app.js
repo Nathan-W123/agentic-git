@@ -298,6 +298,31 @@ function minutesValue(milliseconds) {
 
 /* --------------------------------------------------------------- auth ---- */
 
+/**
+ * The signed-out screens, addressable.
+ *
+ * Every link on the auth shell used to be `href="#"`, so the URL never said
+ * which form was showing and there was nothing to send somebody who only
+ * needs to sign in — the address of the sign-in page was "open the app and
+ * hope you are signed out". These hashes name the three forms instead, which
+ * makes `/#signin` a link that can be pasted into a message.
+ */
+const AUTH_HASHES = new Map([
+  ["signin", "login"],
+  ["register", "register"],
+  ["setup", "bootstrap"],
+]);
+
+/** The same table read the other way, for writing the URL back. */
+const AUTH_MODE_HASHES = new Map(
+  [...AUTH_HASHES].map(([hash, mode]) => [mode, hash]),
+);
+
+/** The form the current URL asks for, if it asks for one at all. */
+function authModeFromHash() {
+  return AUTH_HASHES.get(window.location.hash.replace(/^#/u, ""));
+}
+
 let authMode = "login";
 /**
  * Which half of the invite screen is showing: "join" creates the account the
@@ -496,12 +521,12 @@ function renderAuth() {
 
       <p class="auth-foot">${
         setupRequired && !bootstrap
-          ? `This control plane has no owner yet. <a class="link-muted" href="#" data-act="auth-mode" data-value="bootstrap">Run first-time setup</a>.`
+          ? `This control plane has no owner yet. <a class="link-muted" href="#setup" data-act="auth-mode" data-value="bootstrap">Run first-time setup</a>.`
           : bootstrap
-            ? `Already have an account? <a class="link-muted" href="#" data-act="auth-mode" data-value="login">Sign in</a>.`
+            ? `Already have an account? <a class="link-muted" href="#signin" data-act="auth-mode" data-value="login">Sign in</a>.`
             : register
-              ? `Already have an account? <a class="link-muted" href="#" data-act="auth-mode" data-value="login">Sign in</a>.`
-              : `New here? <a class="link-muted" href="#" data-act="auth-mode" data-value="register">Create an account</a>.`
+              ? `Already have an account? <a class="link-muted" href="#signin" data-act="auth-mode" data-value="login">Sign in</a>.`
+              : `New here? <a class="link-muted" href="#register" data-act="auth-mode" data-value="register">Create an account</a>.`
       }</p>
     </div>
   </main>`;
@@ -3396,6 +3421,20 @@ function navigate(route) {
 }
 
 function applyHash() {
+  // While the signed-out shell is up the hash names a form, not a screen —
+  // so following `/#signin` from the create-account page has to swap the
+  // form rather than fall through to the router, which knows nothing about
+  // it. The invite screen renders here too; its hash is not an auth hash, so
+  // it is left alone.
+  const authRoot = $("#auth-root");
+  if (authRoot !== null && !authRoot.hidden) {
+    const mode = authModeFromHash();
+    if (mode !== undefined && mode !== authMode) {
+      authMode = mode;
+      authRoot.innerHTML = renderAuth();
+    }
+    return;
+  }
   const route = window.location.hash.replace(/^#/u, "") || "chats";
   if (ROUTES.has(route) && route !== state.route) {
     state.route = route;
@@ -3530,11 +3569,19 @@ document.addEventListener("click", (event) => {
       event.preventDefault();
       navigate(value);
       return;
-    case "auth-mode":
+    case "auth-mode": {
       event.preventDefault();
       authMode = value;
+      // Rendered here rather than left to the `hashchange` this triggers, so
+      // the form swaps on the click even when the hash is already the one
+      // being asked for.
+      const hash = AUTH_MODE_HASHES.get(value);
+      if (hash !== undefined) {
+        window.location.hash = `#${hash}`;
+      }
       $("#auth-root").innerHTML = renderAuth();
       return;
+    }
     case "invite-mode":
       event.preventDefault();
       inviteMode = value;
@@ -5398,6 +5445,14 @@ function showAuth() {
   // lapsed. `myAccent` answers with the last accent this browser saw while
   // there is nobody to ask.
   applyTheme();
+  // A session that lapses on a deep link leaves the old screen's hash behind,
+  // which would then send a reload straight back to a screen there is nobody
+  // to draw. Naming the form instead means the sign-in page reloads as the
+  // sign-in page.
+  const hash = AUTH_MODE_HASHES.get(authMode);
+  if (hash !== undefined && window.location.hash !== `#${hash}`) {
+    window.location.hash = `#${hash}`;
+  }
   $("#app-root").hidden = true;
   $("#auth-root").hidden = false;
   $("#auth-root").innerHTML = renderAuth();
@@ -5602,7 +5657,14 @@ async function boot() {
   }
   await loadHealth();
   if (state.health?.setupRequired === true && state.principal === undefined) {
+    // First-time setup outranks the link: neither signing in nor registering
+    // can succeed against a control plane that has no owner yet.
     authMode = "bootstrap";
+  } else {
+    const mode = authModeFromHash();
+    if (mode !== undefined) {
+      authMode = mode;
+    }
   }
   try {
     await loadContext();
@@ -5615,6 +5677,11 @@ async function boot() {
     state.loadError = error.message;
   }
   showApp();
+  // Already signed in and following a sign-in link: the form is not what that
+  // person needs, and the hash has to move before the router reads it.
+  if (authModeFromHash() !== undefined) {
+    window.location.hash = "#chats";
+  }
   applyHash();
   render();
 

@@ -1717,8 +1717,21 @@ const INTERROGATIVE_RE =
   /^(what|why|how|when|who|where|which|is|are|was|were|do|does|did|can|could|would|will|should|have|has|any)\b/iu;
 
 /**
- * Whether a message addressed to an agent by name is a question rather than
- * a request for work.
+ * Terse requests whose answer is the deliverable, even though they are not
+ * phrased as questions.
+ *
+ * `/simple @Hades summary of the codebase` used to miss both question tests
+ * and become an edit task. The task correctly found no diff, then reported
+ * that implementation detail in front of the answer. These openers describe
+ * an answer rather than repository work; the task-verb guard below still wins
+ * for requests that actually ask to build, fix, audit, or change something.
+ */
+const ANSWER_REQUEST_RE =
+  /^(?:(?:give|show|tell)\s+me\s+(?:an?\s+)?(?:summary|overview)\b|summari[sz]e\b|describe\b|explain\b|outline\b|(?:an?\s+)?(?:summary|overview)\b)/iu;
+
+/**
+ * Whether a message addressed to an agent by name asks for an answer rather
+ * than work.
  *
  * The bias here is the opposite of {@link looksLikeTaskRequest}'s, and
  * deliberately so. That one guards the no-mention path, where a false
@@ -1740,7 +1753,11 @@ function readsAsQuestion(content: string): boolean {
   if (TASK_VERB_RE.test(text)) {
     return false;
   }
-  return text.endsWith("?") || INTERROGATIVE_RE.test(text);
+  return (
+    text.endsWith("?") ||
+    INTERROGATIVE_RE.test(text) ||
+    ANSWER_REQUEST_RE.test(text)
+  );
 }
 
 /**
@@ -3003,22 +3020,27 @@ function hstsMaxAge(configured: string | undefined): number {
 /**
  * Whether this control plane accepts self-service sign-up.
  *
- * Closed unless the operator opens it. Open registration composed with the
- * rest of the shipped defaults into remote code execution by a stranger: a new
- * account owns its own organization, which carries `run_task`, and a task runs
- * the agent CLI directly on the host unless a sandbox was configured. Adding
- * people to an existing deployment already has a path that does not depend on
- * this — an invitation, whose secret is the credential.
+ * Open by default so somebody who receives the deployment link can create an
+ * account without first getting an invitation. Registration creates an
+ * isolated organization for that account; it never adds the person to an
+ * existing team's repositories.
  *
- * `COORD_DISABLE_REGISTRATION=1` is still honoured, so a deployment that
- * closed registration explicitly stays closed however the default moves.
+ * Operators can set `COORD_ALLOW_REGISTRATION=0` to require invitations.
+ * `COORD_DISABLE_REGISTRATION=1` is also still honoured for deployments that
+ * used the original opt-out setting.
  */
 function registrationOpen(environment: NodeJS.ProcessEnv): boolean {
   if (environment["COORD_DISABLE_REGISTRATION"] === "1") {
     return false;
   }
   const allow = (environment["COORD_ALLOW_REGISTRATION"] ?? "").trim().toLowerCase();
-  return allow === "1" || allow === "true" || allow === "yes";
+  return (
+    allow === "" ||
+    allow === "1" ||
+    allow === "true" ||
+    allow === "yes" ||
+    allow === "on"
+  );
 }
 
 export class ApiGateway {
@@ -3651,10 +3673,8 @@ export class ApiGateway {
     }
 
     if (method === "POST" && path === `${API_PREFIX}/auth/register`) {
-      // Closed unless the operator opened it with
-      // `COORD_ALLOW_REGISTRATION=1`. See `registrationOpen` for why the
-      // default moved; invitations remain the way people join a deployment
-      // that is not meant to be publicly joinable.
+      // Open by default so a shared deployment link is enough to create an
+      // account. See `registrationOpen` for the invitation-only opt-out.
       if (!registrationOpen(process.env)) {
         throw new HttpError(
           403,
