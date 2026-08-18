@@ -29,10 +29,9 @@ import type { CodexUsageReader } from "./codex-subscription-usage.js";
 const BOOTSTRAP_TOKEN = "bootstrap-token-with-at-least-24-characters";
 const PASSWORD = "RelayPassword123!";
 
-// Self-service sign-up is closed unless an operator opens it. Most of the
-// suite below signs people up to build its fixtures, so the suite opens it the
-// way a publicly-joinable deployment would; the tests that pin the default
-// clear it again for their own runtime.
+// Keep registration explicit for fixtures so a caller's environment cannot
+// change their result. The test that pins the product default clears it for
+// its own runtime.
 process.env["COORD_ALLOW_REGISTRATION"] = "1";
 
 interface TestRuntime {
@@ -4075,8 +4074,8 @@ test("an explicit @mention suppresses auto-claim even when an unmentioned agent 
 test("registration can be closed off", async (t) => {
   // Some deployments want invitations to be the only way in; this is the
   // switch, and it works without a redeploy.
-  const previous = process.env["COORD_DISABLE_REGISTRATION"];
-  process.env["COORD_DISABLE_REGISTRATION"] = "1";
+  const previous = process.env["COORD_ALLOW_REGISTRATION"];
+  process.env["COORD_ALLOW_REGISTRATION"] = "0";
   try {
     const runtime = await startRuntime(t);
     const client = new TestClient(runtime.origin);
@@ -4092,9 +4091,9 @@ test("registration can be closed off", async (t) => {
     assert.equal(refused.data.error.code, "registration_closed");
   } finally {
     if (previous === undefined) {
-      delete process.env["COORD_DISABLE_REGISTRATION"];
+      delete process.env["COORD_ALLOW_REGISTRATION"];
     } else {
-      process.env["COORD_DISABLE_REGISTRATION"] = previous;
+      process.env["COORD_ALLOW_REGISTRATION"] = previous;
     }
   }
 });
@@ -11920,15 +11919,16 @@ function withEnvironment(
   });
 }
 
-test("registration is closed until an operator opens it", async (t) => {
-  // A new account owns its own organization, which carries `run_task`, and a
-  // task runs the agent CLI on the host unless a sandbox was configured. So on
-  // a deployment strangers can reach, open sign-up is the difference between
-  // "they can look" and "they can run code here". Invitations are unaffected.
-  withEnvironment(t, { COORD_ALLOW_REGISTRATION: undefined });
+test("registration is open by default", async (t) => {
+  // No invitation and no registration setting: sharing the deployment link is
+  // enough for a newcomer to create their own isolated account and team.
+  withEnvironment(t, {
+    COORD_ALLOW_REGISTRATION: undefined,
+    COORD_DISABLE_REGISTRATION: undefined,
+  });
   const runtime = await startRuntime(t);
   const client = new TestClient(runtime.origin);
-  const refused = await client.request("/api/v1/auth/register", {
+  const created = await client.request("/api/v1/auth/register", {
     method: "POST",
     body: {
       email: "stranger@example.com",
@@ -11937,8 +11937,10 @@ test("registration is closed until an operator opens it", async (t) => {
     },
   });
 
-  assert.equal(refused.status, 403);
-  assert.equal(refused.data.error.code, "registration_closed");
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  assert.equal(created.data.user.email, "stranger@example.com");
+  assert.equal(created.data.memberships.length, 1);
+  assert.equal(created.data.memberships[0].role, "owner");
 });
 
 test("a TLS request behind a trusted proxy gets Secure cookies and HSTS", async (t) => {
