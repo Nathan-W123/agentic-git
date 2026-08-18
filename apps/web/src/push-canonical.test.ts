@@ -6,7 +6,10 @@ import test from "node:test";
 
 import { CoordinatorProject } from "@coord/cli/project";
 import { InMemoryCoordinationStore } from "@coord/persistence";
-import type { RepositoryService } from "@coord/repository-service";
+import {
+  UpstreamChangedError,
+  type RepositoryService,
+} from "@coord/repository-service";
 import { UserCredentialStore } from "@coord/workspace-manager";
 
 import { GitHubConnectionService } from "./github-connection.js";
@@ -54,16 +57,46 @@ async function harness(t: { after: (fn: () => Promise<void>) => void }) {
   return { project, store, credentials, github, submitter };
 }
 
+interface RecordedRemoteCall {
+  operation: "sync" | "push";
+  credentials?: { token: string };
+}
+
 function recordingRepositories(
-  captured: Array<{ credentials?: { token: string } }>,
-  outcome: "push" | Error = "push",
+  captured: RecordedRemoteCall[],
+  outcomes: {
+    sync?: Array<"sync" | Error>;
+    push?: Array<"push" | Error>;
+  } = {},
 ): RepositoryService {
+  const syncOutcomes = [...(outcomes.sync ?? [])];
+  const pushOutcomes = [...(outcomes.push ?? [])];
   return {
+    syncFromRemote: async (
+      _repository: unknown,
+      options: { credentials?: { token: string } },
+    ) => {
+      captured.push({ operation: "sync", ...options });
+      const outcome = syncOutcomes.shift() ?? "sync";
+      if (outcome instanceof Error) {
+        throw outcome;
+      }
+      const revision = "feedface12".padEnd(40, "0");
+      return {
+        status: "already_current",
+        remoteUrl: "https://push.invalid/origin.git",
+        upstreamBranch: "main",
+        upstreamRevision: revision,
+        previousRevision: revision,
+        revision,
+      };
+    },
     pushToRemote: async (
       _repository: unknown,
       options: { credentials?: { token: string } },
     ) => {
-      captured.push(options);
+      captured.push({ operation: "push", ...options });
+      const outcome = pushOutcomes.shift() ?? "push";
       if (outcome instanceof Error) {
         throw outcome;
       }
@@ -89,8 +122,11 @@ test("a push runs as the task's submitter, with their stored token", async (t) =
     validationCommands: [],
     submittedBy: submitter,
   });
+  // The push action arrives from inside this claimed task. Its own claim is
+  // exempt from the sync guard; another task's claim would still block it.
+  await store.claimSubmittedTasks("origin");
 
-  const captured: Array<{ credentials?: { token: string } }> = [];
+  const captured: RecordedRemoteCall[] = [];
   const result = await pushCanonical(
     project,
     store,
@@ -100,7 +136,15 @@ test("a push runs as the task's submitter, with their stored token", async (t) =
   );
 
   assert.equal(result.outcome, "done");
-  assert.equal(captured[0]?.credentials?.token, "ghp_users_own");
+  assert.deepEqual(
+    captured.map((call) => call.operation),
+    ["sync", "push"],
+  );
+  assert.ok(
+    captured.every(
+      (call) => call.credentials?.token === "ghp_users_own",
+    ),
+  );
   // The explanation names the identity the push carried, so the person
   // reading the thread knows which account to look for on GitHub.
   assert.match(result.explanation, /as octocat/u);
@@ -110,7 +154,7 @@ test("a direct push runs as the authenticated actor without creating a task", as
   const { project, store, github, submitter } = await harness(t);
   await github.connect({ userId: submitter, token: "ghp_direct_user" });
 
-  const captured: Array<{ credentials?: { token: string } }> = [];
+  const captured: RecordedRemoteCall[] = [];
   const result = await pushCanonicalForActor(
     project,
     store,
@@ -120,10 +164,83 @@ test("a direct push runs as the authenticated actor without creating a task", as
   );
 
   assert.equal(result.outcome, "done");
-  assert.equal(captured[0]?.credentials?.token, "ghp_direct_user");
+  assert.deepEqual(
+    captured.map((call) => call.operation),
+    ["sync", "push"],
+  );
+  assert.ok(
+    captured.every(
+      (call) => call.credentials?.token === "ghp_direct_user",
+    ),
+  );
   assert.deepEqual(
     await store.listSubmittedTasks({ repositoryId: "origin" }),
     [],
+  );
+  assert.equal(
+    (await store.listAuditEvents({})).filter(
+      (entry) => entry.event.type === "repository_synced",
+    ).length,
+    1,
+  );
+});
+
+test("an upstream move between sync and push is pulled and retried once", async (t) => {
+  const { project, store, github, submitter } = await harness(t);
+  await github.connect({ userId: submitter, token: "ghp_racing_remote" });
+
+  const captured: RecordedRemoteCall[] = [];
+  const result = await pushCanonicalForActor(
+    project,
+    store,
+    github,
+    { repositoryId: "origin", actorId: submitter },
+    recordingRepositories(captured, {
+      push: [
+        new UpstreamChangedError(
+          "main",
+          "a".repeat(40),
+          "b".repeat(40),
+        ),
+        "push",
+      ],
+    }),
+  );
+
+  assert.equal(result.outcome, "done");
+  assert.deepEqual(
+    captured.map((call) => call.operation),
+    ["sync", "push", "sync", "push"],
+  );
+  assert.equal(
+    (await store.listAuditEvents({})).filter(
+      (entry) => entry.event.type === "repository_synced",
+    ).length,
+    2,
+  );
+});
+
+test("a failed sync refuses without attempting a push", async (t) => {
+  const { project, store, github, submitter } = await harness(t);
+  await github.connect({ userId: submitter, token: "ghp_sync_failure" });
+
+  const captured: RecordedRemoteCall[] = [];
+  const result = await pushCanonicalForActor(
+    project,
+    store,
+    github,
+    { repositoryId: "origin", actorId: submitter },
+    recordingRepositories(captured, {
+      sync: [new Error("the remote histories conflict")],
+    }),
+  );
+
+  assert.equal(result.outcome, "refused");
+  assert.match(result.explanation, /sync did not go through/iu);
+  assert.match(result.explanation, /nothing was pushed/iu);
+  assert.deepEqual(
+    captured.map((call) => call.operation),
+    ["sync"],
   );
 });
 
@@ -148,7 +265,7 @@ test("a submitter with no GitHub connection is refused by name, not covered for"
     submittedBy: submitter,
   });
 
-  const captured: Array<{ credentials?: { token: string } }> = [];
+  const captured: RecordedRemoteCall[] = [];
   const result = await pushCanonical(
     project,
     store,
@@ -199,18 +316,43 @@ test("a token GitHub refuses mid-push is marked unusable and named in the refusa
     store,
     github,
     { repository: { id: "origin" }, task: { id: task.id } },
-    recordingRepositories(
-      [],
-      new Error(
-        "fatal: Authentication failed for 'https://github.com/x/y.git/'",
-      ),
-    ),
+    recordingRepositories([], {
+      push: [
+        new Error(
+          "fatal: Authentication failed for 'https://github.com/x/y.git/'",
+        ),
+      ],
+    }),
   );
 
   assert.equal(result.outcome, "refused");
   assert.match(result.explanation, /reconnect GitHub/iu);
   const summary = await credentials.summary(submitter, "github");
-  assert.match(summary?.unusableReason ?? "", /refused this token/u);
+  assert.match(summary?.unusableReason ?? "", /during a push/u);
+});
+
+test("a token GitHub refuses during sync is marked unusable", async (t) => {
+  const { project, store, github, credentials, submitter } = await harness(t);
+  await github.connect({ userId: submitter, token: "ghp_expired_sync" });
+
+  const result = await pushCanonicalForActor(
+    project,
+    store,
+    github,
+    { repositoryId: "origin", actorId: submitter },
+    recordingRepositories([], {
+      sync: [
+        new Error(
+          "fatal: Authentication failed for 'https://github.com/x/y.git/'",
+        ),
+      ],
+    }),
+  );
+
+  assert.equal(result.outcome, "refused");
+  assert.match(result.explanation, /reconnect GitHub/iu);
+  const summary = await credentials.summary(submitter, "github");
+  assert.match(summary?.unusableReason ?? "", /during a sync/u);
 });
 
 test("a repository with no remote is refused before any identity question", async (t) => {

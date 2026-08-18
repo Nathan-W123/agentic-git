@@ -1,7 +1,10 @@
-import { repoPush } from "@coord/cli/repo-export";
+import { repoPush, repoSync } from "@coord/cli/repo-export";
 import type { CoordinatorProject } from "@coord/cli/project";
 import type { CoordinationStore } from "@coord/persistence";
-import type { RepositoryService } from "@coord/repository-service";
+import {
+  UpstreamChangedError,
+  type RepositoryService,
+} from "@coord/repository-service";
 import { describeError } from "@coord/shared-types";
 
 import type { GitHubConnectionService } from "./github-connection.js";
@@ -16,7 +19,7 @@ async function pushCanonicalAs(
   project: CoordinatorProject,
   store: CoordinationStore,
   github: GitHubConnectionService,
-  input: { repositoryId: string; actorId: string },
+  input: { repositoryId: string; actorId: string; excludeTaskId?: string },
   repositories?: RepositoryService,
 ): Promise<PushCanonicalResult> {
   const connection = await github.tokenFor(input.actorId);
@@ -29,16 +32,49 @@ async function pushCanonicalAs(
         "you and reach only what your token can. Nothing was pushed.",
     };
   }
+  const credentials = { token: connection.token };
+  let operation: "sync" | "push" = "sync";
   try {
-    const pushed = await repoPush(
-      project,
-      store,
-      {
-        repositoryId: input.repositoryId,
-        credentials: { token: connection.token },
-      },
-      repositories,
-    );
+    const sync = async () =>
+      await repoSync(
+        project,
+        store,
+        {
+          repositoryId: input.repositoryId,
+          actorId: input.actorId,
+          credentials,
+          ...(input.excludeTaskId === undefined
+            ? {}
+            : { excludeTaskId: input.excludeTaskId }),
+        },
+        repositories,
+      );
+    const push = async () =>
+      await repoPush(
+        project,
+        store,
+        { repositoryId: input.repositoryId, credentials },
+        repositories,
+      );
+
+    await sync();
+    operation = "push";
+    let pushed: Awaited<ReturnType<typeof push>>;
+    try {
+      pushed = await push();
+    } catch (error) {
+      // GitHub can advance after the sync but before pushToRemote checks its
+      // upstream baseline. Pull that race into canonical and retry once; all
+      // other failures remain refusals, and the retry keeps repoPush's fresh
+      // branch and no-force defaults.
+      if (!(error instanceof UpstreamChangedError)) {
+        throw error;
+      }
+      operation = "sync";
+      await sync();
+      operation = "push";
+      pushed = await push();
+    }
     return {
       outcome: "done",
       detail: { url: pushed.remoteUrl },
@@ -53,11 +89,11 @@ async function pushCanonicalAs(
     if (/authentication failed|error: 40[13]\b|returned error: 40[13]\b/iu.test(explanation)) {
       // Stored and usable are different things: a token GitHub has just
       // refused should stop looking connected in Settings, and the refusal
-      // should say whose token failed rather than only that a push did.
+      // should say whose token failed rather than only that the operation did.
       await github
         .noteAuthFailure(
           input.actorId,
-          "GitHub refused this token during a push",
+          `GitHub refused this token during a ${operation}`,
         )
         .catch(() => undefined);
       return {
@@ -70,7 +106,10 @@ async function pushCanonicalAs(
     }
     return {
       outcome: "refused",
-      explanation: `The push did not go through: ${explanation}`,
+      explanation:
+        operation === "sync"
+          ? `The GitHub sync did not go through, so nothing was pushed: ${explanation}`
+          : `The push did not go through: ${explanation}`,
     };
   }
 }
@@ -79,9 +118,11 @@ async function pushCanonicalAs(
  * Publishes canonical immediately for the authenticated person who asked.
  *
  * Unlike {@link pushCanonical}, this path has no task to resolve: the channel
- * already authenticated the sender and passes that identity directly. It is
- * the implementation behind `/push`, which is a repository operation rather
- * than agent work and therefore never needs a plan or a workspace.
+ * already authenticated the sender and passes that identity directly. It
+ * synchronizes canonical before publishing and retries once if GitHub moves
+ * in between. It is the implementation behind `/push`, which is a repository
+ * operation rather than agent work and therefore never needs a plan or a
+ * workspace.
  */
 export async function pushCanonicalForActor(
   project: CoordinatorProject,
@@ -109,8 +150,9 @@ export async function pushCanonicalForActor(
  * exists — `allowExistingTarget` stays off. An agent asking to publish is
  * asking to put work somewhere a person will look at it, which a branch does;
  * overwriting a branch somebody else is using is a different act, and not one
- * to grant on the strength of a sentence in an objective. `pushToRemote` also
- * refuses when the upstream has moved under the revision being published.
+ * to grant on the strength of a sentence in an objective. Canonical is synced
+ * before publishing; if upstream moves again before the first push, it is
+ * synced and retried once rather than force-pushed.
  *
  * The credential is the *submitter's own* stored GitHub connection — the same
  * rule that decides whose account pays for the agent run decides whose
@@ -157,7 +199,11 @@ export async function pushCanonical(
     project,
     store,
     github,
-    { repositoryId: request.repository.id, actorId: submitter },
+    {
+      repositoryId: request.repository.id,
+      actorId: submitter,
+      excludeTaskId: request.task.id,
+    },
     repositories,
   );
 }
