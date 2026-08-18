@@ -105,6 +105,15 @@ test("/stop is a channel command that names agents rather than an objective", ()
   assert.ok(slashCommandsMatching("/st").some((entry) => entry.name === "stop"));
 });
 
+test("a command written last is still the command, and the mentions survive", () => {
+  // How it is typed when somebody says the thing first and then decides they
+  // only want an answer about it. The command word is lifted out from the end
+  // the same way it is from the front, and the mention stays where it was.
+  const parsed = parseSlashCommand("@Zeus change the background color /ask");
+  assert.equal(parsed?.command.name, "ask");
+  assert.equal(parsed?.rest, "@Zeus change the background color");
+});
+
 test("/dnc and /simple carry an objective, like /ask and /plan", () => {
   // "Do not code" is an answer-only request: the mention and the question
   // around the command word must reach the dispatcher exactly as written.

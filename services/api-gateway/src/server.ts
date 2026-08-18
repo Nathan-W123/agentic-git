@@ -656,6 +656,27 @@ const DO_NOT_CODE_DIRECTIVE =
   "what you would change, in words, and stop there.";
 
 /**
+ * What `/ask` adds to the answer prompt.
+ *
+ * `/ask` is the one command whose whole promise is an answer, and it is the
+ * one that arrives most often attached to a sentence phrased as work — "change
+ * the background color /ask". A model handed an instruction and told only to
+ * be brief has an easy way out: repeat the instruction back, tidied up, which
+ * is what "Change the background" was. It reads as an agent that heard the
+ * words and understood nothing.
+ *
+ * So the prompt says what the reply must not be as well as what it must be.
+ * The structural half of the guarantee is {@link readsAsEchoOfRequest}, which
+ * refuses to post the echo even when the model produces one anyway.
+ */
+const ANSWER_DIRECTIVE =
+  "This is a question to answer, not an instruction to carry out or to " +
+  "acknowledge. Say the answer itself. Never reply with the message repeated " +
+  "back, a tidied-up restatement of it, or a title for it — if the message is " +
+  "worded as an instruction, answer what it would involve; if you genuinely " +
+  "cannot answer, say so in a sentence and say why.";
+
+/**
  * What `/simple` adds: brevity above everything else.
  *
  * Worded for both places it travels — the answer prompt of a question, and
@@ -1076,6 +1097,60 @@ export function explainAnswerFailure(error?: string): string {
     ? "I could not answer that just now."
     : `I could not answer that just now: ${clipToBoundary(cleaned, FAILURE_DETAIL_MAX)}`;
 }
+
+/**
+ * The message stripped down to the words it is actually made of, for
+ * comparing what was asked against what came back: mentions, the punctuation
+ * a model adds when it quotes, and the case it chooses when it tidies a
+ * sentence up all have to stop mattering.
+ */
+function echoShape(value: string): string {
+  return withoutMentions(value)
+    .toLowerCase()
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .trim();
+}
+
+/**
+ * Whether a reply is nothing but the request handed back.
+ *
+ * This is the bug `/ask` shipped with: asked "@agent change the background
+ * color", the answer posted in the channel was "Change the background" — the
+ * sender's own words, capitalised and clipped, with not one thing added. It
+ * is indistinguishable from a broken agent, and it is worse than silence
+ * because it looks like an answer.
+ *
+ * Deliberately narrow, so a real answer is never mistaken for one. A reply
+ * only counts as an echo when every word in it was already in the request:
+ * anything that adds a word — an explanation, a refusal, a "yes, because…" —
+ * has said something and is posted as written. A one-word reply is left alone
+ * for the same reason ("Yes." answers a question that contains "yes"), and so
+ * is a long one, which is an answer that happens to quote.
+ */
+export function readsAsEchoOfRequest(request: string, answer: string): boolean {
+  const asked = echoShape(request);
+  const said = echoShape(answer);
+  if (asked === "" || said === "") {
+    return false;
+  }
+  const words = said.split(" ");
+  if (words.length < 2 || words.length > 25) {
+    return false;
+  }
+  return asked === said || asked.includes(said);
+}
+
+/**
+ * What is said instead of the echo.
+ *
+ * Says the true thing — that no answer came back — and gives the reader both
+ * ways forward, because an instruction sent to `/ask` is the commonest way to
+ * land here and "ask me a question" is not the only reasonable next move.
+ */
+const ECHOED_REQUEST_REPLY =
+  "That came back as your own message repeated rather than an answer, so " +
+  "there was nothing worth posting. Ask me what you want to know about it — " +
+  "or say it without `/ask` and I'll take it on as work instead.";
 
 /**
  * A bounded excerpt that still ends on a word.
@@ -9459,12 +9534,15 @@ export class ApiGateway {
               referencedMessageId,
               // The same directive slot the single-mention path fills: a
               // broadcast `/dnc` is still a do-not-code request in every
-              // answer of the fan-out, and `/simple` still means brief.
+              // answer of the fan-out, `/ask` still has to be answered rather
+              // than repeated back, and `/simple` still means brief.
               parsed?.command.name === "dnc"
                 ? DO_NOT_CODE_DIRECTIVE
-                : parsed?.command.name === "simple"
-                  ? KEEP_IT_SIMPLE_DIRECTIVE
-                  : undefined,
+                : parsed?.command.name === "ask"
+                  ? ANSWER_DIRECTIVE
+                  : parsed?.command.name === "simple"
+                    ? KEEP_IT_SIMPLE_DIRECTIVE
+                    : undefined,
             ).catch(() => undefined),
           ),
         );
@@ -9565,7 +9643,9 @@ export class ApiGateway {
             projectId,
             repositoryId,
             referencedMessageId,
-            parsed?.command.name === "dnc" ? DO_NOT_CODE_DIRECTIVE : undefined,
+            parsed?.command.name === "dnc"
+              ? DO_NOT_CODE_DIRECTIVE
+              : ANSWER_DIRECTIVE,
           );
           continue;
         }
@@ -10556,12 +10636,24 @@ export class ApiGateway {
         `\n\nThe message: ${question}`,
       QUESTION_TIMEOUT_MS,
     );
+    // The sender's own words handed back are not an answer, however
+    // confidently they are worded — see {@link readsAsEchoOfRequest}. Caught
+    // here rather than only asked against in the prompt, because the prompt is
+    // a request and this is the last place before it reaches the channel.
+    const said =
+      answer.text !== undefined && readsAsEchoOfRequest(question, answer.text)
+        ? undefined
+        : answer.text;
     await this.appendChannelEntry({
       projectId,
       repositoryId,
       kind: "agent",
       authorId: `${candidate.userId}:${candidate.provider}`,
-      content: answer.text ?? explainAnswerFailure(answer.error),
+      content:
+        said ??
+        (answer.text === undefined
+          ? explainAnswerFailure(answer.error)
+          : ECHOED_REQUEST_REPLY),
       ...(referencedMessageId === undefined ? {} : { referencedMessageId }),
     });
   }
@@ -10712,9 +10804,11 @@ export class ApiGateway {
     const directive =
       command?.command.name === "dnc"
         ? DO_NOT_CODE_DIRECTIVE
-        : brief
-          ? KEEP_IT_SIMPLE_DIRECTIVE
-          : undefined;
+        : command?.command.name === "ask"
+          ? ANSWER_DIRECTIVE
+          : brief
+            ? KEEP_IT_SIMPLE_DIRECTIVE
+            : undefined;
     if ((answerOnly || brief) && command !== undefined) {
       // A bare command with nothing after it still needs something to hand
       // the agent; the raw text beats an empty question slot.
@@ -11328,8 +11422,14 @@ export class ApiGateway {
     await deliveries;
 
     const returnedText = String(reply?.text ?? reply?.content ?? "").trim();
-    const finalText =
+    const answered =
       returnedText.length > 0 ? returnedText : streamedText.trim();
+    // The same guard the channel answer has: a reply made only of the words
+    // that were asked has answered nothing, and posting it in a thread reads
+    // as an agent that stopped understanding halfway through.
+    const finalText = readsAsEchoOfRequest(question, answered)
+      ? ECHOED_REQUEST_REPLY
+      : answered;
     await this.appendChannelThreadReply({
       projectId: input.projectId,
       repositoryId: input.repositoryId,
