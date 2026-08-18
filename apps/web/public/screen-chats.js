@@ -3809,10 +3809,13 @@ export function renderChats() {
       ${emptyState(
         "chatBubble",
         "No channels yet",
-        "Create or connect a repository to open its channel — every repository becomes a channel here, with its agents in the roster.",
+        "Create or import a repository to open its channel — every repository becomes a channel here, with its agents in the roster.",
         `<button class="btn btn-primary" data-act="repo-create" style="margin-top:6px">${icon(
           "plus",
-        )} Create new repository</button>`,
+        )} Create new repository</button>
+        <button class="btn" data-act="repo-connect">${icon(
+          "link",
+        )} Import from GitHub</button>`,
       )}
     </div></div></div>`;
   }

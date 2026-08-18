@@ -1226,6 +1226,57 @@ test("the product is named Lattice throughout the browser surface", async () => 
 
 /* ------------------------------------------------------------ controls ---- */
 
+test("a first repository can be created or imported from GitHub", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const repos = await publicFile("screen-repos.js");
+  const app = await browserSource();
+
+  const emptyStart = chats.indexOf("if (state.repositories.length === 0)");
+  const emptyEnd = chats.indexOf(
+    "\n  const repositoryId = activeChannelId()",
+    emptyStart,
+  );
+  assert.notEqual(emptyStart, -1, "the zero-repository state should exist");
+  assert.notEqual(
+    emptyEnd,
+    -1,
+    "the zero-repository state should have a boundary",
+  );
+  const empty = chats.slice(emptyStart, emptyEnd);
+
+  assert.match(empty, /data-act="repo-create"[\s\S]*Create new repository/u);
+  assert.match(empty, /data-act="repo-connect"[\s\S]*Import from GitHub/u);
+  assert.match(
+    app,
+    /case "repo-connect":\s*void connectRepository\(render\);/u,
+  );
+
+  const connectStart = repos.indexOf(
+    "export async function connectRepository",
+  );
+  const connectEnd = repos.indexOf(
+    "\nexport async function syncRepositoryFromGitHub",
+    connectStart,
+  );
+  assert.notEqual(connectStart, -1, "the GitHub import handler should exist");
+  assert.notEqual(
+    connectEnd,
+    -1,
+    "the GitHub import handler should have a boundary",
+  );
+  const connect = repos.slice(connectStart, connectEnd);
+
+  assert.match(connect, /title: "Import from GitHub"/u);
+  assert.match(
+    connect,
+    /\/repositories\/github`,\s*\{\s*method: "POST"/u,
+  );
+  assert.doesNotMatch(
+    connect,
+    /\/repositories`,\s*\{\s*method: "POST"/u,
+  );
+});
+
 test("anything the interface can hide, it can also bring back", async () => {
   const code = await publicFile("screen-code.js");
   const app = await browserSource();
