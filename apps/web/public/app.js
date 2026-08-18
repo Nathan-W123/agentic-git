@@ -4826,6 +4826,11 @@ document.addEventListener("click", (event) => {
       state.agentFilter = value;
       render();
       return;
+    case "agent-view":
+      state.agentView = value;
+      persist("ag.agentview", value);
+      render();
+      return;
     case "agent-connect":
       void connectAgent(value, render);
       return;
