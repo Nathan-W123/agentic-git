@@ -3155,11 +3155,12 @@ function restoreFocus(saved) {
     next.style.height = saved.height;
   }
   next.scrollTop = saved.top;
-  // The channel composer's text is painted by a layer under the textarea, and
-  // that layer is rebuilt by this render at the top of its own scroll. Putting
-  // the textarea back where it was without moving the mirror with it leaves
-  // the letters one scroll offset away from the caret sitting in them —
-  // which is what a background frame arriving mid-message looked like.
+  // A channel or thread composer's text is painted by a layer under the
+  // textarea, and that layer is rebuilt by this render at the top of its own
+  // scroll. Putting the textarea back where it was without moving the mirror
+  // with it leaves the letters one scroll offset away from the caret sitting
+  // in them — which is what a background frame arriving mid-message looked
+  // like.
   const mirror = next
     .closest?.(".composer-field")
     ?.querySelector("[data-composer-mirror]");
@@ -3614,6 +3615,7 @@ document.addEventListener("click", (event) => {
     case "channel-mention-key": {
       closePopover();
       typeIntoComposer("@", () => {
+        state.composerAutocompleteTarget = "channel";
         state.mentionActive = true;
         state.mentionQuery = "";
         state.mentionIndex = 0;
@@ -3623,6 +3625,7 @@ document.addEventListener("click", (event) => {
     case "channel-slash-key": {
       closePopover();
       typeIntoComposer("/", () => {
+        state.composerAutocompleteTarget = "channel";
         state.slashActive = true;
         state.slashQuery = "";
         state.slashIndex = 0;
@@ -3634,6 +3637,12 @@ document.addEventListener("click", (event) => {
       return;
     case "channel-slash-pick":
       pickSlashCommand(value, render);
+      return;
+    case "thread-mention-pick":
+      pickMention(value, render, "thread");
+      return;
+    case "thread-slash-pick":
+      pickSlashCommand(value, render, "thread");
       return;
     case "channel-react":
       toggleChannelReaction(activeChannelId(), value, "👍");
@@ -5104,31 +5113,19 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-/* The channel composer additionally steers the @mention dropdown, so its
-   Enter/arrow handling lives with the rest of that feature in screen-chats.js
-   rather than duplicating a second "Enter sends" block here. */
+/* Channel and thread composers steer their shared @mention and slash-command
+   pickers here; the handler also owns Enter-to-send after either list closes. */
 document.addEventListener("keydown", (event) => {
-  if (event.target?.dataset?.act === "channel-input") {
+  if (
+    event.target?.dataset?.act === "channel-input" ||
+    event.target?.dataset?.act === "channel-thread-input"
+  ) {
     handleComposerKeydown(event, render);
   }
 });
 
-
-/* Enter sends a thread reply the same way it sends a channel message. */
-document.addEventListener("keydown", (event) => {
-  const node = event.target;
-  if (node?.dataset?.act !== "channel-thread-input") {
-    return;
-  }
-  if (event.key === "Enter" && !event.shiftKey && !imeComposing(event)) {
-    event.preventDefault();
-    node.closest("form")?.requestSubmit();
-  }
-});
-
-/* Enter sends a direct message the same way it sends a thread reply. The DM
-   composer has no @mention picker steering its Enter, so the plain rule is the
-   whole rule here. */
+/* The DM composer has no @mention or slash picker steering its Enter, so the
+   plain send rule is the whole rule here. */
 document.addEventListener("keydown", (event) => {
   const node = event.target;
   if (node?.dataset?.act !== "dm-input") {

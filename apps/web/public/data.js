@@ -276,6 +276,8 @@ export const state = {
   mentionActive: false,
   mentionQuery: "",
   mentionIndex: 0,
+  /** Which visible composer owns the shared mention/command picker state. */
+  composerAutocompleteTarget: undefined,
   // The command picker, mirroring the three above. Its candidates come from
   // the server with the messages, so it can never offer something the
   // channel would not recognise.

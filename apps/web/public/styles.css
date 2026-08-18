@@ -2403,8 +2403,8 @@ svg {
   outline: none;
   resize: none;
   padding: var(--composer-pad-top) var(--composer-pad-x) var(--composer-pad-bottom);
-  /* Thread replies use the textarea itself to paint their text. Keep both
-     properties explicit so the unpainted fill a mirrored composer sets
+  /* Direct messages use the textarea itself to paint their text. Keep both
+     properties explicit so the transparent fill a mirrored composer sets
      cannot make this shared control's characters disappear in WebKit. */
   color: var(--text);
   -webkit-text-fill-color: var(--text);
@@ -2417,10 +2417,10 @@ svg {
    Transparent, not hidden: the glyphs still lay out — which is what wraps
    the mirror underneath and positions the caret — they simply are not
    painted. `caret-color` puts the one part that must stay visible back.
-   Scoped to `.composer-field`, because `.composer textarea` is shared with
-   the thread reply and DM composers, which have no mirror: painting those
-   transparent left somebody typing into a box that showed nothing, which is
-   the bug the rule above exists to prevent. */
+   Scoped to `.composer-field`, because `.composer textarea` is also shared
+   with the DM composer, which has no mirror: painting that transparent left
+   somebody typing into a box that showed nothing, which is the bug the rule
+   above exists to prevent. */
 .composer-field textarea {
   color: transparent;
   -webkit-text-fill-color: transparent;
@@ -4947,7 +4947,22 @@ svg {
    margin rather than the panel edge, so an attachment reads as belonging to
    the box it will be sent from. */
 .thread-composer-wrap {
+  position: relative;
   min-width: 0;
+}
+
+/* The thread picker belongs to the inset composer rather than to the full
+   panel edge, and opens above it without covering the reply being typed. */
+.thread-composer-wrap .mention-pop {
+  left: 12px;
+  right: 12px;
+}
+
+.thread-composer-wrap.mention-active .composer {
+  border-color: var(--accent-bright);
+  box-shadow:
+    var(--shadow-pop),
+    0 0 0 3px color-mix(in srgb, var(--accent-bright) 10%, transparent);
 }
 
 .thread-composer-wrap .composer-attachments {
