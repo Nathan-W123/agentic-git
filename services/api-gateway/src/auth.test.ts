@@ -261,3 +261,60 @@ test("CSRF verification does not apply to bearer principals", async () => {
   // No cookies, no CSRF header, and it must still pass.
   await auth.verifyCsrf(principal, undefined, undefined);
 });
+
+test("repeated wrong passwords lock that one account", async () => {
+  // The rate limiter in front of this keys on a network address, which behind
+  // a reverse proxy is one address for the whole deployment: it throttles
+  // everybody together and throttles guessing at one account not at all.
+  const { auth } = await serviceWithUser();
+  const attempt = (password: string, email = "worker@example.com") =>
+    auth.login({
+      email,
+      password,
+      ipAddress: "203.0.113.7",
+      userAgent: "test",
+    });
+
+  for (let index = 0; index < 10; index += 1) {
+    await assert.rejects(attempt("WrongPassword123!"), /incorrect/u);
+  }
+
+  // Past the limit the right password is refused too, and says why.
+  await assert.rejects(
+    attempt("RelayPassword123!"),
+    (error: unknown) =>
+      error instanceof AuthenticationError &&
+      error.statusCode === 429 &&
+      error.code === "login_locked",
+  );
+
+  // And nobody else is locked out by it — which is the whole point of counting
+  // per account rather than per deployment.
+  await assert.rejects(
+    attempt("WrongPassword123!", "somebody-else@example.com"),
+    (error: unknown) =>
+      error instanceof AuthenticationError && error.code !== "login_locked",
+  );
+});
+
+test("a session cookie is Secure exactly when the request was", async () => {
+  // Marking it Secure unconditionally breaks every plain-HTTP deployment: the
+  // browser stops sending the cookie back and sign-in looks like it silently
+  // failed. Marking it only when the request arrived over TLS is the same
+  // protection without that.
+  const { auth, user } = await serviceWithUser();
+  const secureFlags = (cookies: readonly string[]) =>
+    cookies.map((value) => /;\s*Secure\b/u.test(value));
+
+  const plain = await auth.issueSession(user, "203.0.113.7", "test");
+  assert.deepEqual(secureFlags(plain.cookies), [false, false]);
+
+  const overTls = await auth.issueSession(user, "203.0.113.7", "test", true);
+  assert.deepEqual(secureFlags(overTls.cookies), [true, true]);
+
+  // The clearing cookie has to match, or the browser keeps the original.
+  assert.deepEqual(
+    secureFlags(await auth.logout(overTls.principal.sessionId ?? "", true)),
+    [true, true],
+  );
+});

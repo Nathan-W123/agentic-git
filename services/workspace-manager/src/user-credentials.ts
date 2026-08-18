@@ -236,11 +236,53 @@ export class UserCredentialError extends Error {
  * backups and stray file reads, not against an attacker who already owns the
  * project directory.
  */
+let capturedCredentialKey: string | undefined;
+
+/**
+ * Takes the configured key out of the process environment and holds it here.
+ *
+ * Every child this control plane spawns used to inherit `COORD_CREDENTIAL_KEY`
+ * — the one key that decrypts every user's stored vendor and GitHub
+ * credential — so an agent CLI, a repository's own test command or a preview
+ * server could read it. The child environment is now built from an allow-list
+ * that excludes it, and this removes the second copy: after boot the variable
+ * is simply not in `process.env` for anything to read, deliberately or by
+ * accident.
+ *
+ * Held in a module slot rather than threaded through every caller because the
+ * ordering is the hazard. A store opened lazily *after* the delete would find
+ * no key, fall back to generating one beside the ciphertext, and then fail to
+ * decrypt credentials written under the configured key — a data outcome, not
+ * an error message. Capturing it here means every store, eager or lazy, in
+ * this process or any other that imports this module, resolves the same key
+ * whenever it happens to open.
+ *
+ * Calling this is optional and idempotent. A caller that passes an explicit
+ * `environment` to {@link resolveCredentialKey} still wins over the capture,
+ * which is what keeps tests and embedded runtimes able to name their own key.
+ */
+export function captureCredentialKey(
+  environment: NodeJS.ProcessEnv = process.env,
+): void {
+  const configured = environment["COORD_CREDENTIAL_KEY"];
+  if (configured === undefined || configured.trim().length === 0) {
+    return;
+  }
+  capturedCredentialKey = configured;
+  delete environment["COORD_CREDENTIAL_KEY"];
+}
+
 export async function resolveCredentialKey(input: {
   keyFilePath: string;
   environment?: NodeJS.ProcessEnv;
 }): Promise<Buffer> {
-  const configured = (input.environment ?? process.env)["COORD_CREDENTIAL_KEY"];
+  // The capture backs the *ambient* environment only. A caller that names its
+  // own environment is saying which key to use, and an empty one means "none",
+  // which is how a test asks for the generated-key path.
+  const configured =
+    input.environment === undefined
+      ? (process.env["COORD_CREDENTIAL_KEY"] ?? capturedCredentialKey)
+      : input.environment["COORD_CREDENTIAL_KEY"];
   if (configured !== undefined && configured.trim().length > 0) {
     const trimmed = configured.trim();
     for (const encoding of ["base64", "hex"] as const) {

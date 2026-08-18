@@ -56,10 +56,14 @@ the web UI.
 | `COORD_HOST` | Listen address. Must be a reachable interface (e.g. `0.0.0.0`) for other machines to connect. | `127.0.0.1` (`0.0.0.0` in the container) |
 | `COORD_PORT` | Listen port. | `4317` |
 | `COORD_BOOTSTRAP_TOKEN` | First-run setup token, minimum 24 characters. Generated and printed on boot if unset — set it explicitly in real deployments. | generated |
-| `COORD_SECURE_COOKIES` | `true` to mark session cookies Secure. Required when serving over HTTPS; leave `false` for plain-HTTP trials. | `false` |
+| `COORD_SECURE_COOKIES` | `true` to force the Secure flag on session cookies. Cookies are marked Secure automatically on any request that arrived over TLS (directly, or via `X-Forwarded-Proto` when `COORD_TRUSTED_PROXY_HOPS` is set), so this is only needed to force it on; leave it unset for plain-HTTP trials, where forcing it stops sign-in working at all. | `false` |
 | `COORD_ALLOWED_ORIGINS` | Comma-separated browser origins allowed CORS access, for a UI hosted on a different origin. | none |
-| `COORD_CREDENTIAL_KEY` | Encrypts users' stored provider credentials. 32 bytes as base64 or hex; anything else is stretched with scrypt. Generated once beside the credential file if unset, which ties the credentials to that directory — set it explicitly in real deployments. | generated |
-| `COORD_CREDENTIAL_POLICY` | What a task does when its submitter has connected no provider account: `host-login` falls back to the machine's own CLI login, `refuse` fails the task. **Set `refuse` on any deployment serving more than one person** — otherwise one person's tasks quietly spend the host owner's subscription. See [per-user provider accounts](architecture/per-user-credentials.md). | `host-login` |
+| `COORD_CREDENTIAL_KEY` | Encrypts users' stored provider credentials. 32 bytes as base64 or hex; anything else is stretched with scrypt. Generated once beside the credential file if unset, which ties the credentials to that directory — set it explicitly in real deployments. Read once at boot and then removed from the process environment, so nothing the control plane spawns can see it. | generated |
+| `COORD_CREDENTIAL_POLICY` | What a task does when its submitter has connected no provider account: `refuse` fails the task, `host-login` falls back to the machine's own CLI login. `refuse` is the default because the fallback is silent — one person's task spends the host owner's subscription and nothing in the run says so. **A single-operator deployment where nobody has connected a provider account needs `host-login`, or its tasks stop running.** See [per-user provider accounts](architecture/per-user-credentials.md). | `refuse` |
+| `COORD_ALLOW_REGISTRATION` | `1` to accept self-service sign-up at `/api/v1/auth/register`. Closed by default: a new account owns its own organization and can run tasks, which on a deployment strangers can reach means they can run code on it. Invitations are unaffected and are the intended way to add people. `COORD_DISABLE_REGISTRATION=1` still closes it explicitly. | closed |
+| `COORD_TRUSTED_PROXY_HOPS` | How many proxies sit in front of this control plane. `0` ignores `X-Forwarded-For` and treats the socket peer as the client. Behind a platform router that means every request shares one rate-limit bucket, so one client can exhaust the ten-per-minute sign-in budget for everybody — set this to the real number of hops. Setting it higher than the truth lets a client choose its own bucket, so it is never inferred. Also what makes `X-Forwarded-Proto` trusted for the Secure-cookie and HSTS decisions. | `0` |
+| `COORD_HSTS` | `Strict-Transport-Security` lifetime in seconds, sent only on requests that arrived over TLS. Empty means one year; `0` turns it off. Browsers remember it for the domain, so turn it off before ever serving that domain over plain HTTP. | one year |
+| `COORD_SANDBOX_USER` | `UID:GID` the Docker sandbox runs containers as, when the project config names no `sandbox.user`. Empty means the user the control plane itself runs as — which owns the worktree being bind-mounted, so files the agent writes stay writable. Set it only for an image whose entrypoint needs root. | this process's UID:GID |
 | `COORD_GITHUB_CLIENT_ID` | Client ID of a GitHub OAuth App with **Enable Device Flow** ticked (github.com → Settings → Developer settings → OAuth Apps). Turns on "Sign in with GitHub" when connecting the push credential in Settings; the device grant needs no client secret. Unset, connecting GitHub means pasting a personal access token. See [per-user provider accounts](architecture/per-user-credentials.md). | unset |
 | `COORD_REPOSITORY_PARALLELISM` | How many remote workers may hold leases in one repository at once. Concurrent workers are separated at plan time: each submits its plan before editing and a colliding plan is sequenced rather than executed. Correctness does not depend on this setting — every result still integrates from its exact leased base or is requeued to replan — so raising it trades a little planning overhead for throughput. | `4` |
 | `COORD_MAX_CONVERSATION_SESSIONS` | How many conversational tasks may hold a live agent session between turns. A held session is a held CLI process, so this is the memory a machine spends on warm conversations. Past the cap the conversation whose turn landed longest ago gives its session up; it stays open and its next turn starts cold in the directory it kept. See [conversational tasks](architecture/conversational-tasks.md). | `8` |
@@ -203,8 +207,14 @@ evaluate it; a project without a policy uses the built-in defaults.
   own machines.
 
 - Put a TLS-terminating reverse proxy (Caddy, nginx, Traefik) in front of
-  port 4317 and set `COORD_SECURE_COOKIES=true`. The control plane itself
-  speaks plain HTTP.
+  port 4317, and set `COORD_TRUSTED_PROXY_HOPS` to the number of proxies in
+  front of it — usually `1`. The control plane itself speaks plain HTTP, so
+  without that count it cannot tell one client from the whole internet and
+  cannot tell that the browser reached it over HTTPS. `COORD_SECURE_COOKIES=true`
+  then only forces what the forwarded protocol already establishes.
+- Keep deployment secrets in the `.env` file beside `docker-compose.yml`. It is
+  git-ignored; a `.env` already committed to a clone of this repository stays
+  committed, and its secrets need rotating rather than just deleting.
 - Back up both the Postgres database **and** the `coordinator-data` volume;
   the store holds coordination history while the volume holds the canonical
   Git mirrors. They must be backed up and restored together.

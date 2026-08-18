@@ -235,6 +235,34 @@ function resolveCredentialMounts(
   return mounts;
 }
 
+/**
+ * The UID:GID a sandboxed container runs as when nothing configured one.
+ *
+ * Docker's default is root, and the rest of this sandbox is built to make root
+ * inside the container matter as little as possible — `--cap-drop ALL`,
+ * `--security-opt no-new-privileges`, a read-only root filesystem, no network.
+ * Two things still leak past that: the task worktree is bind-mounted
+ * read-write, so everything the agent writes lands root-owned on the host and
+ * the next ordinary process to touch those files cannot; and any
+ * container-escape primitive that does turn up starts from UID 0 rather than
+ * from nobody.
+ *
+ * Matching this process is the answer rather than a fixed non-root UID,
+ * because this process is the one that created the worktree being mounted: any
+ * other id would produce files the control plane itself could not rewrite. On
+ * a host where the control plane already runs as root that resolves to root,
+ * which is no worse than today and is the only id that can write a root-owned
+ * worktree. Windows has no such id, and Docker there does not take one.
+ */
+function defaultSandboxUser(): string | undefined {
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+  if (uid === undefined || gid === undefined) {
+    return undefined;
+  }
+  return `${String(uid)}:${String(gid)}`;
+}
+
 function resolveOptions(options: DockerSandboxOptions): ResolvedOptions {
   if (options.egress !== undefined && options.network !== undefined) {
     throw new Error(
@@ -260,7 +288,7 @@ function resolveOptions(options: DockerSandboxOptions): ResolvedOptions {
     pidsLimit: options.pidsLimit ?? 512,
     user:
       options.user === undefined
-        ? undefined
+        ? defaultSandboxUser()
         : assertDockerToken(options.user, "user"),
     readOnlyRootFilesystem: options.readOnlyRootFilesystem ?? true,
     dropCapabilities: options.dropCapabilities ?? true,

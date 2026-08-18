@@ -5,6 +5,10 @@
 # Required in the environment (or a .env file next to this compose file):
 #   POSTGRES_PASSWORD        password for the coordinator database user
 #   COORD_BOOTSTRAP_TOKEN    first-run setup token, at least 24 characters
+#
+# That .env file is git-ignored, and it should hold COORD_CREDENTIAL_KEY too:
+# without it a key is generated beside the credential file, and credentials
+# stop being readable the moment that directory does not survive a restart.
 services:
   postgres:
     image: postgres:16-alpine
@@ -37,6 +41,10 @@ services:
       # nothing. Empty means each one's own default.
       COORD_CREDENTIAL_KEY: ${COORD_CREDENTIAL_KEY:-}
       COORD_CREDENTIAL_POLICY: ${COORD_CREDENTIAL_POLICY:-}
+      COORD_ALLOW_REGISTRATION: ${COORD_ALLOW_REGISTRATION:-}
+      COORD_TRUSTED_PROXY_HOPS: ${COORD_TRUSTED_PROXY_HOPS:-}
+      COORD_HSTS: ${COORD_HSTS:-}
+      COORD_SANDBOX_USER: ${COORD_SANDBOX_USER:-}
       COORD_GITHUB_CLIENT_ID: ${COORD_GITHUB_CLIENT_ID:-}
       COORD_REPOSITORY_PARALLELISM: ${COORD_REPOSITORY_PARALLELISM:-}
     ports:

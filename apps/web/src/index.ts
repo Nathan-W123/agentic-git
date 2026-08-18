@@ -38,6 +38,7 @@ import { ProviderChatService, type ProviderId } from "./providers.js";
 import { pullCanonical } from "./pull-canonical.js";
 import { pushCanonical } from "./push-canonical.js";
 import {
+  captureCredentialKey,
   UserCredentialStore,
   type UserCredentialKind,
 } from "@coord/workspace-manager";
@@ -148,6 +149,13 @@ async function serve(
   const attachments = new AttachmentStore(
     path.join(project.directory, "attachments"),
   );
+  // Before anything opens a credential store, and before anything spawns a
+  // child: this moves `COORD_CREDENTIAL_KEY` out of the process environment
+  // and into the module that needs it, so no subprocess can read the key that
+  // decrypts every user's stored provider and GitHub credentials. Stores
+  // opened later — including the one `ProviderChatService` opens lazily — still
+  // resolve the configured key.
+  captureCredentialKey();
   // One store for the whole process: the chat panel writes credentials and
   // task runs read them, and opening it twice could race on generating the
   // key file.
@@ -174,12 +182,16 @@ async function serve(
       ? {}
       : { deviceClientId: process.env["COORD_GITHUB_CLIENT_ID"] }),
   });
-  // A deployment serving more than one person sets this so a task never
-  // quietly bills the host owner for someone else's work.
+  // Refusing is the default because the alternative is a silent one: with
+  // `host-login`, a task submitted by somebody who has connected no provider
+  // account runs on the host owner's own vendor session and spends their
+  // credit, and nothing in the run says so. A single-operator deployment that
+  // wants that behaviour asks for it by name with
+  // `COORD_CREDENTIAL_POLICY=host-login`.
   const credentialPolicy =
-    process.env["COORD_CREDENTIAL_POLICY"] === "refuse"
-      ? ("refuse" as const)
-      : ("host-login" as const);
+    process.env["COORD_CREDENTIAL_POLICY"] === "host-login"
+      ? ("host-login" as const)
+      : ("refuse" as const);
 
   // Where open conversations live between runs. One per process, because a
   // coordinator is built per run and a conversation has to survive from one

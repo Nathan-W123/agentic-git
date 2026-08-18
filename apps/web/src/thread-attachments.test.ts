@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import { defaultPublicDirectory } from "./assets.js";
+import { AttachmentStore, AttachmentTypeError } from "./attachments.js";
 
 /**
  * A thread could always show a picture and never take one.
@@ -97,4 +99,38 @@ test("a thread reply carries its images to the server", async () => {
     /postChannelReply\(activeChannelId\(\), state\.activeChannelThread, state\.threadDraft\)/u,
   );
   assert.match(data, /threadAttaching: 0,/u);
+});
+
+test("an attachment has to be the image it says it is", async (t) => {
+  // The stored extension used to come from the uploader's declared
+  // `Content-Type` and nothing else, so anything at all could be kept as a
+  // `.png` and served back from this origin. The read path already refuses to
+  // let a browser execute it — allowlisted extension, `nosniff`, no SVG — but
+  // hosting attacker-chosen bytes on a trusted origin is worth refusing on its
+  // own.
+  const directory = await mkdtemp(path.join(os.tmpdir(), "coord-attachment-"));
+  t.after(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+  const store = new AttachmentStore(directory);
+
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.alloc(32),
+  ]);
+  assert.match(await store.save(png, "image/png"), /^[0-9a-f]{32}\.png$/u);
+
+  await assert.rejects(
+    store.save(Buffer.from("<svg onload=\"alert(1)\"></svg>"), "image/png"),
+    AttachmentTypeError,
+  );
+
+  // Only the signature is checked, so a genuine file whose header differs
+  // after it — a JPEG that opens with an EXIF segment rather than JFIF — is
+  // still an image and still stored.
+  const jpeg = Buffer.concat([
+    Buffer.from([0xff, 0xd8, 0xff, 0xe1]),
+    Buffer.alloc(32),
+  ]);
+  assert.match(await store.save(jpeg, "image/jpeg"), /^[0-9a-f]{32}\.jpg$/u);
 });
