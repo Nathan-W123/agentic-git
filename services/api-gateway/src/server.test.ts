@@ -5294,6 +5294,275 @@ test("a command and a mention work together, and /plan holds the run", async (t)
   }, "the approved plan never started");
 });
 
+test("/dnc is answered in the channel, told in words not to code, and files no task", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dnc-answers-only");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text = "The retry loop backs off twice and then gives up.";
+
+  // Worded as work on purpose: without the command this sentence is a task.
+  // "Do not code" has to beat the verb reading, not just accompany it.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/dnc @Claude (Owner) rework the retry loop" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  // An answer, not a task: nothing submitted, nothing to open a thread for.
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const listed = await owner.request(`${base}/messages`);
+  const answer = (listed.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(answer?.content, runtime.chatAnswer.text);
+
+  // The prompt says it in words — and the command word was lifted out, so
+  // the message the agent is asked to answer is the sentence, not the
+  // syntax. (The prompt's channel-context section may still quote the raw
+  // "/dnc" line; "The message:" is the part that must be clean.)
+  const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
+  assert.match(prompt, /do-not-code request/u);
+  assert.match(prompt, /The message: @Claude \(Owner\) rework the retry loop/u);
+});
+
+test("/dnc in a thread reply is answered with the do-not-code words, and no task is filed", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "dnc-thread-answers-only");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // An agent-authored thread: the place where a work-verbed reply used to be
+  // dispatched as a task even when the command promised it would not be.
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it — reworking the retry helper.",
+  });
+
+  runtime.chatAnswer.text = "It retries twice and then backs off for good.";
+  // Worded as work on purpose, like the channel test above: the command has
+  // to beat the verb reading in a thread too.
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "/dnc rework the retry loop" } },
+  );
+  assert.equal(replied.status, 201, JSON.stringify(replied.data));
+
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    const thread = (listed.data.messages as any[]).find(
+      (message) => message.id === root.id,
+    );
+    return thread?.replies?.some(
+      (reply: any) => reply.content === runtime.chatAnswer.text,
+    ) === true;
+  }, "the do-not-code reply was never answered in its thread");
+
+  // Answered, never dispatched — no task is the whole guarantee: nothing to
+  // plan, nothing for the coordinator to run.
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
+  assert.match(prompt, /do-not-code request/u);
+  // The command word is lifted out of the question slot, as in the channel.
+  assert.match(prompt, /The question: rework the retry loop/u);
+});
+
+test("/dnc with nobody mentioned never becomes an auto-claim offer, and says how to ask", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dnc-no-mention");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Task-worded and unaddressed — without the command this is exactly the
+  // message auto-claim exists to offer on, and a "yes" to that offer submits
+  // a task. The command's promise has to hold on this path too.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/dnc fix the retry loop" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  const agreed = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "yes" },
+  });
+  assert.equal(agreed.status, 201, JSON.stringify(agreed.data));
+
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const after = await owner.request(`${base}/messages`);
+  const contents = (after.data.messages as any[]).map((message) =>
+    String(message.content),
+  );
+  assert.ok(
+    contents.every((line) => !/^Want me to take this/u.test(line)),
+    JSON.stringify(contents),
+  );
+  // Not silence either: the sender is told what a do-not-code ask needs.
+  const hint = (after.data.messages as any[]).find(
+    (message) => message.kind === "system",
+  );
+  assert.match(String(hint?.content), /`\/dnc` answers without starting work/u);
+  assert.match(String(hint?.content), /\/dnc @agent your question/u);
+});
+
+test("@agents /dnc answers the whole room, told not to code, and files no task", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "dnc-broadcast");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text = "The retry loop caps at five attempts.";
+
+  // Task-worded and not a question: without the command the broadcast gate
+  // refuses this outright as a would-be broadcast task. The command says it
+  // is a question, so the verb reading must give way here as everywhere.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/dnc @agents rework the retry loop" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const listed = await owner.request(`${base}/messages`);
+  const answer = (listed.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(answer?.content, runtime.chatAnswer.text);
+  // The do-not-code words reach every answer of the fan-out, in the same
+  // directive slot the single-mention path fills.
+  const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
+  assert.match(prompt, /do-not-code request/u);
+});
+
+test("/simple keeps it brief in both places a reply is written from", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+
+  // Work: the directive rides inside the objective string itself, so it
+  // reaches the worker with no new field anywhere between here and there.
+  const taskRepo = await invitableRepository(owner, "simple-brief-task");
+  await joinAllConnectedAgents(runtime, taskRepo);
+  const taskBase = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${taskRepo}/channel`;
+  const work = await owner.request(`${taskBase}/messages`, {
+    method: "POST",
+    body: { content: "/simple @Claude (Owner) rework the retry loop" },
+  });
+  assert.equal(work.status, 201, JSON.stringify(work.data));
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const objective = runtime.submittedTasks[0]?.objective ?? "";
+  assert.match(objective, /rework the retry loop/u);
+  assert.match(objective, /short and simple/u);
+  assert.doesNotMatch(objective, /\/simple/u);
+
+  // A question: the same ask lands in the answer prompt instead, and still
+  // never becomes a task.
+  const askRepo = await invitableRepository(owner, "simple-brief-question");
+  await joinAllConnectedAgents(runtime, askRepo);
+  const askBase = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${askRepo}/channel`;
+  const asked = await owner.request(`${askBase}/messages`, {
+    method: "POST",
+    body: { content: "/simple @Claude (Owner) what are you working on?" },
+  });
+  assert.equal(asked.status, 201, JSON.stringify(asked.data));
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  // Found by content rather than taken from the end: the task above owes an
+  // un-awaited opening-line call that could land in `chatPrompts` at any time.
+  const prompt = runtime.chatPrompts
+    .map((entry) => entry.prompt)
+    .find((entry) => entry.includes("what are you working on?"));
+  assert.ok(prompt, JSON.stringify(runtime.chatPrompts));
+  assert.match(prompt ?? "", /short and simple/u);
+});
+
+test("/push tasks only the named agent with a safe GitHub publish workflow", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "push-command");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  // A second available agent proves this is explicit targeting rather than
+  // an auto-claim or room-wide publish.
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/push @Claude (Owner)" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  const task = runtime.submittedTasks[0];
+  assert.equal(task?.vendor, "claude");
+  const objective = task?.objective ?? "";
+  assert.match(objective, /First sync this repository with GitHub, then publish/u);
+  assert.match(objective, /no more than six words/u);
+  assert.match(objective, /slightly longer version.*commit and push summary/u);
+  assert.match(
+    objective,
+    /if it fails, pull from GitHub and integrate the remote changes, then retry/u,
+  );
+  assert.match(objective, /Do not force-push/u);
+  assert.doesNotMatch(objective, /@Claude|\/push/u);
+});
+
+test("/push without one reachable agent dispatches nothing and explains the target", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "push-needs-agent");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  for (const content of ["/push", "/push @Nobody"]) {
+    const posted = await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content },
+    });
+    assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  }
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const listed = await owner.request(`${base}/messages`);
+  const said = (listed.data.messages as any[])
+    .map((message) => String(message.content))
+    .join("\n");
+  assert.match(said, /`\/push` needs an agent/u);
+  assert.match(said, /`\/push` needs one agent from this channel/u);
+  assert.match(said, /@Claude \(Owner\)/u);
+});
+
 test("a held run says in the room that it is waiting, not only in its thread", async (t) => {
   // The hold announced itself with a sentence inside the thread and nothing
   // anywhere else, and a thread is collapsed until somebody opens it. From
@@ -5701,10 +5970,18 @@ test("a slash inside a sentence is left alone, and /help answers", async (t) => 
     (listed.data.messages as any[]).map((m) => m.content).join("\n"),
     /\/plan/u,
   );
+  assert.match(
+    (listed.data.messages as any[]).map((m) => m.content).join("\n"),
+    /\/push @agent/u,
+  );
   // The picker reads the same table the channel parses by, so they cannot
   // offer and accept different things.
   assert.ok(
     (listed.data.slashCommands as any[]).some((entry) => entry.name === "plan"),
+    JSON.stringify(listed.data.slashCommands),
+  );
+  assert.ok(
+    (listed.data.slashCommands as any[]).some((entry) => entry.name === "push"),
     JSON.stringify(listed.data.slashCommands),
   );
   // /help answers the channel; it does not become work for an agent.

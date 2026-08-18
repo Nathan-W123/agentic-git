@@ -13,7 +13,16 @@
 
 /** What a command does, and what to draw in the picker. */
 export interface SlashCommand {
-  name: string;
+  name:
+    | "plan"
+    | "ask"
+    | "dnc"
+    | "simple"
+    | "push"
+    | "retry"
+    | "cancel"
+    | "stop"
+    | "help";
   /** One line, shown beside the name in the lookup. */
   summary: string;
   /** How it is typed, shown under the summary. */
@@ -45,6 +54,28 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     summary: "Ask without starting work — an answer, not a task",
     usage: "/ask @agent your question",
     takesObjective: true,
+  },
+  {
+    name: "dnc",
+    // "Do not code." The guarantee is structural — the message is answered in
+    // the channel and never becomes a task, so nothing can be written — and
+    // the prompt says it to the agent in words as well, so the reply reads
+    // like an answer rather than an offer to start work.
+    summary: "Do not code — read and answer only, changing nothing",
+    usage: "/dnc @agent your question",
+    takesObjective: true,
+  },
+  {
+    name: "simple",
+    summary: "Answer as short and simple as it can be said",
+    usage: "/simple @agent your message",
+    takesObjective: true,
+  },
+  {
+    name: "push",
+    summary: "Sync and publish this agent's changes on a new GitHub branch",
+    usage: "/push @agent",
+    takesObjective: false,
   },
   {
     name: "retry",
@@ -102,7 +133,8 @@ const SLASH_TOKEN_PATTERN = /(^|\s)\/([a-z][a-z0-9-]*)(?=\s|$)/giu;
  *
  * Being known is what carries the safety the anchor used to. A slash appears
  * in ordinary text constantly — paths, dates, "and/or" — and none of those
- * spell one of the six words in `SLASH_COMMANDS` with whitespace either side.
+ * spell one of the command words in `SLASH_COMMANDS` with whitespace either
+ * side.
  * `/usr/bin/env is on the path` is still a sentence, and so is "read
  * docs/plan.md": the price is that a message which genuinely means to *say*
  * `/help` as its own word is read as asking for it, which is the same trade

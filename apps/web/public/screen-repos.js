@@ -151,8 +151,8 @@ export function renderRepositories() {
       <button class="repo-action accent-2" data-act="repo-connect">
         <span class="ra-icon">${icon("link")}</span>
         <span>
-          <b>Connect external repository</b>
-          <span>Connect a GitHub, GitLab, or Bitbucket repository.</span>
+          <b>Import from GitHub</b>
+          <span>Import an existing GitHub repository and its history.</span>
         </span>
         <span class="ra-chev">${icon("chevronRight")}</span>
       </button>
@@ -259,13 +259,13 @@ export async function createRepository(rerender) {
 
 export async function connectRepository(rerender) {
   const values = await showModal({
-    title: "Connect external repository",
+    title: "Import from GitHub",
     subtitle:
-      "The repository is imported once into canonical. Credentials come from the control plane's environment, never the browser.",
-    confirm: "Connect",
+      "The repository and its history are imported into Lattice. Credentials stay in the control plane, never the browser.",
+    confirm: "Import",
     body: `<label class="field">
-        <span>Repository</span>
-        <input class="input" name="remote" placeholder="owner/name or https://…" required>
+        <span>GitHub repository</span>
+        <input class="input" name="remote" placeholder="owner/name or https://github.com/owner/name" required>
       </label>
       <label class="field">
         <span>Local id</span>
@@ -296,7 +296,7 @@ export async function connectRepository(rerender) {
         },
       },
     );
-    toast("Repository connected", "ok");
+    toast("Repository imported", "ok");
     await loadContext();
     rerender();
   } catch (error) {

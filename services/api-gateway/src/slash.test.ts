@@ -104,3 +104,42 @@ test("/stop is a channel command that names agents rather than an objective", ()
   // And it is offered while somebody is still typing it.
   assert.ok(slashCommandsMatching("/st").some((entry) => entry.name === "stop"));
 });
+
+test("/dnc and /simple carry an objective, like /ask and /plan", () => {
+  // "Do not code" is an answer-only request: the mention and the question
+  // around the command word must reach the dispatcher exactly as written.
+  const dnc = parseSlashCommand("/dnc @Eos what does the retry loop do?");
+  assert.equal(dnc?.command.name, "dnc");
+  assert.equal(dnc?.rest, "@Eos what does the retry loop do?");
+  assert.equal(dnc?.command.takesObjective, true);
+
+  // `/simple` is about the shape of the reply, and like any command it is
+  // read wherever in the message it was typed.
+  const simple = parseSlashCommand("@Eos /simple why did the build fail?");
+  assert.equal(simple?.command.name, "simple");
+  assert.equal(simple?.rest, "@Eos why did the build fail?");
+  assert.equal(simple?.command.takesObjective, true);
+
+  // Both are offered while somebody is still typing them.
+  assert.deepEqual(
+    slashCommandsMatching("/d").map((entry) => entry.name),
+    ["dnc"],
+  );
+  assert.ok(
+    slashCommandsMatching("/si").some((entry) => entry.name === "simple"),
+  );
+});
+
+test("/push names an agent rather than carrying an objective", () => {
+  const parsed = parseSlashCommand("/push @Eos");
+  assert.equal(parsed?.command.name, "push");
+  assert.equal(parsed?.rest, "@Eos");
+  assert.equal(parsed?.command.takesObjective, false);
+  assert.ok(
+    slashCommandsMatching("/pu").some((entry) => entry.name === "push"),
+  );
+  assert.match(formatSlashHelp(), /\/push @agent/u);
+
+  // It is syntax only as its own slash word, like every other command.
+  assert.equal(parseSlashCommand("read docs/push.md first"), undefined);
+});

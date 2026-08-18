@@ -16,6 +16,11 @@ from a customer-hosted or on-premises environment. See
 [instructions.md](instructions.md) for the authoritative scope, phases, and
 architecture rules.
 
+**Where does repository code live?** Today, Lattice keeps its copy of the
+repository on the machine where Lattice is running—not automatically in the
+cloud. Agents work on temporary copies, and GitHub is updated only when someone
+explicitly exports the repository.
+
 **Current deployment status.** One active control-plane process owns canonical
 Git repositories and integration. Remote workers can execute on other machines
 over HTTP, and coordination state can live in PostgreSQL for shared access.
