@@ -19,6 +19,7 @@ import {
   explainAnswerFailure,
   looksLikeTaskRequest,
   narrateTaskEvent,
+  readsAsEchoOfRequest,
   summariseObjective,
   type ApiOperations,
 } from "./server.js";
@@ -5735,6 +5736,142 @@ test("/dnc in a thread reply is answered with the do-not-code words, and no task
   assert.match(prompt, /do-not-code request/u);
   // The command word is lifted out of the question slot, as in the channel.
   assert.match(prompt, /The question: rework the retry loop/u);
+});
+
+test("/ask is answered wherever the command word sits, and files no task", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "ask-answers-only");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  runtime.chatAnswer.text =
+    "The background is set in the dashboard stylesheet, so it is a one-line change there.";
+
+  // The command written last, which is how it is typed when somebody says the
+  // thing first and then decides they only want an answer about it. Worded as
+  // work on purpose: `/ask` has to beat the verb reading from either end of
+  // the sentence.
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) change the background color /ask" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const listed = await owner.request(`${base}/messages`);
+  const answer = (listed.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+  assert.equal(answer?.content, runtime.chatAnswer.text);
+
+  // The prompt says what the reply must not be. An instruction handed to a
+  // model told only to be brief comes back as the instruction, tidied up.
+  const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
+  assert.match(prompt, /question to answer, not an instruction/u);
+  assert.match(prompt, /never reply with the message repeated back/iu);
+  assert.match(
+    prompt,
+    /The message: @Claude \(Owner\) change the background color/u,
+  );
+});
+
+test("an answer that is only the request repeated back is not posted as one", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "ask-echo-guard");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "personal" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  // Exactly what the channel posted when this was reported: the sender's own
+  // words, capitalised and clipped, with nothing added.
+  runtime.chatAnswer.text = "Change the background";
+
+  const posted = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) change the background color /ask" },
+  });
+  assert.equal(posted.status, 201, JSON.stringify(posted.data));
+
+  const listed = await owner.request(`${base}/messages`);
+  const answer = (listed.data.messages as any[]).find(
+    (message) => message.kind === "agent",
+  );
+  assert.notEqual(answer?.content, runtime.chatAnswer.text);
+  assert.match(String(answer?.content), /repeated rather than an answer/u);
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+});
+
+test("/ask in a thread reply is answered, and an echo there is refused too", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  runtime.chatConnections.set(ownerId, [{ provider: "anthropic" }]);
+  const repositoryId = await invitableRepository(owner, "ask-thread-answers-only");
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const root = await runtime.store.appendChannelMessage({
+    repositoryId,
+    projectId: DEFAULT_PROJECT_ID,
+    kind: "agent",
+    authorId: `${ownerId}:anthropic`,
+    content: "On it — reworking the dashboard styles.",
+  });
+
+  runtime.chatAnswer.text = "Change the background";
+  const replied = await owner.request(
+    `${base}/messages/${encodeURIComponent(root.id)}/replies`,
+    { method: "POST", body: { content: "change the background color /ask" } },
+  );
+  assert.equal(replied.status, 201, JSON.stringify(replied.data));
+
+  await waitFor(async () => {
+    const listed = await owner.request(`${base}/messages`);
+    const thread = (listed.data.messages as any[]).find(
+      (message) => message.id === root.id,
+    );
+    return thread?.replies?.some(
+      (reply: any) =>
+        reply.kind === "outcome" &&
+        /repeated rather than an answer/u.test(String(reply.content)),
+    ) === true;
+  }, "the echoed thread answer was posted, or nothing was");
+
+  // Answered, never dispatched: the command's whole promise.
+  assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
+  const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
+  assert.match(prompt, /question to answer, not an instruction/u);
+  assert.match(prompt, /The question: change the background color/u);
+});
+
+test("only a reply that adds nothing counts as the request repeated back", () => {
+  // The reported case, quotes and capitals and all.
+  assert.equal(
+    readsAsEchoOfRequest("@Zeus change the background color", '"Change the background"'),
+    true,
+  );
+  assert.equal(
+    readsAsEchoOfRequest("change the background color", "change the background color"),
+    true,
+  );
+  // Anything that says something is an answer, however short.
+  assert.equal(
+    readsAsEchoOfRequest(
+      "change the background color",
+      "Changing the background means editing the dashboard stylesheet.",
+    ),
+    false,
+  );
+  assert.equal(readsAsEchoOfRequest("is the retry loop bounded?", "Yes."), false);
+  assert.equal(readsAsEchoOfRequest("", "Change the background"), false);
 });
 
 test("/dnc with nobody mentioned never becomes an auto-claim offer, and says how to ask", async (t) => {
