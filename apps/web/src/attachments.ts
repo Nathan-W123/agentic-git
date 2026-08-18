@@ -23,6 +23,43 @@ const TYPES: Record<string, string> = {
   "image/webp": "webp",
 };
 
+/**
+ * The leading bytes each allowlisted format must actually start with.
+ *
+ * Deliberately only the signature, never the rest of the container: a valid
+ * file with an unusual but legal variant header — an odd JPEG segment order, a
+ * WebP the encoder wrote a little differently — has to keep working, because
+ * the point of this check is to catch bytes that are not the format at all,
+ * not to referee the format's own dialects.
+ *
+ * `undefined` where a byte is not fixed: WebP's signature is `RIFF`, four
+ * bytes of length that are whatever the file's length is, then `WEBP`.
+ */
+const SIGNATURES: Record<string, ReadonlyArray<number | undefined>> = {
+  png: [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a],
+  jpg: [0xff, 0xd8, 0xff],
+  gif: [0x47, 0x49, 0x46, 0x38],
+  webp: [
+    0x52, 0x49, 0x46, 0x46,
+    undefined, undefined, undefined, undefined,
+    0x57, 0x45, 0x42, 0x50,
+  ],
+};
+
+/** Whether the bytes begin the way the named format has to begin. */
+function signatureMatches(bytes: Buffer, extension: string): boolean {
+  const signature = SIGNATURES[extension];
+  if (signature === undefined) {
+    return false;
+  }
+  if (bytes.length < signature.length) {
+    return false;
+  }
+  return signature.every(
+    (byte, index) => byte === undefined || bytes[index] === byte,
+  );
+}
+
 const EXTENSION_TYPES: Record<string, string> = Object.fromEntries(
   Object.entries(TYPES).map(([mime, extension]) => [extension, mime]),
 );
@@ -63,6 +100,17 @@ export class AttachmentStore {
         `Images are at most ${String(
           Math.floor(MAX_ATTACHMENT_BYTES / (1024 * 1024)),
         )} MB`,
+      );
+    }
+    // The declared type chose which format to check against; the bytes decide
+    // whether that claim was true. Without this, anything at all could be
+    // stored as `.png` and served from this origin — the read path derives its
+    // content type from the extension and sends `nosniff`, so a browser would
+    // not execute it, but hosting attacker-chosen bytes on a trusted origin is
+    // worth refusing on its own.
+    if (!signatureMatches(bytes, extension)) {
+      throw new AttachmentTypeError(
+        `That file is not a valid ${extension.toUpperCase()} image`,
       );
     }
     await mkdir(this.directory, { recursive: true });

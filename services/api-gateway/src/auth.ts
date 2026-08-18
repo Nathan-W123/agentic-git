@@ -101,7 +101,21 @@ export interface AuthServiceOptions {
   sessionTtlMs?: number;
   /** Default token lifetime in days. 0 means tokens never expire. */
   defaultTokenDays?: number;
+  /**
+   * Marks session cookies `Secure` on every deployment.
+   *
+   * Left off, cookies are still marked `Secure` on any request that actually
+   * arrived over TLS — see the `secure` argument on {@link
+   * AuthService.issueSession}. Turning it on forces the flag on regardless,
+   * which is right for a deployment that is only ever reached over HTTPS and
+   * wrong for a plain-HTTP one, where the browser would refuse to send the
+   * cookie back at all and sign-in would appear to fail silently.
+   */
   secureCookies?: boolean;
+  /** Failed sign-ins for one account before it is locked. */
+  loginFailureLimit?: number;
+  /** How long an account stays locked, and how long failures accumulate. */
+  loginLockoutMs?: number;
   now?: () => Date;
 }
 
@@ -309,10 +323,39 @@ export function parseBearer(header: string | undefined): string | undefined {
   return match?.[1];
 }
 
+/** One account's recent failed sign-ins. */
+interface LoginFailures {
+  count: number;
+  firstAt: number;
+  lockedUntil: number;
+}
+
+/** Beyond this many tracked accounts, expired entries are swept. */
+const LOGIN_FAILURE_TABLE_LIMIT = 4096;
+
 export class AuthService {
   private readonly sessionTtlMs: number;
   private readonly defaultTokenDays: number;
   private readonly secureCookies: boolean;
+  private readonly loginFailureLimit: number;
+  private readonly loginLockoutMs: number;
+  /**
+   * Failed sign-ins, keyed by the address that was typed.
+   *
+   * Keyed by what was submitted rather than by an account id, for two
+   * reasons. The obvious one is that a guess at an address with no account
+   * must be counted the same way, or the lockout itself would answer "does
+   * this account exist". The other is that the rate limiter in front of this
+   * keys on a network address, which behind a reverse proxy is one address for
+   * the whole deployment — so it throttles everybody together and throttles
+   * password guessing against one account not at all.
+   *
+   * In memory rather than in the store: a lockout is a few minutes long, a
+   * restart clears it, and that is the right trade for something whose failure
+   * mode is locking out a legitimate person. It is per control plane, which
+   * matches how the rate limiter already works.
+   */
+  private readonly loginFailures = new Map<string, LoginFailures>();
   private readonly now: () => Date;
 
   public constructor(
@@ -322,6 +365,8 @@ export class AuthService {
     this.sessionTtlMs = options.sessionTtlMs ?? 12 * 60 * 60 * 1000;
     this.defaultTokenDays = options.defaultTokenDays ?? 90;
     this.secureCookies = options.secureCookies ?? false;
+    this.loginFailureLimit = options.loginFailureLimit ?? 10;
+    this.loginLockoutMs = options.loginLockoutMs ?? 15 * 60 * 1000;
     this.now = options.now ?? (() => new Date());
     if (!Number.isSafeInteger(this.sessionTtlMs) || this.sessionTtlMs < 60_000) {
       throw new RangeError("Session lifetime must be at least one minute");
@@ -428,7 +473,19 @@ export class AuthService {
     password: string;
     ipAddress: string;
     userAgent: string;
+    /** Whether the request arrived over TLS. See {@link issueSession}. */
+    secure?: boolean;
   }): Promise<SessionIssueResult> {
+    const attempted = input.email.trim().toLowerCase();
+    const startedAt = this.now().getTime();
+    const locked = this.loginFailures.get(attempted);
+    if (locked !== undefined && locked.lockedUntil > startedAt) {
+      throw new AuthenticationError(
+        "Too many failed sign-in attempts for this account. Try again shortly.",
+        429,
+        "login_locked",
+      );
+    }
     const user = await this.store.getUserByEmail(input.email);
     // Always perform the same expensive derivation so login timing does not
     // reveal whether an email address exists or an account is disabled.
@@ -441,16 +498,64 @@ export class AuthService {
       !user.disabled &&
       passwordValid;
     if (!valid || user === undefined) {
+      this.recordLoginFailure(attempted, startedAt);
       throw new AuthenticationError("Email or password is incorrect");
     }
-    return await this.issueSession(user, input.ipAddress, input.userAgent);
+    this.loginFailures.delete(attempted);
+    return await this.issueSession(
+      user,
+      input.ipAddress,
+      input.userAgent,
+      input.secure,
+    );
   }
 
+  /**
+   * Counts one failure and locks the account once they pile up.
+   *
+   * The window and the lockout are the same length, so a run of wrong
+   * passwords spread thinly enough never locks anything: the count resets as
+   * soon as the oldest failure in the run falls out of the window.
+   */
+  private recordLoginFailure(attempted: string, now: number): void {
+    const existing = this.loginFailures.get(attempted);
+    const record: LoginFailures =
+      existing === undefined || now - existing.firstAt > this.loginLockoutMs
+        ? { count: 0, firstAt: now, lockedUntil: 0 }
+        : existing;
+    record.count += 1;
+    if (record.count >= this.loginFailureLimit) {
+      record.lockedUntil = now + this.loginLockoutMs;
+      record.count = 0;
+      record.firstAt = now;
+    }
+    this.loginFailures.set(attempted, record);
+    if (this.loginFailures.size > LOGIN_FAILURE_TABLE_LIMIT) {
+      for (const [key, value] of this.loginFailures) {
+        if (value.lockedUntil <= now && now - value.firstAt > this.loginLockoutMs) {
+          this.loginFailures.delete(key);
+        }
+      }
+    }
+  }
+
+  /**
+   * Starts a session and returns the cookies that carry it.
+   *
+   * `secure` is what the request itself said: true when it arrived over TLS.
+   * Marking the cookie `Secure` is only correct when it did — set
+   * unconditionally it breaks every plain-HTTP deployment, because the browser
+   * then declines to send the cookie back and sign-in looks like it silently
+   * failed. `secureCookies` still forces it on for a deployment that knows it
+   * is always behind HTTPS.
+   */
   public async issueSession(
     user: UserAccount,
     ipAddress: string,
     userAgent: string,
+    secure?: boolean,
   ): Promise<SessionIssueResult> {
+    const secureCookie = this.secureCookies || secure === true;
     const id = createId("auth");
     const secret = randomBytes(32).toString("base64url");
     const csrfToken = randomBytes(32).toString("base64url");
@@ -481,12 +586,12 @@ export class AuthService {
         cookie(SESSION_COOKIE, `${id}.${secret}`, {
           maxAgeSeconds,
           httpOnly: true,
-          secure: this.secureCookies,
+          secure: secureCookie,
         }),
         cookie(CSRF_COOKIE, csrfToken, {
           maxAgeSeconds,
           httpOnly: false,
-          secure: this.secureCookies,
+          secure: secureCookie,
         }),
       ],
     };
@@ -802,18 +907,21 @@ export class AuthService {
     }
   }
 
-  public async logout(sessionId: string): Promise<string[]> {
+  public async logout(sessionId: string, secure?: boolean): Promise<string[]> {
     await this.store.revokeAuthSession(sessionId);
+    // The clearing cookie has to carry the same attributes as the one it is
+    // replacing, or the browser keeps the original alongside it.
+    const secureCookie = this.secureCookies || secure === true;
     return [
       cookie(SESSION_COOKIE, "", {
         maxAgeSeconds: 0,
         httpOnly: true,
-        secure: this.secureCookies,
+        secure: secureCookie,
       }),
       cookie(CSRF_COOKIE, "", {
         maxAgeSeconds: 0,
         httpOnly: false,
-        secure: this.secureCookies,
+        secure: secureCookie,
       }),
     ];
   }

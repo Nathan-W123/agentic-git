@@ -5,7 +5,10 @@ import { access, mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 
 import type { CoordinationStore } from "@coord/persistence";
-import { RepositoryService } from "@coord/repository-service";
+import {
+  RepositoryService,
+  sanitizeChildEnv,
+} from "@coord/repository-service";
 import { GitWorktreeWorkspaceManager } from "@coord/workspace-manager";
 
 import {
@@ -1070,7 +1073,11 @@ export class PreviewService {
     repositoryId: string,
     port: number,
   ): Promise<NodeJS.ProcessEnv> {
-    const environment: NodeJS.ProcessEnv = { ...process.env };
+    // A preview is somebody else's app: it gets the allow-listed child
+    // environment — a PATH, a HOME, locale and proxy settings — and not this
+    // process's own. Without that it inherited `COORD_DATABASE_URL`, so a
+    // previewed app could connect to the coordination store directly.
+    const environment: NodeJS.ProcessEnv = sanitizeChildEnv(process.env);
     for (const name of CONTROL_PLANE_VARIABLES) {
       delete environment[name];
     }

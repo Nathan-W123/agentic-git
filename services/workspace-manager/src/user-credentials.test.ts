@@ -14,6 +14,7 @@ import test from "node:test";
 
 import {
   captureClaudeSession,
+  captureCredentialKey,
   openCredentialHome,
   resolveCredentialKey,
   supportedCredentialKinds,
@@ -831,4 +832,29 @@ test("a session file for github is refused at the door", async (t) => {
       error instanceof UserCredentialError && error.code === "unsupported_kind",
   );
   assert.equal(await vault.get("user-1", "github"), undefined);
+});
+
+test("the credential key leaves the process environment and still resolves", async (t) => {
+  // The key that decrypts every user's stored provider credential used to sit
+  // in `process.env` for the whole run, where every spawned child could read
+  // it. It is taken out at boot instead — and a store opened *after* that has
+  // to still find it, or it would quietly generate a new key and fail to
+  // decrypt everything written under the old one.
+  const directory = await mkdtemp(path.join(os.tmpdir(), "coord-key-"));
+  t.after(async () => {
+    await rm(directory, { recursive: true, force: true });
+  });
+  const configured = randomBytes(32).toString("base64");
+  const environment: NodeJS.ProcessEnv = {
+    COORD_CREDENTIAL_KEY: configured,
+  };
+
+  captureCredentialKey(environment);
+  assert.equal(environment["COORD_CREDENTIAL_KEY"], undefined);
+
+  const keyFilePath = path.join(directory, "credential-key");
+  const resolved = await resolveCredentialKey({ keyFilePath });
+  assert.equal(resolved.toString("base64"), configured);
+  // Nothing was written beside the ciphertext, because nothing had to be.
+  await assert.rejects(readFile(keyFilePath, "utf8"));
 });

@@ -28,6 +28,12 @@ import type { CodexUsageReader } from "./codex-subscription-usage.js";
 const BOOTSTRAP_TOKEN = "bootstrap-token-with-at-least-24-characters";
 const PASSWORD = "RelayPassword123!";
 
+// Self-service sign-up is closed unless an operator opens it. Most of the
+// suite below signs people up to build its fixtures, so the suite opens it the
+// way a publicly-joinable deployment would; the tests that pin the default
+// clear it again for their own runtime.
+process.env["COORD_ALLOW_REGISTRATION"] = "1";
+
 interface TestRuntime {
   gateway: ApiGateway;
   store: CoordinationStore;
@@ -10972,4 +10978,94 @@ test("unavailable live Codex usage and Claude usage retain their existing shape"
   assert.deepEqual(codexResponse.data.usage, unavailable);
   assert.deepEqual(claudeResponse.data.usage, claude);
   assert.equal(liveReads, 1);
+});
+
+/**
+ * Withdraws one environment variable for the duration of a test.
+ *
+ * The gateway reads the registration and proxy settings the way the rest of
+ * this process does — from the environment — so a test that wants a different
+ * default has to swap it and put it back.
+ */
+function withEnvironment(
+  t: TestContext,
+  values: Record<string, string | undefined>,
+): void {
+  const previous = new Map<string, string | undefined>();
+  for (const [name, value] of Object.entries(values)) {
+    previous.set(name, process.env[name]);
+    if (value === undefined) {
+      delete process.env[name];
+    } else {
+      process.env[name] = value;
+    }
+  }
+  t.after(() => {
+    for (const [name, value] of previous) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  });
+}
+
+test("registration is closed until an operator opens it", async (t) => {
+  // A new account owns its own organization, which carries `run_task`, and a
+  // task runs the agent CLI on the host unless a sandbox was configured. So on
+  // a deployment strangers can reach, open sign-up is the difference between
+  // "they can look" and "they can run code here". Invitations are unaffected.
+  withEnvironment(t, { COORD_ALLOW_REGISTRATION: undefined });
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+  const refused = await client.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "stranger@example.com",
+      displayName: "Stranger",
+      password: PASSWORD,
+    },
+  });
+
+  assert.equal(refused.status, 403);
+  assert.equal(refused.data.error.code, "registration_closed");
+});
+
+test("a TLS request behind a trusted proxy gets Secure cookies and HSTS", async (t) => {
+  // The control plane speaks plain HTTP and TLS terminates at the router, so
+  // the forwarded protocol is the only evidence there is — and it is only
+  // evidence when a proxy is actually trusted, which is why the hop count has
+  // to be stated rather than inferred.
+  withEnvironment(t, { COORD_TRUSTED_PROXY_HOPS: "1" });
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+
+  const overTls = await client.request("/api/v1/health", {
+    headers: { "X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.7" },
+  });
+  assert.match(
+    overTls.headers.get("strict-transport-security") ?? "",
+    /max-age=\d+/u,
+  );
+
+  // The same deployment reached over plain HTTP is not pinned to HTTPS: the
+  // browser would remember that for the domain and nothing in the app could
+  // take it back.
+  const plain = await client.request("/api/v1/health");
+  assert.equal(plain.headers.get("strict-transport-security"), null);
+});
+
+test("without a trusted proxy the forwarded headers are ignored entirely", async (t) => {
+  // Trusting `X-Forwarded-*` unconditionally is worse than not reading it:
+  // every client would choose its own rate-limit bucket and could claim to
+  // have arrived over TLS.
+  withEnvironment(t, { COORD_TRUSTED_PROXY_HOPS: undefined });
+  const runtime = await startRuntime(t);
+  const client = new TestClient(runtime.origin);
+
+  const claimed = await client.request("/api/v1/health", {
+    headers: { "X-Forwarded-Proto": "https", "X-Forwarded-For": "203.0.113.7" },
+  });
+  assert.equal(claimed.headers.get("strict-transport-security"), null);
 });

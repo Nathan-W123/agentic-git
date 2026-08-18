@@ -2583,6 +2583,8 @@ interface RequestContext {
   response: ServerResponse;
   url: URL;
   requestId: string;
+  /** Whether the browser reached this deployment over TLS. */
+  secure: boolean;
   principal?: AuthenticatedPrincipal;
 }
 
@@ -2842,6 +2844,62 @@ function safeEqual(left: string, right: string): boolean {
   return timingSafeEqual(first, second);
 }
 
+/**
+ * How many proxies to trust in `X-Forwarded-For`, from the environment.
+ *
+ * Defaults to none, and anything that is not a non-negative whole number is
+ * none: a typo must not silently let clients choose their own rate-limit
+ * bucket. Capped because a chain longer than this is not a deployment
+ * topology, it is a forged header.
+ */
+function trustedProxyHops(configured: string | undefined): number {
+  const parsed = Number(configured ?? "");
+  if (!Number.isSafeInteger(parsed) || parsed < 0) {
+    return 0;
+  }
+  return Math.min(parsed, 8);
+}
+
+/**
+ * `Strict-Transport-Security` lifetime in seconds, from the environment.
+ *
+ * `COORD_HSTS` unset or `1` means the default of one year; `0` or `off` turns
+ * it off; an explicit number is used as given. It is sent only on requests
+ * that arrived over TLS either way.
+ */
+function hstsMaxAge(configured: string | undefined): number {
+  const value = (configured ?? "").trim().toLowerCase();
+  if (value === "" || value === "1" || value === "true" || value === "on") {
+    return 31_536_000;
+  }
+  if (value === "0" || value === "false" || value === "off") {
+    return 0;
+  }
+  const parsed = Number(value);
+  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : 31_536_000;
+}
+
+/**
+ * Whether this control plane accepts self-service sign-up.
+ *
+ * Closed unless the operator opens it. Open registration composed with the
+ * rest of the shipped defaults into remote code execution by a stranger: a new
+ * account owns its own organization, which carries `run_task`, and a task runs
+ * the agent CLI directly on the host unless a sandbox was configured. Adding
+ * people to an existing deployment already has a path that does not depend on
+ * this — an invitation, whose secret is the credential.
+ *
+ * `COORD_DISABLE_REGISTRATION=1` is still honoured, so a deployment that
+ * closed registration explicitly stays closed however the default moves.
+ */
+function registrationOpen(environment: NodeJS.ProcessEnv): boolean {
+  if (environment["COORD_DISABLE_REGISTRATION"] === "1") {
+    return false;
+  }
+  const allow = (environment["COORD_ALLOW_REGISTRATION"] ?? "").trim().toLowerCase();
+  return allow === "1" || allow === "true" || allow === "yes";
+}
+
 export class ApiGateway {
   public readonly server: Server;
   public readonly webSockets: AuditWebSocketHub;
@@ -2960,6 +3018,23 @@ export class ApiGateway {
   private readonly auditsRunning = new Set<string>();
   private readonly bodyLimit: number;
   private readonly allowedOrigins: ReadonlySet<string>;
+  /**
+   * How many proxies sit in front of this control plane.
+   *
+   * Zero — the default — means the socket's peer address *is* the client, and
+   * `X-Forwarded-For` is ignored entirely. Every documented deployment of this
+   * project puts a platform router in front, and with a proxy there every
+   * request arrives from one address and shares one rate-limit bucket: one
+   * noisy client could exhaust the ten-per-minute sign-in budget for the whole
+   * deployment. Reading the header fixes that, and trusting it unconditionally
+   * would be worse than not reading it at all, because then any client picks
+   * its own bucket. So it is a count the operator states, and the address is
+   * taken that many hops from the right-hand end of the chain — the part a
+   * client cannot forge past its own proxy.
+   */
+  private readonly trustedProxyHops: number;
+  /** Whether `Strict-Transport-Security` is sent on TLS requests. */
+  private readonly hstsMaxAgeSeconds: number;
   private bootstrapInProgress = false;
   /**
    * The configured token, trimmed once here so nothing downstream compares
@@ -3012,6 +3087,10 @@ export class ApiGateway {
     this.auth = new AuthService(options.store, {
       secureCookies: options.secureCookies ?? false,
     });
+    this.trustedProxyHops = trustedProxyHops(
+      process.env["COORD_TRUSTED_PROXY_HOPS"],
+    );
+    this.hstsMaxAgeSeconds = hstsMaxAge(process.env["COORD_HSTS"]);
     this.limiter = new RateLimiter({
       capacity: options.rateLimitPerMinute ?? 240,
     });
@@ -3193,7 +3272,8 @@ export class ApiGateway {
       /^[A-Za-z0-9._-]{1,128}$/u.test(request.headers["x-request-id"])
         ? request.headers["x-request-id"]
         : randomUUID();
-    this.securityHeaders(response, requestId);
+    const secure = this.requestIsSecure(request);
+    this.securityHeaders(response, requestId, secure);
     let url: URL;
     try {
       // Routing needs only the origin-form path. Never parse an untrusted Host
@@ -3213,6 +3293,7 @@ export class ApiGateway {
       response,
       url,
       requestId,
+      secure,
     };
 
     try {
@@ -3415,6 +3496,7 @@ export class ApiGateway {
         user,
         this.remoteAddress(request),
         request.headers["user-agent"] ?? "",
+        context.secure,
       );
       response.setHeader("Set-Cookie", issued.cookies);
       await this.options.store.appendAudit(undefined, {
@@ -3430,11 +3512,11 @@ export class ApiGateway {
     }
 
     if (method === "POST" && path === `${API_PREFIX}/auth/register`) {
-      // Open registration: anybody who can reach this control plane can make
-      // an account. That is a deployment decision rather than an oversight,
-      // and `COORD_DISABLE_REGISTRATION=1` closes it without a deploy for
-      // installations that expect invitations to be the only way in.
-      if (process.env["COORD_DISABLE_REGISTRATION"] === "1") {
+      // Closed unless the operator opened it with
+      // `COORD_ALLOW_REGISTRATION=1`. See `registrationOpen` for why the
+      // default moved; invitations remain the way people join a deployment
+      // that is not meant to be publicly joinable.
+      if (!registrationOpen(process.env)) {
         throw new HttpError(
           403,
           "registration_closed",
@@ -3460,6 +3542,7 @@ export class ApiGateway {
         user,
         this.remoteAddress(request),
         request.headers["user-agent"] ?? "",
+        context.secure,
       );
       response.setHeader("Set-Cookie", issued.cookies);
       await this.options.store.appendAudit(undefined, {
@@ -3481,6 +3564,7 @@ export class ApiGateway {
         password: stringField(body["password"], "password", { max: 256 }) ?? "",
         ipAddress: this.remoteAddress(request),
         userAgent: request.headers["user-agent"] ?? "",
+        secure: context.secure,
       });
       response.setHeader("Set-Cookie", issued.cookies);
       await this.options.store.appendAudit(undefined, {
@@ -3644,6 +3728,7 @@ export class ApiGateway {
           user,
           this.remoteAddress(request),
           request.headers["user-agent"] ?? "",
+          context.secure,
         );
         response.setHeader("Set-Cookie", issued.cookies);
         this.sendJson(response, 200, {
@@ -3669,7 +3754,7 @@ export class ApiGateway {
       }
       response.setHeader(
         "Set-Cookie",
-        await this.auth.logout(principal.sessionId),
+        await this.auth.logout(principal.sessionId, context.secure),
       );
       await this.options.store.appendAudit(undefined, {
         type: "user_signed_out",
@@ -15106,12 +15191,64 @@ export class ApiGateway {
   }
 
   private remoteAddress(request: IncomingMessage): string {
-    return request.socket.remoteAddress ?? "unknown";
+    const peer = request.socket.remoteAddress ?? "unknown";
+    if (this.trustedProxyHops < 1) {
+      return peer;
+    }
+    const forwarded = request.headers["x-forwarded-for"];
+    const chain = (Array.isArray(forwarded) ? forwarded.join(",") : forwarded)
+      ?.split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0);
+    if (chain === undefined || chain.length === 0) {
+      return peer;
+    }
+    // Count from the right: the last entry was appended by the proxy nearest
+    // this process and is the only one it could not have been lied to about.
+    // A client that forges a long chain only pushes its own address further
+    // left, where a correct hop count never looks.
+    const index = chain.length - this.trustedProxyHops;
+    return chain[Math.max(0, index)] ?? peer;
   }
 
-  private securityHeaders(response: ServerResponse, requestId: string): void {
+  /**
+   * Whether the browser reached this deployment over TLS.
+   *
+   * The socket is plaintext in every documented deployment — TLS terminates at
+   * the platform router — so the forwarded protocol is the only evidence
+   * available, and it is only evidence at all when a proxy is trusted.
+   */
+  private requestIsSecure(request: IncomingMessage): boolean {
+    if (
+      (request.socket as unknown as { encrypted?: boolean }).encrypted === true
+    ) {
+      return true;
+    }
+    if (this.trustedProxyHops < 1) {
+      return false;
+    }
+    const header = request.headers["x-forwarded-proto"];
+    const value = Array.isArray(header) ? header[0] : header;
+    return value?.split(",")[0]?.trim().toLowerCase() === "https";
+  }
+
+  private securityHeaders(
+    response: ServerResponse,
+    requestId: string,
+    secure: boolean,
+  ): void {
     response.setHeader("X-Request-Id", requestId);
     response.setHeader("X-Content-Type-Options", "nosniff");
+    // Only on a request that already arrived over TLS. Sending it on a
+    // plain-HTTP deployment would pin that host to HTTPS in every visitor's
+    // browser for the lifetime of the header — the one change here a user
+    // cannot undo from the application.
+    if (secure && this.hstsMaxAgeSeconds > 0) {
+      response.setHeader(
+        "Strict-Transport-Security",
+        `max-age=${String(this.hstsMaxAgeSeconds)}`,
+      );
+    }
     response.setHeader("X-Frame-Options", "DENY");
     response.setHeader("Referrer-Policy", "no-referrer");
     response.setHeader("Permissions-Policy", "camera=(), microphone=(), geolocation=()");

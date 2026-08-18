@@ -770,10 +770,16 @@ export class CoordinatorProject {
     if (sandbox === undefined) {
       return undefined;
     }
+    // `COORD_SANDBOX_USER` is the deployment-level escape hatch for an image
+    // whose entrypoint genuinely needs root — installing packages, writing
+    // outside /tmp and the worktree. Without either, the sandbox runs as the
+    // user that owns the worktree rather than as root; see
+    // `defaultSandboxUser` in the workspace manager.
+    const user = sandbox.user ?? process.env["COORD_SANDBOX_USER"];
     return {
       image: sandbox.image,
       ...(sandbox.network === undefined ? {} : { network: sandbox.network }),
-      ...(sandbox.user === undefined ? {} : { user: sandbox.user }),
+      ...(user === undefined || user === "" ? {} : { user }),
     };
   }
 

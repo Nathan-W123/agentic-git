@@ -352,3 +352,72 @@ test("observers see output the retention cap declines to keep", async () => {
   assert.equal(result.stdoutTruncated, true);
   assert.ok(result.stdout.length < 5000);
 });
+
+test("a child inherits what it needs and none of the control plane's secrets", () => {
+  const previous = {
+    key: process.env["COORD_CREDENTIAL_KEY"],
+    database: process.env["COORD_DATABASE_URL"],
+  };
+  process.env["COORD_CREDENTIAL_KEY"] = "not-for-children";
+  process.env["COORD_DATABASE_URL"] = "postgresql://coordinator:pw@db/coord";
+  try {
+    const sanitized = sanitizeChildEnv(process.env);
+    // The secrets that turn "code ran here" into "every account's stored
+    // provider credentials are readable".
+    assert.equal(sanitized["COORD_CREDENTIAL_KEY"], undefined);
+    assert.equal(sanitized["COORD_DATABASE_URL"], undefined);
+    // What a child actually needs to run at all.
+    assert.equal(sanitized["PATH"], process.env["PATH"]);
+    if (process.env["HOME"] !== undefined) {
+      assert.equal(sanitized["HOME"], process.env["HOME"]);
+    }
+  } finally {
+    for (const [name, value] of [
+      ["COORD_CREDENTIAL_KEY", previous.key],
+      ["COORD_DATABASE_URL", previous.database],
+    ] as const) {
+      if (value === undefined) {
+        delete process.env[name];
+      } else {
+        process.env[name] = value;
+      }
+    }
+  }
+});
+
+test("a caller's own additions are never mistaken for inheritance", () => {
+  // The git credential path builds an environment from `process.env` and then
+  // adds a scoped push token to it. An allow-list that dropped anything it did
+  // not recognise would strip exactly that token, so what the caller put there
+  // has to survive, and it has to survive being sanitized twice.
+  const once = sanitizeChildEnv({
+    ...process.env,
+    GIT_CONFIG_COUNT: "1",
+    GIT_CONFIG_KEY_0: "http.extraHeader",
+    GIT_CONFIG_VALUE_0: "Authorization: Basic scoped-token",
+    CLAUDE_CONFIG_DIR: "/tmp/per-user-home",
+  });
+  const twice = sanitizeChildEnv(once);
+  for (const env of [once, twice]) {
+    assert.equal(env["GIT_CONFIG_VALUE_0"], "Authorization: Basic scoped-token");
+    assert.equal(env["CLAUDE_CONFIG_DIR"], "/tmp/per-user-home");
+  }
+});
+
+test("a spawned child cannot read the credential-encryption key", async () => {
+  const previous = process.env["COORD_CREDENTIAL_KEY"];
+  process.env["COORD_CREDENTIAL_KEY"] = "not-for-children";
+  try {
+    const result = await runProcess(process.execPath, [
+      "-e",
+      "process.stdout.write(String(process.env.COORD_CREDENTIAL_KEY))",
+    ]);
+    assert.equal(result.stdout, "undefined");
+  } finally {
+    if (previous === undefined) {
+      delete process.env["COORD_CREDENTIAL_KEY"];
+    } else {
+      process.env["COORD_CREDENTIAL_KEY"] = previous;
+    }
+  }
+});

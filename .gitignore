@@ -6,3 +6,10 @@ coverage/
 *.tsbuildinfo
 
 .model-cache/
+
+# Deployment secrets. `docker-compose.yml` asks operators to keep
+# POSTGRES_PASSWORD, COORD_BOOTSTRAP_TOKEN and COORD_CREDENTIAL_KEY in a .env
+# file beside it, and this is a repository people clone and then push from.
+.env
+*.env
+!.env.example

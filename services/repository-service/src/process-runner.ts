@@ -67,6 +67,117 @@ export interface ProcessOptions {
  * runs under a test runner.
  */
 const DENIED_CHILD_ENV = ["NODE_TEST_CONTEXT"];
+
+/**
+ * Variables a child may inherit from *this* process's own environment.
+ *
+ * An allow-list rather than a deny-list, because the deny-list was one entry
+ * long and everything else came through: a spawned agent CLI, a repository's
+ * own test command and a preview server all started from a copy of the
+ * control plane's environment, which carries `COORD_CREDENTIAL_KEY` (the key
+ * that decrypts every user's stored vendor and GitHub credentials),
+ * `COORD_DATABASE_URL` and `COORD_BOOTSTRAP_TOKEN`. Any of those reaching a
+ * subprocess turns "code ran here" into "every account's third-party
+ * credentials are readable", so the question this answers is not "what is
+ * dangerous" — that list is never finished — but "what does a child actually
+ * need".
+ *
+ * What it needs is: how to find an executable, where the user's files are,
+ * how to talk to the network through a proxy, and what language and terminal
+ * to speak. The vendor variables at the end are the exception that has to be
+ * stated: `host-login` is a supported credential policy, and it is precisely
+ * "run the agent CLI under the host's own vendor session". A per-user run
+ * never sees them anyway — `openCredentialHome` strips every one of them from
+ * the base environment before adding the caller's own — so keeping them here
+ * costs nothing on the path that matters and keeps single-operator
+ * deployments working.
+ *
+ * Anything a caller puts into `options.env` itself passes through untouched;
+ * see {@link sanitizeChildEnv}. This list governs inheritance only.
+ */
+const ALLOWED_CHILD_ENV: ReadonlySet<string> = new Set([
+  // Finding the executable and the user's own files.
+  "PATH",
+  "Path",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  // Windows counterparts of the same four questions.
+  "SystemRoot",
+  "SYSTEMROOT",
+  "SystemDrive",
+  "windir",
+  "WINDIR",
+  "COMSPEC",
+  "ComSpec",
+  "PATHEXT",
+  "USERPROFILE",
+  "HOMEDRIVE",
+  "HOMEPATH",
+  "APPDATA",
+  "LOCALAPPDATA",
+  "ProgramData",
+  "ProgramFiles",
+  "ProgramFiles(x86)",
+  "ProgramW6432",
+  "PROCESSOR_ARCHITECTURE",
+  "NUMBER_OF_PROCESSORS",
+  // Somewhere to write scratch files.
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  // Language, time and terminal.
+  "LANG",
+  "LANGUAGE",
+  "TZ",
+  "TERM",
+  "COLORTERM",
+  "NO_COLOR",
+  "FORCE_COLOR",
+  "CI",
+  // How to reach the network, including the sandbox's own egress proxy.
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "ALL_PROXY",
+  "NO_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "all_proxy",
+  "no_proxy",
+  // A host vendor login, for the `host-login` credential policy.
+  "ANTHROPIC_API_KEY",
+  "ANTHROPIC_AUTH_TOKEN",
+  "CLAUDE_CODE_OAUTH_TOKEN",
+  "CLAUDE_CONFIG_DIR",
+  "OPENAI_API_KEY",
+  "CODEX_HOME",
+  "GEMINI_API_KEY",
+  "GOOGLE_API_KEY",
+]);
+
+/**
+ * Families inherited whole.
+ *
+ * `LC_` and `XDG_` are locale and directory conventions with an open set of
+ * names. `GIT_` and `SSH_` are how an operator configures the transport a
+ * repository command uses — `GIT_SSH_COMMAND`, `SSH_AUTH_SOCK` — and they are
+ * also how this codebase hands a scoped push token to git, so a child that
+ * could not see them could not clone.
+ */
+const ALLOWED_CHILD_ENV_PREFIXES = ["LC_", "XDG_", "GIT_", "SSH_"];
+
+/** Whether a variable of this name may be inherited from `process.env`. */
+function inheritableChildEnv(name: string): boolean {
+  if (DENIED_CHILD_ENV.includes(name)) {
+    return false;
+  }
+  return (
+    ALLOWED_CHILD_ENV.has(name) ||
+    ALLOWED_CHILD_ENV_PREFIXES.some((prefix) => name.startsWith(prefix))
+  );
+}
+
 const WINDOWS_BATCH_FILE = /\.(?:bat|cmd)$/iu;
 const UNSAFE_WINDOWS_BATCH_TOKEN = /[\0\r\n"&|<>^%!]/u;
 
@@ -157,13 +268,30 @@ function processInvocation(
   };
 }
 
-/** Strips harness variables that would change how a child interprets itself. */
+/**
+ * The environment a child may have, built from what it needs rather than from
+ * what this process happens to be carrying.
+ *
+ * Two rules. A variable whose value is the one this process is holding is
+ * *inheritance*, and survives only if {@link ALLOWED_CHILD_ENV} names it. A
+ * variable the caller put in `env` itself — absent here, or set to something
+ * else — is a deliberate per-run addition and always survives: that is how a
+ * scoped git token, a per-user `CLAUDE_CONFIG_DIR` or a preview's own `PORT`
+ * reaches the child it was assembled for. Composing sanitised environments
+ * therefore stays safe, which matters because callers routinely spread one
+ * and then add to it.
+ */
 export function sanitizeChildEnv(
   env: NodeJS.ProcessEnv = process.env,
 ): NodeJS.ProcessEnv {
-  const sanitized: NodeJS.ProcessEnv = { ...env };
-  for (const name of DENIED_CHILD_ENV) {
-    delete sanitized[name];
+  const sanitized: NodeJS.ProcessEnv = {};
+  for (const [name, value] of Object.entries(env)) {
+    if (value === undefined || DENIED_CHILD_ENV.includes(name)) {
+      continue;
+    }
+    if (inheritableChildEnv(name) || process.env[name] !== value) {
+      sanitized[name] = value;
+    }
   }
   return sanitized;
 }

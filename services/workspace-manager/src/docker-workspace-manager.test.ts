@@ -541,3 +541,22 @@ test("credential mounts must be absolute and must not collide", () => {
     /Two credential mounts target/u,
   );
 });
+
+test("the default container is not root", () => {
+  // Everything else about this sandbox assumes the agent is contained;
+  // running it as UID 0 undercuts that twice over — files it writes land
+  // root-owned on the bind-mounted host worktree, and any escape primitive
+  // starts from root. The default is the user that owns that worktree, which
+  // is this process, because no other id could rewrite what it created.
+  const manager = new DockerWorkspaceManager({ image: "coord/agent:1" });
+  const args = manager.buildRunArgs(AGENT_LAUNCH, WORKSPACE);
+  const uid = process.getuid?.();
+  const gid = process.getgid?.();
+
+  if (uid === undefined || gid === undefined) {
+    // Windows has no such id and Docker there does not take one.
+    assert.equal(flagValue(args, "--user"), undefined);
+    return;
+  }
+  assert.equal(flagValue(args, "--user"), `${String(uid)}:${String(gid)}`);
+});
