@@ -770,6 +770,13 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
       const clauses = ["status = 'submitted'"];
       const values: (string | number)[] = [];
+      clauses.push(
+        `NOT EXISTS (
+          SELECT 1 FROM submitted_tasks predecessor
+          WHERE predecessor.id = submitted_tasks.after_task_id
+            AND predecessor.status IN ('submitted', 'claimed', 'planned')
+        )`,
+      );
       if (input.taskId !== undefined) {
         clauses.push("id = ?");
         values.push(input.taskId);
@@ -1641,6 +1648,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
       agentId: input.agentId,
       validationCommands: input.validationCommands,
       submittedBy: input.submittedBy,
+      afterTaskId: input.afterTaskId,
       context: input.context,
       conversationId: input.conversationId,
       model: input.model,
@@ -1655,6 +1663,24 @@ export class SqliteCoordinationStore implements CoordinationStore {
 
     this.db.exec("BEGIN IMMEDIATE");
     try {
+      if (task.afterTaskId === undefined && input.queueAfterCurrent === true) {
+        const predecessor = this.db
+          .prepare(
+            `SELECT id FROM submitted_tasks
+             WHERE repository_id = ? AND project_id = ? AND agent_id = ?
+               AND submitted_by IS ?
+               AND status IN ('submitted', 'claimed')
+             ORDER BY submitted_at DESC, rowid DESC LIMIT 1`,
+          )
+          .get(
+            task.repositoryId,
+            task.projectId ?? DEFAULT_PROJECT_ID,
+            task.agentId,
+            task.submittedBy ?? null,
+          ) as Row | undefined;
+        task.afterTaskId =
+          predecessor === undefined ? undefined : text(predecessor, "id");
+      }
       // A new turn settles the conversation's previous one: its work already
       // landed, and what it was waiting for has now arrived. One transaction
       // with the insert, so "at most one open turn per conversation" cannot
@@ -1673,8 +1699,8 @@ export class SqliteCoordinationStore implements CoordinationStore {
           `INSERT INTO submitted_tasks
              (id, repository_id, project_id, objective, agent_id,
               validation_commands_json, submitted_by, status, submitted_at,
-              context, conversation_id, model, effort)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              context, conversation_id, model, effort, after_task_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .run(
           task.id,
@@ -1690,6 +1716,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
           task.conversationId ?? null,
           task.model ?? null,
           task.effort ?? null,
+          task.afterTaskId ?? null,
         );
       this.db.exec("COMMIT");
     } catch (error) {
@@ -1736,6 +1763,11 @@ export class SqliteCoordinationStore implements CoordinationStore {
         .prepare(
           `SELECT * FROM submitted_tasks
            WHERE repository_id = ?${projectClause} AND status = 'submitted'
+             AND NOT EXISTS (
+               SELECT 1 FROM submitted_tasks predecessor
+               WHERE predecessor.id = submitted_tasks.after_task_id
+                 AND predecessor.status IN ('submitted', 'claimed', 'planned')
+             )
            ORDER BY submitted_at, rowid`,
         )
         .all(
@@ -1931,6 +1963,7 @@ export class SqliteCoordinationStore implements CoordinationStore {
         "validation_commands_json",
       ),
       submittedBy: optionalText(row, "submitted_by"),
+      afterTaskId: optionalText(row, "after_task_id"),
       context: optionalText(row, "context"),
       conversationId: optionalText(row, "conversation_id"),
       model: optionalText(row, "model"),

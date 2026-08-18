@@ -843,4 +843,15 @@ export const POSTGRES_MIGRATIONS: readonly Migration[] = [
          ON channel_messages(referenced_message_id)`,
     ],
   },
+  {
+    // Mirrors the SQLite migration of the same version.
+    version: 35,
+    name: "queued-task-dependencies",
+    statements: [
+      `ALTER TABLE submitted_tasks ADD COLUMN after_task_id TEXT
+         REFERENCES submitted_tasks(id) ON DELETE SET NULL`,
+      `CREATE INDEX submitted_tasks_after_task
+         ON submitted_tasks(after_task_id)`,
+    ],
+  },
 ];

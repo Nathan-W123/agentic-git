@@ -369,6 +369,9 @@ async function serve(
         objective: input.objective,
         submittedBy: input.actorId,
         ...(agentId === undefined ? {} : { agentId }),
+        ...(input.queueAfterCurrent === true
+          ? { queueAfterCurrent: true }
+          : {}),
         ...(input.context === undefined ? {} : { context: input.context }),
         ...(input.conversationId === undefined
           ? {}
@@ -411,85 +414,99 @@ async function serve(
       return { cancelled };
     },
     async runRepository(input) {
-      await runPendingTasks(project, store, {
-        projectId: input.projectId,
-        repositoryId: input.repositoryId,
-        credentials,
-        credentialPolicy,
-        conversations,
-        cancellations,
-        // What an agent may ask this deployment to do. A fixed list, not a
-        // command channel: an agent may only ask for what its submitter could
-        // do themselves on this repository, and an open channel would let it
-        // ask the platform to do what it is itself forbidden to do. See
-        // docs/architecture/agent-actions.md.
-        actions: {
-          async perform(request) {
-            if (request.action === "preview_stop") {
-              await previews.stopForTask(request.task.id);
-              return { outcome: "done", explanation: "The preview is stopped." };
-            }
-            if (request.action === "push") {
-              // Canonical, never the task's workspace. What an agent has in
-              // its checkout has not been integrated or validated yet, and
-              // publishing it would put work on a remote that this repository
-              // has not accepted — the one place where "the agent's version"
-              // and "the project's version" must not be confused.
-              return await pushCanonical(project, store, github, request);
-            }
-            if (request.action === "pull") {
-              // Canonical again, and for the matching reason: "pull from
-              // GitHub" means the platform's copy of the repository, not the
-              // agent's checkout — a fetch inside the workspace reaches only
-              // the local mirror and updates nothing anyone else can see.
-              return await pullCanonical(project, store, github, request);
-            }
-            if (request.action !== "preview_start") {
-              return {
-                outcome: "refused",
-                explanation:
-                  `"${request.action}" is not something this deployment does. ` +
-                  "Available actions: preview_start, preview_stop, push, pull.",
-              };
-            }
-            // The task's own workspace, never canonical. An agent looking at
-            // canonical would be looking at the app without the change it has
-            // just made, so anything it concluded — or screenshotted — would
-            // be about the wrong version.
-            const started = await previews.startForTask({
-              taskId: request.task.id,
-              repositoryId: request.repository.id,
-              workspacePath: request.workspacePath,
-            });
-            return started.failed
-              ? {
-                  outcome: "refused",
-                  detail: { output: started.output },
-                  explanation:
-                    "The app did not start. Its output is in `detail.output`.",
-                }
-              : {
+      // A run claims the work eligible at its start. Explicit follow-ups
+      // become eligible only when that batch finishes, so keep draining until
+      // one pass finds nothing rather than leaving the newly-unblocked task
+      // waiting for an unrelated future dispatch.
+      for (;;) {
+        const result = await runPendingTasks(project, store, {
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          credentials,
+          credentialPolicy,
+          conversations,
+          cancellations,
+          // What an agent may ask this deployment to do. A fixed list, not a
+          // command channel: an agent may only ask for what its submitter could
+          // do themselves on this repository, and an open channel would let it
+          // ask the platform to do what it is itself forbidden to do. See
+          // docs/architecture/agent-actions.md.
+          actions: {
+            async perform(request) {
+              if (request.action === "preview_stop") {
+                await previews.stopForTask(request.task.id);
+                return {
                   outcome: "done",
-                  detail: {
-                    ...(started.url === undefined ? {} : { url: started.url }),
-                    output: started.output,
-                  },
-                  explanation:
-                    `The app is at ${started.url ?? "an unknown address"}. ` +
-                    "It serves this task's workspace, so it includes changes " +
-                    "that have not landed yet.",
+                  explanation: "The preview is stopped.",
                 };
+              }
+              if (request.action === "push") {
+                // Canonical, never the task's workspace. What an agent has in
+                // its checkout has not been integrated or validated yet, and
+                // publishing it would put work on a remote that this repository
+                // has not accepted — the one place where "the agent's version"
+                // and "the project's version" must not be confused.
+                return await pushCanonical(project, store, github, request);
+              }
+              if (request.action === "pull") {
+                // Canonical again, and for the matching reason: "pull from
+                // GitHub" means the platform's copy of the repository, not the
+                // agent's checkout — a fetch inside the workspace reaches only
+                // the local mirror and updates nothing anyone else can see.
+                return await pullCanonical(project, store, github, request);
+              }
+              if (request.action !== "preview_start") {
+                return {
+                  outcome: "refused",
+                  explanation:
+                    `"${request.action}" is not something this deployment does. ` +
+                    "Available actions: preview_start, preview_stop, push, pull.",
+                };
+              }
+              // The task's own workspace, never canonical. An agent looking at
+              // canonical would be looking at the app without the change it has
+              // just made, so anything it concluded — or screenshotted — would
+              // be about the wrong version.
+              const started = await previews.startForTask({
+                taskId: request.task.id,
+                repositoryId: request.repository.id,
+                workspacePath: request.workspacePath,
+              });
+              return started.failed
+                ? {
+                    outcome: "refused",
+                    detail: { output: started.output },
+                    explanation:
+                      "The app did not start. Its output is in `detail.output`.",
+                  }
+                : {
+                    outcome: "done",
+                    detail: {
+                      ...(started.url === undefined
+                        ? {}
+                        : { url: started.url }),
+                      output: started.output,
+                    },
+                    explanation:
+                      `The app is at ${started.url ?? "an unknown address"}. ` +
+                      "It serves this task's workspace, so it includes changes " +
+                      "that have not landed yet.",
+                  };
+            },
           },
-        },
-        // Where an agent's question goes. The gateway is the only thing here
-        // that knows where people are watching, and it is the same object
-        // serving the channel the answer will arrive in.
-        questions: {
-          awaitAnswer: async (ask) =>
-            await (servingGateway?.awaitAgentAnswer(ask) ??
-              Promise.resolve(undefined)),
-        },
-      });
+          // Where an agent's question goes. The gateway is the only thing here
+          // that knows where people are watching, and it is the same object
+          // serving the channel the answer will arrive in.
+          questions: {
+            awaitAnswer: async (ask) =>
+              await (servingGateway?.awaitAgentAnswer(ask) ??
+                Promise.resolve(undefined)),
+          },
+        });
+        if (result.claimed.length === 0) {
+          return;
+        }
+      }
     },
     async projectMetrics(input) {
       return await computeCoordinationMetrics(store, {

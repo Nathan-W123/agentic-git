@@ -15,6 +15,7 @@
 export interface SlashCommand {
   name:
     | "plan"
+    | "queue"
     | "ask"
     | "dnc"
     | "simple"
@@ -47,6 +48,12 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     name: "plan",
     summary: "Plan it first, and wait for your go-ahead before touching code",
     usage: "/plan @agent what you want done",
+    takesObjective: true,
+  },
+  {
+    name: "queue",
+    summary: "Run this after the agent finishes its current task",
+    usage: "/queue @agent what should run next",
     takesObjective: true,
   },
   {

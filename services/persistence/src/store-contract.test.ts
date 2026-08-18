@@ -474,6 +474,101 @@ for (const backend of backends) {
     }
   });
 
+  test(`${backend.name}: queued task dependencies release in FIFO order`, async () => {
+    const { store, cleanup } = await backend.open();
+    try {
+      const owner = await store.createUser({
+        email: "queued-work@example.invalid",
+        displayName: "Queued Work",
+        passwordDigest: "unused",
+      });
+      const worker = await store.registerWorker({
+        userId: owner.id,
+        organizationId: DEFAULT_ORGANIZATION_ID,
+        name: "queue-worker",
+        adapters: ["codex"],
+        version: "0.1.0",
+      });
+      await store.saveRepository(REPOSITORY);
+      const first = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "first",
+        agentId: "codex",
+        validationCommands: [],
+      });
+      const second = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "second",
+        agentId: "codex",
+        validationCommands: [],
+        queueAfterCurrent: true,
+      });
+      const third = await store.submitTask({
+        repositoryId: REPOSITORY.id,
+        objective: "third",
+        agentId: "codex",
+        validationCommands: [],
+        queueAfterCurrent: true,
+      });
+
+      assert.equal(second.afterTaskId, first.id);
+      assert.equal(third.afterTaskId, second.id);
+      const firstLease = await store.leaseNextTask({
+        workerId: worker.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 3,
+      });
+      assert.equal(firstLease?.task.id, first.id);
+      assert.equal(
+        await store.leaseNextTask({
+          workerId: worker.id,
+          repositoryId: REPOSITORY.id,
+          baseRevision: BASE_VERSION.revision,
+          ttlMs: 60_000,
+          repositoryParallelism: 3,
+        }),
+        undefined,
+      );
+
+      assert.ok(firstLease !== undefined);
+      await store.completeSubmittedTask(first.id, "integrated");
+      await store.finishWorkLease(
+        firstLease.lease.id,
+        "completed",
+        new Date().toISOString(),
+      );
+      const secondLease = await store.leaseNextTask({
+        workerId: worker.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 3,
+      });
+      assert.equal(secondLease?.task.id, second.id);
+
+      assert.ok(secondLease !== undefined);
+      await store.completeSubmittedTask(second.id, "integrated");
+      await store.finishWorkLease(
+        secondLease.lease.id,
+        "completed",
+        new Date().toISOString(),
+      );
+      const thirdLease = await store.leaseNextTask({
+        workerId: worker.id,
+        repositoryId: REPOSITORY.id,
+        baseRevision: BASE_VERSION.revision,
+        ttlMs: 60_000,
+        repositoryParallelism: 3,
+      });
+      assert.equal(thirdLease?.task.id, third.id);
+    } finally {
+      await store.close();
+      await cleanup();
+    }
+  });
+
   test(`${backend.name}: a task's context survives being claimed`, async () => {
     // The whole point of the column is that the agent reads it, and the agent
     // only ever sees a *claimed* task — a context that round-trips on submit

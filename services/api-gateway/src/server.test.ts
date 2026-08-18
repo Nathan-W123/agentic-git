@@ -75,6 +75,8 @@ interface TestRuntime {
     conversationId?: string;
     /** Whether the dispatch asked for the work to be held, not queued. */
     planOnly?: boolean;
+    /** Whether the dispatch asked to follow this agent's active work. */
+    queueAfterCurrent?: boolean;
     /** What the channel picked for this agent, if it picked anything. */
     model?: string;
     effort?: string;
@@ -488,6 +490,11 @@ async function startRuntime(
       return repository;
     },
     async submitTask(input) {
+      const agentId =
+        input.agentId ??
+        (input.vendor === undefined
+          ? "test-agent"
+          : `test-agent-${input.vendor}`);
       submittedTasks.push({
         projectId: input.projectId,
         repositoryId: input.repositoryId,
@@ -500,6 +507,9 @@ async function startRuntime(
           ? {}
           : { conversationId: input.conversationId }),
         ...(input.planOnly === undefined ? {} : { planOnly: input.planOnly }),
+        ...(input.queueAfterCurrent === undefined
+          ? {}
+          : { queueAfterCurrent: input.queueAfterCurrent }),
         ...(input.model === undefined ? {} : { model: input.model }),
         ...(input.effort === undefined ? {} : { effort: input.effort }),
       });
@@ -520,9 +530,12 @@ async function startRuntime(
         // A real deployment resolves `vendor` to one of its own configured
         // agent ids (see `resolveAgentIdForVendor` in apps/web/src/index.ts);
         // the fixture only needs a stable, distinguishable id back.
-        agentId: input.agentId ?? (input.vendor === undefined ? "test-agent" : `test-agent-${input.vendor}`),
+        agentId,
         validationCommands: [],
         submittedBy: input.actorId,
+        ...(input.queueAfterCurrent === true
+          ? { queueAfterCurrent: true }
+          : {}),
       });
     },
     async runRepository() {
@@ -5376,6 +5389,129 @@ test("a command and a mention work together, and /plan holds the run", async (t)
       /Starting now/u.test(reply.content),
     );
   }, "the approved plan never started");
+});
+
+test("/queue chains one agent's follow-up work without claiming it early", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "slash-queue");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Bad queue commands are explained and never create empty or unroutable
+  // work.
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/queue do this later" },
+  });
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/queue @Claude (Owner)" },
+  });
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: {
+      content: "/queue @Claude (Owner) @Codex (Owner) duplicate work",
+    },
+  });
+  assert.equal(runtime.submittedTasks.length, 0);
+  const rejected = await owner.request(`${base}/messages`);
+  assert.match(
+    (rejected.data.messages as Array<{ content: string }>)
+      .map((message) => message.content)
+      .join("\n"),
+    /\/queue @agent what should run next/u,
+  );
+
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "@Claude (Owner) handle current work" },
+  });
+  const current = (await runtime.store.listSubmittedTasks({ repositoryId }))[0];
+  assert.ok(current !== undefined);
+  await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID);
+
+  for (const objective of ["first follow-up", "second follow-up"]) {
+    const posted = await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: `/queue @Claude (Owner) ${objective}` },
+    });
+    assert.equal(posted.status, 201, JSON.stringify(posted.data));
+  }
+  assert.equal(runtime.submittedTasks.length, 3);
+  assert.ok(
+    runtime.submittedTasks
+      .slice(1)
+      .every((task) => task.queueAfterCurrent === true),
+  );
+  assert.equal(runtime.runCalls.length, 1);
+  const tasks = await runtime.store.listSubmittedTasks({ repositoryId });
+  const first = tasks.find((task) => task.objective.includes("first follow-up"));
+  const second = tasks.find((task) => task.objective.includes("second follow-up"));
+  assert.equal(first?.afterTaskId, current.id);
+  assert.equal(second?.afterTaskId, first?.id);
+  assert.deepEqual(
+    await runtime.store.claimSubmittedTasks(repositoryId, DEFAULT_PROJECT_ID),
+    [],
+  );
+
+  await runtime.store.completeSubmittedTask(current.id, "integrated");
+  await runtime.store.appendAudit(undefined, {
+    type: "task_reported",
+    taskId: current.id,
+    data: { explanation: "Current work finished." },
+  });
+  await waitFor(
+    async () => runtime.runCalls.length === 2,
+    "the first queued task was not started after its predecessor finished",
+  );
+  const [firstClaim] = await runtime.store.claimSubmittedTasks(
+    repositoryId,
+    DEFAULT_PROJECT_ID,
+  );
+  assert.equal(firstClaim?.id, first?.id);
+  assert.ok(first !== undefined);
+  await runtime.store.completeSubmittedTask(first.id, "integrated");
+  await runtime.store.appendAudit(undefined, {
+    type: "task_reported",
+    taskId: first.id,
+    data: { explanation: "First follow-up finished." },
+  });
+  await waitFor(
+    async () => runtime.runCalls.length === 3,
+    "the second queued task was not started after the first finished",
+  );
+  const [secondClaim] = await runtime.store.claimSubmittedTasks(
+    repositoryId,
+    DEFAULT_PROJECT_ID,
+  );
+  assert.equal(secondClaim?.id, second?.id);
+  assert.ok(second !== undefined);
+  await runtime.store.completeSubmittedTask(second.id, "integrated");
+
+  // With no unfinished task, the same command is submitted normally and is
+  // immediately claimable.
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "/queue @Claude (Owner) idle follow-up" },
+  });
+  const idle = (await runtime.store.listSubmittedTasks({ repositoryId })).find(
+    (task) => task.objective.includes("idle follow-up"),
+  );
+  assert.equal(idle?.afterTaskId, undefined);
+  assert.equal(runtime.runCalls.length, 4);
+  const [idleClaim] = await runtime.store.claimSubmittedTasks(
+    repositoryId,
+    DEFAULT_PROJECT_ID,
+  );
+  assert.equal(idleClaim?.id, idle?.id);
 });
 
 test("/dnc is answered in the channel, told in words not to code, and files no task", async (t) => {

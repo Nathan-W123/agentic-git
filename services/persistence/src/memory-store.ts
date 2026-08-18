@@ -651,6 +651,10 @@ export class InMemoryCoordinationStore implements CoordinationStore {
           (input.repositoryId === undefined ||
             task.repositoryId === input.repositoryId) &&
           (input.projectId === undefined || task.projectId === input.projectId) &&
+          (task.afterTaskId === undefined ||
+            !["submitted", "claimed", "planned"].includes(
+              this.submitted.get(task.afterTaskId)?.status ?? "integrated",
+            )) &&
           activeLeases(task.repositoryId) < parallelism,
       )
       .sort((left, right) => left.submittedAt.localeCompare(right.submittedAt))[0];
@@ -1150,6 +1154,25 @@ export class InMemoryCoordinationStore implements CoordinationStore {
         }
       }
     }
+    const afterTaskId =
+      input.afterTaskId ??
+      (input.queueAfterCurrent === true
+        ? [...this.submitted.values()]
+            .filter(
+              (candidate) =>
+                candidate.repositoryId === input.repositoryId &&
+                candidate.projectId ===
+                  (input.projectId ?? DEFAULT_PROJECT_ID) &&
+                candidate.agentId === input.agentId &&
+                candidate.submittedBy === input.submittedBy &&
+                (candidate.status === "submitted" ||
+                  candidate.status === "claimed"),
+            )
+            .sort((left, right) =>
+              left.submittedAt.localeCompare(right.submittedAt),
+            )
+            .at(-1)?.id
+        : undefined);
     const task: SubmittedTask = {
       id: createId("task"),
       repositoryId: input.repositoryId,
@@ -1158,6 +1181,7 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       agentId: input.agentId,
       validationCommands: copy(input.validationCommands),
       submittedBy: input.submittedBy,
+      afterTaskId,
       context: input.context,
       conversationId: input.conversationId,
       model: input.model,
@@ -1200,7 +1224,15 @@ export class InMemoryCoordinationStore implements CoordinationStore {
       status: "submitted",
     })) {
       const stored = this.submitted.get(task.id);
-      if (stored?.status === "submitted") {
+      const predecessor =
+        stored?.afterTaskId === undefined
+          ? undefined
+          : this.submitted.get(stored.afterTaskId);
+      if (
+        stored?.status === "submitted" &&
+        (predecessor === undefined ||
+          !["submitted", "claimed", "planned"].includes(predecessor.status))
+      ) {
         stored.status = "claimed";
         stored.claimedAt = new Date().toISOString();
         claimed.push(copy(stored));

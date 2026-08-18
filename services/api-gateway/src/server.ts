@@ -2143,6 +2143,8 @@ export interface ApiOperations {
      * being approved.
      */
     planOnly?: boolean;
+    /** Queue this after this agent owner's latest unfinished task, if any. */
+    queueAfterCurrent?: boolean;
     /**
      * What this channel picked for the agent, overriding the deployment's
      * configured default for this one task. See `SubmitTaskInput.model`.
@@ -9130,7 +9132,7 @@ export class ApiGateway {
    * Returns true when the message is finished with — `/help` and the
    * thread-scoped ones are answered here and go no further. Returns false
    * for commands that only change how the rest of the message is treated
-   * (`/plan`, `/ask`, `/dnc`, `/simple`, `/push`), which still need the
+   * (`/plan`, `/queue`, `/ask`, `/dnc`, `/simple`, `/push`), which still need the
    * mention resolution below.
    */
   private async runSlashCommand(input: {
@@ -9187,6 +9189,24 @@ export class ApiGateway {
           projectId,
           repositoryId,
           "`/push` needs an agent to publish for — use `/push @agent`.",
+        );
+        return true;
+      }
+    }
+    if (input.command.name === "queue") {
+      if (/@agents\b/iu.test(input.rest) || EVERYONE_RE.test(input.rest)) {
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          "`/queue` works with one agent at a time — mention the agent whose work should run next.",
+        );
+        return true;
+      }
+      if (!ADDRESSED_RE.test(input.rest)) {
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          "`/queue` needs one agent and a task — use `/queue @agent what should run next`.",
         );
         return true;
       }
@@ -9466,6 +9486,32 @@ export class ApiGateway {
         );
         return;
       }
+      if (parsed?.command.name === "queue" && mentioned.length !== 1) {
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          mentioned.length > 1
+            ? "`/queue` works with one agent at a time — mention only the agent whose work should run next."
+            : candidates.length === 0
+              ? "`/queue` needs a reachable agent, and this channel has none."
+              : "`/queue` needs one agent from this channel: " +
+                  `${candidates
+                    .map((candidate) => `@${candidate.name}`)
+                    .join(", ")}.`,
+        );
+        return;
+      }
+      if (
+        parsed?.command.name === "queue" &&
+        withoutMentions(content).trim() === ""
+      ) {
+        await this.postChannelSystemMessage(
+          projectId,
+          repositoryId,
+          "`/queue` needs a task to run later — use `/queue @agent what should run next`.",
+        );
+        return;
+      }
       if (
         mentioned.length === 0 &&
         mentionedPeople.length === 0 &&
@@ -9546,6 +9592,9 @@ export class ApiGateway {
           candidate,
           referencedMessageId,
           ...(parsed?.command.name === "plan" ? { planOnly: true } : {}),
+          ...(parsed?.command.name === "queue"
+            ? { queueAfterCurrent: true }
+            : {}),
           // `/simple` travels as a flag rather than as words appended to
           // `content`, so the question-versus-work reading below stays about
           // what the sender actually typed.
@@ -9779,6 +9828,8 @@ export class ApiGateway {
      * execution is already bought.
      */
     planOnly?: boolean;
+    /** Defer this work behind the same agent owner's active queue. */
+    queueAfterCurrent?: boolean;
     /**
      * `/simple`: whatever comes back should be as short and simple as it can
      * be said. Carried as a flag so the question-versus-work reading of
@@ -9826,15 +9877,17 @@ export class ApiGateway {
     // No task exists yet, so this is keyed on the agent instead. The frame
     // below carries the real id and supersedes it; the question path never
     // submits anything, and lets it lapse.
-    this.webSockets.broadcastTransient(projectId, {
-      type: "channel-agent-busy",
-      projectId,
-      repositoryId,
-      userId: candidate.userId,
-      provider: candidate.provider,
-      taskId: `${PENDING_BUSY_PREFIX}${candidate.userId}:${candidate.provider}`,
-      occurredAt: new Date().toISOString(),
-    });
+    if (input.queueAfterCurrent !== true) {
+      this.webSockets.broadcastTransient(projectId, {
+        type: "channel-agent-busy",
+        projectId,
+        repositoryId,
+        userId: candidate.userId,
+        provider: candidate.provider,
+        taskId: `${PENDING_BUSY_PREFIX}${candidate.userId}:${candidate.provider}`,
+        occurredAt: new Date().toISOString(),
+      });
+    }
     // A question is not a task. "What are you working on?" was being turned
     // into a submitted task named after the question, with a thread and a
     // progress indicator attached to work that would never exist — the agent
@@ -9853,7 +9906,11 @@ export class ApiGateway {
     // task that says nothing substantive no longer opens a thread. So the
     // question is answered by an agent that actually read the file, and it
     // still arrives as one line in the channel.
-    if (readsAsQuestion(content) && !needsTheRepository(content)) {
+    if (
+      input.queueAfterCurrent !== true &&
+      readsAsQuestion(content) &&
+      !needsTheRepository(content)
+    ) {
       await this.answerInChannel(
         candidate,
         content,
@@ -9911,7 +9968,12 @@ export class ApiGateway {
     // the thread. Everything downstream hangs off `threadRootId`, so the run
     // can be queued and start narrating while the opening line is still being
     // written.
-    const openingLine = claimMessage === undefined ? "On it." : `On it. ${claimMessage}`;
+    const openingLine =
+      input.queueAfterCurrent === true
+        ? "Queued."
+        : claimMessage === undefined
+          ? "On it."
+          : `On it. ${claimMessage}`;
     // Asked inside a thread, or close enough to one that it belongs there.
     // The explicit half is a person saying "and now this too"; the automatic
     // half is `findThreadToContinue`, held to a high bar because a wrong
@@ -10013,10 +10075,10 @@ export class ApiGateway {
     // already on the screen. Not awaited: a slow model must not hold up
     // queueing the work, and the only thing riding on it is how the first
     // line reads.
-    const acknowledgement = this.composeAcknowledgement(
-      candidate,
-      content,
-      claimMessage,
+    const acknowledgement = (
+      input.queueAfterCurrent === true
+        ? Promise.resolve(openingLine)
+        : this.composeAcknowledgement(candidate, content, claimMessage)
     ).then(async (text) => {
       if (text === openingLine) {
         return text;
@@ -10130,7 +10192,21 @@ export class ApiGateway {
         // be an ordinary queued task, and any concurrent dispatch's
         // `runRepository` takes the oldest queued row in the repository.
         ...(input.planOnly === true ? { planOnly: true } : {}),
+        ...(input.queueAfterCurrent === true
+          ? { queueAfterCurrent: true }
+          : {}),
       });
+      if (input.queueAfterCurrent === true && continuing === undefined) {
+        await this.options.store
+          .setChannelMessageContent(
+            repositoryId,
+            threadRootId,
+            task.afterTaskId === undefined
+              ? "On it."
+              : "Queued — I'll start this after my current task.",
+          )
+          .catch(() => undefined);
+      }
       await this.options.store.appendAudit(undefined, {
         type: "task_submitted",
         taskId: task.id,
@@ -10154,15 +10230,17 @@ export class ApiGateway {
       // the client can retire the indicator against that task's real status
       // rather than guessing from a timeout, and this one goes to everybody
       // including the sender, who is the person most waiting to see it.
-      this.webSockets.broadcastTransient(projectId, {
-        type: "channel-agent-busy",
-        projectId,
-        repositoryId,
-        userId: candidate.userId,
-        provider: candidate.provider,
-        taskId: task.id,
-        occurredAt: new Date().toISOString(),
-      });
+      if (task.afterTaskId === undefined) {
+        this.webSockets.broadcastTransient(projectId, {
+          type: "channel-agent-busy",
+          projectId,
+          repositoryId,
+          userId: candidate.userId,
+          provider: candidate.provider,
+          taskId: task.id,
+          occurredAt: new Date().toISOString(),
+        });
+      }
       // Inside the thread, not beside it: the channel already says who took
       // this, and the detail belongs where somebody following the work will
       // look for it.
@@ -10184,7 +10262,13 @@ export class ApiGateway {
       //
       // `planOnly` is the exception and has to stay one: there the whole
       // point is that nothing runs, so its plan really is worth waiting for.
-      const openingPromise = this.planOpening(candidate, task.objective);
+      const openingPromise =
+        task.afterTaskId === undefined
+          ? this.planOpening(candidate, task.objective)
+          : Promise.resolve({
+              title: summariseObjective(task.objective),
+              thoughts: [],
+            });
       if (input.planOnly === true) {
         // Planned, and stopped there.
         //
@@ -10233,54 +10317,56 @@ export class ApiGateway {
       // events, no thinking, and an indicator that never stopped: the work
       // had been filed, not started. Kicked off without being awaited, so
       // the channel post does not wait on a whole run.
-      void Promise.resolve(
-        this.options.operations.runRepository?.({
-          projectId,
-          repositoryId,
-          actorId: candidate.userId,
-        }),
-      ).catch(async (error: unknown) => {
-        // `describeError`, not `.message`: a run that fails while planning
-        // rejects with an AggregateError whose own message says only that one
-        // or more tasks failed, and the reasons — which agent, and why — are
-        // in `errors`. Reading `.message` reported the shape of the failure
-        // and never its cause, leaving the channel with a sentence nobody
-        // could act on and the log as the only place the answer existed.
-        const reason = describeError(error);
-        process.stderr.write(
-          `[channel] run failed for ${repositoryId}: ${reason}
+      if (task.afterTaskId === undefined) {
+        void Promise.resolve(
+          this.options.operations.runRepository?.({
+            projectId,
+            repositoryId,
+            actorId: candidate.userId,
+          }),
+        ).catch(async (error: unknown) => {
+          // `describeError`, not `.message`: a run that fails while planning
+          // rejects with an AggregateError whose own message says only that one
+          // or more tasks failed, and the reasons — which agent, and why — are
+          // in `errors`. Reading `.message` reported the shape of the failure
+          // and never its cause, leaving the channel with a sentence nobody
+          // could act on and the log as the only place the answer existed.
+          const reason = describeError(error);
+          process.stderr.write(
+            `[channel] run failed for ${repositoryId}: ${reason}
 `,
-        );
-        // Said in the channel, not only to stderr.
-        //
-        // This rejects when the run could not even start — the repository is
-        // unreadable, no agent is configured for the vendor, a stored record
-        // disagrees with itself. In every one of those cases the task writes
-        // no audit events at all, so the watcher below has nothing to follow
-        // and holds its opening line waiting for a run that will never
-        // report. The person saw "On it." and then an hour of silence before
-        // the watchdog admitted defeat, and the one component that knew why
-        // had written the reason to a log nobody reading the channel can see.
-        //
-        // Dropping the watch as well, so the hour of silence does not happen
-        // after the explanation either.
-        this.watchedChannelTasks.delete(task.id);
-        // A run that never started cannot be waiting its turn either. Rare,
-        // but the arbitration can already have been announced: the plan is
-        // admitted before the execution that fails here.
-        await this.withdrawArbitrationNotice({
-          projectId,
-          repositoryId,
-          taskId: task.id,
+          );
+          // Said in the channel, not only to stderr.
+          //
+          // This rejects when the run could not even start — the repository is
+          // unreadable, no agent is configured for the vendor, a stored record
+          // disagrees with itself. In every one of those cases the task writes
+          // no audit events at all, so the watcher below has nothing to follow
+          // and holds its opening line waiting for a run that will never
+          // report. The person saw "On it." and then an hour of silence before
+          // the watchdog admitted defeat, and the one component that knew why
+          // had written the reason to a log nobody reading the channel can see.
+          //
+          // Dropping the watch as well, so the hour of silence does not happen
+          // after the explanation either.
+          this.watchedChannelTasks.delete(task.id);
+          // A run that never started cannot be waiting its turn either. Rare,
+          // but the arbitration can already have been announced: the plan is
+          // admitted before the execution that fails here.
+          await this.withdrawArbitrationNotice({
+            projectId,
+            repositoryId,
+            taskId: task.id,
+          });
+          await this.appendChannelThreadReply({
+            projectId,
+            repositoryId,
+            messageId: threadRootId,
+            authorId: `${candidate.userId}:${candidate.provider}`,
+            content: `I could not start this: ${reason}`,
+          }).catch(() => undefined);
         });
-        await this.appendChannelThreadReply({
-          projectId,
-          repositoryId,
-          messageId: threadRootId,
-          authorId: `${candidate.userId}:${candidate.provider}`,
-          content: `I could not start this: ${reason}`,
-        }).catch(() => undefined);
-      });
+      }
       // From here the thread narrates itself until the task ends.
       this.watchChannelTask({
         taskId: task.id,
@@ -14308,6 +14394,7 @@ export class ApiGateway {
               // A run that has stopped is not waiting its turn, whatever the
               // room was last told about the collision it was in.
               await this.withdrawArbitrationNotice(watched);
+              await this.startQueuedTasksAfter(watched);
               break;
             }
             // Something worth following. Everything held so far goes in
@@ -14366,6 +14453,7 @@ export class ApiGateway {
             // so the standing promise about when this would start is simply
             // taken back rather than answered with a second line.
             await this.withdrawArbitrationNotice(watched);
+            await this.startQueuedTasksAfter(watched);
             break;
           }
         }
@@ -14409,6 +14497,59 @@ export class ApiGateway {
         );
       }
     }
+  }
+
+  /** Starts the first explicit follow-up that this finished task unblocked. */
+  private async startQueuedTasksAfter(
+    watched: WatchedChannelTask,
+  ): Promise<void> {
+    const next = (
+      await this.options.store.listSubmittedTasks({
+        projectId: watched.projectId,
+        repositoryId: watched.repositoryId,
+        status: "submitted",
+      })
+    ).find((task) => task.afterTaskId === watched.taskId);
+    if (next === undefined) {
+      return;
+    }
+    const actorId = next.submittedBy ?? watched.ownerId;
+    const queuedWatch = this.watchedChannelTasks.get(next.id);
+    if (queuedWatch !== undefined) {
+      this.webSockets.broadcastTransient(queuedWatch.projectId, {
+        type: "channel-agent-busy",
+        projectId: queuedWatch.projectId,
+        repositoryId: queuedWatch.repositoryId,
+        userId: queuedWatch.ownerId,
+        provider: queuedWatch.provider,
+        taskId: next.id,
+        occurredAt: new Date().toISOString(),
+      });
+    }
+    void Promise.resolve(
+      this.options.operations.runRepository({
+        projectId: watched.projectId,
+        repositoryId: watched.repositoryId,
+        actorId,
+      }),
+    ).catch(async (error: unknown) => {
+      const reason = describeError(error);
+      process.stderr.write(
+        `[channel] queued run failed for ${watched.repositoryId}: ${reason}\n`,
+      );
+      if (queuedWatch === undefined) {
+        return;
+      }
+      this.watchedChannelTasks.delete(next.id);
+      await this.appendChannelThreadReply({
+        projectId: queuedWatch.projectId,
+        repositoryId: queuedWatch.repositoryId,
+        messageId: queuedWatch.messageId,
+        authorId: queuedWatch.authorId,
+        content: `I could not start this: ${reason}`,
+        kind: "outcome",
+      }).catch(() => undefined);
+    });
   }
 
   /** One channel entry, stored and announced on the event stream. */
