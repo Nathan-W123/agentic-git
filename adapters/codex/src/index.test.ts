@@ -1488,7 +1488,7 @@ test("an explicit /ask asks its questions first, then implements the answers", a
       // asked and hands back what they chose.
       if (event.event === "question_asked") {
         void adapter.resolveQuestion(session.id, {
-          requestId: event.requestId,
+          requestId: event.requestId ?? "",
           status: "answered",
           chosen: 0,
           answers: [{ chosen: 0 }, { text: "In the channel commands" }],

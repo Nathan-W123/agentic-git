@@ -113,7 +113,10 @@ test("a command written last is still the command, and the mentions survive", ()
   const parsed = parseSlashCommand("@Zeus change the background color /ask");
   assert.equal(parsed?.command.name, "ask");
   assert.equal(parsed?.rest, "@Zeus change the background color");
-  assert.match(parsed?.command.summary ?? "", /questions before starting/u);
+  // The summary was reworded when /ask learned to implement after its
+  // question round; the assertion pins the shape (ask, then work), not the
+  // sentence.
+  assert.match(parsed?.command.summary ?? "", /questions first/u);
   assert.equal(parsed?.command.usage, "/ask @agent what you want done");
 });
 
