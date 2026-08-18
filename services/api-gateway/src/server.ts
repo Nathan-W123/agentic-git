@@ -72,6 +72,7 @@ import {
   secretMatches,
   type AuthenticatedPrincipal,
 } from "./auth.js";
+import { createMailer, type Mailer } from "./mailer.js";
 import {
   authorizeOrganization,
   authorizeProject,
@@ -2702,6 +2703,19 @@ export interface ApiGatewayOptions {
    * Injectable so tests and embedded runtimes do not launch a real CLI.
    */
   codexUsageReader?: CodexUsageReader;
+  /**
+   * Delivers password-reset links and registration confirmation codes.
+   * Defaults to the mailer built from `COORD_SMTP_URL`, which logs messages
+   * when no relay is configured. Injected by tests, which must not open a
+   * socket to anywhere.
+   */
+  mailer?: Mailer;
+  /**
+   * Absolute origin this deployment is reached at, used to build links that
+   * travel outside the browser. Defaults to `COORD_PUBLIC_URL`, and failing
+   * that to the `Host` of the request that asked for the link.
+   */
+  publicUrl?: string;
   /** How often open event channels re-check account and membership state. */
   webSocketReauthorizeIntervalMs?: number;
   /**
@@ -3018,6 +3032,47 @@ function hstsMaxAge(configured: string | undefined): number {
 }
 
 /**
+ * How long a password reset link stays usable, in milliseconds.
+ *
+ * An hour by default. Anything unparseable falls back to that rather than
+ * failing startup: a mistyped number should not stop a control plane booting,
+ * and the default is safe.
+ */
+function passwordResetTtlMs(configured: string | undefined): number {
+  const minutes = Number((configured ?? "").trim());
+  return Number.isSafeInteger(minutes) && minutes > 0
+    ? minutes * 60_000
+    : 60 * 60_000;
+}
+
+/**
+ * Refuses a retyped field that does not match what it confirms.
+ *
+ * Absent means unchecked. The browser always sends both, but an existing
+ * script that posts to these endpoints was written before the fields existed,
+ * and breaking it would be a cost with no safety in return: retyping guards
+ * against a typo the person cannot see, not against an attacker.
+ *
+ * The comparison is on the trimmed value for the same reason the field itself
+ * is stored trimmed — otherwise a trailing space typed into one box and not
+ * the other would report a mismatch the person cannot see either.
+ */
+function assertConfirmed(
+  value: unknown,
+  expected: string,
+  field: string,
+  message: string,
+): void {
+  if (value === undefined) {
+    return;
+  }
+  const confirmation = stringField(value, field, { max: 320, min: 0 }) ?? "";
+  if (confirmation !== expected) {
+    throw new HttpError(400, "confirmation_mismatch", message);
+  }
+}
+
+/**
  * Whether this control plane accepts self-service sign-up.
  *
  * Open by default so somebody who receives the deployment link can create an
@@ -3216,6 +3271,10 @@ export class ApiGateway {
    * the system administrator.
    */
   private readonly bootstrapToken: string | undefined;
+  /** Delivers password-reset links and registration confirmation codes. */
+  private readonly mailer: Mailer;
+  /** Configured origin for links that leave the browser, or "" to infer one. */
+  private readonly publicUrl: string;
 
   public constructor(private readonly options: ApiGatewayOptions) {
     const configured = (options.bootstrapToken ?? "").trim();
@@ -3245,9 +3304,24 @@ export class ApiGateway {
         return parsed.origin;
       }),
     );
+    this.mailer =
+      options.mailer ??
+      createMailer({
+        smtpUrl: process.env["COORD_SMTP_URL"],
+        from: process.env["COORD_MAIL_FROM"],
+      });
     this.auth = new AuthService(options.store, {
       secureCookies: options.secureCookies ?? false,
+      passwordResetTtlMs: passwordResetTtlMs(
+        process.env["COORD_PASSWORD_RESET_TTL_MINUTES"],
+      ),
+      mailer: this.mailer,
     });
+    this.publicUrl = (
+      options.publicUrl ??
+      process.env["COORD_PUBLIC_URL"] ??
+      ""
+    ).trim();
     this.trustedProxyHops = trustedProxyHops(
       process.env["COORD_TRUSTED_PROXY_HOPS"],
     );
@@ -3459,13 +3533,19 @@ export class ApiGateway {
 
     try {
       const ip = this.remoteAddress(request);
-      const authRoute = [
-        `${API_PREFIX}/auth/login`,
-        `${API_PREFIX}/auth/bootstrap`,
-        // Registration mints an account from an unauthenticated request, so
-        // it belongs on the stricter limiter with the other two.
-        `${API_PREFIX}/auth/register`,
-      ].includes(url.pathname);
+      const authRoute =
+        [
+          `${API_PREFIX}/auth/login`,
+          `${API_PREFIX}/auth/bootstrap`,
+          // Registration mints an account from an unauthenticated request, so
+          // it belongs on the stricter limiter with the other two.
+          `${API_PREFIX}/auth/register`,
+          `${API_PREFIX}/auth/register/confirm`,
+        ].includes(url.pathname) ||
+        // Password reset belongs here too, and more than any of them: it sends
+        // mail to an address the caller chose, so an unthrottled one is a way
+        // to make this deployment relay a stranger's messages.
+        url.pathname.startsWith(`${API_PREFIX}/auth/password-reset`);
       const rate = (authRoute ? this.authLimiter : this.limiter).consume(
         `${ip}:${authRoute ? "auth" : "api"}`,
       );
@@ -3505,15 +3585,24 @@ export class ApiGateway {
       const invitationPath = /^\/api\/v1\/invitations\/[^/]+(\/accept)?$/u.test(
         url.pathname,
       );
+      // Recovering a forgotten password cannot require being signed in, which
+      // is the one thing a person in that position cannot do. The link's own
+      // secret is the credential, exactly as with an invitation.
+      const passwordResetPath = url.pathname.startsWith(
+        `${API_PREFIX}/auth/password-reset`,
+      );
       const isPublic =
         (request.method === "GET" && url.pathname === `${API_PREFIX}/health`) ||
         (request.method === "GET" && invitationPath) ||
+        (passwordResetPath &&
+          (request.method === "GET" || request.method === "POST")) ||
         (request.method === "POST" &&
           [
             `${API_PREFIX}/auth/login`,
             `${API_PREFIX}/auth/bootstrap`,
             // Creating an account cannot require an account.
             `${API_PREFIX}/auth/register`,
+            `${API_PREFIX}/auth/register/confirm`,
           ].includes(url.pathname)) ||
         (request.method === "POST" &&
           url.pathname.endsWith("/accept") &&
@@ -3625,6 +3714,7 @@ export class ApiGateway {
         throw new HttpError(403, "invalid_bootstrap_token", "Bootstrap token is invalid");
       }
       const body = objectBody(await this.readJson(request));
+      this.assertAccountConfirmations(body);
       if (this.bootstrapInProgress) {
         throw new HttpError(
           409,
@@ -3683,7 +3773,8 @@ export class ApiGateway {
         );
       }
       const body = objectBody(await this.readJson(request));
-      const user = await this.auth.register({
+      this.assertAccountConfirmations(body);
+      const registration = await this.auth.startRegistration({
         email: emailField(body["email"]) ?? "",
         displayName:
           stringField(body["displayName"], "displayName", { max: 120 }) ?? "",
@@ -3696,6 +3787,29 @@ export class ApiGateway {
                   max: 120,
                 }) ?? "",
             }),
+      });
+      this.sendJson(response, 202, registration);
+      return;
+    }
+
+    if (
+      method === "POST" &&
+      path === `${API_PREFIX}/auth/register/confirm`
+    ) {
+      if (!registrationOpen(process.env)) {
+        throw new HttpError(
+          403,
+          "registration_closed",
+          "This control plane does not accept new accounts",
+        );
+      }
+      const body = objectBody(await this.readJson(request));
+      const user = await this.auth.confirmRegistration({
+        registrationId:
+          stringField(body["registrationId"], "registrationId", {
+            max: 128,
+          }) ?? "",
+        code: stringField(body["code"], "code", { max: 32 }) ?? "",
       });
       const issued = await this.auth.issueSession(
         user,
@@ -3729,6 +3843,103 @@ export class ApiGateway {
       await this.options.store.appendAudit(undefined, {
         type: "user_authenticated",
         data: { userId: issued.principal.user.id, bootstrap: false },
+      });
+      this.sendJson(response, 200, {
+        user: issued.principal.user,
+        memberships: issued.principal.memberships,
+        csrfToken: issued.csrfToken,
+      });
+      return;
+    }
+
+    // ---- Forgotten passwords ----------------------------------------------
+    // Both halves are reachable without a session: somebody who cannot sign in
+    // is exactly who these are for. The link carries its own secret.
+    if (method === "POST" && path === `${API_PREFIX}/auth/password-reset`) {
+      const body = objectBody(await this.readJson(request));
+      const email = emailField(body["email"]) ?? "";
+      const issued = await this.auth.requestPasswordReset(email);
+      if (issued !== undefined) {
+        const link = `${this.originFor(request, context.secure)}/#reset/${issued.token}`;
+        try {
+          await this.mailer({
+            to: issued.user.email,
+            subject: "Reset your Lattice password",
+            text:
+              `Hello ${issued.user.displayName},\n\n` +
+              `Somebody asked to reset the password for this account. ` +
+              `Open this link to choose a new one:\n\n${link}\n\n` +
+              `The link works once and stops working at ${issued.expiresAt}.\n\n` +
+              `If this was not you, ignore this message. Your password has ` +
+              `not changed and the link can only be used from your mailbox.\n`,
+          });
+        } catch (error) {
+          // A relay that is down must not turn into a 500 that tells the
+          // caller the address exists. The operator sees the failure; the
+          // person asking sees the same answer either way and can ask again.
+          console.error(
+            `[mail] Could not send the password reset for ${issued.user.id}: ` +
+              describeError(error),
+          );
+        }
+      }
+      // Always the same answer, whether or not that address has an account:
+      // this endpoint takes no credential, so anything else is a way to test
+      // which addresses are registered here.
+      this.sendJson(response, 202, {
+        status: "accepted",
+        message:
+          "If that address has an account, a reset link is on its way to it.",
+      });
+      return;
+    }
+
+    const resetTokenMatch = matchPath(
+      path,
+      new RegExp(`^${API_PREFIX}/auth/password-reset/([^/]+)$`, "u"),
+    );
+    if (resetTokenMatch !== undefined && method === "GET") {
+      const found = await this.auth.findPasswordReset(resetTokenMatch[0] ?? "");
+      if (found === undefined) {
+        throw new HttpError(
+          404,
+          "reset_invalid",
+          "This password reset link is no longer valid. Request a new one.",
+        );
+      }
+      // The address is echoed so the form can say whose password is being
+      // set. Reaching this at all takes the secret from the mailbox it was
+      // sent to, so this discloses nothing that mailbox does not already hold.
+      this.sendJson(response, 200, {
+        reset: { email: found.user.email, expiresAt: found.reset.expiresAt },
+      });
+      return;
+    }
+
+    if (
+      method === "POST" &&
+      path === `${API_PREFIX}/auth/password-reset/confirm`
+    ) {
+      const body = objectBody(await this.readJson(request));
+      const password =
+        stringField(body["password"], "password", { max: 256 }) ?? "";
+      assertConfirmed(
+        body["confirmPassword"],
+        password,
+        "confirmPassword",
+        "Passwords do not match",
+      );
+      const issued = await this.auth.completePasswordReset({
+        token: stringField(body["token"], "token", { max: 512 }) ?? "",
+        password,
+        ipAddress: this.remoteAddress(request),
+        userAgent: request.headers["user-agent"] ?? "",
+        secure: context.secure,
+      });
+      response.setHeader("Set-Cookie", issued.cookies);
+      await this.options.store.appendAudit(undefined, {
+        type: "user_authenticated",
+        data: { userId: issued.principal.user.id, passwordReset: true },
       });
       this.sendJson(response, 200, {
         user: issued.principal.user,
@@ -3815,6 +4026,9 @@ export class ApiGateway {
         const body = objectBody(await this.readJson(request));
         let user = await this.options.store.getUserByEmail(invitation.email);
         if (user === undefined) {
+          // The address is the invitation's, not something typed here, so only
+          // the password is retyped on this form.
+          this.assertAccountConfirmations(body);
           user = await this.options.store.createUser({
             email: invitation.email,
             displayName:
@@ -16000,6 +16214,56 @@ export class ApiGateway {
       response.setHeader("Access-Control-Allow-Credentials", "true");
       response.setHeader("Vary", "Origin");
     }
+  }
+
+  /**
+   * Refuses a create-account body whose retyped fields do not match.
+   *
+   * One place rather than three, so registration, first-run setup and joining
+   * by invitation agree on what "confirmed" means. Both fields are optional —
+   * see {@link assertConfirmed} — and the address is compared the way the
+   * account stores it, lowercased and trimmed, because a capital letter typed
+   * into one box and not the other is not a mismatch anybody could see.
+   */
+  private assertAccountConfirmations(body: Record<string, unknown>): void {
+    const email = body["email"];
+    if (typeof email === "string" && body["confirmEmail"] !== undefined) {
+      const confirmation = body["confirmEmail"];
+      assertConfirmed(
+        typeof confirmation === "string"
+          ? confirmation.trim().toLowerCase()
+          : confirmation,
+        email.trim().toLowerCase(),
+        "confirmEmail",
+        "Email addresses do not match",
+      );
+    }
+    const password = body["password"];
+    if (typeof password === "string") {
+      assertConfirmed(
+        body["confirmPassword"],
+        password.trim(),
+        "confirmPassword",
+        "Passwords do not match",
+      );
+    }
+  }
+
+  /**
+   * The origin to build a link at, for a link that has to work outside this
+   * request — a reset link is opened later, from a mail client.
+   *
+   * The configured value wins. Falling back to the request's own `Host` is
+   * what makes the feature work on a deployment nobody configured, and it is
+   * only a fallback because that header is chosen by the caller: on a
+   * deployment where it can be spoofed, `COORD_PUBLIC_URL` is the fix.
+   */
+  private originFor(request: IncomingMessage, secure: boolean): string {
+    if (this.publicUrl !== "") {
+      return this.publicUrl.replace(/\/+$/u, "");
+    }
+    const host = request.headers.host ?? "localhost";
+    return `${secure ? "https" : "http"}://${host}`;
   }
 
   private remoteAddress(request: IncomingMessage): string {

@@ -24,6 +24,7 @@ import {
   type ApiOperations,
 } from "./server.js";
 import { hashPassword } from "./auth.js";
+import type { MailMessage, Mailer } from "./mailer.js";
 import type { CodexUsageReader } from "./codex-subscription-usage.js";
 
 const BOOTSTRAP_TOKEN = "bootstrap-token-with-at-least-24-characters";
@@ -39,6 +40,8 @@ interface TestRuntime {
   store: CoordinationStore;
   origin: string;
   port: number;
+  /** Every message accepted by the gateway's in-memory test mailer. */
+  mail: MailMessage[];
   /**
    * The vendors each user has "connected", for the `channel/agents` roster
    * route to read back through `chatProviders.connectionsFor`. A real
@@ -307,6 +310,7 @@ async function startRuntime(
   const chatAnswer: TestRuntime["chatAnswer"] = {};
   const providerUsage: TestRuntime["providerUsage"] = new Map();
   const usageCalls: TestRuntime["usageCalls"] = [];
+  const mail: TestRuntime["mail"] = [];
   /** How the agent answers "is this work?" — "yes" unless a test says else. */
   let taskClassification = "yes";
   const canonicalDiffs: TestRuntime["canonicalDiffs"] = [];
@@ -755,6 +759,9 @@ async function startRuntime(
     store,
     operations,
     bootstrapToken: BOOTSTRAP_TOKEN,
+    mailer: async (message) => {
+      mail.push(message);
+    },
     ...(options.allowedOrigins === undefined
       ? {}
       : { allowedOrigins: options.allowedOrigins }),
@@ -797,6 +804,7 @@ async function startRuntime(
     store,
     origin: `http://127.0.0.1:${address.port}`,
     port: address.port,
+    mail,
     chatConnections,
     submittedTasks,
     pushCalls,
@@ -833,6 +841,32 @@ async function bootstrap(client: TestClient): Promise<any> {
   });
   assert.equal(response.status, 201);
   return response.data;
+}
+
+function registrationCode(message: MailMessage | undefined): string {
+  return /\b([0-9]{6})\b/u.exec(message?.text ?? "")?.[1] ?? "";
+}
+
+/** Runs both public registration steps using the code captured by a fake mailer. */
+async function registerAccount(
+  client: TestClient,
+  sent: MailMessage[],
+  body: Record<string, unknown>,
+): Promise<{ status: number; data: any; headers: Headers }> {
+  const mailBefore = sent.length;
+  const started = await client.request("/api/v1/auth/register", {
+    method: "POST",
+    body,
+  });
+  assert.equal(started.status, 202, JSON.stringify(started.data));
+  assert.equal(started.headers.get("set-cookie"), null);
+  const message = sent[mailBefore];
+  const code = registrationCode(message);
+  assert.notEqual(code, "", message?.text);
+  return await client.request("/api/v1/auth/register/confirm", {
+    method: "POST",
+    body: { registrationId: started.data.registrationId, code },
+  });
 }
 
 /**
@@ -2451,13 +2485,10 @@ test("an invitation is claimed by an existing account by signing in", async (t) 
   const repo = await invitableRepository(owner);
 
   const member = new TestClient(runtime.origin);
-  const registered = await member.request("/api/v1/auth/register", {
-    method: "POST",
-    body: {
-      email: "returning@example.com",
-      displayName: "Returning",
-      password: PASSWORD,
-    },
+  const registered = await registerAccount(member, runtime.mail, {
+    email: "returning@example.com",
+    displayName: "Returning",
+    password: PASSWORD,
   });
   assert.equal(registered.status, 201, JSON.stringify(registered.data));
 
@@ -2877,13 +2908,10 @@ test("anybody can create an account, and it comes with somewhere to work", async
   await invitableRepository(owner, "owners-repo");
 
   const newcomer = new TestClient(runtime.origin);
-  const created = await newcomer.request("/api/v1/auth/register", {
-    method: "POST",
-    body: {
-      email: "stranger@example.com",
-      displayName: "Stranger",
-      password: PASSWORD,
-    },
+  const created = await registerAccount(newcomer, runtime.mail, {
+    email: "stranger@example.com",
+    displayName: "Stranger",
+    password: PASSWORD,
   });
   assert.equal(created.status, 201, JSON.stringify(created.data));
   assert.equal(created.data.user.email, "stranger@example.com");
@@ -3088,13 +3116,10 @@ test("the repository channel is scoped by repository access, like everything els
   // Registration gives this account its own organization and project — it
   // has no membership, and no grant, on the owner's repository.
   const newcomer = new TestClient(runtime.origin);
-  await newcomer.request("/api/v1/auth/register", {
-    method: "POST",
-    body: {
-      email: "outsider@example.com",
-      displayName: "Outsider",
-      password: PASSWORD,
-    },
+  await registerAccount(newcomer, runtime.mail, {
+    email: "outsider@example.com",
+    displayName: "Outsider",
+    password: PASSWORD,
   });
 
   // This newcomer has no membership and no grant in the owner's organization
@@ -3222,13 +3247,10 @@ test("the channel roster is the real connected agents of everyone with access to
   // repository, the same 403 every other project-scoped route gives someone
   // who cannot reach the project at all.
   const strangerClient = new TestClient(runtime.origin);
-  await strangerClient.request("/api/v1/auth/register", {
-    method: "POST",
-    body: {
-      email: "outsider-roster@example.com",
-      displayName: "Outsider",
-      password: PASSWORD,
-    },
+  await registerAccount(strangerClient, runtime.mail, {
+    email: "outsider-roster@example.com",
+    displayName: "Outsider",
+    password: PASSWORD,
   });
   const blocked = await strangerClient.request(`${base}/agents`);
   assert.equal(blocked.status, 403);
@@ -4089,6 +4111,15 @@ test("registration can be closed off", async (t) => {
     });
     assert.equal(refused.status, 403);
     assert.equal(refused.data.error.code, "registration_closed");
+    const confirmation = await client.request(
+      "/api/v1/auth/register/confirm",
+      {
+        method: "POST",
+        body: { registrationId: "reg_closed", code: "000000" },
+      },
+    );
+    assert.equal(confirmation.status, 403);
+    assert.equal(confirmation.data.error.code, "registration_closed");
   } finally {
     if (previous === undefined) {
       delete process.env["COORD_ALLOW_REGISTRATION"];
@@ -6939,13 +6970,10 @@ test("a repository's creator can delete it without manage_project, but a colleag
 
   // A total stranger — no membership, no grant — gets the same refusal.
   const stranger = new TestClient(runtime.origin);
-  await stranger.request("/api/v1/auth/register", {
-    method: "POST",
-    body: {
-      email: "stranger-delete@example.com",
-      displayName: "Stranger",
-      password: PASSWORD,
-    },
+  await registerAccount(stranger, runtime.mail, {
+    email: "stranger-delete@example.com",
+    displayName: "Stranger",
+    password: PASSWORD,
   });
   const strangerAttempt = await stranger.request(
     `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/dev-created-repo`,
@@ -7654,15 +7682,38 @@ test("a gateway configured with a padded token still starts and accepts it", asy
 /** A gateway with whatever bootstrap configuration a test wants. */
 async function startBareGateway(
   t: TestContext,
-  options: { bootstrapToken?: string },
-): Promise<{ client: TestClient; store: CoordinationStore }> {
+  options: {
+    bootstrapToken?: string;
+    mailer?: Mailer;
+    authRateLimitPerMinute?: number;
+    allowedOrigins?: readonly string[];
+  },
+): Promise<{
+  client: TestClient;
+  store: CoordinationStore;
+  sent: MailMessage[];
+}> {
   const store = new InMemoryCoordinationStore();
+  const sent: MailMessage[] = [];
   const gateway = new ApiGateway({
     store,
     operations: {} as unknown as ApiOperations,
     ...(options.bootstrapToken === undefined
       ? {}
       : { bootstrapToken: options.bootstrapToken }),
+    ...(options.authRateLimitPerMinute === undefined
+      ? {}
+      : { authRateLimitPerMinute: options.authRateLimitPerMinute }),
+    ...(options.allowedOrigins === undefined
+      ? {}
+      : { allowedOrigins: options.allowedOrigins }),
+    // Never the real one: a test that opens a socket to a mail relay is a test
+    // that fails on somebody else's network.
+    mailer:
+      options.mailer ??
+      (async (message) => {
+        sent.push(message);
+      }),
   });
   t.after(async () => {
     await gateway.close();
@@ -7676,7 +7727,11 @@ async function startBareGateway(
   if (address === null || typeof address === "string") {
     throw new Error("Test gateway did not bind a TCP port");
   }
-  return { client: new TestClient(`http://127.0.0.1:${address.port}`), store };
+  return {
+    client: new TestClient(`http://127.0.0.1:${address.port}`),
+    store,
+    sent,
+  };
 }
 
 test("with no token configured, first-run setup is open", async (t) => {
@@ -11928,13 +11983,10 @@ test("registration is open by default", async (t) => {
   });
   const runtime = await startRuntime(t);
   const client = new TestClient(runtime.origin);
-  const created = await client.request("/api/v1/auth/register", {
-    method: "POST",
-    body: {
-      email: "stranger@example.com",
-      displayName: "Stranger",
-      password: PASSWORD,
-    },
+  const created = await registerAccount(client, runtime.mail, {
+    email: "stranger@example.com",
+    displayName: "Stranger",
+    password: PASSWORD,
   });
 
   assert.equal(created.status, 201, JSON.stringify(created.data));
@@ -12023,4 +12075,375 @@ test("/ask asks first and then works — the command says both halves", async (t
   );
   assert.match(String(ask?.summary), /questions first/iu);
   assert.match(String(ask?.summary), /do the work/iu);
+});
+
+/* ------------------------------------------------- account confirmations ---- */
+
+/** A mailer that keeps what it was asked to send, and a link reader for it. */
+function recordingMailer(): { sent: MailMessage[]; mailer: Mailer } {
+  const sent: MailMessage[] = [];
+  return {
+    sent,
+    mailer: async (message) => {
+      sent.push(message);
+    },
+  };
+}
+
+function resetLink(message: MailMessage | undefined): string {
+  const match = /#reset\/(\S+)/u.exec(message?.text ?? "");
+  return match?.[1] ?? "";
+}
+
+test("creating an account refuses a retyped address that does not match", async (t) => {
+  const { client } = await startBareGateway(t, {});
+
+  const mismatched = await client.request("/api/v1/auth/bootstrap", {
+    method: "POST",
+    body: {
+      email: "owner@example.com",
+      confirmEmail: "owner@exampel.com",
+      displayName: "Owner",
+      password: PASSWORD,
+      confirmPassword: PASSWORD,
+    },
+  });
+  assert.equal(mismatched.status, 400);
+  assert.equal(mismatched.data.error.code, "confirmation_mismatch");
+
+  // And nothing was created: the deployment still has no owner.
+  const health = await client.request("/api/v1/health");
+  assert.equal(health.data.setupRequired, true);
+
+  const matched = await client.request("/api/v1/auth/bootstrap", {
+    method: "POST",
+    body: {
+      email: "Owner@Example.com",
+      // Case is not a mismatch — the account stores the address lowercased.
+      confirmEmail: "owner@example.com",
+      displayName: "Owner",
+      password: PASSWORD,
+      confirmPassword: PASSWORD,
+    },
+  });
+  assert.equal(matched.status, 201, JSON.stringify(matched.data));
+});
+
+test("registering refuses a retyped password that does not match", async (t) => {
+  const { client, sent } = await startBareGateway(t, {});
+  await bootstrap(client);
+
+  const stranger = new TestClient(client.origin);
+  const refused = await stranger.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "newcomer@example.com",
+      confirmEmail: "newcomer@example.com",
+      displayName: "Newcomer",
+      password: PASSWORD,
+      confirmPassword: `${PASSWORD}x`,
+    },
+  });
+  assert.equal(refused.status, 400);
+  assert.equal(refused.data.error.code, "confirmation_mismatch");
+
+  // A client that sends no confirmation at all is still served: the retype is
+  // a guard against a typo, not a credential.
+  const accepted = await registerAccount(stranger, sent, {
+    email: "newcomer@example.com",
+    displayName: "Newcomer",
+    password: PASSWORD,
+  });
+  assert.equal(accepted.status, 201, JSON.stringify(accepted.data));
+});
+
+test("registration creates no durable account or session until its mailed code is confirmed", async (t) => {
+  const { client, store, sent } = await startBareGateway(t, {});
+  await bootstrap(client);
+  const usersBefore = await store.countUsers();
+  const organizationsBefore = (await store.listOrganizations()).length;
+  const stranger = new TestClient(client.origin);
+
+  const started = await stranger.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "confirmed@example.com",
+      confirmEmail: "confirmed@example.com",
+      displayName: "Confirmed",
+      password: PASSWORD,
+      confirmPassword: PASSWORD,
+      organizationName: "Confirmed team",
+    },
+  });
+  assert.equal(started.status, 202, JSON.stringify(started.data));
+  assert.match(started.data.registrationId, /^reg_/u);
+  assert.equal(Number.isNaN(Date.parse(started.data.expiresAt)), false);
+  assert.equal(started.headers.get("set-cookie"), null);
+  assert.equal(stranger.cookieHeader, "");
+  assert.equal(await store.countUsers(), usersBefore);
+  assert.equal((await store.listOrganizations()).length, organizationsBefore);
+  assert.equal(sent.length, 1);
+
+  const wrong = await stranger.request("/api/v1/auth/register/confirm", {
+    method: "POST",
+    body: {
+      registrationId: started.data.registrationId,
+      code: "not-a-code",
+    },
+  });
+  assert.equal(wrong.status, 400);
+  assert.equal(wrong.data.error.code, "registration_code_invalid");
+  assert.equal(await store.countUsers(), usersBefore);
+
+  const confirmed = await stranger.request("/api/v1/auth/register/confirm", {
+    method: "POST",
+    body: {
+      registrationId: started.data.registrationId,
+      code: registrationCode(sent[0]),
+    },
+  });
+  assert.equal(confirmed.status, 201, JSON.stringify(confirmed.data));
+  assert.equal(confirmed.data.user.email, "confirmed@example.com");
+  assert.equal(confirmed.data.memberships.length, 1);
+  assert.match(stranger.cookieHeader, /coord_session=/u);
+  assert.match(stranger.cookieHeader, /coord_csrf=/u);
+  assert.equal(await store.countUsers(), usersBefore + 1);
+  assert.equal((await store.listOrganizations()).length, organizationsBefore + 1);
+
+  const replayed = await stranger.request("/api/v1/auth/register/confirm", {
+    method: "POST",
+    body: {
+      registrationId: started.data.registrationId,
+      code: registrationCode(sent[0]),
+    },
+  });
+  assert.equal(replayed.status, 409);
+  assert.equal(replayed.data.error.code, "registration_already_used");
+  assert.equal(await store.countUsers(), usersBefore + 1);
+});
+
+test("registration mail failure creates neither an account nor a challenge", async (t) => {
+  const { client, store } = await startBareGateway(t, {
+    mailer: async () => {
+      throw new Error("relay unavailable");
+    },
+  });
+  const failed = await client.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "undelivered@example.com",
+      displayName: "Undelivered",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(failed.status, 503);
+  assert.equal(failed.data.error.code, "registration_mail_delivery_failed");
+  assert.equal(await store.countUsers(), 0);
+  const unknown = await client.request("/api/v1/auth/register/confirm", {
+    method: "POST",
+    body: { registrationId: "reg_undelivered", code: "000000" },
+  });
+  assert.equal(unknown.status, 400);
+  assert.equal(unknown.data.error.code, "registration_invalid");
+});
+
+test("both registration steps are public, origin checked, and auth rate limited", async (t) => {
+  const guarded = await startBareGateway(t, {
+    allowedOrigins: ["https://allowed.example"],
+  });
+  for (const path of ["/api/v1/auth/register", "/api/v1/auth/register/confirm"]) {
+    const refused = await guarded.client.request(path, {
+      method: "POST",
+      headers: { Origin: "https://attacker.example" },
+      body:
+        path.endsWith("/confirm")
+          ? { registrationId: "reg_unknown", code: "000000" }
+          : {
+              email: "origin@example.com",
+              displayName: "Origin",
+              password: PASSWORD,
+            },
+    });
+    assert.equal(refused.status, 403, JSON.stringify(refused.data));
+    assert.equal(refused.data.error.code, "origin_rejected");
+  }
+
+  const limited = await startBareGateway(t, { authRateLimitPerMinute: 1 });
+  const started = await limited.client.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "limited@example.com",
+      displayName: "Limited",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(started.status, 202, JSON.stringify(started.data));
+  const throttled = await limited.client.request(
+    "/api/v1/auth/register/confirm",
+    {
+      method: "POST",
+      body: {
+        registrationId: started.data.registrationId,
+        code: registrationCode(limited.sent[0]),
+      },
+    },
+  );
+  assert.equal(throttled.status, 429);
+  assert.equal(throttled.data.error.code, "rate_limited");
+});
+
+/* ------------------------------------------------------ password resets ---- */
+
+test("a forgotten password is recovered through a mailed link", async (t) => {
+  const { sent, mailer } = recordingMailer();
+  const { client } = await startBareGateway(t, { mailer });
+  await bootstrap(client);
+
+  const asked = new TestClient(client.origin);
+  const requested = await asked.request("/api/v1/auth/password-reset", {
+    method: "POST",
+    body: { email: "owner@example.com" },
+  });
+  assert.equal(requested.status, 202);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0]?.to, "owner@example.com");
+
+  const token = resetLink(sent[0]);
+  assert.notEqual(token, "", sent[0]?.text);
+
+  // The form checks the link before asking for a password, and is told whose
+  // account it belongs to.
+  const preview = await asked.request(
+    `/api/v1/auth/password-reset/${encodeURIComponent(token)}`,
+  );
+  assert.equal(preview.status, 200);
+  assert.equal(preview.data.reset.email, "owner@example.com");
+
+  const changed = await asked.request("/api/v1/auth/password-reset/confirm", {
+    method: "POST",
+    body: {
+      token,
+      password: "BrandNewRelay123!",
+      confirmPassword: "BrandNewRelay123!",
+    },
+  });
+  assert.equal(changed.status, 200, JSON.stringify(changed.data));
+  assert.equal(changed.data.user.email, "owner@example.com");
+
+  // The link is single use, and the old password no longer works.
+  const replayed = await asked.request("/api/v1/auth/password-reset/confirm", {
+    method: "POST",
+    body: {
+      token,
+      password: "BrandNewRelay123!",
+      confirmPassword: "BrandNewRelay123!",
+    },
+  });
+  assert.equal(replayed.status, 400);
+  assert.equal(replayed.data.error.code, "reset_invalid");
+
+  const stale = new TestClient(client.origin);
+  const oldPassword = await stale.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "owner@example.com", password: PASSWORD },
+  });
+  assert.equal(oldPassword.status, 401);
+
+  const newPassword = await stale.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: "owner@example.com", password: "BrandNewRelay123!" },
+  });
+  assert.equal(newPassword.status, 200, JSON.stringify(newPassword.data));
+});
+
+test("asking to reset an unknown address says nothing about it", async (t) => {
+  const { sent, mailer } = recordingMailer();
+  const { client } = await startBareGateway(t, { mailer });
+  await bootstrap(client);
+
+  const stranger = new TestClient(client.origin);
+  const answer = await stranger.request("/api/v1/auth/password-reset", {
+    method: "POST",
+    body: { email: "nobody@example.com" },
+  });
+  // Same status and same wording as for an address that does exist, or this
+  // endpoint would answer "does this person have an account here".
+  assert.equal(answer.status, 202);
+  assert.equal(sent.length, 0);
+
+  const known = await stranger.request("/api/v1/auth/password-reset", {
+    method: "POST",
+    body: { email: "owner@example.com" },
+  });
+  assert.equal(known.status, 202);
+  assert.equal(known.data.message, answer.data.message);
+});
+
+test("a reset link that was superseded or mistyped is refused", async (t) => {
+  const { sent, mailer } = recordingMailer();
+  const { client } = await startBareGateway(t, { mailer });
+  await bootstrap(client);
+
+  const asked = new TestClient(client.origin);
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const answer = await asked.request("/api/v1/auth/password-reset", {
+      method: "POST",
+      body: { email: "owner@example.com" },
+    });
+    assert.equal(answer.status, 202);
+  }
+  assert.equal(sent.length, 2);
+
+  // Asking twice invalidates the first link rather than leaving two working
+  // keys in the mailbox.
+  const first = await asked.request(
+    `/api/v1/auth/password-reset/${encodeURIComponent(resetLink(sent[0]))}`,
+  );
+  assert.equal(first.status, 404);
+  assert.equal(first.data.error.code, "reset_invalid");
+
+  const mistyped = await asked.request(
+    `/api/v1/auth/password-reset/${encodeURIComponent(`${resetLink(sent[1])}x`)}`,
+  );
+  assert.equal(mistyped.status, 404);
+
+  const latest = await asked.request(
+    `/api/v1/auth/password-reset/${encodeURIComponent(resetLink(sent[1]))}`,
+  );
+  assert.equal(latest.status, 200);
+});
+
+test("a reset refuses a new password that was retyped differently", async (t) => {
+  const { sent, mailer } = recordingMailer();
+  const { client } = await startBareGateway(t, { mailer });
+  await bootstrap(client);
+
+  const asked = new TestClient(client.origin);
+  await asked.request("/api/v1/auth/password-reset", {
+    method: "POST",
+    body: { email: "owner@example.com" },
+  });
+  const token = resetLink(sent[0]);
+  const refused = await asked.request("/api/v1/auth/password-reset/confirm", {
+    method: "POST",
+    body: {
+      token,
+      password: "BrandNewRelay123!",
+      confirmPassword: "BrandNewRelay124!",
+    },
+  });
+  assert.equal(refused.status, 400);
+  assert.equal(refused.data.error.code, "confirmation_mismatch");
+
+  // The link survives a typo: burning it would leave the person with no way
+  // back in but to ask for another.
+  const retried = await asked.request("/api/v1/auth/password-reset/confirm", {
+    method: "POST",
+    body: {
+      token,
+      password: "BrandNewRelay123!",
+      confirmPassword: "BrandNewRelay123!",
+    },
+  });
+  assert.equal(retried.status, 200, JSON.stringify(retried.data));
 });

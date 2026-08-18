@@ -2,6 +2,7 @@ export * from "./auth.js";
 export * from "./authorization.js";
 export * from "./rate-limiter.js";
 export * from "./collab-websocket.js";
+export * from "./mailer.js";
 export * from "./server.js";
 export * from "./websocket.js";
 export * from "./ws-frame.js";

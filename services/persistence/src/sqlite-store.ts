@@ -96,6 +96,7 @@ import type {
   TokenUsageRecord,
   SubmittedTaskStatus,
   InvitationRecord,
+  PasswordResetRecord,
   RepositoryGrant,
   UserAccount,
   UserAppearance,
@@ -1329,6 +1330,60 @@ export class SqliteCoordinationStore implements CoordinationStore {
       acceptedAt: optionalText(row, "accepted_at"),
       acceptedBy: optionalText(row, "accepted_by"),
       revokedAt: optionalText(row, "revoked_at"),
+    };
+  }
+
+  public async createPasswordReset(reset: PasswordResetRecord): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO password_resets
+           (id, user_id, email, token_hash, created_at, expires_at, consumed_at)
+         VALUES (?, ?, ?, ?, ?, ?, NULL)`,
+      )
+      .run(
+        reset.id,
+        reset.userId,
+        reset.email,
+        reset.secretHash,
+        reset.createdAt,
+        reset.expiresAt,
+      );
+  }
+
+  public async getPasswordReset(
+    id: string,
+  ): Promise<PasswordResetRecord | undefined> {
+    const row = this.db
+      .prepare("SELECT * FROM password_resets WHERE id = ?")
+      .get(id) as Row | undefined;
+    return row === undefined ? undefined : this.toPasswordReset(row);
+  }
+
+  public async consumePasswordReset(id: string, at: string): Promise<boolean> {
+    // Conditional on still being unused, so two requests racing the same link
+    // cannot both come away believing they set the password.
+    const result = this.db
+      .prepare(
+        `UPDATE password_resets SET consumed_at = ?
+         WHERE id = ? AND consumed_at IS NULL`,
+      )
+      .run(at, id);
+    return Number(result.changes) === 1;
+  }
+
+  public async deletePasswordResetsForUser(userId: string): Promise<void> {
+    this.db.prepare("DELETE FROM password_resets WHERE user_id = ?").run(userId);
+  }
+
+  private toPasswordReset(row: Row): PasswordResetRecord {
+    return {
+      id: text(row, "id"),
+      userId: text(row, "user_id"),
+      email: text(row, "email"),
+      secretHash: text(row, "token_hash"),
+      createdAt: text(row, "created_at"),
+      expiresAt: text(row, "expires_at"),
+      consumedAt: optionalText(row, "consumed_at"),
     };
   }
 

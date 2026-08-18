@@ -1054,6 +1054,32 @@ export const MIGRATIONS: readonly Migration[] = [
          ON submitted_tasks(after_task_id)`,
     ],
   },
+  {
+    // Self-service password recovery.
+    //
+    // Until now a forgotten password was somebody else's problem — an owner
+    // had to set a new one — which is no answer at all for the first account
+    // on a deployment, whose owner has nobody above them. A reset is a
+    // short-lived, single-use secret mailed to the address already on the
+    // account, stored hashed for the same reason an invitation is: a readable
+    // table would otherwise be a list of working keys to every account.
+    version: 36,
+    name: "password-resets",
+    statements: [
+      `CREATE TABLE password_resets (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL REFERENCES users(id),
+        email TEXT NOT NULL COLLATE NOCASE,
+        token_hash TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL,
+        consumed_at TEXT
+      )`,
+      `CREATE INDEX password_resets_by_user
+         ON password_resets(user_id, created_at DESC)`,
+      `CREATE INDEX password_resets_by_token ON password_resets(token_hash)`,
+    ],
+  },
 ];
 export const LATEST_SCHEMA_VERSION = MIGRATIONS.reduce(
   (highest, migration) => Math.max(highest, migration.version),

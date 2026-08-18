@@ -27,6 +27,10 @@ test("the signed-out forms are named by a hash", async () => {
     ["signin", "login"],
     ["register", "register"],
     ["setup", "bootstrap"],
+    // Recovering a password is two more forms with two more addresses: one to
+    // ask for a link, one the link itself opens.
+    ["forgot", "forgot"],
+    ["reset", "reset"],
   ] as const) {
     assert.match(
       app,
@@ -107,5 +111,120 @@ test("the hash router hands the signed-out shell its own hashes", async () => {
     body,
     /authRoot\.innerHTML = renderAuth\(\)/u,
     "a hash change while signed out should redraw the form",
+  );
+});
+
+test("creating an account asks for the address and password twice", async () => {
+  const app = await publicFile("app.js");
+  const auth = app.slice(app.indexOf("function renderAuth()"));
+  const form = auth.slice(0, auth.indexOf("function renderPasswordReset()"));
+  // A mistyped address is unrecoverable by the person who made it: every way
+  // back into the account is sent to the address as typed.
+  assert.match(form, /name="confirmEmail"/u, "the address should be retyped");
+  assert.match(
+    form,
+    /name="confirmPassword"/u,
+    "the password should be retyped",
+  );
+  // Sign-in asks for neither: there is nothing there to confirm.
+  assert.match(
+    form,
+    /bootstrap \|\| register[\s\S]{0,600}name="confirmEmail"/u,
+    "the retyped fields belong to the create-account forms",
+  );
+  // Both halves are sent, so the server can refuse a mismatch as well.
+  for (const submit of ["submitRegister", "submitBootstrap"]) {
+    const body = app.slice(app.indexOf(`async function ${submit}(form)`));
+    const posted = body.slice(0, body.indexOf("\n}\n"));
+    assert.match(posted, /confirmEmail:/u, `${submit} should send confirmEmail`);
+    assert.match(
+      posted,
+      /confirmationsMatch\(data\)/u,
+      `${submit} should check the retyped fields before posting`,
+    );
+  }
+});
+
+test("registration waits for the emailed one-time code before entering the app", async () => {
+  const app = await publicFile("app.js");
+  const confirmation = app.slice(
+    app.indexOf("function renderRegistrationConfirmation()"),
+    app.indexOf("function renderAuth()"),
+  );
+  assert.match(
+    confirmation,
+    /data-act="registration-confirmation"/u,
+    "the challenge should render its own form",
+  );
+  assert.match(
+    confirmation,
+    /autocomplete="one-time-code"/u,
+    "the code field should use the browser's one-time-code affordance",
+  );
+  assert.match(confirmation, /pattern="\[0-9\]\{6\}"/u);
+
+  const start = app.slice(
+    app.indexOf("async function submitRegister(form)"),
+    app.indexOf("async function submitRegistrationConfirmation(form)"),
+  );
+  assert.match(start, /registration\.registrationId/u);
+  assert.doesNotMatch(
+    start,
+    /await boot\(\)/u,
+    "starting registration must not enter the application",
+  );
+
+  const finish = app.slice(
+    app.indexOf("async function submitRegistrationConfirmation(form)"),
+    app.indexOf("function enterAfterInvitation()"),
+  );
+  assert.match(finish, /api\("\/auth\/register\/confirm"/u);
+  assert.match(finish, /await boot\(\)/u);
+  assert.match(finish, /message\.textContent = error\.message/u);
+});
+
+test("a forgotten password has a way out of the sign-in form", async () => {
+  const app = await publicFile("app.js");
+  // The old copy told people to ask their organization owner — which is no
+  // answer at all for the owner, who has nobody to ask.
+  assert.equal(
+    app.includes("owner can reset it"),
+    false,
+    "the dead-end hint should be gone",
+  );
+  assert.match(
+    app,
+    /href="#forgot" data-act="auth-mode" data-value="forgot"/u,
+    "sign-in should link to the reset request form",
+  );
+  // The link carries its secret in the fragment, which browsers do not send
+  // to the server, and the form reads it from there.
+  assert.match(
+    app,
+    /hash\.startsWith\("reset\/"\)/u,
+    "the reset token should be read out of the fragment",
+  );
+  assert.match(
+    app,
+    /api\("\/auth\/password-reset", \{/u,
+    "asking for a link should post to the reset endpoint",
+  );
+  assert.match(
+    app,
+    /api\("\/auth\/password-reset\/confirm", \{/u,
+    "setting the new password should post to the confirm endpoint",
+  );
+});
+
+test("the signed-out shell keeps the secret in a reset link", async () => {
+  const app = await publicFile("app.js");
+  const showAuth = app.slice(app.indexOf("function showAuth()"));
+  const body = showAuth.slice(0, showAuth.indexOf("\n}\n"));
+  // Rewriting the hash to the bare form name would throw the token away, and
+  // the page would then have nothing to check.
+  assert.match(
+    body,
+    /!window\.location\.hash\.startsWith\(`#\$\{hash\}`\)/u,
+    "the reset token should survive the hash being normalised",
   );
 });

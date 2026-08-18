@@ -88,6 +88,7 @@ import type {
   TokenUsageFilter,
   TokenUsageRecord,
   InvitationRecord,
+  PasswordResetRecord,
   RepositoryGrant,
   UserAccount,
   UserAppearance,
@@ -938,6 +939,42 @@ export class InMemoryCoordinationStore implements CoordinationStore {
     const found = this.invitations.get(id);
     if (found !== undefined && found.revokedAt === undefined) {
       found.revokedAt = at;
+    }
+  }
+
+  /* ---------------------------------------------------- password resets ---- */
+
+  private readonly passwordResets = new Map<string, PasswordResetRecord>();
+
+  public async createPasswordReset(reset: PasswordResetRecord): Promise<void> {
+    this.requireUser(reset.userId);
+    this.passwordResets.set(reset.id, { ...reset });
+  }
+
+  public async getPasswordReset(
+    id: string,
+  ): Promise<PasswordResetRecord | undefined> {
+    const found = this.passwordResets.get(id);
+    return found === undefined ? undefined : { ...found };
+  }
+
+  public async consumePasswordReset(
+    id: string,
+    at: string,
+  ): Promise<boolean> {
+    const found = this.passwordResets.get(id);
+    if (found === undefined || found.consumedAt !== undefined) {
+      return false;
+    }
+    found.consumedAt = at;
+    return true;
+  }
+
+  public async deletePasswordResetsForUser(userId: string): Promise<void> {
+    for (const [id, reset] of this.passwordResets) {
+      if (reset.userId === userId) {
+        this.passwordResets.delete(id);
+      }
     }
   }
 

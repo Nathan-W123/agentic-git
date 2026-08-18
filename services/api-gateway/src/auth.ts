@@ -1,6 +1,7 @@
 import {
   createHash,
   randomBytes,
+  randomInt,
   scrypt as scryptCallback,
   timingSafeEqual,
 } from "node:crypto";
@@ -9,9 +10,12 @@ import type {
   CoordinationStore,
   OrganizationMembership,
   OrganizationRole,
+  PasswordResetRecord,
   UserAccount,
 } from "@coord/persistence";
 import { createId } from "@coord/shared-types";
+
+import type { Mailer } from "./mailer.js";
 
 const SESSION_COOKIE = "coord_session";
 const CSRF_COOKIE = "coord_csrf";
@@ -116,8 +120,40 @@ export interface AuthServiceOptions {
   loginFailureLimit?: number;
   /** How long an account stays locked, and how long failures accumulate. */
   loginLockoutMs?: number;
+  /**
+   * How long a password reset link works for. One hour by default: long
+   * enough to survive a slow mail relay, short enough that a link sitting in
+   * an old mailbox is not a standing key to the account.
+   */
+  passwordResetTtlMs?: number;
+  /** Delivers the one-time code required to finish self-service sign-up. */
+  mailer?: Mailer;
+  /** How long a registration code remains usable. Ten minutes by default. */
+  registrationTtlMs?: number;
+  /** Wrong codes allowed before a registration challenge is closed. */
+  registrationAttemptLimit?: number;
   now?: () => Date;
 }
+
+/** Account details held only until the mailbox has been proved. */
+export interface PendingRegistration {
+  id: string;
+  email: string;
+  displayName: string;
+  organizationName?: string;
+  passwordDigest: string;
+  codeHash: string;
+  expiresAt: string;
+  failedAttempts: number;
+}
+
+/** The opaque challenge returned after the confirmation mail is accepted. */
+export interface RegistrationStartResult {
+  registrationId: string;
+  expiresAt: string;
+}
+
+type ClosedRegistrationReason = "used" | "expired" | "exhausted";
 
 function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("base64url");
@@ -356,6 +392,15 @@ export class AuthService {
    * matches how the rate limiter already works.
    */
   private readonly loginFailures = new Map<string, LoginFailures>();
+  private readonly passwordResetTtlMs: number;
+  private readonly registrationMailer: Mailer | undefined;
+  private readonly registrationTtlMs: number;
+  private readonly registrationAttemptLimit: number;
+  private readonly pendingRegistrations = new Map<string, PendingRegistration>();
+  private readonly closedRegistrations = new Map<
+    string,
+    { reason: ClosedRegistrationReason; forgetAt: number }
+  >();
   private readonly now: () => Date;
 
   public constructor(
@@ -367,9 +412,25 @@ export class AuthService {
     this.secureCookies = options.secureCookies ?? false;
     this.loginFailureLimit = options.loginFailureLimit ?? 10;
     this.loginLockoutMs = options.loginLockoutMs ?? 15 * 60 * 1000;
+    this.passwordResetTtlMs = options.passwordResetTtlMs ?? 60 * 60 * 1000;
+    this.registrationMailer = options.mailer;
+    this.registrationTtlMs = options.registrationTtlMs ?? 10 * 60 * 1000;
+    this.registrationAttemptLimit = options.registrationAttemptLimit ?? 5;
     this.now = options.now ?? (() => new Date());
     if (!Number.isSafeInteger(this.sessionTtlMs) || this.sessionTtlMs < 60_000) {
       throw new RangeError("Session lifetime must be at least one minute");
+    }
+    if (
+      !Number.isSafeInteger(this.registrationTtlMs) ||
+      this.registrationTtlMs < 60_000
+    ) {
+      throw new RangeError("Registration lifetime must be at least one minute");
+    }
+    if (
+      !Number.isSafeInteger(this.registrationAttemptLimit) ||
+      this.registrationAttemptLimit < 1
+    ) {
+      throw new RangeError("Registration attempt limit must be positive");
     }
   }
 
@@ -424,21 +485,19 @@ export class AuthService {
    * owner, who set the control plane up; a self-registered user administers
    * their own organization and nothing beyond it.
    *
-   * The email uniqueness check belongs to the store, which enforces it under
-   * whatever concurrency the deployment has. A duplicate surfaces as the
-   * store's own conflict rather than being pre-checked here, because a check
-   * followed by an insert is a race.
+   * The early email lookup gives an explicit registration error, while the
+   * store's unique constraint remains the final authority under concurrency.
    */
-  public async register(input: {
+  private async register(input: {
     email: string;
     displayName: string;
-    password: string;
+    passwordDigest: string;
     organizationName?: string;
   }): Promise<UserAccount> {
     const user = await this.store.createUser({
       email: input.email,
       displayName: input.displayName,
-      passwordDigest: await hashPassword(input.password),
+      passwordDigest: input.passwordDigest,
       systemAdmin: false,
     });
     // Slugs have to be unique across the deployment, and a display name is
@@ -466,6 +525,205 @@ export class AuthService {
       description: "Repositories you create live here.",
     });
     return user;
+  }
+
+  /**
+   * Starts self-service registration without creating any durable account.
+   *
+   * The password is digested before it is retained and the confirmation code
+   * is retained only as a hash. The pending record is installed only after
+   * mail delivery succeeds, so a relay failure leaves no credential-shaped
+   * state that can later be confirmed.
+   */
+  public async startRegistration(input: {
+    email: string;
+    displayName: string;
+    password: string;
+    organizationName?: string;
+  }): Promise<RegistrationStartResult> {
+    const email = input.email.trim().toLowerCase();
+    if ((await this.store.getUserByEmail(email)) !== undefined) {
+      throw new AuthenticationError(
+        "An account already uses that email address",
+        409,
+        "account_exists",
+      );
+    }
+    const passwordDigest = await hashPassword(input.password);
+    const now = this.now();
+    this.sweepRegistrationState(now.getTime());
+    // A newer code supersedes any older code for the same address. Removing
+    // it before delivery also means a failed replacement does not leave a
+    // different, still-usable challenge behind.
+    for (const [id, pending] of this.pendingRegistrations) {
+      if (pending.email === email) {
+        this.pendingRegistrations.delete(id);
+      }
+    }
+
+    const id = `reg_${randomBytes(18).toString("base64url")}`;
+    const code = randomInt(0, 1_000_000).toString().padStart(6, "0");
+    const expiresAt = new Date(
+      now.getTime() + this.registrationTtlMs,
+    ).toISOString();
+    const pending: PendingRegistration = {
+      id,
+      email,
+      displayName: input.displayName.trim(),
+      ...(input.organizationName === undefined
+        ? {}
+        : { organizationName: input.organizationName.trim() }),
+      passwordDigest,
+      codeHash: digest(`${id}:${code}`),
+      expiresAt,
+      failedAttempts: 0,
+    };
+    if (this.registrationMailer === undefined) {
+      throw new AuthenticationError(
+        "The confirmation email could not be delivered",
+        503,
+        "registration_mail_delivery_failed",
+      );
+    }
+    try {
+      await this.registrationMailer({
+        to: email,
+        subject: "Confirm your Lattice account",
+        text: [
+          `Your Lattice confirmation code is ${code}.`,
+          "",
+          `It expires at ${expiresAt}.`,
+          "If you did not request this account, you can ignore this message.",
+        ].join("\n"),
+      });
+    } catch {
+      throw new AuthenticationError(
+        "The confirmation email could not be delivered",
+        503,
+        "registration_mail_delivery_failed",
+      );
+    }
+    this.pendingRegistrations.set(id, pending);
+    return { registrationId: id, expiresAt };
+  }
+
+  /** Creates the account only after the one-time mailbox code is accepted. */
+  public async confirmRegistration(input: {
+    registrationId: string;
+    code: string;
+  }): Promise<UserAccount> {
+    const now = this.now().getTime();
+    this.sweepRegistrationState(now);
+    const pending = this.pendingRegistrations.get(input.registrationId);
+    if (pending === undefined) {
+      this.throwClosedRegistration(input.registrationId);
+    }
+    if (Date.parse(pending.expiresAt) <= now) {
+      this.closeRegistration(pending.id, "expired", now);
+      throw new AuthenticationError(
+        "This confirmation code has expired",
+        400,
+        "registration_expired",
+      );
+    }
+    if (pending.failedAttempts >= this.registrationAttemptLimit) {
+      this.closeRegistration(pending.id, "exhausted", now);
+      throw new AuthenticationError(
+        "Too many incorrect confirmation codes were entered",
+        429,
+        "registration_attempts_exhausted",
+      );
+    }
+    if (!equalDigest(`${pending.id}:${input.code.trim()}`, pending.codeHash)) {
+      pending.failedAttempts += 1;
+      if (pending.failedAttempts >= this.registrationAttemptLimit) {
+        this.closeRegistration(pending.id, "exhausted", now);
+        throw new AuthenticationError(
+          "Too many incorrect confirmation codes were entered",
+          429,
+          "registration_attempts_exhausted",
+        );
+      }
+      throw new AuthenticationError(
+        "The confirmation code is incorrect",
+        400,
+        "registration_code_invalid",
+      );
+    }
+
+    // Consumed before the first await below. Two confirmations racing in one
+    // process therefore cannot both reach account creation.
+    this.closeRegistration(pending.id, "used", now);
+    if ((await this.store.getUserByEmail(pending.email)) !== undefined) {
+      throw new AuthenticationError(
+        "An account already uses that email address",
+        409,
+        "account_exists",
+      );
+    }
+    return await this.register({
+      email: pending.email,
+      displayName: pending.displayName,
+      passwordDigest: pending.passwordDigest,
+      ...(pending.organizationName === undefined
+        ? {}
+        : { organizationName: pending.organizationName }),
+    });
+  }
+
+  private closeRegistration(
+    id: string,
+    reason: ClosedRegistrationReason,
+    now: number,
+  ): void {
+    this.pendingRegistrations.delete(id);
+    this.closedRegistrations.set(id, {
+      reason,
+      forgetAt: now + this.registrationTtlMs,
+    });
+  }
+
+  private throwClosedRegistration(id: string): never {
+    const closed = this.closedRegistrations.get(id)?.reason;
+    if (closed === "used") {
+      throw new AuthenticationError(
+        "This registration challenge has already been used",
+        409,
+        "registration_already_used",
+      );
+    }
+    if (closed === "expired") {
+      throw new AuthenticationError(
+        "This confirmation code has expired",
+        400,
+        "registration_expired",
+      );
+    }
+    if (closed === "exhausted") {
+      throw new AuthenticationError(
+        "Too many incorrect confirmation codes were entered",
+        429,
+        "registration_attempts_exhausted",
+      );
+    }
+    throw new AuthenticationError(
+      "This registration challenge is not valid",
+      400,
+      "registration_invalid",
+    );
+  }
+
+  private sweepRegistrationState(now: number): void {
+    for (const [id, pending] of this.pendingRegistrations) {
+      if (Date.parse(pending.expiresAt) <= now) {
+        this.closeRegistration(id, "expired", now);
+      }
+    }
+    for (const [id, closed] of this.closedRegistrations) {
+      if (closed.forgetAt <= now) {
+        this.closedRegistrations.delete(id);
+      }
+    }
   }
 
   public async login(input: {
@@ -502,6 +760,142 @@ export class AuthService {
       throw new AuthenticationError("Email or password is incorrect");
     }
     this.loginFailures.delete(attempted);
+    return await this.issueSession(
+      user,
+      input.ipAddress,
+      input.userAgent,
+      input.secure,
+    );
+  }
+
+  /**
+   * Mints a reset link for an account, if that address has one.
+   *
+   * Returns nothing when the address is unknown, and the caller answers the
+   * same way either way: a form that says "no account for that address" is an
+   * address oracle, and this one can be posted to without any credential at
+   * all.
+   *
+   * Outstanding resets for the account are dropped first, so requesting a
+   * second link invalidates the first. Otherwise every request would leave
+   * another working key behind, and a person who requests three because the
+   * first was slow to arrive would be leaving two of them lying in a mailbox.
+   */
+  public async requestPasswordReset(email: string): Promise<
+    | {
+        user: UserAccount;
+        token: string;
+        expiresAt: string;
+      }
+    | undefined
+  > {
+    const user = await this.store.getUserByEmail(email);
+    if (user === undefined || user.disabled) {
+      return undefined;
+    }
+    await this.store.deletePasswordResetsForUser(user.id);
+    const id = `pwr_${randomBytes(9).toString("base64url")}`;
+    const secret = randomBytes(32).toString("base64url");
+    const now = this.now();
+    const expiresAt = new Date(
+      now.getTime() + this.passwordResetTtlMs,
+    ).toISOString();
+    await this.store.createPasswordReset({
+      id,
+      userId: user.id,
+      email: user.email,
+      secretHash: hashSecret(secret),
+      createdAt: now.toISOString(),
+      expiresAt,
+      consumedAt: undefined,
+    });
+    // The only time the secret exists. It is stored hashed, so a lost link is
+    // reissued rather than looked up.
+    return { user, token: `${id}.${secret}`, expiresAt };
+  }
+
+  /**
+   * The account a reset link belongs to, or nothing if it is not usable.
+   *
+   * Every way a link can be wrong — unknown, mistyped, already used, expired,
+   * or issued to an address the account no longer has — comes back the same,
+   * so the form behind it cannot be used to learn anything about who exists.
+   */
+  public async findPasswordReset(
+    token: string,
+  ): Promise<{ reset: PasswordResetRecord; user: UserAccount } | undefined> {
+    const separator = token.indexOf(".");
+    if (separator < 1) {
+      return undefined;
+    }
+    const reset = await this.store.getPasswordReset(token.slice(0, separator));
+    if (
+      reset === undefined ||
+      !secretMatches(token.slice(separator + 1), reset.secretHash) ||
+      reset.consumedAt !== undefined ||
+      Date.parse(reset.expiresAt) <= this.now().getTime()
+    ) {
+      return undefined;
+    }
+    const user = await this.store.getUser(reset.userId);
+    if (
+      user === undefined ||
+      user.disabled ||
+      // The address is re-checked because the link's authority comes from the
+      // mailbox it was sent to. If the account has since moved to another
+      // address, that mailbox is no longer proof of anything.
+      user.email.toLowerCase() !== reset.email.toLowerCase()
+    ) {
+      return undefined;
+    }
+    return { reset, user };
+  }
+
+  /**
+   * Sets a new password from a reset link and signs the person in.
+   *
+   * Consuming the link is a conditional update in the store, so two requests
+   * racing the same link cannot both succeed. Every other session the account
+   * has is revoked: a reset is the remedy for an account somebody else may be
+   * holding, and leaving their session alive would make it no remedy at all.
+   */
+  public async completePasswordReset(input: {
+    token: string;
+    password: string;
+    ipAddress: string;
+    userAgent: string;
+    secure?: boolean;
+  }): Promise<SessionIssueResult> {
+    const found = await this.findPasswordReset(input.token);
+    if (found === undefined) {
+      throw new AuthenticationError(
+        "This password reset link is no longer valid. Request a new one.",
+        400,
+        "reset_invalid",
+      );
+    }
+    // Hashed before the link is spent, so a password the policy refuses does
+    // not burn the one link the person has.
+    const passwordDigest = await hashPassword(input.password);
+    const consumed = await this.store.consumePasswordReset(
+      found.reset.id,
+      this.now().toISOString(),
+    );
+    if (!consumed) {
+      throw new AuthenticationError(
+        "This password reset link has already been used.",
+        400,
+        "reset_invalid",
+      );
+    }
+    const user = await this.store.updateUser(found.user.id, {
+      passwordDigest,
+    });
+    await this.store.revokeUserSessions(user.id);
+    await this.store.deletePasswordResetsForUser(user.id);
+    // A lockout from the guessing that may have prompted the reset would
+    // otherwise keep the owner out of the account they have just recovered.
+    this.loginFailures.delete(user.email.trim().toLowerCase());
     return await this.issueSession(
       user,
       input.ipAddress,
