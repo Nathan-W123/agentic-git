@@ -111,6 +111,35 @@ export const state = {
   channelMessages: {},
   channelAgentOverrides: {},
   channelRead: JSON.parse(window.localStorage.getItem("ag.chanread") ?? "{}"),
+  /**
+   * Where the "New messages" line goes, keyed by repository id.
+   *
+   * Separate from `channelRead` because the two answer different questions.
+   * `channelRead` is "has this channel anything in it for me", and opening the
+   * channel is precisely what makes that no — so it is stamped to now the
+   * moment the room opens. The divider asks "where was I", and that boundary
+   * has to survive the visit it is drawn in: taken from `channelRead` *before*
+   * the open stamps it, and then left alone until the reader leaves and comes
+   * back. Without the snapshot the line was always at the bottom, which is to
+   * say never drawn at all.
+   */
+  channelReadMark: {},
+  /**
+   * The composer's text per channel, keyed by repository id.
+   *
+   * `chatDraft` is the one live draft the composer and every uploader write
+   * through, and it used to be the only copy — so a half-written message
+   * followed the reader into the next channel and waited there to be sent to
+   * the wrong room. This is where a draft is parked on the way out and found
+   * again on the way back, mirrored into `ag.chandrafts` so it also survives a
+   * reload.
+   */
+  chanDrafts: JSON.parse(window.localStorage.getItem("ag.chandrafts") ?? "{}"),
+  /**
+   * How many messages have arrived below a reader who has scrolled up, keyed
+   * by repository id. Read by the jump-to-latest pill; see `channelUnreadMark`.
+   */
+  chanNewMessages: {},
   /** Repository ids whose channel has been read from the server at least once. */
   channelLoaded: new Set(),
   channelLoadingId: undefined,
@@ -3899,17 +3928,104 @@ export function markChannelRead(repositoryId) {
 }
 
 export function channelUnreadCount(repositoryId, { mentionsOnly = false } = {}) {
+  return countChannelSince(
+    repositoryId,
+    state.channelRead[repositoryId] ?? 0,
+    mentionsOnly,
+  );
+}
+
+/**
+ * Where this visit's "New messages" line goes, as a timestamp.
+ *
+ * Taken once per visit, on the way in and before `markChannelRead` moves the
+ * read stamp to now — see `state.channelReadMark`. `undefined` when there was
+ * nothing unread to divide, which is the common case and the one where no
+ * line should be drawn at all.
+ */
+export function snapshotChannelRead(repositoryId) {
+  if (!repositoryId) {
+    return;
+  }
   const readAt = state.channelRead[repositoryId] ?? 0;
+  // Nothing above the line means no line. A first visit (`readAt` of 0) counts
+  // as nothing rather than as "every message here is new": a room opened for
+  // the first time is not a backlog somebody fell behind on.
+  state.channelReadMark[repositoryId] =
+    readAt > 0 && countChannelSince(repositoryId, readAt, false) > 0
+      ? readAt
+      : undefined;
+}
+
+/** This visit's divider position, or `undefined` when there is nothing to divide. */
+export function channelUnreadMark(repositoryId) {
+  return state.channelReadMark[repositoryId];
+}
+
+/**
+ * How many messages somebody else has put in the room since a moment.
+ *
+ * Own messages never count: arriving at your own words is not falling behind,
+ * and a divider or a jump pill that counted them would appear every time you
+ * sent something while scrolled up.
+ */
+function countChannelSince(repositoryId, since, mentionsOnly = false) {
   const mine = currentUserId() || "you";
   return channelMessagesFor(repositoryId).filter(
     (message) =>
       message.authorId !== mine &&
-      new Date(message.at).getTime() > readAt &&
+      new Date(message.at).getTime() > since &&
       (!mentionsOnly ||
         (message.mentions ?? []).some(
           (mention) => mention.kind === "user" && mention.id === mine,
         )),
   ).length;
+}
+
+/** How many new messages the jump-to-latest pill should offer to carry to. */
+export function channelNewSince(repositoryId, since) {
+  return since === undefined ? 0 : countChannelSince(repositoryId, since, false);
+}
+
+/**
+ * Parks the composer's text under the channel it was typed in.
+ *
+ * Called on every keystroke, so the localStorage write is held back behind a
+ * short timer: the in-memory copy is what any read in this session uses, and
+ * the mirror on disk only has to be right by the time the tab goes away.
+ */
+let draftFlush;
+
+export function saveChannelDraft(repositoryId, text) {
+  if (!repositoryId) {
+    return;
+  }
+  const draft = String(text ?? "");
+  if ((state.chanDrafts[repositoryId] ?? "") === draft) {
+    return;
+  }
+  if (draft === "") {
+    delete state.chanDrafts[repositoryId];
+  } else {
+    state.chanDrafts[repositoryId] = draft;
+  }
+  window.clearTimeout(draftFlush);
+  draftFlush = window.setTimeout(flushChannelDrafts, 500);
+}
+
+export function flushChannelDrafts() {
+  window.clearTimeout(draftFlush);
+  try {
+    window.localStorage.setItem("ag.chandrafts", JSON.stringify(state.chanDrafts));
+  } catch {
+    // A full or blocked store costs the reload-survival half of drafts and
+    // nothing else; the in-memory copy still carries them between channels.
+  }
+}
+
+/** The text this channel was left mid-sentence with, if any. */
+export function channelDraft(repositoryId) {
+  return state.chanDrafts[repositoryId] ?? "";
 }
 
 /**

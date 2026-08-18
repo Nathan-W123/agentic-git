@@ -29,12 +29,16 @@ api,
   channelAuthor,
   channelAwaitsGoAhead,
   channelMessagesFor,
+  channelDraft,
+  channelNewSince,
   channelParticipants,
   channelUnreadCount,
+  channelUnreadMark,
   collaborators,
   currentUserId,
   currentUserName,
   dmUnreadFrom,
+  flushChannelDrafts,
   markChannelRead,
   memberName,
   myAgents,
@@ -47,7 +51,9 @@ api,
   providerEffortOptions,
   providerModelOptions,
   providerOptionsNote,
+  saveChannelDraft,
   sendChannelMessage,
+  snapshotChannelRead,
   state,
   taskBelongsToAgent,
   threadAwaitsGoAhead,
@@ -80,6 +86,7 @@ import {
   miniSelect,
   relativeTime,
   searchBox,
+  showPopover,
   toast,
 } from "./ui.js";
 
@@ -1665,10 +1672,19 @@ function messageRow(
           : `<div class="cmsg-reactions">${reactions
               .map(
                 ([emoji, info]) =>
+                  // Its own emoji in the value, not the row's default: a
+                  // tally is a toggle of *that* reaction. Clicking the 🎉
+                  // somebody else left used to add a 👍 instead, because the
+                  // only emoji the client could send was the hardcoded one.
                   `<button type="button" class="cmsg-reaction${info.mine ? " mine" : ""}"
-                    data-act="channel-react" data-value="${esc(entry.id)}">${emoji} ${info.count}</button>`,
+                    data-act="channel-react" data-value="${esc(entry.id)}"
+                    data-emoji="${esc(emoji)}"
+                    title="${info.mine ? "Remove your" : "Add a"} ${esc(emoji)}"
+                    aria-pressed="${info.mine ? "true" : "false"}">${emoji} ${info.count}</button>`,
               )
-              .join("")}</div>`
+              .join("")}<button type="button" class="cmsg-reaction cmsg-react-add"
+                    data-act="channel-react-pick" data-value="${esc(entry.id)}"
+                    title="Add a reaction" aria-label="Add a reaction">${icon("smile")}</button></div>`
       }
       ${
         // The file list belongs to the thread, so it renders under the
@@ -1720,9 +1736,22 @@ function messageRow(
         deleted
           ? ""
           : iconButton("smile", {
-              act: "channel-react",
+              act: "channel-react-pick",
               value: entry.id,
               title: "React",
+              small: true,
+            })
+      }
+      ${
+        // Copy the words, not the row: what somebody wants off a message is
+        // the text they can paste somewhere else, without the attachment
+        // references the composer wrote into it or the mention markup.
+        deleted
+          ? ""
+          : iconButton("copy", {
+              act: "channel-message-copy",
+              value: entry.id,
+              title: "Copy text",
               small: true,
             })
       }
@@ -1873,7 +1902,8 @@ function messageList(repositoryId) {
     (entry) => query === "" || entry.content.toLowerCase().includes(query),
   );
   if (entries.length === 0) {
-    return `<div class="chan-messages" id="chan-messages"
+    return `<div class="chan-messages" id="chan-messages" role="log"
+      aria-live="polite" aria-relevant="additions" aria-label="Channel messages"
       data-scroll-key="channel:${esc(repositoryId)}">${emptyState(
       "chatBubble",
       query === "" ? "No messages yet" : "Nothing matches that search",
@@ -1948,6 +1978,13 @@ function messageList(repositoryId) {
   }
   timeline.push(...pending.slice(next));
   let lastDay = "";
+  // Where this visit found the room, as a timestamp — see `snapshotChannelRead`.
+  // Suppressed while searching: the results are hits scattered through history,
+  // not a transcript, and "New messages" drawn across them would be pointing at
+  // a boundary that does not exist in what is on screen.
+  const mark = query === "" ? channelUnreadMark(repositoryId) : undefined;
+  const mine = currentUserId() || "you";
+  let markDrawn = mark === undefined;
   const rows = timeline.map((item, index) => {
     const entry = item.entry;
     const day = new Date(item.at ?? Date.now()).toDateString();
@@ -1957,6 +1994,18 @@ function messageList(repositoryId) {
       lastDay = day;
       const isToday = day === new Date().toDateString();
       separator = `<div class="chan-day">${isToday ? "Today" : esc(day)}</div>`;
+    }
+    // The first thing somebody else said after the reader last left. Above the
+    // day separator rather than below it, so a night's backlog reads "you were
+    // away from here" and then "and this is tomorrow", and it is the id
+    // `channel-jump-unread` scrolls to.
+    if (
+      !markDrawn &&
+      entry.authorId !== mine &&
+      Date.parse(item.at ?? "") > mark
+    ) {
+      markDrawn = true;
+      separator = `<div class="chan-unread" id="chan-unread"><span>New messages</span></div>${separator}`;
     }
     if (item.inlineReplyTo !== undefined) {
       return (
@@ -1978,10 +2027,174 @@ function messageList(repositoryId) {
       separator + messageRow(entry, repositoryId, { hideChanges, compact })
     );
   });
-  return `<div class="chan-messages" id="chan-messages"
+  return `<div class="chan-messages" id="chan-messages" role="log"
+    aria-live="polite" aria-relevant="additions" aria-label="Channel messages"
     data-scroll-key="channel:${esc(repositoryId)}">${rows.join(
     "",
   )}${typingIndicator(repositoryId, undefined)}</div>`;
+}
+
+/**
+ * The emoji the picker offers, in the order every chat offers them.
+ *
+ * A short fixed set rather than a full emoji keyboard: the picker is for
+ * answering a message without typing, and the long tail of emoji is a
+ * different feature with a search box in it. These are the six or so that
+ * carry an actual reply — yes, done, thanks, funny, watching, thinking — plus
+ * the two that stand in for applause and disagreement.
+ */
+const REACTION_CHOICES = [
+  "\u{1F44D}",
+  "\u{1F389}",
+  "\u2705",
+  "\u{1F440}",
+  "\u{1F64F}",
+  "\u{1F602}",
+  "\u{1F914}",
+  "\u{1F44E}",
+];
+
+/**
+ * The emoji choices, anchored to the button that asked for them.
+ *
+ * The server has always accepted any emoji on a reaction — the client was the
+ * part that could only ever send one, so every reaction in the product was a
+ * thumbs-up regardless of what somebody meant. This is the missing half.
+ *
+ * Which ones the reader has already left are marked, because the picker
+ * doubles as the way to take one back: pressing a lit choice toggles it off,
+ * the same as pressing the tally under the message.
+ */
+export function reactionPicker(anchor, repositoryId, messageId) {
+  // Roots and thread replies both: the same row renders in both places, and a
+  // reaction on a reply is a real row in the store — the picker marking only
+  // roots would leave a reply's own reactions looking unset in it.
+  const roots = channelMessagesFor(repositoryId);
+  const message =
+    roots.find((entry) => entry.id === messageId) ??
+    roots
+      .flatMap((entry) => entry.replies ?? [])
+      .find((reply) => reply.id === messageId);
+  const reactions = message?.reactions ?? {};
+  const body = REACTION_CHOICES.map(
+    (emoji) =>
+      `<button type="button" class="react-choice${
+        reactions[emoji]?.mine === true ? " mine" : ""
+      }" data-act="channel-react-choose"
+        data-value="${esc(messageId)}" data-emoji="${esc(emoji)}"
+        title="${esc(emoji)}" aria-label="React with ${esc(emoji)}"
+        aria-pressed="${reactions[emoji]?.mine === true ? "true" : "false"}">${emoji}</button>`,
+  ).join("");
+  showPopover(anchor, `<div class="react-grid">${body}</div>`, { width: 236 });
+}
+
+/**
+ * A message's words on the clipboard.
+ *
+ * The text as it was written, minus the attachment reference lines the
+ * composer appends — those are an internal address for a picture and paste as
+ * noise into anything outside this app. Roots and thread replies both, since
+ * the same row renders in both places.
+ */
+export async function copyMessageText(repositoryId, messageId) {
+  const roots = channelMessagesFor(repositoryId);
+  const entry =
+    roots.find((message) => message.id === messageId) ??
+    roots.flatMap((message) => message.replies ?? []).find(
+      (reply) => reply.id === messageId,
+    );
+  // Removed rather than truncated at: `draftText` slices a *draft* at its
+  // first attachment because a draft keeps its references in a block at the
+  // end, but a sent message can have a picture in the middle of a sentence,
+  // and slicing there would put half of it on the clipboard.
+  const text = String(entry?.content ?? "")
+    .replace(ATTACHMENT_PATTERN, "")
+    .replace(/\n{3,}/gu, "\n\n")
+    .trim();
+  if (text === "") {
+    toast("That message has no text to copy", "error");
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(text);
+    toast("Message copied");
+  } catch {
+    // A denied clipboard permission or an insecure origin. Saying so beats a
+    // button that looks like it worked.
+    toast("Could not reach the clipboard", "error");
+  }
+}
+
+/**
+ * The way back down, for a reader who has scrolled up.
+ *
+ * Rendered once with the channel and shown or hidden by class rather than by
+ * re-rendering: whether somebody is following the conversation changes on
+ * every wheel notch, and rebuilding the screen at that rate is the latency the
+ * transcript spent a lot of effort not having. `paintJumpToLatest` is the only
+ * thing that touches it after this.
+ *
+ * Two jobs in one control: with new messages behind it, it says how many and
+ * carries the reader to the first of them; with none, it is the plain "back to
+ * the bottom" every chat has.
+ */
+function jumpToLatest() {
+  return `<button type="button" class="chan-jump" data-act="channel-jump-latest"
+    hidden aria-label="Jump to the latest messages">
+    <span class="chan-jump-count"></span>${icon("chevronDown")}</button>`;
+}
+
+/**
+ * Shows, hides and labels that button against what the transcript is doing.
+ *
+ * Called from the scroll listener and after every render. Reads
+ * `followingChannel`, which is the same flag the restore path uses to decide
+ * whether to pin the bottom — so the pill is visible exactly when a new message
+ * would *not* be scrolled to, which is the only time it has anything to offer.
+ */
+export function paintJumpToLatest() {
+  const pill = document.querySelector(".chan-jump");
+  if (pill === null) {
+    return;
+  }
+  noteFollowChanged();
+  const repositoryId = activeChannelId();
+  // What the count is measured from. The visit's unread mark when there is one
+  // — that is the older boundary and the one the reader actually cares about —
+  // and otherwise the moment they scrolled away, so a room they had fully read
+  // still tells them how much arrived behind their back.
+  const since = channelUnreadMark(repositoryId) ?? leftBottomAt;
+  const count = followingChannel ? 0 : channelNewSince(repositoryId, since);
+  state.chanNewMessages[repositoryId] = count;
+  // Against the node rather than against state: every render hands back a
+  // fresh, blank pill, and a count remembered in state would leave that blank
+  // label looking correct and never repaint it.
+  if (pill.dataset.count !== String(count)) {
+    pill.dataset.count = String(count);
+    const label = pill.querySelector(".chan-jump-count");
+    if (label !== null) {
+      label.textContent = count === 0 ? "" : `${count > 99 ? "99+" : count} new`;
+    }
+    pill.classList.toggle("has-new", count > 0);
+  }
+  pill.hidden = followingChannel;
+}
+
+/**
+ * When the reader last left the bottom of the transcript, or `undefined` while
+ * they are still there. Module-level rather than in `state`: it is a fact about
+ * this scroller in this tab, it means nothing after a reload, and it is written
+ * from a scroll handler that must stay cheap.
+ */
+let leftBottomAt;
+
+/** Keeps that stamp in step with the follow flag. Called wherever it changes. */
+function noteFollowChanged() {
+  if (followingChannel) {
+    leftBottomAt = undefined;
+  } else {
+    leftBottomAt ??= Date.now();
+  }
 }
 
 /**
@@ -3982,6 +4195,7 @@ export function renderChats() {
       ${chanSearchRow()}
       ${pinnedBanner(repositoryId)}
       ${messageList(repositoryId)}
+      ${jumpToLatest()}
       ${agentQuestionPrompt(repositoryId)}
       ${composer(repositoryId)}
     </div>
@@ -4034,7 +4248,23 @@ export function scrollChannel() {
     list.scrollTop = list.scrollHeight;
     followHeight = list.clientHeight;
     followingChannel = true;
+    paintJumpToLatest();
   }
+}
+
+/**
+ * The first message this visit had not seen, or the bottom when there is none.
+ *
+ * The unread line is the more useful destination of the two: somebody coming
+ * back to a busy room wants the start of what they missed, not the end of it.
+ */
+export function jumpToUnreadOrLatest() {
+  const target = document.getElementById("chan-unread");
+  if (target === null) {
+    scrollChannel();
+    return;
+  }
+  target.scrollIntoView({ block: "center" });
 }
 
 /**
@@ -4231,6 +4461,7 @@ export function restoreChannelScroll(saved) {
       }
     });
   }
+  paintJumpToLatest();
   if (list.dataset.followBound === "1") {
     return;
   }
@@ -4296,12 +4527,37 @@ export function restoreChannelScroll(saved) {
     }
     const distance = list.scrollHeight - list.scrollTop - height;
     followingChannel = distance <= FOLLOW_SLACK_PX;
+    paintJumpToLatest();
   });
+  paintJumpToLatest();
 }
 
 export function openChannel(repositoryId, rerender) {
+  // The draft belongs to the room it was typed in. Parked before anything else
+  // moves, because after `state.repositoryId` changes there is no longer a way
+  // to tell which channel the words in the composer were meant for — which is
+  // how a half-written message used to follow the reader into the next channel
+  // and sit there waiting to be sent to the wrong people.
+  const leaving = state.repositoryId;
+  if (leaving !== undefined && leaving !== repositoryId) {
+    saveChannelDraft(leaving, state.chatDraft);
+    flushChannelDrafts();
+  }
   state.repositoryId = repositoryId;
   persist("ag.repo", repositoryId);
+  // Only when the room actually changed. Re-opening the one already on screen
+  // — which is what tapping the current channel in the sidebar does — must not
+  // reach into a live composer: an upload writes its reference into
+  // `state.chatDraft` without going through a keystroke, so the parked copy can
+  // be a few characters behind the real one, and swapping it in would drop the
+  // picture somebody had just staged.
+  if (leaving !== repositoryId) {
+    state.chatDraft = channelDraft(repositoryId);
+  }
+  // Before `markChannelRead`, which is what makes the room read: this is the
+  // "you were here" line, and it has to be taken while there is still a
+  // boundary to take.
+  snapshotChannelRead(repositoryId);
   markChannelRead(repositoryId);
   // Picking a channel from the phone drawer is how it closes — the drawer
   // has no separate close button, matching the outer nav's scrim-only
@@ -4342,6 +4598,7 @@ export function submitComposerMessage(rerender) {
       return;
     }
     state.chatDraft = "";
+    saveChannelDraft(repositoryId, "");
     state.mentionActive = false;
     // A direct reply is one message, not a mode the composer stays trapped
     // in. Continuing an agent task remains sticky as before.
@@ -4366,6 +4623,7 @@ export function submitComposerMessage(rerender) {
     return;
   }
   state.chatDraft = "";
+  saveChannelDraft(repositoryId, "");
   state.mentionActive = false;
   markChannelRead(repositoryId);
   rerender();
@@ -4562,6 +4820,7 @@ export function updateComposerInput(node) {
     .map((attachment) => attachment.reference)
     .join("\n");
   state.chatDraft = `${node.value}${references === "" ? "" : `\n${references}\n`}`;
+  saveChannelDraft(activeChannelId(), state.chatDraft);
   // What the screen actually shows about a draft is the suggestion popup and
   // nothing else: the send button is always enabled, and the textarea already
   // holds the character that was just typed. Only that small popup needs an

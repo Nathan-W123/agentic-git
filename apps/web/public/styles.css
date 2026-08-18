@@ -4729,6 +4729,102 @@ button.chip.lg:hover {
   padding: 14px 0 10px;
 }
 
+/* Where the reader was when they last left this room.
+
+   A ruled line rather than a centred caption like `.chan-day` above: the day
+   separator says "time passed", which is a fact about the transcript, and this
+   says "everything below is for you", which is a fact about the reader. The
+   accent is the same one the rest of their session is drawn in, so the line
+   belongs to them and not to the channel.
+
+   Drawn once per visit and left where it is while they read — see
+   `snapshotChannelRead`. A line that chased the newest message would be
+   pointing at the bottom of the screen forever, which is no information at
+   all. */
+.chan-unread {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0 6px;
+  color: var(--accent-bright);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chan-unread::before,
+.chan-unread::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--accent-line);
+}
+
+/* The label reads left-of-centre, the way every chat draws this: the words are
+   an annotation on the line, not a title over the messages. */
+.chan-unread::after {
+  flex: 24;
+}
+
+.chan-unread::before {
+  flex: 1;
+}
+
+/* The way back down to the newest messages, over the bottom of the transcript.
+
+   Absolutely positioned against `.chan-main` so it floats above the last
+   message rather than taking a row of its own — a pill that pushed the
+   transcript up by its own height every time somebody scrolled would be
+   shifting the very words they scrolled up to read.
+
+   Shown and hidden through the `hidden` attribute from `paintJumpToLatest`,
+   never by re-rendering: following changes on every wheel notch. */
+.chan-jump {
+  position: absolute;
+  /* Clear of the composer, which is the last thing in the column. */
+  bottom: 92px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card-2);
+  box-shadow: var(--shadow-pop);
+  color: var(--text-2);
+  font-size: 11.5px;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.chan-jump[hidden] {
+  display: none;
+}
+
+.chan-jump:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.chan-jump svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* With something waiting below, the pill stops being furniture and becomes the
+   notice that there is unread conversation down there. */
+.chan-jump.has-new {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.chan-jump-count:empty {
+  display: none;
+}
+
 .cmsg-row {
   display: flex;
   /* Two lines when the message answers something: the reply's reference takes
@@ -4999,6 +5095,56 @@ button.chip.lg:hover {
   background: var(--accent-wash);
   border-color: var(--accent-line);
   color: var(--accent-bright);
+}
+
+/* The "+" at the end of a reaction row. Quieter than the tallies beside it —
+   it is an invitation, not a count — and only on a message that already has
+   one, because a bare row of these under every message would be noise. The
+   hover toolbar's smile is how the first reaction gets added. */
+.cmsg-react-add {
+  padding: 2px 7px;
+  color: var(--text-4);
+  border-style: dashed;
+}
+
+.cmsg-react-add:hover {
+  color: var(--accent-bright);
+  border-color: var(--accent-line);
+  border-style: solid;
+}
+
+.cmsg-react-add svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* The picker itself. A single row of choices at a size a finger can hit,
+   wrapping only if a theme's font makes them wider than the popover. */
+.react-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.react-choice {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  font-size: 19px;
+  line-height: 1;
+  border: 1px solid transparent;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+
+.react-choice:hover {
+  background: var(--bg-hover);
+}
+
+/* Already left by this reader: lit, because pressing it again takes it back. */
+.react-choice.mine {
+  background: var(--accent-wash);
+  border-color: var(--accent-line);
 }
 
 /* What the work under a thread changed. Closed by default: the answer most

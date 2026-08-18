@@ -50,6 +50,7 @@ import {
   notifications,
   persist,
   isFavourite,
+  flushChannelDrafts,
   channelAgentsFor,
   activeChannelId,
   canLeaveRepository,
@@ -174,10 +175,14 @@ import {
 import {
   captureChannelScroll,
   channelInfoPopoverHtml,
+  copyMessageText,
   handleComposerKeydown,
+  jumpToUnreadOrLatest,
   openChannel,
+  paintJumpToLatest,
   pickMention,
   pickSlashCommand,
+  reactionPicker,
   renderChats,
   rosterMenuItems,
   restoreChannelAnchor,
@@ -2906,7 +2911,13 @@ function resumeLiveUpdates() {
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") {
     resumeLiveUpdates();
+    return;
   }
+  // Going away is the last moment a draft can be written where a reload will
+  // find it. `saveChannelDraft` holds its own writes behind a short timer to
+  // keep typing cheap, and a tab that closes inside that window would take the
+  // last few words with it.
+  flushChannelDrafts();
 });
 // `persisted` means the page was thawed from the back-forward cache rather
 // than loaded — the one return path visibilitychange does not always cover.
@@ -4117,9 +4128,35 @@ document.addEventListener("click", (event) => {
     case "thread-slash-pick":
       pickSlashCommand(value, render, "thread");
       return;
-    case "channel-react":
-      toggleChannelReaction(activeChannelId(), value, "👍");
+    case "channel-react": {
+      // A tally carries the emoji it counts; the fallback is only for a caller
+      // that has not said, which is now nobody.
+      const emoji = node.dataset.emoji || "👍";
+      toggleChannelReaction(activeChannelId(), value, emoji);
       render();
+      return;
+    }
+    case "channel-react-pick":
+      reactionPicker(node, activeChannelId(), value);
+      return;
+    case "channel-react-choose": {
+      const emoji = node.dataset.emoji;
+      if (emoji === undefined) {
+        return;
+      }
+      closePopover();
+      toggleChannelReaction(activeChannelId(), value, emoji);
+      render();
+      return;
+    }
+    case "channel-message-copy":
+      void copyMessageText(activeChannelId(), value);
+      return;
+    case "channel-jump-latest":
+      jumpToUnreadOrLatest();
+      // The scroll the line above starts is what moves the flag; painting now
+      // would read the old one. Next frame, once the transcript has settled.
+      requestAnimationFrame(paintJumpToLatest);
       return;
     case "channel-pin":
       // `render` travels with it so a refusal can put the banner back: the
