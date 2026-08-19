@@ -15,7 +15,7 @@ import type {
 } from "@coord/persistence";
 import { createId } from "@coord/shared-types";
 
-import type { Mailer } from "./mailer.js";
+import { mailDeliveryMode, type Mailer } from "./mailer.js";
 
 const SESSION_COOKIE = "coord_session";
 const CSRF_COOKIE = "coord_csrf";
@@ -151,6 +151,13 @@ export interface PendingRegistration {
 export interface RegistrationStartResult {
   registrationId: string;
   expiresAt: string;
+  /**
+   * Where the code went. `mailbox` means a relay accepted it; `log` means this
+   * deployment has none configured and the code was written to the control
+   * plane's log instead, which the person waiting for an email has to be told
+   * rather than left to wonder about.
+   */
+  delivery: "mailbox" | "log";
 }
 
 type ClosedRegistrationReason = "used" | "expired" | "exhausted";
@@ -534,6 +541,10 @@ export class AuthService {
    * is retained only as a hash. The pending record is installed only after
    * mail delivery succeeds, so a relay failure leaves no credential-shaped
    * state that can later be confirmed.
+   *
+   * The result says which of the two things happened: a relay took the code,
+   * or this deployment has none and wrote it to the log. Both leave a usable
+   * challenge, and only one of them puts an email in somebody's inbox.
    */
   public async startRegistration(input: {
     email: string;
@@ -604,7 +615,14 @@ export class AuthService {
       );
     }
     this.pendingRegistrations.set(id, pending);
-    return { registrationId: id, expiresAt };
+    return {
+      registrationId: id,
+      expiresAt,
+      delivery:
+        mailDeliveryMode(this.registrationMailer) === "log"
+          ? "log"
+          : "mailbox",
+    };
   }
 
   /** Creates the account only after the one-time mailbox code is accepted. */

@@ -24,7 +24,7 @@ import {
   type ApiOperations,
 } from "./server.js";
 import { hashPassword } from "./auth.js";
-import type { MailMessage, Mailer } from "./mailer.js";
+import { createMailer, type MailMessage, type Mailer } from "./mailer.js";
 import type { CodexUsageReader } from "./codex-subscription-usage.js";
 
 const BOOTSTRAP_TOKEN = "bootstrap-token-with-at-least-24-characters";
@@ -12178,6 +12178,8 @@ test("registration creates no durable account or session until its mailed code i
   assert.equal(started.status, 202, JSON.stringify(started.data));
   assert.match(started.data.registrationId, /^reg_/u);
   assert.equal(Number.isNaN(Date.parse(started.data.expiresAt)), false);
+  // A relay took the message, so the screen may say "check your email".
+  assert.equal(started.data.delivery, "mailbox");
   assert.equal(started.headers.get("set-cookie"), null);
   assert.equal(stranger.cookieHeader, "");
   assert.equal(await store.countUsers(), usersBefore);
@@ -12446,4 +12448,32 @@ test("a reset refuses a new password that was retyped differently", async (t) =>
     },
   });
   assert.equal(retried.status, 200, JSON.stringify(retried.data));
+});
+
+test("registration says so when the deployment has no relay and only logged the code", async (t) => {
+  const logged: string[] = [];
+  const { client } = await startBareGateway(t, {
+    mailer: createMailer({ log: (line) => logged.push(line) }),
+  });
+  await bootstrap(client);
+
+  const stranger = new TestClient(client.origin);
+  const started = await stranger.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "unmailed@example.com",
+      confirmEmail: "unmailed@example.com",
+      displayName: "Unmailed",
+      password: PASSWORD,
+      confirmPassword: PASSWORD,
+    },
+  });
+
+  assert.equal(started.status, 202, JSON.stringify(started.data));
+  // The challenge still exists — the code is in the log — and the answer says
+  // no email was sent, so the sign-up screen stops pointing at an empty inbox.
+  assert.match(started.data.registrationId, /^reg_/u);
+  assert.equal(started.data.delivery, "log");
+  assert.equal(logged.length, 1);
+  assert.match(logged[0] ?? "", /confirmation code/iu);
 });

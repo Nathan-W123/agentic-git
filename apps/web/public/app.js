@@ -475,15 +475,24 @@ function renderInvite() {
 }
 
 function renderRegistrationConfirmation() {
+  // Nothing was emailed when the server says the code went to its log, so the
+  // screen says that rather than sending somebody to watch an empty inbox.
+  const logOnly = pendingRegistration?.delivery === "log";
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">
         ${brandMark(54)}
         <div>
-          <h1>Check your email</h1>
-          <p>Enter the six-digit code sent to ${esc(
-            pendingRegistration?.email ?? "your email address",
-          )}.</p>
+          <h1>${logOnly ? "Your code is in the server log" : "Check your email"}</h1>
+          <p>${
+            logOnly
+              ? `No mail relay is configured on this deployment, so no email was sent to ${esc(
+                  pendingRegistration?.email ?? "your email address",
+                )}. The six-digit code was written to the control plane log with the <code>[mail]</code> prefix — an operator can read it there, or set a mail relay so codes are emailed.`
+              : `Enter the six-digit code sent to ${esc(
+                  pendingRegistration?.email ?? "your email address",
+                )}.`
+          }</p>
         </div>
       </div>
       <form class="auth-card" data-act="registration-confirmation">
@@ -923,6 +932,8 @@ async function submitRegister(form) {
       registrationId: registration.registrationId,
       expiresAt: registration.expiresAt,
       email: String(data.get("email") ?? "").trim(),
+      // "log" means this deployment has no mail relay, so nothing was sent.
+      delivery: registration.delivery === "log" ? "log" : "mailbox",
     };
     $("#auth-root").innerHTML = renderAuth();
   } catch (error) {

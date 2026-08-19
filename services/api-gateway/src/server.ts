@@ -72,7 +72,7 @@ import {
   secretMatches,
   type AuthenticatedPrincipal,
 } from "./auth.js";
-import { createMailer, type Mailer } from "./mailer.js";
+import { createMailer, mailDeliveryMode, type Mailer } from "./mailer.js";
 import {
   authorizeOrganization,
   authorizeProject,
@@ -3308,8 +3308,23 @@ export class ApiGateway {
       options.mailer ??
       createMailer({
         smtpUrl: process.env["COORD_SMTP_URL"],
+        apiUrl: process.env["COORD_MAIL_API_URL"],
+        apiKey: process.env["COORD_MAIL_API_KEY"],
         from: process.env["COORD_MAIL_FROM"],
       });
+    // Said once, loudly, at boot: a deployment with no relay still hands out
+    // confirmation codes and still asks for them back, and the only symptom
+    // anybody sees is an email that never arrives.
+    if (
+      mailDeliveryMode(this.mailer) === "log" &&
+      registrationOpen(process.env)
+    ) {
+      console.warn(
+        "[mail] No COORD_MAIL_API_URL or COORD_SMTP_URL is configured. " +
+          "Sign-up confirmation codes and password reset links will be written " +
+          "to this log instead of being emailed.",
+      );
+    }
     this.auth = new AuthService(options.store, {
       secureCookies: options.secureCookies ?? false,
       passwordResetTtlMs: passwordResetTtlMs(

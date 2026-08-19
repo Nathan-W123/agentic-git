@@ -2,7 +2,7 @@ import { createConnection, type Socket } from "node:net";
 import { connect as connectTls } from "node:tls";
 
 /**
- * Just enough SMTP to deliver the one message this control plane sends.
+ * Two ways to deliver the two messages this control plane sends.
  *
  * A password reset link is worthless unless it reaches the mailbox, and the
  * project takes no third-party dependencies for something this small: the
@@ -11,10 +11,17 @@ import { connect as connectTls } from "node:tls";
  * is optional for the sender, so declining all of it is a complete client
  * rather than a partial one.
  *
- * When no relay is configured the mailer still exists: it writes the link to
- * the log instead of dropping it. A single-operator deployment with no mail
- * relay can then recover an account by reading its own logs, which is the
- * difference between a feature that degrades and one that silently fails.
+ * SMTP is not always reachable, though: hosting platforms routinely block the
+ * outbound ports, and a sign-up code that dies in a connection timeout looks
+ * exactly like one that was never sent. So a provider's HTTPS API is the other
+ * transport, chosen first when one is configured.
+ *
+ * When neither is configured the mailer still exists: it writes the message to
+ * the log instead of dropping it, and says so — {@link mailDeliveryMode} — so
+ * callers stop telling people to check an inbox nothing was sent to. A
+ * single-operator deployment can then recover an account by reading its own
+ * logs, which is the difference between a feature that degrades and one that
+ * silently fails.
  */
 
 export interface MailMessage {
@@ -25,11 +32,20 @@ export interface MailMessage {
 
 export interface MailerOptions {
   /**
-   * `smtp://user:pass@host:587` or `smtps://…` for implicit TLS. Absent means
-   * log-only delivery.
+   * `smtp://user:pass@host:587` or `smtps://…` for implicit TLS. Used when no
+   * `apiUrl` is set; absent with no `apiUrl` either means log-only delivery.
    */
   smtpUrl?: string | undefined;
-  /** Envelope and header sender. Defaults to `no-reply@<smtp host>`. */
+  /**
+   * HTTPS endpoint of a mail provider that accepts a JSON message, used in
+   * preference to SMTP when both are set. Platforms routinely block outbound
+   * SMTP ports, and a relay that cannot be reached is indistinguishable from
+   * no relay at all to the person waiting for the code.
+   */
+  apiUrl?: string | undefined;
+  /** Bearer token for that endpoint. */
+  apiKey?: string | undefined;
+  /** Envelope and header sender. Defaults to `no-reply@<mail host>`. */
   from?: string | undefined;
   /** Where log-only delivery writes. Defaults to `console.info`. */
   log?: ((message: string) => void) | undefined;
@@ -37,8 +53,31 @@ export interface MailerOptions {
   timeoutMs?: number | undefined;
 }
 
+/**
+ * How a mailer reaches the mailbox.
+ *
+ * `log` is not delivery: the message is written to the control plane's log and
+ * nothing leaves the machine. Callers that promise somebody an email need to
+ * know the difference, which is why it is stated rather than inferred.
+ */
+export type MailDelivery = "smtp" | "api" | "log";
+
 /** Delivers one message, or throws if the relay refuses it. */
-export type Mailer = (message: MailMessage) => Promise<void>;
+export type Mailer = ((message: MailMessage) => Promise<void>) & {
+  /** How this mailer delivers. Absent on mailers supplied by a caller. */
+  delivery?: MailDelivery;
+};
+
+/**
+ * What a mailer will actually do with a message, or undefined when it does not
+ * say — a caller-supplied mailer is trusted to deliver, since it was handed in
+ * precisely to do something the mailer built here would not.
+ */
+export function mailDeliveryMode(
+  mailer: Mailer | undefined,
+): MailDelivery | undefined {
+  return mailer?.delivery;
+}
 
 export interface SmtpEndpoint {
   host: string;
@@ -325,6 +364,64 @@ export async function sendMail(
   }
 }
 
+/** An HTTPS mail provider that accepts one JSON message per request. */
+export interface MailApiEndpoint {
+  /** Absolute `https://` (or `http://`, for a local relay) endpoint. */
+  url: string;
+  /** Sent as `Authorization: Bearer …` when present. */
+  apiKey: string | undefined;
+}
+
+export function parseMailApiUrl(value: string): URL {
+  const url = new URL(value);
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error(
+      `Mail API URL must use https: or http:, not ${url.protocol}`,
+    );
+  }
+  return url;
+}
+
+/**
+ * Delivers one message through a provider's HTTP API.
+ *
+ * The body is the shape every hosted provider worth using accepts — sender,
+ * recipients, subject, plain text — so one client covers Resend, Postmark's
+ * compatibility endpoint and anything else that copied them. A non-2xx is an
+ * error with the provider's own words in it, because "the code never arrived"
+ * is only debuggable if the refusal reached the log.
+ */
+export async function sendMailViaHttpApi(
+  endpoint: MailApiEndpoint,
+  from: string,
+  message: MailMessage,
+  options: { timeoutMs?: number | undefined } = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 15_000;
+  const response = await fetch(endpoint.url, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      ...(endpoint.apiKey === undefined || endpoint.apiKey === ""
+        ? {}
+        : { authorization: `Bearer ${endpoint.apiKey}` }),
+    },
+    body: JSON.stringify({
+      from,
+      to: [message.to],
+      subject: message.subject,
+      text: message.text,
+    }),
+    signal: AbortSignal.timeout(timeoutMs),
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(
+      `Mail API refused the message: ${response.status} ${detail.slice(0, 300)}`,
+    );
+  }
+}
+
 /**
  * The mailer this deployment can actually use.
  *
@@ -335,25 +432,52 @@ export async function sendMail(
  */
 export function createMailer(options: MailerOptions = {}): Mailer {
   const log = options.log ?? ((line: string) => console.info(line));
+  const apiUrl = (options.apiUrl ?? "").trim();
   const configured = (options.smtpUrl ?? "").trim();
+  const explicitFrom = (options.from ?? "").trim();
+
+  if (apiUrl !== "") {
+    const parsed = parseMailApiUrl(apiUrl);
+    const endpoint: MailApiEndpoint = {
+      url: parsed.toString(),
+      apiKey: (options.apiKey ?? "").trim() === ""
+        ? undefined
+        : (options.apiKey ?? "").trim(),
+    };
+    const from =
+      explicitFrom === "" ? `no-reply@${parsed.hostname}` : explicitFrom;
+    const mailer: Mailer = async (message) => {
+      await sendMailViaHttpApi(endpoint, from, message, {
+        ...(options.timeoutMs === undefined
+          ? {}
+          : { timeoutMs: options.timeoutMs }),
+      });
+    };
+    mailer.delivery = "api";
+    return mailer;
+  }
+
   if (configured === "") {
-    return async (message) => {
+    const mailer: Mailer = async (message) => {
       log(
-        `[mail] No COORD_SMTP_URL is configured, so this message was not sent. ` +
-          `To: ${message.to}\nSubject: ${message.subject}\n${message.text}`,
+        `[mail] No COORD_SMTP_URL or COORD_MAIL_API_URL is configured, so this ` +
+          `message was not sent. To: ${message.to}\nSubject: ${message.subject}\n${message.text}`,
       );
     };
+    mailer.delivery = "log";
+    return mailer;
   }
+
   const endpoint = parseSmtpUrl(configured);
   const from =
-    (options.from ?? "").trim() === ""
-      ? `no-reply@${endpoint.host}`
-      : (options.from ?? "").trim();
-  return async (message) => {
+    explicitFrom === "" ? `no-reply@${endpoint.host}` : explicitFrom;
+  const mailer: Mailer = async (message) => {
     await sendMail(endpoint, from, message, {
       ...(options.timeoutMs === undefined
         ? {}
         : { timeoutMs: options.timeoutMs }),
     });
   };
+  mailer.delivery = "smtp";
+  return mailer;
 }

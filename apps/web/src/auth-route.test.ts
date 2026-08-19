@@ -204,12 +204,25 @@ test("registration waits for the emailed one-time code before entering the app",
     "the code field should use the browser's one-time-code affordance",
   );
   assert.match(confirmation, /pattern="\[0-9\]\{6\}"/u);
+  // A deployment with no mail relay sends nothing, and the screen has to say
+  // so rather than telling somebody to watch an inbox that stays empty.
+  assert.match(
+    confirmation,
+    /delivery === "log"/u,
+    "the challenge should tell people when no email was sent",
+  );
+  assert.match(confirmation, /server log/iu);
 
   const start = app.slice(
     app.indexOf("async function submitRegister(form)"),
     app.indexOf("async function submitRegistrationConfirmation(form)"),
   );
   assert.match(start, /registration\.registrationId/u);
+  assert.match(
+    start,
+    /registration\.delivery/u,
+    "the challenge should remember whether the code was actually mailed",
+  );
   assert.doesNotMatch(
     start,
     /await boot\(\)/u,

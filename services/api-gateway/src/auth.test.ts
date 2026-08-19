@@ -34,7 +34,7 @@ import {
   parseApiToken,
   parseBearer,
 } from "./auth.js";
-import type { MailMessage } from "./mailer.js";
+import { createMailer, type MailMessage } from "./mailer.js";
 
 function confirmationCode(message: MailMessage | undefined): string {
   return /\b([0-9]{6})\b/u.exec(message?.text ?? "")?.[1] ?? "";
@@ -574,4 +574,33 @@ test("resetting a password revokes the sessions somebody else may be holding", a
     await store.getAuthSession(stolen.principal.sessionId ?? ""),
     undefined,
   );
+});
+
+test("starting registration says whether the code was mailed or only logged", async () => {
+  const store = new InMemoryCoordinationStore();
+  const logged: string[] = [];
+  const logOnly = new AuthService(store, {
+    mailer: createMailer({ log: (line) => logged.push(line) }),
+  });
+
+  const unmailed = await logOnly.startRegistration({
+    email: "nobody@example.com",
+    displayName: "Nobody",
+    password: "a-long-enough-password",
+  });
+
+  // The challenge is still usable — the code is in the log — but the caller is
+  // told not to promise an email nobody sent.
+  assert.equal(unmailed.delivery, "log");
+  assert.equal(logged.length, 1);
+
+  const delivering = new AuthService(new InMemoryCoordinationStore(), {
+    mailer: async () => {},
+  });
+  const mailed = await delivering.startRegistration({
+    email: "somebody@example.com",
+    displayName: "Somebody",
+    password: "a-long-enough-password",
+  });
+  assert.equal(mailed.delivery, "mailbox");
 });
