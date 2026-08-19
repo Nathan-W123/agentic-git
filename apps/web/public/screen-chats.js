@@ -1719,10 +1719,14 @@ function messageRow(
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
-  // Person-to-person replies live in the channel itself. Agent-authored roots
-  // retain the task thread they have always used.
+  // One acknowledgement under a person's task stays visually flat. Once the
+  // agent has substantive narration too, that same request becomes the root
+  // of the task thread. Legacy agent-authored roots keep their old shape.
   const inlineReply = inlineReplyTo !== undefined;
-  const hasTaskThread = entry.kind !== "user" && replies.length > 0;
+  const hasTaskThread =
+    replies.length > 0 &&
+    (entry.kind !== "user" ||
+      (entry.taskId !== undefined && replies.length > 1));
   // Agent answers and acknowledgements remain ordinary roots in the room's
   // chronological transcript. Their stored reference is the address back to
   // the request that prompted them; it does not replace the task thread the
@@ -1965,7 +1969,7 @@ function messageRow(
               title: "Reply to this message",
               small: true,
             })
-          : inlineReply || entry.kind === "user"
+          : inlineReply || (entry.kind === "user" && !hasTaskThread)
             ? iconButton("reply", {
                 act: "channel-message-reply",
                 value: inlineReply ? inlineReplyTo.id : entry.id,
@@ -2076,7 +2080,9 @@ function messageList(repositoryId) {
     entries
       .filter(
         (entry) =>
-          (entry.replies ?? []).length > 0 && entry.taskId !== undefined,
+          entry.taskId !== undefined &&
+          (entry.replies ?? []).length > 0 &&
+          (entry.kind !== "user" || (entry.replies ?? []).length > 1),
       )
       .map((entry) => entry.taskId),
   );
@@ -2102,7 +2108,10 @@ function messageList(repositoryId) {
   };
   const pending = [];
   for (const entry of entries) {
-    if (entry.kind !== "user") {
+    if (
+      entry.kind !== "user" ||
+      (entry.taskId !== undefined && (entry.replies ?? []).length > 1)
+    ) {
       continue;
     }
     for (const reply of entry.replies ?? []) {
@@ -2687,7 +2696,8 @@ function composer(repositoryId) {
           placeholder="${
             state.composerThreadId === undefined
               ? `Message #${esc(repositoryId ?? "")}`
-              : replyTarget?.kind === "user"
+              : replyTarget?.kind === "user" &&
+                  replyTarget.taskId === undefined
                 ? "Write a reply..."
                 : "Add to this thread..."
           }">${esc(draftText())}</textarea>
@@ -2897,7 +2907,10 @@ function threadListPanel(repositoryId) {
   };
   const threads = channelMessagesFor(repositoryId)
     .filter(
-      (entry) => entry.kind !== "user" && (entry.replies ?? []).length > 0,
+      (entry) =>
+        (entry.replies ?? []).length > 0 &&
+        (entry.kind !== "user" ||
+          (entry.taskId !== undefined && (entry.replies ?? []).length > 1)),
     )
     .slice()
     .sort((left, right) => lastActivity(right).localeCompare(lastActivity(left)));
@@ -4762,7 +4775,8 @@ export function submitComposerMessage(rerender) {
     state.mentionActive = false;
     // A direct reply is one message, not a mode the composer stays trapped
     // in. Continuing an agent task remains sticky as before.
-    const directReply = target?.kind === "user";
+    const directReply =
+      target?.kind === "user" && target.taskId === undefined;
     if (directReply) {
       state.composerThreadId = undefined;
     }
@@ -4863,7 +4877,7 @@ function composerThreadChip(repositoryId) {
   if (root === undefined) {
     return "";
   }
-  const directReply = root.kind === "user";
+  const directReply = root.kind === "user" && root.taskId === undefined;
   const author = channelAuthor(repositoryId, root);
   const title = `${directReply ? `${author.name}: ` : ""}${threadTitle(root)}`;
   return `<div class="composer-thread">

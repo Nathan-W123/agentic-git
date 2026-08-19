@@ -622,6 +622,51 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(css, /\.thread-replies-head::after \{/u);
 });
 
+test("user-rooted task threads promote only after substantive narration", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const row = chats.slice(
+    chats.indexOf("function messageRow("),
+    chats.indexOf("function typingIndicator("),
+  );
+  const list = chats.slice(
+    chats.indexOf("function messageList("),
+    chats.indexOf("function isThreadEnding("),
+  );
+  const panel = chats.slice(
+    chats.indexOf("function threadListPanel("),
+    chats.indexOf("function threadPanel("),
+  );
+  const chip = chats.slice(
+    chats.indexOf("function composerThreadChip("),
+    chats.indexOf("export function submitThreadReply("),
+  );
+
+  assert.match(
+    row,
+    /entry\.kind !== "user" \|\|\s*\(entry\.taskId !== undefined && replies\.length > 1\)/u,
+  );
+  assert.match(
+    row,
+    /inlineReply \|\| \(entry\.kind === "user" && !hasTaskThread\)/u,
+    "a lone acknowledgement remains an inline chronological reply",
+  );
+  assert.match(
+    list,
+    /entry\.taskId !== undefined && \(entry\.replies \?\? \[\]\)\.length > 1/u,
+    "a promoted task keeps its replies out of the flat room timeline",
+  );
+  assert.match(
+    panel,
+    /entry\.kind !== "user" \|\|[\s\S]{0,120}entry\.taskId !== undefined && \(entry\.replies \?\? \[\]\)\.length > 1/u,
+    "the thread list accepts new user roots and legacy agent roots",
+  );
+  assert.match(
+    chip,
+    /root\.kind === "user" && root\.taskId === undefined/u,
+    "a user-rooted task remains a task when the channel composer continues it",
+  );
+});
+
 test("a long thread name cannot push the panel's close out of reach", async () => {
   const css = await publicFile("styles.css");
   const chats = await publicFile("screen-chats.js");

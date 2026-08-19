@@ -3456,9 +3456,7 @@ test("an org-wide agent accepts a stranger's @mention and dispatches under the o
   assert.match(task.objective, /please fix the login bug/u);
 
   const after = await owner.request(`${base}/messages`);
-  const systemMessages = (after.data.messages as any[]).filter(
-    (message) => message.kind === "agent",
-  );
+  const systemMessages = agentSpeech(after.data.messages);
   assert.equal(systemMessages.length, 1);
   assert.match(systemMessages[0].content, /On it/u);
 });
@@ -3489,9 +3487,7 @@ test("the acknowledgement is the agent's own sentence, not the same line every t
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
 
   const after = await owner.request(`${base}/messages`);
-  const agentMessages = (after.data.messages as any[]).filter(
-    (message) => message.kind === "agent",
-  );
+  const agentMessages = agentSpeech(after.data.messages);
   assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
   assert.equal(
     agentMessages[0].content,
@@ -3523,14 +3519,12 @@ test("an agent that answers nothing still acknowledges", async (t) => {
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
 
   const after = await owner.request(`${base}/messages`);
-  const agentMessages = (after.data.messages as any[]).filter(
-    (message) => message.kind === "agent",
-  );
+  const agentMessages = agentSpeech(after.data.messages);
   assert.equal(agentMessages.length, 1, JSON.stringify(after.data.messages));
   assert.equal(agentMessages[0].content, "On it.");
 });
 
-test("an agent's work acknowledgement references its request without replacing the task thread", async (t) => {
+test("an agent's work acknowledgement replies inside the user-rooted task thread", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -3547,19 +3541,83 @@ test("an agent's work acknowledgement references its request without replacing t
   });
   assert.equal(posted.status, 201, JSON.stringify(posted.data));
   const listed = await owner.request(`${base}/messages`);
-  const acknowledgement = (listed.data.messages as any[]).find(
-    (message) => message.kind === "agent",
+  const thread = (listed.data.messages as any[]).find(
+    (message) => message.id === posted.data.message.id,
+  );
+  const acknowledgement = thread?.replies.find(
+    (reply: any) => reply.kind === "agent",
   );
 
-  assert.equal(acknowledgement?.referencedMessageId, posted.data.message.id);
-  assert.deepEqual(acknowledgement?.replies ?? [], []);
+  assert.equal(thread?.kind, "user");
+  assert.equal(thread?.content, "@Claude (Owner) tighten the retry policy");
+  assert.equal(
+    acknowledgement?.authorId,
+    `${bootstrapped.user.id}:anthropic`,
+  );
   assert.equal(runtime.submittedTasks.length, 1);
-  const event = (await runtime.store.listAudit()).find(
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.equal(thread?.taskId, task?.id);
+  const events = (await runtime.store.listAudit()).filter(
     (entry) =>
       entry.type === "channel_message_posted" &&
-      entry.data["messageId"] === acknowledgement?.id,
+      entry.data["messageId"] === posted.data.message.id,
   );
-  assert.equal(event?.data["referencedMessageId"], posted.data.message.id);
+  assert.ok(events.length >= 2, JSON.stringify(events));
+});
+
+test("automatic continuation matches an existing user-rooted task thread", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "user-root-continue");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+  const content = "@Claude (Owner) rework the retry policy and its tests";
+
+  const first = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content },
+  });
+  assert.equal(first.status, 201, JSON.stringify(first.data));
+  const second = await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content },
+  });
+  assert.equal(second.status, 201, JSON.stringify(second.data));
+  assert.equal(runtime.submittedTasks.length, 2);
+
+  const [firstSubmission, secondSubmission] = runtime.submittedTasks;
+  assert.equal(firstSubmission?.conversationId, first.data.message.id);
+  assert.equal(secondSubmission?.conversationId, first.data.message.id);
+  await waitFor(async () => {
+    const root = await runtime.store.getChannelMessage(
+      repositoryId,
+      first.data.message.id,
+      bootstrapped.user.id,
+    );
+    return (
+      (root?.replies ?? []).filter((reply) => reply.kind === "agent").length >= 2
+    );
+  }, "the continued task never acknowledged inside the original thread");
+  const messages = await runtime.store.listChannelMessages(
+    repositoryId,
+    bootstrapped.user.id,
+  );
+  const root = messages.find((message) => message.id === first.data.message.id);
+  const repeated = messages.find(
+    (message) => message.id === second.data.message.id,
+  );
+  assert.equal(root?.kind, "user");
+  assert.ok(root?.taskId !== undefined);
+  assert.equal(repeated?.taskId, undefined);
+  assert.ok(
+    (root?.replies ?? []).some(
+      (reply) => reply.kind === "user" && reply.content === content,
+    ),
+  );
 });
 
 test("an agent's own owner can always @mention it, personal or org-wide", async (t) => {
@@ -3587,9 +3645,7 @@ test("an agent's own owner can always @mention it, personal or org-wide", async 
   assert.equal(selfTask.vendor, "claude");
 
   const after = await owner.request(`${base}/messages`);
-  const systemMessages = (after.data.messages as any[]).filter(
-    (message) => message.kind === "agent",
-  );
+  const systemMessages = agentSpeech(after.data.messages);
   assert.equal(systemMessages.length, 1);
   assert.match(systemMessages[0].content, /On it/u);
 });
@@ -3635,11 +3691,13 @@ test("a human channel participant can be @mentioned without an agent refusal", a
  * what an agent says once it has the work.
  */
 function agentSpeech(messages: unknown[]): any[] {
-  return (messages as any[]).filter(
-    (message) =>
-      message.kind === "agent" &&
-      !/^Want me to take this/u.test(String(message.content ?? "")),
-  );
+  return (messages as any[])
+    .flatMap((message) => [message, ...(message.replies ?? [])])
+    .filter(
+      (message) =>
+        message.kind === "agent" &&
+        !/^Want me to take this/u.test(String(message.content ?? "")),
+    );
 }
 
 /**
@@ -4087,9 +4145,7 @@ test("an explicit @mention suppresses auto-claim even when an unmentioned agent 
   );
 
   const after = await owner.request(`${base}/messages`);
-  const systemMessages = (after.data.messages as any[]).filter(
-    (message) => message.kind === "agent",
-  );
+  const systemMessages = agentSpeech(after.data.messages);
   assert.equal(systemMessages.length, 1, JSON.stringify(systemMessages));
   assert.match(systemMessages[0].content, /On it/u);
   // The auto-claim explanation text never appears — confirms the mention
@@ -4222,15 +4278,21 @@ test("a request that names no verb this list knows is still work when an agent i
   assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
 
   const after = await owner.request(`${base}/messages`);
-  const agentMessages = (after.data.messages as any[]).filter(
-    (message) => message.kind === "agent",
+  const taskRoot = (after.data.messages as any[]).find(
+    (message) => message.id === posted.data.message.id,
+  );
+  const agentMessages = (taskRoot?.replies ?? []).filter(
+    (reply: any) => reply.kind === "agent",
   );
   assert.equal(agentMessages.length, 1);
   // The work was taken — but no thread is opened for it yet. The title and
   // reasoning wait until the run narrates something specific to this task,
   // so a one-line change never grows a thread to hold a title nobody reads.
-  const replies = agentMessages[0].replies ?? [];
-  assert.deepEqual(replies, []);
+  const replies = taskRoot?.replies ?? [];
+  assert.equal(taskRoot?.kind, "user");
+  const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
+  assert.equal(taskRoot?.taskId, task?.id);
+  assert.equal(replies.length, 1);
   // Whenever it is written, it is named after the work rather than an id.
   assert.ok(
     !replies.some((reply: any) => /task_[0-9a-f-]{8}/u.test(String(reply.content))),
@@ -5097,7 +5159,7 @@ test("a request that merely opens a thread carries nothing; the follow-up in it 
 
   const threadRoot = (
     await runtime.store.listChannelMessages(repositoryId, ownerId)
-  ).find((message) => message.kind === "agent");
+  ).find((message) => message.kind === "user" && message.taskId !== undefined);
   assert.ok(threadRoot !== undefined, "the dispatch never opened a thread");
 
   // What the run narrates back into its own thread while it works, which is
@@ -5203,7 +5265,7 @@ test("a reply in an open thread continues the conversation, whoever it mentions"
 
   const threadRoot = (
     await runtime.store.listChannelMessages(repositoryId, ownerId)
-  ).find((message) => message.kind === "agent");
+  ).find((message) => message.kind === "user" && message.taskId !== undefined);
   assert.ok(threadRoot !== undefined, "the dispatch never opened a thread");
   // The first turn already carries the conversation — the thread root's own
   // id — so the task it leaves behind can wait as `open`.
@@ -5344,7 +5406,7 @@ test("a thread carries what its task changed, and keeps it", async (t) => {
   // the process that watched the run is gone.
   const threadRoot = (
     await runtime.store.listChannelMessages(repositoryId, ownerId)
-  ).find((message) => message.kind === "agent");
+  ).find((message) => message.kind === "user" && message.taskId !== undefined);
   assert.equal(threadRoot?.taskId, taskId);
 
   // What the run reports while it works.
@@ -5362,14 +5424,14 @@ test("a thread carries what its task changed, and keeps it", async (t) => {
 
   await waitFor(async () => {
     const message = (await runtime.store.listChannelMessages(repositoryId, ownerId)).find(
-      (entry) => entry.kind === "agent",
+      (entry) => entry.kind === "user" && entry.taskId !== undefined,
     );
     return (message?.changedFiles?.length ?? 0) > 0;
   }, "the thread never picked up what the run was changing");
 
   const listed = await owner.request(`${base}/messages`);
   const thread = (listed.data.messages as any[]).find(
-    (message) => message.kind === "agent",
+    (message) => message.kind === "user" && message.taskId !== undefined,
   );
   assert.deepEqual(thread.changedFiles, [
     { path: "src/retry.ts", status: "modified" },
@@ -5390,7 +5452,7 @@ test("a thread carries what its task changed, and keeps it", async (t) => {
   });
   await waitFor(async () => {
     const message = (await runtime.store.listChannelMessages(repositoryId, ownerId)).find(
-      (entry) => entry.kind === "agent",
+      (entry) => entry.kind === "user" && entry.taskId !== undefined,
     );
     return message?.changedFiles?.length === 1;
   }, "the final changeset never replaced the live summary");
@@ -5428,7 +5490,7 @@ test("a command and a mention work together, and /plan holds the run", async (t)
   assert.equal(task?.status, "planned");
   const root = (
     await runtime.store.listChannelMessages(repositoryId, ownerId)
-  ).find((message) => message.kind === "agent");
+  ).find((message) => message.kind === "user" && message.taskId !== undefined);
   assert.match(
     (root?.replies ?? []).map((reply) => reply.content).join("\n"),
     /nothing is running yet/u,
@@ -5467,7 +5529,7 @@ test("a command and a mention work together, and /plan holds the run", async (t)
   await waitFor(async () => {
     const thread = (
       await runtime.store.listChannelMessages(repositoryId, ownerId)
-    ).find((message) => message.kind === "agent");
+    ).find((message) => message.kind === "user" && message.taskId !== undefined);
     return (thread?.replies ?? []).some((reply) =>
       /Starting now/u.test(reply.content),
     );
@@ -5497,7 +5559,7 @@ test("only the person who asked can start a held plan", async (t) => {
   assert.equal(task?.status, "planned");
   const root = (
     await runtime.store.listChannelMessages(repositoryId, ownerId)
-  ).find((message) => message.kind === "agent");
+  ).find((message) => message.kind === "user" && message.taskId !== undefined);
   const thread = `${base}/messages/${encodeURIComponent(root?.id ?? "")}/replies`;
 
   // Somebody else in the room says go. The plan is not theirs to spend: it
@@ -5511,7 +5573,7 @@ test("only the person who asked can start a held plan", async (t) => {
   await waitFor(async () => {
     const held = (
       await runtime.store.listChannelMessages(repositoryId, ownerId)
-    ).find((message) => message.kind === "agent");
+    ).find((message) => message.kind === "user" && message.taskId !== undefined);
     return (held?.replies ?? []).some((reply) => /Owner's to start/u.test(reply.content));
   }, "the bystander was never told whose plan this is");
 
@@ -5530,7 +5592,7 @@ test("only the person who asked can start a held plan", async (t) => {
   await waitFor(async () => {
     const started = (
       await runtime.store.listChannelMessages(repositoryId, ownerId)
-    ).find((message) => message.kind === "agent");
+    ).find((message) => message.kind === "user" && message.taskId !== undefined);
     return (started?.replies ?? []).some((reply) =>
       /Starting now/u.test(reply.content),
     );
@@ -6272,7 +6334,7 @@ test("the room is told when a hold is released, not only the thread", async (t) 
 
   const root = (
     await runtime.store.listChannelMessages(repositoryId, ownerId)
-  ).find((message) => message.kind === "agent");
+  ).find((message) => message.kind === "user" && message.taskId !== undefined);
   const go = await owner.request(
     `${base}/messages/${encodeURIComponent(root?.id ?? "")}/replies`,
     { method: "POST", body: { content: "go ahead" } },
@@ -6610,7 +6672,9 @@ test("an investigator says why a task failed, and retries when told to", async (
 
   const thread = () =>
     runtime.store.listChannelMessages(repositoryId, ownerId).then((messages) =>
-      messages.find((message) => message.kind === "agent"),
+      messages.find(
+        (message) => message.kind === "user" && message.taskId !== undefined,
+      ),
     );
   await waitFor(async () => {
     const root = await thread();
@@ -8270,7 +8334,7 @@ test("a finished thread carries its summary and its line counts", async (t) => {
   ]);
 });
 
-test("a quick task ends as two lines in the room, with no thread at all", async (t) => {
+test("a quick task keeps its acknowledgement inline and opens no task thread", async (t) => {
   // The counterpart of the test above, and the one that was missing while the
   // feature it covers sat inert. Holding the ceremony is only half of it: the
   // held set has to name *every* line that is true of all runs, and
@@ -8347,22 +8411,21 @@ test("a quick task ends as two lines in the room, with no thread at all", async 
   );
 
   const messages = await runtime.store.listChannelMessages(repo, ownerId);
-  // Two lines: the agent taking the work, and the agent reporting it done.
+  // The ending stays flat in the room.
   const ending = messages.find((message) => message.kind === "outcome");
   assert.match(
     String(ending?.content),
     /Changed the retry count to 2\./u,
     `the ending did not carry the agent's own words: ${JSON.stringify(ending)}`,
   );
-  // And not one reply anywhere in the room. This is the assertion that fails
-  // the moment a run-generic event goes missing from the held set again.
-  assert.deepEqual(
-    messages.flatMap((message) =>
-      (message.replies ?? []).map((reply) => reply.content),
-    ),
-    [],
-    "a quick task was given a thread",
+  // The acknowledgement is stored under the request, but it is the only
+  // reply. The browser keeps that shape in the chronological room and only
+  // promotes a user-rooted task once substantive narration adds another.
+  const root = messages.find(
+    (message) => message.kind === "user" && message.taskId === task.id,
   );
+  assert.equal(root?.replies.length, 1, JSON.stringify(root));
+  assert.equal(root?.replies[0]?.kind, "agent");
 });
 
 /**
@@ -9094,27 +9157,27 @@ test("the sweep leaves a quiet task alone, and closes a thread its watcher aband
   }).reconcileFinishedThreads();
 
   const swept = await runtime.store.listChannelMessages(repo, ownerId);
-  assert.deepEqual(
-    swept.flatMap((message) =>
-      (message.replies ?? []).map((reply) => reply.content),
-    ),
-    [],
-    "the sweep gave a thread to a task that had already reported in the room",
+  const quietRoot = swept.find((message) => message.taskId === task.id);
+  assert.equal(
+    quietRoot?.replies.length,
+    1,
+    "the sweep added narration to a quick task that had already ended flat",
   );
+  assert.equal(quietRoot?.replies[0]?.kind, "agent");
   assert.equal(
     swept.filter((message) => message.kind === "outcome").length,
     1,
     "the ending was said twice",
   );
 
-  // And the other half: a thread that really was left mid-sentence, on a turn
-  // that landed conversationally and so sits `open`.
+  // And the other half: a user-rooted thread left mid-sentence across a
+  // restart, on a turn that landed conversationally and so sits `open`.
   const stranded = await runtime.store.appendChannelMessage({
     repositoryId: repo,
     projectId: DEFAULT_PROJECT_ID,
-    kind: "agent",
-    authorId: `${ownerId}:anthropic`,
-    content: "On it.",
+    kind: "user",
+    authorId: ownerId,
+    content: "@Claude refactor the auth module",
   });
   const turn = await runtime.store.submitTask({
     repositoryId: repo,
@@ -9125,6 +9188,13 @@ test("the sweep leaves a quiet task alone, and closes a thread its watcher aband
     conversationId: stranded.id,
   });
   await runtime.store.setChannelMessageTask(repo, stranded.id, turn.id);
+  await runtime.store.addChannelReply({
+    repositoryId: repo,
+    messageId: stranded.id,
+    authorId: `${ownerId}:anthropic`,
+    content: "On it.",
+    kind: "agent",
+  });
   await runtime.store.addChannelReply({
     repositoryId: repo,
     messageId: stranded.id,
@@ -10661,11 +10731,13 @@ test("an answer after the deadline is told it was late, not chatted at", async (
   );
 });
 
-test("the thread exists before the agent's opening line has been written", async (t) => {
+test("the task root exists before the agent's acknowledgement has been written", async (t) => {
   // Reported as "it usually takes a while for the thread to come up". The
-  // acknowledgement is composed by a model and *is* the thread root, so the
-  // thread did not exist until that call returned — up to six seconds of an
-  // empty room after somebody asked for something.
+  // acknowledgement is composed by a model and used to *be* the thread root,
+  // so the thread did not exist until that call returned — up to six seconds
+  // of an empty room after somebody asked for something. The posted request
+  // now exists synchronously as the root and the acknowledgement arrives
+  // underneath it.
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -10686,7 +10758,7 @@ test("the thread exists before the agent's opening line has been written", async
   // so anything the dispatch waits for is time the browser spends blocked
   // before it can render anything at all.
   const startedAt = Date.now();
-  await owner.request(`${base}/messages`, {
+  const request = await owner.request(`${base}/messages`, {
     method: "POST",
     body: { content: `@${name} rework the retry loop` },
   });
@@ -10694,10 +10766,13 @@ test("the thread exists before the agent's opening line has been written", async
 
   const listed = await owner.request(`${base}/messages`);
   assert.ok(
-    (listed.data.messages as { kind: string }[]).some(
-      (message) => message.kind === "agent",
+    (listed.data.messages as { id: string; kind: string; taskId?: string }[]).some(
+      (message) =>
+        message.id === request.data.message.id &&
+        message.kind === "user" &&
+        message.taskId !== undefined,
     ),
-    "the thread did not exist by the time the post returned",
+    "the posted request was not made the task root",
   );
   // No completion's worth of waiting at all. Both model calls this dispatch
   // makes — the acknowledgement and the opening thoughts — now run behind the
@@ -10708,14 +10783,17 @@ test("the thread exists before the agent's opening line has been written", async
     `posting waited ${String(posted)}ms — it is still blocked on a model call`,
   );
 
-  // And the composed sentence still arrives, in place, on the same message.
+  // And the composed sentence still arrives as the agent's first reply.
   await waitFor(async () => {
     const listed = await owner.request(`${base}/messages`);
-    return (listed.data.messages as { kind: string; content: string }[]).some(
-      (message) =>
-        message.kind === "agent" && message.content.startsWith("Picking this up"),
+    const root = (listed.data.messages as any[]).find(
+      (message) => message.id === request.data.message.id,
     );
-  }, "the agent's own wording never replaced the placeholder");
+    return (root?.replies ?? []).some(
+      (reply: any) =>
+        reply.kind === "agent" && reply.content.startsWith("Picking this up"),
+    );
+  }, "the agent's own acknowledgement never reached the task thread");
 });
 
 test("the work is queued without waiting for the thread's opening thoughts", async (t) => {
@@ -11478,14 +11556,16 @@ test("a thread opens on the request that caused it, in the words it was asked in
   }, "the mention never became a task");
   const [task] = await runtime.store.listSubmittedTasks({ repositoryId });
 
-  // Held until here, deliberately: posting it at dispatch would open a thread
-  // for every task, and a task small enough to finish without narrating
-  // itself is meant to stay two lines in the room.
+  // Only the acknowledgement exists before there is substantive narration;
+  // the browser keeps that one reply visually flat.
   const beforeNarration = await owner.request(`${base}/messages`);
   const quiet = (beforeNarration.data.messages as any[]).find(
     (message) => message.taskId === task!.id,
   );
-  assert.deepEqual(quiet?.replies ?? [], [], "no thread before there is news");
+  assert.equal(quiet?.kind, "user");
+  assert.equal(quiet?.content, asked);
+  assert.equal(quiet?.replies?.length, 1, "only the acknowledgement should exist");
+  assert.equal(quiet?.replies?.[0]?.kind, "agent");
 
   await runtime.store.appendAudit(undefined, {
     type: "agent_progress",
@@ -11512,11 +11592,12 @@ test("a thread opens on the request that caused it, in the words it was asked in
     (message) => message.taskId === task!.id,
   );
   const replies = (thread?.replies ?? []) as any[];
-  // First, and attributed to the person who asked rather than to the agent —
-  // opening a thread showed the work with no visible cause before this.
-  assert.equal(replies[0]?.kind, "user", JSON.stringify(replies));
-  assert.equal(replies[0]?.content, asked);
-  assert.equal(replies[0]?.authorId, ownerId);
+  // The root itself is the person's exact request; the replies begin with the
+  // agent acknowledgement and then the work's narration.
+  assert.equal(thread?.kind, "user");
+  assert.equal(thread?.content, asked);
+  assert.equal(thread?.authorId, ownerId);
+  assert.equal(replies[0]?.kind, "agent", JSON.stringify(replies));
 });
 
 test("work merged into an existing thread says what asked for it", async (t) => {
