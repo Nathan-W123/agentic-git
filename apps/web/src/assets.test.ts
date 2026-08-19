@@ -2728,14 +2728,60 @@ test("the spec tab is where an agent is made org-wide or kept personal", async (
   assert.match(spec, /agent\.mine === true\s*\?\s*miniSelect\(\s*"channel-agent-visibility"/u);
   assert.match(spec, /: readOnly\(\s*visibility === "org" \? "Anyone in the org" : "Only its owner",/u);
 
-  // The select lives inside the row block the handler resolves the agent
+  // The select lives inside the chip group the handler resolves the agent
   // from, so the control and its handler cannot drift apart again.
-  assert.match(spec, /<div class="aspec-rows" data-agent="\$\{esc\(agent\.id\)\}">/u);
+  assert.match(spec, /<div class="aspec-chip-grid" data-agent="\$\{esc\(agent\.id\)\}">/u);
   assert.match(handler, /node\.closest\("\[data-agent\]"\)\?\.dataset\.agent/u);
   assert.match(
     handler,
     /applyProviderSetting\(agentId, "visibility", node\.value\)/u,
   );
+});
+
+test("agent details use the reference profile without dropping existing controls", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const spec = chats.slice(
+    chats.indexOf("function agentSpec(agent, repositoryId)"),
+    chats.indexOf("function agentPanel()"),
+  );
+  const panel = chats.slice(
+    chats.indexOf("function agentPanel()"),
+    chats.indexOf("function dmPanel()"),
+  );
+
+  // The visual hierarchy follows the supplied agent profile: a large identity,
+  // introductory copy, connected-setting pills, and checked capability rows.
+  assert.match(spec, /agentFace\(agent, 68\)/u);
+  assert.match(spec, /class="aspec-description"/u);
+  assert.match(spec, /<h3 class="aspec-label">Works with<\/h3>/u);
+  assert.match(spec, /<h3 class="aspec-label">Capabilities<\/h3>/u);
+  assert.match(spec, /class="aspec-chip"/u);
+  assert.match(spec, /class="aspec-capability aspec-current-task"/u);
+  assert.match(panel, /<aside class="thread-panel agent-detail-panel">/u);
+  assert.match(css, /\.agent-detail-panel\s*\{[^}]*min\(680px, 64vw\)/su);
+  assert.match(css, /\.agent-spec \.aspec-chip\s*\{/u);
+  assert.match(css, /\.agent-spec \.aspec-capability\s*\{/u);
+
+  // Every interactive or informative part of the former details page remains
+  // on the single scrolling surface, including owner-only and read-only paths.
+  for (const action of [
+    "channel-agent-visibility",
+    "channel-agent-model",
+    "channel-agent-effort",
+    "agent-role-form",
+    "agent-role-input",
+    "agent-panel-tab",
+    "agent-usage-refresh",
+  ]) {
+    assert.match(spec, new RegExp(`data-act="${action}"|"${action}"`, "u"));
+  }
+  assert.match(spec, /taskSummaryLine\(task, taskMessage\)/u);
+  assert.match(spec, /data-value="history" title="Task history"/u);
+  assert.match(spec, /elsewhere[\s\S]*\.map\(\(\{ repository, member \}\)/u);
+  assert.match(spec, /agentUsage\(agent\)/u);
+  assert.match(spec, /agent\.mine === true/u);
+  assert.match(spec, /const readOnly =/u);
 });
 
 test("a roster row carries one ellipsis and a compact rename delete menu", async () => {

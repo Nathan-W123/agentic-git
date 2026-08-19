@@ -6355,6 +6355,294 @@ button.chip.lg:hover {
   color: var(--text-2);
 }
 
+/* The details landing page follows the supplied profile reference: one large
+   identity, a short introduction, connected-setting pills, and quiet checked
+   capability rows. Existing controls still live in the page instead of being
+   pushed into another settings surface. */
+.agent-spec {
+  padding: clamp(30px, 4vw, 48px) clamp(24px, 5vw, 56px) 48px;
+}
+
+.agent-spec .aspec-content {
+  width: 100%;
+  max-width: 780px;
+  margin: 0 auto;
+}
+
+.agent-spec .aspec-head {
+  display: block;
+  margin-bottom: 36px;
+}
+
+.agent-spec .aspec-face {
+  margin-bottom: 22px;
+}
+
+.agent-spec .aspec-face .status-dot {
+  right: -2px;
+  bottom: 2px;
+}
+
+.agent-spec .aspec-head h2 {
+  margin: 0;
+  color: var(--text);
+  font-size: clamp(30px, 4vw, 38px);
+  font-weight: 680;
+  line-height: 1.12;
+  letter-spacing: -0.035em;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: normal;
+}
+
+.agent-spec .aspec-description {
+  max-width: 680px;
+  margin: 14px 0 10px;
+  color: var(--text-2);
+  font-size: 15px;
+  line-height: 1.62;
+}
+
+.agent-spec .aspec-sub {
+  margin-top: 0;
+  color: var(--text-3);
+  font-size: 11.5px;
+}
+
+.agent-spec .aspec-section {
+  margin-bottom: 34px;
+}
+
+.agent-spec .aspec-section:last-child {
+  margin-bottom: 0;
+}
+
+.agent-spec .aspec-label {
+  margin: 0;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 620;
+  line-height: 1.3;
+  text-transform: none;
+  letter-spacing: -0.012em;
+}
+
+.agent-spec .aspec-section > .aspec-label {
+  display: block;
+  margin-bottom: 15px;
+}
+
+.agent-spec .aspec-label-row {
+  min-height: 26px;
+  margin-bottom: 13px;
+}
+
+.agent-spec .aspec-count {
+  display: inline-grid;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 6px;
+  place-items: center;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  color: var(--text-3);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+.agent-spec .aspec-chip-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.agent-spec .aspec-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  max-width: 100%;
+  padding: 8px 13px;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-card);
+  color: var(--text);
+}
+
+.agent-spec .aspec-chip-label {
+  flex: none;
+  color: var(--text-3);
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.065em;
+  text-transform: uppercase;
+}
+
+.agent-spec .aspec-chip-value {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+
+.agent-spec .aspec-chip-text {
+  min-width: 0;
+  color: var(--text);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-spec .aspec-chip .mini-select {
+  max-width: 190px;
+  padding: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 13px;
+}
+
+.agent-spec .aspec-chip .mini-select:hover {
+  background: transparent;
+}
+
+.agent-spec .aspec-chip .mini-select select {
+  max-width: 158px;
+  color: var(--text);
+  font-size: 13px;
+  text-align: right;
+}
+
+.agent-spec .aspec-capabilities {
+  border-top: 1px solid var(--border-soft);
+}
+
+.agent-spec .aspec-capability {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 66px;
+  margin: 0;
+  padding: 13px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  background: transparent;
+}
+
+.agent-spec .aspec-capability-mark {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: none;
+  place-items: center;
+  color: var(--text-3);
+}
+
+.agent-spec .aspec-capability-mark svg {
+  width: 15px;
+  height: 15px;
+}
+
+.agent-spec .aspec-capability-copy {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.agent-spec .aspec-capability-title {
+  color: var(--text);
+  font-size: 13.5px;
+  line-height: 1.4;
+}
+
+.agent-spec .aspec-capability-meta {
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.4;
+  text-transform: capitalize;
+}
+
+.agent-spec .aspec-role {
+  flex: 0 1 230px;
+  padding: 7px 10px;
+  border-color: var(--border-soft);
+  background: var(--bg-card);
+  font-size: 13px;
+}
+
+.agent-spec .aspec-role:hover {
+  border-color: var(--border-strong);
+}
+
+.agent-spec .aspec-role:focus {
+  border-color: var(--accent-line);
+  background: var(--bg-inset);
+}
+
+.agent-spec .aspec-nav {
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 11.5px;
+}
+
+.agent-spec .aspec-nav:hover {
+  border-color: var(--border-soft);
+}
+
+.agent-spec .aspec-note {
+  margin-top: 10px;
+  color: var(--text-3);
+  font-size: 11.5px;
+  line-height: 1.55;
+}
+
+.agent-spec .aspec-usage-card {
+  padding: 14px 15px;
+  border: 1px solid var(--border-soft);
+  border-radius: 14px;
+  background: var(--bg-card);
+}
+
+.agent-spec .aspec-meter {
+  background: var(--bg-inset);
+}
+
+@media (max-width: 600px) {
+  .agent-spec {
+    padding: 26px 20px 36px;
+  }
+
+  .agent-spec .aspec-head {
+    margin-bottom: 30px;
+  }
+
+  .agent-spec .aspec-head h2 {
+    font-size: 30px;
+  }
+
+  .agent-spec .aspec-chip {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .agent-spec .aspec-capability {
+    align-items: flex-start;
+    flex-wrap: wrap;
+  }
+
+  .agent-spec .aspec-role {
+    flex-basis: calc(100% - 36px);
+    margin-left: 36px;
+    text-align: left;
+  }
+
+  .agent-spec .aspec-current-task .aspec-nav {
+    margin-left: 36px;
+  }
+}
+
 /* -------------------------------------------------------------- thread ---- */
 
 /*
@@ -6389,6 +6677,14 @@ button.chip.lg:hover {
   border-left: 1px solid var(--border-strong);
   box-shadow: -14px 0 30px -22px rgba(0, 0, 0, 0.9);
   z-index: 4;
+}
+
+/* Agent profiles need the breathing room of the reference's detail pane. A
+   remembered drag still wins through --panel-w, and the shared phone rule
+   below still makes every panel full-width on narrow screens. */
+.agent-detail-panel {
+  width: var(--panel-w, min(680px, 64vw));
+  min-width: min(420px, 100%);
 }
 
 .panel-grip {
