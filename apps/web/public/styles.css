@@ -4991,12 +4991,26 @@ button.chip.lg:hover {
   position: relative;
 }
 
+/* Where the stem stops is the whole of whether the turn reads as one line.
+   The route's foot sits fourteen pixels below the middle of the thread link
+   — half the link, plus the descent of the line box the inline-flex link
+   stands on — so `bottom: 25px` ends the stroke eleven pixels above that
+   middle, which is where the elbow's own upright stands. It used to stop at
+   `bottom: 11px`, level with the *outer bottom* of the elbow — but by that
+   point the elbow has curved away to the right, so the last pixels of the
+   stem stood alone beside the corner as a tail poking past the swoosh.
+   The stem now finishes inside the straight part of that upright, four
+   pixels below its top and three above where the curve begins, so the two
+   strokes overlap in the same column and no join is visible. Any change here
+   has to keep the end within that upright (see the height and top of
+   `.cmsg-row.cmsg-threaded .cmsg-thread-link::before`) — too low and the
+   tail comes back, too high and the line breaks in two. */
 .cmsg-row.cmsg-thread-path-end .cmsg-thread-route::before {
   content: "";
   position: absolute;
   left: -29px;
   top: -2px;
-  bottom: 11px;
+  bottom: 25px;
   border-left: 3px solid var(--border-strong);
   pointer-events: none;
 }
@@ -5595,17 +5609,21 @@ button.chip.lg:hover {
    a visible step where the two should be one line. Sized by the border box,
    13px of gap plus 16px of elbow put that stroke at -29px, exactly where the
    stem above it stands. Any change to the gap or the width has to keep that
-   sum at 29 (see `.cmsg-thread-route::before`), or the step comes back. The
-   fourteen-pixel height keeps the horizontal run where it already sat, three
-   pixels below the link's middle. */
+   sum at 29 (see `.cmsg-thread-route::before`), or the step comes back.
+
+   Top and height are read together: the difference between them (18 - 15) is
+   what puts the horizontal run three pixels below the link's middle, where it
+   has always sat. The height is spent upwards, giving the upright seven
+   straight pixels above the corner's arc for the stem to finish inside —
+   enough overlap that neither stroke can end short of the other. */
 .cmsg-row.cmsg-threaded .cmsg-thread-link::before {
   content: "";
   position: absolute;
   box-sizing: border-box;
-  top: calc(50% - 11px);
+  top: calc(50% - 15px);
   right: calc(100% + 13px);
   width: 16px;
-  height: 14px;
+  height: 18px;
   border-left: 3px solid var(--border-strong);
   border-bottom: 3px solid var(--border-strong);
   border-bottom-left-radius: 11px;
