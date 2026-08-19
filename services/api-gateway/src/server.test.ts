@@ -3678,6 +3678,12 @@ test("automatic continuation matches an existing user-rooted task thread", async
       (reply) => reply.kind === "user" && reply.content === content,
     ),
   );
+  assert.ok(
+    (root?.replies ?? [])
+      .filter((reply) => reply.kind === "agent")
+      .every((reply) => !reply.content.includes("Adding this to the thread")),
+    JSON.stringify(root?.replies),
+  );
 });
 
 test("an agent's own owner can always @mention it, personal or org-wide", async (t) => {

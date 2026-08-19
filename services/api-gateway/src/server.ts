@@ -10631,13 +10631,10 @@ export class ApiGateway {
             repositoryId,
             messageId: continuing,
             authorId: `${candidate.userId}:${candidate.provider}`,
-            content:
-              input.threadMessageId === undefined
-                ? // Auto-merged. Said out loud, because the reader did not ask
-                  // for this thread and needs to know why their request landed
-                  // in it rather than somewhere new.
-                  `${acknowledgementText}\n\n(Adding this to the thread above — it looks like the same piece of work.)`
-                : acknowledgementText,
+            // Joining the earlier thread is visible from the request being
+            // copied into it. Keep the agent's reply natural instead of
+            // announcing the coordinator's routing decision as an aside.
+            content: acknowledgementText,
           });
         })
         .catch(() => undefined);
