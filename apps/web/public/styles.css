@@ -99,6 +99,29 @@
   --shadow-pop: 0 6px 16px rgba(0, 0, 0, 0.44);
   --shadow-card: 0 1px 1px rgba(0, 0, 0, 0.28);
 
+  /* Motion. Three durations and one curve, named because a surface arriving
+     and the same surface leaving have to take the same time to read as one
+     movement played backwards, and two numbers written out separately do not
+     stay equal for long.
+
+     The curve is the phone drawer's: most of the distance covered early, then
+     a long quiet tail, which is how something thrown by a hand actually
+     moves. A symmetric ease over the same duration reads as slower, because
+     it saves half the travel for the second half of the time.
+
+     Only the rules that arrived with these tokens read them. The durations
+     written inline elsewhere in this file are the same vocabulary reached at
+     by hand, and rewriting them to point here would be a large diff that
+     changes nothing on screen. */
+  --ease-motion: cubic-bezier(0.32, 0.72, 0, 1);
+  /* A popup is anchored to the click that opened it and has nowhere to
+     travel; it only has to not blink into existence. */
+  --motion-pop: 0.14s;
+  /* A panel crosses real distance, so it gets long enough to be seen doing
+     it — still short enough that nobody opening one waits for it. */
+  --motion-panel: 0.2s;
+  --motion-scrim: 0.18s;
+
   --font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
     "Helvetica Neue", Arial, sans-serif;
   --mono: "JetBrains Mono", "SFMono-Regular", "SF Mono", Menlo, Consolas,
@@ -2559,6 +2582,19 @@ svg {
   position: absolute;
   inset: 0;
   background: rgba(4, 5, 9, 0.4);
+  animation: scrim-in var(--motion-scrim) ease;
+}
+
+@keyframes scrim-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes scrim-out {
+  to {
+    opacity: 0;
+  }
 }
 
 .popover {
@@ -2580,6 +2616,47 @@ svg {
   from {
     opacity: 0;
     transform: translateY(-5px);
+  }
+}
+
+/* The way out, mirroring `pop-in`. `closePopover` (ui.js) puts this class on
+   the layer and holds the node for the length of it rather than removing it
+   on the spot: a popup that eases in over eight frames and then vanishes
+   between two reads as a glitch, not as a dismissal. `forwards` so the last
+   frame holds until the node actually goes, and `pointer-events` off so a
+   surface on its way out cannot swallow the click that follows it. */
+.pop-layer.pop-closing {
+  pointer-events: none;
+}
+
+.pop-layer.pop-closing .popover {
+  animation: pop-out var(--motion-pop) ease forwards;
+}
+
+.pop-layer.pop-closing .pop-scrim {
+  animation: scrim-out var(--motion-scrim) ease forwards;
+}
+
+@keyframes pop-out {
+  to {
+    opacity: 0;
+    transform: translateY(-5px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pop-scrim {
+    animation: none;
+  }
+
+  /* Not `animation: none` like the entrance above it. The exit animation is
+     the only reason the layer is still in the document, so turning it off
+     would leave the popup standing at full opacity for the length of the
+     hold and *then* blink out — more motion noticed, not less. Taken
+     straight to its destination instead; ui.js drops the node on the same
+     timer either way. */
+  .pop-layer.pop-closing {
+    display: none;
   }
 }
 
@@ -4880,32 +4957,47 @@ button.chip.lg:hover {
   margin-top: 0;
 }
 
-/* A thread branches from the root avatar into its compact reply summary.
-   Three pixels of a neutral border grey gives the branch enough presence to
-   read as a path rather than a divider, without the accent's colour pulling
-   the eye away from the message. It starts four pixels below the avatar and
-   stops short of the reply link, so the rounded stroke floats between the two
-   components. The elbow radius carries the extra pixel so the inner curve
-   keeps the shape it had at two. */
-.cmsg-row.cmsg-threaded::before {
+/* One stem belongs to the visible avatar, not to whichever compact message
+   happened to create a task. Rows before the group's final task carry that
+   stem all the way through, so two prompts read as branches of one path and a
+   task on the second prompt still leads back to the face above both of them. */
+.cmsg-row.cmsg-thread-path-through::before {
   content: "";
   position: absolute;
   left: 23px;
-  top: 44px;
-  bottom: 18px;
-  width: 16px;
+  top: -1px;
+  bottom: -1px;
   border-left: 3px solid var(--border-strong);
-  border-bottom: 3px solid var(--border-strong);
   border-top-left-radius: 2px;
-  border-bottom-right-radius: 2px;
-  border-bottom-left-radius: 11px;
   pointer-events: none;
 }
 
-/* A thread whose root also answers something starts its avatar one reference
-   line lower, so the branch drawn under that avatar starts there too. */
-.cmsg-row.cmsg-threaded:has(> .cmsg-ref)::before {
-  top: 62px;
+/* Every grouped path leaves its avatar from the same point, four pixels below
+   the 32px face, regardless of the height of that first message. */
+.cmsg-row.cmsg-thread-path-start.cmsg-thread-path-through::before {
+  top: 44px;
+}
+
+/* The final row owns a wrapper that stops immediately after the thread link.
+   Its stem can therefore end at that link without following the progress bar
+   or the changed-files disclosure when either grows. */
+.cmsg-thread-route {
+  position: relative;
+}
+
+.cmsg-row.cmsg-thread-path-end .cmsg-thread-route::before {
+  content: "";
+  position: absolute;
+  left: -29px;
+  top: -2px;
+  bottom: 11px;
+  border-left: 3px solid var(--border-strong);
+  pointer-events: none;
+}
+
+.cmsg-row.cmsg-thread-path-start.cmsg-thread-path-end
+  .cmsg-thread-route::before {
+  top: 37px;
 }
 
 /* A person's reply is an ordinary line of the transcript, sitting in time
@@ -5476,6 +5568,7 @@ button.chip.lg:hover {
    reader is "there is more, and this much of it". Sized to its content rather
    than the column so the hit area ends where the words do. */
 .cmsg-thread-link {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -5483,6 +5576,23 @@ button.chip.lg:hover {
   margin-top: 6px;
   padding: 2px 0;
   text-align: left;
+}
+
+/* Each task turns out of the shared avatar stem at its thread summary. The
+   short vertical overlap makes consecutive elbows read as branches of one
+   path; the thirteen-pixel gap keeps the stroke clear of the replier faces. */
+.cmsg-row.cmsg-threaded .cmsg-thread-link::before {
+  content: "";
+  position: absolute;
+  top: calc(50% - 11px);
+  right: calc(100% + 13px);
+  width: 16px;
+  height: 11px;
+  border-left: 3px solid var(--border-strong);
+  border-bottom: 3px solid var(--border-strong);
+  border-bottom-left-radius: 11px;
+  border-bottom-right-radius: 2px;
+  pointer-events: none;
 }
 
 /* The count is the link, and it is the reader's own accent rather than a
@@ -6684,6 +6794,53 @@ button.chip.lg:hover {
   z-index: 4;
 }
 
+/* Opening and closing, driven from `playSurfaceMotion` in app.js rather than
+   from the presence of the element itself.
+
+   A render replaces the whole tree, so this panel is a brand new node on
+   every keystroke and every event off the stream. An `animation` on the bare
+   class would therefore replay constantly — CSS cannot tell "just opened"
+   from "still open" here, and only the render loop knows the difference. It
+   adds the class for exactly one animation and takes it off again.
+
+   `panel-leaving` goes on the node the render threw away, put back into the
+   shell for the length of its exit. It is inert by then, so fading out is
+   all it can still do. */
+.thread-panel.panel-entering {
+  animation: panel-in var(--motion-panel) var(--ease-motion);
+}
+
+.thread-panel.panel-leaving {
+  animation: panel-out var(--motion-panel) var(--ease-motion) forwards;
+  pointer-events: none;
+}
+
+@keyframes panel-in {
+  from {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+
+@keyframes panel-out {
+  to {
+    opacity: 0;
+    transform: translateX(16px);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .thread-panel.panel-entering {
+    animation: none;
+  }
+
+  /* As with the closing popover: the exit is why the node is still here, so
+     it is taken to its last frame rather than turned off. */
+  .thread-panel.panel-leaving {
+    display: none;
+  }
+}
+
 /* Agent profiles need the breathing room of the reference's detail pane. A
    remembered drag still wins through --panel-w, and the shared phone rule
    below still makes every panel full-width on narrow screens. */
@@ -7448,11 +7605,86 @@ dialog.modal {
   background: transparent;
   color: inherit;
   max-width: 92vw;
+  /* The centring a modal <dialog> normally gets for free, written out.
+     Browsers hang it off `dialog:modal`, and that stops matching the instant
+     `close()` is called — which is a frame before the exit transition below
+     has even started. Left to the default the card would drop out of the
+     middle of the screen and fade from wherever the top of the document put
+     it. Stated here, it is in the same place open, closing and closed. */
+  position: fixed;
+  inset: 0;
+  margin: auto;
+  width: fit-content;
+  height: fit-content;
+  max-height: calc(100% - 2rem);
+  /* A native <dialog> is `display: none` until it is shown, and the top layer
+     it moves into is not an ordinary style either — so a plain opacity
+     transition has nothing to run between. `allow-discrete` on `display` and
+     `overlay` is what keeps both of those around for the length of the
+     transition, and `@starting-style` below supplies the frame to come *from*
+     on the way in. Without that pair this is a fade with only one end.
+
+     Held to a fade and a couple of pixels of rise: the dialog is already the
+     brightest thing on a dimmed screen, and anything more elaborate makes a
+     confirmation feel like a bigger decision than it is. */
+  opacity: 0;
+  transform: translateY(6px) scale(0.985);
+  transition:
+    opacity var(--motion-pop) ease,
+    transform var(--motion-pop) var(--ease-motion),
+    overlay var(--motion-pop) allow-discrete,
+    display var(--motion-pop) allow-discrete;
+}
+
+dialog.modal[open] {
+  opacity: 1;
+  transform: none;
+}
+
+/* Closed, but kept on screen by the transition above: it is a picture of a
+   dialog by then, and clicks belong to whatever it is fading away from. */
+dialog.modal:not([open]) {
+  pointer-events: none;
+}
+
+@starting-style {
+  dialog.modal[open] {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
 }
 
 dialog.modal::backdrop {
   background: rgba(4, 5, 9, 0.62);
   backdrop-filter: blur(2px);
+  /* The dim comes up with the card rather than a frame before it, so the two
+     read as one surface arriving. Same `allow-discrete` reasoning as above —
+     a backdrop only exists while its dialog is open. */
+  opacity: 0;
+  transition:
+    opacity var(--motion-scrim) ease,
+    overlay var(--motion-scrim) allow-discrete,
+    display var(--motion-scrim) allow-discrete;
+}
+
+dialog.modal[open]::backdrop {
+  opacity: 1;
+}
+
+@starting-style {
+  dialog.modal[open]::backdrop {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Only the transition goes. The open and closed states stay exactly as
+     declared above, so the dialog still arrives at full opacity and still
+     leaves — it simply does both in one frame. */
+  dialog.modal,
+  dialog.modal::backdrop {
+    transition: none;
+  }
 }
 
 .modal-card {
@@ -7718,6 +7950,30 @@ dialog.modal::backdrop {
   }
 }
 
+/* Both scrims belong to a drawer, and a drawer only exists inside the
+   breakpoints below — so off is the default and each media query turns its
+   own back on.
+
+   This block used to sit near the bottom of the file, after the rules that
+   turn them on. Same selector, same specificity, later in the source: it won,
+   and neither scrim ever painted. The drawers still opened, so nothing looked
+   broken — the dim behind them was simply missing, and with it the large tap
+   target that closes one. Declared before its overrides now, which is the
+   only thing a default can be. (`.tree-toggle-btn` and `.chan-sidebar-btn`
+   below hit the same collision and answered it with `!important` at the
+   override end.) */
+.tree-scrim,
+.chan-sidebar-scrim {
+  display: none;
+}
+
+/* Above 900px the file tree is a grid column, not a drawer, and closing it
+   there changes nothing — so a pane held back for an exit has no exit to
+   play and must not take a column while it waits to be dropped. */
+.tree-pane.tree-leaving {
+  display: none;
+}
+
 @media (max-width: 900px) {
   .app {
     grid-template-columns: 1fr;
@@ -7774,6 +8030,71 @@ dialog.modal::backdrop {
     inset: 0;
     z-index: 77;
     background: rgba(4, 5, 9, 0.45);
+  }
+
+  /* On the class the render loop adds, not on `.tree-scrim` itself — the
+     scrim is re-created by every render the Code screen does, and a bare
+     `animation` here would flash it back to transparent each time. */
+  .tree-scrim.scrim-entering {
+    animation: scrim-in var(--motion-scrim) ease;
+  }
+
+  /* The drawer half of the same toggle. Classes rather than a bare
+     `animation`, and for the same reason as `.thread-panel` — the Code screen
+     re-renders while a file streams in, and the tree would slide in again
+     every time. `playSurfaceMotion` in app.js decides when each one is a
+     genuine open or close.
+
+     Only inside this breakpoint: above 900px the tree is an ordinary grid
+     column that never arrives or leaves, and the base rule further down keeps
+     a leaving node out of that layout entirely. */
+  .code-shell.tree-open .tree-pane.tree-entering {
+    animation: tree-in var(--motion-panel) var(--ease-motion);
+  }
+
+  /* The shell has already lost `tree-open` by the time this runs, so the
+     overlay geometry the pane was standing in has to be restated here — this
+     is the same drawer, on its way out. */
+  .tree-pane.tree-leaving {
+    display: grid;
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 250px;
+    z-index: 78;
+    border-right: 1px solid var(--border);
+    animation: tree-out var(--motion-panel) var(--ease-motion) forwards;
+    pointer-events: none;
+  }
+
+  .tree-scrim.scrim-leaving {
+    animation: scrim-out var(--motion-scrim) ease forwards;
+    pointer-events: none;
+  }
+
+  @keyframes tree-in {
+    from {
+      transform: translateX(-100%);
+    }
+  }
+
+  @keyframes tree-out {
+    to {
+      transform: translateX(-100%);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .code-shell.tree-open .tree-pane.tree-entering,
+    .tree-scrim.scrim-entering {
+      animation: none;
+    }
+
+    .tree-pane.tree-leaving,
+    .tree-scrim.scrim-leaving {
+      display: none;
+    }
   }
 
   .coord-head,
@@ -8306,11 +8627,6 @@ dialog.modal::backdrop {
 /* Shown only inside the 600px phone breakpoint below — see the comment
    there. */
 .chan-sidebar-btn {
-  display: none;
-}
-
-.tree-scrim,
-.chan-sidebar-scrim {
   display: none;
 }
 

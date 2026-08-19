@@ -579,44 +579,57 @@ test("a reply carries a quiet visual path back to its root", async () => {
 
   assert.match(
     chats,
-    /hasTaskThread && !isReply \? " cmsg-threaded" : ""/u,
+    /channelThread \? " cmsg-threaded" : ""/u,
     "only channel roots with replies should grow a branch",
   );
   assert.match(
     chats,
-    /!hasTaskThread \|\| isReply/u,
+    /channelThread\s*\? threadSummaryLink\(entry, replies, repositoryId\)\s*: changedBlock/u,
     "the open thread root should not repeat the channel's reply link",
+  );
+  assert.match(
+    chats,
+    /channelThread \? `<div class="cmsg-thread-route">` : ""/u,
+    "the route should wrap the message through its thread link",
+  );
+  assert.match(
+    chats,
+    /channelThread \? `<\/div>\$\{progressBlock\}\$\{changedBlock\}` : ""/u,
+    "progress and changed files should sit after the route endpoint",
   );
   assert.match(renderer, /class="thread-replies"/u);
   assert.match(renderer, /class="thread-replies-head"/u);
   assert.match(renderer, /class="thread-replies-flow"/u);
-  const channelBranch = /\n\.cmsg-row\.cmsg-threaded::before \{([\s\S]*?)\n\}/u.exec(
-    css,
-  )?.[1];
-  const referencedChannelBranch =
-    /\n\.cmsg-row\.cmsg-threaded:has\(> \.cmsg-ref\)::before \{([\s\S]*?)\n\}/u.exec(
+  const channelStem =
+    /\n\.cmsg-row\.cmsg-thread-path-through::before \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
+  const channelEnd =
+    /\n\.cmsg-row\.cmsg-thread-path-end \.cmsg-thread-route::before \{([\s\S]*?)\n\}/u.exec(
+      css,
+    )?.[1];
+  const channelElbow =
+    /\n\.cmsg-row\.cmsg-threaded \.cmsg-thread-link::before \{([\s\S]*?)\n\}/u.exec(
       css,
     )?.[1];
   const panelBranch = /\n\.thread-root\.has-replies::after \{([\s\S]*?)\n\}/u.exec(
     css,
   )?.[1];
-  assert.notEqual(channelBranch, undefined, "the channel thread branch should exist");
-  assert.notEqual(
-    referencedChannelBranch,
-    undefined,
-    "a referenced thread root should retain its adjusted branch",
-  );
+  assert.notEqual(channelStem, undefined, "the shared channel stem should exist");
+  assert.notEqual(channelEnd, undefined, "the channel stem should end at its route");
+  assert.notEqual(channelElbow, undefined, "each thread should branch from the stem");
   assert.notEqual(panelBranch, undefined, "the open thread branch should exist");
-  for (const branch of [channelBranch, panelBranch]) {
+  for (const branch of [channelElbow, panelBranch]) {
     assert.match(branch ?? "", /border-left: 3px solid var\(--border-strong\);/u);
     assert.match(branch ?? "", /border-bottom: 3px solid var\(--border-strong\);/u);
-    assert.match(branch ?? "", /border-top-left-radius: 2px;/u);
     assert.match(branch ?? "", /border-bottom-right-radius: 2px;/u);
     assert.match(branch ?? "", /border-bottom-left-radius: 11px;/u);
-    assert.match(branch ?? "", /top: 44px;/u);
   }
-  assert.match(channelBranch ?? "", /width: 16px;/u);
-  assert.match(referencedChannelBranch ?? "", /top: 62px;/u);
+  assert.match(channelStem ?? "", /top: -1px;/u);
+  assert.match(channelStem ?? "", /bottom: -1px;/u);
+  assert.match(channelEnd ?? "", /bottom: 11px;/u);
+  assert.match(channelElbow ?? "", /right: calc\(100% \+ 13px\);/u);
+  assert.doesNotMatch(css, /\.cmsg-row\.cmsg-threaded::before/u);
   assert.match(panelBranch ?? "", /left: 15px;/u);
   assert.match(panelBranch ?? "", /width: 11px;/u);
   assert.match(css, /\.thread-replies-head::after \{/u);
@@ -652,7 +665,7 @@ test("user-rooted task threads promote only after substantive narration", async 
   );
   assert.match(
     list,
-    /entry\.taskId !== undefined && \(entry\.replies \?\? \[\]\)\.length > 1/u,
+    /entry\.taskId !== undefined &&\s*channelMessageHasTaskThread\(entry\)/u,
     "a promoted task keeps its replies out of the flat room timeline",
   );
   assert.match(
@@ -2388,6 +2401,102 @@ test("channel messages compact only an uninterrupted run from one person", async
     css,
     /\.cmsg-row\.cmsg-compact \.cmsg-body \{[\s\S]{0,80}margin-left: 44px;/u,
   );
+});
+
+test("channel task branches share the compact group's visible avatar", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function continuesUserMessageGroup");
+  const end = chats.indexOf("\n/**\n * The three dots", start);
+  const createPaths = new Function(
+    `${chats.slice(start, end)}\nreturn messageThreadPaths;`,
+  );
+  const paths = createPaths() as (
+    timeline: unknown[],
+    groupConsecutive: boolean,
+  ) => Array<
+    { start: boolean; through: boolean; end: boolean } | undefined
+  >;
+  const item = (
+    authorId: string,
+    options: {
+      at?: string;
+      kind?: string;
+      reply?: boolean;
+      task?: boolean;
+    } = {},
+  ) => ({
+    entry: {
+      kind: options.kind ?? "user",
+      authorId,
+      taskId: options.task === true ? `task-${authorId}` : undefined,
+      replies: options.task === true ? [{}, {}] : [],
+    },
+    inlineReplyTo: options.reply === true ? { id: "root" } : undefined,
+    at: options.at ?? "2026-08-19T10:00:00.000Z",
+  });
+  const shared = [
+    { start: true, through: true, end: false },
+    { start: false, through: false, end: true },
+  ];
+
+  // A task on the compact second prompt starts at the first prompt's avatar.
+  assert.deepEqual(
+    paths([item("alice"), item("alice", { task: true })], true),
+    shared,
+  );
+  // Two task prompts use that same stem; each threaded row supplies an elbow.
+  assert.deepEqual(
+    paths(
+      [item("alice", { task: true }), item("alice", { task: true })],
+      true,
+    ),
+    shared,
+  );
+
+  const standalone = { start: true, through: false, end: true };
+  assert.deepEqual(
+    paths(
+      [item("alice", { task: true }), item("bob", { task: true })],
+      true,
+    ),
+    [standalone, standalone],
+    "another author starts another path",
+  );
+  assert.deepEqual(
+    paths(
+      [
+        item("alice", { task: true }),
+        item("alice", { at: "2026-08-20T10:00:00.000Z", task: true }),
+      ],
+      true,
+    ),
+    [standalone, standalone],
+    "a new day starts another path",
+  );
+  assert.deepEqual(
+    paths(
+      [
+        item("alice", { task: true }),
+        item("alice", { reply: true }),
+        item("alice", { task: true }),
+      ],
+      true,
+    ),
+    [standalone, undefined, standalone],
+    "an inline reply breaks the prompt group",
+  );
+  assert.deepEqual(
+    paths(
+      [item("alice", { task: true }), item("alice", { task: true })],
+      false,
+    ),
+    [standalone, standalone],
+    "search hits never invent a shared path",
+  );
+
+  assert.match(chats, /threadPath: threadPaths\[index\]/u);
+  assert.match(chats, /path\?\.through === true \? " cmsg-thread-path-through"/u);
+  assert.match(chats, /path\?\.end === true \? " cmsg-thread-path-end"/u);
 });
 
 test("private-chat messages compact only an uninterrupted run from one speaker", async () => {
