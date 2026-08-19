@@ -3138,7 +3138,7 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   assert.doesNotMatch(idle, /ctl-working/u);
   assert.match(idle.slice(idle.indexOf("ctl-faces")), /<avatar>Ada<\/avatar>/u);
 
-  // One pixel of accent, and a full circle so the part still to come is there
+  // Two pixels of accent, and a full circle so the part still to come is there
   // to be read against.
   const ring = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::after \{([\s\S]*?)\n\}/u
     .exec(css)?.[1];
@@ -3150,7 +3150,7 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   );
   assert.match(
     ring ?? "",
-    /mask: radial-gradient\(\s*closest-side,\s*transparent calc\(100% - 1px\)/u,
+    /mask: radial-gradient\(\s*closest-side,\s*transparent calc\(100% - 2px\)/u,
   );
 });
 
