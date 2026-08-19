@@ -3617,6 +3617,157 @@ function renameFieldFocused() {
   );
 }
 
+/* ------------------------------------------------------ surface motion ---- */
+
+/**
+ * The surfaces that slide rather than appear, and how to tell they moved.
+ *
+ * Everything here is toggled by `state`, and `state` is drawn by replacing the
+ * whole document — so each of these is a brand new element after every
+ * keystroke and every event off the stream. That is what stops CSS from
+ * animating them on its own: an `animation` on `.thread-panel` runs when the
+ * node is created, and the node is created constantly, so the panel would
+ * slide in again every time somebody typed a character into the composer.
+ * `@starting-style` has the same problem for the same reason.
+ *
+ * Only the render loop knows whether a surface that is here now was here a
+ * moment ago, so the decision lives here and the classes below are the answer
+ * it hands to the stylesheet. The two phone surfaces that *are* pure CSS — the
+ * channel sidebar and its scrim — stay that way: both are toggled by a class
+ * on a container that survives the render, so a transition has two states to
+ * run between and needs none of this.
+ *
+ * `parent` is where a closing surface goes back to for the length of its exit.
+ * The node the render threw away is still a perfectly good element; putting
+ * it back is what gives a panel something to animate *out*, since by the time
+ * anybody knows it closed it is already gone from the new tree.
+ */
+const MOTION_SURFACES = [
+  // Thread, thread list, DM, agent profile and the file view are one column
+  // that shows one of them — so this is "the panel is open", not "the thread
+  // is open", and switching between two of them is deliberately not motion.
+  {
+    selector: ".thread-panel",
+    parent: ".chats-shell",
+    enter: "panel-entering",
+    leave: "panel-leaving",
+  },
+  // The file tree, which is a drawer only below 900px. Above that it is an
+  // ordinary grid column and never opens or closes at all — the classes are
+  // still applied there and styled to do nothing, which keeps the width test
+  // in the stylesheet where the rest of the breakpoint already lives.
+  //
+  // Open is asked of the shell rather than of the pane, because the pane is
+  // in the markup either way and it is the modifier that decides.
+  {
+    selector: ".tree-pane",
+    parent: ".code-shell",
+    enter: "tree-entering",
+    leave: "tree-leaving",
+    isOpen: (root) => root.querySelector(".code-shell.tree-open") !== null,
+  },
+  {
+    selector: ".tree-scrim",
+    parent: ".code-shell",
+    enter: "scrim-entering",
+    leave: "scrim-leaving",
+  },
+];
+
+/** Whether each surface was on screen, and the element it was, before the swap. */
+const surfaceWasOpen = new Map();
+const surfaceNode = new Map();
+
+/**
+ * The live element for a surface, never the one a close is still fading out.
+ *
+ * The distinction is the whole reason this is a function. A closing surface is
+ * put back into the shell and is, for those few frames, a perfectly ordinary
+ * match for its own selector — so the next render would read it as "open
+ * again", the render after that as "closed again", and the panel would sit
+ * there fading out on a loop for as long as anything kept redrawing.
+ */
+function liveNode(root, surface) {
+  return root.querySelector(`${surface.selector}:not(.${surface.leave})`);
+}
+
+function surfaceIsOpen(root, surface) {
+  return surface.isOpen === undefined
+    ? liveNode(root, surface) !== null
+    : surface.isOpen(root);
+}
+
+/** Reads the outgoing document. Must run before `innerHTML` throws it away. */
+function captureSurfaceMotion(root) {
+  for (const surface of MOTION_SURFACES) {
+    surfaceWasOpen.set(surface.selector, surfaceIsOpen(root, surface));
+    surfaceNode.set(surface.selector, liveNode(root, surface));
+  }
+}
+
+/** Plays whatever the swap turned out to be: an opening, a closing, or nothing. */
+function playSurfaceMotion(root) {
+  for (const surface of MOTION_SURFACES) {
+    const open = surfaceIsOpen(root, surface);
+    if (open === (surfaceWasOpen.get(surface.selector) === true)) {
+      continue;
+    }
+    if (open) {
+      const node = liveNode(root, surface);
+      if (node !== null) {
+        animateOnce(node, surface.enter, false);
+      }
+      continue;
+    }
+    const closed = surfaceNode.get(surface.selector);
+    const parent = root.querySelector(surface.parent);
+    if (closed === null || closed === undefined || parent === null) {
+      continue;
+    }
+    // Back in the document, but not back in the interface: it answers to
+    // nothing, takes no focus, and is gone before the animation is cold.
+    closed.inert = true;
+    parent.append(closed);
+    animateOnce(closed, surface.leave, true);
+  }
+}
+
+/**
+ * Wears a class for exactly one animation, then cleans up after itself.
+ *
+ * The timer is not a belt-and-braces second try at `animationend` — it is the
+ * only guarantee. That event never fires at all when reduced motion has taken
+ * the animation away, and browsers hold it back while a tab is in the
+ * background, either of which would otherwise leave a closing panel pinned
+ * over the screen until the next render happened to notice.
+ */
+function animateOnce(node, className, drop) {
+  node.classList.add(className);
+  let done = false;
+  const finish = () => {
+    if (done) {
+      return;
+    }
+    done = true;
+    node.removeEventListener("animationend", onEnd);
+    node.classList.remove(className);
+    if (drop) {
+      node.remove();
+    }
+  };
+  // `animationend` bubbles, and a panel is full of small animations of its
+  // own — a status dot finishing a breath, a skeleton row shimmering. Without
+  // this test the first of them to reach the top would end the panel's
+  // animation on the panel's behalf, a frame or two in.
+  const onEnd = (event) => {
+    if (event.target === node) {
+      finish();
+    }
+  };
+  node.addEventListener("animationend", onEnd);
+  window.setTimeout(finish, 400);
+}
+
 export function render() {
   if (rendering) {
     renderAgain = true;
@@ -3640,6 +3791,10 @@ function renderNow() {
     return;
   }
   applyTheme();
+  // Before anything writes to `root`: the panels and drawers that animate are
+  // read off the outgoing document, and one line below this they stop
+  // existing. See `MOTION_SURFACES`.
+  captureSurfaceMotion(root);
   if (!state.loaded) {
     root.innerHTML = `<div class="app"><div class="main">
       <div class="page">${emptyState(
@@ -3678,6 +3833,12 @@ function renderNow() {
   </div>`;
 
   restoreSettingsScroll(savedSettingsScroll);
+  // What the swap turned out to have opened or closed. Before the transcript
+  // is put back where the reader had it, deliberately: a panel on its way out
+  // still holds its column for the length of the exit, and restoring a scroll
+  // against the full width and then narrowing it again would move the very
+  // line the restore exists to keep still.
+  playSurfaceMotion(root);
 
   // Chats owns this now: the inline file and diff blocks in the transcript are
   // the only place code is read, so the channel has to load its own changeset
@@ -3846,7 +4007,12 @@ function applyHash() {
  * it was closed and reopened.
  */
 function refreshChannelInfoPopover() {
-  const pop = $(".popover");
+  // Scoped through the id, not the bare class: a popover on its way out keeps
+  // its markup for the length of its exit animation and would be found first
+  // here, so the refresh would land on the copy nobody can see any more while
+  // the live one kept its stale roster. `closePopover` drops the id the
+  // moment a layer starts closing, which leaves exactly one match.
+  const pop = $("#pop-layer .popover");
   if (pop !== null && activeChannelId()) {
     pop.innerHTML = channelInfoPopoverHtml(activeChannelId());
   }
