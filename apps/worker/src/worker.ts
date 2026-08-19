@@ -789,6 +789,29 @@ export class Worker {
             });
             return;
           }
+          if (event.event === "scope_release_requested") {
+            // Same hazard as the two above: the adapter blocks on this, so
+            // dropping it parks the agent until the execution timeout. The
+            // worker holds no ownership of its own — the control plane keeps
+            // the leases and the admitted plan — and there is no remote route
+            // for a narrowing yet, so it is refused at once. Refusing costs
+            // only the early release: the plan the agent already has stays in
+            // force, and everything it holds is released at settle as before.
+            await adapter.resolveScopeChange(sessionId, {
+              requestId: event.requestId ?? "",
+              taskId: assignment.task.id,
+              decision: "rejected",
+              revisedPlan: plan,
+              constraints: ["Continue within the admitted plan"],
+              ownershipGrants: [],
+              explanation:
+                "This worker cannot release scope mid-run. Carry on within " +
+                "the plan you already have; what you no longer need is " +
+                "released when the task settles.",
+              decidedAt: new Date().toISOString(),
+            });
+            return;
+          }
           if (event.event !== "scope_change_requested") {
             return;
           }

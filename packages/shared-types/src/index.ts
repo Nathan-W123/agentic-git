@@ -489,6 +489,28 @@ export interface ScopeChangeRequest {
   occurredAt: string;
 }
 
+/**
+ * Resources an agent is handing back mid-run, before the task settles.
+ *
+ * The narrowing counterpart of {@link ScopeChangeRequest}. Deliberately the
+ * same shape in reverse — an id, a set of resources, a reason — because the
+ * two are decided by the same machinery and answered with the same
+ * {@link ScopeChangeDecision}.
+ */
+export interface ScopeReleaseRequest {
+  id: ScopeChangeId;
+  taskId: TaskId;
+  releasedFiles: string[];
+  releasedSymbols: string[];
+  releasedApis: string[];
+  releasedSchemas: string[];
+  releasedConfigKeys: string[];
+  releasedTests: string[];
+  releasedServices: string[];
+  reason: string;
+  occurredAt: string;
+}
+
 export type ScopeChangeDecisionKind =
   | "approved"
   | "approved_with_constraints"
@@ -913,6 +935,14 @@ export type AuditEventType =
   | "action_performed"
   | "scope_change_requested"
   | "scope_change_decided"
+  /**
+   * An agent gave part of its approved plan back before the task ended, and
+   * what came of it. The pair is what makes an over-claimed plan visible: the
+   * request names what was never needed, the decision says when everyone else
+   * stopped waiting for it.
+   */
+  | "scope_release_requested"
+  | "scope_release_decided"
   | "changeset_collected"
   /** Patches a partial admission held back, kept for the follow-up task. */
   | "changeset_withheld"
@@ -1657,6 +1687,34 @@ export function reducePlanScope(
 export interface PlanResourceRef {
   resourceType: ResourceType;
   resourceId: string;
+}
+
+/**
+ * The resources a release names, as {@link reducePlanScope} and the ownership
+ * service both want them.
+ *
+ * One reading of the request rather than seven at each call site: a release
+ * that narrowed the plan by a different set than it released leases for would
+ * leave a file owned by nobody and still claimed, or claimed by nobody and
+ * still owned.
+ */
+export function scopeReleaseResources(
+  request: ScopeReleaseRequest,
+): PlanResourceRef[] {
+  const resources: PlanResourceRef[] = [];
+  const add = (resourceType: ResourceType, ids: readonly string[]): void => {
+    for (const resourceId of ids) {
+      resources.push({ resourceType, resourceId });
+    }
+  };
+  add("file", request.releasedFiles);
+  add("symbol", request.releasedSymbols);
+  add("api", request.releasedApis);
+  add("schema", request.releasedSchemas);
+  add("configuration", request.releasedConfigKeys);
+  add("test", request.releasedTests);
+  add("service", request.releasedServices);
+  return resources;
 }
 
 /** Case-insensitive identity for a planned resource. */

@@ -189,6 +189,7 @@ const COMPLETION_SCHEMA = {
       enum: [
         "completed",
         "scope_change_requested",
+        "scope_release_requested",
         "question_asked",
         "action_requested",
       ],
@@ -364,9 +365,33 @@ interface CodexAskedQuestion {
   recommended?: number;
 }
 
+/**
+ * The agent handing part of its approved plan back before the task ends.
+ *
+ * Named in the same fields a widening uses rather than seven of its own:
+ * Codex answers one fixed schema every round, and every property in it is
+ * required, so an outcome with fields of its own would make each ordinary
+ * completion carry them too. The outcome says which way the resources move.
+ */
+interface CodexScopeRelease {
+  outcome: "scope_release_requested";
+  requestId: string;
+  additionalFiles: string[];
+  additionalSymbols: string[];
+  additionalApis: string[];
+  additionalSchemas: string[];
+  additionalConfigKeys: string[];
+  additionalTests: string[];
+  additionalServices: string[];
+  reason: string;
+  symbolsChanged: string[];
+  explanation: string;
+}
+
 type CodexExecutionResult =
   | CodexCompletion
   | CodexScopeChange
+  | CodexScopeRelease
   | CodexQuestionAsked
   | CodexActionRequest;
 
@@ -687,7 +712,8 @@ function assertExecutionResult(
     return;
   }
   if (
-    completion.outcome !== "scope_change_requested" ||
+    (completion.outcome !== "scope_change_requested" &&
+      completion.outcome !== "scope_release_requested") ||
     typeof completion.requestId !== "string" ||
     !stringArray(completion.additionalFiles) ||
     !stringArray(completion.additionalSymbols) ||
@@ -698,7 +724,7 @@ function assertExecutionResult(
     !stringArray(completion.additionalServices) ||
     typeof completion.reason !== "string"
   ) {
-    throw new TypeError("Codex scope change does not match the output schema");
+    throw new TypeError("Codex scope request does not match the output schema");
   }
 }
 
@@ -1187,6 +1213,39 @@ export class CodexAdapter implements AgentAdapter {
 
       const requestId = execution.requestId.trim() || createId("scope");
       const pending = this.createScopeWaiter(record, requestId);
+      if (execution.outcome === "scope_release_requested") {
+        // The same round trip as a widening, in the other direction: the
+        // coordinator answers with the plan now in force, and a granted
+        // release means the named files belong to somebody else from here on.
+        this.emit(record, {
+          event: "scope_release_requested",
+          requestId,
+          releasedFiles: [...execution.additionalFiles],
+          releasedSymbols: [...execution.additionalSymbols],
+          releasedApis: [...execution.additionalApis],
+          releasedSchemas: [...execution.additionalSchemas],
+          releasedConfigKeys: [...execution.additionalConfigKeys],
+          releasedTests: [...execution.additionalTests],
+          releasedServices: [...execution.additionalServices],
+          reason: execution.reason,
+          occurredAt: new Date().toISOString(),
+        });
+        const released = await pending;
+        record.scopeDecisions.push(structuredClone(released));
+        if (scopeChangeGranted(released)) {
+          // The narrowed plan is what the next round is prompted with, so the
+          // agent cannot go on believing it may edit what it gave back.
+          record.plan = structuredClone(released.revisedPlan);
+        }
+        this.emit(record, {
+          event: "progress",
+          message:
+            `Scope release ${requestId} was ${released.decision}; ` +
+            "Codex execution is continuing",
+          occurredAt: new Date().toISOString(),
+        });
+        continue;
+      }
       this.emit(record, {
         event: "scope_change_requested",
         requestId,
@@ -1860,6 +1919,13 @@ export class CodexAdapter implements AgentAdapter {
       EXPLANATION_STYLE_INSTRUCTIONS,
       "For completed, set outcome=completed and use empty scope-change fields.",
       "When more scope is necessary, stop, set outcome=scope_change_requested, populate every scope field, and wait for the next invocation.",
+      "When you are finished with files in expectedFiles you no longer need " +
+        "to change, hand them back: stop, set " +
+        "outcome=scope_release_requested, name them in the same scope " +
+        "fields, and say why in reason. Other agents are waiting on them, " +
+        "and they stay yours until the task ends otherwise. Release nothing " +
+        "you still have edits in or may still touch — getting one back is a " +
+        "scope change, and it will be refused if somebody else has taken it.",
       // The platform's own verbs. Without this paragraph the actions
       // existed and no Codex agent had any way to learn so — "push to
       // GitHub" was a request it could not satisfy by any route, including

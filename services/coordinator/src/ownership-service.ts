@@ -3,6 +3,7 @@ import {
   createId,
   type AgentPlan,
   type OwnershipMode,
+  type PlanResourceRef,
   type ResourceLease,
   type ResourceType,
 } from "@coord/shared-types";
@@ -270,6 +271,55 @@ export class OwnershipService {
       this.leases.set(key, [...(this.leases.get(key) ?? []), lease]);
     }
     return acquired;
+  }
+
+  /**
+   * Drops only the named resources, leaving the rest of the task's leases
+   * held.
+   *
+   * The narrow counterpart of {@link releaseTask}, which runs at settle and
+   * takes everything. This one runs mid-task, when an agent has finished with
+   * part of what it claimed: a plan that named twenty-two files and touched
+   * eight held the other fourteen until the task ended, and everything that
+   * needed one of them waited that long for nothing.
+   *
+   * Returns what was actually let go, which is not the same as what was
+   * asked for: a resource this task never held is not an error here, it is
+   * simply nothing to release. The caller decides whether an empty result
+   * means the request was pointless.
+   *
+   * Nothing about acquisition changes. A task that wants a released resource
+   * back asks for it the way any widening asks — and is refused on the spot
+   * if somebody else has taken it, never queued behind them.
+   */
+  public releaseResources(
+    taskId: string,
+    resources: readonly PlanResourceRef[],
+  ): ResourceLease[] {
+    const wanted = new Set(
+      resources.map((resource) =>
+        this.key(resource.resourceType, resource.resourceId),
+      ),
+    );
+    const released: ResourceLease[] = [];
+    for (const key of [...this.leases.keys()]) {
+      if (!wanted.has(key)) {
+        continue;
+      }
+      const retained = (this.leases.get(key) ?? []).filter((lease) => {
+        if (lease.taskId === taskId) {
+          released.push(lease);
+          return false;
+        }
+        return true;
+      });
+      if (retained.length === 0) {
+        this.leases.delete(key);
+      } else {
+        this.leases.set(key, retained);
+      }
+    }
+    return released;
   }
 
   public releaseTask(taskId: string): ResourceLease[] {

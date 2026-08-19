@@ -30,7 +30,11 @@ import {
   mergePlanScope,
   normalizeRepositoryPath,
   planGroundingConfidence,
+  planResourceKey,
+  reducePlanScope,
+  scopeReleaseResources,
   summariseChangedFiles,
+  uniqueRepositoryPaths,
   uniqueStrings,
   type AgentPlan,
   type ApprovalKind,
@@ -41,13 +45,16 @@ import {
   type ChangeSet,
   type IntegrationResult,
   type PlanAdmission,
+  type PlanResourceRef,
   type ConflictAssessment,
   type CoordinationRunResult,
   type CoordinatorDecision,
   type FilePatchStatus,
   type ReplanRequest,
+  type ResourceType,
   type ScopeChangeDecision,
   type ScopeChangeRequest,
+  type ScopeReleaseRequest,
   type TaskDefinition,
   type TaskExecutionResult,
   planAdmissionApproved,
@@ -358,6 +365,41 @@ interface PreparedTask extends PlannedTask {
  * ends up reporting a wrapper the other end would have expanded.
  */
 const errorMessage = describeError;
+
+/**
+ * Every resource a plan claims, as the plan itself spells it.
+ *
+ * Two jobs at once. It holds a release to what the plan actually names —
+ * giving back a file that was never claimed changes nothing, and answering
+ * "granted" to it would tell an agent it had freed something it never held.
+ * And it maps whatever the agent wrote back onto the plan's own spelling, so
+ * the narrowing and the lease release act on one string rather than two: the
+ * plan matches resources case-insensitively, ownership keys them exactly, and
+ * a release that used the agent's spelling for one and the plan's for the
+ * other would drop a file from the plan while its lease stayed held.
+ */
+function planClaimedResources(plan: AgentPlan): Map<string, PlanResourceRef> {
+  const claimed = new Map<string, PlanResourceRef>();
+  const add = (
+    resourceType: ResourceType,
+    ids: readonly string[] | undefined,
+  ): void => {
+    for (const resourceId of ids ?? []) {
+      claimed.set(planResourceKey(resourceType, resourceId), {
+        resourceType,
+        resourceId,
+      });
+    }
+  };
+  add("file", plan.expectedFiles);
+  add("symbol", plan.expectedSymbols);
+  add("api", plan.expectedApis);
+  add("schema", plan.expectedSchemas);
+  add("configuration", plan.expectedConfigKeys);
+  add("test", plan.expectedTests);
+  add("service", plan.expectedServices);
+  return claimed;
+}
 
 function pairKey(taskIds: readonly [string, string]): string {
   return [...taskIds].sort().join("\0");
@@ -2467,6 +2509,8 @@ export class Coordinator {
       });
 
       const eventErrors: unknown[] = [];
+      // The same workspace, in a binding the event closure can see is there.
+      const taskWorkspace = workspace;
       let eventChain = Promise.resolve();
       await entry.adapter.streamEvents(entry.session.id, (event) => {
         eventChain = eventChain
@@ -2478,6 +2522,9 @@ export class Coordinator {
                 wave,
                 waveVersion,
                 event,
+                // Only the release path reads it, and only to refuse letting
+                // go of a file the agent has already edited.
+                taskWorkspace,
                 recorder,
                 runAudit,
               ),
@@ -2803,6 +2850,7 @@ export class Coordinator {
     wave: readonly PlannedTask[],
     waveVersion: CanonicalVersion,
     event: AgentEvent,
+    workspace: TaskWorkspace,
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
   ): Promise<void> {
@@ -2822,6 +2870,18 @@ export class Coordinator {
     }
     if (event.event === "action_requested") {
       await this.handleActionRequest(input, entry, event, recorder, runAudit);
+      return;
+    }
+    if (event.event === "scope_release_requested") {
+      await this.handleScopeRelease(
+        input,
+        entry,
+        waveVersion,
+        workspace,
+        event,
+        recorder,
+        runAudit,
+      );
       return;
     }
     if (event.event === "replan_proposed") {
@@ -3010,6 +3070,233 @@ export class Coordinator {
       entry.task.id,
       { decision },
     );
+    await entry.adapter.resolveScopeChange(entry.session.id, decision);
+  }
+
+  /**
+   * An agent giving part of its approved plan back, mid-run.
+   *
+   * The mirror of the widening path above, and deliberately built from the
+   * same pieces: one request, one decision, one plan revision, and the
+   * adapter unblocked either way. A plan that named twenty-two files and
+   * touched eight otherwise holds all twenty-two until the task settles, and
+   * every other agent that needs one of the fourteen waits on work that
+   * finished an hour ago.
+   *
+   * Three things make this safe rather than a new way to deadlock:
+   *
+   * - It is the agent that asks, not the coordinator that infers. Release at
+   *   collection would look cheaper, but conflict repair sends the agent back
+   *   into files it had already finished with — `repairChangeSet` re-collects
+   *   and re-validates against this same plan — so a file dropped at
+   *   collection could be handed back to the agent seconds later with neither
+   *   the lease nor the plan entry it needs, and the re-collection would fail
+   *   the whole task on a scope escape.
+   * - The plan narrows with the leases, in one step. Dropping ownership alone
+   *   would leave the agent believing it may still write a file another task
+   *   now owns, which is exactly the double-claim the leases exist to stop.
+   * - Getting a released file back is a widening like any other, and the
+   *   widening path refuses on the spot rather than queueing. Nothing here
+   *   waits for a lease, so releasing early cannot turn incremental
+   *   acquisition into a cycle: an agent that is refused carries on inside
+   *   what it still holds and reports what it could not do.
+   */
+  private async handleScopeRelease(
+    input: CoordinatorRunInput,
+    entry: PlannedTask,
+    waveVersion: CanonicalVersion,
+    workspace: TaskWorkspace,
+    event: Extract<AgentEvent, { event: "scope_release_requested" }>,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<void> {
+    const request: ScopeReleaseRequest = {
+      id: event.requestId?.trim() || createId("scope"),
+      taskId: entry.task.id,
+      releasedFiles: uniqueRepositoryPaths(event.releasedFiles),
+      releasedSymbols: uniqueStrings(event.releasedSymbols ?? []),
+      releasedApis: uniqueStrings(event.releasedApis ?? []),
+      releasedSchemas: uniqueStrings(event.releasedSchemas ?? []),
+      releasedConfigKeys: uniqueStrings(event.releasedConfigKeys ?? []),
+      releasedTests: uniqueStrings(event.releasedTests ?? []),
+      releasedServices: uniqueStrings(event.releasedServices ?? []),
+      reason: event.reason.trim(),
+      occurredAt: event.occurredAt,
+    };
+    await this.trace(
+      recorder,
+      runAudit,
+      "scope_release_requested",
+      entry.task.id,
+      { request },
+    );
+
+    let decision: ScopeChangeDecision;
+    try {
+      const asked = scopeReleaseResources(request);
+      if (asked.length === 0 || request.reason.length === 0) {
+        throw new Error(
+          "A scope release must name at least one resource and explain why",
+        );
+      }
+      // Only what this plan actually claims. A resource the plan never named
+      // cannot be given back, and quietly "releasing" it would answer granted
+      // to a request that changed nothing.
+      const claimed = planClaimedResources(entry.plan);
+      const resources = asked
+        .map((resource) =>
+          claimed.get(
+            planResourceKey(resource.resourceType, resource.resourceId),
+          ),
+        )
+        .filter(
+          (resource): resource is PlanResourceRef => resource !== undefined,
+        );
+      if (resources.length === 0) {
+        throw new Error(
+          "None of the named resources are in the approved plan, so there " +
+            "is nothing to release",
+        );
+      }
+      // A file with edits in it is not finished with, whatever the agent
+      // believes. Released, its lease would go to somebody else while this
+      // task still holds a change to it in its workspace — two agents editing
+      // one file, which is the situation ownership exists to prevent.
+      //
+      // An unanswerable question is answered the same way as a bad one: a
+      // workspace manager that cannot report working changes cannot prove the
+      // file is clean, so the release is refused rather than assumed safe.
+      const releasedFiles = new Set(
+        resources
+          .filter((resource) => resource.resourceType === "file")
+          .map((resource) => resource.resourceId),
+      );
+      if (releasedFiles.size > 0) {
+        if (this.workspaces.listWorkingChanges === undefined) {
+          throw new Error(
+            "This workspace cannot report uncommitted edits, so no file can " +
+              "be shown to be finished with",
+          );
+        }
+        const working = await this.workspaces.listWorkingChanges(workspace);
+        const edited = working
+          .map((change) => change.path)
+          .filter((changed) => releasedFiles.has(changed));
+        if (edited.length > 0) {
+          throw new Error(
+            `Uncommitted edits are still in ${edited.join(", ")}, so ` +
+              "they cannot be released",
+          );
+        }
+      }
+
+      const revisedPlan = reducePlanScope(entry.plan, resources);
+      // The durable record of what this task is executing, rewritten the same
+      // way a widening rewrites it. Without this the control plane still
+      // shows the wide plan, and a task in another run keeps being refused
+      // the files this one has just given up.
+      //
+      // A narrowing cannot collide with anything — it is a subset of a plan
+      // already admitted against every other holder — so anything other than
+      // an admission here is a failure to record, not a contended file. It is
+      // taken as a refusal and nothing is released: an agent told its files
+      // were freed while the record still claims them is worse than one told
+      // to keep them.
+      if (this.planAuthority !== undefined) {
+        const answer = await this.planAuthority.admit({
+          task: entry.task,
+          plan: revisedPlan,
+          planRevision: entry.planRevision + 1,
+          baseVersion: waveVersion,
+          repository: input.repository,
+          ...(input.projectId === undefined
+            ? {}
+            : { projectId: input.projectId }),
+          revising: true,
+          partialAdmission: false,
+        });
+        if (answer.outcome !== "admitted") {
+          throw new Error(
+            `The narrowed plan could not be recorded: ${answer.explanation}`,
+          );
+        }
+        // A grant of less than the narrowed plan, for the same reason the
+        // widening path refuses one: what is released here is decided from
+        // `revisedPlan`, so a further-reduced record would leave the agent
+        // holding files the record says are somebody else's.
+        if (answer.admission !== undefined) {
+          throw new Error(
+            `The narrowed plan could not be recorded whole: ` +
+              answer.admission.explanation,
+          );
+        }
+      }
+
+      const released = this.ownership.releaseResources(
+        entry.task.id,
+        resources,
+      );
+      entry.plan = revisedPlan;
+      entry.planRevision += 1;
+      entry.decision.planRevision = entry.planRevision;
+      const releasedIds = new Set(released.map((lease) => lease.leaseId));
+      entry.decision.ownershipGrants = entry.decision.ownershipGrants.filter(
+        (lease) => !releasedIds.has(lease.leaseId),
+      );
+      await recorder?.planRevision(entry.task.id, {
+        revision: entry.planRevision,
+        reason: "scope_release",
+        canonicalRevision: waveVersion.revision,
+        plan: revisedPlan,
+      });
+      await recorder?.decision(entry.decision);
+      await this.trace(
+        recorder,
+        runAudit,
+        "ownership_released",
+        entry.task.id,
+        {
+          leaseIds: released.map((lease) => lease.leaseId),
+          files: [...releasedFiles],
+          stage: "scope_release",
+        },
+      );
+      decision = {
+        requestId: request.id,
+        taskId: entry.task.id,
+        decision: "approved",
+        revisedPlan,
+        constraints: [
+          "The released resources are no longer yours to edit; ask for one " +
+            "back with a scope change if that turns out to be wrong",
+        ],
+        ownershipGrants: [],
+        explanation:
+          `Released ${String(released.length)} lease(s); the plan now covers ` +
+          `${String(revisedPlan.expectedFiles.length)} file(s)`,
+        decidedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      decision = {
+        requestId: request.id,
+        taskId: entry.task.id,
+        decision: "rejected",
+        revisedPlan: entry.plan,
+        constraints: ["Continue within the previously approved plan"],
+        ownershipGrants: [],
+        explanation: errorMessage(error),
+        decidedAt: new Date().toISOString(),
+      };
+    }
+
+    await this.trace(
+      recorder,
+      runAudit,
+      "scope_release_decided",
+      entry.task.id,
+      { decision },
+    );
+    // Handed back either way, like every other request the agent blocks on.
     await entry.adapter.resolveScopeChange(entry.session.id, decision);
   }
 

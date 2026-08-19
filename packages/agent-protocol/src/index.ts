@@ -128,6 +128,37 @@ export type AgentEvent =
     }
   | {
       /**
+       * The agent is done with part of its approved plan and is handing that
+       * part back before the task ends.
+       *
+       * The mirror of `scope_change_requested`: that one asks for more, this
+       * one gives some away. An over-claimed plan — twenty-two files declared,
+       * eight actually touched — otherwise holds every one of them until the
+       * task settles, and every other agent that needs one of the fourteen
+       * waits for work that finished long ago.
+       *
+       * Answered with a `ScopeChangeDecision`, like a widening, because the
+       * answer has the same shape: granted or not, and the plan now in force.
+       * A granted release narrows that plan, so the released files stop being
+       * writable — an edit to one after this is a scope escape and fails the
+       * task. Ask for it back through `scope_change_requested` if that turns
+       * out to be wrong, and expect a refusal: whoever took it next owes this
+       * agent nothing.
+       */
+      event: "scope_release_requested";
+      requestId?: string;
+      releasedFiles: string[];
+      releasedSymbols?: string[];
+      releasedApis?: string[];
+      releasedSchemas?: string[];
+      releasedConfigKeys?: string[];
+      releasedTests?: string[];
+      releasedServices?: string[];
+      reason: string;
+      occurredAt: string;
+    }
+  | {
+      /**
        * The agent is stuck on a decision that is not its to make, and has
        * stopped until somebody answers.
        *

@@ -1600,3 +1600,118 @@ test("an explicit /ask round that answers with work instead of questions fails",
     await rm(fixture.root, { recursive: true, force: true });
   }
 });
+
+test("a released file is handed back and the narrowed plan reaches the next round", async () => {
+  const fixture = await createFixture();
+  const executionInputs: string[] = [];
+  const widePlan: AgentPlan = {
+    ...PLAN,
+    expectedFiles: ["src/value.js", "src/spare.js"],
+  };
+  const emptyScope = {
+    additionalFiles: [],
+    additionalSymbols: [],
+    additionalApis: [],
+    additionalSchemas: [],
+    additionalConfigKeys: [],
+    additionalTests: [],
+    additionalServices: [],
+    reason: "",
+  };
+  const runner: CodexProcessRunner = async (_executable, args, options = {}) => {
+    const sandbox = args[args.indexOf("--sandbox") + 1];
+    if (sandbox === "read-only") {
+      return output(JSON.stringify(widePlan));
+    }
+    executionInputs.push(options.input ?? "");
+    if (executionInputs.length === 1) {
+      return output(
+        JSON.stringify({
+          outcome: "scope_release_requested",
+          requestId: "release_1",
+          symbolsChanged: [],
+          explanation: "",
+          action: "",
+          ...emptyScope,
+          additionalFiles: ["src/spare.js"],
+          reason: "The spare file turned out not to need changing",
+        }),
+      );
+    }
+    await writeFile(
+      path.join(options.cwd ?? "", "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(
+      JSON.stringify({
+        outcome: "completed",
+        symbolsChanged: ["value"],
+        explanation: "Updated the fixture value",
+        requestId: "",
+        action: "",
+        ...emptyScope,
+      }),
+    );
+  };
+
+  try {
+    const adapter = new CodexAdapter({
+      agentId: "codex",
+      repository: fixture.repository,
+      workspaces: fixture.workspaces,
+      planningRoot: fixture.planningRoot,
+      command: "codex-test",
+      runner,
+    });
+    const baseVersion = await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    );
+    const session = await adapter.startTask({
+      task: TASK,
+      canonicalVersion: baseVersion,
+      repositoryId: fixture.repository.id,
+    });
+    const events: AgentEvent[] = [];
+    await adapter.streamEvents(session.id, (event) => {
+      events.push(event);
+      // Standing in for the coordinator, which answers a release the same way
+      // it answers a widening.
+      if (event.event === "scope_release_requested") {
+        assert.deepEqual(event.releasedFiles, ["src/spare.js"]);
+        void adapter.resolveScopeChange(session.id, {
+          requestId: event.requestId ?? "",
+          taskId: TASK.id,
+          decision: "approved",
+          revisedPlan: PLAN,
+          constraints: [],
+          ownershipGrants: [],
+          explanation: "Released",
+          decidedAt: new Date().toISOString(),
+        });
+      }
+    });
+    await adapter.requestPlan(session.id);
+    const workspace = await fixture.workspaces.create({
+      taskId: TASK.id,
+      rootPath: fixture.workspaceRoot,
+      repository: fixture.repository,
+      baseVersion,
+    });
+    await adapter.sendContext(session.id, contextFor(workspace));
+
+    const kinds = events.map((event) => event.event);
+    assert.ok(kinds.includes("scope_release_requested"), kinds.join(", "));
+    assert.equal(executionInputs.length, 2);
+    // The first round was told it could hand scope back; the second was
+    // prompted with the plan that no longer includes what it gave away.
+    assert.match(executionInputs[0] ?? "", /scope_release_requested/u);
+    assert.doesNotMatch(executionInputs[1] ?? "", /src\/spare\.js/u);
+    const changeSet = await adapter.collectChanges(session.id);
+    assert.equal(changeSet.patches.length, 1);
+
+    await fixture.workspaces.destroy(workspace);
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
