@@ -483,6 +483,51 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
   );
 });
 
+test("the pink tools toggle animates without replacing its node", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const action = app.slice(
+    app.indexOf('case "chan-tools-toggle"'),
+    app.indexOf('case "preview-start"'),
+  );
+
+  assert.match(
+    chats,
+    /class="icon-btn chan-tools-toggle\$\{[\s\S]{0,100}state\.chanToolsOpen === true \? " on" : ""/u,
+  );
+  assert.match(
+    css,
+    /\.icon-btn \{[\s\S]{0,260}transition: background 0\.15s ease, color 0\.15s ease;/u,
+  );
+  assert.match(
+    css,
+    /\.icon-btn\.on \{\s*background: var\(--accent-wash\);\s*color: var\(--accent-bright\);/u,
+  );
+  assert.match(
+    css,
+    /\.chan-tools-toggle svg \{\s*transition: transform 0\.15s ease;/u,
+  );
+  assert.match(
+    css,
+    /\.chan-tools-toggle\.on svg \{\s*transform: rotate\(-90deg\);/u,
+  );
+
+  // The header itself must redraw because opening the fold adds its tools.
+  // Reattaching the clicked button in its old state before applying `on`
+  // gives both the pink treatment and the arrow a real before/after to tween.
+  assert.match(action, /const toggle = node;/u);
+  assert.match(action, /state\.chanToolsOpen = open;[\s\S]*?\brender\(\);/u);
+  assert.match(action, /replacement\.replaceWith\(toggle\);/u);
+  assert.match(action, /void toggle\.offsetWidth;/u);
+  assert.match(action, /toggle\.classList\.toggle\("on", open\);/u);
+  assert.match(action, /toggle\.setAttribute\("aria-expanded", String\(open\)\);/u);
+  assert.match(
+    action,
+    /toggle\.setAttribute\("title", open \? "Hide tools" : "Show tools"\);/u,
+  );
+});
+
 test("the phone drawer is dragged out under the finger, not toggled", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
@@ -629,6 +674,22 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(channelStem ?? "", /bottom: -1px;/u);
   assert.match(channelEnd ?? "", /bottom: 11px;/u);
   assert.match(channelElbow ?? "", /right: calc\(100% \+ 13px\);/u);
+  // The elbow turns out of the stem, so its own upright has to stand in the
+  // stem's column. It is placed from its right edge, which means the gap plus
+  // its width must land on the stem's offset — and it must be measured by the
+  // border box, or the three-pixel stroke hangs outside that width and the
+  // turn steps sideways where it should read as one line.
+  assert.match(channelElbow ?? "", /box-sizing: border-box;/u);
+  const stemLeft = Number(/left: (-?\d+)px;/u.exec(channelEnd ?? "")?.[1]);
+  const elbowGap = Number(
+    /right: calc\(100% \+ (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
+  );
+  const elbowWidth = Number(/width: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
+  assert.equal(
+    elbowGap + elbowWidth,
+    -stemLeft,
+    "the elbow's upright should sit in the stem's own column",
+  );
   assert.doesNotMatch(css, /\.cmsg-row\.cmsg-threaded::before/u);
   assert.match(panelBranch ?? "", /left: 15px;/u);
   assert.match(panelBranch ?? "", /width: 11px;/u);

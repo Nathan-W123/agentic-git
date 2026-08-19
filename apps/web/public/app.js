@@ -3834,10 +3834,12 @@ function renderNow() {
 
   restoreSettingsScroll(savedSettingsScroll);
   // What the swap turned out to have opened or closed. Before the transcript
-  // is put back where the reader had it, deliberately: a panel on its way out
-  // still holds its column for the length of the exit, and restoring a scroll
-  // against the full width and then narrowing it again would move the very
-  // line the restore exists to keep still.
+  // is put back where the reader had it, deliberately: an opening panel does
+  // take its column here, and restoring a scroll against the full width and
+  // then narrowing it again would move the very line the restore exists to
+  // keep still. A closing one no longer takes anything — it leaves out of
+  // flow, over a layout that has already settled — so this order costs it
+  // nothing.
   playSurfaceMotion(root);
 
   // Chats owns this now: the inline file and diff blocks in the transcript are
@@ -4712,10 +4714,32 @@ document.addEventListener("click", (event) => {
       state.simplifyShown[value] = !(state.simplifyShown[value] === true);
       render();
       return;
-    case "chan-tools-toggle":
-      state.chanToolsOpen = !(state.chanToolsOpen === true);
+    case "chan-tools-toggle": {
+      const toggle = node;
+      const focused = document.activeElement === toggle;
+      const open = !(state.chanToolsOpen === true);
+      state.chanToolsOpen = open;
+
+      // Opening the fold changes which tools are in the header, so the rest
+      // of the screen still needs its ordinary render. Keep this button,
+      // though: a replacement already wearing its final class has no previous
+      // state for the button colour or arrow rotation to transition from.
       render();
+      const replacement = document.querySelector(".chan-tools-toggle");
+      if (replacement !== null) {
+        replacement.replaceWith(toggle);
+        // Establish the retained button's old style after reattaching it,
+        // then move it to the new state so the existing CSS transition runs.
+        void toggle.offsetWidth;
+        toggle.classList.toggle("on", open);
+        toggle.setAttribute("aria-expanded", String(open));
+        toggle.setAttribute("title", open ? "Hide tools" : "Show tools");
+        if (focused) {
+          toggle.focus();
+        }
+      }
       return;
+    }
     case "preview-start":
       void startPreviewAction(value);
       return;
