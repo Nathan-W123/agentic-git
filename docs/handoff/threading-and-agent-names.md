@@ -24,17 +24,17 @@ volume is attached**, so every redeploy still wipes `.coordinator`.
 A thread is **a task**, not a topic. The code says so: *"the channel keeps one
 line per request rather than a running commentary."*
 
-1. `@mention` in a channel message → `dispatchChannelMentions`, called **only**
-   from the channel messages POST route. Replies never reach it.
-2. The agent posts an **acknowledgement** message immediately; that message is
-   the thread root. `authorId` is `` `${candidate.userId}:${candidate.provider}` ``.
+1. `@mention` in a channel message → `dispatchChannelMentions`, called from
+   the channel messages POST route. Thread replies reach the same dispatch
+   path through `answerThreadReply` when they ask for work.
+2. The person's request is the task root. Dispatch posts no agent
+   acknowledgement; a transient working indicator shows that the agent took it.
 3. `Task: <title>` plus the opening reasoning go in as replies, then
-   `watchChannelTask` streams the run's narration into the same thread via
-   `messageId: acknowledgement.id`.
-4. A person replying in a thread is answered by `answerThreadReply`. **It
-   already passes the thread so far as context** — item 1 on the original list
-   is therefore essentially done. The agent is derived from the root's
-   `authorId`; there is no mention routing, so it is always *that* agent.
+   `watchChannelTask` streams the run's narration into the same request-rooted
+   thread.
+4. A person replying in a thread is answered by `answerThreadReply`, which
+   passes the thread as context and resolves the agent from the persisted task
+   (or from an explicit mention for legacy threads).
 
 Consequences worth holding on to:
 
@@ -53,20 +53,17 @@ with the same context the thread's own agent already receives.
   (`resolveChannelMentionCandidates`) instead of assuming the root's agent.
   Keep the current behaviour as the fallback when no mention is present —
   that is what makes "reply without @mentioning" work today.
-- If a reply asks for *work* rather than an answer, the dispatch path must
-  reuse the existing thread instead of creating an acknowledgement of its own.
-  Today `dispatchChannelMentions` always creates one; it needs to accept a
-  target thread.
+- If a reply asks for *work* rather than an answer, the dispatch path reuses
+  the existing thread and adds no acknowledgement of its own.
 - Visibility still applies: a personal agent must refuse a stranger the same
   way it does in the channel (`candidate.visibility === "personal"` guard).
 
 ## Item 3 — no thread for small tasks
 
 **Do not classify "small" up front.** Judging size before the work means
-guessing before anything is known. Make threads *lazy* instead: post the
-acknowledgement as an ordinary message and promote it to a thread only when
-there is more than one thing to say. A one-line change produces an
-acknowledgement and an outcome and stays flat, with no heuristic to get wrong.
+guessing before anything is known. Threads are lazy instead: the request stays
+flat until substantive narration arrives. A one-line change produces an
+outcome beside the request and no thread, with no heuristic to get wrong.
 
 If a decision up front is wanted anyway, `planOpening` already returns a title
 and thoughts — a plan with no thoughts is the natural "no thread" signal.

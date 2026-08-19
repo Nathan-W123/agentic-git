@@ -861,14 +861,14 @@ const DEFAULT_CLAUDE_MODEL = "claude-sonnet-5";
  * The model to run a throwaway line on, per provider.
  *
  * Some of what this server asks a model for is ceremony, not work: a six-word
- * thread title, a twenty-word "picking this up". Those were running on
+ * thread title, for example. Those were running on
  * whatever model the account had chosen — {@link DEFAULT_CLAUDE_MODEL} unless
- * somebody changed it — which is Sonnet rates for a sentence whose whole
- * specification is "under twenty words".
+ * somebody changed it — which is Sonnet rates for a title whose whole
+ * specification is "under six words".
  *
  * Only Anthropic has an entry, and deliberately. Haiku is a model this
  * deployment can name with confidence; guessing a cheap counterpart for
- * another vendor and being wrong turns every acknowledgement into an
+ * another vendor and being wrong turns every ceremonial call into an
  * unknown-model error, which costs far more than it saves. An absent entry
  * means "no override" — that provider keeps the account's own model, exactly
  * as before.
