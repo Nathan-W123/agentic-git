@@ -2011,6 +2011,70 @@ test("thread composer paints pings and commands and opens their suggestion lists
   );
 });
 
+test("the thread slash picker surfaces its thread commands before the six-row limit", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const start = chats.indexOf("function channelSlashCandidates");
+  const end = chats.indexOf("\nfunction slashPopover", start);
+  assert.notEqual(start, -1, "the slash candidate filter should exist");
+  assert.notEqual(end, -1, "the slash candidate filter should have a boundary");
+
+  const state = {
+    slashQuery: "",
+    channelSlashCommands: {
+      repo: [
+        "plan",
+        "queue",
+        "ask",
+        "dnc",
+        "simple",
+        "push",
+        "retry",
+        "cancel",
+        "stop",
+        "help",
+      ].map((name) => ({ name })),
+    },
+  };
+  const candidates = new Function(
+    "state",
+    `${chats.slice(start, end)}\nreturn channelSlashCandidates;`,
+  )(state) as (repositoryId: string, target?: string) => Array<{ name: string }>;
+
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["plan", "queue", "ask", "dnc", "simple", "push"],
+    "the channel keeps the server's general command order",
+  );
+  assert.deepEqual(
+    candidates("repo", "thread").map((entry) => entry.name),
+    ["retry", "cancel", "push", "ask", "dnc", "simple"],
+    "thread actions remain visible instead of being truncated",
+  );
+
+  state.slashQuery = "pl";
+  assert.deepEqual(
+    candidates("repo", "thread").map((entry) => entry.name),
+    ["plan"],
+    "typing a specific command still finds commands outside the first six",
+  );
+
+  const suggestions = chats.slice(
+    chats.indexOf("function composerSuggestions"),
+    chats.indexOf("\nfunction mentionActiveFor"),
+  );
+  assert.match(
+    suggestions,
+    /channelSlashCandidates\(repositoryId, target\)/u,
+    "the rendered picker asks for the order of its own composer",
+  );
+  const keys = chats.slice(chats.indexOf("export function handleComposerKeydown"));
+  assert.match(
+    keys,
+    /channelSlashCandidates\(activeChannelId\(\), target\)/u,
+    "keyboard selection uses the same contextual order as the visible list",
+  );
+});
+
 test("a posted ping highlights its full name with a quiet static treatment", async () => {
   const chats = await publicFile("screen-chats.js");
   const css = await publicFile("styles.css");

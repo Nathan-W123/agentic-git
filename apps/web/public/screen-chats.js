@@ -2455,11 +2455,30 @@ function channelMentionCandidates(repositoryId) {
  * `/el` is guessing. The list comes from the server with the messages, so the
  * picker cannot offer something the channel would not recognise.
  */
-function channelSlashCandidates(repositoryId) {
+function channelSlashCandidates(repositoryId, target = "channel") {
   const query = state.slashQuery.trim().toLowerCase();
-  return (state.channelSlashCommands[repositoryId] ?? [])
-    .filter((entry) => String(entry.name ?? "").startsWith(query))
-    .slice(0, 6);
+  const matching = (state.channelSlashCommands[repositoryId] ?? []).filter(
+    (entry) => String(entry.name ?? "").startsWith(query),
+  );
+  if (target === "thread") {
+    // The server sends one channel-wide command list, with the general task
+    // commands first. Reusing its first six entries in a thread pushed
+    // `/retry` and `/cancel` below the picker's hard limit, even though those
+    // are the two commands whose meaning is specifically tied to a thread.
+    // Put every command the thread handles directly first. A more specific
+    // query still finds any other command because ordering happens after the
+    // prefix filter.
+    const threadFirst = ["retry", "cancel", "push", "ask", "dnc", "simple"];
+    matching.sort((left, right) => {
+      const leftAt = threadFirst.indexOf(String(left.name ?? ""));
+      const rightAt = threadFirst.indexOf(String(right.name ?? ""));
+      return (
+        (leftAt === -1 ? threadFirst.length : leftAt) -
+        (rightAt === -1 ? threadFirst.length : rightAt)
+      );
+    });
+  }
+  return matching.slice(0, 6);
 }
 
 function slashPopover(candidates, target) {
@@ -2517,7 +2536,7 @@ function composerSuggestions(repositoryId, target = "channel") {
   }
   return `${
     state.slashActive
-      ? slashPopover(channelSlashCandidates(repositoryId), target)
+      ? slashPopover(channelSlashCandidates(repositoryId, target), target)
       : ""
   }${
     state.mentionActive
@@ -5105,7 +5124,7 @@ export function handleComposerKeydown(event, rerender) {
   // open at a time (see `updateMentionState`), so the two cannot both claim
   // an Enter.
   if (ownsSuggestions && state.slashActive) {
-    const list = channelSlashCandidates(activeChannelId());
+    const list = channelSlashCandidates(activeChannelId(), target);
     if (event.key === "ArrowDown") {
       event.preventDefault();
       state.slashIndex = list.length === 0 ? 0 : (state.slashIndex + 1) % list.length;
