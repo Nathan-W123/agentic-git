@@ -3603,11 +3603,42 @@ test("agent details use the reference profile without dropping existing controls
   assert.match(spec, /<h3 class="aspec-label">Works with<\/h3>/u);
   assert.match(spec, /<h3 class="aspec-label">Capabilities<\/h3>/u);
   assert.match(spec, /class="aspec-chip"/u);
-  assert.match(spec, /class="aspec-capability aspec-current-task"/u);
+  assert.match(
+    spec,
+    /class="aspec-capability aspec-current-task\$\{\s*task === undefined \? "" : " aspec-current-task-active"\s*\}"/u,
+  );
   assert.match(panel, /<aside class="thread-panel agent-detail-panel">/u);
   assert.match(css, /\.agent-detail-panel\s*\{[^}]*min\(680px, 64vw\)/su);
   assert.match(css, /\.agent-spec \.aspec-chip\s*\{/u);
   assert.match(css, /\.agent-spec \.aspec-capability\s*\{/u);
+
+  // Only a real assignment becomes the primary-colour bubble. Its own copy,
+  // state line, mark, and history control remain legible on that solid surface.
+  const activeTask = /\n\.agent-spec \.aspec-current-task-active \{([\s\S]*?)\n\}/u.exec(
+    css,
+  )?.[1];
+  assert.notEqual(activeTask, undefined, "an active task has a shape rule");
+  assert.match(activeTask ?? "", /background: var\(--accent\);/u);
+  assert.match(activeTask ?? "", /border-radius: 14px;/u);
+  for (const child of [
+    "aspec-capability-mark",
+    "aspec-capability-title",
+    "aspec-capability-meta",
+    "aspec-nav",
+  ]) {
+    assert.match(
+      css,
+      new RegExp(`\\.aspec-current-task-active \\.${child}`, "u"),
+    );
+  }
+  assert.match(
+    css,
+    /\.aspec-current-task-active \.aspec-capability-mark,[\s\S]*?\.aspec-current-task-active \.aspec-nav \{\s*color: #fff;/u,
+  );
+  assert.match(
+    css,
+    /\.aspec-current-task-active \.aspec-nav \{[\s\S]*?background: rgba\(0, 0, 0, 0\.14\);/u,
+  );
 
   // Every interactive or informative part of the former details page remains
   // on the single scrolling surface, including owner-only and read-only paths.
@@ -3628,6 +3659,55 @@ test("agent details use the reference profile without dropping existing controls
   assert.match(spec, /agentUsage\(agent\)/u);
   assert.match(spec, /agent\.mine === true/u);
   assert.match(spec, /const readOnly =/u);
+});
+
+test("the role field offers the two reserved roles without stopping anyone typing one", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+  const spec = chats.slice(
+    chats.indexOf("function agentSpec(agent, repositoryId)"),
+    chats.indexOf("function agentPanel()"),
+  );
+  const menu = chats.slice(
+    chats.indexOf("const RESERVED_ROLES = ["),
+    chats.indexOf("const AGENT_STATUS_TITLE"),
+  );
+
+  // The field is still a field: free text, same commit contract as before.
+  assert.match(spec, /class="aspec-role" data-act="agent-role-input"/u);
+  // With a picker beside it, drawn only where the server would accept one.
+  assert.match(spec, /canManageRepository\(repository\.id\)/u);
+  assert.match(spec, /data-act="agent-role-menu"/u);
+  assert.match(css, /\.agent-spec \.aspec-role-field\s*\{/u);
+  assert.match(css, /\.agent-spec \.aspec-role-pick\s*\{/u);
+
+  // Both reserved names, spelled the way the server compares them.
+  assert.match(chats, /const INVESTIGATOR_ROLE = "investigator"/u);
+  assert.match(menu, /value: AUDITOR_ROLE/u);
+  assert.match(menu, /value: INVESTIGATOR_ROLE/u);
+  // A personal agent cannot hold either, so the entry says so rather than
+  // waiting for the server to refuse it.
+  assert.match(menu, /agent\.visibility !== "org"/u);
+  assert.match(menu, /disabled: personal \|\| current === role\.value/u);
+  // And the menu always leaves a way back to plain typing.
+  assert.match(menu, /act: "agent-role-custom"/u);
+  assert.match(menu, /export function roleMenuItems\(agentId, repositoryId\)/u);
+
+  // Picking one writes through the same setting path a typed role does.
+  assert.match(app, /case "agent-role-menu":/u);
+  assert.match(app, /roleMenuItems\(value, node\.dataset\.repo\)/u);
+  assert.match(app, /showMenu\(node, items\)/u);
+  assert.match(
+    app,
+    /setChannelAgentSetting\(target\.repositoryId, target\.agentId, "role", role, render\)/u,
+  );
+  // Opening the picker must not commit-and-redraw the field out from under
+  // the click that opens it.
+  assert.match(
+    app,
+    /event\.relatedTarget\?\.dataset\?\.act === "agent-role-menu"/u,
+  );
 });
 
 test("a roster row carries one ellipsis and a compact rename delete menu", async () => {

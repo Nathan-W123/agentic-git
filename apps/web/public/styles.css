@@ -6909,12 +6909,55 @@ button.chip.lg:hover {
   text-transform: capitalize;
 }
 
+/* Input and picker travel together, so the pair is what the row sizes. */
+.agent-spec .aspec-role-field {
+  display: flex;
+  min-width: 0;
+  flex: 0 1 230px;
+  align-items: center;
+  gap: 2px;
+}
+
 .agent-spec .aspec-role {
   flex: 0 1 230px;
   padding: 7px 10px;
   border-color: var(--border-soft);
   background: var(--bg-card);
   font-size: 13px;
+}
+
+.agent-spec .aspec-role-field .aspec-role {
+  flex: 1 1 auto;
+}
+
+.agent-spec .aspec-role-pick {
+  display: grid;
+  width: 28px;
+  height: 28px;
+  flex: none;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-3);
+  cursor: pointer;
+  place-items: center;
+}
+
+.agent-spec .aspec-role-pick:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.agent-spec .aspec-role-pick:focus-visible {
+  border-color: var(--accent-line);
+  color: var(--text);
+  outline: none;
+}
+
+.agent-spec .aspec-role-pick svg {
+  width: 13px;
+  height: 13px;
 }
 
 .agent-spec .aspec-role:hover {
@@ -6935,6 +6978,39 @@ button.chip.lg:hover {
 
 .agent-spec .aspec-nav:hover {
   border-color: var(--border-soft);
+}
+
+/* A task that exists is the live assignment this profile is about, so it
+   becomes one accent surface instead of another grey capability row. The
+   available-for-work fallback keeps the unmodified row above. */
+.agent-spec .aspec-current-task-active {
+  margin-top: 10px;
+  padding: 13px 14px;
+  border-bottom: 0;
+  border-radius: 14px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.agent-spec .aspec-current-task-active .aspec-capability-mark,
+.agent-spec .aspec-current-task-active .aspec-capability-title,
+.agent-spec .aspec-current-task-active .aspec-capability-meta,
+.agent-spec .aspec-current-task-active .aspec-nav {
+  color: #fff;
+}
+
+.agent-spec .aspec-current-task-active .aspec-capability-meta {
+  opacity: 0.78;
+}
+
+.agent-spec .aspec-current-task-active .aspec-nav {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(0, 0, 0, 0.14);
+}
+
+.agent-spec .aspec-current-task-active .aspec-nav:hover {
+  border-color: rgba(255, 255, 255, 0.34);
+  background: rgba(0, 0, 0, 0.22);
 }
 
 .agent-spec .aspec-note {
@@ -6978,9 +7054,12 @@ button.chip.lg:hover {
     flex-wrap: wrap;
   }
 
-  .agent-spec .aspec-role {
+  .agent-spec .aspec-role-field {
     flex-basis: calc(100% - 36px);
     margin-left: 36px;
+  }
+
+  .agent-spec .aspec-role {
     text-align: left;
   }
 

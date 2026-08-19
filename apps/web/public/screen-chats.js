@@ -744,8 +744,88 @@ function personRow(person) {
 /** The role the roster acts on. */
 const AUDITOR_ROLE = "auditor";
 
+/** Its mirror image, and the other name the server acts on. */
+const INVESTIGATOR_ROLE = "investigator";
+
+/**
+ * The two roles this system knows the meaning of, written the way the picker
+ * offers them.
+ *
+ * Every other role is free text an agent only reads as a sentence in its
+ * objective, so the field stays a field. These two are different: they are
+ * spelled exactly, or they are just words. Nobody should have to know that a
+ * capital A or a plural quietly turns the auditor back into prose, which is
+ * the whole reason there is a list to pick from at all.
+ */
+const RESERVED_ROLES = [
+  {
+    value: AUDITOR_ROLE,
+    label: "Auditor",
+    hint: "Reads everything merged here and posts what it finds",
+    iconName: "shield",
+  },
+  {
+    value: INVESTIGATOR_ROLE,
+    label: "Investigator",
+    hint: "Explains failed tasks and says what to try next",
+    iconName: "search",
+  },
+];
+
 function isAuditor(agent) {
   return (agent.role ?? "").trim().toLowerCase() === AUDITOR_ROLE;
+}
+
+/**
+ * What the chevron beside a role field offers.
+ *
+ * Built here, beside the field it belongs to, for the reason `rosterMenuItems`
+ * is: every condition in it is one the server will apply anyway, and a menu
+ * that offers what the server refuses is worse than no menu. A reserved role
+ * needs `manage_project` — checked by the caller, which is why there is no
+ * chevron at all without it — and it needs an org-wide agent, because an
+ * auditor spends its owner's account forever without being asked. That second
+ * rule is shown rather than hidden: the entry is there, greyed, saying why.
+ */
+export function roleMenuItems(agentId, repositoryId) {
+  const agent = channelAgentsFor(repositoryId).find(
+    (entry) => entry.id === agentId,
+  );
+  if (agent === undefined) {
+    return [];
+  }
+  const current = String(agent.role ?? "")
+    .trim()
+    .toLowerCase();
+  const personal = agent.visibility !== "org";
+  const items = RESERVED_ROLES.map((role) => ({
+    act: "agent-role-pick",
+    value: role.value,
+    label: role.label,
+    hint: personal
+      ? `Share this agent with the org first — ${role.label.toLowerCase()}s spend their owner's account unasked`
+      : current === role.value
+        ? "Held here now"
+        : role.hint,
+    iconName: current === role.value ? "check" : role.iconName,
+    disabled: personal || current === role.value,
+  }));
+  items.push({ separator: true });
+  items.push({
+    act: "agent-role-custom",
+    label: "Write a role…",
+    hint: "Any words; they ride on every task in this channel",
+    iconName: "pencil",
+  });
+  if (current !== "") {
+    items.push({
+      act: "agent-role-pick",
+      value: "",
+      label: "Clear role",
+      iconName: "close",
+    });
+  }
+  return items;
 }
 
 const AGENT_STATUS_TITLE = {
@@ -1607,6 +1687,28 @@ function threadProgress(entry) {
 function threadWorkingAuthor(entry, repositoryId) {
   const turns = threadReplyTurns(entry.replies ?? []);
   const replies = turns[turns.length - 1]?.replies ?? [];
+  for (let index = replies.length - 1; index >= 0; index -= 1) {
+    const author = channelAuthor(repositoryId, replies[index]);
+    if (author?.agent !== undefined) {
+      return author;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The last agent to have said anything in a thread, whenever it said it.
+ *
+ * `threadWorkingAuthor` answers a narrower question — who is speaking in the
+ * turn happening right now — and goes quiet the moment a run ends, which is
+ * exactly when a log of finished work still needs a name against the row. This
+ * one reads the whole reply history backwards instead, so a thread names the
+ * agent currently on it while it runs and the one that last worked on it once
+ * it has stopped. Replies rather than the root: the root is the request, and
+ * the person who made it is not who did the work.
+ */
+function threadLastAgentAuthor(entry, repositoryId) {
+  const replies = entry.replies ?? [];
   for (let index = replies.length - 1; index >= 0; index -= 1) {
     const author = channelAuthor(repositoryId, replies[index]);
     if (author?.agent !== undefined) {
@@ -3100,7 +3202,16 @@ function threadListPanel(repositoryId) {
                 const count = replies.filter(
                   (reply) => reply.kind !== "progress" && reply !== titled,
                 ).length;
-                const author = channelAuthor(repositoryId, entry);
+                // The agent that worked the thread, not the person whose
+                // message it hangs under. Every row in a channel one person
+                // asks in carried that same person's name, which answered a
+                // question nobody scanning a work log has; the useful name is
+                // the colleague who did — or is doing — the work. Falls back
+                // to the root author only for a thread no agent has spoken in
+                // yet, where there is no better answer.
+                const author =
+                  threadLastAgentAuthor(entry, repositoryId) ??
+                  channelAuthor(repositoryId, entry);
                 // The one thing a log of finished work cannot say for itself:
                 // which of these is still moving. Marked from the task's own
                 // status, the same signal that keeps the agent's typing dots
@@ -3506,11 +3617,27 @@ function agentSpec(agent, repositoryId) {
         here ? `How ${esc(agent.name)} contributes in #${esc(repository.id)}` : "Channel role"
       }</span>
     </span>
-    <input class="aspec-role" data-act="agent-role-input"
-      data-value="${esc(agent.id)}" data-repo="${esc(repository.id)}"
-      value="${esc(member.role ?? "")}" maxlength="120" autocomplete="off"
-      enterkeyhint="done" placeholder="Not set"
-      aria-label="Role for ${esc(agent.name)} in #${esc(repository.id)}">
+    <span class="aspec-role-field">
+      <input class="aspec-role" data-act="agent-role-input"
+        data-value="${esc(agent.id)}" data-repo="${esc(repository.id)}"
+        value="${esc(member.role ?? "")}" maxlength="120" autocomplete="off"
+        enterkeyhint="done" placeholder="Not set"
+        aria-label="Role for ${esc(agent.name)} in #${esc(repository.id)}">
+      ${
+        // The typed field is unchanged; this only puts the two spellings that
+        // mean something one press away. Drawn for moderators alone because
+        // they are the only people the server lets set one, and a chevron
+        // that opens a menu of refusals is not a shortcut.
+        canManageRepository(repository.id)
+          ? `<button type="button" class="aspec-role-pick"
+              data-act="agent-role-menu" data-value="${esc(agent.id)}"
+              data-repo="${esc(repository.id)}" title="Reserved roles"
+              aria-label="Choose a role for ${esc(agent.name)} in #${esc(
+                repository.id,
+              )}">${icon("chevronDown")}</button>`
+          : ""
+      }
+    </span>
   </form>`;
   // Model and reasoning are the agent's own credential spending its owner's
   // account, so only that owner picks them; a teammate reads what was chosen.
@@ -3611,7 +3738,9 @@ function agentSpec(agent, repositoryId) {
         <h3 class="aspec-label">Capabilities</h3>
         <div class="aspec-capabilities">
           ${roleField(currentRepository, currentAssignment, true)}
-          <div class="aspec-capability aspec-current-task">
+          <div class="aspec-capability aspec-current-task${
+            task === undefined ? "" : " aspec-current-task-active"
+          }">
             <span class="aspec-capability-mark">${icon("check")}</span>
             <span class="aspec-capability-copy">
               <span class="aspec-capability-title">${

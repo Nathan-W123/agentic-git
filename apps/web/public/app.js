@@ -184,6 +184,7 @@ import {
   pickSlashCommand,
   reactionPicker,
   renderChats,
+  roleMenuItems,
   rosterMenuItems,
   restoreChannelAnchor,
   restoreChannelScroll,
@@ -1471,6 +1472,52 @@ function commitChannelRole(input) {
   const role = input.value.trim();
   input.defaultValue = role;
   setChannelAgentSetting(repositoryId, agentId, "role", role, render);
+  render();
+}
+
+/**
+ * Which role field opened the picker.
+ *
+ * A menu item carries one value — the role — and the field it was opened from
+ * is the rest of the address. Remembered here rather than packed into that
+ * value because an agent id already contains a colon and a repository id is
+ * free text, so any separator chosen for them would be one somebody could
+ * type.
+ */
+let roleMenuTarget;
+
+/** The role field the picker was opened from, if it is still on screen. */
+function openRoleInput() {
+  if (roleMenuTarget === undefined) {
+    return null;
+  }
+  return (
+    $$("[data-act='agent-role-input']").find(
+      (node) =>
+        node.dataset.value === roleMenuTarget.agentId &&
+        node.dataset.repo === roleMenuTarget.repositoryId,
+    ) ?? null
+  );
+}
+
+/**
+ * Writes a role chosen from the picker, exactly as typing it would.
+ *
+ * The field is set first so it never disagrees with what was just picked in
+ * the frame before the redraw, and `defaultValue` moves with it so the blur
+ * that follows does not send the same word a second time.
+ */
+function pickChannelRole(role) {
+  const target = roleMenuTarget;
+  if (target === undefined) {
+    return;
+  }
+  const input = openRoleInput();
+  if (input !== null) {
+    input.value = role;
+    input.defaultValue = role;
+  }
+  setChannelAgentSetting(target.repositoryId, target.agentId, "role", role, render);
   render();
 }
 
@@ -5229,6 +5276,36 @@ document.addEventListener("click", (event) => {
         })
         .catch((error) => toast(error.message, "error"));
       return;
+    /*
+     * The role field's picker. The field itself still takes any words — this
+     * only offers the two the server acts on, so nobody has to know their
+     * exact spelling to use them.
+     */
+    case "agent-role-menu": {
+      const items = roleMenuItems(value, node.dataset.repo);
+      if (items.length === 0) {
+        return;
+      }
+      roleMenuTarget = { agentId: value, repositoryId: node.dataset.repo };
+      showMenu(node, items);
+      return;
+    }
+    case "agent-role-pick": {
+      // `closePopover` returns focus to the chevron, which the redraw inside
+      // `pickChannelRole` then replaces — so the menu goes first.
+      closePopover();
+      pickChannelRole(value ?? "");
+      roleMenuTarget = undefined;
+      return;
+    }
+    case "agent-role-custom": {
+      const input = openRoleInput();
+      closePopover();
+      roleMenuTarget = undefined;
+      input?.focus();
+      input?.select();
+      return;
+    }
     case "agent-switch":
     case "agent-menu": {
       // Was folded in with the navigation cases below, so the three dots on
@@ -6116,6 +6193,14 @@ document.addEventListener("focusout", (event) => {
   // is how most edits to it end, and losing one because it was never
   // "submitted" would be the field quietly discarding work.
   if (act === "agent-role-input") {
+    // Unless the click that took focus away was the chevron beside it. That
+    // opens the picker, and committing here would redraw the field — taking
+    // the button the menu is anchored to out of the page before the click
+    // that opens it lands. Whatever was half-typed is still in the field and
+    // still commits on the next blur.
+    if (event.relatedTarget?.dataset?.act === "agent-role-menu") {
+      return;
+    }
     if (node.isConnected) {
       commitChannelRole(node);
     }
