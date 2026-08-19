@@ -1619,7 +1619,7 @@ const ACK_ONLY_RE =
  * precisely to do it.
  */
 const TASK_VERB_RE =
-  /\b(make|makes|made|making|fix|fixe[sd]|fixing|add|adds|added|adding|update|updates|updated|updating|change|changes|changed|changing|remove|removes|removed|removing|delete|deletes|deleted|deleting|implement|implements|implemented|implementing|build|builds|built|building|create|creates|created|creating|refactor|refactors|refactored|refactoring|investigate|investigates|investigated|investigating|debug|debugs|debugged|debugging|patch|patches|patched|patching|migrate|migrates|migrated|migrating|rename|renames|renamed|renaming|adjust|adjusts|adjusted|adjusting|tweak|tweaks|tweaked|tweaking|animate|animates|animated|animating|write|writes|wrote|writing|move|moves|moved|moving|deploy|deploys|deployed|deploying|revert|reverts|reverted|reverting|upgrade|upgrades|upgraded|upgrading|optimi[sz]e[sd]?|optimi[sz]ing|clean ?up|handle|handles|handled|handling|support|supports|supported|supporting|enable|enables|enabled|enabling|disable|disables|disabled|disabling|hook ?up|wire ?up|set ?up|review|reviews|reviewed|reviewing|swap|swaps|swapped|swapping|replace|replaces|replaced|replacing|bump|bumps|bumped|bumping|revise|revises|revised|revising|look into|check into|audit|audits|audited|auditing|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|inspect|inspects|inspected|inspecting|scan|scans|scanned|scanning|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing)\b/iu;
+  /\b(make|makes|made|making|fix|fixe[sd]|fixing|add|adds|added|adding|update|updates|updated|updating|change|changes|changed|changing|remove|removes|removed|removing|delete|deletes|deleted|deleting|implement|implements|implemented|implementing|build|builds|built|building|create|creates|created|creating|refactor|refactors|refactored|refactoring|investigate|investigates|investigated|investigating|debug|debugs|debugged|debugging|patch|patches|patched|patching|migrate|migrates|migrated|migrating|rename|renames|renamed|renaming|adjust|adjusts|adjusted|adjusting|tweak|tweaks|tweaked|tweaking|animate|animates|animated|animating|write|writes|wrote|writing|move|moves|moved|moving|deploy|deploys|deployed|deploying|revert|reverts|reverted|reverting|upgrade|upgrades|upgraded|upgrading|optimi[sz]e[sd]?|optimi[sz]ing|clean ?up|handle|handles|handled|handling|support|supports|supported|supporting|enable|enables|enabled|enabling|disable|disables|disabled|disabling|hook ?up|wire ?up|set ?up|review|reviews|reviewed|reviewing|swap|swaps|swapped|swapping|replace|replaces|replaced|replacing|bump|bumps|bumped|bumping|revise|revises|revised|revising|look into|check into|audit|audits|audited|auditing|analy[sz]e|analy[sz]es|analy[sz]ed|analy[sz]ing|inspect|inspects|inspected|inspecting|scan|scans|scanned|scanning|assess|assesses|assessed|assessing|examine|examines|examined|examining|diagnose|diagnoses|diagnosed|diagnosing|help|helps|helped|helping|solve|solves|solved|solving|address|addresses|addressed|addressing|finish|finishes|finished|finishing|complete|completes|completed|completing|test|tests|tested|testing|verify|verifies|verified|verifying|tackle|tackles|tackled|tackling|improve|improves|improved|improving|figure ?out|take (?:a look|care of)|pick ?up)\b/iu;
 
 /**
  * A question about the status of existing work — asked *with* a task verb
@@ -1804,6 +1804,23 @@ const THREAD_MERGE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
 const REQUEST_OPENER_RE =
   /\b(please|can you|could you|would you|will you|can we|could we|shall we|can (?:someone|somebody|anyone|anybody)|could (?:someone|somebody|anyone|anybody)|(?:someone|somebody|anyone|anybody) (?:should|able to|want to)|we need to|i need (?:you|someone|somebody)|let'?s|go ahead and)\b/iu;
 
+/**
+ * Phrases that deliberately open work to the room without naming an agent.
+ *
+ * These are the most useful middle ground between "only @mentions work" and
+ * an agent commenting on every problem humans discuss. Each one explicitly
+ * solicits help or an owner. It therefore reaches the model-backed final gate
+ * even when the request uses no verb from {@link TASK_VERB_RE}: "any takers
+ * for the flaky tests?" and "who can own the auth ticket?" are real asks,
+ * while "the flaky tests are annoying" is still just conversation.
+ */
+const OPEN_WORK_REQUEST_RE =
+  /\b(?:(?:can|could|would|will) (?:someone|somebody|anyone|anybody|(?:one of )?(?:the )?agents?)|who (?:can|could|will|wants? to|has time to)|any takers?|(?:does|would) (?:someone|somebody|anyone|anybody|an? agent) want to|(?:i|we) (?:need|want|could use) (?:someone|somebody|anyone|anybody|an? agent|help|a hand)|looking for (?:someone|somebody|anyone|anybody|an? agent|help|a hand)|(?:someone|somebody|anyone|anybody|an? agent) (?:take|own|handle|pick ?up|look into|help with))\b/iu;
+
+function explicitlyOpensWorkToRoom(content: string): boolean {
+  return OPEN_WORK_REQUEST_RE.test(withoutMentions(content));
+}
+
 /** A sentence that opens with the work verb itself — an instruction. */
 const IMPERATIVE_OPENER_RE = new RegExp(`^(?:${TASK_VERB_RE.source})`, "iu");
 
@@ -1845,6 +1862,9 @@ export function readsAsDirectRequest(content: string): boolean {
   if (text.length === 0) {
     return false;
   }
+  if (explicitlyOpensWorkToRoom(text)) {
+    return true;
+  }
   if (REQUEST_OPENER_RE.test(text)) {
     return true;
   }
@@ -1858,12 +1878,19 @@ export function readsAsDirectRequest(content: string): boolean {
 }
 
 /**
- * How an unnamed request is offered, and how the acceptance below finds it
- * again. A prefix rather than a stored flag: a channel message carries no
- * metadata of its own, and the offer has to be recognisable in the transcript
- * by the same reading a person gives it.
+ * How an unnamed request is offered, and how the acceptance below recognises
+ * it. The request and agent are stored on the offer itself, but the prefix is
+ * still the durable marker that distinguishes this invitation from ordinary
+ * agent speech and preserves compatibility with older offers.
  */
 const AUTO_CLAIM_OFFER_OPENING = "Want me to take this";
+
+/**
+ * A casual "yes" should not revive an old offer after the room has moved on.
+ * Ten minutes is ample for the deliberate two-line handshake and short
+ * enough that an offer left above a later conversation becomes inert.
+ */
+const AUTO_CLAIM_OFFER_TTL_MS = 10 * 60 * 1000;
 
 /**
  * How long the "is this a request" check may take.
@@ -15469,6 +15496,12 @@ export class ApiGateway {
     if (requestAt < 0) {
       return undefined;
     }
+    // Identity matters to the classifier even though names do not. Two
+    // different people talking are the signal that "can you fix that?" may
+    // be addressed to a teammate rather than to the room. Stable, local
+    // labels expose that shape without putting anyone's display name into a
+    // prompt or making the eventual worker depend on who happened to speak.
+    const humanLabels = new Map<string, number>();
     const lines = messages
       .slice(0, requestAt)
       .filter(
@@ -15482,9 +15515,18 @@ export class ApiGateway {
       )
       .map((message) => {
         const content = collapseWhitespace(message.content);
-        return content.length <= 280
+        const clipped = content.length <= 280
           ? content
           : `${content.slice(0, 279).trimEnd()}…`;
+        if (message.kind !== "user") {
+          return `Agent: ${clipped}`;
+        }
+        let label = humanLabels.get(message.authorId);
+        if (label === undefined) {
+          label = humanLabels.size + 1;
+          humanLabels.set(message.authorId, label);
+        }
+        return `Human ${String(label)}: ${clipped}`;
       })
       .filter((line) => line.length > 0)
       .slice(-AUTO_CLAIM_CONTEXT_LOOKBACK);
@@ -15534,10 +15576,17 @@ export class ApiGateway {
     referencedMessageId: string;
   }): Promise<void> {
     const { projectId, repositoryId, content, senderId, candidates } = input;
-    // Two gates now, not one. `looksLikeTaskRequest` asks whether this is
-    // about work; on the unnamed path the question is whether it is addressed
-    // to anybody, and a remark about work is not.
-    if (!looksLikeTaskRequest(content) || !readsAsDirectRequest(content)) {
+    // Two gates, plus one deliberate escape from the vocabulary list.
+    // Ordinary requests still need both concrete work and direct-address
+    // evidence. Explicit open-room invitations ("any takers?", "who can
+    // own this?") are already stronger evidence of intent than a particular
+    // work verb, so they may reach the model even when the list does not know
+    // their phrasing. Remarks and human conversation clear neither path.
+    const opensWorkToRoom = explicitlyOpensWorkToRoom(content);
+    if (
+      !readsAsDirectRequest(content) ||
+      (!looksLikeTaskRequest(content) && !opensWorkToRoom)
+    ) {
       return;
     }
     const context = await this.autoClaimContext({
@@ -15614,12 +15663,16 @@ export class ApiGateway {
       candidate,
       "Someone wrote the current message below in a team chat for a " +
         "software project.\n\n" +
-        "Is the current message asking for work to be done on the " +
-        "repository — a change, a " +
-        "fix, an investigation, something built? A remark, an opinion, a " +
-        "greeting, a status question, or a comment about work already " +
-        "finished is not.\n\n" +
-        "Use recent context only to resolve references such as \"that\"; " +
+        "Should you briefly offer to take repository work from this " +
+        "message? Answer yes only when the current message is a standalone " +
+        "request or clearly opens work to the room — a change, fix, " +
+        "investigation, or something built. A remark, opinion, greeting, " +
+        "status question, or comment about finished work is not. If recent " +
+        "context shows people talking and the message could reasonably be " +
+        "directed to one particular human, answer no; do not interrupt their " +
+        "conversation. An explicit request to someone, anyone, or the room " +
+        "is open to you even without an @mention.\n\n" +
+        "Use recent context only to resolve references and who is speaking; " +
         "classify the current message, never the background itself.\n\n" +
         (context === undefined ? "" : `${context}\n\n`) +
         "Answer with one word: yes or no.\n\nCurrent message: " +
@@ -15633,16 +15686,16 @@ export class ApiGateway {
   /**
    * Dispatches an offer the sender has just agreed to. True when it did.
    *
-   * The offer carries no stored state, so acceptance re-reads the transcript:
-   * the most recent offer, and the message before it, which is the request in
-   * the sender's own words — which is what the dispatch wants as its
-   * objective anyway. The agent is chosen again rather than parsed back out
-   * of the offer's prose; the scoring is deterministic, so it lands on the
-   * same one it named.
+   * The offer already records both facts acceptance needs: its author is the
+   * agent that volunteered and `referencedMessageId` is the request it read.
+   * Binding to those is safer than choosing again after roles or activity may
+   * have changed, and safer than assuming the nearest user line is still the
+   * request after a busy room has carried on talking.
    *
-   * Only the person who asked may accept. Anyone could type "yes" in a busy
-   * channel and mean something else entirely, and the pick was made on the
-   * question of whose account pays.
+   * Only the person who asked may accept, and only as the next human turn
+   * within a short window. Anyone could type "yes" later in a busy channel
+   * and mean something else entirely, and the pick was made on the question
+   * of whose account pays.
    */
   private async maybeAcceptAutoClaim(input: {
     projectId: string;
@@ -15660,8 +15713,7 @@ export class ApiGateway {
       senderId,
       { limit: AUTO_CLAIM_CONTEXT_LOOKBACK + 3 },
     );
-    // Oldest first, so the offer is the last one of ours in the window, and
-    // the request is the last thing a person said before it.
+    // Oldest first, so the offer is the last one of ours in the window.
     let offerAt = -1;
     for (let index = recent.length - 1; index >= 0; index -= 1) {
       const message = recent[index];
@@ -15677,12 +15729,58 @@ export class ApiGateway {
     if (offerAt < 0) {
       return false;
     }
-    let request: ChannelMessage | undefined;
-    for (let index = offerAt - 1; index >= 0; index -= 1) {
+    const offer = recent[offerAt];
+    if (offer === undefined) {
+      return false;
+    }
+    const offeredAt = new Date(offer.createdAt).getTime();
+    if (
+      !Number.isFinite(offeredAt) ||
+      Date.now() - offeredAt > AUTO_CLAIM_OFFER_TTL_MS
+    ) {
+      return false;
+    }
+    // The approval being handled is already stored. If any other person has
+    // spoken since the offer, the room has moved on and a bare "yes" is no
+    // longer specific enough to spend an account.
+    let approvalAt = -1;
+    for (let index = recent.length - 1; index > offerAt; index -= 1) {
       const message = recent[index];
-      if (message?.kind === "user") {
-        request = message;
+      if (
+        message?.kind === "user" &&
+        message.authorId === senderId &&
+        collapseWhitespace(message.content) === collapseWhitespace(input.content)
+      ) {
+        approvalAt = index;
         break;
+      }
+    }
+    if (
+      approvalAt < 0 ||
+      recent
+        .slice(offerAt + 1, approvalAt)
+        .some((message) => message.kind === "user")
+    ) {
+      return false;
+    }
+    let request =
+      offer.referencedMessageId === undefined
+        ? undefined
+        : await this.options.store
+            .getChannelMessage(
+              repositoryId,
+              offer.referencedMessageId,
+              senderId,
+            )
+            .catch(() => undefined);
+    // Compatibility for offers written before references were attached.
+    if (request === undefined) {
+      for (let index = offerAt - 1; index >= 0; index -= 1) {
+        const message = recent[index];
+        if (message?.kind === "user") {
+          request = message;
+          break;
+        }
       }
     }
     if (request === undefined || request.authorId !== senderId) {
@@ -15694,15 +15792,19 @@ export class ApiGateway {
       request,
       messages: recent,
     });
-    const chosen = await this.chooseAutoClaimCandidate({
-      repositoryId,
-      content: request.content,
-      senderId,
-      candidates,
-      ...(context === undefined ? {} : { context }),
-    });
+    const chosen = candidates.find(
+      (candidate) =>
+        `${candidate.userId}:${candidate.provider}` === offer.authorId &&
+        (candidate.visibility === "org" || candidate.userId === senderId),
+    );
     if (chosen === undefined) {
-      return false;
+      await this.postChannelSystemMessage(
+        projectId,
+        repositoryId,
+        "That agent is no longer available here — mention another one if " +
+          "you still want this picked up.",
+      );
+      return true;
     }
     await this.dispatchOneMention({
       projectId,
@@ -15753,7 +15855,15 @@ export class ApiGateway {
     const hasDirectMatch = direct.some((entry) => entry.score > 0);
     // The first line is framing for the worker, not conversation. Scoring it
     // would make an agent named "Context" look relevant to every request.
-    const contextualWords = input.context?.split("\n").slice(1).join("\n");
+    const contextualWords = input.context
+      ?.split("\n")
+      .slice(1)
+      .join("\n")
+      // Speaker labels help the classifier distinguish a human exchange but
+      // are not subject matter. Letting "Human" or "Agent" enter relevance
+      // scoring would make a persona with either word in its name win every
+      // generic follow-up for the wrong reason.
+      .replace(/^- (?:Human \d+|Agent): /gmu, "- ");
     const contextTokens =
       contextualWords === undefined ? undefined : relevanceTokens(contextualWords);
     const scored = (

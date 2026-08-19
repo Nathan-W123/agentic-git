@@ -162,6 +162,22 @@ export const state = {
   repositoryGrants: {},
   activeChannelThread: undefined,
   /**
+   * A thread that has just come into existence under something this account
+   * asked for, waiting to be opened — see `notePromptedThread`.
+   *
+   * `{ repositoryId, messageId }`, and only ever the most recent one: two
+   * agents finishing their first reply in the same reconcile is one panel
+   * with one occupant, and the newest is the one still being written.
+   */
+  promptedThread: undefined,
+  /**
+   * The thread `activeChannelThread` holds because the app opened it, rather
+   * than because the reader pressed something. Kept apart so the next
+   * prompted thread may replace one the app chose and never one the reader
+   * did.
+   */
+  autoOpenedThread: undefined,
+  /**
    * The thread the composer is aimed at, if the reader chose one.
    *
    * Item 4 of the threading work, explicit rather than automatic: guessing
@@ -3031,12 +3047,78 @@ function withSentTime(message) {
   };
 }
 
+/**
+ * Whether a channel root is a thread standing under a task this account asked
+ * for — the shape `channelMessageHasTaskThread` draws in the transcript,
+ * narrowed to the person who prompted it.
+ */
+function ownTaskThread(entry) {
+  return (
+    entry.kind === "user" &&
+    entry.taskId !== undefined &&
+    String(entry.authorId ?? "") === currentUserId() &&
+    (entry.replies ?? []).length > 0
+  );
+}
+
+/**
+ * Remembers a thread that has just appeared under one of this account's own
+ * requests, so the surface can open it.
+ *
+ * Somebody asks an agent for something and then waits, watching a request
+ * that says nothing back until the narration arrives — and when it does it
+ * arrives *inside* a thread, collapsed to a one-line summary they still have
+ * to click. This is the transition worth catching: a root of theirs that had
+ * no replies a moment ago and has some now.
+ *
+ * `before` is the timeline this read replaced, and is undefined on a
+ * channel's first read — where every thread in the room is equally new and
+ * none of them is news. Deciding from the two timelines rather than from a
+ * message event keeps the client out of guessing which reply started a
+ * thread: the store stays the source of truth, exactly as `loadChannel`'s
+ * reconcile does for everything else.
+ */
+function notePromptedThread(repositoryId, before) {
+  if (before === undefined) {
+    return;
+  }
+  const already = new Set(before.filter(ownTaskThread).map((entry) => entry.id));
+  const opened = state.channelMessages[repositoryId]
+    .filter((entry) => ownTaskThread(entry) && !already.has(entry.id))
+    .at(-1);
+  if (opened !== undefined) {
+    state.promptedThread = { repositoryId, messageId: opened.id };
+  }
+}
+
+/**
+ * The thread waiting to be opened in this repository, taken rather than read:
+ * a reconcile that produces one gets exactly one chance to open it, and a
+ * surface that decides against opening it does not leave it to ambush the
+ * next unrelated refresh.
+ */
+export function takePromptedThread(repositoryId) {
+  const pending = state.promptedThread;
+  if (pending === undefined || pending.repositoryId !== repositoryId) {
+    return undefined;
+  }
+  state.promptedThread = undefined;
+  return pending.messageId;
+}
+
 async function loadChannel(repositoryId) {
   const response = await apiOptional(channelPath(repositoryId, "/messages"), undefined);
   if (response === undefined) {
     return false;
   }
+  // Taken before the replacement, and only for a channel that has been read
+  // once already — the local seed `channelMessagesFor` falls back to is not a
+  // timeline anything happened in.
+  const before = state.channelLoaded.has(repositoryId)
+    ? (state.channelMessages[repositoryId] ?? [])
+    : undefined;
   state.channelMessages[repositoryId] = (response.messages ?? []).map(withSentTime);
+  notePromptedThread(repositoryId, before);
   state.channelAgentOverrides[repositoryId] = {
     ...state.channelAgentOverrides[repositoryId],
     ...response.agentOverrides,

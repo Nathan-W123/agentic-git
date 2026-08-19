@@ -65,6 +65,7 @@ import {
   ensureRepositoryGrants,
   refreshChannelMessages,
   refreshProviderUsage,
+  takePromptedThread,
   addChannelAgent,
   removeChannelAgent,
   removeChannelAgentForUser,
@@ -2974,6 +2975,7 @@ function resumeLiveUpdates() {
   const channel = activeChannelId();
   if (state.route === "chats" && channel) {
     void refreshChannelMessages(channel).then(() => {
+      openPromptedThread(channel);
       if (!renameFieldFocused()) {
         render();
       }
@@ -3209,6 +3211,48 @@ function sidePanelOpen() {
     state.activeChannelThread !== undefined ||
     state.chanThreadList === true
   );
+}
+
+/**
+ * Opens the thread an agent has just started, for the person who asked it to.
+ *
+ * Tasking an agent used to end in waiting: the request sat in the room saying
+ * nothing, and when the agent finally began narrating it did so inside a
+ * thread that showed up collapsed to a single summary line. The person who
+ * prompted it had to notice that line and click it to see any of the work
+ * they had asked for. `notePromptedThread` in data.js spots the moment a
+ * thread appears under one of this account's own requests; this decides
+ * whether the panel is free to show it.
+ *
+ * Desktop only. The thread panel is beside the transcript here, so opening it
+ * costs the reader nothing they were already looking at — where on a phone it
+ * is a full-screen surface dropped over the room, which is a different and
+ * much ruder thing to do to somebody mid-sentence.
+ *
+ * It also declines rather than interrupts. Anything the reader deliberately
+ * put in that panel — a file, the tree, a conversation, another agent, a
+ * thread they opened themselves — stays where they put it; the only thing
+ * this will replace is a thread it opened the same way a moment ago, so a
+ * second task prompted while the first one's thread is still up moves the
+ * panel on to the newer work.
+ */
+function openPromptedThread(repositoryId) {
+  const messageId = takePromptedThread(repositoryId);
+  if (
+    messageId === undefined ||
+    phoneLayout() ||
+    state.route !== "chats" ||
+    state.activeAgentPanel !== undefined ||
+    state.activeDm !== undefined ||
+    state.chanFileView !== undefined ||
+    state.chanTree === true ||
+    (state.activeChannelThread !== undefined &&
+      state.activeChannelThread !== state.autoOpenedThread)
+  ) {
+    return;
+  }
+  state.activeChannelThread = messageId;
+  state.autoOpenedThread = messageId;
 }
 
 /**
@@ -4518,6 +4562,8 @@ document.addEventListener("click", (event) => {
           return;
         }
         state.activeChannelThread = value;
+        // Chosen, so `openPromptedThread` will not choose over it.
+        state.autoOpenedThread = undefined;
         state.activeDm = undefined;
         state.activeAgentPanel = undefined;
         closeChannelFile();
@@ -4660,6 +4706,8 @@ document.addEventListener("click", (event) => {
         return;
       }
       state.activeChannelThread = value;
+      // Chosen, so `openPromptedThread` will not choose over it.
+      state.autoOpenedThread = undefined;
       // …and puts away an open conversation, for the same reason: they share
       // the one panel, and a direct message left on top of a thread the reader
       // just asked for would look like the thread failed to open.
@@ -6631,7 +6679,10 @@ async function boot() {
       // all of them.
       window.clearTimeout(channelFrameTimer);
       channelFrameTimer = window.setTimeout(() => {
-        void refreshChannelMessages(channelRepositoryId).then(() => render());
+        void refreshChannelMessages(channelRepositoryId).then(() => {
+          openPromptedThread(channelRepositoryId);
+          render();
+        });
       }, CHANNEL_FRAME_COALESCE_MS);
     }
     // The audit half of the same news. The transient frame above is what
