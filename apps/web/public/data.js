@@ -1380,13 +1380,14 @@ export async function loadInvitations() {
  * the invitation admits the person to every repository the organization has,
  * which is a different and much larger thing to hand out.
  */
-export async function createInvitation(email, role, repositoryId) {
+export async function createInvitation(role, repositoryId) {
   const response = await api(
     `/organizations/${encodeURIComponent(state.organizationId)}/invitations`,
     {
       method: "POST",
       body: {
-        email,
+        // No address: the link is the invitation, and it is shared wherever
+        // the team already talks rather than mailed to one person.
         role,
         ...(repositoryId === undefined || repositoryId === ""
           ? {}
@@ -1425,13 +1426,20 @@ export async function readInvitation(token) {
  * password the server would ignore only invites the reader to think their
  * existing one is being changed.
  */
-export async function acceptInvitation(token, displayName, password) {
+export async function acceptInvitation(token, displayName, password, email) {
   return await api(`/invitations/${encodeURIComponent(token)}/accept`, {
     method: "POST",
     body:
       displayName === undefined && password === undefined
         ? {}
-        : { displayName, password },
+        : {
+            displayName,
+            password,
+            // Only an open link carries one: an addressed invitation already
+            // knows the address, and letting one be typed there would be a
+            // way to accept somebody else's.
+            ...(email === undefined || email === "" ? {} : { email }),
+          },
   });
 }
 

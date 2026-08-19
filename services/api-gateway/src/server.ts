@@ -2083,6 +2083,18 @@ const ROLES: readonly OrganizationRole[] = [
   "reviewer",
   "viewer",
 ];
+/**
+ * Statuses that mean an agent is done with a task.
+ *
+ * Everything else — submitted, claimed, planned, open — is work it still
+ * owes, which is what "busy" means when choosing who to hand something to.
+ */
+const FINISHED_TASK_STATUSES: ReadonlySet<SubmittedTaskStatus> = new Set([
+  "integrated",
+  "failed",
+  "cancelled",
+]);
+
 const TASK_STATUSES: readonly SubmittedTaskStatus[] = [
   "submitted",
   "claimed",
@@ -4091,12 +4103,17 @@ export class ApiGateway {
         // bring in. Saying so here discloses nothing the same response does
         // not already: it names the address, and it takes the link's secret
         // to reach at all, so this cannot be used to test addresses.
-        const existing = await this.options.store.getUserByEmail(
-          invitation.email,
-        );
+        //
+        // An open link names nobody, so there is nothing to look up and
+        // nothing to prefill: whoever opens it says who they are.
+        const open = invitation.email === "";
+        const existing = open
+          ? undefined
+          : await this.options.store.getUserByEmail(invitation.email);
         this.sendJson(response, 200, {
           invitation: {
             email: invitation.email,
+            open,
             role: invitation.role,
             status: state,
             accountExists: existing !== undefined,
@@ -4119,27 +4136,75 @@ export class ApiGateway {
           );
         }
         const body = objectBody(await this.readJson(request));
-        let user = await this.options.store.getUserByEmail(invitation.email);
-        if (user === undefined) {
-          // The address is the invitation's, not something typed here, so only
-          // the password is retyped on this form.
-          this.assertAccountConfirmations(body);
-          user = await this.options.store.createUser({
-            email: invitation.email,
-            displayName:
-              stringField(body["displayName"], "displayName", { max: 120 }) ??
-              "",
-            passwordDigest: await hashPassword(
-              stringField(body["password"], "password", { max: 256 }) ?? "",
-            ),
-          });
+        const open = invitation.email === "";
+        const signedIn = await this.auth
+          .authenticate(request.headers.cookie)
+          .catch(() => undefined);
+        let user;
+        if (open) {
+          // Nobody is named, so whoever opened the link says who they are.
+          // Somebody already signed in simply takes the grant — the common
+          // case for a link pasted into a chat a team is already in, where
+          // most readers have accounts and one or two do not.
+          if (signedIn !== undefined) {
+            // The full account, not the session's public view: a fresh
+            // session is issued below and that needs the record, not the
+            // shape the browser is allowed to see.
+            user = await this.options.store.getUser(signedIn.user.id);
+            if (user === undefined) {
+              throw new HttpError(401, "unauthorized", "Sign in is required");
+            }
+          } else {
+            const email = emailField(body["email"]);
+            if (email === undefined) {
+              throw new HttpError(
+                400,
+                "invalid_request",
+                "An email address is required to join",
+              );
+            }
+            // Refused rather than signed in: holding the link proves nothing
+            // about who is holding it, so an existing account is claimed by
+            // signing in, exactly as the addressed form requires.
+            if (
+              (await this.options.store.getUserByEmail(email)) !== undefined
+            ) {
+              throw new HttpError(
+                409,
+                "account_exists",
+                `An account already uses ${email}. ` +
+                  "Sign in as that account to join.",
+              );
+            }
+            this.assertAccountConfirmations(body);
+            user = await this.options.store.createUser({
+              email,
+              displayName:
+                stringField(body["displayName"], "displayName", { max: 120 }) ??
+                "",
+              passwordDigest: await hashPassword(
+                stringField(body["password"], "password", { max: 256 }) ?? "",
+              ),
+            });
+          }
         } else {
-          // The account already exists, so the invitation is not proof of who
-          // is holding the link. Signing in is.
-          const signedIn = await this.auth
-            .authenticate(request.headers.cookie)
-            .catch(() => undefined);
-          if (signedIn?.user.id !== user.id) {
+          user = await this.options.store.getUserByEmail(invitation.email);
+          if (user === undefined) {
+            // The address is the invitation's, not something typed here, so
+            // only the password is retyped on this form.
+            this.assertAccountConfirmations(body);
+            user = await this.options.store.createUser({
+              email: invitation.email,
+              displayName:
+                stringField(body["displayName"], "displayName", { max: 120 }) ??
+                "",
+              passwordDigest: await hashPassword(
+                stringField(body["password"], "password", { max: 256 }) ?? "",
+              ),
+            });
+          } else if (signedIn?.user.id !== user.id) {
+            // The account already exists, so the invitation is not proof of
+            // who is holding the link. Signing in is.
             throw new HttpError(
               409,
               "account_exists",
@@ -4148,17 +4213,24 @@ export class ApiGateway {
             );
           }
         }
-        const claimed = await this.options.store.acceptInvitation(
-          invitation.id,
-          user.id,
-          new Date().toISOString(),
-        );
-        if (!claimed) {
-          throw new HttpError(
-            409,
-            "invitation_used",
-            "This invitation has already been used",
+        // An addressed invitation is spent here. An open one is not: it was
+        // made to be used by however many people it reaches, and marking it
+        // accepted would turn "shared with the team" into "the first person
+        // to click it". It still ends — on its expiry, or when somebody
+        // revokes it — and those are the two ways it is meant to.
+        if (!open) {
+          const claimed = await this.options.store.acceptInvitation(
+            invitation.id,
+            user.id,
+            new Date().toISOString(),
           );
+          if (!claimed) {
+            throw new HttpError(
+              409,
+              "invitation_used",
+              "This invitation has already been used",
+            );
+          }
         }
         // A repository-scoped invitation grants that repository and nothing
         // else — deliberately no organization membership, because any
@@ -4971,7 +5043,25 @@ export class ApiGateway {
       }
       if (method === "POST") {
         const body = objectBody(await this.readJson(request));
-        const email = emailField(body["email"]) ?? "";
+        // An address is optional, and without one this is a link rather than
+        // a letter: anybody holding it can join, and more than one person
+        // can. That is what an invitation actually gets used for — pasted
+        // into the group chat where the team already is — and the addressed
+        // form could not do it. It named one mailbox, it was spent the first
+        // time it was opened, and the second person to click it was told the
+        // invitation had already been used.
+        //
+        // What it is not is a weaker grant. The link still expires, is still
+        // revocable, still names exactly one repository, and still cannot
+        // hand out a role its author could not assign. It is a bearer
+        // credential for that one repository, which is what makes it worth
+        // keeping out of a public place — but the group chat it was always
+        // going to be pasted into is not one.
+        const offered =
+          body["email"] === undefined || body["email"] === ""
+            ? undefined
+            : emailField(body["email"]);
+        const email = offered ?? "";
         const role = stringField(body["role"], "role", { max: 20 }) as
           | OrganizationRole
           | undefined;
@@ -5037,6 +5127,9 @@ export class ApiGateway {
             organizationId,
             email,
             role,
+            // Worth telling apart in the record: one act of sharing that can
+            // become any number of members.
+            ...(email === "" ? { openLink: true } : {}),
             action: "invited",
             actorId: principal.user.id,
           },
@@ -13811,9 +13904,12 @@ export class ApiGateway {
    * behaviour that exists today, wrong only in the way described above and
    * no worse than before.
    */
-  private async recentObjectivesFor(
-    repositoryId: string,
-  ): Promise<(candidate: ChannelMentionCandidate) => string[]> {
+  private async agentActivityIn(repositoryId: string): Promise<{
+    /** What this agent has recently been asked to do here, newest first. */
+    recentObjectives: (candidate: ChannelMentionCandidate) => string[];
+    /** Whether it already has work here that has not finished. */
+    busy: (candidate: ChannelMentionCandidate) => boolean;
+  }> {
     const agentIdByAdapter = new Map<string, string>();
     const configured = await Promise.resolve(
       this.options.operations.listAgents?.(),
@@ -13828,6 +13924,10 @@ export class ApiGateway {
     }
     const perAgent = agentIdByAdapter.size > 0;
     const recent = new Map<string, string[]>();
+    // Anything not yet finished. Queued counts as busy alongside running:
+    // the question this answers is "would handing it this mean waiting",
+    // and a task sitting in front of the one that is running means yes.
+    const working = new Set<string>();
     // Newest first — see `recentFirst`. Never read `listSubmittedTasks`
     // directly here: it returns oldest first, and taking the first
     // {@link RECENT_ACTIVITY_LOOKBACK} of that is each owner's *earliest*
@@ -13846,17 +13946,30 @@ export class ApiGateway {
         list.push(task.objective);
         recent.set(key, list);
       }
-    }
-    return (candidate) => {
-      if (!perAgent) {
-        return recent.get(candidate.userId) ?? [];
+      if (!FINISHED_TASK_STATUSES.has(task.status)) {
+        working.add(key);
       }
-      const agentId = agentIdByAdapter.get(candidate.vendor);
+    }
+    const keyFor = (candidate: ChannelMentionCandidate): string | undefined => {
+      if (!perAgent) {
+        return candidate.userId;
+      }
       // A vendor this deployment has no agent for has never run anything
       // here — a submission naming it fails before a task exists.
+      const agentId = agentIdByAdapter.get(candidate.vendor);
       return agentId === undefined
-        ? []
-        : (recent.get(`${candidate.userId}\0${agentId}`) ?? []);
+        ? undefined
+        : `${candidate.userId}\0${agentId}`;
+    };
+    return {
+      recentObjectives: (candidate) => {
+        const key = keyFor(candidate);
+        return key === undefined ? [] : (recent.get(key) ?? []);
+      },
+      busy: (candidate) => {
+        const key = keyFor(candidate);
+        return key !== undefined && working.has(key);
+      },
     };
   }
 
@@ -13883,7 +13996,7 @@ export class ApiGateway {
       return undefined;
     }
     const tokens = relevanceTokens(input.text);
-    const recentObjectives = await this.recentObjectivesFor(input.repositoryId);
+    const { recentObjectives } = await this.agentActivityIn(input.repositoryId);
     const [best] = input.candidates
       .map((candidate) => ({
         candidate,
@@ -15986,7 +16099,7 @@ export class ApiGateway {
     // (e.g. real recent-files-per-agent) is used here, and
     // `recentObjectivesFor` for how it is keyed per agent rather than per
     // person.
-    const recentObjectives = await this.recentObjectivesFor(repositoryId);
+    const { recentObjectives, busy } = await this.agentActivityIn(repositoryId);
     const direct = dispatchable
       .map((candidate) => ({
         candidate,
@@ -16014,39 +16127,62 @@ export class ApiGateway {
             ),
           }))
     ).sort((a, b) => b.score - a.score);
-    // Relevance decides *who*, never *whether*. Requiring a minimum score
-    // meant a request had to share a word with some agent's role or name
-    // before anybody would take it, so "can someone start building general
-    // infrastructure for a chess engine" — unmistakably a task, addressed to
-    // the room — matched nothing and was met with silence. A channel that
-    // ignores plain requests is worse than one that occasionally picks the
-    // less apt agent, and the sender can always name someone to override it.
-    const [best] = scored;
-    if (best === undefined) {
-      return undefined;
-    }
-    // A tie no longer means silence. The margin rules were written so that
-    // "two similarly relevant agents" failed closed, on the reasoning that
-    // dispatching wrongly spends somebody's real usage — but with two agents
-    // connected, which is the ordinary case, near-ties are the norm and the
-    // channel simply never answered anything that was not @mentioned. Never
-    // answering is its own failure, and the more common one.
+    // Three tiers, tried in order. Relevance decides *who*, never *whether*:
+    // a request that matches nobody is still a request, and a channel that
+    // ignores it is worse than one that occasionally picks the less apt
+    // agent — the sender can always name someone to override it.
     //
-    // So a tie is broken rather than refused, and the tie-break is the
-    // question the margin was really standing in for: whose usage is this?
-    // The sender's own agent goes first, because a person spending their own
-    // account needs no protecting from themselves. Otherwise the earliest
-    // candidate wins, which is stable across identical messages so the same
-    // request does not land on a different agent each time.
-    const runnerUpScore = scored[1]?.score ?? 0;
-    const clearWinner =
-      best.score - runnerUpScore >= MIN_MARGIN_ABSOLUTE &&
-      best.score >= runnerUpScore * MIN_MARGIN_RATIO;
-    const tied = scored.filter((entry) => entry.score === best.score);
-    const chosen = clearWinner
-      ? best
-      : (tied.find((entry) => entry.candidate.userId === senderId) ?? tied[0]);
-    return chosen?.candidate;
+    // 1. Fit. Whoever the message and the room's recent work actually point
+    //    at. A real match is worth waiting for, so this tier does not care
+    //    whether the agent is busy: being the right one to ask outranks
+    //    being the free one.
+    const matched = scored.filter((entry) => entry.score > 0);
+    if (matched.length > 0) {
+      const [best] = matched;
+      if (best === undefined) {
+        return undefined;
+      }
+      // A tie is broken rather than refused. The margin rules used to fail
+      // closed on "two similarly relevant agents", and with two agents
+      // connected — the ordinary case — near-ties are the norm, so the
+      // channel simply never answered anything unaddressed. The tie-break is
+      // the question the margin was standing in for: whose usage is this?
+      // The sender's own agent first, because a person spending their own
+      // account needs no protecting from themselves; otherwise the earliest
+      // candidate, which is stable across identical messages so the same
+      // request does not land somewhere different each time.
+      const runnerUpScore = matched[1]?.score ?? 0;
+      const clearWinner =
+        best.score - runnerUpScore >= MIN_MARGIN_ABSOLUTE &&
+        best.score >= runnerUpScore * MIN_MARGIN_RATIO;
+      if (clearWinner) {
+        return best.candidate;
+      }
+      const tied = matched.filter((entry) => entry.score === best.score);
+      return (
+        tied.find((entry) => entry.candidate.userId === senderId) ?? tied[0]
+      )?.candidate;
+    }
+
+    // 2. The sender's own. Nothing matched on role or on what the room has
+    //    been doing, so there is no "right" agent to find — and where there
+    //    is no reason to spend somebody else's account, the person who asked
+    //    should be spending their own. A busy one is skipped here, because a
+    //    fallback pick has no claim worth queueing behind.
+    const ordered = scored.map((entry) => entry.candidate);
+    const mine = ordered.filter((candidate) => candidate.userId === senderId);
+    const free = mine.find((candidate) => !busy(candidate));
+    if (free !== undefined) {
+      return free;
+    }
+
+    // 3. Anyone. The sender has no agent here, or the one they have is
+    //    already working. Free first for the same reason as above, and
+    //    falling back to a busy one rather than to silence: the queue is a
+    //    real answer, and no answer is not.
+    return (
+      ordered.find((candidate) => !busy(candidate)) ?? ordered[0]
+    );
   }
 
   /** A coordinator-authored line in the channel, broadcast the same way a real post is. */

@@ -12866,3 +12866,203 @@ test("an implied request is proposed on, and yes starts it in its question round
   // is the whole reason an offer was made instead of an edit.
   assert.match(objective, /force a question round/u);
 });
+
+/**
+ * Who an unaddressed request goes to, when nothing about it points anywhere.
+ *
+ * Fit decides first and is worth queueing behind — the right agent to ask is
+ * still the right one when it is busy. Below that there is no "right", only
+ * "whose account", and the answer is the person who asked. Below *that* the
+ * only remaining question is who can start now.
+ */
+test("an unmatched request goes to the sender's own agent, then to whoever is free", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const ownerId = bootstrapped.user.id;
+  const repositoryId = await invitableRepository(owner, "fallback-order");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+
+  const teammate = await runtime.store.createUser({
+    email: "fallback-colleague@example.com",
+    displayName: "Colleague Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: teammate.id,
+    role: "developer",
+  });
+  const colleague = new TestClient(runtime.origin);
+  await colleague.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: teammate.email, password: PASSWORD },
+  });
+
+  // One agent each, both org-wide so either could take anything.
+  runtime.chatConnections.set(ownerId, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  runtime.chatConnections.set(teammate.id, [
+    { provider: "openai", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  // Named so that nothing in the request can match either of them, and no
+  // role set on either: this is the case where fit has no answer at all.
+  for (const [agent, name] of [
+    ["anthropic", "Willow"],
+    [`${teammate.id}:openai`, "Cedar"],
+  ] as const) {
+    assert.equal(
+      (await owner.request(`${base}/agents/${agent}`, {
+        method: "POST",
+        body: { name },
+      })).status,
+      200,
+    );
+  }
+
+  runtime.setTaskClassification("ACT");
+  assert.equal(
+    (await colleague.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "rewrite the shipping calculator" },
+    })).status,
+    201,
+  );
+
+  // Tier two: nothing matched, so the person who asked spends their own
+  // account rather than a colleague's.
+  assert.equal(runtime.submittedTasks.length, 1, JSON.stringify(runtime.submittedTasks));
+  assert.equal(
+    runtime.submittedTasks[0]?.actorId,
+    teammate.id,
+    "the sender's own agent takes an unmatched request",
+  );
+
+  // That task is now in flight — nothing has finished it — so the same
+  // sender asking again finds their own agent busy.
+  assert.equal(
+    (await colleague.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "rewrite the invoice totals page" },
+    })).status,
+    201,
+  );
+
+  // Tier three: anybody who can start now, rather than a queue behind an
+  // agent that was only ever the fallback pick.
+  assert.equal(runtime.submittedTasks.length, 2, JSON.stringify(runtime.submittedTasks));
+  assert.equal(
+    runtime.submittedTasks[1]?.actorId,
+    ownerId,
+    "a busy fallback hands over to whoever is free",
+  );
+});
+
+/**
+ * An invitation with no address on it: a link, not a letter.
+ *
+ * The addressed form named one mailbox and was spent the first time it was
+ * opened, which is not how an invitation gets used. It gets pasted into the
+ * chat the team is already in, and the second person to click it was told it
+ * had already been used.
+ */
+test("an invite link with no address admits more than one person", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  await bootstrap(owner);
+  const repo = await invitableRepository(owner, "open-link");
+
+  const invited = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+    {
+      method: "POST",
+      body: {
+        role: "developer",
+        repositoryId: repo,
+        projectId: DEFAULT_PROJECT_ID,
+      },
+    },
+  );
+  assert.equal(invited.status, 201, JSON.stringify(invited.data));
+  const token = invited.data.token as string;
+  assert.match(token, /^inv_[\w-]+\.[\w-]+$/u);
+
+  // Nobody is named, and the screen the recipient lands on has to know that
+  // so it asks who they are rather than showing a blank disabled field.
+  const preview = await new TestClient(runtime.origin).request(
+    `/api/v1/invitations/${token}`,
+  );
+  assert.equal(preview.status, 200);
+  assert.equal(preview.data.invitation.open, true);
+  assert.equal(preview.data.invitation.email, "");
+  assert.equal(preview.data.invitation.role, "developer");
+
+  // Two people, one link, neither of them named on it.
+  for (const [email, name] of [
+    ["first@example.com", "First Joiner"],
+    ["second@example.com", "Second Joiner"],
+  ] as const) {
+    const joiner = new TestClient(runtime.origin);
+    const accepted = await joiner.request(
+      `/api/v1/invitations/${token}/accept`,
+      { method: "POST", body: { email, displayName: name, password: PASSWORD } },
+    );
+    assert.equal(accepted.status, 200, `${email}: ${JSON.stringify(accepted.data)}`);
+    assert.equal(accepted.data.user.email, email);
+    // The same grant the addressed form makes, and no more: one repository,
+    // no organization membership, because any organization role would reach
+    // every repository and undo the scoping.
+    assert.deepEqual(accepted.data.memberships, []);
+  }
+
+  const grants = await runtime.store.listRepositoryGrants(repo);
+  assert.deepEqual(
+    grants.map((grant) => grant.role),
+    ["developer", "developer"],
+  );
+
+  // An address that already has an account is refused rather than signed in:
+  // holding the link proves nothing about who is holding it.
+  const impostor = new TestClient(runtime.origin);
+  const taken = await impostor.request(`/api/v1/invitations/${token}/accept`, {
+    method: "POST",
+    body: {
+      email: "first@example.com",
+      displayName: "Not First",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(taken.status, 409);
+  assert.equal(taken.data.error?.code ?? taken.data.code, "account_exists");
+
+  // And it still ends when somebody ends it.
+  const listed = await owner.request(
+    `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations`,
+  );
+  const open = (listed.data.invitations as any[]).find(
+    (entry) => entry.email === "",
+  );
+  assert.equal(open?.status, "pending", "an open link is not spent by use");
+  assert.equal(
+    (
+      await owner.request(
+        `/api/v1/organizations/${DEFAULT_ORGANIZATION_ID}/invitations/${open.id}`,
+        { method: "DELETE" },
+      )
+    ).status,
+    200,
+  );
+  const late = new TestClient(runtime.origin);
+  const refused = await late.request(`/api/v1/invitations/${token}/accept`, {
+    method: "POST",
+    body: {
+      email: "third@example.com",
+      displayName: "Too Late",
+      password: PASSWORD,
+    },
+  });
+  assert.equal(refused.status, 409, JSON.stringify(refused.data));
+});
