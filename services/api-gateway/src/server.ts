@@ -1827,6 +1827,22 @@ const AUTO_CLAIM_OFFER_TAIL =
   'Say "yes" and I\'ll ask you what I need before I start — or @mention ' +
   "someone else.";
 
+/**
+ * How long the offer's choice prompt stays up.
+ *
+ * Long enough to survive a lunch, short enough that a room does not collect
+ * prompts nobody is going to answer. Lapsing is not a refusal: the offer is
+ * still in the transcript and "yes" still starts it — this only takes the
+ * buttons down.
+ */
+const AUTO_CLAIM_QUESTION_TTL_MS = 6 * 60 * 60 * 1000;
+
+/** Marks a pending question as an offer rather than a run's own question. */
+const AUTO_CLAIM_QUESTION_PREFIX = "offer:";
+
+const AUTO_CLAIM_QUESTION_YES = "Yes, go ahead";
+const AUTO_CLAIM_QUESTION_NO = "No thanks";
+
 /** The proposal out of an offer message, or nothing if this is not one. */
 export function autoClaimProposal(content: string): string | undefined {
   const at = content.indexOf(AUTO_CLAIM_OFFER_TAIL);
@@ -3174,6 +3190,17 @@ export class ApiGateway {
    * same reason: a hold nobody ever answers costs one string.
    */
   private readonly announcedChannelHolds = new Set<string>();
+  /**
+   * Offers that have already been answered, by the offer's message id.
+   *
+   * An offer can be answered two ways — the prompt's buttons, or "yes" in the
+   * room — and both have to end it. Without this, tapping Yes and then typing
+   * "yes" would start the same work twice, which is the one mistake an offer
+   * exists to make impossible. Bounded, and in memory only: an entry matters
+   * for as long as the offer is the most recent one in its channel, and a
+   * restart takes the prompt with it anyway.
+   */
+  private readonly settledAutoClaimOffers = new Set<string>();
   /**
    * What each task in a thread has changed, by thread then by task.
    *
@@ -15896,13 +15923,161 @@ export class ApiGateway {
     // category the message was sorted into. In the agent's own voice, too:
     // it is the one being asked, and the reader can see whose usage is about
     // to be spent.
-    await this.appendChannelEntry({
+    const posted = await this.appendChannelEntry({
       projectId,
       repositoryId,
       kind: "agent",
       authorId: `${chosen.userId}:${chosen.provider}`,
       content: `${decision.proposal}\n\n${AUTO_CLAIM_OFFER_TAIL}`,
       referencedMessageId: input.referencedMessageId,
+    });
+    // And the same prompt `/ask` puts up, so the answer is a tap rather than
+    // a word. The message above is not redundant with it: the prompt is a
+    // live wait that ends, and the transcript is what is still there
+    // afterwards — including for anybody who was not looking when it opened.
+    // Typing "yes" keeps working for exactly that reason.
+    this.offerAsQuestion({
+      projectId,
+      repositoryId,
+      messageId: posted.id,
+      candidate: chosen,
+      senderId,
+      proposal: decision.proposal,
+      request: { id: input.referencedMessageId, content },
+      ...(context === undefined ? {} : { context }),
+    });
+  }
+
+  /**
+   * Puts an offer up as the choice prompt, beside the line in the room.
+   *
+   * The prompt is the one an agent's own questions use — the same list, the
+   * same keyboard shortcuts, the same "only the person who asked sees it"
+   * rule — because an offer is the same kind of thing: a decision that
+   * belongs to one person and that work is waiting on. There is no task yet,
+   * so nothing is blocked by it; that is the only difference, and it is why
+   * this one is allowed to lapse quietly.
+   */
+  private offerAsQuestion(input: {
+    projectId: string;
+    repositoryId: string;
+    /** The offer message, which is what the prompt hangs off. */
+    messageId: string;
+    candidate: ChannelMentionCandidate;
+    senderId: string;
+    proposal: string;
+    request: { id?: string; content: string };
+    context?: string;
+  }): void {
+    const requestId = `${AUTO_CLAIM_QUESTION_PREFIX}${input.messageId}`;
+    const askedAtMs = Date.now();
+    const finish = (): void => {
+      this.pendingAgentQuestions.delete(requestId);
+      // Both routes to an answer end here, so a tap cannot be followed by a
+      // typed "yes" starting the same work twice.
+      this.settledAutoClaimOffers.add(input.messageId);
+      for (const id of this.settledAutoClaimOffers) {
+        if (this.settledAutoClaimOffers.size <= 500) {
+          break;
+        }
+        this.settledAutoClaimOffers.delete(id);
+      }
+      this.announceAgentQuestions(input.projectId);
+    };
+    const timer = setTimeout(() => {
+      // Lapsing is not a refusal. The offer stays in the transcript and
+      // "yes" still starts it — this only takes the prompt down, so a room
+      // does not accumulate choices nobody is going to make.
+      this.pendingAgentQuestions.delete(requestId);
+      this.announceAgentQuestions(input.projectId);
+    }, AUTO_CLAIM_QUESTION_TTL_MS);
+    timer.unref?.();
+    this.pendingAgentQuestions.set(requestId, {
+      // No task exists yet — that is the whole point of asking first. The id
+      // is the offer's, so anything that logs one can still be traced back
+      // to the message it came from.
+      taskId: requestId,
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      messageId: input.messageId,
+      authorId: `${input.candidate.userId}:${input.candidate.provider}`,
+      submitterId: input.senderId,
+      questions: [
+        {
+          question: input.proposal,
+          options: [AUTO_CLAIM_QUESTION_YES, AUTO_CLAIM_QUESTION_NO],
+        },
+      ],
+      askedAtMs,
+      deadlineAtMs: askedAtMs + AUTO_CLAIM_QUESTION_TTL_MS,
+      optionCount: 2,
+      settle: (answers) => {
+        clearTimeout(timer);
+        finish();
+        if (answers[0]?.chosen !== 0) {
+          // "No thanks", or a skip. Nothing is said in the room: the person
+          // declined a suggestion, which is not an event anybody else needs
+          // narrating to them.
+          return;
+        }
+        void this.startOfferedWork({
+          projectId: input.projectId,
+          repositoryId: input.repositoryId,
+          candidate: input.candidate,
+          senderId: input.senderId,
+          proposal: input.proposal,
+          request: input.request,
+          ...(input.context === undefined ? {} : { context: input.context }),
+        }).catch(() => undefined);
+      },
+    });
+    this.announceAgentQuestions(input.projectId);
+  }
+
+  /**
+   * Starts what an offer offered, however it was agreed to.
+   *
+   * One method for the tap and for the typed "yes", so the two cannot drift
+   * into dispatching differently — which they would, because the objective
+   * they build is the interesting part and it is easy to get half right.
+   */
+  private async startOfferedWork(input: {
+    projectId: string;
+    repositoryId: string;
+    candidate: ChannelMentionCandidate;
+    senderId: string;
+    proposal: string;
+    request: { id?: string; content: string };
+    context?: string;
+  }): Promise<void> {
+    // Two things were said and the worker needs both. "The gray looks rough"
+    // is what the person wrote; "shall I change the background colour?" is
+    // what they said yes to. The remark alone is an observation, not an
+    // objective; the proposal alone throws away the words somebody actually
+    // chose. So the request leads and the agreement follows it — and the
+    // message stays the visible content, so the thread still reads as an
+    // answer to what was asked.
+    //
+    // And it goes in asking. An offer was made precisely because something
+    // was unclear — which colour, which page, how far — so the first round
+    // is the question round, exactly as `/ask` does it. What the agent would
+    // otherwise have guessed at is asked once, by the agent, instead of
+    // guessed at now and corrected later.
+    await this.dispatchOneMention({
+      projectId: input.projectId,
+      repositoryId: input.repositoryId,
+      content: input.request.content,
+      objective:
+        `${input.request.content}\n\nAgreed in the channel — this is the ` +
+        `specific thing that was said yes to:\n${input.proposal}`,
+      forceQuestion: true,
+      senderId: input.senderId,
+      candidate: input.candidate,
+      trigger: "auto_claim",
+      ...(input.request.id === undefined
+        ? {}
+        : { referencedMessageId: input.request.id }),
+      ...(input.context === undefined ? {} : { context: input.context }),
     });
   }
 
@@ -16007,6 +16182,12 @@ export class ApiGateway {
           message.content.startsWith(AUTO_CLAIM_OFFER_OPENING) ||
           message.content.startsWith("Want me to take care of this?"))
       ) {
+        // Already answered through the prompt. Not "no offer here" — it was
+        // made and it was settled, and saying yes to it a second time must
+        // not start the work again.
+        if (this.settledAutoClaimOffers.has(message.id)) {
+          return false;
+        }
         offerAt = index;
         break;
       }
@@ -16041,32 +16222,39 @@ export class ApiGateway {
     if (chosen === undefined) {
       return false;
     }
-    // Two things were said and the worker needs both. "The gray looks rough"
-    // is what the person wrote; "shall I change the background colour?" is
-    // what they said yes to. The remark alone is an observation, not an
-    // objective; the proposal alone throws away the words somebody actually
-    // chose. So the request leads and the agreement follows it — and the
-    // message stays the visible content, so the thread still reads as an
-    // answer to what was asked.
-    //
-    // And it goes in asking. An offer was made precisely because something
-    // was unclear — which colour, which page, how far — so the first round
-    // is the question round, exactly as `/ask` does it. What the agent would
-    // otherwise have guessed at is asked once, by the agent, instead of
-    // guessed at now and corrected later.
-    const proposal = autoClaimProposal(recent[offerAt]?.content ?? "");
+    const offer = recent[offerAt];
+    const proposal = autoClaimProposal(offer?.content ?? "");
+    if (offer !== undefined) {
+      // The words answered the prompt too, so take it down rather than leave
+      // a live choice for something that has just started.
+      this.settledAutoClaimOffers.add(offer.id);
+      if (
+        this.pendingAgentQuestions.delete(
+          `${AUTO_CLAIM_QUESTION_PREFIX}${offer.id}`,
+        )
+      ) {
+        this.announceAgentQuestions(projectId);
+      }
+    }
+    if (proposal !== undefined) {
+      await this.startOfferedWork({
+        projectId,
+        repositoryId,
+        candidate: chosen,
+        senderId,
+        proposal,
+        request: { id: request.id, content: request.content },
+        ...(context === undefined ? {} : { context }),
+      });
+      return true;
+    }
+    // An offer from before the agent started naming what it would do. There
+    // is no proposal to carry, so this is the older dispatch: the request in
+    // the sender's own words, and no forced question round.
     await this.dispatchOneMention({
       projectId,
       repositoryId,
       content: request.content,
-      ...(proposal === undefined
-        ? {}
-        : {
-            objective:
-              `${request.content}\n\nAgreed in the channel — this is the ` +
-              `specific thing that was said yes to:\n${proposal}`,
-            forceQuestion: true,
-          }),
       senderId,
       candidate: chosen,
       trigger: "auto_claim",

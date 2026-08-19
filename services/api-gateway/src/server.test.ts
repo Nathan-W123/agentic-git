@@ -13066,3 +13066,135 @@ test("an invite link with no address admits more than one person", async (t) => 
   });
   assert.equal(refused.status, 409, JSON.stringify(refused.data));
 });
+
+/**
+ * The offer as a prompt, not only as a sentence to answer in words.
+ *
+ * It is the same prompt an agent's own questions use — one list, one set of
+ * keyboard shortcuts, one rule about who may answer — because an offer is the
+ * same kind of thing: one person's decision, with work waiting on it.
+ */
+test("an offer puts up the choice prompt, and tapping yes starts the work", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "offer-prompt");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setTaskClassification("OFFER: Shall I retire the old feature flag?");
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "that old flag is still hanging around everywhere" },
+    })).status,
+    201,
+  );
+
+  const open = await owner.request(`${base}/questions`);
+  assert.equal(open.status, 200);
+  const prompt = (open.data.questions as any[])[0];
+  assert.notEqual(prompt, undefined, JSON.stringify(open.data));
+  assert.equal(
+    prompt.questions[0].question,
+    "Shall I retire the old feature flag?",
+  );
+  assert.deepEqual(prompt.questions[0].options, ["Yes, go ahead", "No thanks"]);
+  assert.equal(runtime.submittedTasks.length, 0, "a prompt is not a start");
+
+  // Somebody else's prompt is nobody else's decision — the same rule the
+  // agent's own questions follow.
+  const stranger = new TestClient(runtime.origin);
+  const other = await runtime.store.createUser({
+    email: "offer-prompt-other@example.com",
+    displayName: "Other Dev",
+    passwordDigest: await hashPassword(PASSWORD),
+  });
+  await runtime.store.saveMembership({
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    userId: other.id,
+    role: "developer",
+  });
+  await stranger.request("/api/v1/auth/login", {
+    method: "POST",
+    body: { email: other.email, password: PASSWORD },
+  });
+  assert.deepEqual(
+    (await stranger.request(`${base}/questions`)).data.questions,
+    [],
+  );
+
+  const answered = await owner.request(
+    `${base}/questions/${encodeURIComponent(prompt.requestId)}/answer`,
+    { method: "POST", body: { answers: [{ chosen: 0 }] } },
+  );
+  assert.equal(answered.status, 200);
+
+  // The tap dispatches exactly what a typed "yes" dispatches: the words the
+  // person used, the proposal they agreed to, and the question round.
+  await waitFor(
+    async () => runtime.submittedTasks.length === 1,
+    "tapping yes never dispatched the work",
+  );
+  const objective = String(runtime.submittedTasks[0]?.objective);
+  assert.match(objective, /old flag is still hanging around/u);
+  assert.match(objective, /Shall I retire the old feature flag/u);
+  assert.match(objective, /force a question round/u);
+
+  // And the prompt is gone, so the work cannot be started a second time by
+  // somebody typing "yes" underneath it.
+  assert.deepEqual((await owner.request(`${base}/questions`)).data.questions, []);
+  assert.equal(
+    (await owner.request(`${base}/messages`, {
+      method: "POST",
+      body: { content: "yes" },
+    })).status,
+    201,
+  );
+  assert.equal(
+    runtime.submittedTasks.length,
+    1,
+    JSON.stringify(runtime.submittedTasks),
+  );
+});
+
+test("declining the prompt starts nothing, and says nothing about it", async (t) => {
+  const runtime = await startRuntime(t);
+  const owner = new TestClient(runtime.origin);
+  const bootstrapped = await bootstrap(owner);
+  const repositoryId = await invitableRepository(owner, "offer-declined");
+  const base = `/api/v1/projects/${DEFAULT_PROJECT_ID}/repositories/${repositoryId}/channel`;
+  runtime.chatConnections.set(bootstrapped.user.id, [
+    { provider: "anthropic", visibility: "org" },
+  ]);
+  await joinAllConnectedAgents(runtime, repositoryId);
+
+  runtime.setTaskClassification("OFFER: Shall I tidy the imports?");
+  await owner.request(`${base}/messages`, {
+    method: "POST",
+    body: { content: "the imports in that module are a mess" },
+  });
+  const prompt = (await owner.request(`${base}/questions`)).data.questions[0];
+  const before = (await owner.request(`${base}/messages`)).data.messages.length;
+
+  assert.equal(
+    (
+      await owner.request(
+        `${base}/questions/${encodeURIComponent(prompt.requestId)}/answer`,
+        { method: "POST", body: { answers: [{ chosen: 1 }] } },
+      )
+    ).status,
+    200,
+  );
+
+  assert.equal(runtime.submittedTasks.length, 0);
+  // Declining a suggestion is not an event the room needs narrating to it.
+  assert.equal(
+    (await owner.request(`${base}/messages`)).data.messages.length,
+    before,
+  );
+  assert.deepEqual((await owner.request(`${base}/questions`)).data.questions, []);
+});
