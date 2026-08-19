@@ -4791,7 +4791,7 @@ export function submitComposerMessage(rerender) {
     }
     state.chatDraft = "";
     saveChannelDraft(repositoryId, "");
-    state.mentionActive = false;
+    closeComposerAutocomplete("channel");
     // A direct reply is one message, not a mode the composer stays trapped
     // in. Continuing an agent task remains sticky as before.
     const directReply =
@@ -4817,7 +4817,7 @@ export function submitComposerMessage(rerender) {
   }
   state.chatDraft = "";
   saveChannelDraft(repositoryId, "");
-  state.mentionActive = false;
+  closeComposerAutocomplete("channel");
   markChannelRead(repositoryId);
   rerender();
   scrollChannel();
@@ -4921,13 +4921,34 @@ export function submitThreadReply(rerender) {
   // same way a channel message does, and `messageBody` reads them back out.
   postChannelReply(activeChannelId(), state.activeChannelThread, state.threadDraft);
   state.threadDraft = "";
-  if (state.composerAutocompleteTarget === "thread") {
-    state.mentionActive = false;
-    state.mentionQuery = "";
-    state.slashActive = false;
-    state.slashQuery = "";
-  }
+  closeComposerAutocomplete("thread");
   rerender();
+}
+
+/**
+ * Closes whichever picker a composer was showing, because it just sent.
+ *
+ * Both pickers are a suggestion about the word under the cursor, and sending
+ * takes that word — the whole draft — away. Leaving either one open left a
+ * list of commands hanging over an emptied composer with nothing left to
+ * complete: the popup outlives the message it was helping to write, and,
+ * since only typing reopens the question, it stays there through a channel
+ * switch and everything after it.
+ *
+ * The query and the highlighted row go with it. A stale `/dep` left behind
+ * would decide what the next `/` offers before a single character of it has
+ * been typed.
+ */
+function closeComposerAutocomplete(target) {
+  if (state.composerAutocompleteTarget !== target) {
+    return;
+  }
+  state.mentionActive = false;
+  state.mentionQuery = "";
+  state.mentionIndex = 0;
+  state.slashActive = false;
+  state.slashQuery = "";
+  state.slashIndex = 0;
 }
 
 function autocompleteSnapshot() {
