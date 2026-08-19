@@ -101,6 +101,63 @@ test("registration retains digests and creates the account only after the mailed
   );
 });
 
+test("unconfirmed registration creates the account, its team and its project at once", async () => {
+  const store = new InMemoryCoordinationStore();
+  const sent: MailMessage[] = [];
+  const auth = new AuthService(store, {
+    mailer: async (message) => {
+      sent.push(message);
+    },
+  });
+
+  const user = await auth.registerUnconfirmed({
+    email: "Straight.In@Example.com",
+    displayName: "Straight In",
+    password: "NoCodeNeeded123!",
+    organizationName: "Straight team",
+  });
+  assert.equal(user.email, "straight.in@example.com");
+  assert.equal(user.systemAdmin, false);
+  assert.equal(await store.countUsers(), 1);
+  // Nothing is mailed on this path, so a deployment with no relay still works.
+  assert.equal(sent.length, 0);
+  const organizations = await store.listOrganizations(user.id);
+  assert.equal(organizations.length, 1);
+  assert.equal(organizations[0]?.name, "Straight team");
+  assert.deepEqual(
+    (await store.listProjects(organizations[0]?.id ?? "")).map(
+      (project) => project.slug,
+    ),
+    ["default"],
+  );
+  // The password is stored as a digest, and only as a digest.
+  assert.notEqual(user.passwordDigest, "NoCodeNeeded123!");
+  assert.equal(await verifyPassword("NoCodeNeeded123!", user.passwordDigest), true);
+
+  const errorCode = (code: string) => (error: unknown) =>
+    error instanceof AuthenticationError && error.code === code;
+  // The address is taken once. A second sign-up with it is refused, whatever
+  // case it is typed in.
+  await assert.rejects(
+    auth.registerUnconfirmed({
+      email: "straight.in@example.com",
+      displayName: "Impostor",
+      password: "NoCodeNeeded123!",
+    }),
+    errorCode("account_exists"),
+  );
+  // A password the policy refuses leaves no account behind.
+  await assert.rejects(
+    auth.registerUnconfirmed({
+      email: "weak@example.com",
+      displayName: "Weak",
+      password: "short",
+    }),
+    errorCode("invalid_password"),
+  );
+  assert.equal(await store.countUsers(), 1);
+});
+
 test("registration rejects wrong, expired, exhausted, reused, and unknown challenges", async () => {
   let clock = new Date("2026-01-01T00:00:00.000Z");
   const store = new InMemoryCoordinationStore();

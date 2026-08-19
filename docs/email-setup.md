@@ -1,10 +1,16 @@
 # Setting Up Email
 
-The control plane sends two messages: the six-digit code that confirms a new
-account at sign-up, and the single-use link behind **Forgotten your
-password?**. Both go through the same mailer, and until it is configured
-neither one leaves the machine — the message is written to the control plane's
-log instead, prefixed `[mail]`.
+The control plane sends the single-use link behind **Forgotten your
+password?**, and — where a deployment asks for it — the six-digit code that
+confirms a new account at sign-up. Both go through the same mailer, and until
+it is configured neither one leaves the machine: the message is written to the
+control plane's log instead, prefixed `[mail]`.
+
+**Sign-up does not need any of this.** Email confirmation is off by default,
+so signing up creates the account and enters the app with nothing emailed. Set
+`COORD_REQUIRE_EMAIL_CONFIRMATION=1` once the steps below are done and tested
+if you want new accounts to prove their address first. Password recovery is
+the reason to set mail up either way.
 
 This page is the whole checklist. The per-variable reference lives in the
 [deployment guide](deployment.md#environment-reference-control-plane).
@@ -31,10 +37,10 @@ no third-party dependency.
 
 **Use the HTTPS API unless you have a reason not to.** Hosting platforms
 routinely block the outbound SMTP ports, and a blocked relay does not fail
-quickly or clearly: the connection sits there until it times out, and sign-up
-ends at "The confirmation email could not be delivered". This is the reason a
-deployment on Railway can look correctly configured and still never deliver a
-code.
+quickly or clearly: the connection sits there until it times out, so a reset
+link never arrives and sign-up with confirmation turned on ends at "The
+confirmation email could not be delivered". This is the reason a deployment on
+Railway can look correctly configured and still never deliver anything.
 
 If both are set, the API wins.
 
@@ -107,27 +113,27 @@ Restart the control plane, then confirm all three:
    once at startup:
 
    ```
-   [mail] No COORD_MAIL_API_URL or COORD_SMTP_URL is configured. Sign-up
-   confirmation codes and password reset links will be written to this log
-   instead of being emailed.
+   [mail] No COORD_MAIL_API_URL or COORD_SMTP_URL is configured. Password
+   reset links will be written to this log instead of being emailed.
    ```
 
    Seeing that after a restart means the variables did not reach the process.
 
-2. **Sign-up says "check your email".** Create an account with an address you
-   can read. `POST /api/v1/auth/register` answers `"delivery": "mailbox"` when
-   the message was handed to the provider, and `"delivery": "log"` when it was
-   not — the sign-up screen changes its wording to match, so it never tells
-   somebody to check an inbox nothing was sent to.
+2. **A reset link arrives.** Use **Forgotten your password?** once and confirm
+   `POST /api/v1/auth/password-reset` mails a working link to an address you
+   can read.
 
-3. **The code arrives**, and entering it at
-   `POST /api/v1/auth/register/confirm` creates the account. Then use
-   **Forgotten your password?** once to confirm
-   `POST /api/v1/auth/password-reset` mails a working link.
+3. **Only then, if you want it, turn confirmation on.** Set
+   `COORD_REQUIRE_EMAIL_CONFIRMATION=1`, restart, and sign up with an address
+   you can read: `POST /api/v1/auth/register` answers `"delivery": "mailbox"`
+   when the message was handed to the provider and `"delivery": "log"` when it
+   was not, and entering the code at `POST /api/v1/auth/register/confirm`
+   creates the account.
 
 ## When it still does not arrive
 
-- **Sign-up fails with "The confirmation email could not be delivered."** The
+- **Sign-up fails with "The confirmation email could not be delivered."** Only
+  happens with `COORD_REQUIRE_EMAIL_CONFIRMATION=1`. The
   provider refused, or the relay could not be reached. The control plane logs
   the provider's own words — a `403`/`422` here is nearly always a `From`
   address the provider has not verified. On Railway with `COORD_SMTP_URL` set,

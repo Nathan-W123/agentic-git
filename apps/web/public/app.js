@@ -902,11 +902,13 @@ async function submitBootstrap(form) {
 }
 
 /**
- * Starts sign-up, then waits for proof that the mailbox is reachable.
+ * Creates the account and goes straight in.
  *
- * The first response deliberately carries no session. It only identifies the
- * short-lived challenge whose code was mailed to the address, and the account
- * does not exist until the next form confirms it.
+ * Email confirmation is switched off on this deployment, so the server
+ * answers with a session and the app opens on the chats screen — the same
+ * landing an invitation gets. A deployment that turns confirmation back on
+ * answers with a challenge instead of a session, and the code screen below
+ * still handles it; which one came back is what the response says.
  */
 async function submitRegister(form) {
   const data = new FormData(form);
@@ -928,6 +930,14 @@ async function submitRegister(form) {
         ...(organizationName === "" ? {} : { organizationName }),
       },
     });
+    // Signed in already: the account exists and the session cookie is set.
+    if (registration.user !== undefined) {
+      pendingRegistration = undefined;
+      authMode = "login";
+      window.location.hash = "#chats";
+      await boot();
+      return;
+    }
     pendingRegistration = {
       registrationId: registration.registrationId,
       expiresAt: registration.expiresAt,

@@ -34,6 +34,10 @@ const PASSWORD = "RelayPassword123!";
 // change their result. The test that pins the product default clears it for
 // its own runtime.
 process.env["COORD_ALLOW_REGISTRATION"] = "1";
+// The mailed-code step is off by default in the product. The fixtures below
+// exercise it, so they ask for it explicitly; the test that pins the default
+// clears it for its own runtime.
+process.env["COORD_REQUIRE_EMAIL_CONFIRMATION"] = "1";
 
 interface TestRuntime {
   gateway: ApiGateway;
@@ -12222,6 +12226,48 @@ test("registration creates no durable account or session until its mailed code i
   assert.equal(replayed.status, 409);
   assert.equal(replayed.data.error.code, "registration_already_used");
   assert.equal(await store.countUsers(), usersBefore + 1);
+});
+
+test("sign-up creates the account and signs in when no code is required", async (t) => {
+  // The product default: no mailbox challenge, so a deployment with no relay
+  // configured can still take sign-ups and the newcomer lands in the app.
+  withEnvironment(t, { COORD_REQUIRE_EMAIL_CONFIRMATION: undefined });
+  const { client, store, sent } = await startBareGateway(t, {});
+  const stranger = new TestClient(client.origin);
+
+  const created = await stranger.request("/api/v1/auth/register", {
+    method: "POST",
+    body: {
+      email: "immediate@example.com",
+      confirmEmail: "immediate@example.com",
+      displayName: "Immediate",
+      password: PASSWORD,
+      confirmPassword: PASSWORD,
+    },
+  });
+  assert.equal(created.status, 201, JSON.stringify(created.data));
+  assert.equal(created.data.user.email, "immediate@example.com");
+  assert.equal(created.data.memberships.length, 1);
+  assert.equal(created.data.memberships[0].role, "owner");
+  assert.match(stranger.cookieHeader, /coord_session=/u);
+  assert.equal(await store.countUsers(), 1);
+  // Nothing was emailed, because nothing has to be.
+  assert.equal(sent.length, 0);
+
+  // The session works straight away, which is what "goes straight to the app"
+  // means on the far side of the browser.
+  const me = await stranger.request("/api/v1/auth/me");
+  assert.equal(me.status, 200, JSON.stringify(me.data));
+  assert.equal(me.data.user.email, "immediate@example.com");
+
+  // A client still holding the old two-step flow is told why, rather than
+  // being refused a code that was never issued.
+  const stale = await stranger.request("/api/v1/auth/register/confirm", {
+    method: "POST",
+    body: { registrationId: "reg_stale", code: "000000" },
+  });
+  assert.equal(stale.status, 409);
+  assert.equal(stale.data.error.code, "registration_confirmation_disabled");
 });
 
 test("registration mail failure creates neither an account nor a challenge", async (t) => {

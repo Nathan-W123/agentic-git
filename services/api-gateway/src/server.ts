@@ -3098,6 +3098,26 @@ function registrationOpen(environment: NodeJS.ProcessEnv): boolean {
   );
 }
 
+/**
+ * Whether sign-up makes somebody prove their mailbox before the account exists.
+ *
+ * Off by default. Confirmation only works on a deployment with mail actually
+ * configured, and until then it stops sign-up dead: the code is written to a
+ * log nobody signing up can read, so the account can never be finished. Until
+ * mail is wired up here, sign-up creates the account straight away and the
+ * person lands in the app.
+ *
+ * Setting `COORD_REQUIRE_EMAIL_CONFIRMATION=1` turns the mailed-code step back
+ * on for a deployment whose relay is configured. Everything it needs is still
+ * in place — the challenge, the code, and `/auth/register/confirm`.
+ */
+function emailConfirmationRequired(environment: NodeJS.ProcessEnv): boolean {
+  const required = (environment["COORD_REQUIRE_EMAIL_CONFIRMATION"] ?? "")
+    .trim()
+    .toLowerCase();
+  return required === "1" || required === "true" || required === "yes" || required === "on";
+}
+
 export class ApiGateway {
   public readonly server: Server;
   public readonly webSockets: AuditWebSocketHub;
@@ -3312,18 +3332,25 @@ export class ApiGateway {
         apiKey: process.env["COORD_MAIL_API_KEY"],
         from: process.env["COORD_MAIL_FROM"],
       });
-    // Said once, loudly, at boot: a deployment with no relay still hands out
-    // confirmation codes and still asks for them back, and the only symptom
-    // anybody sees is an email that never arrives.
-    if (
-      mailDeliveryMode(this.mailer) === "log" &&
-      registrationOpen(process.env)
-    ) {
+    // Said once, loudly, at boot. Sign-up no longer needs mail — it creates
+    // the account outright — but password resets still do, and a deployment
+    // that turned confirmation back on without a relay cannot complete a
+    // sign-up at all, which is worth naming separately.
+    if (mailDeliveryMode(this.mailer) === "log") {
       console.warn(
         "[mail] No COORD_MAIL_API_URL or COORD_SMTP_URL is configured. " +
-          "Sign-up confirmation codes and password reset links will be written " +
-          "to this log instead of being emailed.",
+          "Password reset links will be written to this log instead of being " +
+          "emailed.",
       );
+      if (
+        emailConfirmationRequired(process.env) &&
+        registrationOpen(process.env)
+      ) {
+        console.warn(
+          "[mail] COORD_REQUIRE_EMAIL_CONFIRMATION is set, so sign-up asks for " +
+            "a code that only this log will show. Configure a relay or unset it.",
+        );
+      }
     }
     this.auth = new AuthService(options.store, {
       secureCookies: options.secureCookies ?? false,
@@ -3789,7 +3816,7 @@ export class ApiGateway {
       }
       const body = objectBody(await this.readJson(request));
       this.assertAccountConfirmations(body);
-      const registration = await this.auth.startRegistration({
+      const account = {
         email: emailField(body["email"]) ?? "",
         displayName:
           stringField(body["displayName"], "displayName", { max: 120 }) ?? "",
@@ -3802,7 +3829,31 @@ export class ApiGateway {
                   max: 120,
                 }) ?? "",
             }),
-      });
+      };
+      // No mailbox challenge unless this deployment asks for one: the account
+      // is created here and the caller is signed in, exactly as confirming a
+      // code would have done. See `emailConfirmationRequired`.
+      if (!emailConfirmationRequired(process.env)) {
+        const user = await this.auth.registerUnconfirmed(account);
+        const issued = await this.auth.issueSession(
+          user,
+          this.remoteAddress(request),
+          request.headers["user-agent"] ?? "",
+          context.secure,
+        );
+        response.setHeader("Set-Cookie", issued.cookies);
+        await this.options.store.appendAudit(undefined, {
+          type: "user_authenticated",
+          data: { userId: user.id, registered: true },
+        });
+        this.sendJson(response, 201, {
+          user: issued.principal.user,
+          memberships: issued.principal.memberships,
+          csrfToken: issued.csrfToken,
+        });
+        return;
+      }
+      const registration = await this.auth.startRegistration(account);
       this.sendJson(response, 202, registration);
       return;
     }
@@ -3816,6 +3867,16 @@ export class ApiGateway {
           403,
           "registration_closed",
           "This control plane does not accept new accounts",
+        );
+      }
+      // A client left over from a deployment that asked for codes, talking to
+      // one that does not. Say so plainly rather than refusing a code that was
+      // never issued as though it were wrong.
+      if (!emailConfirmationRequired(process.env)) {
+        throw new HttpError(
+          409,
+          "registration_confirmation_disabled",
+          "This control plane does not confirm sign-up by email. Sign in with the account you just created.",
         );
       }
       const body = objectBody(await this.readJson(request));

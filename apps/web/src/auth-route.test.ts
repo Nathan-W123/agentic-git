@@ -187,7 +187,7 @@ test("creating an account asks for the address and password twice", async () => 
   }
 });
 
-test("registration waits for the emailed one-time code before entering the app", async () => {
+test("sign-up enters the app directly, and still handles a mailed code when one is asked for", async () => {
   const app = await publicFile("app.js");
   const confirmation = app.slice(
     app.indexOf("function renderRegistrationConfirmation()"),
@@ -217,16 +217,20 @@ test("registration waits for the emailed one-time code before entering the app",
     app.indexOf("async function submitRegister(form)"),
     app.indexOf("async function submitRegistrationConfirmation(form)"),
   );
+  // Email confirmation is off, so the server hands back a session and the new
+  // account lands on the chats screen instead of a code form.
+  assert.match(
+    start,
+    /registration\.user !== undefined/u,
+    "sign-up should notice when it was signed in outright",
+  );
+  assert.match(start, /window\.location\.hash = "#chats"/u);
+  assert.match(start, /await boot\(\)/u);
   assert.match(start, /registration\.registrationId/u);
   assert.match(
     start,
     /registration\.delivery/u,
     "the challenge should remember whether the code was actually mailed",
-  );
-  assert.doesNotMatch(
-    start,
-    /await boot\(\)/u,
-    "starting registration must not enter the application",
   );
 
   const finish = app.slice(
