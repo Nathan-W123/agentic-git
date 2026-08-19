@@ -4714,10 +4714,32 @@ document.addEventListener("click", (event) => {
       state.simplifyShown[value] = !(state.simplifyShown[value] === true);
       render();
       return;
-    case "chan-tools-toggle":
-      state.chanToolsOpen = !(state.chanToolsOpen === true);
+    case "chan-tools-toggle": {
+      const toggle = node;
+      const focused = document.activeElement === toggle;
+      const open = !(state.chanToolsOpen === true);
+      state.chanToolsOpen = open;
+
+      // Opening the fold changes which tools are in the header, so the rest
+      // of the screen still needs its ordinary render. Keep this button,
+      // though: a replacement already wearing its final class has no previous
+      // state for the button colour or arrow rotation to transition from.
       render();
+      const replacement = document.querySelector(".chan-tools-toggle");
+      if (replacement !== null) {
+        replacement.replaceWith(toggle);
+        // Establish the retained button's old style after reattaching it,
+        // then move it to the new state so the existing CSS transition runs.
+        void toggle.offsetWidth;
+        toggle.classList.toggle("on", open);
+        toggle.setAttribute("aria-expanded", String(open));
+        toggle.setAttribute("title", open ? "Hide tools" : "Show tools");
+        if (focused) {
+          toggle.focus();
+        }
+      }
       return;
+    }
     case "preview-start":
       void startPreviewAction(value);
       return;

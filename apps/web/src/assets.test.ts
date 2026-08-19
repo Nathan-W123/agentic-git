@@ -483,6 +483,51 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
   );
 });
 
+test("the pink tools toggle animates without replacing its node", async () => {
+  const app = await publicFile("app.js");
+  const chats = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+  const action = app.slice(
+    app.indexOf('case "chan-tools-toggle"'),
+    app.indexOf('case "preview-start"'),
+  );
+
+  assert.match(
+    chats,
+    /class="icon-btn chan-tools-toggle\$\{[\s\S]{0,100}state\.chanToolsOpen === true \? " on" : ""/u,
+  );
+  assert.match(
+    css,
+    /\.icon-btn \{[\s\S]{0,260}transition: background 0\.15s ease, color 0\.15s ease;/u,
+  );
+  assert.match(
+    css,
+    /\.icon-btn\.on \{\s*background: var\(--accent-wash\);\s*color: var\(--accent-bright\);/u,
+  );
+  assert.match(
+    css,
+    /\.chan-tools-toggle svg \{\s*transition: transform 0\.15s ease;/u,
+  );
+  assert.match(
+    css,
+    /\.chan-tools-toggle\.on svg \{\s*transform: rotate\(-90deg\);/u,
+  );
+
+  // The header itself must redraw because opening the fold adds its tools.
+  // Reattaching the clicked button in its old state before applying `on`
+  // gives both the pink treatment and the arrow a real before/after to tween.
+  assert.match(action, /const toggle = node;/u);
+  assert.match(action, /state\.chanToolsOpen = open;[\s\S]*?\brender\(\);/u);
+  assert.match(action, /replacement\.replaceWith\(toggle\);/u);
+  assert.match(action, /void toggle\.offsetWidth;/u);
+  assert.match(action, /toggle\.classList\.toggle\("on", open\);/u);
+  assert.match(action, /toggle\.setAttribute\("aria-expanded", String\(open\)\);/u);
+  assert.match(
+    action,
+    /toggle\.setAttribute\("title", open \? "Hide tools" : "Show tools"\);/u,
+  );
+});
+
 test("the phone drawer is dragged out under the finger, not toggled", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
