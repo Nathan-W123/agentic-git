@@ -146,12 +146,15 @@ test("a push runs as the task's submitter, with their stored token", async (t) =
       (call) => call.credentials?.token === "ghp_users_own",
     ),
   );
-  // The explanation names the identity the push carried, so the person
-  // reading the thread knows which account to look for on GitHub, and carries
-  // both levels of description instead of making them inspect the remote.
-  assert.match(result.explanation, /as octocat/u);
-  assert.match(result.explanation, /coord\/readable-push-names/u);
-  assert.match(
+  // The explanation is the branch and the identity the push carried, and
+  // nothing else: the person reading the thread knows where it landed and
+  // which account to look for on GitHub. The objective summary, the revision
+  // and the remote URL are deliberately absent.
+  assert.equal(
+    result.explanation,
+    "Pushed to coord/readable-push-names as octocat.",
+  );
+  assert.doesNotMatch(
     result.explanation,
     /Use readable push branch names and include a fuller summary/u,
   );
@@ -179,6 +182,11 @@ test("a direct push runs as the authenticated actor without creating a task", as
     captured.every(
       (call) => call.credentials?.token === "ghp_direct_user",
     ),
+  );
+  // `/push` says the branch and the account, full stop.
+  assert.equal(
+    result.explanation,
+    "Pushed to coord/readable-push-names as octocat.",
   );
   assert.deepEqual(
     await store.listSubmittedTasks({ repositoryId: "origin" }),

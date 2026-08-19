@@ -3066,6 +3066,32 @@ let drawerDrag;
  * or not; it is always in the markup now (see `renderChats`), so nothing else
  * in the chats screen reads `chanSidebarOpen`.
  */
+/* How long the sidebar's people and agents take to fold away or unroll, in
+   milliseconds: the last pair's delay plus its own travel, rounded up. */
+const CHAN_FOLD_MS = 380;
+let chanFoldTimer;
+
+/**
+ * Say that the sidebar is mid-fold, for as long as it is.
+ *
+ * The two rosters have to clip their contents while their height is moving —
+ * that clipping is the fold — but an expanded roster must not clip, because an
+ * agent's usage card opens below its row and the last row's card reaches past
+ * the bottom of the list. Clipping only while the fold runs gives the
+ * animation the crop it needs and hands the card its overhang back the moment
+ * the sidebar has settled.
+ */
+function markChanFolding(shell) {
+  if (shell === null || shell === undefined) {
+    return;
+  }
+  shell.classList.add("chan-folding");
+  clearTimeout(chanFoldTimer);
+  chanFoldTimer = setTimeout(() => {
+    shell.classList.remove("chan-folding");
+  }, CHAN_FOLD_MS);
+}
+
 function setChanDrawer(open) {
   const next = open === true;
   state.chanSidebarOpen = next;
@@ -3672,6 +3698,27 @@ const MOTION_SURFACES = [
     enter: "scrim-entering",
     leave: "scrim-leaving",
   },
+  // The channel header's tool tray, which comes out of the arrow beside it
+  // and folds back into it. The arrow is what a reader clicked, so the icons
+  // travel to and from that one point rather than fading where they stand.
+  //
+  // Where it goes back matters here in a way it does not for a panel:
+  // appended, a tray on its way out would reappear on the far side of the
+  // arrow it is supposed to be retreating into, which is why `place` exists.
+  {
+    selector: ".chan-tools",
+    parent: ".chan-head",
+    enter: "tools-entering",
+    leave: "tools-leaving",
+    place: (parent, node) => {
+      const toggle = parent.querySelector(".chan-tools-toggle");
+      if (toggle === null) {
+        parent.append(node);
+        return;
+      }
+      toggle.before(node);
+    },
+  },
 ];
 
 /** Whether each surface was on screen, and the element it was, before the swap. */
@@ -3727,7 +3774,11 @@ function playSurfaceMotion(root) {
     // Back in the document, but not back in the interface: it answers to
     // nothing, takes no focus, and is gone before the animation is cold.
     closed.inert = true;
-    parent.append(closed);
+    if (surface.place === undefined) {
+      parent.append(closed);
+    } else {
+      surface.place(parent, closed);
+    }
     animateOnce(closed, surface.leave, true);
   }
 }
@@ -4463,10 +4514,9 @@ document.addEventListener("click", (event) => {
       // Keep this DOM in place while its width changes. A whole-screen render
       // replaces the sidebar outright, which gives a newly inserted element
       // its final width and leaves CSS with nothing to animate between.
-      node.closest(".chats-shell")?.classList.toggle(
-        "chan-collapsed",
-        state.chanCollapsed,
-      );
+      const shell = node.closest(".chats-shell");
+      shell?.classList.toggle("chan-collapsed", state.chanCollapsed);
+      markChanFolding(shell);
       const label = state.chanCollapsed ? "Expand sidebar" : "Collapse sidebar";
       node.setAttribute("aria-pressed", String(state.chanCollapsed));
       node.setAttribute("aria-label", label);

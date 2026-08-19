@@ -483,6 +483,61 @@ test("the sidebar collapses to an icon rail with account controls at its foot", 
   );
 });
 
+test("people and agents fold up into the channel list as the sidebar collapses", async () => {
+  const chats = await publicFile("screen-chats.js");
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+
+  // Each list is a clipping box around one block. Without the inner block
+  // there is no height for the row to shrink away from, and the fold becomes
+  // the cut it used to be.
+  assert.match(chats, /class="chan-roster chan-roster-people"/u);
+  assert.match(chats, /class="chan-roster chan-roster-agents"/u);
+  assert.match(chats, /class="chan-roster-inner"/u);
+  assert.match(chats, /section\("People",[^)]*"chan-sec-people"\)/u);
+  assert.match(chats, /section\("Agents",[^)]*"chan-sec-agents"\)/u);
+
+  // Folded, not switched off: the collapsed rail must no longer name the two
+  // lists in its `display: none` set, and must give them somewhere to travel.
+  const railRules = css.slice(css.indexOf(".chats-shell.chan-collapsed :is("));
+  assert.doesNotMatch(
+    railRules.slice(0, railRules.indexOf("display: none;")),
+    /\.chan-roster,/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed \.chan-roster \{\s*grid-template-rows: 0fr;/u,
+  );
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed :is\(\.chan-sec-people, \.chan-sec-agents\),[\s\S]{0,120}transform: translateY\(-10px\);/u,
+  );
+  assert.match(css, /\.chan-roster \{[\s\S]{0,320}grid-template-rows 0\.22s/u);
+
+  // The lists stagger, one behind the other, in opposite orders at the two
+  // ends — otherwise the four of them move as one block and nothing reads as
+  // coming out from under the channels.
+  assert.match(css, /\.chan-roster-agents \{\s*transition-delay: 0\.09s;/u);
+  assert.match(
+    css,
+    /\.chats-shell\.chan-collapsed \.chan-sec-people \{\s*transition-delay: 0\.09s/u,
+  );
+
+  // Clipping only while the fold runs. An agent's usage card hangs below its
+  // row, so a list that clipped at rest would swallow it.
+  assert.match(
+    css,
+    /\.chats-shell\.chan-folding \.chan-roster,[\s\S]{0,80}overflow: hidden;/u,
+  );
+  const collapseAction = app.slice(
+    app.indexOf('case "chan-collapse-toggle"'),
+    app.indexOf('case "chan-sidebar-close"'),
+  );
+  assert.match(collapseAction, /markChanFolding\(shell\)/u);
+  assert.match(app, /function markChanFolding\(/u);
+  assert.match(app, /classList\.remove\("chan-folding"\)/u);
+});
+
 test("the pink tools toggle animates without replacing its node", async () => {
   const app = await publicFile("app.js");
   const chats = await publicFile("screen-chats.js");
@@ -525,6 +580,69 @@ test("the pink tools toggle animates without replacing its node", async () => {
   assert.match(
     action,
     /toggle\.setAttribute\("title", open \? "Hide tools" : "Show tools"\);/u,
+  );
+});
+
+test("the header tools come out of the arrow and fold back into it", async () => {
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+
+  // A screen is one `innerHTML` assignment, so the tray is a new element on
+  // every render and a bare CSS animation would replay the reveal whenever
+  // anything redrew. It joins the surfaces the render loop decides for.
+  const surfaces = app.slice(
+    app.indexOf("const MOTION_SURFACES = ["),
+    app.indexOf("/** Whether each surface was on screen"),
+  );
+  assert.match(
+    surfaces,
+    /selector: "\.chan-tools",\s*parent: "\.chan-head",\s*enter: "tools-entering",\s*leave: "tools-leaving",/u,
+  );
+
+  // A tray on its way out has to go back beside the arrow it is retreating
+  // into, not appended past it on the far side.
+  assert.match(surfaces, /place: \(parent, node\) => \{[\s\S]{0,200}toggle\.before\(node\);/u);
+  const play = app.slice(
+    app.indexOf("function playSurfaceMotion"),
+    app.indexOf("function animateOnce"),
+  );
+  assert.match(
+    play,
+    /if \(surface\.place === undefined\) \{\s*parent\.append\(closed\);\s*\} else \{\s*surface\.place\(parent, closed\);/u,
+  );
+
+  // Out of the arrow rather than in place: each icon starts the distance it
+  // sits from the arrow away from itself, and the row is staggered so it
+  // unfolds from that one point.
+  assert.match(
+    css,
+    /\.chan-tools\.tools-entering > \* \{\s*--tool-shift: 42px;\s*animation: chan-tool-out/u,
+  );
+  assert.match(
+    css,
+    /\.chan-tools\.tools-entering > \*:nth-last-child\(2\) \{\s*--tool-shift: 74px;\s*animation-delay: 0\.03s;/u,
+  );
+  assert.match(
+    css,
+    /\.chan-tools\.tools-leaving > \*:nth-child\(2\) \{\s*animation-delay: 0\.03s;/u,
+  );
+  assert.match(
+    css,
+    /@keyframes chan-tool-out \{\s*from \{[\s\S]{0,120}transform: translateX\(var\(--tool-shift\)\) scale\(0\.6\);/u,
+  );
+  assert.match(
+    css,
+    /@keyframes chan-tool-in \{\s*to \{[\s\S]{0,120}transform: translateX\(var\(--tool-shift\)\) scale\(0\.6\);/u,
+  );
+
+  // The stagger has to finish inside the fallback timer that drops a closing
+  // surface, or the tray outlives its own exit.
+  assert.match(css, /animation: chan-tool-in 0\.18s/u);
+  assert.match(css, /\.chan-tools\.tools-leaving > \*:nth-child\(n \+ 5\) \{\s*animation-delay: 0\.12s;/u);
+
+  assert.match(
+    css,
+    /@media \(prefers-reduced-motion: reduce\) \{\s*\.chan-tools\.tools-entering > \* \{\s*animation: none;\s*\}[\s\S]{0,320}\.chan-tools\.tools-leaving \{\s*display: none;/u,
   );
 });
 
@@ -629,7 +747,7 @@ test("a reply carries a quiet visual path back to its root", async () => {
   );
   assert.match(
     chats,
-    /channelThread\s*\? threadSummaryLink\(entry, replies, repositoryId\)\s*: changedBlock/u,
+    /channelThread\s*\? threadSummaryLink\(entry, replies, repositoryId, progress\)\s*: changedBlock/u,
     "the open thread root should not repeat the channel's reply link",
   );
   assert.match(
@@ -639,8 +757,8 @@ test("a reply carries a quiet visual path back to its root", async () => {
   );
   assert.match(
     chats,
-    /channelThread \? `<\/div>\$\{progressBlock\}\$\{changedBlock\}` : ""/u,
-    "progress and changed files should sit after the route endpoint",
+    /channelThread \? `<\/div>\$\{changedBlock\}` : ""/u,
+    "the changed files should sit after the route endpoint",
   );
   assert.match(renderer, /class="thread-replies"/u);
   assert.match(renderer, /class="thread-replies-head"/u);
@@ -2082,6 +2200,96 @@ test("channel @mentions include repository guests and surface directed unread pi
   assert.match(chats, /mentions > 0 \? "@"/u);
 });
 
+test("mention suggestions narrow agents and people by name or email", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const participantStart = data.indexOf("export function channelParticipants");
+  const participantEnd = data.indexOf("\nfunction seedMessages", participantStart);
+  assert.notEqual(participantStart, -1, "the participant resolver should exist");
+  assert.notEqual(participantEnd, -1, "the participant resolver should have a boundary");
+
+  const participantState = {
+    channelPeople: {
+      repo: [
+        {
+          userId: "mary",
+          user: { displayName: "Mary Jane", email: "mary@example.com" },
+        },
+      ],
+    },
+    members: [],
+  };
+  const participants = new Function(
+    "state",
+    "channelAgentsFor",
+    "currentUserId",
+    "currentUserName",
+    `${data
+      .slice(participantStart, participantEnd)
+      .replace("export function", "function")}\nreturn channelParticipants;`,
+  )(
+    participantState,
+    () => [
+      { id: "zeus", name: "Zeus" },
+      { id: "athena", name: "Athena" },
+    ],
+    () => "current-user",
+    () => "Current User",
+  ) as (repositoryId: string) => Array<{
+    id: string;
+    name: string;
+    email?: string;
+    kind: string;
+  }>;
+  const roster = participants("repo");
+  assert.equal(
+    roster.find((entry) => entry.id === "mary")?.email,
+    "mary@example.com",
+    "a person's email remains available as a search term",
+  );
+
+  const candidateStart = chats.indexOf("function channelMentionCandidates");
+  const candidateEnd = chats.indexOf("\n/**", candidateStart);
+  assert.notEqual(candidateStart, -1, "the mention candidate filter should exist");
+  assert.notEqual(candidateEnd, -1, "the mention candidate filter should have a boundary");
+  const mentionState = { mentionQuery: "" };
+  const candidates = new Function(
+    "state",
+    "channelParticipants",
+    `${chats.slice(candidateStart, candidateEnd)}\nreturn channelMentionCandidates;`,
+  )(mentionState, () => roster) as (repositoryId: string) => Array<{
+    name: string;
+    kind: string;
+  }>;
+
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["agents", "everyone", "Zeus", "Athena", "Mary Jane"],
+    "an empty @ keeps both agents and people visible",
+  );
+
+  mentionState.mentionQuery = "zeu";
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["Zeus"],
+    "typing an agent name removes unrelated agents and people",
+  );
+
+  mentionState.mentionQuery = "jane";
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["Mary Jane"],
+    "people remain searchable by display name",
+  );
+
+  mentionState.mentionQuery = "mary@";
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["Mary Jane"],
+    "people remain searchable by email",
+  );
+});
+
 test("@everyone is offered, highlighted, and pinged to every person in the room", async () => {
   const chats = await publicFile("screen-chats.js");
   const data = await publicFile("data.js");
@@ -2782,6 +2990,167 @@ test("each task turn puts its own thinking below its prompt and starts closed", 
     thinking.includes("?? !done"),
     false,
     "an active turn should start closed just like a finished turn",
+  );
+});
+
+test("the progress bar restarts for each task turn in a thread", async () => {
+  const source = await publicFile("screen-chats.js");
+  const progressStart = source.indexOf("function threadProgress(entry)");
+  const progressEnd = source.indexOf("\n/*", progressStart);
+  const turnsStart = source.indexOf("function threadReplyTurns(replies)");
+  const turnsEnd = source.indexOf(
+    "\n/** One turn's narration",
+    turnsStart,
+  );
+  assert.notEqual(progressStart, -1, "thread progress should still be derived");
+  assert.notEqual(progressEnd, -1, "thread progress should have a boundary");
+  assert.notEqual(turnsStart, -1, "thread turns should still be grouped");
+  assert.notEqual(turnsEnd, -1, "thread turn grouping should have a boundary");
+
+  const progress = Function(
+    "state",
+    "THREAD_FINISHED_RE",
+    `"use strict";\n${source.slice(turnsStart, turnsEnd)}\n${source.slice(
+      progressStart,
+      progressEnd,
+    )}\nreturn threadProgress;`,
+  )(
+    { tasks: [{ id: "task-1", status: "claimed" }] },
+    /^(Done —|I could not|This was cancelled)/u,
+  ) as (entry: {
+    taskId: string;
+    replies: Array<{ kind: string; content: string }>;
+  }) => number | undefined;
+
+  const thread = {
+    taskId: "task-1",
+    replies: [
+      { kind: "progress", content: "Planning workspace prepared" },
+      { kind: "progress", content: "Done — the first task landed" },
+      { kind: "outcome", content: "The first task is complete" },
+      { kind: "user", content: "Please do one more task in this thread" },
+      { kind: "progress", content: "Planning workspace prepared" },
+      { kind: "progress", content: "Execution started" },
+    ],
+  };
+
+  assert.equal(
+    progress(thread),
+    20,
+    "an earlier ending must not hide the active turn's progress",
+  );
+  assert.equal(
+    progress({
+      ...thread,
+      replies: thread.replies.filter((reply) => reply.kind !== "user"),
+    }),
+    20,
+    "a task added without a copied prompt must restart progress too",
+  );
+  thread.replies.push({ kind: "outcome", content: "The follow-up is complete" });
+  assert.equal(
+    progress(thread),
+    undefined,
+    "the bar should still disappear when the current turn ends",
+  );
+});
+
+test("the run is a ring on the agent working, at the front of the stack", async () => {
+  const source = await publicFile("screen-chats.js");
+  const css = await publicFile("styles.css");
+
+  // The bar under the thread is gone: it said something was moving without
+  // ever saying who, which is the whole reason it moved onto a face.
+  assert.doesNotMatch(css, /\.thread-progress\b/u);
+  assert.doesNotMatch(source, /class="thread-progress"/u);
+
+  const slice = (from: string, to: string) => {
+    const start = source.indexOf(from);
+    assert.notEqual(start, -1, `${from} should still exist`);
+    const end = source.indexOf(to, start + from.length);
+    assert.notEqual(end, -1, `${from} should have a boundary`);
+    return source.slice(start, end);
+  };
+  const summary = Function(
+    "threadTitleReply",
+    "isThreadThinking",
+    "threadSaidCount",
+    "threadAwaitsGoAhead",
+    "threadReplyTurns",
+    "channelAuthor",
+    "agentFace",
+    "avatar",
+    "currentUserName",
+    "myAvatar",
+    "esc",
+    `"use strict";\n${slice("function threadParticipants(replies", "\n/**")}\n${slice(
+      "function threadWorkingAuthor(entry",
+      "\n/*",
+    )}\n${slice("function threadSummaryLink(entry", "\n/**")}\nreturn threadSummaryLink;`,
+  )(
+    () => undefined,
+    () => false,
+    (said: number) => `${said} replies`,
+    () => false,
+    (replies: unknown[]) => [{ replies }],
+    (_repositoryId: string, reply: { author: string; agent?: boolean }) => ({
+      name: reply.author,
+      agent: reply.agent === true ? { id: reply.author } : undefined,
+    }),
+    (agent: { id: string }) => `<face>${agent.id}</face>`,
+    (name: string) => `<avatar>${name}</avatar>`,
+    () => "Ada",
+    () => undefined,
+    (value: string) => String(value),
+  ) as (
+    entry: unknown,
+    replies: unknown[],
+    repositoryId: string,
+    progress: number | undefined,
+  ) => string;
+
+  const replies = [
+    { author: "Ada" },
+    { author: "codex", agent: true },
+    { author: "Bo" },
+    { author: "claude", agent: true },
+  ];
+  const running = summary({ id: "m1", replies }, replies, "repo-1", 45);
+  assert.match(
+    running,
+    /<span class="ctl-working" style="--run:45"/u,
+    "the ring should carry the run's position",
+  );
+  assert.match(
+    running.slice(running.indexOf("ctl-faces")),
+    /ctl-working[\s\S]*?<face>claude<\/face>[\s\S]*?<avatar>Ada<\/avatar>/u,
+    "the agent still working should be ringed and first in the stack",
+  );
+  assert.equal(
+    running.match(/<face>claude<\/face>/gu)?.length,
+    1,
+    "moving a participant to the front must not duplicate them",
+  );
+
+  // Nothing running, nothing drawn: the stack goes back to being the order
+  // people spoke in.
+  const idle = summary({ id: "m1", replies }, replies, "repo-1", undefined);
+  assert.doesNotMatch(idle, /ctl-working/u);
+  assert.match(idle.slice(idle.indexOf("ctl-faces")), /<avatar>Ada<\/avatar>/u);
+
+  // One pixel of accent, and a full circle so the part still to come is there
+  // to be read against.
+  const ring = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::after \{([\s\S]*?)\n\}/u
+    .exec(css)?.[1];
+  assert.notEqual(ring, undefined, "the ring should be drawn on the face");
+  assert.match(ring ?? "", /border-radius: 50%;/u);
+  assert.match(
+    ring ?? "",
+    /conic-gradient\(\s*var\(--accent\) calc\(var\(--run, 0\) \* 1%\)/u,
+  );
+  assert.match(
+    ring ?? "",
+    /mask: radial-gradient\(\s*closest-side,\s*transparent calc\(100% - 1px\)/u,
   );
 });
 

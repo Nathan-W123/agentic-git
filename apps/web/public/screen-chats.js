@@ -892,9 +892,14 @@ export function rosterMenuItems(agentId) {
  * to — which costs no row of its own, holds still while the list under it
  * grows, and puts the control where somebody counting the list is already
  * looking.
+ *
+ * `cls` names the section so the stylesheet can move it: the people and agent
+ * headings fold up into the channel list when the sidebar collapses, one just
+ * behind the other, and a rule cannot stagger two elements it cannot tell
+ * apart.
  */
-function section(label, act, value, title) {
-  return `<div class="chan-sec">
+function section(label, act, value, title, cls) {
+  return `<div class="chan-sec ${cls}">
     <span class="chan-sec-label">${esc(label)}</span>
     <button type="button" class="chan-sec-add" data-act="${act}"
       data-value="${value}" title="${esc(title)}" aria-label="${esc(title)}">
@@ -968,26 +973,36 @@ function chanSidebar(activeRepositoryId) {
             : channels.map((repo) => chanRow(repo, activeRepositoryId)).join("")
         }
       </div>
-      ${section("People", "invite-repo", channel, "Invite someone")}
-      <div class="chan-roster">
-        ${
-          // People first, then agents. The channel header already names the
-          // repository, so repeating it in the label said nothing the eye had
-          // not just read — and it grew with the name, which is why a long
-          // repository pushed the word "Agents" out of sight entirely.
-          people.length === 0
-            ? `<div class="util-empty">Nobody else yet.</div>`
-            : people.map((person) => personRow(person)).join("")
-        }
+      <!-- People and agents fold up under the channel list rather than
+           vanishing with it. Each list is a clipping box around one inner
+           block, which is the whole of what lets the stylesheet animate a
+           height nobody has measured: the row of the grid goes to zero, the
+           block inside it keeps its own height, and the box crops the
+           difference. -->
+      ${section("People", "invite-repo", channel, "Invite someone", "chan-sec-people")}
+      <div class="chan-roster chan-roster-people">
+        <div class="chan-roster-inner">
+          ${
+            // People first, then agents. The channel header already names the
+            // repository, so repeating it in the label said nothing the eye had
+            // not just read — and it grew with the name, which is why a long
+            // repository pushed the word "Agents" out of sight entirely.
+            people.length === 0
+              ? `<div class="util-empty">Nobody else yet.</div>`
+              : people.map((person) => personRow(person)).join("")
+          }
+        </div>
       </div>
-      ${section("Agents", "channel-agent-menu", channel, "Add an agent")}
-      <div class="chan-roster">
-        ${
-          // No empty state. The "+" on the heading directly above is both the
-          // explanation and the thing to press; a sentence between them is a
-          // line to read on the way past.
-          roster.map((agent) => rosterRow(agent)).join("")
-        }
+      ${section("Agents", "channel-agent-menu", channel, "Add an agent", "chan-sec-agents")}
+      <div class="chan-roster chan-roster-agents">
+        <div class="chan-roster-inner">
+          ${
+            // No empty state. The "+" on the heading directly above is both the
+            // explanation and the thing to press; a sentence between them is a
+            // line to read on the way past.
+            roster.map((agent) => rosterRow(agent)).join("")
+          }
+        </div>
       </div>
     </div>
     <!-- The profile is the one account control at the foot. Its menu already
@@ -1262,24 +1277,51 @@ function threadSaidCount(said) {
  * link for one fact. The dot keeps the fact and drops the repetition; the
  * words survive for screen readers, and the sentence itself is still in the
  * room, one message down, now pointing back here.
+ *
+ * A run still going draws its position as a one-pixel ring around the face of
+ * the agent running it, which is also lifted to the front of the stack. The
+ * bar this replaces sat on its own line under the thread and could only ever
+ * say that something was moving, never who was moving it.
  */
-function threadSummaryLink(entry, replies, repositoryId) {
+function threadSummaryLink(entry, replies, repositoryId, progress) {
   const titled = threadTitleReply(entry);
   const said = replies.filter(
     (reply) => reply !== titled && !isThreadThinking(reply),
   );
-  const faces = threadParticipants(replies, repositoryId)
+  const participants = threadParticipants(replies, repositoryId);
+  // Whoever the ring belongs to goes first. A stack of faces is in the order
+  // people happened to speak, which is no help at all when the question the
+  // reader has is "who is on this right now" — so the one being measured is
+  // lifted to the front of the stack, where the ring is unobstructed and the
+  // answer is the first thing in the row.
+  const working =
+    progress === undefined
+      ? undefined
+      : (threadWorkingAuthor(entry, repositoryId) ?? participants[0]);
+  const ordered =
+    working === undefined
+      ? participants
+      : [
+          working,
+          ...participants.filter((author) => author.name !== working.name),
+        ];
+  const faces = ordered
     .slice(0, 3)
-    .map((author) =>
-      author.agent !== undefined
-        ? agentFace(author.agent, 20)
-        : avatar(
-            author.name,
-            20,
-            author.name,
-            author.name === currentUserName() ? myAvatar() : undefined,
-          ),
-    )
+    .map((author, index) => {
+      const face =
+        author.agent !== undefined
+          ? agentFace(author.agent, 20)
+          : avatar(
+              author.name,
+              20,
+              author.name,
+              author.name === currentUserName() ? myAvatar() : undefined,
+            );
+      return working !== undefined && index === 0
+        ? `<span class="ctl-working" style="--run:${progress}"
+            title="${progress}% by phase">${face}<span class="sr-only">Working, ${progress}% done</span></span>`
+        : face;
+    })
     .join("");
   return `<button type="button" class="cmsg-thread-link" data-act="channel-thread-open"
       data-value="${esc(entry.id)}">
@@ -1483,7 +1525,13 @@ function changedFilesBlock(entry, repositoryId) {
  * a fixed milestone, which is all a phase deserves.
  */
 function threadProgress(entry) {
-  const replies = entry.replies ?? [];
+  // Only the newest turn can be moving. A completed turn leaves its outcome
+  // and fixed ending in the thread forever; reading the whole reply history
+  // meant either one hid the bar when somebody added more work to the same
+  // thread. `threadReplyTurns` already owns both kinds of turn boundary, so
+  // the bar and the transcript now agree about which run is current.
+  const turns = threadReplyTurns(entry.replies ?? []);
+  const replies = turns[turns.length - 1]?.replies ?? [];
   if (replies.length === 0) {
     return undefined;
   }
@@ -1544,6 +1592,28 @@ function threadProgress(entry) {
     }
   }
   return sawRunMarker ? progress : undefined;
+}
+
+/**
+ * Who the current run belongs to, so the ring can be drawn on them.
+ *
+ * Read from the narration for the same reason the progress is: the agent that
+ * spoke last in the current turn is the one still speaking, and no assignment
+ * record has to be fetched or kept in step for that to be true. Threads carry
+ * whoever has replied — a person asking a follow-up, a second agent handed the
+ * next task — so "the last agent-authored line" is the only reading that
+ * survives a room with more than one participant in it.
+ */
+function threadWorkingAuthor(entry, repositoryId) {
+  const turns = threadReplyTurns(entry.replies ?? []);
+  const replies = turns[turns.length - 1]?.replies ?? [];
+  for (let index = replies.length - 1; index >= 0; index -= 1) {
+    const author = channelAuthor(repositoryId, replies[index]);
+    if (author?.agent !== undefined) {
+      return author;
+    }
+  }
+  return undefined;
 }
 
 /* ------------------------------------------------- message identity ---- */
@@ -1760,13 +1830,11 @@ function messageRow(
   const changedBlock = hideChanges
     ? ""
     : changedFilesBlock(entry, repositoryId);
+  // The run is drawn around the face running it, inside the thread link — see
+  // `threadSummaryLink`. It used to be a bar on its own line under the route,
+  // which spent a full line of the room saying something no reader could
+  // attribute to anybody in a thread with more than one participant.
   const progress = channelThread ? threadProgress(entry) : undefined;
-  const progressBlock =
-    progress === undefined
-      ? ""
-      : `<div class="thread-progress" title="${progress}% by phase">
-           <i style="width:${progress}%"></i>
-         </div>`;
   return `<div class="cmsg-row${isReply ? " cmsg-reply" : ""}${
     inlineReply ? " cmsg-inline-reply" : ""
   }${compact ? " cmsg-compact" : ""
@@ -1861,14 +1929,14 @@ function messageRow(
                     title="Add a reaction" aria-label="Add a reaction">${icon("smile")}</button></div>`
       }
       ${
-        // The route ends at the thread link. Progress and changed files are
-        // deliberately outside it, so opening either can never pull the grey
-        // connector down past the thing it identifies.
+        // The route ends at the thread link. The changed files are deliberately
+        // outside it, so opening them can never pull the grey connector down
+        // past the thing it identifies.
         channelThread
-          ? threadSummaryLink(entry, replies, repositoryId)
+          ? threadSummaryLink(entry, replies, repositoryId, progress)
           : changedBlock
       }
-      ${channelThread ? `</div>${progressBlock}${changedBlock}` : ""}
+      ${channelThread ? `</div>${changedBlock}` : ""}
     </div>
     <span class="cmsg-actions">
       ${
@@ -2502,7 +2570,11 @@ function channelMentionCandidates(repositoryId) {
     ...channelParticipants(repositoryId)
       .filter((entry) => typeof entry.name === "string" && entry.name !== "")
       .filter(
-        (entry) => query === "" || entry.name.toLowerCase().includes(query),
+        (entry) =>
+          query === "" ||
+          entry.name.toLowerCase().includes(query) ||
+          (typeof entry.email === "string" &&
+            entry.email.toLowerCase().includes(query)),
       ),
     // Five, not seven. The picker opens upward from the composer and covers
     // the conversation you are replying to, so every extra row is a line of
