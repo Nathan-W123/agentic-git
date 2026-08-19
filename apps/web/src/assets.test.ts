@@ -1014,6 +1014,27 @@ test("one agent's work is not every agent of that vendor's work", async () => {
   );
 });
 
+test("the thinking indicator names the busy agent, not the first agent of its vendor", async () => {
+  const data = await publicFile("data.js");
+  const start = data.indexOf("export function agentsThinkingIn(repositoryId)");
+  assert.notEqual(start, -1, "the thinking-agent selector should still exist");
+  const body = data.slice(start, data.indexOf("\n}\n", start));
+
+  // The busy frame carries both halves of the agent's identity. Accepting any
+  // of the viewer's own agents after only the provider matched made their
+  // Codex name win even when a teammate's Codex was the one actually running.
+  assert.match(
+    body,
+    /\(candidate\.provider \?\? candidate\.id\) !== entry\.provider/u,
+  );
+  assert.match(body, /candidate\.userId === entry\.userId/u);
+  assert.equal(
+    /candidate\.mine === true\s*\?\s*true/u.test(body),
+    false,
+    "a same-provider agent from another owner must not claim the busy frame",
+  );
+});
+
 test("a notification says which agent, not which vendor", async () => {
   const data = await publicFile("data.js");
   const screen = await publicFile("screen-notifications.js");

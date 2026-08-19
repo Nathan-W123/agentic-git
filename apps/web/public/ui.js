@@ -207,6 +207,13 @@ export const ICONS = {
     '<circle cx="12" cy="12" r="9"/><path d="M8.3 14.2c1 1.3 2.3 2 3.7 2s2.7-.7 3.7-2"/><circle cx="8.7" cy="9.8" r="1" fill="currentColor" stroke="none"/><circle cx="15.3" cy="9.8" r="1" fill="currentColor" stroke="none"/>',
   ),
   reply: S('<path d="M9 8 4.5 12 9 16"/><path d="M4.5 12h9a6 6 0 0 1 6 6v1"/>'),
+  // Two overlapping sheets — the clipboard glyph every surface uses for "take
+  // these words with you". Drawn as one rounded rectangle behind another
+  // rather than as a clipboard with a clasp: at 14px the clasp closes up into
+  // a smudge and the pair of sheets stays readable.
+  copy: S(
+    '<rect x="9" y="9" width="11" height="11" rx="2.2"/><path d="M5.5 15H5a1 1 0 0 1-1-1V5a1 1 0 0 1 1-1h9a1 1 0 0 1 1 1v.5"/>',
+  ),
   pin: S(
     '<path d="M9.3 3.5h5.4l-.6 5.2 3.2 3.6H6.7l3.2-3.6z"/><path d="M12 12.3V20"/>',
   ),
@@ -1095,6 +1102,115 @@ export function statTile({ value, label, foot, iconName, tone = "purple" }) {
       ${foot === undefined ? "" : `<div class="st-foot">${foot}</div>`}
     </span>
   </div>`;
+}
+
+/* ------------------------------------------------------- panel shapes ---- */
+
+/**
+ * A labelled rail: a quiet label on the left, its content beside it.
+ *
+ * The shape a page reaches for when a row needs saying what it *is* without
+ * spending a heading on it. The labels stack into one narrow column down the
+ * left, so the eye reads the contents as a list of properties rather than as
+ * a stack of unrelated widgets, and nothing has to be bordered off to be
+ * legible.
+ */
+export function sectionRail(label, body, { stacked = false } = {}) {
+  return `<div class="rail${stacked ? " stacked" : ""}">
+    <span class="rail-label">${esc(label)}</span>
+    <span class="rail-body">${body}</span>
+  </div>`;
+}
+
+/**
+ * A run of chips on one line, wrapping, with anything trailing kept last.
+ *
+ * Each item is either a plain string or `{label, iconName, tone, title, act,
+ * value}`; an item with an `act` is a control rather than a label, and is
+ * rendered as a real button so it is reachable from the keyboard. `trailing`
+ * is for the "+ Add" affordance that belongs at the end of the run.
+ */
+export function chipRow(items, trailing = "") {
+  const body = items
+    .filter((item) => item !== undefined && item !== null && item !== "")
+    .map((item) => {
+      if (typeof item === "string") {
+        return `<span class="chip lg"><span>${esc(item)}</span></span>`;
+      }
+      const tone = item.tone === undefined ? "" : ` ${item.tone}`;
+      const glyph = item.iconName === undefined ? "" : icon(item.iconName);
+      const title = item.title === undefined ? "" : ` title="${esc(item.title)}"`;
+      const inner = `${glyph}<span>${esc(item.label)}</span>`;
+      return item.act === undefined
+        ? `<span class="chip lg${tone}"${title}>${inner}</span>`
+        : `<button type="button" class="chip lg${tone}" data-act="${esc(item.act)}"${
+            item.value === undefined ? "" : ` data-value="${esc(item.value)}"`
+          }${title}>${inner}</button>`;
+    })
+    .join("");
+  return `<span class="chip-row">${body}${trailing}</span>`;
+}
+
+/**
+ * One tile in a grid of them: a glyph, a title, a line about it, and a foot.
+ *
+ * `title` is escaped here; `subtitle`, `foot` and `trailing` are markup, so
+ * whatever a caller puts in them escapes its own text. A div rather than a
+ * button, for the same reason the agent rows are: a tile carries its own
+ * controls, and a nested `<button>` is hoisted out of the outer one by the
+ * parser — taking the tile's own click target with it.
+ */
+export function tileCard({
+  glyph = "",
+  iconName,
+  title,
+  subtitle = "",
+  foot = "",
+  trailing = "",
+  tone = "",
+  act,
+  value = "",
+  active = false,
+}) {
+  const head =
+    glyph !== ""
+      ? glyph
+      : iconName === undefined
+        ? ""
+        : `<span class="tile-icon${tone === "" ? "" : ` ${tone}`}">${icon(iconName)}</span>`;
+  return `<div class="tile${active ? " active" : ""}"${
+    act === undefined
+      ? ""
+      : ` role="button" tabindex="0" data-act="${esc(act)}" data-value="${esc(value)}"`
+  }>
+    ${
+      head === "" && trailing === ""
+        ? ""
+        : `<div class="tile-head">${head}<span class="tile-spacer"></span>${trailing}</div>`
+    }
+    <div class="tile-title">${esc(title)}</div>
+    ${subtitle === "" ? "" : `<div class="tile-sub">${subtitle}</div>`}
+    ${foot === "" ? "" : `<div class="tile-foot">${foot}</div>`}
+  </div>`;
+}
+
+/**
+ * The last tile in a grid — the one that adds another of whatever the grid
+ * holds. `compact` renders it as the chip-sized version, for the end of a
+ * `chipRow` rather than the end of a grid.
+ */
+export function addTile({ title, subtitle = "", act, value = "", compact = false }) {
+  const target = `data-act="${esc(act)}"${value === "" ? "" : ` data-value="${esc(value)}"`}`;
+  if (compact) {
+    return `<button type="button" class="chip lg add" ${target}>${icon("plus")}<span>${esc(
+      title,
+    )}</span></button>`;
+  }
+  return `<button type="button" class="tile add" ${target}>
+    <span class="tile-icon">${icon("plus")}</span>
+    <span class="tile-title">${esc(title)}</span>
+    ${subtitle === "" ? "" : `<span class="tile-sub">${esc(subtitle)}</span>`}
+  </button>`;
 }
 
 export function emptyState(iconName, title, body, action = "") {

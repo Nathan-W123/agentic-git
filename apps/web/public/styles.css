@@ -2888,41 +2888,394 @@ svg {
 
 .agent-panel {
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  /* Hero, rails, tabs, body, composer. */
+  grid-template-rows: auto auto auto 1fr auto;
   min-height: 0;
   height: calc(100vh - 320px);
-  min-height: 460px;
+  min-height: 500px;
 }
 
-.agent-panel-head {
+.agent-panel .tabs {
+  padding: 0 12px;
+}
+
+/* The selected agent's identity, given the room the reference gives a title:
+   the face large enough to recognise, the name at heading size, and the
+   facts about the connection stated underneath rather than crowded beside
+   it. This replaces a 14px name on one line with the controls — which read
+   as another row of the list rather than as the subject of the panel. */
+.agent-hero {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 14px 12px 14px 16px;
+  gap: 14px;
+  padding: 18px 12px 16px 18px;
   border-bottom: 1px solid var(--border-soft);
 }
 
-.agent-panel-head .aph-name {
+.agent-hero .ah-face {
+  flex: none;
+}
+
+.agent-hero .ah-id {
+  min-width: 0;
+}
+
+.agent-hero .ah-name {
   display: flex;
   align-items: center;
+  gap: 10px;
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-hero .ah-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  margin-top: 3px;
+}
+
+.agent-hero .spacer {
+  flex: 1;
+}
+
+.agent-rails {
+  display: grid;
   gap: 9px;
+  padding: 14px 18px 15px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+/* The deck: the same connections as the list, laid out as cards. The head
+   above it keeps the filter tabs and the search box it always had, plus the
+   grid/list switch — the list is still the right shape for twenty agents,
+   so it stays rather than being replaced. */
+.agent-deck {
+  padding: 14px;
+}
+
+.agent-deck .tile-face {
+  flex: none;
+}
+
+.agent-deck-tools {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.agent-section-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.agent-section-head h2 {
   font-size: 14.5px;
   font-weight: 600;
   letter-spacing: -0.01em;
 }
 
-.agent-panel-head .aph-meta {
+.agent-section-head .ash-count {
   font-size: 11.5px;
-  color: var(--text-3);
-  margin-top: 1px;
+  color: var(--text-4);
 }
 
-.agent-panel-head .spacer {
+.agent-section-head .spacer {
   flex: 1;
 }
 
-.agent-panel .tabs {
-  padding: 0 12px;
+/* ------------------------------------------------------------- tiles ---- */
+
+/* The card grid, the labelled rail and the chip run below are one set: a
+   surface says what it holds with a quiet label, lays the things out as
+   tiles rather than as rows, and states the small facts about each as chips.
+   Kept general on purpose — My Agents uses all three, the repository grid
+   uses the add tile, and nothing here knows what an agent is. */
+
+.tile-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(212px, 1fr));
+  gap: 12px;
+}
+
+.tile {
+  display: grid;
+  align-content: start;
+  gap: 5px;
+  padding: 14px;
+  background: var(--bg-card-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  text-align: left;
+  min-width: 0;
+  transition: background 0.14s ease, border-color 0.14s ease;
+}
+
+.tile[role="button"] {
+  cursor: pointer;
+}
+
+.tile:hover {
+  border-color: var(--border-strong);
+}
+
+.tile[role="button"]:hover {
+  background: var(--bg-hover);
+}
+
+/* The selected tile is stated twice — a tinted ground and an accent edge —
+   because in a grid there is no neighbouring row to compare against, and a
+   tile that is only slightly lighter than the eleven around it does not read
+   as chosen at a glance. */
+.tile.active {
+  background: var(--accent-wash);
+  border-color: var(--accent-line);
+}
+
+.tile:focus-visible {
+  outline: 2px solid var(--accent-bright);
+  outline-offset: 2px;
+}
+
+.tile-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 3px;
+}
+
+.tile-head .tile-spacer {
+  flex: 1;
+}
+
+.tile-icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  display: grid;
+  place-items: center;
+  background: var(--accent-wash);
+  color: var(--accent-bright);
+  flex: none;
+}
+
+.tile-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.tile-icon.green {
+  background: var(--green-wash);
+  color: var(--green);
+}
+
+.tile-icon.blue {
+  background: var(--blue-wash);
+  color: var(--blue);
+}
+
+.tile-icon.orange {
+  background: var(--orange-wash);
+  color: var(--orange);
+}
+
+.tile-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tile-sub {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11.5px;
+  color: var(--text-3);
+  min-width: 0;
+}
+
+.tile-sub svg {
+  width: 12px;
+  height: 12px;
+  color: var(--text-4);
+  flex: none;
+}
+
+.tile-sub span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tile-foot {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-top: 7px;
+  min-width: 0;
+}
+
+.tile-foot .tile-pct {
+  font-size: 11px;
+  color: var(--text-3);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Dashed, and the only tile without a ground: it is an invitation rather
+   than a thing, and drawing it like the others makes the grid look as though
+   it already contains one more than it does. */
+.tile.add {
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  gap: 4px;
+  background: none;
+  border-style: dashed;
+  color: var(--text-3);
+  min-height: 100%;
+}
+
+.tile.add:hover {
+  border-color: var(--accent-line);
+  color: var(--text);
+  background: var(--accent-wash);
+}
+
+.tile.add .tile-icon {
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+  margin-bottom: 2px;
+}
+
+.tile.add .tile-title {
+  color: var(--text-2);
+}
+
+.tile.add:hover .tile-title {
+  color: var(--text);
+}
+
+/* --------------------------------------------------------- rails ---- */
+
+.rail {
+  display: grid;
+  grid-template-columns: 62px minmax(0, 1fr);
+  gap: 12px;
+  align-items: start;
+}
+
+.rail.stacked {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 7px;
+}
+
+.rail-label {
+  font-size: 11px;
+  color: var(--text-4);
+  padding-top: 5px;
+  white-space: nowrap;
+}
+
+.rail.stacked .rail-label {
+  padding-top: 0;
+}
+
+.rail-body {
+  min-width: 0;
+}
+
+.chip-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+  min-width: 0;
+}
+
+/* The chip at reading size. The small one is a tag inside a dense row; this
+   one is a control-sized statement of one fact, so it drops the accent
+   ground — a rail of six purple chips is a rail of six things shouting — and
+   keeps the tones for the ones that mean something. */
+.chip.lg {
+  padding: 5px 10px;
+  border-radius: 8px;
+  font-size: 11.5px;
+  background: var(--bg-card-2);
+  border-color: var(--border);
+  color: var(--text-2);
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.chip.lg span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chip.lg svg {
+  width: 13px;
+  height: 13px;
+  flex: none;
+  color: var(--text-4);
+}
+
+button.chip.lg:hover {
+  border-color: var(--border-strong);
+  color: var(--text);
+}
+
+.chip.lg.purple {
+  background: var(--accent-wash);
+  border-color: var(--accent-line);
+  color: var(--accent-bright);
+}
+
+.chip.lg.green {
+  background: var(--green-wash);
+  border-color: rgba(74, 222, 128, 0.2);
+  color: var(--green);
+}
+
+.chip.lg.blue {
+  background: var(--blue-wash);
+  border-color: rgba(96, 165, 250, 0.2);
+  color: var(--blue);
+}
+
+.chip.lg.orange {
+  background: var(--orange-wash);
+  border-color: rgba(251, 191, 36, 0.2);
+  color: var(--orange);
+}
+
+.chip.lg.purple svg,
+.chip.lg.green svg,
+.chip.lg.blue svg,
+.chip.lg.orange svg {
+  color: currentColor;
+}
+
+.chip.lg.add {
+  background: none;
+  border-style: dashed;
+  color: var(--text-3);
+}
+
+.chip.lg.add:hover {
+  color: var(--text);
+  border-color: var(--accent-line);
 }
 
 /* --------------------------------------------------------- coordinator ---- */
@@ -4376,6 +4729,102 @@ svg {
   padding: 14px 0 10px;
 }
 
+/* Where the reader was when they last left this room.
+
+   A ruled line rather than a centred caption like `.chan-day` above: the day
+   separator says "time passed", which is a fact about the transcript, and this
+   says "everything below is for you", which is a fact about the reader. The
+   accent is the same one the rest of their session is drawn in, so the line
+   belongs to them and not to the channel.
+
+   Drawn once per visit and left where it is while they read — see
+   `snapshotChannelRead`. A line that chased the newest message would be
+   pointing at the bottom of the screen forever, which is no information at
+   all. */
+.chan-unread {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 0 6px;
+  color: var(--accent-bright);
+  font-size: 10.5px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.chan-unread::before,
+.chan-unread::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--accent-line);
+}
+
+/* The label reads left-of-centre, the way every chat draws this: the words are
+   an annotation on the line, not a title over the messages. */
+.chan-unread::after {
+  flex: 24;
+}
+
+.chan-unread::before {
+  flex: 1;
+}
+
+/* The way back down to the newest messages, over the bottom of the transcript.
+
+   Absolutely positioned against `.chan-main` so it floats above the last
+   message rather than taking a row of its own — a pill that pushed the
+   transcript up by its own height every time somebody scrolled would be
+   shifting the very words they scrolled up to read.
+
+   Shown and hidden through the `hidden` attribute from `paintJumpToLatest`,
+   never by re-rendering: following changes on every wheel notch. */
+.chan-jump {
+  position: absolute;
+  /* Clear of the composer, which is the last thing in the column. */
+  bottom: 92px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 4;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px 5px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--bg-card-2);
+  box-shadow: var(--shadow-pop);
+  color: var(--text-2);
+  font-size: 11.5px;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.chan-jump[hidden] {
+  display: none;
+}
+
+.chan-jump:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.chan-jump svg {
+  width: 14px;
+  height: 14px;
+}
+
+/* With something waiting below, the pill stops being furniture and becomes the
+   notice that there is unread conversation down there. */
+.chan-jump.has-new {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.chan-jump-count:empty {
+  display: none;
+}
+
 .cmsg-row {
   display: flex;
   /* Two lines when the message answers something: the reply's reference takes
@@ -4646,6 +5095,56 @@ svg {
   background: var(--accent-wash);
   border-color: var(--accent-line);
   color: var(--accent-bright);
+}
+
+/* The "+" at the end of a reaction row. Quieter than the tallies beside it —
+   it is an invitation, not a count — and only on a message that already has
+   one, because a bare row of these under every message would be noise. The
+   hover toolbar's smile is how the first reaction gets added. */
+.cmsg-react-add {
+  padding: 2px 7px;
+  color: var(--text-4);
+  border-style: dashed;
+}
+
+.cmsg-react-add:hover {
+  color: var(--accent-bright);
+  border-color: var(--accent-line);
+  border-style: solid;
+}
+
+.cmsg-react-add svg {
+  width: 13px;
+  height: 13px;
+}
+
+/* The picker itself. A single row of choices at a size a finger can hit,
+   wrapping only if a theme's font makes them wider than the popover. */
+.react-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+
+.react-choice {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  font-size: 19px;
+  line-height: 1;
+  border: 1px solid transparent;
+  background: transparent;
+  transition: background 0.12s ease;
+}
+
+.react-choice:hover {
+  background: var(--bg-hover);
+}
+
+/* Already left by this reader: lit, because pressing it again takes it back. */
+.react-choice.mine {
+  background: var(--accent-wash);
+  border-color: var(--accent-line);
 }
 
 /* What the work under a thread changed. Closed by default: the answer most
@@ -7286,6 +7785,33 @@ dialog.modal::backdrop {
   .agent-search-wrap {
     flex: 1 0 100%;
     width: auto;
+  }
+
+  /* The panel's hero and its rails, at a width where a 19px name, three icon
+     buttons and a 62px label column no longer all fit on their own lines.
+     The hero wraps its controls under the name; the rails put each label
+     above its own row rather than squeezing the chips into what is left. */
+  .agent-hero {
+    flex-wrap: wrap;
+    row-gap: 10px;
+    padding: 16px 14px;
+  }
+
+  .agent-rails {
+    padding: 12px 14px;
+  }
+
+  .rail {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 6px;
+  }
+
+  .rail-label {
+    padding-top: 0;
+  }
+
+  .agent-deck {
+    padding: 12px;
   }
 
   /* Every screen's title row (`.page-head`) — icon, heading, and a trailing

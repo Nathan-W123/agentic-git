@@ -21,6 +21,7 @@ import {
   state,
 } from "./data.js";
 import {
+  addTile,
   avatarStack,
   esc,
   hueFor,
@@ -194,6 +195,18 @@ export function renderRepositories() {
           )
         : `<div class="repo-grid ${state.repoView === "list" ? "list" : ""}">
             ${repositories.map(repositoryCard).join("")}
+            ${
+              // The same trailing tile the agent deck ends with: the grid says
+              // what it holds and how to add one more to it, rather than
+              // sending the reader back up to the buttons above.
+              state.repoView === "list"
+                ? ""
+                : addTile({
+                    title: "Add repository",
+                    subtitle: "Create one, or import from GitHub",
+                    act: "repo-create",
+                  })
+            }
           </div>`
     }
 

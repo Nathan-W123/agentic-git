@@ -31,18 +31,23 @@ import {
 } from "./data.js";
 import { chatComposer, chatThread } from "./chat.js";
 import {
+  addTile,
   agentFace,
   agentLabelOf,
   badge,
   bar,
+  chipRow,
   esc,
   icon,
   iconButton,
   emptyState,
   searchBox,
+  sectionRail,
+  segmented,
   showModal,
   statTile,
   tabs,
+  tileCard,
   toast,
 } from "./ui.js";
 
@@ -101,6 +106,159 @@ function agentRow(agent, active) {
   </div>`;
 }
 
+/** What an agent is doing, in one line, for a card or a row. */
+function taskLine(agent) {
+  return (
+    agent.task?.objective ??
+    (agent.connected
+      ? "No task assigned"
+      : agent.detail !== undefined && agent.detail !== ""
+        ? agent.detail
+        : "Not connected")
+  );
+}
+
+/**
+ * One connection as a card.
+ *
+ * The same facts the row carries, arranged so they can be taken in without
+ * reading across: face and name first, what it is doing under them, and the
+ * state — badge and progress — along the bottom edge of every card at the
+ * same height, so a deck of them compares at a glance.
+ */
+function agentCard(agent, active) {
+  const task = agent.task;
+  const queued = task !== undefined && !taskStarted(task);
+  return tileCard({
+    glyph: `<span class="tile-face">${agentFace(agent, 36)}</span>`,
+    trailing: iconButton("dots", {
+      act: "agent-menu",
+      value: agent.id,
+      title: "Agent actions",
+      small: true,
+    }),
+    title: agent.name,
+    subtitle: `${icon(task === undefined ? "pause" : "file")}<span>${esc(taskLine(agent))}</span>`,
+    foot: `${badge(agent.status)}${
+      task === undefined
+        ? ""
+        : queued
+          ? `<span class="tile-pct">Queued</span>`
+          : `${bar(agent.progress, agent.status === "working" ? "" : "grey")}
+             <span class="tile-pct">${Math.round(agent.progress)}%</span>`
+    }`,
+    act: "agent-pick",
+    value: agent.id,
+    active,
+  });
+}
+
+/** The deck of connections, with the tile that adds another one last. */
+function connectionGrid(agents, selected) {
+  return `<div class="tile-grid agent-deck">
+    ${agents.map((agent) => agentCard(agent, agent.id === selected?.id)).join("")}
+    ${addTile({
+      title: "Add agent",
+      subtitle: "Connect Claude, Codex or Gemini",
+      act: "agent-add",
+    })}
+  </div>`;
+}
+
+/** The selected agent, at the size of the thing the panel is about. */
+function agentHero(agent) {
+  const presence =
+    agent.presence === "offline"
+      ? "Offline"
+      : agent.presence === "idle"
+        ? "Idle"
+        : "Online";
+  return `<header class="agent-hero">
+    <span class="ah-face">${agentFace(agent, 52)}</span>
+    <div class="ah-id">
+      <div class="ah-name">${esc(agent.name)}${badge(agent.status)}</div>
+      <div class="ah-meta">${
+        agent.presence === "offline" ? "" : '<span class="dot green"></span>'
+      }<span>${esc(presence)}</span><span>·</span><span>${esc(
+        agent.visibility === "org" ? "Shared with the project" : "Yours only",
+      )}</span></div>
+    </div>
+    <span class="spacer"></span>
+    ${iconButton("info", { act: "agent-info", title: "Connection details" })}
+    ${iconButton("chart", { act: "agent-usage", title: "Usage" })}
+    ${iconButton("dots", { act: "agent-menu", value: agent.id, title: "More" })}
+  </header>`;
+}
+
+/**
+ * The connection's properties, as labelled rails rather than as a paragraph
+ * of dot-separated fragments. Three lines that each answer one question:
+ * what it thinks with, what it is on, and what it has touched.
+ */
+function agentRails(agent) {
+  const task = agent.task;
+  const patches = state.changeSet?.patches ?? [];
+  return `<div class="agent-rails">
+    ${sectionRail(
+      "Model",
+      chipRow([
+        {
+          label: agent.model === "" ? "Model unset" : agent.model,
+          iconName: "cpu",
+          title: "The model this agent answers with",
+        },
+        agent.effort === "" ? undefined : { label: `${agent.effort} effort`, iconName: "bolt" },
+        agent.contextPercent > 0
+          ? {
+              label: `${agent.contextPercent}% context`,
+              iconName: "layers",
+              tone: agent.contextPercent > 80 ? "orange" : undefined,
+              title: "How full the last exchange left the context window",
+            }
+          : undefined,
+      ]),
+    )}
+    ${sectionRail(
+      "Task",
+      chipRow(
+        task === undefined
+          ? [
+              {
+                label: agent.connected ? "No task assigned" : "Not connected",
+                iconName: "pause",
+              },
+            ]
+          : [
+              {
+                label: task.objective,
+                iconName: "file",
+                tone: "purple",
+                title: task.objective,
+              },
+              taskStarted(task)
+                ? { label: `${taskProgress(task)}% done`, iconName: "clock", tone: "blue" }
+                : { label: "Queued", iconName: "clock", tone: "orange" },
+              task.repositoryId === undefined || task.repositoryId === ""
+                ? undefined
+                : { label: task.repositoryId, iconName: "folder" },
+            ],
+      ),
+    )}
+    ${sectionRail(
+      "Files",
+      chipRow([
+        patches.length === 0
+          ? { label: "Nothing touched yet", iconName: "file" }
+          : {
+              label: `${patches.length} file${patches.length === 1 ? "" : "s"} in the changeset`,
+              iconName: "file",
+              tone: "green",
+            },
+      ]),
+    )}
+  </div>`;
+}
+
 function detailPane(agent) {
   if (agent === undefined) {
     return `<section class="card agent-panel">${emptyState(
@@ -110,25 +268,9 @@ function detailPane(agent) {
     )}</section>`;
   }
   const tab = state.agentTab ?? "chat";
-  const window = agent.contextPercent > 0 ? `${agent.contextPercent}% context` : "";
   return `<section class="card agent-panel">
-    <header class="agent-panel-head">
-      ${agentFace(agent, 40)}
-      <div style="min-width:0">
-        <div class="aph-name">${esc(agent.name)}
-          <span class="ch-status" style="font-weight:400">${
-            agent.presence === "offline" ? "" : '<span class="dot green"></span>'
-          }${esc(agent.presence === "offline" ? "Offline" : agent.presence === "idle" ? "Idle" : "Online")}</span>
-        </div>
-        <div class="aph-meta">${esc(
-          [agent.model || "Model unset", window].filter(Boolean).join(" · "),
-        )}</div>
-      </div>
-      <span class="spacer"></span>
-      ${iconButton("info", { act: "agent-info", title: "Connection details" })}
-      ${iconButton("chart", { act: "agent-usage", title: "Usage" })}
-      ${iconButton("dots", { act: "agent-menu", value: agent.id, title: "More" })}
-    </header>
+    ${agentHero(agent)}
+    ${agentRails(agent)}
 
     ${tabs(
       "agent-tab",
@@ -238,6 +380,9 @@ export function renderAgents() {
   const idle = agents.filter((agent) => agent.status === "idle").length;
   const offline = agents.filter((agent) => agent.status === "offline").length;
   const done = state.tasks.filter((task) => task.status === "integrated").length;
+  // The deck is the default; the list stays for the reader who wants density
+  // rather than cards, and which one somebody chose is kept across sessions.
+  const view = state.agentView === "list" ? "list" : "grid";
 
   return `<div class="scroll"><div class="page">
     <div class="page-head">
@@ -283,6 +428,13 @@ export function renderAgents() {
       })}
     </div>
 
+    <div class="agent-section-head">
+      <h2>Your connections</h2>
+      <span class="ash-count">${esc(
+        `${agents.filter((agent) => agent.connected).length} of ${agents.length} connected`,
+      )}</span>
+    </div>
+
     <div class="agents-split">
       <section class="card">
         <div class="agent-list-head">
@@ -297,6 +449,14 @@ export function renderAgents() {
             state.agentFilter,
           )}
           <span class="spacer" style="flex:1"></span>
+          <span class="agent-deck-tools">${segmented(
+            "agent-view",
+            [
+              { value: "grid", label: "▦" },
+              { value: "list", label: "☰" },
+            ],
+            view,
+          )}</span>
           <span class="agent-search-wrap">${searchBox(
             "Search agents...",
             state.agentQuery,
@@ -305,21 +465,28 @@ export function renderAgents() {
         </div>
         ${
           shown.length === 0
-            ? emptyState(
+            ? `${emptyState(
                 "robot",
                 agents.length === 0 ? "No agents connected" : "No agents match",
                 agents.length === 0
                   ? "Connect Claude, Codex, or Gemini to give yourself an agent on this project."
                   : "Try another filter or search term.",
-              )
-            : `<div class="agent-rows">
-                ${shown
-                  .map((agent) => agentRow(agent, agent.id === selected?.id))
-                  .join("")}
-              </div>
-              <div class="agent-list-foot">
-                <button data-act="agent-all">View all agents ${icon("arrowRight")}</button>
-              </div>`
+                agents.length === 0
+                  ? `<button class="btn btn-primary" data-act="agent-add">${icon(
+                      "plus",
+                    )} Add Agent</button>`
+                  : "",
+              )}`
+            : view === "grid"
+              ? connectionGrid(shown, selected)
+              : `<div class="agent-rows">
+                  ${shown
+                    .map((agent) => agentRow(agent, agent.id === selected?.id))
+                    .join("")}
+                </div>
+                <div class="agent-list-foot">
+                  <button data-act="agent-all">View all agents ${icon("arrowRight")}</button>
+                </div>`
         }
       </section>
 
