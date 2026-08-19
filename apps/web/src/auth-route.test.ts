@@ -77,16 +77,6 @@ test("arriving on a sign-in link opens sign-in, and clicking one moves the URL",
   const fromHash = boot.indexOf("const mode = authModeFromHash()", setup);
   assert.notEqual(setup, -1, "bootstrap should still win when setup is due");
   assert.notEqual(fromHash, -1, "boot should read the form out of the URL");
-  // Signed in already: the hash has to move before the router reads it, or
-  // the sign-in link would leave a signed-in person on an unknown route.
-  const redirect = boot.indexOf('window.location.hash = "#chats"', fromHash);
-  const applied = boot.indexOf("applyHash()", fromHash);
-  assert.notEqual(redirect, -1, "a signed-in visitor should be sent inside");
-  assert.equal(
-    redirect < applied,
-    true,
-    "the redirect should happen before the router reads the hash",
-  );
   // And the click that swaps forms writes the URL, so the address bar is
   // always something that can be shared.
   assert.match(
@@ -94,6 +84,50 @@ test("arriving on a sign-in link opens sign-in, and clicking one moves the URL",
     /authMode = value;[\s\S]{0,400}AUTH_MODE_HASHES\.get\(value\)/u,
     "switching forms should write the matching hash",
   );
+});
+
+/**
+ * A sign-in link is a request for the sign-in page.
+ *
+ * It used to be answered by rewriting the hash to "#chats" whenever a session
+ * happened to be in place, so `/#signin` opened the app of whoever last used
+ * the browser — indistinguishable from `/#chats`, and useless to somebody who
+ * was sent the link so they could get into an account of their own.
+ */
+test("a signed-in visitor following an auth link lands on the form", async () => {
+  const app = await publicFile("app.js");
+  const boot = app.slice(
+    app.indexOf("async function boot()"),
+    app.indexOf("async function boot()") + 2000,
+  );
+  assert.equal(
+    boot.includes('window.location.hash = "#chats"'),
+    false,
+    "boot should no longer redirect an auth link into the app",
+  );
+  assert.match(
+    boot,
+    /const linked = authModeFromHash\(\);\s*if \(linked !== undefined && state\.principal !== undefined\) \{\s*await signOutForAuthLink\(linked\);\s*return;/u,
+    "an auth link should win over the session it arrived on top of",
+  );
+  // The session has to actually end: a sign-in form drawn over a live session
+  // is a dead end, because a reload walks straight past it.
+  const helper = app.slice(app.indexOf("async function signOutForAuthLink("));
+  const body = helper.slice(0, helper.indexOf("\n}\n"));
+  assert.match(body, /api\("\/auth\/logout", \{ method: "POST"/u);
+  assert.match(body, /state\.principal = undefined/u);
+  assert.match(body, /authMode = mode/u);
+  assert.match(body, /showAuth\(\)/u);
+  // Signing in from that form must not be undone by the hash that opened it.
+  for (const submit of ["submitLogin", "submitBootstrap"]) {
+    const form = app.slice(app.indexOf(`async function ${submit}(form)`));
+    const posted = form.slice(0, form.indexOf("\n}\n"));
+    assert.match(
+      posted,
+      /window\.location\.hash = "#chats";\s*await boot\(\)/u,
+      `${submit} should leave the auth hash behind before re-booting`,
+    );
+  }
 });
 
 test("the hash router hands the signed-out shell its own hashes", async () => {
@@ -111,6 +145,14 @@ test("the hash router hands the signed-out shell its own hashes", async () => {
     body,
     /authRoot\.innerHTML = renderAuth\(\)/u,
     "a hash change while signed out should redraw the form",
+  );
+  // The same link typed into the address bar of a signed-in tab is the same
+  // request, and gets the same answer instead of being ignored for not being
+  // the name of a screen.
+  assert.match(
+    body,
+    /if \(linked !== undefined && state\.principal !== undefined\) \{\s*void signOutForAuthLink\(linked\);/u,
+    "an auth hash should be honoured while the app shell is up",
   );
 });
 
