@@ -14,7 +14,11 @@ import {
 
 import { CoordinatorProject } from "./project.js";
 import { repoAdd, repoCreate } from "./commands.js";
-import { pushCredentials, repoPush } from "./repo-export.js";
+import {
+  formatRepoPushResult,
+  pushCredentials,
+  repoPush,
+} from "./repo-export.js";
 
 /**
  * The CLI-facing export path.
@@ -90,6 +94,24 @@ test("the push token is read from the environment, never from config", async () 
   } finally {
     await rm(harness.root, { recursive: true, force: true });
   }
+});
+
+test("CLI push output includes the short branch and longer summary", () => {
+  assert.equal(
+    formatRepoPushResult({
+      remoteUrl: "https://github.com/example/project.git",
+      targetBranch: "coord/readable-push-names",
+      summary: "Use readable push branch names and include a fuller summary",
+      revision: "abcdef1234567890".padEnd(40, "0"),
+      upstreamBranch: "main",
+      upstreamRevision: "1".repeat(40),
+      createdBranch: true,
+    }),
+    "Pushed abcdef123456 to coord/readable-push-names\n" +
+      "Summary: Use readable push branch names and include a fuller summary\n" +
+      "Remote: https://github.com/example/project.git\n" +
+      "Created the target branch; main was not modified.",
+  );
 });
 
 test("a repository imported from a remote pushes to a dedicated branch", async () => {
@@ -218,6 +240,7 @@ test("an explicit per-user credential wins over the environment token", async ()
         return {
           remoteUrl: LOOPBACK_HOST,
           targetBranch: "coord/x",
+          summary: "Update the repository",
           revision: "0".repeat(40),
           upstreamBranch: "main",
           upstreamRevision: undefined,

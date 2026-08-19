@@ -7,6 +7,7 @@ export * from "./handoff-store.js";
 export * from "./hunks.js";
 export * from "./metrics.js";
 export * from "./policy.js";
+export * from "./blanket-claim.js";
 export * from "./ownership-service.js";
 export * from "./partial-admission.js";
 export * from "./plan-admission.js";

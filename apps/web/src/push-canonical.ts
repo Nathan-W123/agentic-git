@@ -82,7 +82,8 @@ async function pushCanonicalAs(
         `Pushed ${pushed.revision.slice(0, 8)} to ${pushed.targetBranch} on ` +
         `${pushed.remoteUrl}` +
         (connection.login === undefined ? "" : ` as ${connection.login}`) +
-        ". Open a pull request from that branch when you want it reviewed.",
+        `. Summary: ${pushed.summary}. Open a pull request from that branch ` +
+        "when you want it reviewed.",
     };
   } catch (error) {
     const explanation = describeError(error);

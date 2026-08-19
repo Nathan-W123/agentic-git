@@ -14,9 +14,12 @@ this feature from growing into "give agents everything".
 
 An agent today can already: run any shell command, iterate internally, read and
 write its workspace, ask a **person** a question mid-task and wait for the
-answer (`question_asked` → `QuestionController` → back), and ask for **more
+answer (`question_asked` → `QuestionController` → back), ask for **more
 scope** mid-task and wait for the decision (`scope_change_requested` →
-`ScopeChangeDecision` → back). Its results come back as file changes *and* a
+`ScopeChangeDecision` → back), and — since early lease release — hand part of
+its approved plan **back** the same way (`scope_release_requested` → the same
+`ScopeChangeDecision` → back), which narrows the plan and frees the leases for
+whoever is waiting on them. Its results come back as file changes *and* a
 free-text explanation — the explanation is a real channel, and a long report
 travels through it intact.
 
@@ -124,9 +127,12 @@ Consequences worth stating:
 Four:
 
 - `push` — publishes **canonical** to the repository's recorded remote, on a
-  new branch, and answers with the branch and revision. Canonical rather than
-  the task's workspace: the workspace holds work that has not been integrated
-  or validated, and publishing that would put the agent's version somewhere a
+  short `coord/<change-name>` branch, and answers with that branch, the
+  revision, and a longer readable change summary. The name and summary come
+  from meaningful canonical commit subjects, ignoring coordinator task IDs
+  and synthetic sync or merge subjects. Canonical rather than the task's
+  workspace: the workspace holds work that has not been integrated or
+  validated, and publishing that would put the agent's version somewhere a
   reader would take for the project's. It refuses rather than forces when the
   branch already exists or the upstream has moved, and refuses with a specific
   reason when the repository has no remote or the task's submitter has not

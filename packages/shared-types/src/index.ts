@@ -126,7 +126,49 @@ export interface AgentPlan {
    * recomputed and overwritten before the plan is used for arbitration.
    */
   grounding?: PlanGrounding;
+  /**
+   * How this plan's scope was arrived at, when it was not an agent writing
+   * down what it intended to touch.
+   *
+   * Absent on every plan an agent submitted, which is what keeps the ordinary
+   * path exactly as it was. See {@link PlanClaim} for the two shapes a
+   * coordinator-issued claim takes.
+   */
+  claim?: PlanClaim;
 }
+
+/**
+ * The whole repository, claimed without anybody describing it.
+ *
+ * Granted to a task that is alone in its repository, in place of the planning
+ * round trip whose only purpose was to give a second task something to
+ * arbitrate against. Nothing can conflict with it, because nothing else can
+ * be admitted while it is held.
+ */
+export interface BlanketPlanClaim {
+  kind: "blanket";
+  grantedAt: string;
+}
+
+/**
+ * What a blanket claim was narrowed to when somebody else arrived, read from
+ * the holder's worktree rather than predicted.
+ *
+ * `directories` is the unit deliberately: a task frozen halfway through a
+ * sweep has touched a few files of a directory it is still working through,
+ * and freezing it to exactly those files would refuse it the next file in the
+ * same directory a second later. Directories keep a wide refactor moving; the
+ * cost is that the arriving task is admitted to a little less than it could
+ * strictly have had.
+ */
+export interface FrozenPlanClaim {
+  kind: "frozen";
+  /** Repository-relative directory prefixes, each ending in `/`. */
+  directories: string[];
+  frozenAt: string;
+}
+
+export type PlanClaim = BlanketPlanClaim | FrozenPlanClaim;
 
 export interface CanonicalVersion {
   sequence: number;
@@ -485,6 +527,28 @@ export interface ScopeChangeRequest {
   additionalConfigKeys: string[];
   additionalTests: string[];
   additionalServices: string[];
+  reason: string;
+  occurredAt: string;
+}
+
+/**
+ * Resources an agent is handing back mid-run, before the task settles.
+ *
+ * The narrowing counterpart of {@link ScopeChangeRequest}. Deliberately the
+ * same shape in reverse — an id, a set of resources, a reason — because the
+ * two are decided by the same machinery and answered with the same
+ * {@link ScopeChangeDecision}.
+ */
+export interface ScopeReleaseRequest {
+  id: ScopeChangeId;
+  taskId: TaskId;
+  releasedFiles: string[];
+  releasedSymbols: string[];
+  releasedApis: string[];
+  releasedSchemas: string[];
+  releasedConfigKeys: string[];
+  releasedTests: string[];
+  releasedServices: string[];
   reason: string;
   occurredAt: string;
 }
@@ -913,6 +977,21 @@ export type AuditEventType =
   | "action_performed"
   | "scope_change_requested"
   | "scope_change_decided"
+  /**
+   * An agent gave part of its approved plan back before the task ended, and
+   * what came of it. The pair is what makes an over-claimed plan visible: the
+   * request names what was never needed, the decision says when everyone else
+   * stopped waiting for it.
+   */
+  | "scope_release_requested"
+  | "scope_release_decided"
+  /**
+   * A task alone in its repository was handed the whole of it without being
+   * asked to describe itself, and — when somebody else turned up — what that
+   * claim was narrowed to, read from its worktree at that moment.
+   */
+  | "blanket_claim_granted"
+  | "blanket_claim_frozen"
   | "changeset_collected"
   /** Patches a partial admission held back, kept for the follow-up task. */
   | "changeset_withheld"
@@ -1372,6 +1451,61 @@ export function arbitrationSymbols(plan: AgentPlan): string[] {
   ]);
 }
 
+/** Whether this plan is a repository-wide claim nobody has narrowed yet. */
+export function isBlanketClaim(plan: Pick<AgentPlan, "claim">): boolean {
+  return plan.claim?.kind === "blanket";
+}
+
+/** The directories a frozen claim covers, or nothing for any other plan. */
+export function claimedDirectories(
+  plan: Pick<AgentPlan, "claim">,
+): readonly string[] {
+  return plan.claim?.kind === "frozen" ? plan.claim.directories : [];
+}
+
+/**
+ * Whether a claim — as opposed to the declarations beside it — covers a path.
+ *
+ * A blanket claim covers everything. A frozen claim covers whatever lives
+ * under a directory its holder was observed working in. Neither says anything
+ * about `expectedFiles`, which every caller checks the ordinary way.
+ */
+export function claimCoversPath(
+  plan: Pick<AgentPlan, "claim">,
+  file: string,
+): boolean {
+  if (plan.claim === undefined) {
+    return false;
+  }
+  if (plan.claim.kind === "blanket") {
+    return true;
+  }
+  return plan.claim.directories.some((directory) =>
+    file.startsWith(directory),
+  );
+}
+
+function isPlanClaim(value: unknown): value is PlanClaim {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const claim = value as {
+    kind?: unknown;
+    grantedAt?: unknown;
+    frozenAt?: unknown;
+    directories?: unknown;
+  };
+  if (claim.kind === "blanket") {
+    return typeof claim.grantedAt === "string";
+  }
+  return (
+    claim.kind === "frozen" &&
+    typeof claim.frozenAt === "string" &&
+    isStringArray(claim.directories) &&
+    claim.directories.every((directory) => directory.endsWith("/"))
+  );
+}
+
 export function assertAgentPlan(value: unknown): asserts value is AgentPlan {
   if (typeof value !== "object" || value === null) {
     throw new TypeError("Agent plan must be an object");
@@ -1397,7 +1531,8 @@ export function assertAgentPlan(value: unknown): asserts value is AgentPlan {
     !["low", "medium", "high", "critical"].includes(plan.riskLevel ?? "") ||
     (plan.intent !== undefined &&
       (typeof plan.intent !== "string" || plan.intent.trim().length === 0)) ||
-    (plan.grounding !== undefined && !isPlanGrounding(plan.grounding))
+    (plan.grounding !== undefined && !isPlanGrounding(plan.grounding)) ||
+    (plan.claim !== undefined && !isPlanClaim(plan.claim))
   ) {
     throw new TypeError("Agent plan does not match the coordination schema");
   }
@@ -1657,6 +1792,34 @@ export function reducePlanScope(
 export interface PlanResourceRef {
   resourceType: ResourceType;
   resourceId: string;
+}
+
+/**
+ * The resources a release names, as {@link reducePlanScope} and the ownership
+ * service both want them.
+ *
+ * One reading of the request rather than seven at each call site: a release
+ * that narrowed the plan by a different set than it released leases for would
+ * leave a file owned by nobody and still claimed, or claimed by nobody and
+ * still owned.
+ */
+export function scopeReleaseResources(
+  request: ScopeReleaseRequest,
+): PlanResourceRef[] {
+  const resources: PlanResourceRef[] = [];
+  const add = (resourceType: ResourceType, ids: readonly string[]): void => {
+    for (const resourceId of ids) {
+      resources.push({ resourceType, resourceId });
+    }
+  };
+  add("file", request.releasedFiles);
+  add("symbol", request.releasedSymbols);
+  add("api", request.releasedApis);
+  add("schema", request.releasedSchemas);
+  add("configuration", request.releasedConfigKeys);
+  add("test", request.releasedTests);
+  add("service", request.releasedServices);
+  return resources;
 }
 
 /** Case-insensitive identity for a planned resource. */

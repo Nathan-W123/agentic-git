@@ -124,6 +124,27 @@ export function configuredRepositoryParallelism(explicit?: number): number {
 }
 
 /**
+ * Whether a task alone in its repository is handed the whole of it instead of
+ * being asked to plan.
+ *
+ * On unless a deployment says otherwise. The claim costs nothing to give —
+ * nothing else can be admitted while it is held — and it removes the single
+ * largest fixed delay before a solo task's first edit. `COORD_BLANKET_CLAIM=0`
+ * puts every task back through planning, which is the state the system was in
+ * before this existed.
+ */
+export function configuredBlanketClaims(explicit?: boolean): boolean {
+  if (explicit !== undefined) {
+    return explicit;
+  }
+  const raw = process.env["COORD_BLANKET_CLAIM"]?.trim().toLowerCase() ?? "";
+  if (raw.length === 0) {
+    return true;
+  }
+  return !["0", "false", "off", "no"].includes(raw);
+}
+
+/**
  * Wire version of the remote worker protocol.
  *
  * 1 planned and executed in one shot and posted a result.
@@ -2963,12 +2984,25 @@ export async function acceptWorkResult(
   }
 }
 
-/** Convenience binding for a project-hosted control plane. */
+/**
+ * Convenience binding for a project-hosted control plane.
+ *
+ * The optional `shared` argument is how a hosting process hands in services
+ * that are worth keeping for its lifetime — above all the code intelligence
+ * one, whose index cache is keyed on `(repository path, revision)` and so is
+ * useless on an instance that is rebuilt per call. Omitted, this constructs
+ * its own exactly as it always did, which is what the bare CLI and the tests
+ * rely on.
+ */
 export function workerOperations(
   project: CoordinatorProject,
   store: CoordinationStore,
+  shared: {
+    repositories?: RepositoryService;
+    intelligence?: CodeIntelligenceService;
+  } = {},
 ) {
-  const repositories = new RepositoryService();
+  const repositories = shared.repositories ?? new RepositoryService();
   const worktrees = new GitWorktreeWorkspaceManager(
     repositories.getGitClient(),
   );
@@ -2977,7 +3011,8 @@ export function workerOperations(
     sandboxOptions === undefined
       ? worktrees
       : new DockerWorkspaceManager(sandboxOptions, worktrees);
-  const intelligence = new CodeIntelligenceService(repositories);
+  const intelligence =
+    shared.intelligence ?? new CodeIntelligenceService(repositories);
   const services: WorkResultServices = {
     repositories,
     integrations: new IntegrationService(repositories, workspaces),

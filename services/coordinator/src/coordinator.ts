@@ -30,7 +30,11 @@ import {
   mergePlanScope,
   normalizeRepositoryPath,
   planGroundingConfidence,
+  planResourceKey,
+  reducePlanScope,
+  scopeReleaseResources,
   summariseChangedFiles,
+  uniqueRepositoryPaths,
   uniqueStrings,
   type AgentPlan,
   type ApprovalKind,
@@ -41,15 +45,19 @@ import {
   type ChangeSet,
   type IntegrationResult,
   type PlanAdmission,
+  type PlanResourceRef,
   type ConflictAssessment,
   type CoordinationRunResult,
   type CoordinatorDecision,
   type FilePatchStatus,
   type ReplanRequest,
+  type ResourceType,
   type ScopeChangeDecision,
   type ScopeChangeRequest,
+  type ScopeReleaseRequest,
   type TaskDefinition,
   type TaskExecutionResult,
+  isBlanketClaim,
   planAdmissionApproved,
 } from "@coord/shared-types";
 import {
@@ -83,6 +91,7 @@ import {
   ScopeExpansionError,
   assertChangeSetWithinPlan,
 } from "./scope-validator.js";
+import { frozenClaimCovers } from "./blanket-claim.js";
 
 export interface CoordinatedTask {
   task: TaskDefinition;
@@ -359,6 +368,41 @@ interface PreparedTask extends PlannedTask {
  */
 const errorMessage = describeError;
 
+/**
+ * Every resource a plan claims, as the plan itself spells it.
+ *
+ * Two jobs at once. It holds a release to what the plan actually names —
+ * giving back a file that was never claimed changes nothing, and answering
+ * "granted" to it would tell an agent it had freed something it never held.
+ * And it maps whatever the agent wrote back onto the plan's own spelling, so
+ * the narrowing and the lease release act on one string rather than two: the
+ * plan matches resources case-insensitively, ownership keys them exactly, and
+ * a release that used the agent's spelling for one and the plan's for the
+ * other would drop a file from the plan while its lease stayed held.
+ */
+function planClaimedResources(plan: AgentPlan): Map<string, PlanResourceRef> {
+  const claimed = new Map<string, PlanResourceRef>();
+  const add = (
+    resourceType: ResourceType,
+    ids: readonly string[] | undefined,
+  ): void => {
+    for (const resourceId of ids ?? []) {
+      claimed.set(planResourceKey(resourceType, resourceId), {
+        resourceType,
+        resourceId,
+      });
+    }
+  };
+  add("file", plan.expectedFiles);
+  add("symbol", plan.expectedSymbols);
+  add("api", plan.expectedApis);
+  add("schema", plan.expectedSchemas);
+  add("configuration", plan.expectedConfigKeys);
+  add("test", plan.expectedTests);
+  add("service", plan.expectedServices);
+  return claimed;
+}
+
 function pairKey(taskIds: readonly [string, string]): string {
   return [...taskIds].sort().join("\0");
 }
@@ -594,6 +638,38 @@ export type PlanAuthorityDecision =
 export interface PlanAuthority {
   admit(request: PlanAdmissionRequest): Promise<PlanAuthorityDecision>;
   /**
+   * The whole repository, for a task that is alone in it, or nothing.
+   *
+   * Asked before the agent is asked to plan, because the answer decides
+   * whether it is asked at all: a plan exists so a second task can arbitrate
+   * against it, and where there is no second task it buys nothing but a round
+   * trip. A grant is recorded on the lease exactly as an admitted plan is —
+   * that record is what makes the claim visible to whoever arrives next.
+   *
+   * Optional: an authority that does not implement it simply leaves every
+   * task planning as it always did.
+   */
+  claimRepository?(
+    request: BlanketClaimRequest,
+  ): Promise<AgentPlan | undefined>;
+  /**
+   * Narrows a repository-wide claim to what its holder has actually touched,
+   * once somebody else is in the repository.
+   *
+   * `observe` reads the holder's worktree, and is called at the moment of the
+   * freeze rather than sampled from anything periodic: a file written a
+   * second ago is a file this task owns, and handing it away would put two
+   * agents in it. The narrowed plan is written under the lease store's
+   * compare-and-swap, so a freeze and an admission decided at the same moment
+   * cannot both win.
+   *
+   * Answers `undefined` while the claim should stay whole — nobody else is
+   * here yet — and the narrowed plan once it has been frozen.
+   */
+  freezeBlanketClaim?(
+    request: BlanketFreezeRequest,
+  ): Promise<AgentPlan | undefined>;
+  /**
    * Turns the half a partial admission withheld into work of its own.
    *
    * Called only once the granted half is durably in canonical: a task asking
@@ -608,6 +684,28 @@ export interface PlanAuthority {
    * complete, and nobody ever writes the rest.
    */
   deferRemainder?(request: DeferredScopeRequest): Promise<void>;
+}
+
+/** What an authority needs to decide whether a task is alone in a repository. */
+export interface BlanketClaimRequest {
+  task: TaskDefinition;
+  repository: CanonicalRepository;
+  projectId?: string;
+  baseVersion: CanonicalVersion;
+}
+
+/** A blanket claim, and the worktree read that decides what it becomes. */
+export interface BlanketFreezeRequest {
+  task: TaskDefinition;
+  plan: AgentPlan;
+  planRevision: number;
+  repository: CanonicalRepository;
+  projectId?: string;
+  baseVersion: CanonicalVersion;
+  /** Read synchronously at freeze time; never a cached or polled view. */
+  observe(): Promise<
+    ReadonlyArray<{ path: string; status: FilePatchStatus }>
+  >;
 }
 
 /** The remainder of a partially admitted task, once its granted half landed. */
@@ -1298,7 +1396,15 @@ export class Coordinator {
                             lease.plan !== undefined &&
                             planAdmissionApproved(lease.plan.admission),
                         )
-                        .flatMap((lease) => lease.plan?.plan.expectedFiles ?? []),
+                        .flatMap((lease) =>
+                          // A holder that never planned names no files, and
+                          // saying nothing about it would tell this agent the
+                          // repository is free when one task holds all of it.
+                          lease.plan !== undefined &&
+                          isBlanketClaim(lease.plan.plan)
+                            ? ["(the whole repository, by an unplanned task)"]
+                            : (lease.plan?.plan.expectedFiles ?? []),
+                        ),
                     ),
                   ])
                   .catch(() => []);
@@ -1374,6 +1480,82 @@ export class Coordinator {
           // moved are the same conversation a replan already has with an
           // agent, and the answer is judged below exactly as a first plan
           // would be.
+          // A task alone in its repository is handed the whole of it and
+          // never asked to describe itself. The plan an agent would have
+          // written here exists so a second task can arbitrate against it,
+          // and where there is no second task the round trip buys nothing —
+          // it is the single largest fixed cost before the first edit.
+          //
+          // Every condition below is about being able to keep the promise
+          // later: only a solo run (nothing in this wave to arbitrate
+          // against in memory), only a first turn (a replan is a
+          // conversation about a plan that already exists), and only an
+          // adapter that can be told its scope instead of asked for it.
+          const claimRepository = this.planAuthority?.claimRepository?.bind(
+            this.planAuthority,
+          );
+          const acceptClaim = entry.adapter.acceptBlanketClaim?.bind(
+            entry.adapter,
+          );
+          const claim =
+            input.tasks.length === 1 &&
+            turnStart.replan === undefined &&
+            acceptClaim !== undefined &&
+            claimRepository !== undefined &&
+            // Never claim what cannot later be given back: a workspace
+            // manager that cannot report working changes can never be frozen,
+            // so the claim would hold the whole repository until the task
+            // ended and every arrival would wait it out.
+            this.workspaces.listWorkingChanges !== undefined &&
+            this.planAuthority?.freezeBlanketClaim !== undefined
+              ? await claimRepository({
+                  task: entry.task,
+                  repository: input.repository,
+                  ...(input.projectId === undefined
+                    ? {}
+                    : { projectId: input.projectId }),
+                  baseVersion: version,
+                })
+              : undefined;
+          if (claim !== undefined && acceptClaim !== undefined) {
+            await acceptClaim(session.id, claim);
+            await recorder?.plan(entry.task.id, claim);
+            await recorder?.planRevision(entry.task.id, {
+              revision: 1,
+              reason: "initial",
+              canonicalRevision: version.revision,
+              plan: claim,
+            });
+            await this.trace(
+              recorder,
+              runAudit,
+              "blanket_claim_granted",
+              entry.task.id,
+              {
+                repositoryId: input.repository.id,
+                canonicalRevision: version.revision,
+                planningCallsSaved: 1,
+              },
+            );
+            return {
+              ...entry,
+              ...(resumed === undefined ? {} : { resumed }),
+              session,
+              plan: claim,
+              planRevision: 1,
+              plannedVersion: version,
+              decision: {
+                decision: "approved",
+                taskId: entry.task.id,
+                planRevision: 1,
+                ownershipGrants: [],
+                constraints: [],
+                blockedBy: [],
+                explanation:
+                  "Granted the whole repository: nothing else is executing in it",
+              },
+            };
+          }
           const submitted =
             turnStart.replan === undefined
               ? await entry.adapter.requestPlan(session.id)
@@ -2467,6 +2649,8 @@ export class Coordinator {
       });
 
       const eventErrors: unknown[] = [];
+      // The same workspace, in a binding the event closure can see is there.
+      const taskWorkspace = workspace;
       let eventChain = Promise.resolve();
       await entry.adapter.streamEvents(entry.session.id, (event) => {
         eventChain = eventChain
@@ -2478,6 +2662,9 @@ export class Coordinator {
                 wave,
                 waveVersion,
                 event,
+                // Only the release path reads it, and only to refuse letting
+                // go of a file the agent has already edited.
+                taskWorkspace,
                 recorder,
                 runAudit,
               ),
@@ -2509,6 +2696,19 @@ export class Coordinator {
         recorder,
         runAudit,
       );
+      // A repository-wide claim only lasts as long as nobody else wants the
+      // repository. This is what notices somebody does, and narrows the claim
+      // to what this agent has already touched — read from the worktree at
+      // that moment, not from the poll above, whose whole purpose is to
+      // report a view that is allowed to lag.
+      const freezing = this.watchBlanketClaim(
+        input,
+        entry,
+        waveVersion,
+        workspace,
+        recorder,
+        runAudit,
+      );
       // Held rather than thrown: when an event handler fails, its catch
       // cancels this session, and what rejects out of `sendContext` is the
       // echo of that teardown — "Session … was cancelled" — not the cause.
@@ -2529,6 +2729,7 @@ export class Coordinator {
         contextFailed = true;
       } finally {
         await watching.stop();
+        await freezing.stop();
       }
       await eventChain;
       if (eventErrors.length > 0) {
@@ -2605,6 +2806,20 @@ export class Coordinator {
         throw new ScopeExpansionError(split.escaped);
       }
       const granted = split?.granted ?? changeSet;
+      // A claim frozen from observation can be narrower than the sweep it was
+      // taken in the middle of: three files of a directory were on disk, the
+      // fourth was written a minute later. That file was never refused to
+      // anyone — it is simply outside a claim nobody predicted — so it is put
+      // through the same widening every other mid-run reach goes through, and
+      // only a genuine collision ends the task.
+      await this.widenFrozenClaim(
+        input,
+        entry,
+        waveVersion,
+        granted,
+        recorder,
+        runAudit,
+      );
       assertChangeSetWithinPlan(entry.plan, granted);
       changeSet = granted;
       await recorder?.changeSet(changeSet);
@@ -2803,6 +3018,7 @@ export class Coordinator {
     wave: readonly PlannedTask[],
     waveVersion: CanonicalVersion,
     event: AgentEvent,
+    workspace: TaskWorkspace,
     recorder: RunRecorder | undefined,
     runAudit: AuditEvent[],
   ): Promise<void> {
@@ -2822,6 +3038,18 @@ export class Coordinator {
     }
     if (event.event === "action_requested") {
       await this.handleActionRequest(input, entry, event, recorder, runAudit);
+      return;
+    }
+    if (event.event === "scope_release_requested") {
+      await this.handleScopeRelease(
+        input,
+        entry,
+        waveVersion,
+        workspace,
+        event,
+        recorder,
+        runAudit,
+      );
       return;
     }
     if (event.event === "replan_proposed") {
@@ -3010,6 +3238,233 @@ export class Coordinator {
       entry.task.id,
       { decision },
     );
+    await entry.adapter.resolveScopeChange(entry.session.id, decision);
+  }
+
+  /**
+   * An agent giving part of its approved plan back, mid-run.
+   *
+   * The mirror of the widening path above, and deliberately built from the
+   * same pieces: one request, one decision, one plan revision, and the
+   * adapter unblocked either way. A plan that named twenty-two files and
+   * touched eight otherwise holds all twenty-two until the task settles, and
+   * every other agent that needs one of the fourteen waits on work that
+   * finished an hour ago.
+   *
+   * Three things make this safe rather than a new way to deadlock:
+   *
+   * - It is the agent that asks, not the coordinator that infers. Release at
+   *   collection would look cheaper, but conflict repair sends the agent back
+   *   into files it had already finished with — `repairChangeSet` re-collects
+   *   and re-validates against this same plan — so a file dropped at
+   *   collection could be handed back to the agent seconds later with neither
+   *   the lease nor the plan entry it needs, and the re-collection would fail
+   *   the whole task on a scope escape.
+   * - The plan narrows with the leases, in one step. Dropping ownership alone
+   *   would leave the agent believing it may still write a file another task
+   *   now owns, which is exactly the double-claim the leases exist to stop.
+   * - Getting a released file back is a widening like any other, and the
+   *   widening path refuses on the spot rather than queueing. Nothing here
+   *   waits for a lease, so releasing early cannot turn incremental
+   *   acquisition into a cycle: an agent that is refused carries on inside
+   *   what it still holds and reports what it could not do.
+   */
+  private async handleScopeRelease(
+    input: CoordinatorRunInput,
+    entry: PlannedTask,
+    waveVersion: CanonicalVersion,
+    workspace: TaskWorkspace,
+    event: Extract<AgentEvent, { event: "scope_release_requested" }>,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<void> {
+    const request: ScopeReleaseRequest = {
+      id: event.requestId?.trim() || createId("scope"),
+      taskId: entry.task.id,
+      releasedFiles: uniqueRepositoryPaths(event.releasedFiles),
+      releasedSymbols: uniqueStrings(event.releasedSymbols ?? []),
+      releasedApis: uniqueStrings(event.releasedApis ?? []),
+      releasedSchemas: uniqueStrings(event.releasedSchemas ?? []),
+      releasedConfigKeys: uniqueStrings(event.releasedConfigKeys ?? []),
+      releasedTests: uniqueStrings(event.releasedTests ?? []),
+      releasedServices: uniqueStrings(event.releasedServices ?? []),
+      reason: event.reason.trim(),
+      occurredAt: event.occurredAt,
+    };
+    await this.trace(
+      recorder,
+      runAudit,
+      "scope_release_requested",
+      entry.task.id,
+      { request },
+    );
+
+    let decision: ScopeChangeDecision;
+    try {
+      const asked = scopeReleaseResources(request);
+      if (asked.length === 0 || request.reason.length === 0) {
+        throw new Error(
+          "A scope release must name at least one resource and explain why",
+        );
+      }
+      // Only what this plan actually claims. A resource the plan never named
+      // cannot be given back, and quietly "releasing" it would answer granted
+      // to a request that changed nothing.
+      const claimed = planClaimedResources(entry.plan);
+      const resources = asked
+        .map((resource) =>
+          claimed.get(
+            planResourceKey(resource.resourceType, resource.resourceId),
+          ),
+        )
+        .filter(
+          (resource): resource is PlanResourceRef => resource !== undefined,
+        );
+      if (resources.length === 0) {
+        throw new Error(
+          "None of the named resources are in the approved plan, so there " +
+            "is nothing to release",
+        );
+      }
+      // A file with edits in it is not finished with, whatever the agent
+      // believes. Released, its lease would go to somebody else while this
+      // task still holds a change to it in its workspace — two agents editing
+      // one file, which is the situation ownership exists to prevent.
+      //
+      // An unanswerable question is answered the same way as a bad one: a
+      // workspace manager that cannot report working changes cannot prove the
+      // file is clean, so the release is refused rather than assumed safe.
+      const releasedFiles = new Set(
+        resources
+          .filter((resource) => resource.resourceType === "file")
+          .map((resource) => resource.resourceId),
+      );
+      if (releasedFiles.size > 0) {
+        if (this.workspaces.listWorkingChanges === undefined) {
+          throw new Error(
+            "This workspace cannot report uncommitted edits, so no file can " +
+              "be shown to be finished with",
+          );
+        }
+        const working = await this.workspaces.listWorkingChanges(workspace);
+        const edited = working
+          .map((change) => change.path)
+          .filter((changed) => releasedFiles.has(changed));
+        if (edited.length > 0) {
+          throw new Error(
+            `Uncommitted edits are still in ${edited.join(", ")}, so ` +
+              "they cannot be released",
+          );
+        }
+      }
+
+      const revisedPlan = reducePlanScope(entry.plan, resources);
+      // The durable record of what this task is executing, rewritten the same
+      // way a widening rewrites it. Without this the control plane still
+      // shows the wide plan, and a task in another run keeps being refused
+      // the files this one has just given up.
+      //
+      // A narrowing cannot collide with anything — it is a subset of a plan
+      // already admitted against every other holder — so anything other than
+      // an admission here is a failure to record, not a contended file. It is
+      // taken as a refusal and nothing is released: an agent told its files
+      // were freed while the record still claims them is worse than one told
+      // to keep them.
+      if (this.planAuthority !== undefined) {
+        const answer = await this.planAuthority.admit({
+          task: entry.task,
+          plan: revisedPlan,
+          planRevision: entry.planRevision + 1,
+          baseVersion: waveVersion,
+          repository: input.repository,
+          ...(input.projectId === undefined
+            ? {}
+            : { projectId: input.projectId }),
+          revising: true,
+          partialAdmission: false,
+        });
+        if (answer.outcome !== "admitted") {
+          throw new Error(
+            `The narrowed plan could not be recorded: ${answer.explanation}`,
+          );
+        }
+        // A grant of less than the narrowed plan, for the same reason the
+        // widening path refuses one: what is released here is decided from
+        // `revisedPlan`, so a further-reduced record would leave the agent
+        // holding files the record says are somebody else's.
+        if (answer.admission !== undefined) {
+          throw new Error(
+            `The narrowed plan could not be recorded whole: ` +
+              answer.admission.explanation,
+          );
+        }
+      }
+
+      const released = this.ownership.releaseResources(
+        entry.task.id,
+        resources,
+      );
+      entry.plan = revisedPlan;
+      entry.planRevision += 1;
+      entry.decision.planRevision = entry.planRevision;
+      const releasedIds = new Set(released.map((lease) => lease.leaseId));
+      entry.decision.ownershipGrants = entry.decision.ownershipGrants.filter(
+        (lease) => !releasedIds.has(lease.leaseId),
+      );
+      await recorder?.planRevision(entry.task.id, {
+        revision: entry.planRevision,
+        reason: "scope_release",
+        canonicalRevision: waveVersion.revision,
+        plan: revisedPlan,
+      });
+      await recorder?.decision(entry.decision);
+      await this.trace(
+        recorder,
+        runAudit,
+        "ownership_released",
+        entry.task.id,
+        {
+          leaseIds: released.map((lease) => lease.leaseId),
+          files: [...releasedFiles],
+          stage: "scope_release",
+        },
+      );
+      decision = {
+        requestId: request.id,
+        taskId: entry.task.id,
+        decision: "approved",
+        revisedPlan,
+        constraints: [
+          "The released resources are no longer yours to edit; ask for one " +
+            "back with a scope change if that turns out to be wrong",
+        ],
+        ownershipGrants: [],
+        explanation:
+          `Released ${String(released.length)} lease(s); the plan now covers ` +
+          `${String(revisedPlan.expectedFiles.length)} file(s)`,
+        decidedAt: new Date().toISOString(),
+      };
+    } catch (error) {
+      decision = {
+        requestId: request.id,
+        taskId: entry.task.id,
+        decision: "rejected",
+        revisedPlan: entry.plan,
+        constraints: ["Continue within the previously approved plan"],
+        ownershipGrants: [],
+        explanation: errorMessage(error),
+        decidedAt: new Date().toISOString(),
+      };
+    }
+
+    await this.trace(
+      recorder,
+      runAudit,
+      "scope_release_decided",
+      entry.task.id,
+      { decision },
+    );
+    // Handed back either way, like every other request the agent blocks on.
     await entry.adapter.resolveScopeChange(entry.session.id, decision);
   }
 
@@ -3527,6 +3982,195 @@ export class Coordinator {
       );
     }
     return taskResult;
+  }
+
+  /**
+   * Narrows a repository-wide claim as soon as somebody else is in the
+   * repository, and stops as soon as it has.
+   *
+   * A timer rather than a signal because the arrival happens in another run,
+   * often another process: the lease table is the only thing both sides can
+   * see. What the timer decides is *when to look*, never what is true — the
+   * worktree is read inside the freeze itself, so the narrowed claim is what
+   * the agent had touched at the instant it was written, not at the last tick.
+   *
+   * Like the working-change poll, it is never allowed to disturb the run: a
+   * freeze that cannot be written leaves the claim whole, which refuses the
+   * arriving task rather than putting two agents in one file.
+   */
+  private watchBlanketClaim(
+    input: CoordinatorRunInput,
+    entry: PlannedTask,
+    waveVersion: CanonicalVersion,
+    workspace: TaskWorkspace,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): { stop: () => Promise<void> } {
+    const freeze = this.planAuthority?.freezeBlanketClaim?.bind(
+      this.planAuthority,
+    );
+    const list = this.workspaces.listWorkingChanges?.bind(this.workspaces);
+    if (
+      freeze === undefined ||
+      list === undefined ||
+      !isBlanketClaim(entry.plan)
+    ) {
+      return { stop: async () => undefined };
+    }
+    let inFlight: Promise<void> = Promise.resolve();
+    let stopped = false;
+
+    const tick = async (): Promise<void> => {
+      if (stopped || !isBlanketClaim(entry.plan)) {
+        return;
+      }
+      let frozen: AgentPlan | undefined;
+      try {
+        frozen = await freeze({
+          task: entry.task,
+          plan: entry.plan,
+          planRevision: entry.planRevision,
+          repository: input.repository,
+          ...(input.projectId === undefined
+            ? {}
+            : { projectId: input.projectId }),
+          baseVersion: waveVersion,
+          observe: async () => await list(workspace),
+        });
+      } catch {
+        return;
+      }
+      if (frozen === undefined) {
+        return;
+      }
+      entry.plan = frozen;
+      entry.planRevision += 1;
+      entry.decision.planRevision = entry.planRevision;
+      try {
+        const leases = this.ownership.acquire(
+          frozen,
+          entry.task.agentId,
+          waveVersion.sequence,
+          { approvedResources: approvedSchemaResources(frozen) },
+        );
+        entry.decision.ownershipGrants.push(...leases);
+        await recorder?.leases(leases);
+      } catch {
+        // The durable claim is what arbitration reads; the in-run ownership
+        // ledger is a convenience on top of it, and a solo run has nobody to
+        // take a lease from anyway.
+      }
+      await recorder?.planRevision(entry.task.id, {
+        revision: entry.planRevision,
+        reason: "scope_change",
+        canonicalRevision: waveVersion.revision,
+        plan: frozen,
+      });
+      await recorder?.decision(entry.decision);
+      await this.trace(
+        recorder,
+        runAudit,
+        "blanket_claim_frozen",
+        entry.task.id,
+        {
+          repositoryId: input.repository.id,
+          planRevision: entry.planRevision,
+          files: frozen.expectedFiles,
+          directories:
+            frozen.claim?.kind === "frozen" ? frozen.claim.directories : [],
+        },
+      ).catch(() => undefined);
+    };
+
+    const timer = setInterval(() => {
+      inFlight = inFlight.then(tick);
+    }, this.workingChangePollMs);
+    timer.unref?.();
+
+    return {
+      stop: async () => {
+        stopped = true;
+        clearInterval(timer);
+        await inFlight.catch(() => undefined);
+      },
+    };
+  }
+
+  /**
+   * Widens a frozen claim to cover files written after it was taken, or fails
+   * the task saying which file somebody else holds and who.
+   *
+   * The widening is the existing mid-run path and inherits its rule exactly:
+   * decided against every other holder, granted or refused immediately, never
+   * queued. Nothing here waits on a lease while holding one.
+   */
+  private async widenFrozenClaim(
+    input: CoordinatorRunInput,
+    entry: PlannedTask,
+    waveVersion: CanonicalVersion,
+    changeSet: ChangeSet,
+    recorder: RunRecorder | undefined,
+    runAudit: AuditEvent[],
+  ): Promise<void> {
+    if (entry.plan.claim?.kind !== "frozen") {
+      return;
+    }
+    const escaped = [
+      ...new Set(
+        changeSet.patches
+          .map((patch) => patch.path)
+          .filter((file) => !frozenClaimCovers(entry.plan, file)),
+      ),
+    ].sort();
+    if (escaped.length === 0) {
+      return;
+    }
+    const revisedPlan: AgentPlan = {
+      ...entry.plan,
+      expectedFiles: [...entry.plan.expectedFiles, ...escaped].sort(),
+    };
+    if (this.planAuthority !== undefined) {
+      const answer = await this.planAuthority.admit({
+        task: entry.task,
+        plan: revisedPlan,
+        planRevision: entry.planRevision + 1,
+        baseVersion: waveVersion,
+        repository: input.repository,
+        ...(input.projectId === undefined
+          ? {}
+          : { projectId: input.projectId }),
+        revising: true,
+        // Same all-or-nothing rule as every other mid-run caller: a narrower
+        // grant would leave a file somebody else holds inside the plan the
+        // changeset is validated against.
+        partialAdmission: false,
+      });
+      if (answer.outcome !== "admitted" || answer.admission !== undefined) {
+        const explanation =
+          answer.outcome === "admitted"
+            ? (answer.admission?.explanation ?? "")
+            : answer.explanation;
+        throw new Error(
+          `Work outside the frozen claim could not be kept: ` +
+            `${escaped.join(", ")} overlaps work running elsewhere in this ` +
+            `repository: ${explanation}`,
+        );
+      }
+    }
+    entry.plan = revisedPlan;
+    entry.planRevision += 1;
+    entry.decision.planRevision = entry.planRevision;
+    await recorder?.planRevision(entry.task.id, {
+      revision: entry.planRevision,
+      reason: "scope_change",
+      canonicalRevision: waveVersion.revision,
+      plan: revisedPlan,
+    });
+    await this.trace(recorder, runAudit, "plan_revised", entry.task.id, {
+      revision: entry.planRevision,
+      reason: "frozen_claim_widened",
+      expectedFiles: revisedPlan.expectedFiles,
+    });
   }
 
   /**

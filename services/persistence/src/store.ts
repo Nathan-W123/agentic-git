@@ -579,7 +579,13 @@ export interface StoredPlanRevision {
    * are all the coordinator revising a plan in response to something that
    * happened *to* the task.
    */
-  reason: "initial" | "canonical_change" | "scope_change" | "agent_replan";
+  reason:
+    | "initial"
+    | "canonical_change"
+    | "scope_change"
+    /** The agent handing part of its plan back, the inverse of a widening. */
+    | "scope_release"
+    | "agent_replan";
   canonicalRevision: string;
   plan: AgentPlan;
   createdAt: string;

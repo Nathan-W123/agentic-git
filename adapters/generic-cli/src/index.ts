@@ -507,6 +507,18 @@ export class GenericCliAdapter implements AgentAdapter {
     }
   }
 
+  /**
+   * Takes the coordinator's word for what this session may touch, in place of
+   * the planning round trip a task alone in its repository does not need.
+   */
+  public async acceptBlanketClaim(
+    sessionId: string,
+    plan: AgentPlan,
+  ): Promise<void> {
+    const record = this.requireSession(sessionId);
+    record.plan = structuredClone(plan);
+  }
+
   public async sendContext(
     sessionId: string,
     context: CoordinatorContext,

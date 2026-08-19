@@ -8,9 +8,13 @@ import {
   BLOCKED_ATTEMPTS_BEFORE_SEQUENCING,
   DEFAULT_PLAN_RETRY_MS,
   PlanAdmissionController,
+  blanketPlan,
   deferredScopeObjective,
+  freezePlanFromWorkingChanges,
   isDeferredScopeFollowUp,
   type ActivePlan,
+  type BlanketClaimRequest,
+  type BlanketFreezeRequest,
   type DeferredScopeRequest,
   type PlanAdmissionRequest,
   type PlanAuthority,
@@ -19,10 +23,12 @@ import {
 import type { CoordinationStore, WorkLease } from "@coord/persistence";
 import { RepositoryService } from "@coord/repository-service";
 import {
+  isBlanketClaim,
   planAdmissionApproved,
   planAdmissionPartial,
   reducePlanScope,
   type AgentPlan,
+  type PlanAdmission,
   type TaskId,
 } from "@coord/shared-types";
 
@@ -87,6 +93,8 @@ export class LeasePlanAuthority implements PlanAuthority {
   private readonly intelligence: CodeIntelligenceService;
   private readonly admissions: PlanAdmissionController;
   private readonly maxWaitMs: number;
+  /** See the constructor option of the same name. */
+  private readonly blanketClaims: boolean;
   /** When each task was first told to wait, for the bound below. */
   private readonly waitingSince = new Map<TaskId, number>();
 
@@ -108,6 +116,12 @@ export class LeasePlanAuthority implements PlanAuthority {
      * effort exact-base integration already knows how to absorb.
      */
     maxWaitMs?: number;
+    /**
+     * Whether a task alone in its repository may be granted all of it without
+     * planning. On by default; a deployment that would rather every task keep
+     * describing itself sets COORD_BLANKET_CLAIM=0.
+     */
+    blanketClaims?: boolean;
   }) {
     this.store = options.store;
     this.leaseIdForTask = options.leaseIdForTask;
@@ -116,6 +130,7 @@ export class LeasePlanAuthority implements PlanAuthority {
       options.intelligence ?? new CodeIntelligenceService(this.repositories);
     this.admissions = options.admissions ?? new PlanAdmissionController();
     this.maxWaitMs = options.maxWaitMs ?? 30 * 60 * 1000;
+    this.blanketClaims = options.blanketClaims ?? true;
   }
 
   public async admit(
@@ -146,6 +161,25 @@ export class LeasePlanAuthority implements PlanAuthority {
       // nothing to decide against, so the repository index nobody needs is not
       // built.
       return await this.publish(request, lease, request.plan, approvedLeaseIds);
+    }
+
+    // A repository-wide claim is answered before the index is built. There is
+    // nothing to arbitrate against a claim that covers everything — the
+    // answer is the same whatever this plan says — and paying the most
+    // expensive step in the control plane to reach a foregone conclusion
+    // would make every arrival behind a blanket holder cost more than the
+    // plan it is waiting for.
+    const blanket = active.find((entry) => isBlanketClaim(entry.plan));
+    if (blanket !== undefined) {
+      return {
+        outcome: "deferred",
+        retryAfterMs: DEFAULT_PLAN_RETRY_MS,
+        blockedBy: [blanket.taskId],
+        explanation:
+          `Task ${blanket.taskId} holds a repository-wide claim; it is ` +
+          "narrowed to what it has touched as soon as it notices this task, " +
+          "and this plan is decided against that",
+      };
     }
 
     // Only reached when something else really is running: indexing a
@@ -315,6 +349,182 @@ export class LeasePlanAuthority implements PlanAuthority {
       blockedBy: admission.blockedBy,
       explanation: admission.explanation,
     };
+  }
+
+  /**
+   * The whole repository, for a task nobody is competing with.
+   *
+   * The check is deliberately stricter than "no approved plan is executing":
+   * any other active lease at all disqualifies the claim, including one whose
+   * holder has not planned yet. A blanket claim admitted alongside a task
+   * that is mid-plan would refuse that task everything the moment it
+   * submitted, and it has already paid for the plan by then.
+   *
+   * The grant is written under the same compare-and-swap every admission
+   * uses, so a claim and an admission decided at the same instant cannot both
+   * be recorded. A refused write is not an error: it means somebody arrived,
+   * and the caller simply plans as it always did.
+   */
+  public async claimRepository(
+    request: BlanketClaimRequest,
+  ): Promise<AgentPlan | undefined> {
+    if (!this.blanketClaims) {
+      return undefined;
+    }
+    const leaseId = this.leaseIdForTask.get(request.task.id);
+    if (leaseId === undefined) {
+      // Nothing durable to publish the claim on, so nothing would stop a
+      // second task being admitted straight into it.
+      return undefined;
+    }
+    await this.store.expireWorkLeases(new Date().toISOString());
+    const lease = await this.store.getWorkLease(leaseId);
+    if (lease === undefined || lease.status !== "active") {
+      return undefined;
+    }
+    if (lease.plan !== undefined) {
+      // A contract already exists for this task — a resumed turn, or a retry
+      // after a deferral. Replacing it with a wider one is precisely what the
+      // immutability rule on approved admissions forbids.
+      return undefined;
+    }
+    const others = (
+      await this.store.listWorkLeases({
+        status: "active",
+        repositoryId: lease.repositoryId,
+      })
+    ).filter((candidate) => candidate.id !== lease.id);
+    if (others.length > 0) {
+      return undefined;
+    }
+    const plan = blanketPlan(request.task);
+    const admission = this.admissions.admit({
+      plan,
+      agentId: request.task.agentId,
+      baseRevision: request.baseVersion.revision,
+      baseVersion: request.baseVersion.sequence,
+      active: [],
+      planRevision: 1,
+    });
+    if (!planAdmissionApproved(admission)) {
+      return undefined;
+    }
+    const saved = await this.store.saveWorkLeasePlan({
+      leaseId: lease.id,
+      submission: { plan, admission },
+      // Nothing else is admitted here, and the write is refused if that
+      // stopped being true between the read above and this line.
+      observedApprovedLeaseIds: [],
+    });
+    if (saved.outcome !== "saved") {
+      return undefined;
+    }
+    await this.store.appendAudit(undefined, {
+      type: "blanket_claim_granted",
+      taskId: request.task.id,
+      data: {
+        ...(request.projectId === undefined
+          ? {}
+          : { projectId: request.projectId }),
+        repositoryId: request.repository.id,
+        leaseId: lease.id,
+        baseRevision: request.baseVersion.revision,
+        planningCallsSaved: 1,
+      },
+    });
+    return plan;
+  }
+
+  /**
+   * Narrows a blanket claim to what its holder has actually touched, the
+   * moment anybody else is in the repository.
+   *
+   * The worktree is read here, between deciding to freeze and writing the
+   * result, and never sampled from anything that polls: a file written a
+   * second ago belongs to this task, and handing it to the arriving one would
+   * put two agents in it. A refused write — somebody's admission landed
+   * first — re-reads the worktree rather than reusing this one, for the same
+   * reason.
+   */
+  public async freezeBlanketClaim(
+    request: BlanketFreezeRequest,
+  ): Promise<AgentPlan | undefined> {
+    if (!isBlanketClaim(request.plan)) {
+      return undefined;
+    }
+    const leaseId = this.leaseIdForTask.get(request.task.id);
+    if (leaseId === undefined) {
+      return undefined;
+    }
+    await this.store.expireWorkLeases(new Date().toISOString());
+    const lease = await this.store.getWorkLease(leaseId);
+    if (lease === undefined || lease.status !== "active") {
+      return undefined;
+    }
+    const others = (
+      await this.store.listWorkLeases({
+        status: "active",
+        repositoryId: lease.repositoryId,
+      })
+    ).filter((candidate) => candidate.id !== lease.id);
+    if (others.length === 0) {
+      // Still alone. A claim narrowed for nobody costs this task scope it may
+      // still need and buys no one anything.
+      return undefined;
+    }
+    const approvedLeaseIds = others
+      .filter(
+        (candidate) =>
+          candidate.plan !== undefined &&
+          planAdmissionApproved(candidate.plan.admission),
+      )
+      .map((candidate) => candidate.id)
+      .sort();
+    const frozen = freezePlanFromWorkingChanges(
+      request.plan,
+      await request.observe(),
+    );
+    const admission: PlanAdmission = this.admissions.admit({
+      plan: frozen,
+      agentId: request.task.agentId,
+      baseRevision: request.baseVersion.revision,
+      baseVersion: request.baseVersion.sequence,
+      // A narrowing of a claim that already covered the repository cannot
+      // collide with anything: everything it keeps, it already held.
+      active: [],
+      planRevision: request.planRevision + 1,
+    });
+    const saved = await this.store.saveWorkLeasePlan({
+      leaseId: lease.id,
+      submission: { plan: frozen, admission },
+      observedApprovedLeaseIds: approvedLeaseIds,
+      // The one legitimate rewrite of an approved contract, for the same
+      // reason mid-execution arbitration is: this is narrower than what was
+      // already granted, so nobody's decision is invalidated by it.
+      replaceApproved: true,
+    });
+    if (saved.outcome === "stale") {
+      return await this.freezeBlanketClaim(request);
+    }
+    if (saved.outcome === "lease_lost") {
+      return undefined;
+    }
+    await this.store.appendAudit(undefined, {
+      type: "blanket_claim_frozen",
+      taskId: request.task.id,
+      data: {
+        ...(request.projectId === undefined
+          ? {}
+          : { projectId: request.projectId }),
+        repositoryId: request.repository.id,
+        leaseId: lease.id,
+        files: frozen.expectedFiles,
+        directories:
+          frozen.claim?.kind === "frozen" ? frozen.claim.directories : [],
+        arrivedTasks: others.map((candidate) => candidate.taskId).sort(),
+      },
+    });
+    return frozen;
   }
 
   /**

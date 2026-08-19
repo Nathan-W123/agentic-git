@@ -182,6 +182,10 @@ The server binds to loopback by default. Relevant deployment variables are:
 | `COORD_ALLOWED_ORIGINS` | Comma-separated additional browser origins. |
 | `COORD_SECURE_COOKIES` | Set `true` behind HTTPS. |
 
+Sign-up confirmation codes and password-reset links need a mail provider
+configured, or they are written to the server log instead of being sent:
+[setting up email](docs/email-setup.md).
+
 ## Real Agents
 
 The benchmark can replace selected scripted tasks with a real JSONL process:

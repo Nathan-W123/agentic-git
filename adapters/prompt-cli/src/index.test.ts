@@ -1197,3 +1197,157 @@ test("claude: an explicit ask is planned as the work that follows its questions"
   assert.doesNotMatch(planningInputs[0] ?? "", /Coordinator: force a question/u);
   assert.match(planningInputs[0] ?? "", /clarification round/u);
 });
+
+test("claude: a released file is handed back and the next round is prompted with the narrowed plan", async () => {
+  const fixture = await createFixture();
+  const executionInputs: string[] = [];
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    if (args.includes("--permission-mode")) {
+      return output(
+        claudeEnvelope(
+          JSON.stringify({
+            ...PLAN,
+            expectedFiles: ["src/value.js", "src/spare.js"],
+          }),
+        ),
+      );
+    }
+    executionInputs.push(String(options.input));
+    if (executionInputs.length === 1) {
+      return output(
+        claudeEnvelope(
+          JSON.stringify({
+            ...COMPLETION,
+            outcome: "scope_release_requested",
+            requestId: "release_1",
+            symbolsChanged: [],
+            explanation: "",
+            additionalFiles: ["src/spare.js"],
+            reason: "The spare file turned out not to need changing",
+          }),
+        ),
+      );
+    }
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(claudeEnvelope(JSON.stringify(COMPLETION)));
+  };
+
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const seen: string[] = [];
+  await adapter.streamEvents(session.id, (event) => {
+    seen.push(event.event);
+    if (event.event === "scope_release_requested") {
+      assert.deepEqual(event.releasedFiles, ["src/spare.js"]);
+      void adapter.resolveScopeChange(session.id, {
+        requestId: event.requestId ?? "",
+        taskId: TASK.id,
+        decision: "approved",
+        revisedPlan: { ...PLAN, expectedFiles: ["src/value.js"] },
+        constraints: [],
+        ownershipGrants: [],
+        explanation: "Released",
+        decidedAt: new Date().toISOString(),
+      });
+    }
+  });
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+
+  await adapter.sendContext(session.id, contextFor(workspace));
+
+  assert.ok(seen.includes("scope_release_requested"), seen.join(", "));
+  assert.equal(executionInputs.length, 2);
+  // The round after a granted release is prompted with the plan now in force,
+  // so the agent cannot go on believing the released file is still its own.
+  assert.doesNotMatch(executionInputs[1] ?? "", /src\/spare\.js/u);
+  const changeSet = await adapter.collectChanges(session.id);
+  assert.equal(changeSet.patches.length, 1);
+});
+
+test("claude: the execution prompt and schema both offer handing scope back", async () => {
+  const fixture = await createFixture();
+  let executionInput = "";
+  let executionSchema: { properties?: { outcome?: { enum?: string[] } } } = {};
+  const runner: PromptCliProcessRunner = async (
+    _executable,
+    args,
+    options = {},
+  ) => {
+    if (args.includes("--permission-mode")) {
+      return output(claudeEnvelope(JSON.stringify(PLAN)));
+    }
+    executionInput = String(options.input);
+    executionSchema = JSON.parse(
+      String(args[args.indexOf("--json-schema") + 1]),
+    ) as typeof executionSchema;
+    await writeFile(
+      path.join(String(options.cwd), "src", "value.js"),
+      "export const value = 2;\n",
+      "utf8",
+    );
+    return output(claudeEnvelope(JSON.stringify(COMPLETION)));
+  };
+
+  const adapter = createClaudeAdapter({
+    agentId: "claude",
+    repository: fixture.repository,
+    workspaces: fixture.workspaces,
+    planningRoot: fixture.planningRoot,
+    command: "claude-test",
+    runner,
+  });
+  const session = await adapter.startTask({
+    task: TASK,
+    canonicalVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+    repositoryId: fixture.repository.id,
+  });
+  await adapter.requestPlan(session.id);
+  const workspace = await fixture.workspaces.create({
+    taskId: TASK.id,
+    rootPath: fixture.workspaceRoot,
+    repository: fixture.repository,
+    baseVersion: await fixture.repositories.getCanonicalVersion(
+      fixture.repository,
+    ),
+  });
+  await adapter.sendContext(session.id, contextFor(workspace));
+
+  assert.match(executionInput, /scope_release_requested/u);
+  assert.ok(
+    executionSchema.properties?.outcome?.enum?.includes(
+      "scope_release_requested",
+    ),
+    JSON.stringify(executionSchema.properties?.outcome),
+  );
+});

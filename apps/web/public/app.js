@@ -475,15 +475,24 @@ function renderInvite() {
 }
 
 function renderRegistrationConfirmation() {
+  // Nothing was emailed when the server says the code went to its log, so the
+  // screen says that rather than sending somebody to watch an empty inbox.
+  const logOnly = pendingRegistration?.delivery === "log";
   return `<main class="auth-shell">
     <div class="auth-box">
       <div class="auth-mascot">
         ${brandMark(54)}
         <div>
-          <h1>Check your email</h1>
-          <p>Enter the six-digit code sent to ${esc(
-            pendingRegistration?.email ?? "your email address",
-          )}.</p>
+          <h1>${logOnly ? "Your code is in the server log" : "Check your email"}</h1>
+          <p>${
+            logOnly
+              ? `No mail relay is configured on this deployment, so no email was sent to ${esc(
+                  pendingRegistration?.email ?? "your email address",
+                )}. The six-digit code was written to the control plane log with the <code>[mail]</code> prefix — an operator can read it there, or set a mail relay so codes are emailed.`
+              : `Enter the six-digit code sent to ${esc(
+                  pendingRegistration?.email ?? "your email address",
+                )}.`
+          }</p>
         </div>
       </div>
       <form class="auth-card" data-act="registration-confirmation">
@@ -893,11 +902,13 @@ async function submitBootstrap(form) {
 }
 
 /**
- * Starts sign-up, then waits for proof that the mailbox is reachable.
+ * Creates the account and goes straight in.
  *
- * The first response deliberately carries no session. It only identifies the
- * short-lived challenge whose code was mailed to the address, and the account
- * does not exist until the next form confirms it.
+ * Email confirmation is switched off on this deployment, so the server
+ * answers with a session and the app opens on the chats screen — the same
+ * landing an invitation gets. A deployment that turns confirmation back on
+ * answers with a challenge instead of a session, and the code screen below
+ * still handles it; which one came back is what the response says.
  */
 async function submitRegister(form) {
   const data = new FormData(form);
@@ -919,10 +930,20 @@ async function submitRegister(form) {
         ...(organizationName === "" ? {} : { organizationName }),
       },
     });
+    // Signed in already: the account exists and the session cookie is set.
+    if (registration.user !== undefined) {
+      pendingRegistration = undefined;
+      authMode = "login";
+      window.location.hash = "#chats";
+      await boot();
+      return;
+    }
     pendingRegistration = {
       registrationId: registration.registrationId,
       expiresAt: registration.expiresAt,
       email: String(data.get("email") ?? "").trim(),
+      // "log" means this deployment has no mail relay, so nothing was sent.
+      delivery: registration.delivery === "log" ? "log" : "mailbox",
     };
     $("#auth-root").innerHTML = renderAuth();
   } catch (error) {
@@ -3924,7 +3945,40 @@ function actionOf(event) {
   return node === null ? undefined : { node, act: node.dataset.act, value: node.dataset.value };
 }
 
+/**
+ * Gives a touch reader one message's controls at a time.
+ *
+ * A pointer reveals the action bar by hovering the row. Touch has no hover,
+ * but permanently drawing every bar turns the transcript into a column of
+ * controls. A tap on a message therefore selects that row; tapping it again
+ * or anywhere outside a message clears the selection. Once the bar is open,
+ * pressing one of its controls must not close it before the delegated action
+ * below gets the same click.
+ */
+function selectMobileChannelMessage(event) {
+  if (!window.matchMedia("(hover: none)").matches) {
+    return;
+  }
+  const row = event.target.closest?.(".cmsg-row:not(.cmsg-system)") ?? null;
+  if (row !== null && event.target.closest?.(".cmsg-actions") !== null) {
+    return;
+  }
+  const shouldSelect =
+    row !== null && !row.classList.contains("cmsg-selected");
+  for (const selected of document.querySelectorAll(
+    ".cmsg-row.cmsg-selected",
+  )) {
+    selected.classList.remove("cmsg-selected");
+  }
+  if (shouldSelect) {
+    row.classList.add("cmsg-selected");
+  }
+}
+
 document.addEventListener("click", (event) => {
+  // This runs before action lookup because an ordinary message body has no
+  // `data-act`: selecting it is still a complete interaction on touch.
+  selectMobileChannelMessage(event);
   const found = actionOf(event);
   if (found === undefined) {
     return;

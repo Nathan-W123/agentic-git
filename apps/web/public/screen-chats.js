@@ -1719,10 +1719,14 @@ function messageRow(
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
-  // Person-to-person replies live in the channel itself. Agent-authored roots
-  // retain the task thread they have always used.
+  // One acknowledgement under a person's task stays visually flat. Once the
+  // agent has substantive narration too, that same request becomes the root
+  // of the task thread. Legacy agent-authored roots keep their old shape.
   const inlineReply = inlineReplyTo !== undefined;
-  const hasTaskThread = entry.kind !== "user" && replies.length > 0;
+  const hasTaskThread =
+    replies.length > 0 &&
+    (entry.kind !== "user" ||
+      (entry.taskId !== undefined && replies.length > 1));
   // Agent answers and acknowledgements remain ordinary roots in the room's
   // chronological transcript. Their stored reference is the address back to
   // the request that prompted them; it does not replace the task thread the
@@ -1965,7 +1969,7 @@ function messageRow(
               title: "Reply to this message",
               small: true,
             })
-          : inlineReply || entry.kind === "user"
+          : inlineReply || (entry.kind === "user" && !hasTaskThread)
             ? iconButton("reply", {
                 act: "channel-message-reply",
                 value: inlineReply ? inlineReplyTo.id : entry.id,
@@ -2076,7 +2080,9 @@ function messageList(repositoryId) {
     entries
       .filter(
         (entry) =>
-          (entry.replies ?? []).length > 0 && entry.taskId !== undefined,
+          entry.taskId !== undefined &&
+          (entry.replies ?? []).length > 0 &&
+          (entry.kind !== "user" || (entry.replies ?? []).length > 1),
       )
       .map((entry) => entry.taskId),
   );
@@ -2102,7 +2108,10 @@ function messageList(repositoryId) {
   };
   const pending = [];
   for (const entry of entries) {
-    if (entry.kind !== "user") {
+    if (
+      entry.kind !== "user" ||
+      (entry.taskId !== undefined && (entry.replies ?? []).length > 1)
+    ) {
       continue;
     }
     for (const reply of entry.replies ?? []) {
@@ -2687,7 +2696,8 @@ function composer(repositoryId) {
           placeholder="${
             state.composerThreadId === undefined
               ? `Message #${esc(repositoryId ?? "")}`
-              : replyTarget?.kind === "user"
+              : replyTarget?.kind === "user" &&
+                  replyTarget.taskId === undefined
                 ? "Write a reply..."
                 : "Add to this thread..."
           }">${esc(draftText())}</textarea>
@@ -2897,7 +2907,10 @@ function threadListPanel(repositoryId) {
   };
   const threads = channelMessagesFor(repositoryId)
     .filter(
-      (entry) => entry.kind !== "user" && (entry.replies ?? []).length > 0,
+      (entry) =>
+        (entry.replies ?? []).length > 0 &&
+        (entry.kind !== "user" ||
+          (entry.taskId !== undefined && (entry.replies ?? []).length > 1)),
     )
     .slice()
     .sort((left, right) => lastActivity(right).localeCompare(lastActivity(left)));
@@ -3312,26 +3325,31 @@ function agentSpec(agent, repositoryId) {
   const allChannelsLoaded = state.repositories.every((repository) =>
     state.channelRosterLoaded.has(repository.id),
   );
-  // One row, written the way the conversation beside it writes a line: the
-  // thing on the left, the one value that answers it on the right. A card per
-  // setting was two borders and a heading to say "opus", and the page had six
-  // of them stacked — the boxes were most of what there was to read.
-  const settingRow = (label, control, title = "") =>
-    `<div class="aspec-row"${title === "" ? "" : ` title="${esc(title)}"`}>
-      <span class="aspec-row-label">${esc(label)}</span>
-      <span class="aspec-row-value">${control}</span>
+  // The reference treats configuration as a short set of integrations rather
+  // than a settings table. The controls stay in place, but each value now reads
+  // as one compact connection chip beneath the profile introduction.
+  const configurationChip = (label, control, title = "") =>
+    `<div class="aspec-chip"${title === "" ? "" : ` title="${esc(title)}"`}>
+      <span class="aspec-chip-label">${esc(label)}</span>
+      <span class="aspec-chip-value">${control}</span>
     </div>`;
   const readOnly = (value) =>
-    `<span class="aspec-row-text">${esc(value)}</span>`;
-  // The same row shape, with the value half editable. In this channel it reads
-  // "Role", because the heading above it already says which channel; in the
-  // list of the agent's other rooms the channel is the label.
+    `<span class="aspec-chip-text">${esc(value)}</span>`;
+  // Channel roles remain editable in the profile's capabilities list. This is
+  // the same form contract as before, only presented like the checked rows in
+  // the supplied design.
   const roleField = (repository, member, here = false) => `<form
-    class="aspec-row aspec-channel" data-act="agent-role-form"
+    class="aspec-capability aspec-channel" data-act="agent-role-form"
     data-value="${esc(agent.id)}" data-repo="${esc(repository.id)}">
-    <span class="aspec-row-label" title="#${esc(repository.id)}">${
-      here ? "Role" : `#${esc(repository.id)}`
-    }</span>
+    <span class="aspec-capability-mark">${icon("check")}</span>
+    <span class="aspec-capability-copy">
+      <span class="aspec-capability-title">${
+        here ? "Role in this channel" : `#${esc(repository.id)}`
+      }</span>
+      <span class="aspec-capability-meta">${
+        here ? `How ${esc(agent.name)} contributes in #${esc(repository.id)}` : "Channel role"
+      }</span>
+    </span>
     <input class="aspec-role" data-act="agent-role-input"
       data-value="${esc(agent.id)}" data-repo="${esc(repository.id)}"
       value="${esc(member.role ?? "")}" maxlength="120" autocomplete="off"
@@ -3354,12 +3372,12 @@ function agentSpec(agent, repositoryId) {
   // override at all — it is the stored credential's own field, so the answer
   // is the same in every room and only its owner may change it. It sits with
   // Connection above the per-channel settings for that reason, and says so in
-  // the row's tooltip rather than in another line of prose.
+  // the chip's tooltip rather than in another line of prose.
   const visibility = agent.visibility === "org" ? "org" : "personal";
-  const configuration = `<div class="aspec-rows" data-agent="${esc(agent.id)}">
-      ${settingRow("Connection", readOnly(agentLabelOf(providerId)), providerId)}
-      ${settingRow(
-        "Who can task it",
+  const configuration = `<div class="aspec-chip-grid" data-agent="${esc(agent.id)}">
+      ${configurationChip("Connection", readOnly(agentLabelOf(providerId)), providerId)}
+      ${configurationChip(
+        "Visibility",
         agent.mine === true
           ? miniSelect(
               "channel-agent-visibility",
@@ -3375,7 +3393,7 @@ function agentSpec(agent, repositoryId) {
             ),
         `Set on the connection, so it applies wherever this agent works — not just #${repositoryId}`,
       )}
-      ${settingRow(
+      ${configurationChip(
         "Model",
         models.length === 0
           ? readOnly(currentAssignment.model || "Default")
@@ -3386,7 +3404,7 @@ function agentSpec(agent, repositoryId) {
               "Model in this channel",
             ),
       )}
-      ${settingRow(
+      ${configurationChip(
         "Reasoning",
         efforts.length === 0
           ? readOnly(currentAssignment.effort || "Default")
@@ -3397,13 +3415,6 @@ function agentSpec(agent, repositoryId) {
               "Reasoning effort in this channel",
             ),
       )}
-      ${roleField(
-        state.repositories.find((repository) => repository.id === repositoryId) ?? {
-          id: repositoryId,
-        },
-        currentAssignment,
-        true,
-      )}
     </div>`;
   // The room the panel was opened from is already the whole first section, so
   // it is not repeated in the list underneath it; that list is only "and here
@@ -3411,103 +3422,114 @@ function agentSpec(agent, repositoryId) {
   const elsewhere = assignments.filter(
     ({ repository }) => repository.id !== repositoryId,
   );
+  const currentRepository =
+    state.repositories.find((repository) => repository.id === repositoryId) ?? {
+      id: repositoryId,
+    };
+  const currentRole = String(currentAssignment.role ?? "").trim();
+  const description =
+    currentRole === ""
+      ? `Ready to take on work in #${repositoryId}. Review how this agent is connected, who can task it, and how it is configured for this channel.`
+      : `Focused on ${currentRole} in #${repositoryId}. Review how this agent is connected, who can task it, and how it is configured for this channel.`;
   return `<div class="agent-spec">
-    <section class="aspec-head">
-      <span class="aspec-face">
-        ${agentFace(agent, 44)}
-        ${statusDot(status, AGENT_STATUS_TITLE[status])}
-      </span>
-      <div class="aspec-identity">
+    <div class="aspec-content">
+      <section class="aspec-head">
+        <span class="aspec-face">
+          ${agentFace(agent, 68)}
+          ${statusDot(status, AGENT_STATUS_TITLE[status])}
+        </span>
         <h2>${esc(agent.name)}</h2>
+        <p class="aspec-description">${esc(description)}</p>
         <div class="aspec-sub">${esc(AGENT_STATUS_TITLE[status])} · #${esc(
           repositoryId,
         )}${agent.mine ? " · Your agent" : ""}</div>
-      </div>
-    </section>
+      </section>
 
-    <section class="aspec-section">
-      <div class="aspec-label">Orchestration in #${esc(repositoryId)}</div>
-      ${configuration}
-      ${optionsNote === "" ? "" : `<div class="aspec-note">${esc(optionsNote)}</div>`}
-      <div class="aspec-note">A role is what this agent is for here; it rides
-        on every task submitted in this channel.${
-          // Said where the switch is, because "anyone in the org" reads like
-          // handing over the key otherwise: it decides who may @mention the
-          // agent, and the credential behind it is still never shared.
-          agent.mine === true
-            ? ` Sharing it with the org lets teammates @mention it —
-        the credential itself is never shared.`
-            : ""
-        }</div>
-    </section>
+      <section class="aspec-section">
+        <h3 class="aspec-label">Works with</h3>
+        ${configuration}
+        ${optionsNote === "" ? "" : `<div class="aspec-note">${esc(optionsNote)}</div>`}
+      </section>
 
-    <section class="aspec-section">
-      <div class="aspec-label-row">
-        <span class="aspec-label">Current task</span>
-        <button type="button" class="aspec-nav" data-act="agent-panel-tab"
-          data-value="history" title="Task history">
-          <span>History</span>${icon("arrowRight")}</button>
-      </div>
+      <section class="aspec-section">
+        <h3 class="aspec-label">Capabilities</h3>
+        <div class="aspec-capabilities">
+          ${roleField(currentRepository, currentAssignment, true)}
+          <div class="aspec-capability aspec-current-task">
+            <span class="aspec-capability-mark">${icon("check")}</span>
+            <span class="aspec-capability-copy">
+              <span class="aspec-capability-title">${
+                task === undefined
+                  ? "Available for new work"
+                  : esc(taskSummaryLine(task, taskMessage))
+              }</span>
+              <span class="aspec-capability-meta">${
+                task === undefined
+                  ? `No task is running in #${esc(repositoryId)}`
+                  : `${esc(
+                      String(task.status ?? "working").replaceAll("_", " "),
+                    )} · #${esc(taskRepositoryId)} · ${esc(relativeTime(task.submittedAt))}`
+              }</span>
+            </span>
+            <button type="button" class="aspec-nav" data-act="agent-panel-tab"
+              data-value="history" title="Task history">
+              <span>History</span>${icon("arrowRight")}</button>
+          </div>
+        </div>
+        <div class="aspec-note">A role is what this agent is for here; it rides
+          on every task submitted in this channel.${
+            // Said where the switch is, because "anyone in the org" reads like
+            // handing over the key otherwise: it decides who may @mention the
+            // agent, and the credential behind it is still never shared.
+            agent.mine === true
+              ? ` Sharing it with the org lets teammates @mention it —
+          the credential itself is never shared.`
+              : ""
+          }</div>
+      </section>
+
       ${
-        // A box is spent on the one thing that is happening rather than on the
-        // sentence saying nothing is: an idle agent should read as a quiet
-        // line, not as an empty container with a border around the emptiness.
-        task === undefined
-          ? `<div class="aspec-note">Nothing running.</div>`
-          : `<div class="aspec-box aspec-live">
-               <div class="aspec-task">${esc(taskSummaryLine(task, taskMessage))}</div>
-               <div class="aspec-task-meta">${esc(
-                 String(task.status ?? "working").replaceAll("_", " "),
-               )} · #${esc(taskRepositoryId)} · ${esc(relativeTime(task.submittedAt))}</div>
-             </div>`
+        elsewhere.length === 0 && allChannelsLoaded
+          ? ""
+          : `<section class="aspec-section">
+              <div class="aspec-label-row">
+                <h3 class="aspec-label">Also in</h3>
+                <span class="aspec-count">${elsewhere.length}</span>
+              </div>
+              ${
+                elsewhere.length === 0
+                  ? ""
+                  : `<div class="aspec-capabilities aspec-channels">
+                      ${elsewhere
+                        .map(({ repository, member }) => roleField(repository, member))
+                        .join("")}
+                    </div>`
+              }
+              ${
+                allChannelsLoaded
+                  ? ""
+                  : `<div class="aspec-note">Checking remaining channels…</div>`
+              }
+            </section>`
       }
-    </section>
 
-    ${
-      elsewhere.length === 0 && allChannelsLoaded
-        ? ""
-        : `<section class="aspec-section">
-            <div class="aspec-label-row">
-              <span class="aspec-label">Also in</span>
-              <span class="aspec-count">${elsewhere.length}</span>
-            </div>
-            ${
-              // No empty rule where the list would be: an `.aspec-rows` with
-              // nothing in it is still a hairline across the panel, which
-              // reads as a row that failed to render rather than as a list
-              // that has not arrived.
-              elsewhere.length === 0
-                ? ""
-                : `<div class="aspec-rows aspec-channels">
-                    ${elsewhere
-                      .map(({ repository, member }) => roleField(repository, member))
-                      .join("")}
-                  </div>`
-            }
-            ${
-              allChannelsLoaded
-                ? ""
-                : `<div class="aspec-note">Checking remaining channels…</div>`
-            }
-          </section>`
-    }
-
-    <section class="aspec-section">
-      <div class="aspec-label-row">
-        <span class="aspec-label">Usage</span>
-        ${
-          agent.mine === true
-            ? iconButton("refresh", {
-                act: "agent-usage-refresh",
-                value: providerId,
-                title: "Check usage again",
-                small: true,
-              })
-            : ""
-        }
-      </div>
-      ${agentUsage(agent)}
-    </section>
+      <section class="aspec-section aspec-usage-section">
+        <div class="aspec-label-row">
+          <h3 class="aspec-label">Usage</h3>
+          ${
+            agent.mine === true
+              ? iconButton("refresh", {
+                  act: "agent-usage-refresh",
+                  value: providerId,
+                  title: "Check usage again",
+                  small: true,
+                })
+              : ""
+          }
+        </div>
+        <div class="aspec-usage-card">${agentUsage(agent)}</div>
+      </section>
+    </div>
   </div>`;
 }
 
@@ -3559,7 +3581,7 @@ function agentPanel() {
   // definitions merged into a column flex box that centred its child: the
   // header shrank to its own content and floated in the middle of the panel,
   // hairline and all, while the page under it stayed full width.
-  return `<aside class="thread-panel">
+  return `<aside class="thread-panel agent-detail-panel">
     ${panelGrip()}
     <header class="thread-head">
       ${panelKind(
@@ -4753,7 +4775,8 @@ export function submitComposerMessage(rerender) {
     state.mentionActive = false;
     // A direct reply is one message, not a mode the composer stays trapped
     // in. Continuing an agent task remains sticky as before.
-    const directReply = target?.kind === "user";
+    const directReply =
+      target?.kind === "user" && target.taskId === undefined;
     if (directReply) {
       state.composerThreadId = undefined;
     }
@@ -4854,7 +4877,7 @@ function composerThreadChip(repositoryId) {
   if (root === undefined) {
     return "";
   }
-  const directReply = root.kind === "user";
+  const directReply = root.kind === "user" && root.taskId === undefined;
   const author = channelAuthor(repositoryId, root);
   const title = `${directReply ? `${author.name}: ` : ""}${threadTitle(root)}`;
   return `<div class="composer-thread">

@@ -1,6 +1,8 @@
 import {
   arbitrationFiles,
+  claimCoversPath,
   completeAgentPlan,
+  isBlanketClaim,
   planAdmissionApproved,
   planGroundingConfidence,
   planResourceKey,
@@ -389,6 +391,16 @@ export class PlanAdmissionController {
    * wait for all five is throughput thrown away for no safety gained.
    */
   public admit(input: PlanAdmissionInput): PlanAdmission {
+    // Answered before anything is scored, because a coordinator-issued claim
+    // is not a set of declarations conflict scoring could compare with: a
+    // blanket claim holds the whole repository, and a claim frozen from
+    // observation holds directories its holder is still working through. Both
+    // are refusals of overlap rather than judgements about it, and both leave
+    // everything outside them to be decided exactly as it always was.
+    const claimed = this.claimBlocked(input);
+    if (claimed !== undefined) {
+      return claimed;
+    }
     const whole = this.decide(input.plan, input, this.occupancy(input));
     if (planAdmissionApproved(whole) || input.partialAdmission === false) {
       return whole;
@@ -587,6 +599,66 @@ export class PlanAdmissionController {
               `${resource.resourceId} (held by ${resource.heldBy.join(", ")})`,
           )
           .join(", "),
+    };
+  }
+
+  /**
+   * A refusal when an executing task holds a claim over something this plan
+   * wants, or nothing when it does not.
+   *
+   * Deliberately not folded into conflict scoring. A claim is a statement
+   * about what a task is *allowed* to reach, not evidence about what it
+   * intends, and scoring it would let a high-confidence disjointness argument
+   * talk its way past a lease that has already been granted.
+   */
+  private claimBlocked(input: PlanAdmissionInput): PlanAdmission | undefined {
+    const candidate = input.plan.taskId;
+    const others = input.active.filter((entry) => entry.taskId !== candidate);
+    if (others.length === 0) {
+      return undefined;
+    }
+    const wanted = arbitrationFiles(input.plan);
+    const blocking = others.filter(
+      (entry) =>
+        isBlanketClaim(entry.plan) ||
+        wanted.some((file) => claimCoversPath(entry.plan, file)),
+    );
+    if (blocking.length === 0) {
+      return undefined;
+    }
+    const blanket = blocking.some((entry) => isBlanketClaim(entry.plan));
+    return {
+      taskId: candidate,
+      planRevision: input.planRevision ?? 1,
+      baseRevision: input.baseRevision,
+      decidedAt: new Date().toISOString(),
+      status: "sequenced",
+      ownershipGrants: [],
+      constraints: [
+        blanket
+          ? "Resubmit once the repository-wide claim is narrowed or released"
+          : "Plan around the directories the executing task is working in, " +
+            "or resubmit once it integrates",
+      ],
+      blockedBy: blocking.map((entry) => entry.taskId).sort(),
+      conflicts: [],
+      explanation: blanket
+        ? "A task already executing holds a repository-wide claim, so nothing " +
+          "else can be admitted until it is narrowed to what it has touched"
+        : "Executing work holds " +
+          blocking
+            .flatMap((entry) =>
+              (entry.plan.claim?.kind === "frozen"
+                ? entry.plan.claim.directories
+                : []
+              ).filter((directory) =>
+                wanted.some((file) => file.startsWith(directory)),
+              ),
+            )
+            .filter((value, index, all) => all.indexOf(value) === index)
+            .sort()
+            .join(", "),
+      retryAfterMs: input.retryAfterMs ?? DEFAULT_PLAN_RETRY_MS,
     };
   }
 

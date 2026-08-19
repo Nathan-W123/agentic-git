@@ -17,6 +17,7 @@ import {
 import {
   assertAgentPlan,
   createId,
+  isBlanketClaim,
   readsAsReportRequest,
   scopeChangeGranted,
   type AgentPlan,
@@ -550,7 +551,35 @@ interface ScopeChange {
   explanation: string;
 }
 
-type ExecutionResult = Completion | ScopeChange | QuestionAsked | ActionRequested;
+/**
+ * The agent handing part of its approved plan back before the task ends.
+ *
+ * Carried in the same fields a widening uses, rather than seven more of its
+ * own: the CLI answers one fixed schema every round, and an outcome that
+ * needed extra properties would make every ordinary completion carry them
+ * too. The outcome says which direction the named resources are moving.
+ */
+interface ScopeRelease {
+  outcome: "scope_release_requested";
+  requestId: string;
+  additionalFiles: string[];
+  additionalSymbols: string[];
+  additionalApis: string[];
+  additionalSchemas: string[];
+  additionalConfigKeys: string[];
+  additionalTests: string[];
+  additionalServices: string[];
+  reason: string;
+  symbolsChanged: string[];
+  explanation: string;
+}
+
+type ExecutionResult =
+  | Completion
+  | ScopeChange
+  | ScopeRelease
+  | QuestionAsked
+  | ActionRequested;
 
 interface PromptCliSession {
   session: AgentSession;
@@ -775,7 +804,8 @@ function assertExecutionResult(
     return;
   }
   if (
-    completion.outcome !== "scope_change_requested" ||
+    (completion.outcome !== "scope_change_requested" &&
+      completion.outcome !== "scope_release_requested") ||
     typeof completion.requestId !== "string" ||
     !stringArray(completion.additionalFiles) ||
     !stringArray(completion.additionalSymbols) ||
@@ -787,7 +817,7 @@ function assertExecutionResult(
     typeof completion.reason !== "string"
   ) {
     throw new TypeError(
-      "The scope change request does not match the required output shape",
+      "The scope request does not match the required output shape",
     );
   }
 }
@@ -860,11 +890,12 @@ const EXPLANATION_STYLE_INSTRUCTIONS = [
 
 const COMPLETION_SHAPE_INSTRUCTIONS = [
   "When you are done (or blocked), answer with exactly one JSON object and nothing else:",
-  '  outcome ("completed", "scope_change_requested", "question_asked" or "action_requested"), symbolsChanged, explanation,',
+  '  outcome ("completed", "scope_change_requested", "scope_release_requested", "question_asked" or "action_requested"), symbolsChanged, explanation,',
   "  requestId, additionalFiles, additionalSymbols, additionalApis, additionalSchemas,",
   "  additionalConfigKeys, additionalTests, additionalServices, reason,",
   "  question, options, recommended, questions, action",
   "For completed, use empty scope fields. For scope_change_requested, fill every scope field.",
+  "For scope_release_requested, put the resources you are handing back in the same scope fields and say why in reason.",
   'For question_asked, set requestId and either question plus options (at least two), or questions: a list of up to ' +
     String(MAX_AGENT_QUESTIONS) +
     ' objects, each with its own question, options (at least two) and recommended (the index of the one you would pick). Leave the scope fields empty.',
@@ -958,6 +989,7 @@ const COMPLETION_JSON_SCHEMA_DEFINITION = {
       enum: [
         "completed",
         "scope_change_requested",
+        "scope_release_requested",
         "question_asked",
         "action_requested",
       ],
@@ -1334,6 +1366,27 @@ export class PromptCliAdapter implements AgentAdapter {
     }
   }
 
+  /**
+   * Takes the coordinator's word for what this session may touch.
+   *
+   * The planning workspace goes with it: a session that will never be asked
+   * to plan has no use for a second checkout of the repository, and holding
+   * one would cost the very thing skipping the plan was meant to save.
+   */
+  public async acceptBlanketClaim(
+    sessionId: string,
+    plan: AgentPlan,
+  ): Promise<void> {
+    const record = this.requireSession(sessionId);
+    record.plan = structuredClone(plan);
+    await this.destroyPlanningWorkspace(record);
+    this.emit(record, {
+      event: "progress",
+      message: `${this.profile.name} holds the whole repository and started without planning`,
+      occurredAt: new Date().toISOString(),
+    });
+  }
+
   public async requestReplan(
     sessionId: string,
     request: ReplanRequest,
@@ -1552,6 +1605,39 @@ export class PromptCliAdapter implements AgentAdapter {
       }
       const requestId = execution.requestId.trim() || createId("scope");
       const pending = this.createScopeWaiter(record, requestId);
+      if (execution.outcome === "scope_release_requested") {
+        // The same round trip as a widening, in the other direction: the
+        // coordinator answers with the plan now in force, and a granted
+        // release means the named files are somebody else's from here on.
+        this.emit(record, {
+          event: "scope_release_requested",
+          requestId,
+          releasedFiles: [...execution.additionalFiles],
+          releasedSymbols: [...execution.additionalSymbols],
+          releasedApis: [...execution.additionalApis],
+          releasedSchemas: [...execution.additionalSchemas],
+          releasedConfigKeys: [...execution.additionalConfigKeys],
+          releasedTests: [...execution.additionalTests],
+          releasedServices: [...execution.additionalServices],
+          reason: execution.reason,
+          occurredAt: new Date().toISOString(),
+        });
+        const released = await pending;
+        record.scopeDecisions.push(structuredClone(released));
+        if (scopeChangeGranted(released)) {
+          // The narrowed plan is what the next round is prompted with, so the
+          // agent cannot go on believing it may edit what it just gave back.
+          record.plan = structuredClone(released.revisedPlan);
+        }
+        this.emit(record, {
+          event: "progress",
+          message:
+            `Scope release ${requestId} was ${released.decision}; ` +
+            `${this.profile.name} execution is continuing`,
+          occurredAt: new Date().toISOString(),
+        });
+        continue;
+      }
       this.emit(record, {
         event: "scope_change_requested",
         requestId,
@@ -2321,9 +2407,27 @@ export class PromptCliAdapter implements AgentAdapter {
         "you changed no files. Changing files is not the goal of such a " +
         "task; the action was.",
       "Do not modify files outside expectedFiles without first answering with a scope_change_requested outcome.",
+      "When you are finished with files in expectedFiles you no longer need " +
+        "to change, hand them back: answer with a scope_release_requested " +
+        "outcome naming them in the same scope fields, with a reason. Other " +
+        "agents are waiting on them, and they stay yours until the task " +
+        "ends otherwise. Release nothing you still have edits in or may " +
+        "still touch — getting one back is a scope change, and it will be " +
+        "refused if somebody else has taken it by then.",
       "Do not change Git metadata.",
       `Task: ${taskObjective}`,
       `Approved plan: ${JSON.stringify(approvedPlan)}`,
+      ...(approvedPlan !== undefined && isBlanketClaim(approvedPlan)
+        ? [
+            "You hold the whole repository: nobody asked you for a file " +
+              "list because nothing else is running here, so edit whatever " +
+              "the objective genuinely requires. If another task starts " +
+              "while you work, your claim is narrowed to the directories " +
+              "you have already touched, and reaching outside them from " +
+              "then on can be refused — so if you are told a file is " +
+              "taken, report that honestly instead of editing it anyway.",
+          ]
+        : []),
       `Coordinator decision: ${JSON.stringify(context.decision)}`,
       `Prior scope decisions: ${JSON.stringify(record.scopeDecisions)}`,
       // Answers already given, so a second round does not ask the same thing

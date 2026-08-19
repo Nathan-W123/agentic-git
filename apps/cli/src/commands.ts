@@ -12,6 +12,7 @@ import {
   type PromptCliEffort,
 } from "@coord/adapter-prompt-cli";
 import type { AgentAdapter } from "@coord/agent-protocol";
+import type { CodeIntelligenceService } from "@coord/code-intelligence";
 import {
   Coordinator,
   ConversationRegistry,
@@ -49,6 +50,7 @@ import {
 import { LeasePlanAuthority } from "./lease-admission.js";
 import type { AgentConfig, CoordinatorProject } from "./project.js";
 import {
+  configuredBlanketClaims,
   configuredRepositoryParallelism,
   WORK_LEASE_TTL_MS,
 } from "./worker-operations.js";
@@ -1052,6 +1054,17 @@ export interface RunOptions {
    * everything this would.
    */
   cancellations?: TaskCancellationRegistry;
+  /**
+   * The repository index this host already has.
+   *
+   * Same lifecycle argument as `conversations`: the service caches built
+   * indexes on `(repository path, revision)`, and a run that builds its own
+   * starts from an empty cache and pays the whole walk again — for a revision
+   * the host has very likely indexed already. A long-lived host passes one
+   * service here and every run's coordinator and plan authority share it.
+   * The CLI passes nothing and builds per run, exactly as before.
+   */
+  intelligence?: CodeIntelligenceService;
 }
 
 /**
@@ -1307,9 +1320,19 @@ export async function runPendingTasks(
               [...leases].map(([taskId, lease]) => [taskId, lease.id]),
             ),
             repositories,
+            blanketClaims: configuredBlanketClaims(),
+            ...(options.intelligence === undefined
+              ? {}
+              : { intelligence: options.intelligence }),
           });
     const coordinator = new Coordinator({
       repositories,
+      // Shared with admission above and with the host, when there is one:
+      // grounding a plan and admitting it read the same index of the same
+      // revision, so whichever gets there first pays for it once.
+      ...(options.intelligence === undefined
+        ? {}
+        : { intelligence: options.intelligence }),
       workspaces,
       store,
       approvalPolicy: approvalPolicyForProject(projectRecord?.policy),

@@ -209,3 +209,54 @@ test("the transcript announces itself to a screen reader", async () => {
   // announcement on the page.
   assert.doesNotMatch(chats, /id="chan-messages"[\s\S]{0,120}aria-live="assertive"/u);
 });
+
+test("mobile message actions surface only for the selected message", async () => {
+  const app = await publicFile("app.js");
+  const css = await publicFile("styles.css");
+  const select = slice(
+    app,
+    "function selectMobileChannelMessage",
+    '\ndocument.addEventListener("click"',
+  );
+
+  // Selection is a touch-only substitute for hover. A second tap on the same
+  // row leaves `shouldSelect` false, while clearing all existing selections
+  // first transfers the toolbar when a different message is tapped.
+  assert.match(select, /matchMedia\("\(hover: none\)"\)\.matches/u);
+  assert.match(select, /\.cmsg-row:not\(\.cmsg-system\)/u);
+  assert.match(
+    select,
+    /row !== null && !row\.classList\.contains\("cmsg-selected"\)/u,
+  );
+  assert.match(select, /querySelectorAll\(\s*"\.cmsg-row\.cmsg-selected"/u);
+  assert.match(select, /selected\.classList\.remove\("cmsg-selected"\)/u);
+  assert.match(select, /row\.classList\.add\("cmsg-selected"\)/u);
+
+  // A toolbar press remains a toolbar press, and the selector runs before the
+  // delegated handler's no-action early return so tapping plain message text
+  // can select it.
+  assert.match(
+    select,
+    /row !== null && event\.target\.closest\?\.\("\.cmsg-actions"\) !== null/u,
+  );
+  assert.match(
+    app,
+    /document\.addEventListener\("click", \(event\) => \{[\s\S]{0,360}selectMobileChannelMessage\(event\);\s*const found = actionOf\(event\);/u,
+  );
+
+  // Touch overrides both the later desktop hover rule and mobile browsers'
+  // sticky synthetic hover. Only the selected row restores the toolbar's
+  // placement and hit testing; the desktop hover/focus reveal remains intact.
+  assert.match(
+    css,
+    /@media \(hover: none\) \{[\s\S]*?\.cmsg-row \.cmsg-actions \{\s*opacity: 0 !important;\s*pointer-events: none !important;/u,
+  );
+  assert.match(
+    css,
+    /\.cmsg-row\.cmsg-selected \.cmsg-actions \{[\s\S]*?position: static !important;[\s\S]*?opacity: 1 !important;[\s\S]*?pointer-events: auto !important;/u,
+  );
+  assert.match(
+    css,
+    /\.cmsg-row:hover \.cmsg-actions,\s*\.cmsg-row:focus-within \.cmsg-actions \{\s*opacity: 1;\s*pointer-events: auto;/u,
+  );
+});

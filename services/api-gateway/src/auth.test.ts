@@ -34,7 +34,7 @@ import {
   parseApiToken,
   parseBearer,
 } from "./auth.js";
-import type { MailMessage } from "./mailer.js";
+import { createMailer, type MailMessage } from "./mailer.js";
 
 function confirmationCode(message: MailMessage | undefined): string {
   return /\b([0-9]{6})\b/u.exec(message?.text ?? "")?.[1] ?? "";
@@ -99,6 +99,63 @@ test("registration retains digests and creates the account only after the mailed
     ),
     ["default"],
   );
+});
+
+test("unconfirmed registration creates the account, its team and its project at once", async () => {
+  const store = new InMemoryCoordinationStore();
+  const sent: MailMessage[] = [];
+  const auth = new AuthService(store, {
+    mailer: async (message) => {
+      sent.push(message);
+    },
+  });
+
+  const user = await auth.registerUnconfirmed({
+    email: "Straight.In@Example.com",
+    displayName: "Straight In",
+    password: "NoCodeNeeded123!",
+    organizationName: "Straight team",
+  });
+  assert.equal(user.email, "straight.in@example.com");
+  assert.equal(user.systemAdmin, false);
+  assert.equal(await store.countUsers(), 1);
+  // Nothing is mailed on this path, so a deployment with no relay still works.
+  assert.equal(sent.length, 0);
+  const organizations = await store.listOrganizations(user.id);
+  assert.equal(organizations.length, 1);
+  assert.equal(organizations[0]?.name, "Straight team");
+  assert.deepEqual(
+    (await store.listProjects(organizations[0]?.id ?? "")).map(
+      (project) => project.slug,
+    ),
+    ["default"],
+  );
+  // The password is stored as a digest, and only as a digest.
+  assert.notEqual(user.passwordDigest, "NoCodeNeeded123!");
+  assert.equal(await verifyPassword("NoCodeNeeded123!", user.passwordDigest), true);
+
+  const errorCode = (code: string) => (error: unknown) =>
+    error instanceof AuthenticationError && error.code === code;
+  // The address is taken once. A second sign-up with it is refused, whatever
+  // case it is typed in.
+  await assert.rejects(
+    auth.registerUnconfirmed({
+      email: "straight.in@example.com",
+      displayName: "Impostor",
+      password: "NoCodeNeeded123!",
+    }),
+    errorCode("account_exists"),
+  );
+  // A password the policy refuses leaves no account behind.
+  await assert.rejects(
+    auth.registerUnconfirmed({
+      email: "weak@example.com",
+      displayName: "Weak",
+      password: "short",
+    }),
+    errorCode("invalid_password"),
+  );
+  assert.equal(await store.countUsers(), 1);
 });
 
 test("registration rejects wrong, expired, exhausted, reused, and unknown challenges", async () => {
@@ -574,4 +631,33 @@ test("resetting a password revokes the sessions somebody else may be holding", a
     await store.getAuthSession(stolen.principal.sessionId ?? ""),
     undefined,
   );
+});
+
+test("starting registration says whether the code was mailed or only logged", async () => {
+  const store = new InMemoryCoordinationStore();
+  const logged: string[] = [];
+  const logOnly = new AuthService(store, {
+    mailer: createMailer({ log: (line) => logged.push(line) }),
+  });
+
+  const unmailed = await logOnly.startRegistration({
+    email: "nobody@example.com",
+    displayName: "Nobody",
+    password: "a-long-enough-password",
+  });
+
+  // The challenge is still usable — the code is in the log — but the caller is
+  // told not to promise an email nobody sent.
+  assert.equal(unmailed.delivery, "log");
+  assert.equal(logged.length, 1);
+
+  const delivering = new AuthService(new InMemoryCoordinationStore(), {
+    mailer: async () => {},
+  });
+  const mailed = await delivering.startRegistration({
+    email: "somebody@example.com",
+    displayName: "Somebody",
+    password: "a-long-enough-password",
+  });
+  assert.equal(mailed.delivery, "mailbox");
 });

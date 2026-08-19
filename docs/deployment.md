@@ -61,7 +61,10 @@ the web UI.
 | `COORD_CREDENTIAL_KEY` | Encrypts users' stored provider credentials. 32 bytes as base64 or hex; anything else is stretched with scrypt. Generated once beside the credential file if unset, which ties the credentials to that directory — set it explicitly in real deployments. Read once at boot and then removed from the process environment, so nothing the control plane spawns can see it. | generated |
 | `COORD_CREDENTIAL_POLICY` | What a task does when its submitter has connected no provider account: `refuse` fails the task, `host-login` falls back to the machine's own CLI login. `refuse` is the default because the fallback is silent — one person's task spends the host owner's subscription and nothing in the run says so. **A single-operator deployment where nobody has connected a provider account needs `host-login`, or its tasks stop running.** See [per-user provider accounts](architecture/per-user-credentials.md). | `refuse` |
 | `COORD_ALLOW_REGISTRATION` | Set to `0` to close self-service sign-up at `/api/v1/auth/register`. A new account owns its own organization and can run tasks, so close registration on a deployment strangers can reach unless that is intentional. Invitations are unaffected. `COORD_DISABLE_REGISTRATION=1` still closes it explicitly. | open |
-| `COORD_SMTP_URL` | Relay used to send registration confirmation codes and "forgotten password" links: `smtp://user:password@host:587` (STARTTLS when the relay offers it) or `smtps://host:465` (TLS from the first byte). Percent-encode an `@` in the password. Unset means messages are written to the control plane's log instead, which is a usable path for a single-operator deployment and no answer at all for a shared one. | unset |
+| `COORD_REQUIRE_EMAIL_CONFIRMATION` | Set to `1` to make sign-up mail a six-digit code and create the account only once that code is submitted. Off by default: sign-up creates the account immediately and signs the browser in, so a deployment with no mail configured can still take sign-ups. Only turn it on where a mail transport below is configured and tested — otherwise the code goes to the log and nobody can finish signing up. | off |
+| `COORD_MAIL_API_URL` | HTTPS endpoint of a mail provider used to send "forgotten password" links (and sign-up confirmation codes where `COORD_REQUIRE_EMAIL_CONFIRMATION` is on), e.g. `https://api.resend.com/emails`. Takes precedence over `COORD_SMTP_URL`. Prefer it on any platform that blocks outbound SMTP ports (Railway, Fly, most serverless hosts), where a relay cannot be reached and the code silently never arrives. The request body is `{from, to, subject, text}`, which every hosted provider of this shape accepts. Step by step: [setting up email](email-setup.md). | unset |
+| `COORD_MAIL_API_KEY` | Bearer token for that endpoint. | unset |
+| `COORD_SMTP_URL` | Relay used to send "forgotten password" links (and sign-up confirmation codes where `COORD_REQUIRE_EMAIL_CONFIRMATION` is on): `smtp://user:password@host:587` (STARTTLS when the relay offers it) or `smtps://host:465` (TLS from the first byte). Percent-encode an `@` in the password. Unset means messages are written to the control plane's log instead, which is a usable path for a single-operator deployment and no answer at all for a shared one. | unset |
 | `COORD_MAIL_FROM` | `From` address on those messages, display name allowed (`Lattice <no-reply@example.com>`). Unset means `no-reply@<SMTP host>`, which most relays refuse to send as — set the address the relay has authorised. | `no-reply@<SMTP host>` |
 | `COORD_PUBLIC_URL` | Absolute origin this deployment is reached at, used to build the reset link. Unset falls back to the `Host` header of the request that asked for the link — correct behind a router that sets it, wrong wherever a client can choose it. | inferred from `Host` |
 | `COORD_PASSWORD_RESET_TTL_MINUTES` | How long a reset link stays usable. Requesting a new link always invalidates the previous one, whatever this is. | `60` |
@@ -88,18 +91,43 @@ one's own default, so an unset variable changes nothing.
 
 ## Account email confirmation
 
-Self-service sign-up first validates the submitted fields, hashes the password,
-and mails a six-digit code to the address. No user, organization, membership,
-project, or session is created at that point. The account is created and the
-browser is signed in only after the code is submitted to
-`/api/v1/auth/register/confirm` before it expires. A code is single-use and is
-closed after repeated incorrect attempts. Pending challenges are process-local,
-so a restart invalidates them and multi-instance deployments must route both
-steps to the same control-plane instance.
+**Off by default.** Self-service sign-up validates the submitted fields, hashes
+the password, creates the account with its own organization and project, signs
+the browser in, and lands the person in the app. Nothing is emailed, so a
+deployment with no mail transport configured can still take sign-ups. The
+address is taken on trust; anyone who can reach an open deployment can create
+an account under an address that is not theirs, which is one more reason to
+close registration (`COORD_ALLOW_REGISTRATION=0`) on a deployment strangers can
+reach.
 
-Configure `COORD_SMTP_URL` for every shared deployment. Without it, the code is
+Set `COORD_REQUIRE_EMAIL_CONFIRMATION=1` to turn the mailed-code step back on.
+Sign-up then mails a six-digit code and creates no user, organization,
+membership, project, or session until that code is submitted to
+`/api/v1/auth/register/confirm` before it expires; `POST /api/v1/auth/register`
+answers `202` with the challenge instead of `201` with a session. A code is
+single-use and is closed after repeated incorrect attempts. Pending challenges
+are process-local, so a restart invalidates them and multi-instance deployments
+must route both steps to the same control-plane instance. While confirmation is
+off, `/api/v1/auth/register/confirm` answers `409
+registration_confirmation_disabled`.
+
+**Turning it on needs mail first.** [Setting up email](email-setup.md) is the
+checklist: pick a transport, verify a sender address, set the variables,
+confirm a code arrives. Configure `COORD_MAIL_API_URL` (with
+`COORD_MAIL_API_KEY`) or `COORD_SMTP_URL`, and set `COORD_MAIL_FROM` to an
+address the provider has verified. With neither transport set, the code is
 written to the control plane log with the `[mail]` prefix and never reaches the
-person's inbox.
+person's inbox — the control plane warns about that once at boot, the sign-up
+screen says the code went to the log rather than telling anybody to check their
+email, and `POST /api/v1/auth/register` answers `"delivery": "log"` instead of
+`"mailbox"`.
+
+On a platform that blocks outbound SMTP — Railway among them — an SMTP relay
+connection times out and every sign-up with confirmation on fails at the "could
+not be delivered" step. Use the HTTPS mail API there. Under Compose, these
+variables reach the container only because they are listed in the
+`control-plane` service's `environment:` block; a deployment that adds another
+one has to add the line too.
 
 ## Forgotten passwords
 
@@ -111,10 +139,10 @@ send to a server, so it stays out of access logs. It expires after
 one, and setting a password through it signs every other session for that
 account out.
 
-With no `COORD_SMTP_URL` set the request still succeeds and the message is
-written to the log, prefixed `[mail]`. That is the whole recovery path for a
+With neither `COORD_MAIL_API_URL` nor `COORD_SMTP_URL` set the request still
+succeeds and the message is written to the log, prefixed `[mail]`. That is the whole recovery path for a
 deployment with no relay: read the log, copy the link. Configure a relay for
-anything other people use.
+anything other people use — see [setting up email](email-setup.md).
 
 The request endpoint answers the same way whether or not the address has an
 account, so it cannot be used to find out who is registered here. It shares

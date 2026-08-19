@@ -196,12 +196,14 @@ async function advanceCanonical(
   fixture: PushFixture,
   file = "b.txt",
   content = "two\n",
+  message =
+    "coord(task_12345678-1234-1234-1234-123456789012): Improve push branch naming with readable summaries",
 ): Promise<string> {
   const git = new GitClient();
   const work = path.join(fixture.root, `work-${Math.random().toString(36).slice(2, 8)}`);
   await git.run(["clone", "--branch", "main", fixture.remotePath, work]);
   await writeFile(path.join(work, file), content, "utf8");
-  await fixture.repositories.commitAll(work, "coordinator work");
+  await fixture.repositories.commitAll(work, message);
   await git.run([
     `--git-dir=${fixture.canonical.path}`,
     "fetch",
@@ -263,7 +265,11 @@ test("canonical state pushes to a dedicated branch, never over the source", asyn
       remoteUrl: LOOPBACK_HOST,
     });
 
-    assert.match(result.targetBranch, /^coord\/export-/u);
+    assert.equal(result.targetBranch, "coord/improve-push-branch-naming");
+    assert.equal(
+      result.summary,
+      "Improve push branch naming with readable summaries",
+    );
     assert.equal(result.createdBranch, true);
     assert.equal(result.revision, expected);
 
@@ -280,6 +286,28 @@ test("canonical state pushes to a dedicated branch, never over the source", asyn
       "refs/heads/main",
     ]);
     assert.equal(mainAfter.stdout.trim(), mainBefore.stdout.trim());
+  } finally {
+    await rm(fixture.root, { recursive: true, force: true });
+  }
+});
+
+test("push naming is sanitized, bounded, and falls back to changed files", async () => {
+  const fixture = await pushFixture();
+  try {
+    await advanceCanonical(
+      fixture,
+      "src/push branch.ts",
+      "export const summary = true;\n",
+      "Sync main from origin: merge 1234567890abcdef into canonical",
+    );
+
+    const result = await fixture.repositories.pushToRemote(fixture.canonical, {
+      remoteUrl: LOOPBACK_HOST,
+    });
+
+    assert.equal(result.summary, "Update src/push branch.ts");
+    assert.equal(result.targetBranch, "coord/update-src-push-branch");
+    assert.ok(result.targetBranch.length < 40);
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }
@@ -574,6 +602,11 @@ test("diverged histories are joined with a merge, and push works after", async (
       remoteUrl: LOOPBACK_HOST,
     });
     assert.equal(pushed.revision, synced.revision);
+    assert.equal(pushed.targetBranch, "coord/improve-push-branch-naming");
+    assert.equal(
+      pushed.summary,
+      "Improve push branch naming with readable summaries",
+    );
   } finally {
     await rm(fixture.root, { recursive: true, force: true });
   }

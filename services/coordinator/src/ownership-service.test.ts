@@ -229,3 +229,77 @@ test("blockers are reported at the same granularity leases are issued", () => {
   assert.equal(blockers.length, 1);
   assert.deepEqual(blockers[0]?.ranges, [{ startLine: 40, endLine: 80 }]);
 });
+
+test("releasing part of a plan frees only what was named", () => {
+  const service = new OwnershipService(
+    () => new Date("2026-01-01T00:00:00.000Z"),
+  );
+  const wide: AgentPlan = {
+    ...plan("task_a"),
+    expectedFiles: ["src/kept.ts", "src/done.ts"],
+    expectedSymbols: ["keptSymbol"],
+  };
+  service.acquire(wide, "agent_a", 1);
+
+  const released = service.releaseResources("task_a", [
+    { resourceType: "file", resourceId: "src/done.ts" },
+  ]);
+
+  assert.deepEqual(
+    released.map((lease) => lease.resourceId),
+    ["src/done.ts"],
+  );
+  // What it kept, it still holds — including the symbol, which nobody asked
+  // it to give up.
+  assert.deepEqual(
+    service
+      .activeLeases()
+      .map((lease) => lease.resourceId)
+      .sort(),
+    ["keptSymbol", "src/kept.ts"],
+  );
+  // And the released file is another agent's to take, an hour before this
+  // task settles.
+  const taker: AgentPlan = {
+    ...plan("task_b"),
+    expectedFiles: ["src/done.ts"],
+  };
+  assert.equal(service.acquire(taker, "agent_b", 1).length, 1);
+  // The half this task kept is still its own.
+  assert.throws(
+    () =>
+      service.acquire(
+        { ...plan("task_c"), expectedFiles: ["src/kept.ts"] },
+        "agent_c",
+        1,
+      ),
+    OwnershipConflictError,
+  );
+});
+
+test("releasing what a task never held is not an error, and takes nothing", () => {
+  const service = new OwnershipService(
+    () => new Date("2026-01-01T00:00:00.000Z"),
+  );
+  service.acquire(plan("task_a"), "agent_a", 1);
+
+  // Another task's lease is not this one's to release: naming it here must
+  // not quietly hand somebody else's file away.
+  const otherHeld = service.acquire(
+    { ...plan("task_b"), expectedFiles: ["src/other.ts"] },
+    "agent_b",
+    1,
+  );
+  const released = service.releaseResources("task_a", [
+    { resourceType: "file", resourceId: "src/other.ts" },
+    { resourceType: "file", resourceId: "src/never-claimed.ts" },
+  ]);
+
+  assert.deepEqual(released, []);
+  assert.equal(
+    service
+      .activeLeases()
+      .some((lease) => lease.leaseId === otherHeld[0]?.leaseId),
+    true,
+  );
+});

@@ -187,7 +187,7 @@ test("creating an account asks for the address and password twice", async () => 
   }
 });
 
-test("registration waits for the emailed one-time code before entering the app", async () => {
+test("sign-up enters the app directly, and still handles a mailed code when one is asked for", async () => {
   const app = await publicFile("app.js");
   const confirmation = app.slice(
     app.indexOf("function renderRegistrationConfirmation()"),
@@ -204,16 +204,33 @@ test("registration waits for the emailed one-time code before entering the app",
     "the code field should use the browser's one-time-code affordance",
   );
   assert.match(confirmation, /pattern="\[0-9\]\{6\}"/u);
+  // A deployment with no mail relay sends nothing, and the screen has to say
+  // so rather than telling somebody to watch an inbox that stays empty.
+  assert.match(
+    confirmation,
+    /delivery === "log"/u,
+    "the challenge should tell people when no email was sent",
+  );
+  assert.match(confirmation, /server log/iu);
 
   const start = app.slice(
     app.indexOf("async function submitRegister(form)"),
     app.indexOf("async function submitRegistrationConfirmation(form)"),
   );
-  assert.match(start, /registration\.registrationId/u);
-  assert.doesNotMatch(
+  // Email confirmation is off, so the server hands back a session and the new
+  // account lands on the chats screen instead of a code form.
+  assert.match(
     start,
-    /await boot\(\)/u,
-    "starting registration must not enter the application",
+    /registration\.user !== undefined/u,
+    "sign-up should notice when it was signed in outright",
+  );
+  assert.match(start, /window\.location\.hash = "#chats"/u);
+  assert.match(start, /await boot\(\)/u);
+  assert.match(start, /registration\.registrationId/u);
+  assert.match(
+    start,
+    /registration\.delivery/u,
+    "the challenge should remember whether the code was actually mailed",
   );
 
   const finish = app.slice(

@@ -2,7 +2,14 @@ import assert from "node:assert/strict";
 import net from "node:net";
 import test from "node:test";
 
-import { createMailer, parseSmtpUrl, sendMail } from "./mailer.js";
+import http from "node:http";
+
+import {
+  createMailer,
+  mailDeliveryMode,
+  parseSmtpUrl,
+  sendMail,
+} from "./mailer.js";
 
 /**
  * A relay that answers every command with 250 and keeps the conversation.
@@ -201,4 +208,109 @@ test("a configured relay is used, with a default sender when none is named", asy
   await relay.idle();
   const conversation = relay.transcripts[0] ?? [];
   assert.equal(conversation.includes("MAIL FROM:<no-reply@127.0.0.1>"), true);
+});
+
+/** A mail provider's HTTP API, on loopback, that records what it was sent. */
+async function fakeMailApi(status = 200): Promise<{
+  url: string;
+  requests: { authorization: string | undefined; body: unknown }[];
+  close: () => Promise<void>;
+}> {
+  const requests: { authorization: string | undefined; body: unknown }[] = [];
+  const server = http.createServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk: Buffer) => chunks.push(chunk));
+    request.on("end", () => {
+      requests.push({
+        authorization: request.headers.authorization,
+        body: JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown,
+      });
+      response.writeHead(status, { "content-type": "application/json" });
+      response.end(status < 300 ? '{"id":"msg_1"}' : '{"message":"forbidden"}');
+    });
+  });
+  await new Promise<void>((resolve) => {
+    server.listen(0, "127.0.0.1", () => resolve());
+  });
+  const address = server.address();
+  const port = typeof address === "object" && address !== null ? address.port : 0;
+  return {
+    url: `http://127.0.0.1:${String(port)}/emails`,
+    requests,
+    close: () =>
+      new Promise<void>((resolve) => {
+        server.close(() => resolve());
+      }),
+  };
+}
+
+test("a mailer says whether it delivers or only logs", async (t) => {
+  const relay = await fakeRelay();
+  t.after(async () => {
+    await relay.close();
+  });
+
+  assert.equal(mailDeliveryMode(createMailer({ log: () => {} })), "log");
+  assert.equal(
+    mailDeliveryMode(
+      createMailer({ smtpUrl: `smtp://127.0.0.1:${String(relay.port)}` }),
+    ),
+    "smtp",
+  );
+  assert.equal(
+    mailDeliveryMode(
+      createMailer({ apiUrl: "https://api.example.com/emails", apiKey: "k" }),
+    ),
+    "api",
+  );
+  // A mailer handed in by a caller says nothing, and is trusted to deliver.
+  assert.equal(mailDeliveryMode(async () => {}), undefined);
+});
+
+test("an HTTP mail API is used in preference to SMTP, and carries the key", async (t) => {
+  const api = await fakeMailApi();
+  const relay = await fakeRelay();
+  t.after(async () => {
+    await api.close();
+    await relay.close();
+  });
+
+  const mailer = createMailer({
+    apiUrl: api.url,
+    apiKey: "test-key",
+    smtpUrl: `smtp://127.0.0.1:${String(relay.port)}`,
+    from: "Lattice <no-reply@example.com>",
+  });
+  await mailer({
+    to: "new@example.com",
+    subject: "Confirm your Lattice account",
+    text: "Your Lattice confirmation code is 123456.",
+  });
+
+  assert.equal(api.requests.length, 1);
+  const sent = api.requests[0];
+  assert.equal(sent?.authorization, "Bearer test-key");
+  assert.deepEqual(sent?.body, {
+    from: "Lattice <no-reply@example.com>",
+    to: ["new@example.com"],
+    subject: "Confirm your Lattice account",
+    text: "Your Lattice confirmation code is 123456.",
+  });
+  // The SMTP relay is untouched: one transport sends, not both.
+  await relay.idle();
+  assert.equal(relay.transcripts.length, 0);
+});
+
+test("a refusal from the mail API is an error, not a silent non-delivery", async (t) => {
+  const api = await fakeMailApi(403);
+  t.after(async () => {
+    await api.close();
+  });
+
+  const mailer = createMailer({ apiUrl: api.url, apiKey: "test-key" });
+
+  await assert.rejects(
+    mailer({ to: "new@example.com", subject: "s", text: "t" }),
+    /403/u,
+  );
 });

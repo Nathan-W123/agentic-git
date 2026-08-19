@@ -19,7 +19,10 @@ test("replying to a person aims the channel composer", async () => {
     chats.indexOf("function typingIndicator("),
   );
 
-  assert.match(row, /inlineReply \|\| entry\.kind === "user"/u);
+  assert.match(
+    row,
+    /inlineReply \|\| \(entry\.kind === "user" && !hasTaskThread\)/u,
+  );
   assert.match(row, /act: "channel-message-reply"/u);
   assert.match(row, /act: "channel-thread-open"/u);
   assert.match(row, /act: "thread-reply-quote"/u);
@@ -49,7 +52,7 @@ test("a person's response takes its place at the end of the transcript", async (
   // is what put a just-sent message back up in the middle of history.
   assert.match(
     list,
-    /if \(entry\.kind !== "user"\) \{\s*continue;[\s\S]*inlineReplyTo: entry,/u,
+    /entry\.kind !== "user" \|\|[\s\S]{0,120}entry\.taskId !== undefined[\s\S]*inlineReplyTo: entry,/u,
   );
   assert.match(list, /pending\.sort\(\(a, b\) => stamp\(a\.at\) - stamp\(b\.at\)\)/u);
   assert.match(
@@ -68,7 +71,7 @@ test("a person's response takes its place at the end of the transcript", async (
   );
   assert.match(
     chats,
-    /const hasTaskThread = entry\.kind !== "user" && replies\.length > 0;/u,
+    /entry\.taskId !== undefined && replies\.length > 1/u,
   );
   assert.match(chats, /messageReference\(inlineReplyTo, repositoryId\)/u);
   assert.match(chats, /cmsg-inline-reply/u);
@@ -93,7 +96,7 @@ test("a person's response renders inline with the message it answers", async () 
   assert.match(row, /inlineReply \? " cmsg-inline-reply" : ""/u);
   assert.match(
     row,
-    /const hasTaskThread = entry\.kind !== "user" && replies\.length > 0;/u,
+    /entry\.taskId !== undefined && replies\.length > 1/u,
     "a human reply must not become task-thread navigation",
   );
 });
@@ -115,7 +118,7 @@ test("an agent root keeps its chronological place while referencing the request"
   assert.match(row, /messageReference\(referencedRoot, repositoryId\)/u);
   assert.match(
     row,
-    /const hasTaskThread = entry\.kind !== "user" && replies\.length > 0;/u,
+    /entry\.kind !== "user" \|\|\s*\(entry\.taskId !== undefined && replies\.length > 1\)/u,
     "the persisted reference must not replace an acknowledgement's task thread",
   );
   assert.match(
@@ -125,7 +128,7 @@ test("an agent root keeps its chronological place while referencing the request"
   );
 });
 
-test("person-to-person replies stay out of task thread navigation", async () => {
+test("task-bearing user messages join thread navigation without capturing person-to-person replies", async () => {
   const [app, chats] = await Promise.all([
     publicFile("app.js"),
     publicFile("screen-chats.js"),
@@ -141,7 +144,12 @@ test("person-to-person replies stay out of task thread navigation", async () => 
 
   assert.match(
     panel,
-    /entry\.kind !== "user" && \(entry\.replies \?\? \[\]\)\.length > 0/u,
+    /entry\.kind !== "user" \|\|[\s\S]{0,120}entry\.taskId !== undefined && \(entry\.replies \?\? \[\]\)\.length > 1/u,
+  );
+  assert.match(
+    chats,
+    /entry\.kind === "user" && !hasTaskThread/u,
+    "a task request should switch from a direct reply to thread navigation only after substantive narration",
   );
   assert.match(pinJump, /entry\.kind !== "user"/u);
   assert.match(pinJump, /state\.scrollToMessage = value;/u);
@@ -161,7 +169,11 @@ test("the direct-reply composer names its target and resets after sending", asyn
   assert.match(chip, /directReply \? "Replying to" : "Continuing in"/u);
   assert.match(chip, /directReply \? `\$\{author\.name\}: ` : ""/u);
   assert.match(chip, /title\.slice\(0, 70\)/u);
-  assert.match(submit, /const directReply = target\?\.kind === "user";/u);
+  assert.match(
+    submit,
+    /target\?\.kind === "user" && target\.taskId === undefined/u,
+    "task-bearing user roots keep the composer in task-continuation mode",
+  );
   assert.match(submit, /state\.composerThreadId = undefined;/u);
   // Sending a reply ends at the bottom of the chat, where the reply now is —
   // not back at the message it answers.

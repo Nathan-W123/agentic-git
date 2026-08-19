@@ -72,7 +72,7 @@ import {
   secretMatches,
   type AuthenticatedPrincipal,
 } from "./auth.js";
-import { createMailer, type Mailer } from "./mailer.js";
+import { createMailer, mailDeliveryMode, type Mailer } from "./mailer.js";
 import {
   authorizeOrganization,
   authorizeProject,
@@ -295,7 +295,7 @@ interface WatchedChannelTask {
   taskId: string;
   projectId: string;
   repositoryId: string;
-  /** The agent-authored message the replies hang off. */
+  /** The request message the replies hang off (or a legacy agent root). */
   messageId: string;
   authorId: string;
   /** Whose credential the run is spending, for reporting a failed sign-in. */
@@ -314,6 +314,8 @@ interface WatchedChannelTask {
    * open. Flushed in order the moment something substantive does arrive.
    */
   pending: string[];
+  /** The agent acknowledgement, kept ahead of every narrated reply. */
+  acknowledgement?: Promise<unknown>;
   /**
    * The request that caused this work, held until the thread actually opens.
    *
@@ -3098,6 +3100,26 @@ function registrationOpen(environment: NodeJS.ProcessEnv): boolean {
   );
 }
 
+/**
+ * Whether sign-up makes somebody prove their mailbox before the account exists.
+ *
+ * Off by default. Confirmation only works on a deployment with mail actually
+ * configured, and until then it stops sign-up dead: the code is written to a
+ * log nobody signing up can read, so the account can never be finished. Until
+ * mail is wired up here, sign-up creates the account straight away and the
+ * person lands in the app.
+ *
+ * Setting `COORD_REQUIRE_EMAIL_CONFIRMATION=1` turns the mailed-code step back
+ * on for a deployment whose relay is configured. Everything it needs is still
+ * in place — the challenge, the code, and `/auth/register/confirm`.
+ */
+function emailConfirmationRequired(environment: NodeJS.ProcessEnv): boolean {
+  const required = (environment["COORD_REQUIRE_EMAIL_CONFIRMATION"] ?? "")
+    .trim()
+    .toLowerCase();
+  return required === "1" || required === "true" || required === "yes" || required === "on";
+}
+
 export class ApiGateway {
   public readonly server: Server;
   public readonly webSockets: AuditWebSocketHub;
@@ -3308,8 +3330,30 @@ export class ApiGateway {
       options.mailer ??
       createMailer({
         smtpUrl: process.env["COORD_SMTP_URL"],
+        apiUrl: process.env["COORD_MAIL_API_URL"],
+        apiKey: process.env["COORD_MAIL_API_KEY"],
         from: process.env["COORD_MAIL_FROM"],
       });
+    // Said once, loudly, at boot. Sign-up no longer needs mail — it creates
+    // the account outright — but password resets still do, and a deployment
+    // that turned confirmation back on without a relay cannot complete a
+    // sign-up at all, which is worth naming separately.
+    if (mailDeliveryMode(this.mailer) === "log") {
+      console.warn(
+        "[mail] No COORD_MAIL_API_URL or COORD_SMTP_URL is configured. " +
+          "Password reset links will be written to this log instead of being " +
+          "emailed.",
+      );
+      if (
+        emailConfirmationRequired(process.env) &&
+        registrationOpen(process.env)
+      ) {
+        console.warn(
+          "[mail] COORD_REQUIRE_EMAIL_CONFIRMATION is set, so sign-up asks for " +
+            "a code that only this log will show. Configure a relay or unset it.",
+        );
+      }
+    }
     this.auth = new AuthService(options.store, {
       secureCookies: options.secureCookies ?? false,
       passwordResetTtlMs: passwordResetTtlMs(
@@ -3774,7 +3818,7 @@ export class ApiGateway {
       }
       const body = objectBody(await this.readJson(request));
       this.assertAccountConfirmations(body);
-      const registration = await this.auth.startRegistration({
+      const account = {
         email: emailField(body["email"]) ?? "",
         displayName:
           stringField(body["displayName"], "displayName", { max: 120 }) ?? "",
@@ -3787,7 +3831,31 @@ export class ApiGateway {
                   max: 120,
                 }) ?? "",
             }),
-      });
+      };
+      // No mailbox challenge unless this deployment asks for one: the account
+      // is created here and the caller is signed in, exactly as confirming a
+      // code would have done. See `emailConfirmationRequired`.
+      if (!emailConfirmationRequired(process.env)) {
+        const user = await this.auth.registerUnconfirmed(account);
+        const issued = await this.auth.issueSession(
+          user,
+          this.remoteAddress(request),
+          request.headers["user-agent"] ?? "",
+          context.secure,
+        );
+        response.setHeader("Set-Cookie", issued.cookies);
+        await this.options.store.appendAudit(undefined, {
+          type: "user_authenticated",
+          data: { userId: user.id, registered: true },
+        });
+        this.sendJson(response, 201, {
+          user: issued.principal.user,
+          memberships: issued.principal.memberships,
+          csrfToken: issued.csrfToken,
+        });
+        return;
+      }
+      const registration = await this.auth.startRegistration(account);
       this.sendJson(response, 202, registration);
       return;
     }
@@ -3801,6 +3869,16 @@ export class ApiGateway {
           403,
           "registration_closed",
           "This control plane does not accept new accounts",
+        );
+      }
+      // A client left over from a deployment that asked for codes, talking to
+      // one that does not. Say so plainly rather than refusing a code that was
+      // never issued as though it were wrong.
+      if (!emailConfirmationRequired(process.env)) {
+        throw new HttpError(
+          409,
+          "registration_confirmation_disabled",
+          "This control plane does not confirm sign-up by email. Sign in with the account you just created.",
         );
       }
       const body = objectBody(await this.readJson(request));
@@ -10074,11 +10152,10 @@ export class ApiGateway {
     const messages = await this.options.store
       .listChannelMessages(input.repositoryId, input.viewerId, { limit: 40 })
       .catch(() => []);
-    // The thread root is the agent's acknowledgement — "On it." — and a new
-    // request rarely overlaps a pleasantry. The task's own objective is the
-    // request the thread grew from, so scoring against it makes the merge
-    // test request-vs-request, which is the comparison a person means by
-    // "this is about the same thing".
+    // Legacy roots are the agent's acknowledgement — "On it." — while new
+    // roots are the request itself. The task objective remains useful for
+    // both shapes, and makes this comparison request-vs-request rather than
+    // relying on a title or pleasantry.
     const tasks = await this.options.store
       .listSubmittedTasks({ repositoryId: input.repositoryId })
       .catch(() => []);
@@ -10095,7 +10172,10 @@ export class ApiGateway {
       // agent meant "now do the same for the other file", sent to whichever
       // agent was free, opened a parallel thread about the same work instead
       // of continuing the one that holds its story.
-      if (message.kind !== "agent") {
+      if (
+        message.kind !== "agent" &&
+        !(message.kind === "user" && message.taskId !== undefined)
+      ) {
         continue;
       }
       const age = now - new Date(message.createdAt).getTime();
@@ -10161,7 +10241,11 @@ export class ApiGateway {
     );
     let best: { id: string; title: string; score: number } | undefined;
     for (const message of messages) {
-      if (message.kind !== "agent" || message.replies.length === 0) {
+      if (
+        (message.kind !== "agent" &&
+          !(message.kind === "user" && message.taskId !== undefined)) ||
+        message.replies.length === 0
+      ) {
         continue;
       }
       const titleReply = message.replies.find((reply) =>
@@ -10358,22 +10442,11 @@ export class ApiGateway {
     }
 
     // The agent answers first, in its own voice — but the voice is bought
-    // with a model call, and this used to wait for it before posting
-    // anything. That call is allowed six seconds, and the message it produces
-    // is *the thread root*: until it landed there was no thread, no title and
-    // nothing to open, so somebody who had just asked for something watched an
-    // empty room for up to six seconds and reasonably concluded they had been
-    // ignored. `composeAcknowledgement`'s own comment says this line "only has
-    // to prove the request was heard, inside a couple of seconds, which is far
-    // less time than a model call takes" — which was true, and the code did
-    // the opposite.
-    //
-    // So the thread is posted now, saying the plain thing, and the composed
-    // sentence replaces it in place when it arrives. Same message, same id,
-    // same position; the wait buys better words rather than the existence of
-    // the thread. Everything downstream hangs off `threadRootId`, so the run
-    // can be queued and start narrating while the opening line is still being
-    // written.
+    // with a model call, and this used to wait for it before posting anything.
+    // New tasks already have the posted request as their durable root, so the
+    // acknowledgement can arrive underneath it without delaying dispatch.
+    // Internal dispatches with no request to root under retain the legacy
+    // placeholder path.
     const openingLine =
       input.queueAfterCurrent === true
         ? "Queued."
@@ -10426,11 +10499,14 @@ export class ApiGateway {
             request: content,
           });
     const taskContext = threadContext ?? input.context;
-    // Continuing an existing thread: the acknowledgement belongs inside it,
-    // and everything this run narrates hangs off the same root, so the two
-    // pieces of work read as one story rather than two.
+    // A new task hangs directly off the request that caused it. Older channel
+    // history may still have agent-authored roots, and internal dispatches
+    // without a posted request keep that fallback.
+    const requestRootId =
+      continuing === undefined ? input.referencedMessageId : undefined;
     const threadRootId =
       continuing ??
+      requestRootId ??
       (
         await this.appendChannelEntry({
           projectId,
@@ -10461,7 +10537,7 @@ export class ApiGateway {
     // Skipped only when the request was made inside the thread already, since
     // then it is a reply and is in it by definition.
     const opener =
-      input.threadMessageId === undefined
+      input.threadMessageId === undefined && requestRootId === undefined
         ? { authorId: senderId, content }
         : undefined;
     if (opener !== undefined && continuing !== undefined) {
@@ -10486,6 +10562,16 @@ export class ApiGateway {
         ? Promise.resolve(openingLine)
         : this.composeAcknowledgement(candidate, content, claimMessage)
     ).then(async (text) => {
+      if (requestRootId !== undefined) {
+        await this.appendChannelThreadReply({
+          projectId,
+          repositoryId,
+          messageId: requestRootId,
+          authorId: `${candidate.userId}:${candidate.provider}`,
+          content: text,
+        }).catch(() => undefined);
+        return text;
+      }
       if (text === openingLine) {
         return text;
       }
@@ -10603,7 +10689,11 @@ export class ApiGateway {
           ? { queueAfterCurrent: true }
           : {}),
       });
-      if (input.queueAfterCurrent === true && continuing === undefined) {
+      if (
+        input.queueAfterCurrent === true &&
+        continuing === undefined &&
+        requestRootId === undefined
+      ) {
         await this.options.store
           .setChannelMessageContent(
             repositoryId,
@@ -10695,6 +10785,7 @@ export class ApiGateway {
         // work nobody had approved, and leaving the thread still saying nothing
         // was running.
         const planned = await openingPromise;
+        await acknowledgement.catch(() => undefined);
         await this.appendChannelThreadReply({
           projectId,
           repositoryId,
@@ -10765,6 +10856,7 @@ export class ApiGateway {
             repositoryId,
             taskId: task.id,
           });
+          await acknowledgement.catch(() => undefined);
           await this.appendChannelThreadReply({
             projectId,
             repositoryId,
@@ -10793,6 +10885,7 @@ export class ApiGateway {
         // substantive first, they simply arrive with the next line rather than
         // holding one up.
         pending: [],
+        ...(requestRootId === undefined ? {} : { acknowledgement }),
         // Held with the narration for the reason above: posting it now would
         // open a thread this task may never deserve.
         ...(opener === undefined || continuing !== undefined
@@ -10822,6 +10915,7 @@ export class ApiGateway {
         })
         .catch(() => undefined);
     } catch (error) {
+      await acknowledgement.catch(() => undefined);
       await this.appendChannelThreadReply({
         repositoryId,
         messageId: threadRootId,
@@ -11158,6 +11252,30 @@ export class ApiGateway {
     if (root === undefined) {
       return;
     }
+    const candidates = await this.resolveChannelMentionCandidates(
+      input.projectId,
+      input.repositoryId,
+    );
+    let threadAuthorId = AGENT_AUTHORED_ROOT_KINDS.has(root.kind)
+      ? root.authorId
+      : root.taskId === undefined
+        ? undefined
+        : root.replies.find(
+            (reply) =>
+              AGENT_AUTHORED_ROOT_KINDS.has(reply.kind) &&
+              reply.authorId.includes(":"),
+          )?.authorId;
+    // The acknowledgement normally attributes a user-rooted task. During the
+    // short window before it lands, an explicit mention in the request is the
+    // same durable routing signal that dispatched the work in the first place.
+    if (threadAuthorId === undefined && root.taskId !== undefined) {
+      const namedAtRoot = candidates.find((entry) =>
+        root.content.includes(`@${entry.name}`),
+      );
+      if (namedAtRoot !== undefined) {
+        threadAuthorId = `${namedAtRoot.userId}:${namedAtRoot.provider}`;
+      }
+    }
     // A thread hanging off a person's message is a conversation between
     // people, so a bare reply in one stays between people. But a reply that
     // *mentions* an agent has said out loud who it is for, and this used to
@@ -11166,11 +11284,7 @@ export class ApiGateway {
     // many times it was asked. Threads open from a reply button on every
     // message, so a person's own request growing a thread is the common case,
     // not the exception.
-    if (!AGENT_AUTHORED_ROOT_KINDS.has(root.kind)) {
-      const candidates = await this.resolveChannelMentionCandidates(
-        input.projectId,
-        input.repositoryId,
-      );
+    if (threadAuthorId === undefined) {
       // Who the reply is for, in order of how directly they were named: an
       // @mention in the reply itself wins; failing that, whoever the *root*
       // message mentioned — a thread grown from "@Romeo build X" is Romeo's
@@ -11244,7 +11358,7 @@ export class ApiGateway {
       }
       return;
     }
-    const [ownerId = "", provider = ""] = root.authorId.split(":");
+    const [ownerId = "", provider = ""] = threadAuthorId.split(":");
     if (ownerId === "" || provider === "") {
       // An agent-authored root whose author is not `owner:vendor`. Nothing
       // here resolves to somebody who could answer, and this used to be one
@@ -11257,10 +11371,6 @@ export class ApiGateway {
       );
       return;
     }
-    const candidates = await this.resolveChannelMentionCandidates(
-      input.projectId,
-      input.repositoryId,
-    );
     const owner = candidates.find(
       (entry) => entry.userId === ownerId && entry.provider === provider,
     );
@@ -12572,12 +12682,22 @@ export class ApiGateway {
       } after the question's deadline — I'd already cancelled the task ` +
       "rather than guess, so there is nothing left holding your choice. " +
       "Ask again and I'll start over knowing it.";
-    if (root?.kind === "agent") {
+    const agentAuthorId =
+      root === undefined
+        ? undefined
+        : AGENT_AUTHORED_ROOT_KINDS.has(root.kind)
+          ? root.authorId
+          : root.replies.find(
+              (reply) =>
+                AGENT_AUTHORED_ROOT_KINDS.has(reply.kind) &&
+                reply.authorId.includes(":"),
+            )?.authorId;
+    if (agentAuthorId !== undefined) {
       await this.appendChannelThreadReply({
         projectId: input.projectId,
         repositoryId: input.repositoryId,
         messageId: input.messageId,
-        authorId: root.authorId,
+        authorId: agentAuthorId,
         content,
       }).catch(() => undefined);
     } else {
@@ -12718,7 +12838,17 @@ export class ApiGateway {
       input.messageId,
       input.viewerId,
     );
-    const [ownerId = "", provider = ""] = (root?.authorId ?? "").split(":");
+    const agentAuthorId =
+      root === undefined
+        ? undefined
+        : AGENT_AUTHORED_ROOT_KINDS.has(root.kind)
+          ? root.authorId
+          : root.replies.find(
+              (reply) =>
+                AGENT_AUTHORED_ROOT_KINDS.has(reply.kind) &&
+                reply.authorId.includes(":"),
+            )?.authorId;
+    const [ownerId = "", provider = ""] = (agentAuthorId ?? "").split(":");
     const authorId =
       ownerId === "" || provider === "" ? undefined : `${ownerId}:${provider}`;
     // In the agent's voice when there is an agent whose thread this is, and as
@@ -14153,11 +14283,24 @@ export class ApiGateway {
         ) {
           continue;
         }
+        const authorId = AGENT_AUTHORED_ROOT_KINDS.has(message.kind)
+          ? message.authorId
+          : replies.find(
+              (reply) =>
+                AGENT_AUTHORED_ROOT_KINDS.has(reply.kind) &&
+                reply.authorId.includes(":"),
+            )?.authorId;
+        // A user-rooted task is attributed by its persisted acknowledgement.
+        // If a crash happened before that reply landed, guessing would make
+        // the requester appear to have written the agent's ending.
+        if (authorId === undefined) {
+          continue;
+        }
         await this.appendChannelThreadReply({
           projectId: message.projectId,
           repositoryId: repository.id,
           messageId: message.id,
-          authorId: message.authorId,
+          authorId,
           content: ending,
           kind: "outcome",
         }).catch(() => undefined);
@@ -14830,6 +14973,10 @@ export class ApiGateway {
           taskId: watched.taskId,
           limit: 200,
         });
+        if (events.length > 0 && watched.acknowledgement !== undefined) {
+          await watched.acknowledgement.catch(() => undefined);
+          delete watched.acknowledgement;
+        }
         for (const record of events) {
           watched.cursor = record.sequence;
           const data = (record.event.data ?? {}) as Record<string, unknown>;
@@ -15136,6 +15283,8 @@ export class ApiGateway {
           await this.withdrawArbitrationNotice(watched);
           const abandoned =
             "I could not finish this — I stopped hearing back from the run.";
+          await watched.acknowledgement?.catch(() => undefined);
+          delete watched.acknowledgement;
           // Same rule as a terminal event: a run that never said anything
           // worth a thread should not open one purely to admit it gave up.
           if (watched.threaded) {

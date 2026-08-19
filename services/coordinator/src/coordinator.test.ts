@@ -2254,3 +2254,564 @@ test("the strict rebase switch restores the unconditional replan", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+/** What a releasing agent does after its edits are on disk. */
+interface ReleaseScript {
+  /** Handed back mid-run, once the edits below are written. */
+  release: string[];
+  /** Written before the release, so a test can edit what it gives back. */
+  alsoWrites?: string[];
+  /** Called once this agent's release has been decided. */
+  announce?: () => void;
+  /** Awaited before asking for anything back. */
+  awaitBefore?: Promise<void>;
+  /** Asked for again afterwards, through the ordinary widening path. */
+  reacquire?: string[];
+}
+
+/** An agent that gives part of its plan back before the task ends. */
+class ReleasingAgent extends TestAgent {
+  public readonly decisions: ScopeChangeDecision[] = [];
+
+  public constructor(
+    agentId: string,
+    agentPlan: AgentPlan,
+    repository: CanonicalRepository,
+    workspaces: WorkspaceManager,
+    outputPath: string,
+    private readonly script: ReleaseScript,
+  ) {
+    super(agentId, agentPlan, repository, workspaces, outputPath);
+  }
+
+  public override async sendContext(
+    sessionId: string,
+    context: CoordinatorContext,
+  ): Promise<void> {
+    await super.sendContext(sessionId, context);
+    for (const extra of this.script.alsoWrites ?? []) {
+      await writeFile(
+        path.join(context.workspacePath, extra),
+        `${this.planFor().taskId} still editing\n`,
+        "utf8",
+      );
+    }
+    const released = await new Promise<ScopeChangeDecision>((resolve) => {
+      this.sessionFor(sessionId).scopeResolver = resolve;
+      this.handlerFor(sessionId)?.({
+        event: "scope_release_requested",
+        requestId: `release_${this.planFor().taskId}`,
+        releasedFiles: [...this.script.release],
+        reason: "Finished with these; they turned out not to need changing",
+        occurredAt: new Date().toISOString(),
+      });
+    });
+    this.decisions.push(released);
+    this.script.announce?.();
+
+    const reacquire = this.script.reacquire;
+    if (reacquire === undefined) {
+      return;
+    }
+    await this.script.awaitBefore;
+    const answer = await new Promise<ScopeChangeDecision>((resolve) => {
+      this.sessionFor(sessionId).scopeResolver = resolve;
+      this.handlerFor(sessionId)?.({
+        event: "scope_change_requested",
+        requestId: `regain_${this.planFor().taskId}`,
+        additionalFiles: [...reacquire],
+        reason: "One of the released files needs a change after all",
+        occurredAt: new Date().toISOString(),
+      });
+    });
+    this.decisions.push(answer);
+    if (answer.decision === "rejected" || answer.decision === "deferred") {
+      // The honest ending: refused means refused, and writing anyway would be
+      // an edit outside the plan — a scope escape that fails the whole task.
+      return;
+    }
+    for (const regained of reacquire) {
+      await writeFile(
+        path.join(context.workspacePath, regained),
+        `${this.planFor().taskId} regained\n`,
+        "utf8",
+      );
+    }
+  }
+}
+
+/** An agent that waits for somebody else's release and then takes the file. */
+class TakingAgent extends TestAgent {
+  public readonly decisions: ScopeChangeDecision[] = [];
+
+  public constructor(
+    agentId: string,
+    agentPlan: AgentPlan,
+    repository: CanonicalRepository,
+    workspaces: WorkspaceManager,
+    outputPath: string,
+    private readonly takes: string[],
+    private readonly awaitBefore: Promise<void>,
+    private readonly announce?: () => void,
+  ) {
+    super(agentId, agentPlan, repository, workspaces, outputPath);
+  }
+
+  public override async sendContext(
+    sessionId: string,
+    context: CoordinatorContext,
+  ): Promise<void> {
+    await super.sendContext(sessionId, context);
+    await this.awaitBefore;
+    const answer = await new Promise<ScopeChangeDecision>((resolve) => {
+      this.sessionFor(sessionId).scopeResolver = resolve;
+      this.handlerFor(sessionId)?.({
+        event: "scope_change_requested",
+        requestId: `take_${this.planFor().taskId}`,
+        additionalFiles: [...this.takes],
+        reason: "Picking up a file another task has finished with",
+        occurredAt: new Date().toISOString(),
+      });
+    });
+    this.decisions.push(answer);
+    if (answer.decision !== "rejected" && answer.decision !== "deferred") {
+      for (const taken of this.takes) {
+        await writeFile(
+          path.join(context.workspacePath, taken),
+          `${this.planFor().taskId} took over\n`,
+          "utf8",
+        );
+      }
+    }
+    this.announce?.();
+  }
+}
+
+function signal(): { wait: Promise<void>; fire: () => void } {
+  let fire: () => void = () => undefined;
+  const wait = new Promise<void>((resolve) => {
+    fire = () => {
+      resolve();
+    };
+  });
+  return { wait, fire };
+}
+
+test("a released file goes to another agent while the task is still running", async () => {
+  // The whole point of releasing early: a plan that named two files and needed
+  // one held the other until it settled, and everything that wanted it waited
+  // that long for work that was already finished.
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const handedOver = signal();
+    const releasing = new ReleasingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt", "src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      { release: ["src/b.txt"], announce: handedOver.fire },
+    );
+    const taking = new TakingAgent(
+      "agent_b",
+      plan("task_b", ["src/c.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/c.txt",
+      ["src/b.txt"],
+      handedOver.wait,
+    );
+
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        { task: task("task_a"), adapter: releasing },
+        { task: task("task_b"), adapter: taking },
+      ],
+    });
+
+    assert.equal(releasing.decisions[0]?.decision, "approved");
+    // The plan narrows with the leases: two agents believing they hold one
+    // file is the failure this has to avoid.
+    assert.deepEqual(releasing.decisions[0]?.revisedPlan.expectedFiles, [
+      "src/a.txt",
+    ]);
+    assert.equal(taking.decisions[0]?.decision, "approved");
+    assert.equal(result.tasks.every((entry) => entry.status === "integrated"), true);
+    assert.deepEqual(result.tasks[0]?.plan.expectedFiles, ["src/a.txt"]);
+    assert.equal(
+      result.tasks[1]?.plan.expectedFiles.includes("src/b.txt"),
+      true,
+    );
+    assert.equal(
+      result.audit.some((event) => event.type === "scope_release_requested"),
+      true,
+    );
+    assert.equal(
+      result.audit.some((event) => event.type === "scope_release_decided"),
+      true,
+    );
+    assert.equal(
+      result.audit.some(
+        (event) =>
+          event.type === "ownership_released" &&
+          event.taskId === "task_a" &&
+          (event.data as { stage?: string }).stage === "scope_release",
+      ),
+      true,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a released file can be asked for again, and is granted if nobody took it", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ReleasingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt", "src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      { release: ["src/b.txt"], reacquire: ["src/b.txt"] },
+    );
+
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(agent.decisions[0]?.decision, "approved");
+    // Re-acquisition is the widening path, unchanged — no second mechanism.
+    assert.equal(agent.decisions[1]?.decision, "approved");
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(
+      result.tasks[0]?.plan.expectedFiles.includes("src/b.txt"),
+      true,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a released file taken by somebody else is refused, and the task still ends cleanly", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const handedOver = signal();
+    const takenOver = signal();
+    const releasing = new ReleasingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt", "src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      {
+        release: ["src/b.txt"],
+        announce: handedOver.fire,
+        awaitBefore: takenOver.wait,
+        reacquire: ["src/b.txt"],
+      },
+    );
+    const taking = new TakingAgent(
+      "agent_b",
+      plan("task_b", ["src/c.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/c.txt",
+      ["src/b.txt"],
+      handedOver.wait,
+      takenOver.fire,
+    );
+
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [
+        { task: task("task_a"), adapter: releasing },
+        { task: task("task_b"), adapter: taking },
+      ],
+    });
+
+    assert.equal(releasing.decisions[0]?.decision, "approved");
+    // Refused rather than queued: a running agent holding leases must never
+    // be parked waiting for one.
+    assert.equal(releasing.decisions[1]?.decision, "rejected");
+    assert.equal(releasing.decisions[1]?.retryAfterMs, undefined);
+    // Refused means the agent reports rather than writes: an edit outside the
+    // plan would fail the whole task as a scope escape.
+    assert.equal(result.tasks.every((entry) => entry.status === "integrated"), true);
+    assert.equal(
+      result.tasks[0]?.plan.expectedFiles.includes("src/b.txt"),
+      false,
+    );
+    const b = await fixture.repositories.readFile(
+      fixture.repository,
+      (
+        await fixture.repositories.getCanonicalVersion(fixture.repository)
+      ).revision,
+      "src/b.txt",
+    );
+    assert.match(b, /task_b took over/u);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a file the agent still has edits in is not released", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ReleasingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt", "src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      { release: ["src/b.txt"], alsoWrites: ["src/b.txt"] },
+    );
+
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(agent.decisions[0]?.decision, "rejected");
+    assert.match(agent.decisions[0]?.explanation ?? "", /uncommitted edits/iu);
+    // Nothing was given away, so the edit still lands.
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(
+      result.tasks[0]?.plan.expectedFiles.includes("src/b.txt"),
+      true,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("nothing is released for a resource the plan never claimed", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ReleasingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      { release: ["src/d.txt"] },
+    );
+
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(agent.decisions[0]?.decision, "rejected");
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.deepEqual(result.tasks[0]?.plan.expectedFiles, ["src/a.txt"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test(
+  "two agents releasing and then asking for each other's file both get answers",
+  { timeout: 120_000 },
+  async () => {
+    // The deadlock shape early release re-introduces: incremental acquisition,
+    // two holders, each wanting what the other has. It is safe only because no
+    // decision here ever waits on a lease — a widening is answered on the spot,
+    // granted or refused, and neither agent is parked while holding its own.
+    // If either side queued, this run would never finish.
+    const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+    try {
+      const fixture = await createFixture(root);
+      const aReleased = signal();
+      const bReleased = signal();
+      const first = new ReleasingAgent(
+        "agent_a",
+        plan("task_a", ["src/a.txt", "src/ab.txt"]),
+        fixture.repository,
+        fixture.workspaces,
+        "src/a.txt",
+        {
+          release: ["src/ab.txt"],
+          announce: aReleased.fire,
+          awaitBefore: bReleased.wait,
+          reacquire: ["src/bc.txt"],
+        },
+      );
+      const second = new ReleasingAgent(
+        "agent_b",
+        plan("task_b", ["src/b.txt", "src/bc.txt"]),
+        fixture.repository,
+        fixture.workspaces,
+        "src/b.txt",
+        {
+          release: ["src/bc.txt"],
+          announce: bReleased.fire,
+          awaitBefore: aReleased.wait,
+          reacquire: ["src/ab.txt"],
+        },
+      );
+
+      const result = await new Coordinator({
+        repositories: fixture.repositories,
+        workspaces: fixture.workspaces,
+      }).run({
+        repository: fixture.repository,
+        workspaceRoot: path.join(root, "workspaces"),
+        integrationRoot: path.join(root, "integration"),
+        tasks: [
+          { task: task("task_a"), adapter: first },
+          { task: task("task_b"), adapter: second },
+        ],
+      });
+
+      for (const agent of [first, second]) {
+        assert.equal(agent.decisions[0]?.decision, "approved");
+        // Answered, not queued — and never with "come back later", which is
+        // what waiting while holding would look like from here.
+        assert.equal(agent.decisions[1] !== undefined, true);
+        assert.notEqual(agent.decisions[1]?.decision, "deferred");
+        assert.equal(agent.decisions[1]?.retryAfterMs, undefined);
+      }
+      assert.equal(result.tasks.every((entry) => entry.status === "integrated"), true);
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);
+
+test("the narrowed plan is recorded with the authority before anything is released", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ReleasingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt", "src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      { release: ["src/b.txt"] },
+    );
+    const admitted: Array<{ files: string[]; revising: boolean | undefined }> = [];
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      planAuthority: {
+        async admit(request) {
+          admitted.push({
+            files: [...request.plan.expectedFiles],
+            revising: request.revising,
+          });
+          return { outcome: "admitted", plan: request.plan };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    assert.equal(agent.decisions[0]?.decision, "approved");
+    // Without this the control plane keeps showing the wide plan, and tasks
+    // in other runs go on being refused a file nobody is using.
+    assert.deepEqual(admitted.at(-1), {
+      files: ["src/a.txt"],
+      revising: true,
+    });
+    assert.equal(result.tasks[0]?.status, "integrated");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("a narrowing the authority will not record releases nothing", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "coord-run-test-"));
+
+  try {
+    const fixture = await createFixture(root);
+    const agent = new ReleasingAgent(
+      "agent_a",
+      plan("task_a", ["src/a.txt", "src/b.txt"]),
+      fixture.repository,
+      fixture.workspaces,
+      "src/a.txt",
+      { release: ["src/b.txt"] },
+    );
+    const result = await new Coordinator({
+      repositories: fixture.repositories,
+      workspaces: fixture.workspaces,
+      planAuthority: {
+        async admit(request) {
+          return request.revising === true
+            ? {
+                outcome: "deferred",
+                retryAfterMs: 1_000,
+                blockedBy: [],
+                explanation: "the record is unavailable",
+              }
+            : { outcome: "admitted", plan: request.plan };
+        },
+      },
+    }).run({
+      repository: fixture.repository,
+      workspaceRoot: path.join(root, "workspaces"),
+      integrationRoot: path.join(root, "integration"),
+      tasks: [{ task: task("task_a"), adapter: agent }],
+    });
+
+    // Told its files were freed while the record still claims them is worse
+    // than told to keep them, so nothing moves.
+    assert.equal(agent.decisions[0]?.decision, "rejected");
+    assert.match(agent.decisions[0]?.explanation ?? "", /record/u);
+    assert.equal(
+      agent.decisions[0]?.revisedPlan.expectedFiles.includes("src/b.txt"),
+      true,
+    );
+    assert.equal(result.tasks[0]?.status, "integrated");
+    assert.equal(
+      result.tasks[0]?.plan.expectedFiles.includes("src/b.txt"),
+      true,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

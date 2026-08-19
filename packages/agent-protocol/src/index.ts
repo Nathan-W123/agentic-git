@@ -128,6 +128,37 @@ export type AgentEvent =
     }
   | {
       /**
+       * The agent is done with part of its approved plan and is handing that
+       * part back before the task ends.
+       *
+       * The mirror of `scope_change_requested`: that one asks for more, this
+       * one gives some away. An over-claimed plan — twenty-two files declared,
+       * eight actually touched — otherwise holds every one of them until the
+       * task settles, and every other agent that needs one of the fourteen
+       * waits for work that finished long ago.
+       *
+       * Answered with a `ScopeChangeDecision`, like a widening, because the
+       * answer has the same shape: granted or not, and the plan now in force.
+       * A granted release narrows that plan, so the released files stop being
+       * writable — an edit to one after this is a scope escape and fails the
+       * task. Ask for it back through `scope_change_requested` if that turns
+       * out to be wrong, and expect a refusal: whoever took it next owes this
+       * agent nothing.
+       */
+      event: "scope_release_requested";
+      requestId?: string;
+      releasedFiles: string[];
+      releasedSymbols?: string[];
+      releasedApis?: string[];
+      releasedSchemas?: string[];
+      releasedConfigKeys?: string[];
+      releasedTests?: string[];
+      releasedServices?: string[];
+      reason: string;
+      occurredAt: string;
+    }
+  | {
+      /**
        * The agent is stuck on a decision that is not its to make, and has
        * stopped until somebody answers.
        *
@@ -373,6 +404,20 @@ export interface AgentAdapter {
   ): Promise<AgentSession>;
 
   requestPlan(sessionId: string): Promise<AgentPlan>;
+
+  /**
+   * Tells the session what it may touch, instead of asking it.
+   *
+   * Used for the one plan an agent never writes: a task alone in its
+   * repository is granted all of it, and the planning round trip that would
+   * otherwise produce something for a second task to arbitrate against is
+   * skipped entirely. The session is left exactly as `requestPlan` would have
+   * left it — a plan is on the record, so execution proceeds unchanged.
+   *
+   * Optional: an adapter without it simply keeps planning, and the
+   * coordinator never offers it a blanket claim.
+   */
+  acceptBlanketClaim?(sessionId: string, plan: AgentPlan): Promise<void>;
 
   requestReplan(
     sessionId: string,

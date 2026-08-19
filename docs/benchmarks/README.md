@@ -12,7 +12,9 @@ coordinator behavior rather than model variance. That determinism is bought by
 having the fixture supply the plan the detector is later graded on, so these
 scenarios measure the coordinator, not the premise it rests on. For the same
 comparison against a real agent whose plans are not known in advance, see
-[live-evidence.md](live-evidence.md); for where a coordinated run spends its
+[live-evidence.md](live-evidence.md); for how often a task is alone in its
+repository, and what that buys the plan it therefore never has to write, see
+[blanket-claim.md](blanket-claim.md); for where a coordinated run spends its
 time, see [performance.md](performance.md). For why the intent-level conflict
 signal is scored but never scheduled on — a negative result, on a registered
 held-out split — see [intent-signal.md](intent-signal.md).

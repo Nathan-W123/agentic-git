@@ -31,7 +31,7 @@ import {
 import { formatCliError } from "./error-format.js";
 import { CoordinatorProject, PROJECT_DIRECTORY } from "./project.js";
 import { recoverCoordinationState } from "./recovery.js";
-import { repoPush } from "./repo-export.js";
+import { formatRepoPushResult, repoPush } from "./repo-export.js";
 import {
   createBenchmarkFixture,
   createLiveBenchmarkFixture,
@@ -532,14 +532,7 @@ async function runRepo(
           allowExistingTarget: flags.includes("--update-existing"),
           allowUnverifiedUpstream: flags.includes("--allow-unverified"),
         });
-        console.log(
-          `Pushed ${result.revision.slice(0, 12)} to ${result.targetBranch}
-` +
-            `Remote: ${result.remoteUrl}
-` +
-            `${result.createdBranch ? "Created" : "Updated"} the target branch; ` +
-            `${result.upstreamBranch} was not modified.`,
-        );
+        console.log(formatRepoPushResult(result));
       });
       break;
     }
