@@ -2200,6 +2200,96 @@ test("channel @mentions include repository guests and surface directed unread pi
   assert.match(chats, /mentions > 0 \? "@"/u);
 });
 
+test("mention suggestions narrow agents and people by name or email", async () => {
+  const data = await publicFile("data.js");
+  const chats = await publicFile("screen-chats.js");
+  const participantStart = data.indexOf("export function channelParticipants");
+  const participantEnd = data.indexOf("\nfunction seedMessages", participantStart);
+  assert.notEqual(participantStart, -1, "the participant resolver should exist");
+  assert.notEqual(participantEnd, -1, "the participant resolver should have a boundary");
+
+  const participantState = {
+    channelPeople: {
+      repo: [
+        {
+          userId: "mary",
+          user: { displayName: "Mary Jane", email: "mary@example.com" },
+        },
+      ],
+    },
+    members: [],
+  };
+  const participants = new Function(
+    "state",
+    "channelAgentsFor",
+    "currentUserId",
+    "currentUserName",
+    `${data
+      .slice(participantStart, participantEnd)
+      .replace("export function", "function")}\nreturn channelParticipants;`,
+  )(
+    participantState,
+    () => [
+      { id: "zeus", name: "Zeus" },
+      { id: "athena", name: "Athena" },
+    ],
+    () => "current-user",
+    () => "Current User",
+  ) as (repositoryId: string) => Array<{
+    id: string;
+    name: string;
+    email?: string;
+    kind: string;
+  }>;
+  const roster = participants("repo");
+  assert.equal(
+    roster.find((entry) => entry.id === "mary")?.email,
+    "mary@example.com",
+    "a person's email remains available as a search term",
+  );
+
+  const candidateStart = chats.indexOf("function channelMentionCandidates");
+  const candidateEnd = chats.indexOf("\n/**", candidateStart);
+  assert.notEqual(candidateStart, -1, "the mention candidate filter should exist");
+  assert.notEqual(candidateEnd, -1, "the mention candidate filter should have a boundary");
+  const mentionState = { mentionQuery: "" };
+  const candidates = new Function(
+    "state",
+    "channelParticipants",
+    `${chats.slice(candidateStart, candidateEnd)}\nreturn channelMentionCandidates;`,
+  )(mentionState, () => roster) as (repositoryId: string) => Array<{
+    name: string;
+    kind: string;
+  }>;
+
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["agents", "everyone", "Zeus", "Athena", "Mary Jane"],
+    "an empty @ keeps both agents and people visible",
+  );
+
+  mentionState.mentionQuery = "zeu";
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["Zeus"],
+    "typing an agent name removes unrelated agents and people",
+  );
+
+  mentionState.mentionQuery = "jane";
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["Mary Jane"],
+    "people remain searchable by display name",
+  );
+
+  mentionState.mentionQuery = "mary@";
+  assert.deepEqual(
+    candidates("repo").map((entry) => entry.name),
+    ["Mary Jane"],
+    "people remain searchable by email",
+  );
+});
+
 test("@everyone is offered, highlighted, and pinged to every person in the room", async () => {
   const chats = await publicFile("screen-chats.js");
   const data = await publicFile("data.js");

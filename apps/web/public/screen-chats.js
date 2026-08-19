@@ -2570,7 +2570,11 @@ function channelMentionCandidates(repositoryId) {
     ...channelParticipants(repositoryId)
       .filter((entry) => typeof entry.name === "string" && entry.name !== "")
       .filter(
-        (entry) => query === "" || entry.name.toLowerCase().includes(query),
+        (entry) =>
+          query === "" ||
+          entry.name.toLowerCase().includes(query) ||
+          (typeof entry.email === "string" &&
+            entry.email.toLowerCase().includes(query)),
       ),
     // Five, not seven. The picker opens upward from the composer and covers
     // the conversation you are replying to, so every extra row is a line of

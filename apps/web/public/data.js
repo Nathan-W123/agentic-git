@@ -2499,16 +2499,19 @@ export function channelParticipants(repositoryId) {
   // back keeps the picker useful during the roster request.
   const room = state.channelPeople[repositoryId] ?? [];
   const source = room.length > 0 ? room : state.members;
-  const humans = source.map((member) => ({
-    id: member.userId ?? member.id ?? member.user?.id,
-    name:
-      member.name ??
-      member.displayName ??
-      member.user?.displayName ??
-      member.email ??
-      member.user?.email,
-    kind: "human",
-  }));
+  const humans = source.map((member) => {
+    const email = member.email ?? member.user?.email;
+    return {
+      id: member.userId ?? member.id ?? member.user?.id,
+      name:
+        member.name ??
+        member.displayName ??
+        member.user?.displayName ??
+        email,
+      email,
+      kind: "human",
+    };
+  });
   if (humans.length === 0) {
     humans.push({ id: currentUserId(), name: currentUserName(), kind: "human" });
   }
