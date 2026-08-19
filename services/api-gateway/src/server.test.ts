@@ -5831,7 +5831,7 @@ test("/queue chains one agent's follow-up work without claiming it early", async
   assert.equal(idleClaim?.id, idle?.id);
 });
 
-test("/dnc is answered in the channel, told in words not to code, and files no task", async (t) => {
+test("/dnc is answered without announcing the constraint and files no task", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -5859,16 +5859,18 @@ test("/dnc is answered in the channel, told in words not to code, and files no t
   );
   assert.equal(answer?.content, runtime.chatAnswer.text);
 
-  // The prompt says it in words — and the command word was lifted out, so
-  // the message the agent is asked to answer is the sentence, not the
+  // The prompt makes the constraint silent, and the command word was lifted
+  // out, so the message the agent is asked to answer is the sentence, not the
   // syntax. (The prompt's channel-context section may still quote the raw
   // "/dnc" line; "The message:" is the part that must be clean.)
   const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
-  assert.match(prompt, /do-not-code request/u);
+  assert.match(prompt, /Silently treat this as read-only/u);
+  assert.match(prompt, /without mentioning `\/dnc`/u);
+  assert.match(prompt, /calling it a do-not-code request/u);
   assert.match(prompt, /The message: @Claude \(Owner\) rework the retry loop/u);
 });
 
-test("/dnc in a thread reply is answered with the do-not-code words, and no task is filed", async (t) => {
+test("/dnc in a thread is answered without announcing the constraint or filing a task", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -5911,7 +5913,8 @@ test("/dnc in a thread reply is answered with the do-not-code words, and no task
   // plan, nothing for the coordinator to run.
   assert.equal(runtime.submittedTasks.length, 0, JSON.stringify(runtime.submittedTasks));
   const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
-  assert.match(prompt, /do-not-code request/u);
+  assert.match(prompt, /Silently treat this as read-only/u);
+  assert.match(prompt, /calling it a do-not-code request/u);
   // The command word is lifted out of the question slot, as in the channel.
   assert.match(prompt, /The question: rework the retry loop/u);
 });
@@ -6076,7 +6079,7 @@ test("/dnc with nobody mentioned never becomes an auto-claim offer, and says how
   assert.match(String(hint?.content), /\/dnc @agent your question/u);
 });
 
-test("@agents /dnc answers the whole room, told not to code, and files no task", async (t) => {
+test("@agents /dnc silently keeps every answer read-only and files no task", async (t) => {
   const runtime = await startRuntime(t);
   const owner = new TestClient(runtime.origin);
   const bootstrapped = await bootstrap(owner);
@@ -6103,10 +6106,11 @@ test("@agents /dnc answers the whole room, told not to code, and files no task",
     (message) => message.kind === "agent",
   );
   assert.equal(answer?.content, runtime.chatAnswer.text);
-  // The do-not-code words reach every answer of the fan-out, in the same
-  // directive slot the single-mention path fills.
+  // The silent read-only constraint reaches every answer of the fan-out, in
+  // the same directive slot the single-mention path fills.
   const prompt = runtime.chatPrompts.at(-1)?.prompt ?? "";
-  assert.match(prompt, /do-not-code request/u);
+  assert.match(prompt, /Silently treat this as read-only/u);
+  assert.match(prompt, /without mentioning `\/dnc`/u);
 });
 
 test("/simple keeps it brief in both places a reply is written from", async (t) => {

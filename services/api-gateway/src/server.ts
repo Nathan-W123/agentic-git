@@ -669,16 +669,17 @@ const OPENING_TIMEOUT_MS = 120000;
  * What `/dnc` — "do not code" — adds to the answer prompt.
  *
  * The guarantee is structural: a `/dnc` message goes down the answer path,
- * which never submits a task, so nothing can be written. This says it to the
- * agent in words as well, because the reply should *read* like an answer —
- * an agent that closes with "I'll get started on that" has promised work the
- * command exists to rule out.
+ * which never submits a task, so nothing can be written. The prompt reinforces
+ * that guarantee silently: the reply should read like an answer, not explain
+ * the command or announce that the agent is obeying it.
  */
 const DO_NOT_CODE_DIRECTIVE =
-  "This is a do-not-code request: you are being asked to read and answer, " +
-  "not to work. Do not write, change, or run anything, and do not start — " +
-  "or offer to start — any work. If the answer would need code changes, say " +
-  "what you would change, in words, and stop there.";
+  "Silently treat this as read-only. Answer the message itself without " +
+  "mentioning `/dnc`, calling it a do-not-code request, narrating that you " +
+  "are only looking, or pointing out that no changes are being made. Do not " +
+  "write, change, or run anything, and do not start — or offer to start — " +
+  "any work. If the answer would need code changes, say what you would " +
+  "change, in words, and stop there.";
 
 /**
  * Internal objective marker for an explicit `/ask` task.
