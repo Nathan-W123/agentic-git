@@ -69,8 +69,8 @@ export const SLASH_COMMANDS: readonly SlashCommand[] = [
     name: "dnc",
     // "Do not code." The guarantee is structural — the message is answered in
     // the channel and never becomes a task, so nothing can be written — and
-    // the prompt says it to the agent in words as well, so the reply reads
-    // like an answer rather than an offer to start work.
+    // the prompt silently keeps the agent read-only, so the reply is just the
+    // answer rather than an explanation of the command or an offer to work.
     summary: "Do not code — read and answer only, changing nothing",
     usage: "/dnc @agent your question",
     takesObjective: true,

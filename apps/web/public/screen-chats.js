@@ -1892,16 +1892,16 @@ function messageRow(
   }
   const reactions = Object.entries(entry.reactions ?? {});
   const replies = entry.replies ?? [];
-  // One acknowledgement under a person's task stays visually flat. Once the
-  // agent has substantive narration too, that same request becomes the root
-  // of the task thread. Legacy agent-authored roots keep their old shape.
+  // A person's task becomes a thread when substantive narration arrives.
+  // Until then its request stays visually flat. Legacy agent-authored roots
+  // keep their old shape.
   const inlineReply = inlineReplyTo !== undefined;
   const hasTaskThread = channelMessageHasTaskThread(entry);
   const channelThread = hasTaskThread && !isReply;
-  // Agent answers and acknowledgements remain ordinary roots in the room's
-  // chronological transcript. Their stored reference is the address back to
-  // the request that prompted them; it does not replace the task thread the
-  // acknowledgement may also grow below itself. Resolve against the complete
+  // Agent answers and legacy acknowledgements remain ordinary roots in the
+  // room's chronological transcript. Their stored reference is the address
+  // back to the request that prompted them; it does not replace a task thread
+  // the root may also grow below itself. Resolve against the complete
   // loaded channel rather than the filtered `messageList`, so searching for
   // the answer does not make its address disappear.
   const referencedRoot =
@@ -2187,8 +2187,7 @@ function channelMessageHasTaskThread(entry) {
   const replies = entry.replies ?? [];
   return (
     replies.length > 0 &&
-    (entry.kind !== "user" ||
-      (entry.taskId !== undefined && replies.length > 1))
+    (entry.kind !== "user" || entry.taskId !== undefined)
   );
 }
 
@@ -2339,7 +2338,7 @@ function messageList(repositoryId) {
   for (const entry of entries) {
     if (
       entry.kind !== "user" ||
-      (entry.taskId !== undefined && (entry.replies ?? []).length > 1)
+      (entry.taskId !== undefined && (entry.replies ?? []).length > 0)
     ) {
       continue;
     }
@@ -2625,14 +2624,11 @@ function isThreadEnding(reply) {
  * narration — was written for replies stored before that mark existed, and it
  * swallowed every sentence an agent addresses to a person inside a thread.
  *
- * That is what "they start on the task but they don't respond and confirm"
- * was. Asking for more work in a thread does get an acknowledgement, posted
- * before the task is even submitted — but it is a reply rather than a root, it
- * carries the default `agent` kind, and so it was filed as run chatter and
- * hoisted into a "Thinking" fold that renders closed once a thread has an
- * ending. The reader saw their request and then nothing. The same fold ate
- * "Starting now.", "Queued again — I'll report back here.", the held plan, and
- * every answer an agent gives to a question asked in a thread.
+ * This used to swallow task acknowledgements posted as ordinary `agent`
+ * replies, along with every answer an agent addressed to a person. Those
+ * acknowledgements are no longer posted, but historical replies and real
+ * conversational answers still need to remain visible rather than being
+ * hoisted into a closed "Thinking" fold.
  *
  * The cost is threads older than the `progress` mark, whose narration is
  * stored as `agent` and now renders inline instead of folded. That is a couple
@@ -3167,8 +3163,7 @@ function threadListPanel(repositoryId) {
     .filter(
       (entry) =>
         (entry.replies ?? []).length > 0 &&
-        (entry.kind !== "user" ||
-          (entry.taskId !== undefined && (entry.replies ?? []).length > 1)),
+        (entry.kind !== "user" || entry.taskId !== undefined),
     )
     .slice()
     .sort((left, right) => lastActivity(right).localeCompare(lastActivity(left)));
@@ -4125,9 +4120,8 @@ function threadReplyTurns(replies) {
   };
   for (const reply of replies) {
     // A human prompt is the usual boundary. An outcome is also a durable
-    // boundary for work merged into this thread automatically: that path can
-    // add the next agent acknowledgement and run without copying the channel
-    // prompt into the reply list.
+    // boundary for older work merged into this thread without copying the
+    // channel prompt into the reply list.
     if (reply.kind === "user" || ended) {
       finish();
       turn = {
@@ -4315,8 +4309,7 @@ function threadTyping(root) {
   const replies = root.replies ?? [];
   // The *last* reply, not any of them. A thread whose earlier turn ended is
   // exactly where somebody asks for the next one, and asking whether the
-  // thread has ever ended meant the dots never came back for it — the same
-  // turn whose acknowledgement was being folded away, so it went quiet twice.
+  // thread has ever ended meant the dots never came back for a later turn.
   if (
     root.kind !== "agent" ||
     replies.length === 0 ||

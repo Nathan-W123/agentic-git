@@ -2276,7 +2276,7 @@ test("a ceremonial line runs on the cheap model, and real work does not", async 
           [
             JSON.stringify({
               type: "assistant",
-              message: { content: [{ type: "text", text: "On it." }] },
+              message: { content: [{ type: "text", text: "Retry loop" }] },
             }),
             JSON.stringify({ type: "result", is_error: false }),
           ].join("\n"),
@@ -2298,14 +2298,13 @@ test("a ceremonial line runs on the cheap model, and real work does not", async 
   const modelOf = (args: readonly string[]) =>
     args[args.indexOf("--model") + 1];
 
-  // The account chose Opus. A twenty-word acknowledgement is not worth it —
-  // the whole specification of that line is its length — so a ceremonial turn
-  // is answered by Haiku instead.
+  // The account chose Opus. A six-word thread title is not worth it, so a
+  // ceremonial turn is answered by Haiku instead.
   await service.complete({
     userId: "u",
     systemAdmin: true,
     provider: "anthropic",
-    messages: [{ role: "user", content: "say you are picking this up" }],
+    messages: [{ role: "user", content: "name this task thread" }],
     ceremonial: true,
   });
   assert.equal(modelOf(seen[0] ?? []), "claude-haiku-4-5");

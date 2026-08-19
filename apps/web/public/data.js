@@ -1146,7 +1146,7 @@ export function noteAgentBusy(frame) {
   }
   // The first frame of a request arrives before its task exists: it is what
   // makes an agent start typing the moment it is mentioned, instead of once
-  // the acknowledgement and the coordinator have both answered. It is keyed on
+  // the coordinator has submitted the task. It is keyed on
   // the agent, so the frame that follows with a real task id replaces it here
   // — otherwise both would sit in the table, and the placeholder, matching no
   // task and so never retired by status, would hold the dots up for its whole
@@ -2536,27 +2536,8 @@ function seedMessages(repositoryId) {
       kind: "agent",
       authorId: agents[0].id,
       content:
-        "Picked up the outstanding tasks on this repository and started on the highest-priority one. I'll post here once there's a changeset to review.",
-      at: new Date(now - 1000 * 60 * 60 * 20).toISOString(),
-    });
-  }
-  if (agents[1] !== undefined) {
-    rows.push({
-      id: `${repositoryId}-seed-3`,
-      kind: "agent",
-      authorId: agents[1].id,
-      content:
         "Reviewed the last changeset — looks clean. Flagged one file that might need a second pass on error handling.",
       at: new Date(now - 1000 * 60 * 60 * 3).toISOString(),
-      replies: [
-        {
-          id: `${repositoryId}-seed-3-r1`,
-          kind: "user",
-          authorId: currentUserId() || "you",
-          content: "Good catch, I'll take a look this afternoon.",
-          at: new Date(now - 1000 * 60 * 60 * 2).toISOString(),
-        },
-      ],
     });
   }
   return rows;

@@ -856,12 +856,12 @@ test("user-rooted task threads promote only after substantive narration", async 
 
   assert.match(
     row,
-    /entry\.kind !== "user" \|\|\s*\(entry\.taskId !== undefined && replies\.length > 1\)/u,
+    /entry\.kind !== "user" \|\|\s*entry\.taskId !== undefined/u,
   );
   assert.match(
     row,
     /inlineReply \|\| \(entry\.kind === "user" && !hasTaskThread\)/u,
-    "a lone acknowledgement remains an inline chronological reply",
+    "a task stays inline until substantive narration arrives",
   );
   assert.match(
     list,
@@ -870,7 +870,7 @@ test("user-rooted task threads promote only after substantive narration", async 
   );
   assert.match(
     panel,
-    /entry\.kind !== "user" \|\|[\s\S]{0,120}entry\.taskId !== undefined && \(entry\.replies \?\? \[\]\)\.length > 1/u,
+    /entry\.kind !== "user" \|\| entry\.taskId !== undefined/u,
     "the thread list accepts new user roots and legacy agent roots",
   );
   assert.match(
@@ -2919,12 +2919,9 @@ test("the browser does not name agents", async () => {
 });
 
 test("an agent's reply to a person is shown, not folded into the thinking block", async () => {
-  // Reported as "they start on the task but they don't respond and confirm".
-  // The server does post an acknowledgement when work is asked for inside a
-  // thread — before the task is even submitted — but it is a reply carrying
-  // the default `agent` kind, and the transcript treated any such reply as run
-  // chatter and hoisted it into a fold that renders closed once a thread has
-  // an ending. The reader saw their request and then nothing.
+  // Historical acknowledgements and current conversational answers both carry
+  // the default `agent` kind. Neither is run narration, so neither belongs in
+  // the thinking fold.
   const source = await publicFile("screen-chats.js");
   const start = source.indexOf("function isThreadThinking");
   const body = source.slice(start, source.indexOf("\n}", start));
@@ -3138,7 +3135,7 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   assert.doesNotMatch(idle, /ctl-working/u);
   assert.match(idle.slice(idle.indexOf("ctl-faces")), /<avatar>Ada<\/avatar>/u);
 
-  // One pixel of accent, and a full circle so the part still to come is there
+  // Two pixels of accent, and a full circle so the part still to come is there
   // to be read against.
   const ring = /\n\.cmsg-thread-link \.ctl-faces \.ctl-working::after \{([\s\S]*?)\n\}/u
     .exec(css)?.[1];
@@ -3150,7 +3147,7 @@ test("the run is a ring on the agent working, at the front of the stack", async 
   );
   assert.match(
     ring ?? "",
-    /mask: radial-gradient\(\s*closest-side,\s*transparent calc\(100% - 1px\)/u,
+    /mask: radial-gradient\(\s*closest-side,\s*transparent calc\(100% - 2px\)/u,
   );
 });
 

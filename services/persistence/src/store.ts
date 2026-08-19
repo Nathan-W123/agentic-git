@@ -1598,11 +1598,9 @@ export interface CoordinationStore {
   /**
    * Records which task a thread is the story of.
    *
-   * Set after the fact rather than when the thread opens, because the thread
-   * opens first: the agent acknowledges in its own voice before anything slow
-   * runs, and the task does not exist until the submission that follows
-   * returns. Attaching it here is what lets the thread and the work be joined
-   * without the run still being in memory.
+   * Set after the request is posted because the task id does not exist until
+   * submission returns. Attaching it here is what lets the thread and the work
+   * be joined without the run still being in memory.
    */
   setChannelMessageTask(
     repositoryId: string,
@@ -1612,13 +1610,8 @@ export interface CoordinationStore {
   /**
    * Replaces what a message says, leaving everything else about it alone.
    *
-   * For a line that has to exist before it can be written well. An agent's
-   * acknowledgement is composed by a model, and waiting for that before
-   * posting anything meant the thread — the thing somebody watches to see
-   * that their request was heard — did not exist for as long as the call
-   * took. Posting first and rewriting when the words arrive is the way round
-   * that, and it keeps the message's identity, timestamp and thread intact
-   * so nothing downstream can tell the difference.
+   * For a line that has to exist before its final wording is known. Rewriting
+   * in place keeps the message's identity, timestamp and thread intact.
    */
   setChannelMessageContent(
     repositoryId: string,
