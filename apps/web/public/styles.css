@@ -5580,14 +5580,26 @@ button.chip.lg:hover {
 
 /* Each task turns out of the shared avatar stem at its thread summary. The
    short vertical overlap makes consecutive elbows read as branches of one
-   path; the thirteen-pixel gap keeps the stroke clear of the replier faces. */
+   path; the thirteen-pixel gap keeps the stroke clear of the replier faces.
+
+   `border-box` is what makes the turn seamless rather than decorative. The
+   elbow is placed from its right edge, so under the default content box its
+   own three-pixel left stroke hung *outside* the declared width and pushed
+   the whole corner three pixels further left than the stem it turns out of —
+   a visible step where the two should be one line. Sized by the border box,
+   13px of gap plus 16px of elbow put that stroke at -29px, exactly where the
+   stem above it stands. Any change to the gap or the width has to keep that
+   sum at 29 (see `.cmsg-thread-route::before`), or the step comes back. The
+   fourteen-pixel height keeps the horizontal run where it already sat, three
+   pixels below the link's middle. */
 .cmsg-row.cmsg-threaded .cmsg-thread-link::before {
   content: "";
   position: absolute;
+  box-sizing: border-box;
   top: calc(50% - 11px);
   right: calc(100% + 13px);
   width: 16px;
-  height: 11px;
+  height: 14px;
   border-left: 3px solid var(--border-strong);
   border-bottom: 3px solid var(--border-strong);
   border-bottom-left-radius: 11px;

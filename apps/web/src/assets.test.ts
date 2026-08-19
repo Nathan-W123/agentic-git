@@ -629,6 +629,22 @@ test("a reply carries a quiet visual path back to its root", async () => {
   assert.match(channelStem ?? "", /bottom: -1px;/u);
   assert.match(channelEnd ?? "", /bottom: 11px;/u);
   assert.match(channelElbow ?? "", /right: calc\(100% \+ 13px\);/u);
+  // The elbow turns out of the stem, so its own upright has to stand in the
+  // stem's column. It is placed from its right edge, which means the gap plus
+  // its width must land on the stem's offset — and it must be measured by the
+  // border box, or the three-pixel stroke hangs outside that width and the
+  // turn steps sideways where it should read as one line.
+  assert.match(channelElbow ?? "", /box-sizing: border-box;/u);
+  const stemLeft = Number(/left: (-?\d+)px;/u.exec(channelEnd ?? "")?.[1]);
+  const elbowGap = Number(
+    /right: calc\(100% \+ (\d+)px\);/u.exec(channelElbow ?? "")?.[1],
+  );
+  const elbowWidth = Number(/width: (\d+)px;/u.exec(channelElbow ?? "")?.[1]);
+  assert.equal(
+    elbowGap + elbowWidth,
+    -stemLeft,
+    "the elbow's upright should sit in the stem's own column",
+  );
   assert.doesNotMatch(css, /\.cmsg-row\.cmsg-threaded::before/u);
   assert.match(panelBranch ?? "", /left: 15px;/u);
   assert.match(panelBranch ?? "", /width: 11px;/u);
