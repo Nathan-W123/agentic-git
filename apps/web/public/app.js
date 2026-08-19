@@ -3945,7 +3945,40 @@ function actionOf(event) {
   return node === null ? undefined : { node, act: node.dataset.act, value: node.dataset.value };
 }
 
+/**
+ * Gives a touch reader one message's controls at a time.
+ *
+ * A pointer reveals the action bar by hovering the row. Touch has no hover,
+ * but permanently drawing every bar turns the transcript into a column of
+ * controls. A tap on a message therefore selects that row; tapping it again
+ * or anywhere outside a message clears the selection. Once the bar is open,
+ * pressing one of its controls must not close it before the delegated action
+ * below gets the same click.
+ */
+function selectMobileChannelMessage(event) {
+  if (!window.matchMedia("(hover: none)").matches) {
+    return;
+  }
+  const row = event.target.closest?.(".cmsg-row:not(.cmsg-system)") ?? null;
+  if (row !== null && event.target.closest?.(".cmsg-actions") !== null) {
+    return;
+  }
+  const shouldSelect =
+    row !== null && !row.classList.contains("cmsg-selected");
+  for (const selected of document.querySelectorAll(
+    ".cmsg-row.cmsg-selected",
+  )) {
+    selected.classList.remove("cmsg-selected");
+  }
+  if (shouldSelect) {
+    row.classList.add("cmsg-selected");
+  }
+}
+
 document.addEventListener("click", (event) => {
+  // This runs before action lookup because an ordinary message body has no
+  // `data-act`: selecting it is still a complete interaction on touch.
+  selectMobileChannelMessage(event);
   const found = actionOf(event);
   if (found === undefined) {
     return;

@@ -4058,15 +4058,20 @@ button.chip.lg:hover {
     opacity: 1;
   }
 
-  /* The react/reply buttons over a message, and the usage card over a
-     roster avatar, were both hover-only reveals with no other way to reach
-     them on a touch device — see the comment on `.cmsg-row .cmsg-actions`
-     and `.rr-usage` below, both defined later in the file. `!important`
-     rather than relying on source order: those base rules and this query
-     both match `.cmsg-row .cmsg-actions` at equal specificity, and the one
-     later in the file otherwise wins regardless of which media query is
-     active. */
+  /* A touch selects one message before surfacing its actions. Keeping the
+     unselected rule explicit also defeats the synthetic/sticky `:hover` some
+     mobile browsers add after a tap. `!important` is intentional: the base
+     hover/focus reveal is defined later and must remain the desktop contract. */
   .cmsg-row .cmsg-actions {
+    opacity: 0 !important;
+    pointer-events: none !important;
+  }
+
+  .cmsg-row.cmsg-selected {
+    background: var(--bg-hover);
+  }
+
+  .cmsg-row.cmsg-selected .cmsg-actions {
     position: static !important;
     opacity: 1 !important;
     pointer-events: auto !important;
