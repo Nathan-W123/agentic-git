@@ -1657,12 +1657,16 @@ export function assertChangeSet(value: unknown): asserts value is ChangeSet {
 }
 
 /**
- * A plan with every optional resource collection populated. Grounding stays
- * optional: it is a verification verdict, not a resource collection, and
- * there is no honest default for a plan that was never verified.
+ * A plan with every optional resource collection populated. Grounding and
+ * claim stay optional: neither is a resource collection, and neither has an
+ * honest default — grounding is a verification verdict a plan may never have
+ * received, and a claim records that the coordinator issued this scope rather
+ * than an agent describing it, which is untrue of every plan an agent wrote.
  */
-export type CompleteAgentPlan = Required<Omit<AgentPlan, "grounding">> &
-  Pick<AgentPlan, "grounding">;
+export type CompleteAgentPlan = Required<
+  Omit<AgentPlan, "grounding" | "claim">
+> &
+  Pick<AgentPlan, "grounding" | "claim">;
 
 /** Returns a detached plan with every optional resource collection populated. */
 export function completeAgentPlan(plan: AgentPlan): CompleteAgentPlan {
